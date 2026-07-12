@@ -460,28 +460,43 @@ func TestSocialChallengeIsProviderBoundSingleUseAndAwardsBonusOnce(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteSocialVerification(context.Background(), policy, "provider-b", challenge.Cleartext, "100", "x_api", now); !errors.Is(err, auth.ErrSocialChallenge) {
+	if _, err := store.CompleteSocialVerification(context.Background(), policy, "provider-b", challenge.Cleartext, "100", "author-a", "x_api", now); !errors.Is(err, auth.ErrSocialChallenge) {
 		t.Fatalf("cross-provider err=%v", err)
 	}
-	status, err := store.CompleteSocialVerification(context.Background(), policy, "provider-a", challenge.Cleartext, "100", "x_api", now)
+	// FIX-570 H3: verification is recorded pending — no bonus is granted until the
+	// dwell reconciler promotes it.
+	status, err := store.CompleteSocialVerification(context.Background(), policy, "provider-a", challenge.Cleartext, "100", "author-a", "x_api", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.SocialVerified || status.BonusUses != policy.SocialBonusUses {
-		t.Fatalf("status=%+v", status)
+	if status.SocialVerified || status.BonusUses != 0 {
+		t.Fatalf("expected pending status=%+v", status)
 	}
-	if _, err := store.CompleteSocialVerification(context.Background(), policy, "provider-a", challenge.Cleartext, "101", "x_api", now); !errors.Is(err, auth.ErrSocialChallenge) {
+	if _, err := store.CompleteSocialVerification(context.Background(), policy, "provider-a", challenge.Cleartext, "101", "author-a", "x_api", now); !errors.Is(err, auth.ErrSocialChallenge) {
 		t.Fatalf("replay err=%v", err)
 	}
+	recheck := func(_ context.Context, _, boundAuthor string) error {
+		if boundAuthor != "author-a" {
+			return errors.New("unexpected author")
+		}
+		return nil
+	}
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, now.Add(31*time.Minute), recheck); err != nil || granted != 1 {
+		t.Fatalf("promotion granted=%d err=%v", granted, err)
+	}
 	after, err := store.ProviderReferralStatus(context.Background(), policy, "provider-a")
-	if err != nil || after.BonusUses != policy.SocialBonusUses {
+	if err != nil || !after.SocialVerified || after.BonusUses != policy.SocialBonusUses {
 		t.Fatalf("after=%+v err=%v", after, err)
+	}
+	// A second promotion pass must not double-grant.
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, now.Add(62*time.Minute), recheck); err != nil || granted != 0 {
+		t.Fatalf("double grant=%d err=%v", granted, err)
 	}
 	providerBChallenge, err := store.CreateSocialChallenge(context.Background(), policy, "provider-b", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteSocialVerification(context.Background(), policy, "provider-b", providerBChallenge.Cleartext, "100", "x_api", now); !errors.Is(err, auth.ErrSocialChallenge) {
+	if _, err := store.CompleteSocialVerification(context.Background(), policy, "provider-b", providerBChallenge.Cleartext, "100", "author-b", "x_api", now); !errors.Is(err, auth.ErrSocialChallenge) {
 		t.Fatalf("duplicate post err=%v", err)
 	}
 }

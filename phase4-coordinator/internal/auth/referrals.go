@@ -735,7 +735,7 @@ func (s *Store) EnsureProviderReferral(ctx context.Context, policy ReferralPolic
 		var revokedAt sql.NullString
 		err := conn.QueryRowContext(ctx, `
 SELECT issuer_id, key_id, base_capacity, bonus_capacity, revoked_at,
-       EXISTS(SELECT 1 FROM referral_social_verifications v WHERE v.provider_id = referral_issuers.provider_id AND v.campaign = referral_issuers.campaign)
+       EXISTS(SELECT 1 FROM referral_social_verifications v WHERE v.provider_id = referral_issuers.provider_id AND v.campaign = referral_issuers.campaign AND v.granted_at IS NOT NULL)
   FROM referral_issuers
  WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(&issuerID, &keyID, &base, &bonus, &revokedAt, &socialVerified)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -789,7 +789,7 @@ func (s *Store) ProviderReferralStatus(ctx context.Context, policy ReferralPolic
 	var socialVerified int
 	err := s.db.QueryRowContext(ctx, `
 SELECT issuer_id, key_id, base_capacity, bonus_capacity, first_serving_at, revoked_at,
-       EXISTS(SELECT 1 FROM referral_social_verifications v WHERE v.provider_id = referral_issuers.provider_id AND v.campaign = referral_issuers.campaign)
+       EXISTS(SELECT 1 FROM referral_social_verifications v WHERE v.provider_id = referral_issuers.provider_id AND v.campaign = referral_issuers.campaign AND v.granted_at IS NOT NULL)
   FROM referral_issuers
  WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(
 		&out.IssuerID, &keyID, &out.BaseUses, &out.BonusUses, &firstServingAt, &revokedAt, &socialVerified)
@@ -897,7 +897,18 @@ INSERT INTO referral_social_challenges (
 	return SocialChallenge{Cleartext: cleartext, ExpiresAt: expiresAt, Code: code}, nil
 }
 
-func (s *Store) CompleteSocialVerification(ctx context.Context, policy ReferralPolicy, providerID, challenge, postID, method string, now time.Time) (ProviderReferral, error) {
+// socialVerificationDwell is how long a social verification stays PENDING before
+// the reconciler re-checks the post and grants the capacity bonus. It bounds the
+// window in which a transient (deleted/protected) post could otherwise have
+// permanently inflated capacity. FIX-570 H3.
+const socialVerificationDwell = 30 * time.Minute
+
+// CompleteSocialVerification records a social verification as PENDING. It does NOT
+// grant the capacity bonus here; the bonus is granted later by
+// PromoteMaturedSocialVerifications after a dwell window and a re-check. The bound
+// X author id (may be empty when the API omits it) is persisted so promotion can
+// confirm the post is still authored by the same account. FIX-570 H3.
+func (s *Store) CompleteSocialVerification(ctx context.Context, policy ReferralPolicy, providerID, challenge, postID, authorID, method string, now time.Time) (ProviderReferral, error) {
 	if err := policy.Validate(); err != nil {
 		return ProviderReferral{}, err
 	}
@@ -908,6 +919,7 @@ func (s *Store) CompleteSocialVerification(ctx context.Context, policy ReferralP
 	if postID == "" || strings.Trim(postID, "0123456789") != "" {
 		return ProviderReferral{}, ErrSocialChallenge
 	}
+	authorID = strings.TrimSpace(authorID)
 	hash := sha256.Sum256([]byte(strings.TrimSpace(challenge)))
 	var out ProviderReferral
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
@@ -925,10 +937,18 @@ SELECT c.issuer_id, c.expires_at, c.consumed_at
 		if err != nil || consumedAt.Valid || !expires.After(now.UTC()) {
 			return ErrSocialChallenge
 		}
+		var authorValue any
+		if authorID != "" {
+			authorValue = authorID
+		}
+		// Record PENDING (granted_at NULL). The UNIQUE(post_id) constraint already
+		// binds one X post to one provider, and PK(provider_id, campaign) binds one
+		// verification per provider — so a post or provider cannot be double-bound.
 		if _, err := conn.ExecContext(ctx, `
 INSERT INTO referral_social_verifications (
-    provider_id, campaign, issuer_id, post_id, verification_method, verified_at
-) VALUES (?, ?, ?, ?, ?, ?)`, providerID, policy.Campaign, issuerID, postID, method, timeText(now.UTC())); err != nil {
+    provider_id, campaign, issuer_id, post_id, verification_method, verified_at, author_id, pending_since
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			providerID, policy.Campaign, issuerID, postID, method, timeText(now.UTC()), authorValue, timeText(now.UTC())); err != nil {
 			if isConstraintFailure(err) {
 				return ErrSocialChallenge
 			}
@@ -939,15 +959,6 @@ UPDATE referral_social_challenges SET consumed_at = ? WHERE challenge_hash = ? A
 			timeText(now.UTC()), fmt.Sprintf("%x", hash[:])); err != nil {
 			return err
 		}
-		result, err := conn.ExecContext(ctx, `
-UPDATE referral_issuers SET bonus_capacity = bonus_capacity + ? WHERE issuer_id = ? AND revoked_at IS NULL`,
-			policy.SocialBonusUses, issuerID)
-		if err != nil {
-			return err
-		}
-		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-			return ErrSocialChallenge
-		}
 		var keyID string
 		if err := conn.QueryRowContext(ctx, `
 SELECT key_id, base_capacity, bonus_capacity FROM referral_issuers WHERE issuer_id = ?`, issuerID).Scan(&keyID, &out.BaseUses, &out.BonusUses); err != nil {
@@ -956,9 +967,6 @@ SELECT key_id, base_capacity, bonus_capacity FROM referral_issuers WHERE issuer_
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?`, issuerID).Scan(&out.Used); err != nil {
 			return err
 		}
-		// Live, unredeemed reservations are authoritative capacity claims, exactly
-		// as in the provider-status remaining calculation. Ignoring them here would
-		// let social verification advertise capacity that is already spoken for.
 		var reserved int
 		if err := conn.QueryRowContext(ctx, `
 SELECT COUNT(1)
@@ -978,14 +986,107 @@ SELECT COUNT(1)
 		}
 		out.Campaign = policy.Campaign
 		out.IssuerID = issuerID
+		// Bonus is not yet granted, so remaining reflects the current (un-bonused)
+		// capacity. advocacy_status stays "pending_social_review" until promotion.
 		out.Remaining = out.BaseUses + out.BonusUses - out.Used - reserved
 		if out.Remaining < 0 {
 			out.Remaining = 0
 		}
-		out.SocialVerified = true
-		out.AdvocacyStatus = "verified"
+		out.SocialVerified = false
+		out.AdvocacyStatus = "pending_social_review"
 		out.FirstServingSeen = true
 		return nil
 	})
 	return out, err
+}
+
+// PromoteMaturedSocialVerifications grants the capacity bonus for social
+// verifications that have dwelled past socialVerificationDwell, but only after
+// recheck confirms the post is still public and still authored by the bound
+// author. The grant is idempotent (guarded by granted_at IS NULL) so no
+// verification is ever granted twice. recheck receives the post id and the bound
+// author id (empty when unknown) and must return nil to grant, or an error to
+// mark the verification failed. FIX-570 H3.
+func (s *Store) PromoteMaturedSocialVerifications(ctx context.Context, policy ReferralPolicy, now time.Time, recheck func(ctx context.Context, postID, boundAuthorID string) error) (int, error) {
+	if err := policy.Validate(); err != nil {
+		return 0, err
+	}
+	if !policy.EnableSocialBonus || recheck == nil {
+		return 0, nil
+	}
+	cutoff := timeText(now.UTC().Add(-socialVerificationDwell))
+	rows, err := s.db.QueryContext(ctx, `
+SELECT provider_id, issuer_id, post_id, COALESCE(author_id, '')
+  FROM referral_social_verifications
+ WHERE campaign = ?
+   AND granted_at IS NULL
+   AND failed_at IS NULL
+   AND pending_since IS NOT NULL
+   AND pending_since <= ?`, policy.Campaign, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	type pending struct{ providerID, issuerID, postID, authorID string }
+	var matured []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.providerID, &p.issuerID, &p.postID, &p.authorID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		matured = append(matured, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	granted := 0
+	for _, p := range matured {
+		checkErr := recheck(ctx, p.postID, p.authorID)
+		txErr := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+			if checkErr != nil {
+				_, err := conn.ExecContext(ctx, `
+UPDATE referral_social_verifications
+   SET failed_at = ?
+ WHERE provider_id = ? AND campaign = ? AND granted_at IS NULL AND failed_at IS NULL`,
+					timeText(now.UTC()), p.providerID, policy.Campaign)
+				return err
+			}
+			result, err := conn.ExecContext(ctx, `
+UPDATE referral_social_verifications
+   SET granted_at = ?
+ WHERE provider_id = ? AND campaign = ? AND granted_at IS NULL AND failed_at IS NULL`,
+				timeText(now.UTC()), p.providerID, policy.Campaign)
+			if err != nil {
+				return err
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				// Already granted/failed by a concurrent tick; nothing to do.
+				return nil
+			}
+			bonusResult, err := conn.ExecContext(ctx, `
+UPDATE referral_issuers SET bonus_capacity = bonus_capacity + ? WHERE issuer_id = ? AND revoked_at IS NULL`,
+				policy.SocialBonusUses, p.issuerID)
+			if err != nil {
+				return err
+			}
+			// If the issuer was revoked between verify and promotion the grant is a
+			// no-op on capacity; granted_at is still set so it is not retried.
+			if _, err := bonusResult.RowsAffected(); err != nil {
+				return err
+			}
+			granted++
+			return nil
+		})
+		if txErr != nil {
+			return granted, txErr
+		}
+	}
+	return granted, nil
 }

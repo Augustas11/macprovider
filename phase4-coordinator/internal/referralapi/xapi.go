@@ -51,61 +51,86 @@ func NewXAPIClient(bearer, joinBaseURL string) *XAPIClient {
 	}
 }
 
-func (c *XAPIClient) VerifyPost(ctx context.Context, postID, expectedURL string) error {
+type xPostPayload struct {
+	Data struct {
+		ID       string `json:"id"`
+		AuthorID string `json:"author_id"`
+		Entities struct {
+			URLs []struct {
+				Expanded string `json:"expanded_url"`
+				Unwound  string `json:"unwound_url"`
+			} `json:"urls"`
+		} `json:"entities"`
+	} `json:"data"`
+}
+
+func (c *XAPIClient) fetchPost(ctx context.Context, postID string) (xPostPayload, error) {
+	var payload xPostPayload
 	if c == nil || c.bearer == "" || !xPostIDPattern.MatchString(postID) {
-		return errors.New("x verifier unavailable")
+		return payload, errors.New("x verifier unavailable")
 	}
-	endpoint := "https://api.x.com/2/tweets/" + postID + "?tweet.fields=entities"
+	endpoint := "https://api.x.com/2/tweets/" + postID + "?tweet.fields=entities,author_id"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return err
+		return payload, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.bearer)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return payload, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("x lookup status %d", resp.StatusCode)
+		return payload, fmt.Errorf("x lookup status %d", resp.StatusCode)
 	}
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return errors.New("x lookup content type invalid")
+		return payload, errors.New("x lookup content type invalid")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
 	if err != nil || len(body) > 64*1024 {
-		return errors.New("x lookup response invalid")
-	}
-	var payload struct {
-		Data struct {
-			ID       string `json:"id"`
-			Entities struct {
-				URLs []struct {
-					Expanded string `json:"expanded_url"`
-					Unwound  string `json:"unwound_url"`
-				} `json:"urls"`
-			} `json:"entities"`
-		} `json:"data"`
+		return payload, errors.New("x lookup response invalid")
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.Data.ID != postID {
-		return errors.New("x lookup response mismatch")
+		return payload, errors.New("x lookup response mismatch")
+	}
+	return payload, nil
+}
+
+// VerifyPost confirms the post is public and contains the expected invite URL,
+// returning the bound X author id (may be empty if the API omits it). FIX-570 H3
+// binds this author id so a later re-check can detect a swapped/deleted post.
+func (c *XAPIClient) VerifyPost(ctx context.Context, postID, expectedURL string) (string, error) {
+	payload, err := c.fetchPost(ctx, postID)
+	if err != nil {
+		return "", err
 	}
 	want, err := canonicalShareURL(expectedURL, c.joinBase)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, entity := range payload.Data.Entities.URLs {
 		for _, candidate := range []string{entity.Expanded, entity.Unwound} {
 			got, err := canonicalShareURL(candidate, c.joinBase)
 			if err == nil && got == want {
-				return nil
+				return payload.Data.AuthorID, nil
 			}
 		}
 	}
-	return errors.New("expected invite URL missing")
+	return "", errors.New("expected invite URL missing")
+}
+
+// LookupPostAuthor re-checks, at promotion time, that the post is STILL public
+// (a non-200/gone post errors) and returns its current author id so the caller
+// can confirm it still matches the author bound at verify time. FIX-570 H3.
+func (c *XAPIClient) LookupPostAuthor(ctx context.Context, postID string) (string, error) {
+	payload, err := c.fetchPost(ctx, postID)
+	if err != nil {
+		return "", err
+	}
+	return payload.Data.AuthorID, nil
 }
 
 func canonicalShareURL(raw string, joinBase *url.URL) (string, error) {

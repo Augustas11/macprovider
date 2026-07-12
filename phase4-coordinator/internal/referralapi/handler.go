@@ -31,7 +31,7 @@ type Store interface {
 	EnsureProviderReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ProviderReferral, error)
 	CreateSocialChallenge(context.Context, auth.ReferralPolicy, string, time.Time) (auth.SocialChallenge, error)
 	ValidateSocialChallenge(context.Context, auth.ReferralPolicy, string, string, time.Time) error
-	CompleteSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, string, time.Time) (auth.ProviderReferral, error)
+	CompleteSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, string, string, time.Time) (auth.ProviderReferral, error)
 }
 
 type TokenValidator interface {
@@ -43,7 +43,9 @@ type ServingEvidence interface {
 }
 
 type PostVerifier interface {
-	VerifyPost(context.Context, string, string) error
+	// VerifyPost confirms the post is public and contains the expected invite URL,
+	// returning the bound X author id (may be empty if the API omits it).
+	VerifyPost(context.Context, string, string) (string, error)
 }
 
 type Metrics interface {
@@ -476,18 +478,23 @@ func (h *Handler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := h.PostVerifier.VerifyPost(r.Context(), postID, expectedURL); err != nil {
+	authorID, err := h.PostVerifier.VerifyPost(r.Context(), postID, expectedURL)
+	if err != nil {
 		h.observe("x_verify", "failed")
 		writeError(w, http.StatusUnprocessableEntity, "post_not_verified", "post is unavailable or does not contain the invite link")
 		return
 	}
-	status, err = h.Store.CompleteSocialVerification(r.Context(), h.Policy, providerID, req.Challenge, postID, "x_api", h.now())
+	// FIX-570 H3: the verification is recorded PENDING and the bonus is NOT granted
+	// here. A background reconciler grants it only after a dwell window, once the
+	// post is confirmed still public and still authored by the bound author, so a
+	// transient (deleted/protected) post cannot permanently inflate capacity.
+	status, err = h.Store.CompleteSocialVerification(r.Context(), h.Policy, providerID, req.Challenge, postID, authorID, "x_api", h.now())
 	if err != nil {
 		h.observe("x_verify", "conflict")
 		writeError(w, http.StatusConflict, "challenge_invalid", "challenge expired, reused, or belongs to another provider")
 		return
 	}
-	h.observe("x_verify", "verified")
+	h.observe("x_verify", "pending")
 	h.writeProviderStatus(w, status)
 }
 

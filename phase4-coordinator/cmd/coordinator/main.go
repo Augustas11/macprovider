@@ -941,7 +941,11 @@ func main() {
 			Metrics:     metricsHandle,
 		}
 		if cfg.Referrals.EnableSocialInviteBonus {
-			referralHandler.PostVerifier = referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
+			xClient := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
+			referralHandler.PostVerifier = xClient
+			// FIX-570 H3: grant the social bonus only after a dwell + re-check that the
+			// post is still public and still authored by the bound account.
+			startSocialVerificationPromotionReconciler(shutdownCtx, tokenStore, referralPolicy, xClient, logger)
 		}
 		referralValidate = referralHandler.HandleValidate
 		referralReserve = referralHandler.HandleReserve
@@ -1260,6 +1264,57 @@ func startAppTrackReferralMintReconciler(ctx context.Context, handler *onboardin
 		}
 		reconcile()
 		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
+// socialAuthorLookup is the promotion-time re-check seam for FIX-570 H3: it
+// returns the post's current author id, erroring if the post is gone/private.
+type socialAuthorLookup interface {
+	LookupPostAuthor(ctx context.Context, postID string) (string, error)
+}
+
+// startSocialVerificationPromotionReconciler periodically grants the deferred
+// social bonus for verifications that have dwelled past the window, but only
+// after re-confirming the post is still public and still authored by the bound
+// account. FIX-570 H3.
+func startSocialVerificationPromotionReconciler(ctx context.Context, store *auth.Store, policy auth.ReferralPolicy, verifier socialAuthorLookup, logger zerolog.Logger) {
+	if store == nil || verifier == nil || !policy.EnableSocialBonus {
+		return
+	}
+	recheck := func(ctx context.Context, postID, boundAuthorID string) error {
+		author, err := verifier.LookupPostAuthor(ctx, postID)
+		if err != nil {
+			return err
+		}
+		if boundAuthorID != "" && author != boundAuthorID {
+			return fmt.Errorf("post author changed")
+		}
+		return nil
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			granted, err := store.PromoteMaturedSocialVerifications(reconcileCtx, policy, time.Now().UTC(), recheck)
+			if err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Msg("social verification promotion failed")
+				return
+			}
+			if granted > 0 {
+				logger.Info().Int("granted", granted).Msg("promoted matured social verifications")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {

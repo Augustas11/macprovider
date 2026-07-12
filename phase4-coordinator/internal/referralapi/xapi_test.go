@@ -43,24 +43,31 @@ func TestXVerifierUsesFixedAPIOriginAndExpandedInviteEntity(t *testing.T) {
 			if r.Header.Get("Authorization") != "Bearer x-token" {
 				t.Fatalf("missing X bearer")
 			}
-			body := `{"data":{"id":"123","entities":{"urls":[{"expanded_url":"https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"}]}}}`
+			body := `{"data":{"id":"123","author_id":"author-9","entities":{"urls":[{"expanded_url":"https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"}]}}}`
 			header := make(http.Header)
 			header.Set("Content-Type", "application/json")
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
 		})},
 	}
-	err := client.VerifyPost(context.Background(), "123", "https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc")
+	authorID, err := client.VerifyPost(context.Background(), "123", "https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requested != "https://api.x.com/2/tweets/123?tweet.fields=entities" {
+	if authorID != "author-9" {
+		t.Fatalf("author id=%q", authorID)
+	}
+	if requested != "https://api.x.com/2/tweets/123?tweet.fields=entities,author_id" {
 		t.Fatalf("requested=%q", requested)
 	}
-	if err := client.VerifyPost(context.Background(), "123", "https://malibu.tech/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"); err == nil {
+	if _, err := client.VerifyPost(context.Background(), "123", "https://malibu.tech/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"); err == nil {
 		t.Fatal("accepted invite URL outside configured join origin")
 	}
-	if err := client.VerifyPost(context.Background(), "https://127.0.0.1", "https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"); err == nil {
+	if _, err := client.VerifyPost(context.Background(), "https://127.0.0.1", "https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"); err == nil {
 		t.Fatal("accepted non-numeric post ID")
+	}
+	// LookupPostAuthor returns the current author for the promotion re-check.
+	if got, err := client.LookupPostAuthor(context.Background(), "123"); err != nil || got != "author-9" {
+		t.Fatalf("lookup author got=%q err=%v", got, err)
 	}
 }
 

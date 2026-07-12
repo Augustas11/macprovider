@@ -3,6 +3,7 @@ package referralapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,12 +34,13 @@ func (s staticServing) FirstVerifiedServing(context.Context, string) (time.Time,
 type recordingVerifier struct {
 	postID      string
 	expectedURL string
+	authorID    string
 	err         error
 }
 
-func (v *recordingVerifier) VerifyPost(_ context.Context, postID, expectedURL string) error {
+func (v *recordingVerifier) VerifyPost(_ context.Context, postID, expectedURL string) (string, error) {
 	v.postID, v.expectedURL = postID, expectedURL
-	return v.err
+	return v.authorID, v.err
 }
 
 func apiPolicy() auth.ReferralPolicy {
@@ -62,7 +64,7 @@ func TestOptionalXShareUnlocksBonusWithoutChangingProviderAccess(t *testing.T) {
 	}
 	defer store.Close()
 	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
-	verifier := &recordingVerifier{}
+	verifier := &recordingVerifier{authorID: "author-1"}
 	h := Handler{
 		Store:           store,
 		Tokens:          staticTokens{providerID: "provider-1"},
@@ -106,16 +108,18 @@ func TestOptionalXShareUnlocksBonusWithoutChangingProviderAccess(t *testing.T) {
 	if verifier.postID != "123456789" || verifier.expectedURL != challengeBody.ShareURL {
 		t.Fatalf("verifier post=%q expected=%q want=%q", verifier.postID, verifier.expectedURL, challengeBody.ShareURL)
 	}
+	// FIX-570 H3: the bonus is NOT granted at verify time; the verification is
+	// pending and the bonus stays 0 until the dwell reconciler promotes it.
 	var status auth.ProviderReferral
 	status, err = store.ProviderReferralStatus(context.Background(), apiPolicy(), "provider-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.SocialVerified || status.BonusUses != 2 || status.Remaining != 3 {
-		t.Fatalf("status=%+v", status)
+	if status.SocialVerified || status.BonusUses != 0 || status.Remaining != 1 {
+		t.Fatalf("expected pending (no bonus yet), status=%+v", status)
 	}
 
-	// A replay can neither re-consume the challenge nor add the bonus twice.
+	// A replay can neither re-consume the challenge nor create a second pending row.
 	replayRequest := httptest.NewRequest(http.MethodPost, "/v1/provider/referrals/x/verify", strings.NewReader(verifyBody))
 	replayRequest.Header.Set("Authorization", "Bearer valid-token")
 	replayResponse := httptest.NewRecorder()
@@ -123,9 +127,90 @@ func TestOptionalXShareUnlocksBonusWithoutChangingProviderAccess(t *testing.T) {
 	if replayResponse.Code != http.StatusConflict {
 		t.Fatalf("replay status=%d body=%s", replayResponse.Code, replayResponse.Body.String())
 	}
+
+	// Promotion before the dwell window elapses grants nothing.
+	recheck := func(_ context.Context, postID, boundAuthor string) error {
+		if boundAuthor != "author-1" {
+			return errors.New("author not bound")
+		}
+		return nil
+	}
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), apiPolicy(), now.Add(time.Minute), recheck); err != nil || granted != 0 {
+		t.Fatalf("premature promotion granted=%d err=%v", granted, err)
+	}
+
+	// After the dwell window, promotion grants the bonus exactly once.
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), apiPolicy(), now.Add(31*time.Minute), recheck); err != nil || granted != 1 {
+		t.Fatalf("promotion granted=%d err=%v", granted, err)
+	}
 	status, err = store.ProviderReferralStatus(context.Background(), apiPolicy(), "provider-1")
-	if err != nil || status.BonusUses != 2 {
-		t.Fatalf("replay changed bonus: status=%+v err=%v", status, err)
+	if err != nil || !status.SocialVerified || status.BonusUses != 2 || status.Remaining != 3 {
+		t.Fatalf("post-promotion status=%+v err=%v", status, err)
+	}
+
+	// A second promotion pass must not double-grant.
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), apiPolicy(), now.Add(62*time.Minute), recheck); err != nil || granted != 0 {
+		t.Fatalf("double promotion granted=%d err=%v", granted, err)
+	}
+}
+
+func TestSocialVerificationDoesNotGrantWhenPostDeletedBeforeDwell(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	verifier := &recordingVerifier{authorID: "author-1"}
+	h := Handler{
+		Store:           store,
+		Tokens:          staticTokens{providerID: "provider-2"},
+		ServingEvidence: staticServing{when: now.Add(-time.Minute), eligible: true},
+		PostVerifier:    verifier,
+		Policy:          apiPolicy(),
+		Now:             func() time.Time { return now },
+		JoinBaseURL:     "https://malibu.tech/j",
+	}
+	challengeReq := httptest.NewRequest(http.MethodPost, "/v1/provider/referrals/x/challenge", nil)
+	challengeReq.Header.Set("Authorization", "Bearer valid-token")
+	challengeResp := httptest.NewRecorder()
+	h.HandleChallenge(challengeResp, challengeReq)
+	if challengeResp.Code != http.StatusOK {
+		t.Fatalf("challenge status=%d", challengeResp.Code)
+	}
+	var challengeBody struct {
+		ShareURL string `json:"share_url"`
+	}
+	if err := json.Unmarshal(challengeResp.Body.Bytes(), &challengeBody); err != nil {
+		t.Fatal(err)
+	}
+	shareURL, _ := url.Parse(challengeBody.ShareURL)
+	challenge := shareURL.Query().Get("c")
+	verifyBody := `{"post_url":"https://x.com/malibu/status/987654321","challenge":"` + challenge + `"}`
+	verifyReq := httptest.NewRequest(http.MethodPost, "/v1/provider/referrals/x/verify", strings.NewReader(verifyBody))
+	verifyReq.Header.Set("Authorization", "Bearer valid-token")
+	verifyResp := httptest.NewRecorder()
+	h.HandleVerify(verifyResp, verifyReq)
+	if verifyResp.Code != http.StatusOK {
+		t.Fatalf("verify status=%d body=%s", verifyResp.Code, verifyResp.Body.String())
+	}
+	// The post is deleted before the dwell elapses: re-check errors, so the bonus
+	// is never granted and the verification is marked failed.
+	recheckFails := func(_ context.Context, _, _ string) error { return errors.New("post gone") }
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), apiPolicy(), now.Add(31*time.Minute), recheckFails); err != nil || granted != 0 {
+		t.Fatalf("failed promotion granted=%d err=%v", granted, err)
+	}
+	status, err := store.ProviderReferralStatus(context.Background(), apiPolicy(), "provider-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.SocialVerified || status.BonusUses != 0 {
+		t.Fatalf("deleted post must not grant bonus, status=%+v", status)
+	}
+	// A subsequent successful re-check must not resurrect the failed verification.
+	recheckOK := func(_ context.Context, _, _ string) error { return nil }
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), apiPolicy(), now.Add(62*time.Minute), recheckOK); err != nil || granted != 0 {
+		t.Fatalf("failed verification resurrected granted=%d err=%v", granted, err)
 	}
 }
 

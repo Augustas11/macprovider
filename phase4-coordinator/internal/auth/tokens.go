@@ -520,6 +520,30 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 	if err := ensureColumnTx(ctx, tx, "referral_issuers", "replaced_by", `ALTER TABLE referral_issuers ADD COLUMN replaced_by TEXT`); err != nil {
 		return err
 	}
+	// FIX-570 H3: social verifications are recorded PENDING with the bound X author
+	// id and only granted a capacity bonus after a dwell + re-check. author_id may
+	// be NULL when the X API omits it; granted_at IS NULL means not yet granted.
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "author_id", `ALTER TABLE referral_social_verifications ADD COLUMN author_id TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "pending_since", `ALTER TABLE referral_social_verifications ADD COLUMN pending_since TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "granted_at", `ALTER TABLE referral_social_verifications ADD COLUMN granted_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "failed_at", `ALTER TABLE referral_social_verifications ADD COLUMN failed_at TEXT`); err != nil {
+		return err
+	}
+	// Back-compat: rows written before H3 were granted their bonus at insert time.
+	// Mark them granted (granted_at = verified_at) so the promotion reconciler never
+	// re-grants them. Only pre-H3 rows match (they have no pending_since).
+	if _, err := tx.ExecContext(ctx, `
+UPDATE referral_social_verifications
+   SET granted_at = verified_at
+ WHERE granted_at IS NULL AND pending_since IS NULL`); err != nil {
+		return err
+	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {
 		return err
 	}
