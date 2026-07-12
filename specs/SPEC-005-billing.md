@@ -117,6 +117,20 @@ model (§7) and the cache-**isolation** invariant (§11–§16).
   follow-up (LOW):** the shipped `internal/billing` tests assert the four AC shapes only partially (hot
   path/recovery-insert check gross but not all rates/provider credits; no test asserts recovery flag-only
   credit retention; AC-Q055 doesn't snapshot unchanged credits) — a test-hardening task, not a spec gap.
+- **R8-audit corrections (3-lane codex).** Core (four shapes, §3 caveat, AC-CI-5) confirmed PASS by all
+  lanes. Refined the R7 `invalid_usage_tokens` note against code: (1) **completion carve-out** (code +
+  security + architect) — an out-of-range **completion** is `invalid_usage_tokens` only when there is **no
+  valid in-range estimate**; with a clampable in-range estimate the completion is priced at the estimate
+  (mirrors the §5.3 clamp), NOT quarantined (`invalidRecoveryCompletion`); prompt/estimate out-of-range
+  and completion `<0` still always quarantine. (2) **recovery cache-snapshot strictness** (code) — a
+  positive first-attempt cache row requires the identity snapshot's **exact `config_snapshot_id`** and
+  quarantines **`missing_cache_config_snapshot`** if absent (does not fall back to the §10.2 timestamp
+  lookup); documented in §10.2. (3) **force-credit is not reason-gated** (security) — shipped §11.6.1
+  accepts any `quarantined=1` row regardless of reason, so §2.4's "integrity reasons MUST stay
+  quarantined" is operator policy, not code-enforced; reconciled at §2.4 + §11.6.1, carried a
+  reason-allowlist policy follow-up. **Carried LOW (security):** the recovery orphan pass can display an
+  earlier `missing_request_log` reason instead of `invalid_usage_tokens` (COALESCE preserves the first
+  reason) — money stays quarantined, only the operator-visible reason can mislead; a diagnostic follow-up.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -329,7 +343,14 @@ satisfied); the full close moves to v0.5.
   `reconciliation_mismatch`, `operator_split_mismatch`, and
   `conflicting_settlement_id` — only the first should ever be
   candidates for an unquarantine flow; the others reflect real
-  invariant violations and MUST stay quarantined. Wait for #169.
+  invariant violations and (as an operator-policy stance) should stay
+  quarantined. **Shipped reality (v0.6):** #169 landed the §11.6.1
+  force-credit resolution flow, which is **NOT reason-gated** — it can
+  re-admit any quarantined row regardless of reason (see §11.6.1 "Not
+  reason-gated"). So this "should stay quarantined" is operator policy,
+  **not** a code-enforced restriction; a reason allowlist is a carried
+  follow-up. The prohibition on direct `UPDATE ... SET quarantined=0`
+  SQL still stands (that bypasses the §OQ-5 audit log entirely).
 - **Acceptance.** On a backfilled deployment (`attempt_n` populated
   everywhere) the quarantine count from the row-3+ class drops to
   zero on a fresh nightly reconciliation pass. The v0.3.1 fallback
@@ -1884,6 +1905,24 @@ operator review. The successful resolution remains out of
 payout until `force_credit_matures_at_utc`. The maturity timestamp
 is `created_at_utc + billing.force_credit_settlement_hold_seconds`
 and defaults to 24h.
+
+**Not reason-gated (v0.6 honest disclosure).** Shipped force-credit
+(`internal/billing/quarantine.go`) accepts **any** `quarantined = 1`
+row **regardless of `quarantine_reason`** — there is no reason
+allowlist. This is in tension with §2.4's pre-#169 stance that
+integrity reasons (`invalid_usage_tokens`, `missing_config_snapshot`,
+`missing_cache_config_snapshot`, `reconciliation_mismatch`,
+`operator_split_mismatch`, `conflicting_settlement_id`, etc.) "MUST
+stay quarantined": §11.6.1 (the #169 operator-resolution mechanism)
+does **not** enforce that restriction in code — it relies on operator
+discipline plus the maturity hold, audit log (§11.6.4), and correction
+window (§11.6.2). Because a **recovery flag-only** quarantine can leave
+non-zero credits stored (§2.7), force-crediting such an integrity-reason
+row re-admits and pays those retained credits. **Carried policy
+follow-up:** whether force-credit should enforce a `quarantine_reason`
+allowlist (block integrity reasons, permit only reviewable classes) is
+an open money-path decision; v0.6 documents the shipped un-gated
+behavior, it does not ratify it.
 
 **Path parameter:** `request_credit_id` MUST be the integer
 primary key of a row in `ledger_request_credits`. Decimal digits
