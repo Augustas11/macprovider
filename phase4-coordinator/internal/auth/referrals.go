@@ -771,13 +771,32 @@ SELECT key_id, base_capacity, bonus_capacity FROM referral_issuers WHERE issuer_
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?`, issuerID).Scan(&out.Used); err != nil {
 			return err
 		}
+		// Live, unredeemed reservations are authoritative capacity claims, exactly
+		// as in the provider-status remaining calculation. Ignoring them here would
+		// let social verification advertise capacity that is already spoken for.
+		var reserved int
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM referral_reservations r
+ WHERE r.issuer_id = ? AND r.expires_at > ?
+   AND NOT EXISTS (
+       SELECT 1 FROM referral_redemptions d
+        WHERE d.campaign = r.campaign
+          AND d.provider_id = r.provider_id
+          AND d.issuer_id = r.issuer_id
+   )`, issuerID, timeText(now.UTC())).Scan(&reserved); err != nil {
+			return err
+		}
 		out.Code, err = EncodeReferralCode(policy, ReferralTypeProvider, keyID, issuerID)
 		if err != nil {
 			return err
 		}
 		out.Campaign = policy.Campaign
 		out.IssuerID = issuerID
-		out.Remaining = out.BaseUses + out.BonusUses - out.Used
+		out.Remaining = out.BaseUses + out.BonusUses - out.Used - reserved
+		if out.Remaining < 0 {
+			out.Remaining = 0
+		}
 		out.SocialVerified = true
 		out.AdvocacyStatus = "verified"
 		out.FirstServingSeen = true
