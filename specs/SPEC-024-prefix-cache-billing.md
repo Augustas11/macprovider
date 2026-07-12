@@ -7,12 +7,13 @@
 **Change log v0.2 (2026-07-12, provider-local cache-isolation baseline — spec-only, reconciled to shipped code):**
 v0.1 specified the *accounting* of a provider-reported `cached_prompt_tokens` but left the number's *provenance safety* unspecified: the entire provider-local KV/conversation cache keying, the cross-account isolation invariant, and coordinator cross-checking were deferred (§2/§7). v0.2 writes that missing normative baseline, matching the shipped Swift provider + Go coordinator + gateway.
 - **§11 (cache-key / isolation invariant):** the provider-local cache is partitioned **solely by the coordinator-supplied `conversation_key`**, and reuse additionally requires an exact token-level longest-common-prefix (LCP ≥ 32) with matching `model_id` and quantization (`kvBits`) — codifying the shipped guards. The provider cache has **no account/buyer dimension of its own**.
-- **§12 (account-namespacing — the load-bearing cross-component invariant):** cross-account isolation is inherited entirely from the requirement that `conversation_key` be **unforgeable and account-scoped before it reaches the provider or the coordinator sticky map** — shipped via the gateway's keyed HMAC derivation (`conv:` + unpadded-base64url(HMAC-SHA256(secret, scope‖`\n`‖account_id‖`\n`‖tag)), already normative in **SPEC-006 §1.3 / SPEC-008 §1.1**), public-ingress stripping of the `X-MacProvider-Internal-*` namespace, **and** the coordinator's operator/service-bearer gate on internal routing headers (which adds replay-resistance HMAC alone does not). v0.2's contribution is connecting this existing derivation to the cache-**isolation** property and reconciling the provider-visibility tension (next bullet) — not re-owning the derivation.
+- **§12 (account-namespacing — the load-bearing cross-component invariant):** cross-account isolation is inherited entirely from the requirement that `conversation_key` be **unforgeable and account-scoped before it reaches the provider or the coordinator sticky map** — shipped via the gateway's keyed HMAC derivation (`conv:` + unpadded-base64url(HMAC-SHA256(secret, scope‖`\n`‖account_id‖`\n`‖tag)), already normative in **SPEC-006 §1.3 / SPEC-008 §2.1**), public-ingress stripping of the `X-MacProvider-Internal-*` namespace, **and** the coordinator's operator/service-bearer gate on internal routing headers (which adds replay-resistance HMAC alone does not). v0.2's contribution is connecting this existing derivation to the cache-**isolation** property and reconciling the provider-visibility tension (next bullet) — not re-owning the derivation.
 - **§12 provider-visibility reconciliation (cross-spec — RESOLVED via option (a)):** the shipped prefix-cache design **sends the derived `conv:` key to the provider** (cleartext relay and inside the Tier-2 encrypted plaintext), because provider-local KV caching needs a stable per-conversation key. This tensioned the prior SPEC-004 FR-SR-2 / SPEC-006 / SPEC-008 invariant that the provider cannot see `conv:`. **Resolution (operator decision, 2026-07-12): option (a) — ratify the shipped design.** The corpus is amended in this same change — **SPEC-004 v0.3.2** (FR-SR-2 provider-visibility carve-out), **SPEC-006 v0.9.8** (survivability invariant (b) narrowed), **SPEC-008 v0.4.1** (§2.2 invariant (b) narrowed) — now permitting the coordinator to provide the **derived, opaque, account-scoped** `conv:` key to the provider for prefix caching, under an explicit privacy disclosure: the provider learns a stable per-conversation identifier (the same cross-turn correlation sticky affinity already grants) but MUST NOT be able to recover the raw buyer tag or `account_id` (the HMAC is one-way), and captured network frames still contain no raw account/tag (Pillar B survivability, unchanged).
 - **§13 (non-leakage threat model):** cache reuse MUST NOT cross a `conversation_key` boundary, and `cached_prompt_tokens` (buyer-visible, §8) plus TTFT MUST NOT become a cross-account prefix-content/timing oracle.
-- **§14 (coordinator cross-check — the deferred §7 item):** resolves the v0.1 deferral; ties trust of a positive `cached_prompt_tokens` to `sticky_result == "hit"` and flags the shipped sticky-Lookup account-scope gap (account compared only on write, not on the routing read path).
-- **§15 (ingest paths without a fronting gateway):** direct/Tier-2/cleartext ingest trust `conversation_key` verbatim with no provider-side account binding; v0.2 states the deployment invariant these paths must preserve.
+- **§14 (coordinator cross-check — the deferred §7 item):** resolves the v0.1 deferral; ties trust of a positive `cached_prompt_tokens` to `sticky_result == "hit"` and flags two shipped gaps the coordinator MUST close: the sticky-Lookup account-scope gap (account compared only on write, not on the routing read path — FR-CI13) and the **queued-routing final-provider provenance** gap (the slot-queue `enterBest` path can carry a stale `sticky_result == "hit"` after admitting a different provider — FR-CI11a).
+- **§15 (ingest paths without a fronting gateway):** direct/Tier-2/cleartext ingest accept `conversation_key` with **no provider-side account binding** (the value is trimmed and FR-CI1-validated — an invalid key becomes *absent* and disables caching — so it is not blindly *verbatim*, but no **account** dimension is added); v0.2 states the deployment invariant these paths must preserve.
 - **§16 (acceptance criteria):** adds the missing **non-interference** test requirement (no shipped test drives two distinct keys/accounts against one cache).
+- **R2-audit reconciliation (2026-07-12, spec-only).** Second codex 3-lane pass (code/security/architect) confirmed option (a) resolved but flagged incomplete carve-out reconciliation and new fidelity gaps; all C/H/M addressed in this same change: **§2** now frames the tool-call bullet as v0.1 *accounting* scope (not a cache-mechanism claim) consistent with FR-CI3; **§14 FR-CI11a** documents the queued-routing final-provider provenance gap (`slot_queue.go enterBest`); **§13 FR-CI10a** records the provider-receipt/retention + cross-provider-linkability **disclosure-completeness** items; **§15** distinguishes the three shipped ingest transport shapes (relay top-level field / Tier-2 envelope field / direct-HTTP `X-MacProvider-Provider-Conversation` header); citations corrected (SPEC-008 §2.1 for the derivation, SPEC-006 §5.4/§5.4.1 for the coordinator origin gate); FR-CI1/CI2 and the §16 coverage inventory reconciled to the actual shipped tests (Unicode/grapheme trim semantics; LRU/route/range **are** tested but shallowly; partial-trim + queued-provenance untested).
 
 **Change log v0.1 (2026-07-02, prefix-cache billing design):**
 - **Prefix-cache reuse meaning.** Prefix-cache reuse means the same provider that served conversation turn N also serves turn N+1 through SPEC-004 sticky affinity and can skip prefill work for an exact canonical prefix of the new prompt that was already materialized in provider-local KV cache.
@@ -32,7 +33,7 @@ SPEC-024 specifies the billing treatment for provider-reported prefix-cache reus
 - KV-cache implementation **internals** on the provider are out of scope. SPEC-024 defines the reported `cached_prompt_tokens` semantics and (v0.2, §11) the **observable cache-key/reuse invariant**; the mlx-swift cache pinning, materialization, and eviction *mechanism* between `generate()` calls remain IMPL concerns and SPEC-024 MUST NOT prescribe internal mlx APIs. (v0.2 pins the *behavior* — what may be reused for which key — not the mechanism.)
 - ~~Cache-hit fraud detection algorithms are out of scope. Section 7 defines the v0.1 fraud model and defers cross-checked coordinator verification to v0.2.~~ **(v0.2: resolved.)** Coordinator cross-checking of `cached_prompt_tokens` is now in scope — §14. Specific ML-based anomaly-scoring *algorithms* remain out of scope; §14 pins only the deterministic route/attribution gates the coordinator already applies.
 - Cross-provider KV-cache handoff is out of scope. A request that does not route through a sticky hit MUST report `cached_prompt_tokens = 0` or omit the field.
-- Prefix-cache reuse for tool-call replies is out of scope. Tool-message content is buyer-supplied and does not share a stable canonical form with previous turns; v0.1 accounting is restricted to system, user, and assistant message-content prefixes.
+- **v0.1 billing *accounting* for tool-call replies is out of scope** (unchanged): the v0.1 discounted-price accounting attributes cache credit only to system, user, and assistant message-content prefixes. **This is a v0.1 *accounting-scope* statement, NOT a claim about the shipped cache mechanism.** v0.2 §11 FR-CI3 records the shipped reality: the provider's rendered prompt **does** include tool messages and assistant tool-call content, and that full rendered prompt (`prompt_token_ids ‖ generated_token_ids`) is what is tokenized and cached (`ToolPromptRenderer`, `ModelRuntime.swift`). So tool history participates in the provider-local *cache key / LCP*, even though v0.1 *billing* does not separately credit it. The two are consistent once read as accounting-scope vs cache-key-scope.
 - Buyer-side cache-hint headers are out of scope. Buyers MUST NOT send `X-MacProvider-Expect-Cached-Prefix` or an equivalent v0.1 hint. Providers are the source of truth for actual cache reuse; buyers observe `usage.cached_prompt_tokens`.
 - Rate-card hot reload for the new field is out of scope. SPEC-005 Wave 0/1 work continues to govern hot-reload semantics. v0.1 IMPL MAY require coordinator restart to activate `prompt_cache_hit_rate_per_mtok`.
 
@@ -217,7 +218,10 @@ namespace and nothing else** — entries are held in a dictionary keyed by the t
 `conversation_key`. A lookup for key K MUST NOT return, reuse, or measure any prefix stored
 under a different key K′. `conversation_key` uses the SPEC-004 `conv:<opaque-id>` namespace; the shipped provider
 validator (`ChatCompletionRequest.validConversationKey`) additionally requires the `conv:`
-prefix, length > 5, ≤ 256 UTF-8 bytes, and every Unicode scalar ≥ U+0020 **except U+007F**
+prefix, length > 5 (Swift `String.count`, i.e. **extended grapheme clusters**, measured after
+trimming Foundation `.whitespacesAndNewlines` — not a byte or scalar count, so a reimplementation
+counting bytes/scalars or trimming only ASCII whitespace can diverge on non-ASCII input),
+≤ 256 UTF-8 bytes, and every Unicode scalar ≥ U+0020 **except U+007F**
 (i.e. it rejects C0 controls and DEL but **does not** restrict to printable ASCII — non-ASCII
 Unicode ≥ U+0020 is accepted). Note the provider dictionary compares keys by Swift **string
 canonical equivalence**, so canonically-equivalent Unicode (e.g. composed vs decomposed `é`)
@@ -232,7 +236,10 @@ tokens), LCP `<` the incoming prompt length (a full-prompt match is not a reuse 
 identical `model_id`, and identical quantization (`kvBits`). A mismatch on model or `kvBits`
 MUST yield a cache **miss**, not a partial reuse. Additionally (shipped guards): every KV
 layer MUST be *trimmable* and each `trim` MUST remove exactly the requested token count, else
-the request is a **miss** (regression-tested). Because reused KV corresponds to *identical
+the request is a **miss** (enforced at runtime in `ConversationCache.swift`; the current
+`ConversationCacheTests` cover the fully-**non-trimmable** rejection path, **not** a
+partial/incorrect trim-count case — see the §16 coverage note; a partial-trim regression test
+is a MUST-add). Because reused KV corresponds to *identical
 tokens*, reuse preserves **model semantics conditional on identical sampler/RNG state** — the
 per-position logits/KV are equivalent to a cold prefill. It does **not** guarantee
 bit-for-bit identical *sampled output*: the shipped default is stochastic sampling
@@ -272,7 +279,7 @@ single upstream invariant, which v0.2 makes normative:
 **FR-CI5 (unforgeable, account-scoped key).** By the time a `conversation_key` reaches a
 provider or the coordinator sticky map, it MUST be **account-scoped and unforgeable** — a
 value that no buyer can choose or collide with another account's value. This derivation is
-**already normative in SPEC-006 §1.3 / SPEC-008 §1.1**; SPEC-024 references it and does not
+**already normative in SPEC-006 §1.3 / SPEC-008 §2.1**; SPEC-024 references it and does not
 re-own it. For clarity, the **byte-exact** shipped algorithm
 (`phase5-gateway/internal/router/chat_proxy.go` `deriveConversationKey`) is:
 
@@ -293,7 +300,9 @@ namespace, including `X-MacProvider-Internal-Conv`) at public ingress; (b) the *
 itself rejects internal routing headers unless the request carries the operator/service
 bearer (`internal/buyer/server.go`), so a party that *observes* a valid `conv:` key still
 cannot **replay** it to the coordinator without gateway-origin authorization (HMAC gives
-unforgeability, not replay-resistance — SPEC-006 §… states the coordinator gate). A
+unforgeability, not replay-resistance — SPEC-006 §5.4 / §5.4.1 states the coordinator
+gate: `X-MacProvider-Internal-Conv` is honored only on authenticated/network-restricted
+gateway-originated traffic and never from direct buyer traffic). A
 deployment MUST preserve both: the account-scoped key is set exclusively by trusted
 infrastructure and honored only on authenticated gateway-origin traffic.
 
@@ -323,10 +332,14 @@ the shipped design**, and the corpus is amended in this same change:
   preflight/attestation paths still MUST NOT reveal it.
 
 The disclosed privacy trade-off: the provider learns a **stable per-conversation identifier**
-and can correlate that conversation's turns (the **same** correlation SPEC-004 sticky affinity
+and can correlate that conversation's turns (the correlation SPEC-004 sticky affinity
 already grants by pinning the conversation to one provider), but **cannot** recover the raw
 buyer tag or `account_id` (one-way HMAC), and captured network frames still carry no raw
-account/tag. §11–§16's isolation guarantees therefore hold at the wire/account-scoping layer,
+account/tag. **Cross-provider linkability caveat:** the derived key is forwarded on cache
+**misses** and **re-routes** too, not only on sticky hits, so over a conversation's life the
+**same** identifier MAY reach **more than one** provider — slightly broader than the
+single-provider correlation sticky affinity alone grants. This is the SPEC-006 §5.4
+disclosure-completeness item (§13). §11–§16's isolation guarantees therefore hold at the wire/account-scoping layer,
 and the residual trust assumption is narrowed to: the provider is trusted to **hold (not
 exfiltrate)** the opaque derived key — which it must be trusted to do for sticky affinity
 regardless.
@@ -368,6 +381,23 @@ event (`KVCacheTelemetry.swift`) is a **local operator signal** (default stderr)
 be exposed to buyers; only the §8 buyer-visible `cached_prompt_tokens` count crosses to the
 buyer, and only for the buyer's own account.
 
+**FR-CI10a (disclosure-completeness — MUST close).** The option-(a) carve-out gives the
+provider a durable artifact and a broader correlation surface than the shipped buyer-facing
+disclosure describes. Two consequences are **not yet disclosed** to buyers and MUST be added
+to the SPEC-006 §5.4 `sticky_affinity` disclosure, `/v1/models tier1_disclosure`, and
+`disclosure.go`:
+- **(i) Provider receipt + independent retention.** The provider **receives** the derived
+  opaque conversation identifier and **retains** it in a provider-local KV cache under its own
+  TTL/LRU (§11 FR-CI4). `DELETE /v1/sticky` purges only the **coordinator sticky map**, not
+  this provider-local entry (SPEC-006 §1.3 lifecycle clarification).
+- **(ii) Cross-provider linkability.** Because the derived key is forwarded on cache **misses**
+  and **re-routes**, the same stable identifier MAY reach **more than one** provider across a
+  conversation's life — broader than the single-provider correlation sticky affinity alone
+  grants (§12 cross-provider linkability caveat).
+The current disclosure (preferential routing + single-provider correlation) is accurate but
+**incomplete** for (i)–(ii). v0.2 records this as a tracked completeness gap, not a silent
+omission; extending the disclosure copy is a follow-up (buyer-facing string + `disclosure.go`).
+
 ## 14. Coordinator cross-check of `cached_prompt_tokens` (v0.2)
 
 This section resolves the v0.1 §7 deferral with the **deterministic** gates the coordinator
@@ -377,7 +407,23 @@ ML-based anomaly scoring remains out of scope (§2).
 **FR-CI11 (route gate).** A positive `cached_prompt_tokens` MUST be accepted for the
 discounted price only when the request was served on a **sticky hit** (`sticky_result ==
 "hit"`). A positive value on any non-hit route MUST be quarantined (`ambiguous_cache`) and
-priced as if `cached_prompt_tokens = 0` (§3).
+priced as if `cached_prompt_tokens = 0` (§3). FR-CI11's soundness depends on `sticky_result`
+describing the provider **actually dispatched to** — see FR-CI11a.
+
+**FR-CI11a (final-provider provenance — known shipped gap, MUST close).** `sticky_result`
+MUST reflect the provider that ultimately served the request, not the provider sticky ordering
+initially preferred. The **normal** selection path enforces this (it corrects a stale
+sticky hit when preflight selects another provider,
+`internal/buyer/server.go` `selectProviderExcluding`). The **slot-queue** path does **not**:
+it computes sticky ordering, then `enterBest` (`internal/buyer/slot_queue.go`) MAY admit a
+**different** provider with a shorter queue while the original `stickyResult == "hit"` is
+carried unchanged (`internal/buyer/server.go`), and billing then trusts that stale state
+(`internal/buyer/billing_recorder.go`). A positive `cached_prompt_tokens` can therefore be
+discounted after a **non-sticky final selection** on the queued path. The account-scoped HMAC
+keeps this from becoming a *cross-account* oracle (the different provider still only has its
+own account-scoped keys), so it is a **billing-attribution** defect, not an isolation breach.
+v0.2 records it as a shipped gap the coordinator MUST close by re-deriving `sticky_result`
+against the **final** admitted provider on the slot-queue path before honoring the discount.
 
 **FR-CI12 (range + retry gates).** The coordinator MUST null and flag (`invalid_cached_prompt_tokens`)
 any value `< 0` or `> prompt_tokens`, and MUST null `cached_prompt_tokens` on any retry
@@ -397,13 +443,25 @@ redundant but MUST NOT be relied upon as the *primary* isolation control.
 
 ## 15. Ingest paths without a fronting gateway (v0.2)
 
-The provider accepts `conversation_key` on multiple ingest paths — the cleartext HTTP/relay
-path and the Tier-2 encrypted-envelope path — with **no provider-side account binding**
-(`InferenceRelay.swift`, `Tier2ProviderSession.swift`). (The value is trimmed and passed
-through the FR-CI1 prefix/length/scalar validation — an invalid key becomes *absent* and
-disables caching — so it is not blindly *verbatim*, but no **account** dimension is added.)
-This is safe **only** while every buyer request passes through the FR-CI5 deriving gateway
-first.
+The provider accepts `conversation_key` on **three distinct transport shapes**, all with **no
+provider-side account binding** — a reimplementation that reads the wrong shape silently
+disables caching:
+
+1. **Cleartext WebSocket relay** — a **top-level JSON field** `conversation_key` on the
+   `inference_request` message (`InferenceRelay.swift`; coordinator seals it at
+   `relay.go` `sealInferenceRequest`).
+2. **Tier-2 encrypted leg** — inside the decrypted `inference_request_plaintext` **envelope**
+   `conversation_key` field, never in AAD/outer metadata (`Tier2ProviderSession.swift`;
+   SPEC-008 v0.4.1 §6.6).
+3. **Direct HTTP** (`POST /v1/chat/completions` straight to the provider) — the
+   `X-MacProvider-Provider-Conversation` **request header** (`HTTPServer.swift`); the request
+   **JSON body** parser does **not** carry the key (it initializes as absent,
+   `ChatCompletionRequest.swift`), so on this path the header is the only channel.
+
+On all three the value is trimmed and passed through the FR-CI1 prefix/length/scalar
+validation — an invalid key becomes *absent* and disables caching, so it is not blindly
+*verbatim* — but no **account** dimension is added. This is safe **only** while every buyer
+request passes through the FR-CI5 deriving gateway first.
 
 **FR-CI14 (deployment invariant).** Any deployment topology in which buyers can reach the
 coordinator or provider **without** the gateway HMAC derivation (direct coordinator access, a
@@ -434,12 +492,20 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   logits/KV are equal with and without reuse. Under stochastic sampling the AC MUST assert
   *distributional* equivalence, not byte equality (FR-CI2).
 
-**Coverage note (v0.2).** The shipped provider tests lock reuse *correctness* (LCP,
-model/`kvBits` swap → miss, non-trimmable → miss, TTL/LRU/token-cap eviction, cached-token
-clamping — the LRU test drives three keys through one cache). But **no test asserts
-cross-key/cross-account non-interference (AC-CI-1)**, exercises the sub-32 LCP / full-prompt
-miss paths (AC-CI-2), the coordinator route/retry/range normalization (AC-CI-5), or
-cold-vs-warm reuse-equivalence (AC-CI-6). Also un-tested here: FR-CI4 lifecycle, FR-CI8's
-full non-interference claim, FR-CI10 buyer non-exposure, FR-CI13 read-path account compare on
-a non-FR-CI5 topology, and FR-CI14 reuse-disable on buyer-chosen-key paths. Closing these is a
-v0.2 IMPL deliverable.
+**Coverage note (v0.2 — reconciled to the actual shipped test suite).** *What is tested:* the
+shipped provider tests (`ConversationCacheTests`) lock reuse *correctness* — LCP,
+model/`kvBits` swap → miss, fully-non-trimmable → miss, TTL expiry, LRU and token-cap
+eviction, and cached-token clamping — and the coordinator Go tests exercise the
+`normalizeCachedPromptTokens` **route / retry / range** gates (FR-CI11/CI12) on the normal
+(non-queued) path. *What is NOT tested (the real gaps, MUST-add):* (1) cross-key/cross-account
+non-interference (AC-CI-1) — the LRU test drives three keys through one cache but asserts only
+**aggregate** entry/token counts, **not which specific LRU key was evicted** nor that key K′
+returns a cold result while key K is warm; (2) the sub-32 LCP / full-prompt miss paths
+(AC-CI-2); (3) the **partial/incorrect trim-count** rejection (only the fully-non-trimmable
+case is covered — FR-CI2); (4) cold-vs-warm reuse-equivalence (AC-CI-6); (5) the
+**queued-routing final-provider provenance** gap (FR-CI11a — no test drives a slot-queue
+re-selection with a carried `sticky_result == "hit"`); (6) FR-CI13 read-path account compare
+on a non-FR-CI5 topology; (7) FR-CI14 reuse-disable on buyer-chosen-key paths. Closing these is
+a v0.2 IMPL deliverable. (The earlier draft mislabeled TTL/LRU/token-cap and coordinator
+route/range normalization as untested; they exist — the accurate gap is *depth* of the LRU/trim
+assertions and the queued-provenance + cross-key cases above.)
