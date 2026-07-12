@@ -331,6 +331,114 @@ func TestHandleAppTrackRegisterCapOnePreparesExactlyOneIdentity(t *testing.T) {
 	}
 }
 
+// TestHandleAppTrackRegisterLostResponseReplayRecoversCredential is the FIX-570
+// C1 regression at the HTTP boundary: the original signed register commits (token
+// minted, referral redeemed, PostgreSQL identity prepared) but its response is
+// lost. Replaying the IDENTICAL signed request must return a usable token bound to
+// the SAME redemption WITHOUT double-consuming the invite and WITHOUT destroying
+// the committed state. Pre-fix, recovery re-ran prepareIdentity with a consumed
+// nonce and the compensation branch deleted the freshly rotated credential.
+func TestHandleAppTrackRegisterLostResponseReplayRecoversCredential(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := auth.ReferralPolicy{
+		RequireForRegistration: true,
+		Campaign:               "prebeta",
+		PolicyVersion:          "v1",
+		CurrentKeyID:           "K1",
+		HMACKeys:               map[string]string{"K1": strings.Repeat("r", 32)},
+		ProviderBaseUses:       1,
+		SocialBonusUses:        2,
+		ChallengeTTL:           10 * time.Minute,
+	}
+	code, err := store.CreateSeedReferral(context.Background(), policy, "app_replay", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The store's referral/reservation/reissue paths use real wall-clock time, so
+	// the attempt clock must be anchored to real `now` (the reservation TTL and
+	// reissue cooldown windows are evaluated against time.Now).
+	testNow := time.Now().UTC().Truncate(time.Second)
+	// registrationPrepared=true models the durable PostgreSQL attempt marker written
+	// at the original attempt and surviving to the replay.
+	stats := &fakeStatsDB{registrationPrepared: true}
+	handler := &Handler{
+		StatsDB:           stats,
+		AuthTokenStore:    store,
+		ReferralStore:     store,
+		ReferralPolicy:    policy,
+		CoordinatorDomain: "coordinator.streamvc.live",
+		CoordinatorWSURL:  "wss://coordinator.streamvc.live/v2/provider",
+		IPRateLimiter:     allowLimiter{},
+		ASNRateLimiter:    allowLimiter{},
+		AppAttestConfig:   AppAttestConfig{BundleID: "live.streamvc.Malibu", TeamID: "MALIBU1234"},
+		Now:               func() time.Time { return testNow },
+	}
+	body, providerID := signedRegisterBody(t, func(m map[string]any) {
+		m["referral_code"] = code
+		m["ts_utc"] = testNow.Format(time.RFC3339)
+	})
+	send := func() (int, string) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+		req.RemoteAddr = "198.51.100.20:5000"
+		rr := httptest.NewRecorder()
+		handler.HandleAppTrackRegister(rr, req)
+		var resp RegisterResponse
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		return rr.Code, resp.ProviderToken
+	}
+
+	code1, token1 := send()
+	if code1 != http.StatusOK || token1 == "" {
+		t.Fatalf("original register status=%d token=%q", code1, token1)
+	}
+
+	// Response lost; client replays the identical signed request.
+	code2, token2 := send()
+	if code2 != http.StatusOK || token2 == "" {
+		t.Fatalf("replay register status=%d token=%q", code2, token2)
+	}
+	if token2 == token1 {
+		t.Fatal("replay returned the same token; expected a rotated credential")
+	}
+
+	// The rotated token is usable; the original is revoked.
+	if bound, ok, err := store.ValidateToken(context.Background(), token2); err != nil || !ok || bound != providerID {
+		t.Fatalf("replay token invalid: bound=%q ok=%v err=%v", bound, ok, err)
+	}
+	if _, ok, err := store.ValidateToken(context.Background(), token1); err != nil || ok {
+		t.Fatalf("original token must be revoked after rotation: ok=%v err=%v", ok, err)
+	}
+
+	// Exactly one active token remains; the invite was consumed exactly once (a
+	// cap-1 seed cannot be redeemed twice, and validation now reports exhausted).
+	tokens, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := 0
+	for _, tok := range tokens {
+		if !tok.RevokedAt.Valid {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active tokens=%d want 1 (tokens=%+v)", active, tokens)
+	}
+	if _, err := store.ValidateReferral(context.Background(), policy, code, testNow); !errors.Is(err, auth.ErrReferralExhausted) {
+		t.Fatalf("invite should be exhausted (consumed once), got %v", err)
+	}
+
+	// A further immediate replay is bounded by the reissue cooldown, so a
+	// lost-token loop cannot mint unboundedly.
+	if code3, _ := send(); code3 != http.StatusTooManyRequests {
+		t.Fatalf("third replay status=%d want 429 (reissue cooldown)", code3)
+	}
+}
+
 func TestHandleHardwareEvidenceQueuesAuthenticatedAutotuneEvidence(t *testing.T) {
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	stats := &fakeStatsDB{}
@@ -920,6 +1028,12 @@ func TestHandleAppTrackRegisterUsesServerTimeForNonceReplay(t *testing.T) {
 	if !stats.nonceObservedAt.Equal(want) {
 		t.Fatalf("nonce observed_at=%s want server time %s", stats.nonceObservedAt, want)
 	}
+	// FIX-570 C1: the durable attempt marker is keyed on the SIGNED ts_utc, not
+	// server time, so a lost-response replay resolves to the same marker.
+	wantAttempt := time.Date(2026, 7, 3, 11, 59, 0, 0, time.UTC)
+	if !stats.attemptTS.Equal(wantAttempt) {
+		t.Fatalf("attempt ts=%s want signed ts_utc %s", stats.attemptTS, wantAttempt)
+	}
 }
 
 func TestHandleAppTrackRegisterAppAttestPresentRequiresVerifier(t *testing.T) {
@@ -1271,6 +1385,7 @@ type fakeStatsDB struct {
 	nonceProviderID            string
 	nonceSourceIP              string
 	nonceObservedAt            time.Time
+	attemptTS                  time.Time
 	nonceCalls                 int
 	upsertProviderID           string
 	upsertAttested             bool
@@ -1295,13 +1410,14 @@ type fakeStatsDB struct {
 	existingEvidenceErr        error
 }
 
-func (f *fakeStatsDB) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, tsUTC time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
+func (f *fakeStatsDB) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt, attemptTS time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nonceCalls++
 	f.nonceProviderID = providerID
 	f.nonceSourceIP = sourceIP
-	f.nonceObservedAt = tsUTC
+	f.nonceObservedAt = observedAt
+	f.attemptTS = attemptTS
 	if f.nonceErr != nil {
 		return f.nonceErr
 	}

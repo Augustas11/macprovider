@@ -158,12 +158,16 @@ type Handler struct {
 // StatsDB is the Postgres-side dependency surface.
 type StatsDB interface {
 	// PrepareProviderRegistration atomically records nonce replay protection and
-	// the provider identity in one PostgreSQL transaction.
-	PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, tsUTC time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error
-	// ProviderRegistrationPrepared reports whether the exact nonce/identity
-	// transaction committed. It resolves ambiguous PostgreSQL commit outcomes
-	// and drives recovery of durable cross-store App-track mint sagas.
-	ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, tsUTC time.Time) (bool, error)
+	// the provider identity in one PostgreSQL transaction. observedAt is server
+	// time (anchors the nonce-replay window); attemptTS is the SIGNED ts_utc,
+	// which is stable across a lost-response replay and identifies the durable
+	// provider_register_attempts commitment marker (FIX-570 C1).
+	PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt, attemptTS time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error
+	// ProviderRegistrationPrepared reports whether the exact attempt (keyed by the
+	// signed attemptTS, replay-invariant) committed. It resolves ambiguous
+	// PostgreSQL commit outcomes and drives recovery of durable cross-store
+	// App-track mint sagas.
+	ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, attemptTS time.Time) (bool, error)
 
 	// UpsertProviderHardwareProfile persists provider-reported hardware identity
 	// for async stats enrichment. This must only run after rate-limit checks pass.
@@ -447,7 +451,11 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			recoverCtx, cancelRecover := context.WithTimeout(r.Context(), 2*time.Second)
 			recoveredToken, recovered, recoverErr := h.ReferralStore.RecoverAppTrackReferralMint(
 				recoverCtx, req.ProviderID, currentBearer, req.ReferralCode, h.ReferralPolicy,
-				auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, ObservedAt: now},
+				// FIX-570 C1: the attempt identity is the SIGNED ts_utc, not server
+				// `now`. ts_utc is stable across a lost-response replay, so the durable
+				// PostgreSQL attempt marker written at the original attempt is found on
+				// replay and recovery can prove the identity committed.
+				auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, ObservedAt: tsUTC},
 			)
 			cancelRecover()
 			if recoverErr != nil {
@@ -473,7 +481,10 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 	prepareIdentity := func() error {
 		prepareCtx, cancelPrepare := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancelPrepare()
-		return h.StatsDB.PrepareProviderRegistration(prepareCtx, req.ProviderID, sourceIP, req.Nonce, now, pubkey, attested, appAttestKeyID)
+		// FIX-570 C1: the nonce-replay window stays anchored to server `now`; the
+		// durable attempt marker is bound to the SIGNED ts_utc so a lost-response
+		// replay resolves to the same attempt identity.
+		return h.StatsDB.PrepareProviderRegistration(prepareCtx, req.ProviderID, sourceIP, req.Nonce, now, tsUTC, pubkey, attested, appAttestKeyID)
 	}
 	mintCredential := func() error {
 		mintCtx, cancelMint := context.WithTimeout(r.Context(), 2*time.Second)
@@ -481,7 +492,7 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		if referralReservationID != "" {
 			token, err = h.ReferralStore.MintProviderTokenAppTrackWithReferralReservation(
 				mintCtx, req.ProviderID, currentBearer, req.ReferralCode, h.ReferralPolicy, referralReservationID,
-				auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, ObservedAt: now},
+				auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, ObservedAt: tsUTC},
 			)
 		} else if h.ReferralPolicy.RequireForRegistration {
 			token, err = h.ReferralStore.MintProviderTokenAppTrackWithReferral(mintCtx, req.ProviderID, currentBearer, req.ReferralCode, h.ReferralPolicy)
@@ -490,17 +501,57 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		}
 		return err
 	}
-	if referralReservationID != "" || recoveryMode {
+	if recoveryMode {
+		// FIX-570 C1: recovery mode means a prior gated attempt for THIS signed
+		// request already durably minted the credential + redemption; RecoverApp...
+		// rotated the still-unused token. The identity was already prepared at the
+		// original attempt, so we MUST NOT re-run prepareIdentity() (its nonce is
+		// consumed), MUST NOT re-mint, and MUST NOT run the fresh compensation
+		// branch (which previously destroyed the rotated credential). We only
+		// verify the durable commitment (keyed by the replay-invariant signed
+		// ts_utc), then resolve the saga and disclose.
+		checkCtx, cancelCheck := context.WithTimeout(context.Background(), 2*time.Second)
+		prepared, checkErr := h.StatsDB.ProviderRegistrationPrepared(checkCtx, req.ProviderID, sourceIP, req.Nonce, tsUTC)
+		cancelCheck()
+		if checkErr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal_error", "provider registration outcome pending reconciliation")
+			return
+		}
+		if !prepared {
+			// The original identity never committed (e.g. crash between mint and
+			// prepare). Do NOT disclose the rotated token; roll it back and fail so
+			// the client retries a clean registration.
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = h.ReferralStore.RollbackAppTrackReferralMint(cleanupCtx, req.ProviderID, token)
+			cancelCleanup()
+			writeJSONError(w, http.StatusServiceUnavailable, "registration_incomplete", "prior registration did not complete; retry")
+			return
+		}
+		ackCtx, cancelAck := context.WithTimeout(context.Background(), 2*time.Second)
+		ackErr := h.ReferralStore.AcknowledgeAppTrackReferralMint(ackCtx, req.ProviderID, token)
+		cancelAck()
+		if ackErr != nil {
+			// FIX-570 ADV-H4: an ack conflict means the saga row is gone — possibly
+			// because a CONCURRENT attempt revoked/replaced this token. Before
+			// disclosing, re-validate that the rotated token is STILL the active
+			// credential for the provider; if a concurrent attempt superseded it,
+			// FAIL without disclosing a dead token.
+			if !h.appTrackTokenStillActive(req.ProviderID, token) {
+				writeJSONError(w, http.StatusConflict, "existing_active_token_no_proof", "credential superseded by a concurrent attempt")
+				return
+			}
+			if h.Metrics != nil {
+				h.Metrics.IncRegisterReconcileDeferred()
+			}
+		}
+	} else if referralReservationID != "" {
 		// Fresh gated registrations cross the credential authority first. A
 		// referral failure therefore cannot create a PostgreSQL identity or
 		// reward/auth anchor. The cleartext token is not exposed until the
-		// subsequent atomic PostgreSQL prepare succeeds. In recovery mode the token
-		// was already minted with a durable saga row, so only prepare + ack remain.
-		if !recoveryMode {
-			if err := mintCredential(); err != nil {
-				writeAppTrackMintError(w, err)
-				return
-			}
+		// subsequent atomic PostgreSQL prepare succeeds.
+		if err := mintCredential(); err != nil {
+			writeAppTrackMintError(w, err)
+			return
 		}
 		prepareErr := prepareIdentity()
 		if prepareErr != nil {
@@ -508,7 +559,7 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			// attempt before deciding whether to preserve or compensate the
 			// undisclosed SQLite token.
 			checkCtx, cancelCheck := context.WithTimeout(context.Background(), 2*time.Second)
-			prepared, checkErr := h.StatsDB.ProviderRegistrationPrepared(checkCtx, req.ProviderID, sourceIP, req.Nonce, now)
+			prepared, checkErr := h.StatsDB.ProviderRegistrationPrepared(checkCtx, req.ProviderID, sourceIP, req.Nonce, tsUTC)
 			cancelCheck()
 			if checkErr != nil {
 				writeJSONError(w, http.StatusInternalServerError, "internal_error", "provider registration outcome pending reconciliation")
@@ -534,7 +585,11 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			// preparation committed (prepared implied by reaching this branch), so
 			// leaving the pending-mint row lets the reconciler resolve it with
 			// prepared=true, which PRESERVES the credential + referral redemption.
-			// Deleting or compensating here would risk stranding a live credential.
+			// ADV-H4: still guard disclosure against a concurrent supersession.
+			if errors.Is(ackErr, auth.ErrReferralConflict) && !h.appTrackTokenStillActive(req.ProviderID, token) {
+				writeJSONError(w, http.StatusConflict, "existing_active_token_no_proof", "credential superseded by a concurrent attempt")
+				return
+			}
 			if h.Metrics != nil {
 				h.Metrics.IncRegisterReconcileDeferred()
 			}
@@ -620,6 +675,25 @@ func writeAppTrackMintError(w http.ResponseWriter, err error) {
 	default:
 		writeJSONError(w, http.StatusInternalServerError, "internal_error", "provider token mint failed")
 	}
+}
+
+// appTrackTokenStillActive reports whether the given cleartext token is still the
+// active, unrevoked credential bound to providerID. FIX-570 ADV-H4 uses it as a
+// disclosure guard: after an acknowledgement conflict a concurrent attempt may
+// have revoked/replaced this token, and a dead credential must never be
+// disclosed. ValidateToken is read-only for app-track tokens (it does not mark
+// them used). On any lookup error it fails closed (treats the token as inactive).
+func (h *Handler) appTrackTokenStillActive(providerID, cleartext string) bool {
+	if h.AuthTokenStore == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	bound, ok, err := h.AuthTokenStore.ValidateToken(ctx, cleartext)
+	if err != nil || !ok {
+		return false
+	}
+	return bound == providerID
 }
 
 func (h *Handler) persistHardwareProfileAsync(providerID string, summary HardwareSummary, observedAt time.Time) {

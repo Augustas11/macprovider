@@ -239,7 +239,11 @@ final class LaunchProviderController: ObservableObject {
     // failure surfaces normally rather than a fresh-referral dead-end.
     func recoverExistingIdentity() async {
         stage = .idle
-        await launchViaCLIInstall(existingIdentity: true)
+        // PROD-H3: the Keychain bearer is gone, so — unlike an ordinary
+        // existing-identity launch — the re-disclosed credential must be
+        // imported from the CLI config into the Malibu Keychain before
+        // finalization checks for the Keychain identity.
+        await launchViaCLIInstall(existingIdentity: true, recoveringMissingBearer: true)
     }
 
     // PROD-H6 (b): explicit destructive escape hatch. Move the app-owned
@@ -280,7 +284,7 @@ final class LaunchProviderController: ObservableObject {
         await finalizeExistingInstall(logLine: "Background provider is already running locally.")
     }
 
-    private func launchViaCLIInstall(existingIdentity: Bool = false) async {
+    private func launchViaCLIInstall(existingIdentity: Bool = false, recoveringMissingBearer: Bool = false) async {
         guard existingIdentity || !referralRequired || referralCodeIsValid else {
             stage = .failed(
                 stage: "referral",
@@ -314,11 +318,16 @@ final class LaunchProviderController: ObservableObject {
                 }
             }
             var importError: Error?
-            if !existingIdentity {
+            // PROD-H3: recovery imports the re-disclosed credential too. A fresh
+            // install defers a retriable "token not in config yet" error until
+            // the launchd provider is healthy, but recovery starts the child
+            // directly with the Keychain bearer (no launchd wait), so a missing
+            // credential there is terminal — surface it instead of deferring.
+            if !existingIdentity || recoveringMissingBearer {
                 do {
                     try await dependencies.importCLIConfigAfterInstall()
                 } catch {
-                    if isRetriableImportError(error) {
+                    if !recoveringMissingBearer, isRetriableImportError(error) {
                         importError = error
                         installLogLines.append(deferredImportMessage(for: error))
                     } else {
@@ -346,13 +355,18 @@ final class LaunchProviderController: ObservableObject {
 
     // PROD-M2: install.sh surfaces a referral rejection from the authoritative
     // mint as `referral_<token>` (token ∈ missing|invalid|expired|revoked|
-    // exhausted), both as a MACPROVIDER_REFERRAL_REJECTED marker and in the
-    // fatal message. Scan the captured install log for it.
+    // exhausted|required), both as a MACPROVIDER_REFERRAL_REJECTED marker and in
+    // the fatal message. Scan the captured install log for it.
     private func referralRejectionFromInstallLog() -> String? {
-        let pattern = #"referral_(missing|invalid|expired|revoked|exhausted)"#
+        let pattern = #"referral_(missing|invalid|expired|revoked|exhausted|required)"#
         for line in installLogLines.reversed() {
             if let range = line.range(of: pattern, options: .regularExpression) {
-                return String(line[range].dropFirst("referral_".count))
+                let token = String(line[range].dropFirst("referral_".count))
+                // PROD-M4: the server's authoritative `referral_required`
+                // rejection means an invite is mandatory. Normalize it to the
+                // `missing` case so the failure copy and mandatory-invite routing
+                // match the other required-invite rejections.
+                return token == "required" ? "missing" : token
             }
         }
         return nil
@@ -363,7 +377,10 @@ final class LaunchProviderController: ObservableObject {
         case "expired": return "This invite has expired. Enter a new invite code."
         case "revoked": return "This invite is no longer available. Enter a new invite code."
         case "exhausted": return "This invite has already been used. Enter a new invite code."
-        case "missing": return "An invite code is required. Enter a new invite code."
+        // PROD-M4: `required` is normalized to `missing` upstream, but map it
+        // here too so any direct preflight `required` reason renders the same
+        // mandatory-invite copy rather than the generic fallback.
+        case "missing", "required": return "An invite code is required. Enter a new invite code."
         default: return "This invite is not valid. Enter a new invite code."
         }
     }

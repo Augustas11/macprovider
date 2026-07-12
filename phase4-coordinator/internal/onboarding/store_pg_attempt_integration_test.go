@@ -78,8 +78,12 @@ func TestProviderRegistrationPreparedSurvivesNoncePrune(t *testing.T) {
 	sourceIP := "203.0.113.7"
 	nonce := "aa11bb22cc33"
 	observedAt := time.Now().UTC().Truncate(time.Second)
+	// FIX-570 C1: attemptTS (signed ts_utc) is the replay-invariant marker key;
+	// here it differs from observedAt to prove ProviderRegistrationPrepared keys
+	// on attemptTS, not the server-time nonce window.
+	attemptTS := observedAt.Add(-30 * time.Second)
 
-	if err := store.PrepareProviderRegistration(ctx, providerID, sourceIP, nonce, observedAt, pub, false, nil); err != nil {
+	if err := store.PrepareProviderRegistration(ctx, providerID, sourceIP, nonce, observedAt, attemptTS, pub, false, nil); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 
@@ -88,7 +92,7 @@ func TestProviderRegistrationPreparedSurvivesNoncePrune(t *testing.T) {
 		t.Fatalf("prune nonces: %v", err)
 	}
 
-	prepared, err := store.ProviderRegistrationPrepared(ctx, providerID, sourceIP, nonce, observedAt)
+	prepared, err := store.ProviderRegistrationPrepared(ctx, providerID, sourceIP, nonce, attemptTS)
 	if err != nil {
 		t.Fatalf("prepared: %v", err)
 	}
@@ -96,9 +100,17 @@ func TestProviderRegistrationPreparedSurvivesNoncePrune(t *testing.T) {
 		t.Fatal("committed attempt reported prepared=false after nonce prune (A1 regression)")
 	}
 
+	// The server-time observedAt must NOT match the attempt marker (C1: the marker
+	// is keyed on the signed attemptTS, replay-invariant).
+	if wrongKey, err := store.ProviderRegistrationPrepared(ctx, providerID, sourceIP, nonce, observedAt); err != nil {
+		t.Fatalf("prepared(observedAt): %v", err)
+	} else if wrongKey {
+		t.Fatal("attempt marker matched server-time observedAt; must key on signed attemptTS")
+	}
+
 	// A genuinely un-prepared attempt (no attempt row) must still report false so
 	// reconciliation still compensates a true non-commit.
-	notPrepared, err := store.ProviderRegistrationPrepared(ctx, "p_never", sourceIP, "ffffffffffff", observedAt)
+	notPrepared, err := store.ProviderRegistrationPrepared(ctx, "p_never", sourceIP, "ffffffffffff", attemptTS)
 	if err != nil {
 		t.Fatalf("prepared(missing): %v", err)
 	}

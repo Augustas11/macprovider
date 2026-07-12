@@ -460,9 +460,25 @@ enum ProviderConfig {
         try startFreshMovingCLIConfigAside(now: now, paths: .current)
     }
 
+    /// The durable provider_id file the installer's `choose_provider_id` reads
+    /// first (`~/.config/macprovider/provider_id`). It lives next to config.yaml
+    /// and is part of the app-owned identity bundle.
+    static func providerIDFile(paths: ProviderPaths = .current) -> URL {
+        paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
+    }
+
+    // PROD-H3: "Start as a new provider" must be truly destructive+clean. Moving
+    // only config.yaml aside left the durable provider_id file (and the app
+    // ownership marker) in place, so the installer's choose_provider_id reused
+    // the old bound provider_id and the fresh registration landed back in the
+    // bound-identity conflict. Archive the COMPLETE identity bundle — config.yaml,
+    // the provider_id file, and the app marker — into one timestamped directory
+    // so the next install generates a brand-new provider_id. Partial moves roll
+    // back so a failure never leaves the identity half-retired.
     static func startFreshMovingCLIConfigAside(now: Date = Date(), paths: ProviderPaths) throws -> URL? {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: paths.configFile.path) else { return nil }
+        let bundle = [paths.configFile, providerIDFile(paths: paths), paths.appMarkerFile]
+        guard bundle.contains(where: { fm.fileExists(atPath: $0.path) }) else { return nil }
         try paths.ensureDirectories()
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -470,11 +486,28 @@ enum ProviderConfig {
         let suffix = formatter.string(from: now)
             .replacingOccurrences(of: ":", with: "")
             .replacingOccurrences(of: "-", with: "")
-        let backup = paths.configFile.deletingLastPathComponent()
-            .appendingPathComponent("config.yaml.cli-backup-\(suffix)")
-        try fm.moveItem(at: paths.configFile, to: backup)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
-        return backup
+        let archive = paths.configFile.deletingLastPathComponent()
+            .appendingPathComponent("identity-archive-\(suffix)-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try fm.createDirectory(at: archive, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: archive.path)
+
+        var moved: [(from: URL, to: URL)] = []
+        do {
+            for artifact in bundle where fm.fileExists(atPath: artifact.path) {
+                let destination = archive.appendingPathComponent(artifact.lastPathComponent)
+                try fm.moveItem(at: artifact, to: destination)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+                moved.append((artifact, destination))
+            }
+        } catch {
+            // Restore any already-archived artifacts so the identity stays whole.
+            for entry in moved.reversed() {
+                try? fm.moveItem(at: entry.to, to: entry.from)
+            }
+            try? fm.removeItem(at: archive)
+            throw error
+        }
+        return archive
     }
 
     // AUDIT R1 CODE M2 / SECURITY S3 / ARCHITECT A6 fix: uninstall must complete

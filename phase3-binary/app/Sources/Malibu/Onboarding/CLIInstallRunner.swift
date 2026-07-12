@@ -32,6 +32,16 @@ enum CLIInstallRunner {
         } else {
             existingProviderToken = nil
         }
+        // PROD-H3: request repair mode whenever a durable app-owned identity
+        // exists — either the Keychain bearer is present (ordinary repair) or it
+        // is gone but the app marker + config provider_id remain (recovery). The
+        // installer's `existing_provider_credential_configured` accepts the
+        // marker+provider_id case under APP_MANAGED_REPAIR=1, so this keeps a
+        // missing-bearer recovery out of the fresh-referral path.
+        var appManagedRepair = existingProviderToken?.isEmpty == false
+        if !appManagedRepair {
+            appManagedRepair = await ProviderConfig.existingIdentityMissingBearer()
+        }
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
         }
@@ -48,7 +58,7 @@ enum CLIInstallRunner {
                 process.environment = installerEnvironment(
                     base: ProcessInfo.processInfo.environment,
                     referralCode: referralCode,
-                    appManagedRepair: existingProviderToken?.isEmpty == false,
+                    appManagedRepair: appManagedRepair,
                     installPort: installPort,
                     home: NSHomeDirectory()
                 )

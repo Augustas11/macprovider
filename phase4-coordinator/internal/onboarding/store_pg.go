@@ -371,7 +371,7 @@ VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 // as one PostgreSQL unit before the SQLite credential authority is entered.
 // A referral is preflighted before this method and authoritatively redeemed
 // afterward, so PostgreSQL latency never runs under SQLite's writer lock.
-func (s *PGStore) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
+func (s *PGStore) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt, attemptTS time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
 	if s == nil || s.db == nil {
 		return errors.New("onboarding postgres store is nil")
 	}
@@ -382,6 +382,7 @@ func (s *PGStore) PrepareProviderRegistration(ctx context.Context, providerID, s
 	defer tx.Rollback()
 
 	observedAt = observedAt.UTC()
+	attemptTS = attemptTS.UTC()
 	cutoffStart := observedAt.Add(-registerNonceWindow)
 	cutoffEnd := observedAt.Add(registerNonceWindow)
 	var exists bool
@@ -435,14 +436,16 @@ INSERT INTO provider_register_nonces (provider_id, source_ip, nonce, ts_utc)
 VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 		return err
 	}
-	// FIX-570 A1: durable, attempt-bound commitment marker written in the SAME
+	// FIX-570 A1/C1: durable, attempt-bound commitment marker written in the SAME
 	// transaction as the identity prepare. Unlike provider_register_nonces this
 	// row is never touched by the replay-nonce pruner, so reconciliation can
 	// prove this exact attempt committed even after the replay cache is pruned.
+	// It is keyed by the SIGNED attemptTS (not server time) so a lost-response
+	// replay of the identical signed request resolves to the same marker.
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO provider_register_attempts (provider_id, source_ip, nonce, ts_utc)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (provider_id, source_ip, nonce, ts_utc) DO NOTHING`, providerID, sourceIP, nonce, observedAt); err != nil {
+ON CONFLICT (provider_id, source_ip, nonce, ts_utc) DO NOTHING`, providerID, sourceIP, nonce, attemptTS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -460,7 +463,7 @@ ON CONFLICT (provider_id, source_ip, nonce, ts_utc) DO NOTHING`, providerID, sou
 // replay-nonce cleaner) instead of JOINing the prunable replay cache. Pruning the
 // replay nonce no longer flips a committed attempt to prepared=false, which had
 // caused destructive compensation of a live credential in the 65s..2min window.
-func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time) (bool, error) {
+func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, attemptTS time.Time) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, errors.New("onboarding postgres store is nil")
 	}
@@ -473,7 +476,7 @@ SELECT EXISTS (
        AND a.source_ip = $2
        AND a.nonce = $3
        AND a.ts_utc = $4
-)`, providerID, sourceIP, nonce, observedAt.UTC()).Scan(&prepared)
+)`, providerID, sourceIP, nonce, attemptTS.UTC()).Scan(&prepared)
 	return prepared, err
 }
 
