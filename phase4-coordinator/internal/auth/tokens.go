@@ -488,6 +488,19 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			total_removed_tokens INTEGER NOT NULL,
 			total_removed_logs INTEGER NOT NULL
 		)`,
+		// FIX-570 H4/H5: append-only audit of privileged referral admin mutations
+		// (seed capacity adjustment, issuer replacement, revocation). actor/reason
+		// are operator-supplied; target is the affected campaign/issuer.
+		`CREATE TABLE IF NOT EXISTS referral_admin_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			action TEXT NOT NULL,
+			target TEXT NOT NULL,
+			detail TEXT NOT NULL DEFAULT '',
+			ts TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_referral_admin_audit_ts ON referral_admin_audit(ts)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -501,6 +514,10 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "referral_redemptions", "policy_version", `ALTER TABLE referral_redemptions ADD COLUMN policy_version TEXT NOT NULL DEFAULT 'v1'`); err != nil {
+		return err
+	}
+	// FIX-570 H4: link a revoked issuer to its audited replacement.
+	if err := ensureColumnTx(ctx, tx, "referral_issuers", "replaced_by", `ALTER TABLE referral_issuers ADD COLUMN replaced_by TEXT`); err != nil {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {

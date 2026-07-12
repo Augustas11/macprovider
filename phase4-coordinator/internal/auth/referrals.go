@@ -18,15 +18,17 @@ import (
 )
 
 var (
-	ErrReferralRequired  = errors.New("referral code required")
-	ErrReferralInvalid   = errors.New("referral code invalid")
-	ErrReferralExpired   = errors.New("referral code expired")
-	ErrReferralRevoked   = errors.New("referral code revoked")
-	ErrReferralExhausted = errors.New("referral code exhausted")
-	ErrReferralConflict  = errors.New("provider already attributed to another referral")
-	ErrReferralLocked    = errors.New("provider referral locked until first verified serving")
-	ErrSocialDisabled    = errors.New("social invite bonus disabled")
-	ErrSocialChallenge   = errors.New("social challenge invalid")
+	ErrReferralRequired          = errors.New("referral code required")
+	ErrReferralInvalid           = errors.New("referral code invalid")
+	ErrReferralExpired           = errors.New("referral code expired")
+	ErrReferralRevoked           = errors.New("referral code revoked")
+	ErrReferralExhausted         = errors.New("referral code exhausted")
+	ErrReferralConflict          = errors.New("provider already attributed to another referral")
+	ErrReferralSeedExists        = errors.New("seed referral already exists")
+	ErrReferralCapacityBelowUsed = errors.New("referral capacity cannot be set below redeemed plus reserved uses")
+	ErrReferralLocked            = errors.New("provider referral locked until first verified serving")
+	ErrSocialDisabled            = errors.New("social invite bonus disabled")
+	ErrSocialChallenge           = errors.New("social challenge invalid")
 )
 
 const (
@@ -169,23 +171,21 @@ func (s *Store) CreateSeedReferral(ctx context.Context, policy ReferralPolicy, s
 	if expiresAt != nil {
 		expiry = timeText(expiresAt.UTC())
 	}
-	result, err := s.db.ExecContext(ctx, `
+	// FIX-570 H5: seed creation is INSERT-only. A silent upsert could strand a
+	// live code (e.g. re-running with the default --max-uses 1 after the seed
+	// already accrued redemptions). Capacity changes go through the audited
+	// AdjustSeedReferral path instead.
+	_, err := s.db.ExecContext(ctx, `
 INSERT INTO referral_issuers (
     issuer_id, code_type, key_id, campaign, provider_id,
     base_capacity, bonus_capacity, expires_at, created_at, first_serving_at
-) VALUES (?, 'S', ?, ?, NULL, ?, 0, ?, ?, ?)
-ON CONFLICT(issuer_id) DO UPDATE SET
-    base_capacity = excluded.base_capacity,
-    expires_at = excluded.expires_at
-WHERE referral_issuers.code_type = 'S'
-  AND referral_issuers.key_id = excluded.key_id
-  AND referral_issuers.campaign = excluded.campaign`,
+) VALUES (?, 'S', ?, ?, NULL, ?, 0, ?, ?, ?)`,
 		seedID, policy.CurrentKeyID, policy.Campaign, maxUses, expiry, nowString(), nowString())
+	if isConstraintFailure(err) {
+		return "", ErrReferralSeedExists
+	}
 	if err != nil {
 		return "", err
-	}
-	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-		return "", ErrReferralConflict
 	}
 	return EncodeReferralCode(policy, ReferralTypeSeed, policy.CurrentKeyID, seedID)
 }
@@ -210,6 +210,191 @@ UPDATE referral_issuers
 		return ErrReferralInvalid
 	}
 	return nil
+}
+
+// SeedReferralAdjustment is the preview/result of an AdjustSeedReferral call.
+// It is returned for both dry-run and applied adjustments so operators can see
+// the exact effect before and after mutation.
+type SeedReferralAdjustment struct {
+	SeedID             string
+	CurrentCapacity    int
+	NewCapacity        int
+	Redeemed           int
+	Reserved           int
+	ResultingRemaining int
+	Applied            bool
+}
+
+// AdjustSeedReferral previews (apply=false) or applies (apply=true) a change to a
+// seed issuer's base_capacity. Applying requires a non-empty actor and reason and
+// refuses to set capacity below the floor of already-redeemed plus live-reserved
+// uses (which would strand committed installs). Every applied change writes an
+// append-only referral_admin_audit row. FIX-570 H5.
+func (s *Store) AdjustSeedReferral(ctx context.Context, policy ReferralPolicy, seedID string, newCapacity int, apply bool, actor, reason string, now time.Time) (SeedReferralAdjustment, error) {
+	if err := policy.Validate(); err != nil {
+		return SeedReferralAdjustment{}, err
+	}
+	seedID = strings.TrimSpace(seedID)
+	if !referralPartPattern.MatchString(seedID) || newCapacity < 0 {
+		return SeedReferralAdjustment{}, ErrReferralInvalid
+	}
+	if apply && (strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "") {
+		return SeedReferralAdjustment{}, fmt.Errorf("actor and reason are required to apply a seed adjustment")
+	}
+	out := SeedReferralAdjustment{SeedID: seedID, NewCapacity: newCapacity}
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var codeType string
+		if err := conn.QueryRowContext(ctx, `
+SELECT code_type, base_capacity
+  FROM referral_issuers
+ WHERE issuer_id = ? AND campaign = ?`, seedID, policy.Campaign).Scan(&codeType, &out.CurrentCapacity); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrReferralInvalid
+			}
+			return err
+		}
+		if codeType != ReferralTypeSeed {
+			return ErrReferralInvalid
+		}
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?`, seedID).Scan(&out.Redeemed); err != nil {
+			return err
+		}
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM referral_reservations r
+ WHERE r.issuer_id = ? AND r.expires_at > ?
+   AND NOT EXISTS (
+       SELECT 1 FROM referral_redemptions d
+        WHERE d.campaign = r.campaign
+          AND d.provider_id = r.provider_id
+          AND d.issuer_id = r.issuer_id
+   )`, seedID, timeText(now.UTC())).Scan(&out.Reserved); err != nil {
+			return err
+		}
+		floor := out.Redeemed + out.Reserved
+		out.ResultingRemaining = newCapacity - floor
+		if out.ResultingRemaining < 0 {
+			out.ResultingRemaining = 0
+		}
+		if !apply {
+			return nil
+		}
+		if newCapacity < floor {
+			return ErrReferralCapacityBelowUsed
+		}
+		result, err := conn.ExecContext(ctx, `
+UPDATE referral_issuers SET base_capacity = ? WHERE issuer_id = ? AND campaign = ? AND code_type = 'S'`,
+			newCapacity, seedID, policy.Campaign)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return ErrReferralInvalid
+		}
+		detail := fmt.Sprintf("base_capacity %d->%d redeemed=%d reserved=%d", out.CurrentCapacity, newCapacity, out.Redeemed, out.Reserved)
+		if err := recordReferralAdminAuditTx(ctx, conn, actor, reason, "adjust_seed", policy.Campaign+"/"+seedID, detail, now); err != nil {
+			return err
+		}
+		out.Applied = true
+		return nil
+	})
+	if err != nil {
+		return SeedReferralAdjustment{}, err
+	}
+	return out, nil
+}
+
+// ReferralReplacement is the result of ReplaceReferralIssuer.
+type ReferralReplacement struct {
+	ProviderID   string
+	OldIssuerID  string
+	NewIssuerID  string
+	NewCode      string
+	BaseCapacity int
+}
+
+// ReplaceReferralIssuer mints a fresh usable provider issuer to succeed a revoked
+// one within a campaign. The revoked issuer is detached from the provider slot
+// (its code stays revoked) and linked to the new issuer via replaced_by plus an
+// audit row. Requires a non-empty actor and reason. FIX-570 H4.
+func (s *Store) ReplaceReferralIssuer(ctx context.Context, policy ReferralPolicy, issuerID, actor, reason string, now time.Time) (ReferralReplacement, error) {
+	if err := policy.Validate(); err != nil {
+		return ReferralReplacement{}, err
+	}
+	issuerID = strings.TrimSpace(issuerID)
+	if !referralPartPattern.MatchString(issuerID) {
+		return ReferralReplacement{}, ErrReferralInvalid
+	}
+	if strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "" {
+		return ReferralReplacement{}, fmt.Errorf("actor and reason are required to replace an issuer")
+	}
+	var out ReferralReplacement
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var codeType string
+		var providerID sql.NullString
+		var firstServingAt sql.NullString
+		var revokedAt sql.NullString
+		if err := conn.QueryRowContext(ctx, `
+SELECT code_type, provider_id, first_serving_at, revoked_at
+  FROM referral_issuers
+ WHERE issuer_id = ? AND campaign = ?`, issuerID, policy.Campaign).Scan(&codeType, &providerID, &firstServingAt, &revokedAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrReferralInvalid
+			}
+			return err
+		}
+		if codeType != ReferralTypeProvider || !providerID.Valid || strings.TrimSpace(providerID.String) == "" {
+			return ErrReferralInvalid
+		}
+		if !revokedAt.Valid {
+			return fmt.Errorf("issuer %s is not revoked; only a revoked issuer can be replaced", issuerID)
+		}
+		newID, err := randomReferralID()
+		if err != nil {
+			return err
+		}
+		firstServing := firstServingAt.String
+		if !firstServingAt.Valid || strings.TrimSpace(firstServing) == "" {
+			firstServing = timeText(now.UTC())
+		}
+		// Detach the revoked issuer from the provider slot so the fresh issuer can
+		// occupy UNIQUE(provider_id, campaign); the old code stays revoked.
+		if _, err := conn.ExecContext(ctx, `
+UPDATE referral_issuers SET provider_id = NULL, replaced_by = ? WHERE issuer_id = ? AND campaign = ?`,
+			newID, issuerID, policy.Campaign); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO referral_issuers (
+    issuer_id, code_type, key_id, campaign, provider_id,
+    base_capacity, bonus_capacity, created_at, first_serving_at
+) VALUES (?, 'P', ?, ?, ?, ?, 0, ?, ?)`,
+			newID, policy.CurrentKeyID, policy.Campaign, providerID.String, policy.ProviderBaseUses, timeText(now.UTC()), firstServing); err != nil {
+			return err
+		}
+		code, err := EncodeReferralCode(policy, ReferralTypeProvider, policy.CurrentKeyID, newID)
+		if err != nil {
+			return err
+		}
+		detail := fmt.Sprintf("provider=%s replaced_by=%s base_capacity=%d", providerID.String, newID, policy.ProviderBaseUses)
+		if err := recordReferralAdminAuditTx(ctx, conn, actor, reason, "replace_issuer", policy.Campaign+"/"+issuerID, detail, now); err != nil {
+			return err
+		}
+		out = ReferralReplacement{ProviderID: providerID.String, OldIssuerID: issuerID, NewIssuerID: newID, NewCode: code, BaseCapacity: policy.ProviderBaseUses}
+		return nil
+	})
+	if err != nil {
+		return ReferralReplacement{}, err
+	}
+	return out, nil
+}
+
+func recordReferralAdminAuditTx(ctx context.Context, conn *sql.Conn, actor, reason, action, target, detail string, now time.Time) error {
+	_, err := conn.ExecContext(ctx, `
+INSERT INTO referral_admin_audit (actor, reason, action, target, detail, ts)
+VALUES (?, ?, ?, ?, ?, ?)`,
+		strings.TrimSpace(actor), strings.TrimSpace(reason), action, target, detail, timeText(now.UTC()))
+	return err
 }
 
 func (s *Store) ValidateReferral(ctx context.Context, policy ReferralPolicy, code string, now time.Time) (ReferralValidation, error) {

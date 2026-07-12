@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -43,6 +44,10 @@ func main() {
 		err = preFlipAudit(os.Args[2:])
 	case "create-seed-referral":
 		err = createSeedReferral(os.Args[2:], os.Getenv, os.Stdout)
+	case "adjust-seed-referral":
+		err = adjustSeedReferral(os.Args[2:], os.Getenv, os.Stdout)
+	case "replace-referral-issuer":
+		err = replaceReferralIssuer(os.Args[2:], os.Getenv, os.Stdout)
 	case "revoke-referral":
 		err = revokeReferral(os.Args[2:], os.Stdout)
 	default:
@@ -617,7 +622,7 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|revoke-referral> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|replace-referral-issuer|revoke-referral> [flags]")
 }
 
 func createSeedReferral(args []string, getenv func(string) string, stdout io.Writer) error {
@@ -667,10 +672,120 @@ func createSeedReferral(args []string, getenv func(string) string, stdout io.Wri
 	}
 	defer store.Close()
 	code, err := store.CreateSeedReferral(context.Background(), policy, strings.TrimSpace(*seedID), *maxUses, expiry)
+	if errors.Is(err, auth.ErrReferralSeedExists) {
+		return fmt.Errorf("seed %s already exists; use adjust-seed-referral to change its capacity", strings.TrimSpace(*seedID))
+	}
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "referral_code=%s\ncampaign=%s\nseed_id=%s\nmax_uses=%d\n", code, policy.Campaign, strings.TrimSpace(*seedID), *maxUses)
+	_, err = fmt.Fprintf(stdout, "referral_code=%s\ncampaign=%s\nseed_id=%s\nmax_uses=%d\nstatus=created\n", code, policy.Campaign, strings.TrimSpace(*seedID), *maxUses)
+	return err
+}
+
+func adjustSeedReferral(args []string, getenv func(string) string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("adjust-seed-referral", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	campaign := fs.String("campaign", "", "referral campaign identifier")
+	keyID := fs.String("key-id", "", "HMAC key identifier")
+	secretEnv := fs.String("secret-env", "", "environment variable containing the HMAC secret")
+	seedID := fs.String("seed-id", "", "opaque seed issuer identifier")
+	maxUses := fs.Int("max-uses", -1, "new maximum successful registrations")
+	apply := fs.Bool("apply", false, "apply the change (default is dry-run preview)")
+	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
+	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*secretEnv) == "" {
+		return fmt.Errorf("--secret-env is required; referral HMAC secrets are not accepted on argv")
+	}
+	if *maxUses < 0 {
+		return fmt.Errorf("--max-uses is required and must be >= 0")
+	}
+	secret := getenv(strings.TrimSpace(*secretEnv))
+	if len(secret) < 32 {
+		return fmt.Errorf("referral HMAC secret from %s must be at least 32 bytes", *secretEnv)
+	}
+	policy := auth.ReferralPolicy{
+		Campaign:         strings.TrimSpace(*campaign),
+		PolicyVersion:    "v1",
+		CurrentKeyID:     strings.TrimSpace(*keyID),
+		HMACKeys:         map[string]string{strings.TrimSpace(*keyID): secret},
+		ProviderBaseUses: 1,
+		SocialBonusUses:  1,
+		ChallengeTTL:     15 * time.Minute,
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	preview, err := store.AdjustSeedReferral(context.Background(), policy, strings.TrimSpace(*seedID), *maxUses, *apply, strings.TrimSpace(*actor), strings.TrimSpace(*reason), time.Now().UTC())
+	if errors.Is(err, auth.ErrReferralCapacityBelowUsed) {
+		return fmt.Errorf("refusing to set capacity below redeemed+reserved uses for seed %s", strings.TrimSpace(*seedID))
+	}
+	if err != nil {
+		return err
+	}
+	mode := "dry-run"
+	if preview.Applied {
+		mode = "applied"
+	}
+	_, err = fmt.Fprintf(stdout, "mode=%s\ncampaign=%s\nseed_id=%s\ncurrent_capacity=%d\nnew_capacity=%d\nredeemed=%d\nreserved=%d\nresulting_remaining=%d\n",
+		mode, policy.Campaign, preview.SeedID, preview.CurrentCapacity, preview.NewCapacity, preview.Redeemed, preview.Reserved, preview.ResultingRemaining)
+	return err
+}
+
+func replaceReferralIssuer(args []string, getenv func(string) string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("replace-referral-issuer", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	campaign := fs.String("campaign", "", "referral campaign identifier")
+	keyID := fs.String("key-id", "", "HMAC key identifier")
+	secretEnv := fs.String("secret-env", "", "environment variable containing the HMAC secret")
+	issuerID := fs.String("issuer-id", "", "revoked provider issuer identifier to replace")
+	actor := fs.String("actor", "", "operator identity recorded in the audit log")
+	reason := fs.String("reason", "", "reason recorded in the audit log")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*secretEnv) == "" {
+		return fmt.Errorf("--secret-env is required; referral HMAC secrets are not accepted on argv")
+	}
+	if strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "" {
+		return fmt.Errorf("--actor and --reason are required")
+	}
+	secret := getenv(strings.TrimSpace(*secretEnv))
+	if len(secret) < 32 {
+		return fmt.Errorf("referral HMAC secret from %s must be at least 32 bytes", *secretEnv)
+	}
+	policy := auth.ReferralPolicy{
+		Campaign:         strings.TrimSpace(*campaign),
+		PolicyVersion:    "v1",
+		CurrentKeyID:     strings.TrimSpace(*keyID),
+		HMACKeys:         map[string]string{strings.TrimSpace(*keyID): secret},
+		ProviderBaseUses: 1,
+		SocialBonusUses:  1,
+		ChallengeTTL:     15 * time.Minute,
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	replacement, err := store.ReplaceReferralIssuer(context.Background(), policy, strings.TrimSpace(*issuerID), strings.TrimSpace(*actor), strings.TrimSpace(*reason), time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "replaced campaign=%s provider_id=%s old_issuer_id=%s new_issuer_id=%s new_referral_code=%s base_capacity=%d\n",
+		policy.Campaign, replacement.ProviderID, replacement.OldIssuerID, replacement.NewIssuerID, replacement.NewCode, replacement.BaseCapacity)
 	return err
 }
 
