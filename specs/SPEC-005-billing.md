@@ -95,6 +95,16 @@ model (§7) and the cache-**isolation** invariant (§11–§16).
   reuse** basis (not "dishonest/inconsistent report"). Reconciled SPEC-024's stale "simply withholds the
   discount" / "priced as if cached=0" language (§2/§7/§14) to the shipped whole-row quarantine. Added
   **AC-CACHE-QUARANTINE-CREDIT-EFFECT** and a force-credit-no-recompute assertion to **AC-Q055**.
+- **R6-audit corrections (3-lane codex).** All three lanes converged on the completeness of the §2.7
+  quarantine taxonomy: the **recovery** path has **two** subpaths, not one — flag-only (row exists,
+  credits retained) **and** `insertQuarantineTx` (no row exists → inserts a NEW zero-credit,
+  no-operator-row shape like the hot path). §2.7 + AC-CACHE-QUARANTINE-CREDIT-EFFECT now cover all
+  **four** write shapes. Architect additionally flagged that SPEC-024 §3 (canonical, non-superseded)
+  states an absolute "quarantine MUST zero payable credits" invariant that the recovery **flag-only**
+  path does not enforce — reconciled by keeping §3 as the intended invariant and documenting the
+  recovery flag-only retention as a **shipped deviation** (carried code follow-up: recovery flag-only
+  should zero stored credits), with a cross-referenced caveat in SPEC-024 §3 and the fixed AC-CI-5
+  wording. Non-§2.7 checks (clamps, caps, cache ceiling, rate resolution, snapshot immutability) PASS.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -537,27 +547,42 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 
 **Clarification — cache quarantine vs D7, honest shipped behavior (v0.6).** A cache quarantine
 (`ambiguous_cache`, `invalid_cached_prompt_tokens`) always sets `quarantined = 1`, but its effect on
-**stored credits depends on which of three code paths applies** — there is **no** universal
-"cache-quarantined rows pay zero" guarantee:
+**stored credits depends on which code path applies** — there is **no** universal "cache-quarantined
+rows pay zero" guarantee. Four effects across three paths:
 - **Hot-path** quarantine (`hotpath.go`, first-write): the formula result is **zeroed**, the row is
   inserted with zero credits, and the path **returns before inserting any `ledger_operator_credits`
   row** — so a hot-path cache-quarantine row stores zero and has **no** operator-credit row.
 - **Receipt-time** quarantine (§7.5b, on a row that was `quarantined = 0`): **zeroes both**
   `ledger_request_credits` and the existing linked `ledger_operator_credits` row (`settlement_receipts.go`).
-- **Recovery** quarantine (`recovery.go` `quarantineExistingLedgerForRequestAttemptTx`): a **flag-only**
-  UPDATE of `quarantined` / `quarantine_reason` / `updated_at_utc` on a **pre-existing** ledger row — it
-  does **NOT** modify stored credits. A row that was already credited **non-zero** before being cache-
-  quarantined by recovery therefore **retains its non-zero credits**.
+- **Recovery** quarantine (`recovery.go`) has **two** subpaths, chosen by whether a ledger row already
+  exists for the `(request_id, attempt_n)`:
+  - **Existing row** (`quarantineExistingLedgerForRequestAttemptTx`): a **flag-only** UPDATE of
+    `quarantined` / `quarantine_reason` / `updated_at_utc` — it does **NOT** modify stored credits. A row
+    already credited **non-zero** therefore **retains its non-zero credits**.
+  - **No existing row** (`insertQuarantineTx`): recovery **inserts a NEW** quarantined
+    `ledger_request_credits` row with **all rates and credits zero**, `quarantined = 1`, and **no**
+    `ledger_operator_credits` row — i.e. the same zero-credit/no-operator-row shape as the hot path.
 
 **Force-credit never recomputes.** Force-credit (§11.6.1) inserts a resolution and re-admits the row to
 the payable projection **as-is** (`quarantine.go` / `store.go` payable view); force-void voids it;
 settlement sums the **stored** amounts (`settlement.go`). So a force-credited cache-quarantine row pays
-exactly what is stored: **zero** for the hot-path / receipt-time cases, but the **original non-zero**
-for a recovery-flagged row. §7.5b re-pricing — the only runtime re-price — **selects only
+exactly what is stored: **zero** for the hot-path / receipt-time / recovery-insert cases, but the
+**original non-zero** for a recovery **flag-only** row (pre-existing non-zero credits). §7.5b re-pricing —
+the only runtime re-price — **selects only
 `quarantined = 0` rows** (`settlement_receipts.go`), so it operates *before* quarantine and **cannot**
 restore an already-quarantined row. An earlier draft's claim that force-credit "restores the legitimate
 prompt/completion credit" is **false** and is retracted; so is the over-broad "permanently pays zero"
-claim (the recovery path is the counterexample).
+claim (the recovery flag-only path is the counterexample).
+
+**Note — the recovery flag-only path deviates from the intended invariant.** SPEC-024 §3 (the canonical,
+non-superseded cache wire contract) states the *intended* rule: an `ambiguous_cache` /
+`invalid_cached_prompt_tokens` quarantine MUST set payable credit fields to 0 and never produce
+provider-creditable credits. The recovery **flag-only** subpath does **not** honor that invariant — it
+leaves a pre-existing row's stored non-zero credits in place, so a subsequent force-credit can pay them.
+This is a **shipped deviation** from the SPEC-024 §3 zero-payable rule, not intended behavior; it is
+tracked with the "unify the quarantine credit effect" follow-up below (the fix is for recovery flag-only
+to also zero the stored credits). v0.6 documents the deviation honestly rather than restating an
+invariant the code does not uniformly enforce.
 
 Reconciliation with D7 (which forbids zero-crediting *legitimate completed work*): a positive
 `cached_prompt_tokens` on a non-sticky-hit route is **not** necessarily a dishonest report — per
@@ -568,9 +593,11 @@ and receipt-time** quarantines zero the **whole row** (not just the un-creditabl
 *can* zero legitimate uncached-prompt + completion work. **Carried design follow-up:** whether an
 ambiguous/invalid cache signal should zero only the **cache discount** (re-price `cached = 0`, still
 paying the legitimate uncached-prompt + completion credit) rather than the entire row — and whether the
-three quarantine paths should be **unified** to one credit effect — is an open money-path decision
-(a code change gated by the G-series probe + a `beta/DECISION_CRITERIA.md` entry). v0.6 **documents** the
-shipped path-dependent behavior; it does not ratify it as optimal.
+four quarantine write shapes (hot-path, receipt-time, recovery flag-only, recovery insert) should be
+**unified** to one credit effect (in particular, recovery flag-only zeroing stored credits to honor the
+SPEC-024 §3 invariant) — is an open money-path decision (a code change gated by the G-series probe + a
+`beta/DECISION_CRITERIA.md` entry). v0.6 **documents** the shipped path-dependent behavior; it does not
+ratify it as optimal.
 
 ### 2.8 D8 - Failed-request accounting
 
@@ -2783,8 +2810,8 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-CACHE-QUARANTINE-CREDIT-EFFECT: Path-dependent cache-quarantine credits (v0.6 §2.7)
 
-**Verification:** Drive the three cache-quarantine paths: (a) hot-path `ambiguous_cache` first-write; (b) §7.5b receipt-time quarantine on a previously `quarantined=0` row; (c) recovery `quarantineExistingLedgerForRequestAttemptTx` on a pre-existing non-zero-credit row. Inspect `ledger_request_credits` and `ledger_operator_credits`.
-**Expected:** (a) request-credit row stored with `gross_credits=provider_credits=0` and **no** `ledger_operator_credits` row exists; (b) both request- and operator-credit rows zeroed; (c) `quarantined=1`/`quarantine_reason` set with `gross_credits`/`provider_credits` **unchanged** (non-zero retained). No path recomputes to a new non-zero value; §7.5b re-pricing skips any `quarantined=1` row.
+**Verification:** Drive the four cache-quarantine write shapes: (a) hot-path `ambiguous_cache` first-write; (b) §7.5b receipt-time quarantine on a previously `quarantined=0` row; (c) recovery `quarantineExistingLedgerForRequestAttemptTx` on a pre-existing non-zero-credit row; (d) recovery `insertQuarantineTx` when **no** ledger row exists. Inspect `ledger_request_credits` and `ledger_operator_credits`.
+**Expected:** (a) request-credit row stored with `gross_credits=provider_credits=0` and **no** `ledger_operator_credits` row exists; (b) both request- and operator-credit rows zeroed; (c) `quarantined=1`/`quarantine_reason` set with `gross_credits`/`provider_credits` **unchanged** (non-zero retained — the SPEC-024 §3 zero-payable invariant deviation, §2.7); (d) a NEW `quarantined=1` request-credit row with all rates and credits `0` and **no** operator-credit row. No path recomputes to a new non-zero value; §7.5b re-pricing skips any `quarantined=1` row.
 **Network:** Not required.
 **State reset:** Fresh fixture database.
 
