@@ -131,6 +131,17 @@ model (§7) and the cache-**isolation** invariant (§11–§16).
   reason-allowlist policy follow-up. **Carried LOW (security):** the recovery orphan pass can display an
   earlier `missing_request_log` reason instead of `invalid_usage_tokens` (COALESCE preserves the first
   reason) — money stays quarantined, only the operator-visible reason can mislead; a diagnostic follow-up.
+- **R9-audit corrections (3-lane codex).** All three lanes flagged that two R8 fixes had landed **only in
+  the changelog**, not the normative text — a concurrent audit lane running in the worktree had reverted
+  those two working-tree edits before the R8 commit. Both are now applied to the normative sections (and
+  the extra locations that repeat the same claims): (1) the **completion carve-out** — a >10M completion
+  with a valid in-range estimate is clamped, not quarantined — now in the **§5.3** recovery note, **§2.7**
+  intro, and the **§5.4** 10M example; (2) the **recovery cache-snapshot strictness** (exact
+  `config_snapshot_id`, `missing_cache_config_snapshot`, no timestamp fallback for positive first-attempt
+  cache rows) now in **§10.2** and **§10.4**. Also fixed a stale **§11.6.1** cross-reference ("§2.4" →
+  the v0.3.3 "Quarantine rule narrowing" changelog) and softened the overstated "monotonic-quarantine
+  **schema** invariant" to application-enforced (the schema CHECK only constrains `quarantined IN (0,1)`,
+  not the transition). Process fix: never edit this worktree while an audit lane is running in it.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -332,8 +343,11 @@ satisfied); the full close moves to v0.5.
   quarantine **CREATION** class for row 3+; resolution of pre-existing
   quarantines is out of scope and tracked in #169. **Operators MUST
   NOT execute direct `UPDATE ledger_request_credits SET quarantined=0`
-  SQL** — that violates the monotonic-quarantine schema invariant,
-  bypasses the §OQ-5 audit-log requirement, and risks crediting a row
+  SQL** — that violates the monotonic-quarantine invariant
+  (application-enforced: the schema CHECK only constrains `quarantined
+  IN (0,1)`, not the 0→1-only transition, so a direct `SET quarantined=0`
+  is not DB-blocked and would immediately re-enter the payable
+  projection), bypasses the §OQ-5 audit-log requirement, and risks crediting a row
   that was legitimately quarantined for a non-row-3+ reason. The
   current quarantine reason strings (per `internal/billing/recovery.go`
   and `internal/billing/settlement.go`) include: `ambiguous_attempt_n`
@@ -582,8 +596,9 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 (`ambiguous_cache`, `invalid_cached_prompt_tokens`) always sets `quarantined = 1`, but its effect on
 **stored credits depends on which code path applies** — there is **no** universal "cache-quarantined
 rows pay zero" guarantee. (The recovery subpaths below carry the same structure for the
-`invalid_usage_tokens` out-of-range prompt/completion reason — see §5.3's recovery-path note.) Four
-effects across three paths:
+`invalid_usage_tokens` out-of-range reason — subject to the §5.3 completion carve-out, where a >10M
+completion with a valid in-range estimate is clamped, not quarantined — see §5.3's recovery-path note.)
+Four effects across three paths:
 - **Hot-path** quarantine (`hotpath.go`, first-write): the formula result is **zeroed**, the row is
   inserted with zero credits, and the path **returns before inserting any `ledger_operator_credits`
   row** — so a hot-path cache-quarantine row stores zero and has **no** operator-credit row.
@@ -1114,9 +1129,17 @@ order: (1) fault/null short-circuits, (2) the completion clamp, (3) the token-va
 # classifiers. Either way credits are zeroed.
 #
 # RECOVERY-path note (v0.6): the null_usage_error classification above is the FORMULA / hot-path
-# behavior. During RECOVERY (recovery.go), an out-of-range prompt/completion/estimate (<0 or
-# >10_000_000) is intercepted BEFORE the formula and classified as an 'invalid_usage_tokens'
-# QUARANTINE (not null_usage_error), sharing the same two recovery subpaths as the cache quarantines
+# behavior. During RECOVERY (recovery.go), an out-of-range token is intercepted BEFORE the formula and
+# classified as an 'invalid_usage_tokens' QUARANTINE (not null_usage_error), but the interception is
+# NARROWER than the formula gate (recovery.go invalidRecoveryToken/Estimate/Completion):
+#   - prompt <0 or >10_000_000            => invalid_usage_tokens (always)
+#   - estimate <0 or >10_000_000          => invalid_usage_tokens (always)
+#   - completion <0                       => invalid_usage_tokens (always)
+#   - completion >10_000_000              => invalid_usage_tokens ONLY IF there is no valid in-range
+#       estimate; WITH a valid in-range estimate the completion is CLAMPED to that estimate and priced
+#       normally (mirrors the §5.3 billableCompletion clamp) — e.g. completion=10_000_001, estimate=2
+#       prices at 2, it is NOT quarantined.
+# An invalid_usage_tokens quarantine shares the same two recovery subpaths as the cache quarantines
 # (§2.7): flag-only on a pre-existing row (stored credits RETAINED — the §2.7 deviation) or
 # insertQuarantineTx on a new row (zero credits, no operator row). So the "out-of-range => null_error"
 # rule holds for the formula path; recovery reconciles the same condition as invalid_usage_tokens.
@@ -1269,7 +1292,7 @@ analogous provider-favorable direction).
 - **Cache split (no configured cache-hit rate):** 1000 prompt of which 400 `cached_prompt_tokens`, 7B rates, no `prompt_cache_hit_credits_per_mtok`. Cached tokens default to the full prompt rate, so `prompt_numerator = 600*1_000_000 + 400*1_000_000 = 1000*1_000_000` — identical to no cache split. Cache accounting is a no-op on cost until a discount rate is configured.
 - **Cache split (discount configured):** same row with `prompt_cache_hit_credits_per_mtok = 250000`. `prompt_numerator = 600*1_000_000 + 400*250_000 = 700_000_000` — the 400 cached tokens billed at ¼ the prompt rate.
 - **Completion clamp:** provider reports 5000 completion tokens but `estimated_completion_tokens = ceil(wire_bytes/16) = 4200`. Billable completion clamps to 4200 and `usage_source` is recorded as `byte_estimated`.
-- **10M cap:** a row with `prompt_tokens = 10_000_001` (or a cached/completion field over 10M) is `null_usage_error` with gross=provider=operator=0.
+- **10M cap:** a row with `prompt_tokens = 10_000_001` (or a cached/completion field over 10M) is `null_usage_error` with gross=provider=operator=0 **in the formula path**. Exception: a `completion_tokens` over 10M is first subject to the §5.3 completion clamp — with a valid in-range `estimated_completion_tokens` the completion is clamped to the estimate (and priced) before the 10M gate sees it, so it is not a `null_usage_error`. During recovery the same case is `invalid_usage_tokens` only when no in-range estimate exists (§5.3 recovery note).
 
 ## 5.5 Model-key normalization and rate-card resolution
 
@@ -1621,9 +1644,21 @@ Startup scans prior 24 hours.
 Creditable request_log rows missing ledger rows get recovery rows.
 Recovery rows set recovery_source=startup_scan.
 Recovery rows use the latest `ledger_config_snapshots` entry whose effective_at_utc is less than or equal to request_log.ts_utc.
-If no such config snapshot exists, the row is quarantined instead of priced with current config.
+If no such config snapshot exists, the row is quarantined (`missing_config_snapshot`) instead of priced with current config.
 Recovery rows use `ledger_provider_identity_snapshots` to resolve provider_assigned_id to stable provider_id.
 The scan is idempotent.
+
+**Stricter snapshot rule for positive first-attempt cache rows (v0.6).** When a recovery row carries a
+**positive `cached_prompt_tokens` on `attempt_n = 0`** (`cacheProvenanceRequired`, `recovery.go`),
+recovery does **not** use the timestamp-qualified latest-snapshot rule above. It requires the row's
+**exact** `ledger_provider_identity_snapshots.config_snapshot_id` (the snapshot the row was priced
+under at insert): if that id is present it prices from that exact snapshot; if it is **absent**, recovery
+**quarantines** as **`missing_cache_config_snapshot`** rather than falling back to the timestamp lookup —
+because a cache discount must be reconstructed from the exact historical rate, not an approximate
+by-timestamp one. Non-cache rows (and cache rows on retries) use the timestamp-qualified rule and
+quarantine `missing_config_snapshot` only when no snapshot at or before `ts_utc` exists. (This mirrors
+the §7.5b receipt-time `missing_cache_config_snapshot` strictness for the same reason.) This stricter
+rule applies to §10.4's snapshot-selection step below as well.
 
 ### 10.3 Nightly reconcile
 
@@ -1646,7 +1681,7 @@ Time is explicit input.
 No live network call may affect output.
 `scanWindow.to_utc` MUST be no closer to wall-clock now than `settlement.recovery_grace_seconds` (default 30s). Rows with `request_log.ts_utc` newer than this cutoff are excluded from the scan to prevent races with in-flight hot-path transactions.
 SPEC-002 v1.5.1 indexes `request_log.ts_utc`, `(request_id, id)`, `external_request_id` (partial-NULL), and `(account_id, external_request_id)` (partial-NULL composite) are preconditions for production-scale reconciliation scans. Any reconciliation surface that performs closing-the-books joins between coordinator `request_log` and gateway `usage_events` / `audit_events` by composite reconciliation key — whether run as an out-of-process harness OR as a future coordinator-hosted reconciliation endpoint — MUST read per-key migration state via `coordinator migrate-indexes --check --format json` (`requestlog.Store.MigrationState`) and fail closed when any depended-on composite key is in state `legacy` or `unindexed`, per the SPEC-002 v1.5.1 operational binding. Fixture / dev / one-shot recovery runs MAY pass an explicit bounded `--allow-unindexed-scan` override; the override MUST NOT be the default. Coordinator's own in-process AttemptN paths (`hotpath.go`, `recovery.go`, `endpoints.go` `/admin/ledger/reconcile`) use single-table SQLite `IS` clustering and are correct (just unindexed-slow) under state `unindexed`; they do NOT fail closed during the rollout window. (v0.3.2 / issue #197; v0.3.1 / issue #211 added the composite index dependency.)
-For each recoverable request_log row, the algorithm selects the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc.
+For each recoverable request_log row, the algorithm selects the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc — **except** a positive first-attempt cache row, which requires the exact identity-snapshot `config_snapshot_id` and quarantines `missing_cache_config_snapshot` if absent (the §10.2 stricter rule, no timestamp fallback).
 If no config snapshot or provider identity snapshot can be selected for a provider-reached row, the row is quarantined.
 
 ### 10.5 Quarantine
@@ -1909,7 +1944,8 @@ and defaults to 24h.
 **Not reason-gated (v0.6 honest disclosure).** Shipped force-credit
 (`internal/billing/quarantine.go`) accepts **any** `quarantined = 1`
 row **regardless of `quarantine_reason`** — there is no reason
-allowlist. This is in tension with §2.4's pre-#169 stance that
+allowlist. This is in tension with the v0.3.3 changelog's "Quarantine
+rule narrowing" pre-#169 stance (§ Change log v0.3.3) that
 integrity reasons (`invalid_usage_tokens`, `missing_config_snapshot`,
 `missing_cache_config_snapshot`, `reconciliation_mismatch`,
 `operator_split_mismatch`, `conflicting_settlement_id`, etc.) "MUST
