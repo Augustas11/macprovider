@@ -392,3 +392,81 @@ func TestProviderStatusRemainsLockedBeforeVerifiedServing(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// TestProviderStatusExposesCrossLaneFields is the FIX-570 cross-lane contract
+// regression: the status endpoint must expose configured_bonus_uses (the
+// policy incentive, distinct from the awarded bonus_uses), and — while an X
+// verification is pending — advocacy_status pending_social_review with a
+// review_due_at (pending_since + dwell).
+func TestProviderStatusExposesCrossLaneFields(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	verifier := &recordingVerifier{authorID: "author-1"}
+	h := Handler{
+		Store:           store,
+		Tokens:          staticTokens{providerID: "provider-1"},
+		ServingEvidence: staticServing{when: now.Add(-time.Minute), eligible: true},
+		PostVerifier:    verifier,
+		Policy:          apiPolicy(),
+		Now:             func() time.Time { return now },
+		JoinBaseURL:     "https://malibu.tech/j",
+	}
+	// Drive challenge + verify so the provider has a PENDING social verification.
+	challengeReq := httptest.NewRequest(http.MethodPost, "/v1/provider/referrals/x/challenge", nil)
+	challengeReq.Header.Set("Authorization", "Bearer valid-token")
+	challengeResp := httptest.NewRecorder()
+	h.HandleChallenge(challengeResp, challengeReq)
+	if challengeResp.Code != http.StatusOK {
+		t.Fatalf("challenge status=%d", challengeResp.Code)
+	}
+	var challengeBody struct {
+		ShareURL string `json:"share_url"`
+	}
+	if err := json.Unmarshal(challengeResp.Body.Bytes(), &challengeBody); err != nil {
+		t.Fatal(err)
+	}
+	shareURL, _ := url.Parse(challengeBody.ShareURL)
+	challenge := shareURL.Query().Get("c")
+	verifyBody := `{"post_url":"https://x.com/malibu/status/123456789","challenge":"` + challenge + `"}`
+	verifyReq := httptest.NewRequest(http.MethodPost, "/v1/provider/referrals/x/verify", strings.NewReader(verifyBody))
+	verifyReq.Header.Set("Authorization", "Bearer valid-token")
+	verifyResp := httptest.NewRecorder()
+	h.HandleVerify(verifyResp, verifyReq)
+	if verifyResp.Code != http.StatusOK {
+		t.Fatalf("verify status=%d body=%s", verifyResp.Code, verifyResp.Body.String())
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/v1/provider/referrals", nil)
+	statusReq.Header.Set("Authorization", "Bearer valid-token")
+	statusResp := httptest.NewRecorder()
+	h.HandleProviderStatus(statusResp, statusReq)
+	if statusResp.Code != http.StatusOK {
+		t.Fatalf("status code=%d body=%s", statusResp.Code, statusResp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(statusResp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := body["configured_bonus_uses"]; !ok || got.(float64) != float64(apiPolicy().SocialBonusUses) {
+		t.Fatalf("configured_bonus_uses=%v ok=%v", got, ok)
+	}
+	if body["advocacy_status"] != "pending_social_review" {
+		t.Fatalf("advocacy_status=%v", body["advocacy_status"])
+	}
+	due, ok := body["review_due_at"].(string)
+	if !ok {
+		t.Fatalf("review_due_at missing: %s", statusResp.Body.String())
+	}
+	wantDue := now.Add(auth.SocialVerificationDwell).UTC().Format(time.RFC3339)
+	if due != wantDue {
+		t.Fatalf("review_due_at=%q want=%q", due, wantDue)
+	}
+	// bonus_uses (awarded) is still 0 while pending; configured stays the incentive.
+	if body["bonus_uses"].(float64) != 0 {
+		t.Fatalf("bonus_uses should be 0 while pending, got %v", body["bonus_uses"])
+	}
+}

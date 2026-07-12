@@ -29,7 +29,19 @@ var (
 	ErrReferralLocked            = errors.New("provider referral locked until first verified serving")
 	ErrSocialDisabled            = errors.New("social invite bonus disabled")
 	ErrSocialChallenge           = errors.New("social challenge invalid")
+	// ErrSocialRecheckTransient signals that a promotion-time social re-check
+	// failed for a transient reason (timeout / 429 / 5xx / transport error)
+	// rather than a confirmed terminal one (post deleted, protected, or author
+	// mismatch). A recheck func returns it to keep the verification PENDING for a
+	// later retry instead of permanently failing the bonus. FIX-570 M3.
+	ErrSocialRecheckTransient = errors.New("social recheck transient failure")
 )
+
+// SocialVerificationDwell is how long a social verification stays PENDING before
+// the promotion reconciler re-checks the post and grants the capacity bonus. It
+// is exported so status responses can compute a stable review_due_at
+// (pending_since + dwell) for the dashboard. FIX-570 H3 / cross-lane contract.
+const SocialVerificationDwell = 30 * time.Minute
 
 const (
 	ReferralTypeSeed     = "S"
@@ -106,6 +118,11 @@ type ProviderReferral struct {
 	IssuerID         string
 	FirstServingSeen bool
 	Revoked          bool
+	// ReviewDueAt is set only while advocacy_status == "pending_social_review":
+	// the RFC3339 instant (pending_since + dwell) at which the pending X
+	// verification becomes eligible for promotion. Nil in every other state.
+	// FIX-570 cross-lane contract.
+	ReviewDueAt *time.Time
 }
 
 type SocialChallenge struct {
@@ -786,13 +803,11 @@ func (s *Store) ProviderReferralStatus(ctx context.Context, policy ReferralPolic
 	var out ProviderReferral
 	var keyID, firstServingAt string
 	var revokedAt sql.NullString
-	var socialVerified int
 	err := s.db.QueryRowContext(ctx, `
-SELECT issuer_id, key_id, base_capacity, bonus_capacity, first_serving_at, revoked_at,
-       EXISTS(SELECT 1 FROM referral_social_verifications v WHERE v.provider_id = referral_issuers.provider_id AND v.campaign = referral_issuers.campaign AND v.granted_at IS NOT NULL)
+SELECT issuer_id, key_id, base_capacity, bonus_capacity, first_serving_at, revoked_at
   FROM referral_issuers
  WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(
-		&out.IssuerID, &keyID, &out.BaseUses, &out.BonusUses, &firstServingAt, &revokedAt, &socialVerified)
+		&out.IssuerID, &keyID, &out.BaseUses, &out.BonusUses, &firstServingAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProviderReferral{Campaign: policy.Campaign, AdvocacyStatus: "locked_until_first_serving"}, ErrReferralLocked
 	}
@@ -824,11 +839,33 @@ SELECT COUNT(1)
 	}
 	out.Campaign = policy.Campaign
 	out.Remaining = max(0, out.BaseUses+out.BonusUses-out.Used-reserved)
-	out.SocialVerified = socialVerified == 1
 	out.FirstServingSeen = firstServingAt != ""
-	out.AdvocacyStatus = "eligible"
-	if out.SocialVerified {
+	// Surface the social-advocacy lifecycle so the dashboard can render granted,
+	// pending (with a review_due_at), and terminally-failed states distinctly.
+	// FIX-570 H3 / cross-lane contract.
+	var grantedAt, failedAt, pendingSince sql.NullString
+	verifyErr := s.db.QueryRowContext(ctx, `
+SELECT granted_at, failed_at, pending_since
+  FROM referral_social_verifications
+ WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(&grantedAt, &failedAt, &pendingSince)
+	switch {
+	case errors.Is(verifyErr, sql.ErrNoRows):
+		out.AdvocacyStatus = "eligible"
+	case verifyErr != nil:
+		return ProviderReferral{}, verifyErr
+	case grantedAt.Valid:
+		out.SocialVerified = true
 		out.AdvocacyStatus = "verified"
+	case failedAt.Valid:
+		out.AdvocacyStatus = "social_review_failed"
+	case pendingSince.Valid:
+		out.AdvocacyStatus = "pending_social_review"
+		if since, parseErr := time.Parse(time.RFC3339, pendingSince.String); parseErr == nil {
+			due := since.Add(SocialVerificationDwell)
+			out.ReviewDueAt = &due
+		}
+	default:
+		out.AdvocacyStatus = "eligible"
 	}
 	return out, nil
 }
@@ -901,7 +938,7 @@ INSERT INTO referral_social_challenges (
 // the reconciler re-checks the post and grants the capacity bonus. It bounds the
 // window in which a transient (deleted/protected) post could otherwise have
 // permanently inflated capacity. FIX-570 H3.
-const socialVerificationDwell = 30 * time.Minute
+const socialVerificationDwell = SocialVerificationDwell
 
 // CompleteSocialVerification records a social verification as PENDING. It does NOT
 // grant the capacity bonus here; the bonus is granted later by
@@ -995,6 +1032,8 @@ SELECT COUNT(1)
 		out.SocialVerified = false
 		out.AdvocacyStatus = "pending_social_review"
 		out.FirstServingSeen = true
+		reviewDue := now.UTC().Add(SocialVerificationDwell)
+		out.ReviewDueAt = &reviewDue
 		return nil
 	})
 	return out, err
@@ -1045,6 +1084,14 @@ SELECT provider_id, issuer_id, post_id, COALESCE(author_id, '')
 	granted := 0
 	for _, p := range matured {
 		checkErr := recheck(ctx, p.postID, p.authorID)
+		// FIX-570 M3: a TRANSIENT recheck failure (timeout / 429 / 5xx / transport
+		// error) must NOT permanently deny the bonus. Leave the row PENDING so the
+		// next reconciler tick retries it (bounded natural backoff at the tick
+		// interval). Only confirmed-terminal failures (post deleted, protected, or
+		// author mismatch) set failed_at.
+		if checkErr != nil && errors.Is(checkErr, ErrSocialRecheckTransient) {
+			continue
+		}
 		txErr := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 			if checkErr != nil {
 				_, err := conn.ExecContext(ctx, `

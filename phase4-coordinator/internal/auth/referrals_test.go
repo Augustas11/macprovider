@@ -501,6 +501,114 @@ func TestSocialChallengeIsProviderBoundSingleUseAndAwardsBonusOnce(t *testing.T)
 	}
 }
 
+// TestTransientSocialRecheckLeavesPendingThenGrantsOnce is the FIX-570 M3
+// regression: a transient re-check failure (timeout / 429 / 5xx) must NOT set
+// failed_at; the verification stays pending and a subsequent successful pass
+// grants the bonus exactly once. The status endpoint reports pending_social_review
+// with a review_due_at throughout, then verified after the grant.
+func TestTransientSocialRecheckLeavesPendingThenGrantsOnce(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	policy.EnableSocialBonus = true
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	if _, err := store.EnsureProviderReferral(context.Background(), policy, "provider-a", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := store.CreateSocialChallenge(context.Background(), policy, "provider-a", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.CompleteSocialVerification(context.Background(), policy, "provider-a", challenge.Cleartext, "100", "author-a", "x_api", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.AdvocacyStatus != "pending_social_review" || pending.ReviewDueAt == nil {
+		t.Fatalf("expected pending with review_due_at, got %+v", pending)
+	}
+	if want := now.Add(auth.SocialVerificationDwell); !pending.ReviewDueAt.Equal(want) {
+		t.Fatalf("review_due_at=%v want=%v", pending.ReviewDueAt, want)
+	}
+
+	// A transient recheck failure must leave the row pending (no failed_at) and
+	// grant nothing.
+	transient := func(_ context.Context, _, _ string) error {
+		return fmt.Errorf("x lookup 503: %w", auth.ErrSocialRecheckTransient)
+	}
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, now.Add(31*time.Minute), transient); err != nil || granted != 0 {
+		t.Fatalf("transient granted=%d err=%v", granted, err)
+	}
+	mid, err := store.ProviderReferralStatus(context.Background(), policy, "provider-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mid.AdvocacyStatus != "pending_social_review" || mid.SocialVerified {
+		t.Fatalf("transient failure must stay pending, got %+v", mid)
+	}
+
+	// A subsequent successful pass grants exactly once.
+	ok := func(_ context.Context, _, _ string) error { return nil }
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, now.Add(40*time.Minute), ok); err != nil || granted != 1 {
+		t.Fatalf("success granted=%d err=%v", granted, err)
+	}
+	after, err := store.ProviderReferralStatus(context.Background(), policy, "provider-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.SocialVerified || after.AdvocacyStatus != "verified" || after.ReviewDueAt != nil {
+		t.Fatalf("expected verified, got %+v", after)
+	}
+	if after.BonusUses != policy.SocialBonusUses {
+		t.Fatalf("bonus=%d want=%d", after.BonusUses, policy.SocialBonusUses)
+	}
+}
+
+// TestTerminalSocialRecheckFailsAndSurfacesFailedStatus is the FIX-570 M3
+// terminal path plus the cross-lane social_review_failed status: a confirmed
+// terminal recheck (post deleted / author mismatch) sets failed_at, grants no
+// bonus, and the status endpoint reports social_review_failed.
+func TestTerminalSocialRecheckFailsAndSurfacesFailedStatus(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	policy.EnableSocialBonus = true
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	if _, err := store.EnsureProviderReferral(context.Background(), policy, "provider-a", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := store.CreateSocialChallenge(context.Background(), policy, "provider-a", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteSocialVerification(context.Background(), policy, "provider-a", challenge.Cleartext, "100", "author-a", "x_api", now); err != nil {
+		t.Fatal(err)
+	}
+	terminal := func(_ context.Context, _, _ string) error {
+		return errors.New("post author changed")
+	}
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, now.Add(31*time.Minute), terminal); err != nil || granted != 0 {
+		t.Fatalf("terminal granted=%d err=%v", granted, err)
+	}
+	after, err := store.ProviderReferralStatus(context.Background(), policy, "provider-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.AdvocacyStatus != "social_review_failed" || after.SocialVerified || after.ReviewDueAt != nil {
+		t.Fatalf("expected social_review_failed, got %+v", after)
+	}
+	// A later successful tick must NOT resurrect a terminally-failed verification.
+	ok := func(_ context.Context, _, _ string) error { return nil }
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, now.Add(90*time.Minute), ok); err != nil || granted != 0 {
+		t.Fatalf("failed row must not be granted later granted=%d err=%v", granted, err)
+	}
+}
+
 // TestCustodyProvenRecoveryIgnoresIssuerRevocation is the FIX-570 A3 regression:
 // once a provider is bound to a redemption, presenting the same code must succeed
 // even after the issuer is revoked. Pre-fix redeemReferralTx re-validated the

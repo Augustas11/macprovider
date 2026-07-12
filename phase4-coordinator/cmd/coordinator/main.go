@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -1293,9 +1294,16 @@ func startSocialVerificationPromotionReconciler(ctx context.Context, store *auth
 	recheck := func(ctx context.Context, postID, boundAuthorID string) error {
 		author, err := verifier.LookupPostAuthor(ctx, postID)
 		if err != nil {
+			// FIX-570 M3: preserve the transient/terminal classification so the
+			// promotion reconciler leaves transient failures PENDING (retryable)
+			// and only permanently fails on a confirmed-terminal lookup.
+			if errors.Is(err, referralapi.ErrXPostTransient) {
+				return fmt.Errorf("%w: %v", auth.ErrSocialRecheckTransient, err)
+			}
 			return err
 		}
 		if boundAuthorID != "" && author != boundAuthorID {
+			// A changed author is a confirmed terminal failure.
 			return fmt.Errorf("post author changed")
 		}
 		return nil

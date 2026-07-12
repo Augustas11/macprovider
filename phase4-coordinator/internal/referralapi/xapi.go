@@ -16,6 +16,20 @@ import (
 
 var xPostIDPattern = regexp.MustCompile(`^[0-9]{1,24}$`)
 
+// FIX-570 M3: promotion-time re-checks classify their failure so the promotion
+// reconciler can tell a CONFIRMED terminal state (post deleted / protected) from
+// a TRANSIENT one (timeout / 429 / 5xx / transport error). Only terminal
+// failures may permanently deny the social bonus; transient failures leave the
+// verification pending for a later retry.
+var (
+	// ErrXPostTerminal means the post is confirmed gone or inaccessible in a way
+	// that will not recover (404 not found, 410 gone, 403 protected/suspended).
+	ErrXPostTerminal = errors.New("x post terminally unavailable")
+	// ErrXPostTransient means the lookup could not be completed for a reason that
+	// may succeed on retry (timeout, 429 rate limit, 5xx, transport/parse error).
+	ErrXPostTransient = errors.New("x post lookup transient failure")
+)
+
 func ParseXPostID(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "x.com") || u.Port() != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -78,23 +92,32 @@ func (c *XAPIClient) fetchPost(ctx context.Context, postID string) (xPostPayload
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return payload, err
+		// Transport errors (timeout, connection reset, DNS) are always transient.
+		return payload, fmt.Errorf("x lookup transport error: %w", ErrXPostTransient)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return payload, fmt.Errorf("x lookup status %d", resp.StatusCode)
+		// FIX-570 M3: only a confirmed gone/inaccessible post is terminal. Rate
+		// limits and server errors are transient and must be retried, never used
+		// to permanently deny the bonus.
+		switch resp.StatusCode {
+		case http.StatusNotFound, http.StatusGone, http.StatusForbidden:
+			return payload, fmt.Errorf("x lookup status %d: %w", resp.StatusCode, ErrXPostTerminal)
+		default:
+			return payload, fmt.Errorf("x lookup status %d: %w", resp.StatusCode, ErrXPostTransient)
+		}
 	}
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return payload, errors.New("x lookup content type invalid")
+		return payload, fmt.Errorf("x lookup content type invalid: %w", ErrXPostTransient)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024+1))
 	if err != nil || len(body) > 64*1024 {
-		return payload, errors.New("x lookup response invalid")
+		return payload, fmt.Errorf("x lookup response invalid: %w", ErrXPostTransient)
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.Data.ID != postID {
-		return payload, errors.New("x lookup response mismatch")
+		return payload, fmt.Errorf("x lookup response mismatch: %w", ErrXPostTransient)
 	}
 	return payload, nil
 }

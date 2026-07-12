@@ -542,7 +542,7 @@ func statusOutcome(status auth.ProviderReferral) string {
 
 func (h *Handler) writeProviderStatus(w http.ResponseWriter, status auth.ProviderReferral) {
 	joinBase := strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/")
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"campaign":             status.Campaign,
 		"advocacy_status":      status.AdvocacyStatus,
 		"invite_code":          status.Code,
@@ -554,7 +554,19 @@ func (h *Handler) writeProviderStatus(w http.ResponseWriter, status auth.Provide
 		"first_serving_seen":   status.FirstServingSeen,
 		"social_bonus_enabled": h.Policy.EnableSocialBonus,
 		"invite_url":           joinBase + "/" + url.PathEscape(status.Code),
-	})
+		// FIX-570 cross-lane contract: the configured "share to unlock N" incentive
+		// value (policy SocialBonusUses), distinct from bonus_uses which is the
+		// currently-AWARDED bonus capacity. The dashboard renders the incentive
+		// before it is granted.
+		"configured_bonus_uses": h.Policy.SocialBonusUses,
+	}
+	// review_due_at is present only while a social verification is pending its
+	// dwell/promotion. It is the instant the pending X verification becomes
+	// eligible for promotion (pending_since + dwell). FIX-570 cross-lane contract.
+	if status.ReviewDueAt != nil {
+		body["review_due_at"] = status.ReviewDueAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func referralReason(err error) string {

@@ -2,6 +2,7 @@ package referralapi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -78,4 +79,43 @@ func mustURL(t *testing.T, raw string) *url.URL {
 		t.Fatal(err)
 	}
 	return u
+}
+
+// TestXLookupClassifiesTransientVsTerminal is the FIX-570 M3 regression: only a
+// confirmed gone/protected post (404/410/403) is terminal; rate limits, server
+// errors, and transport failures are transient so promotion retries instead of
+// permanently denying the bonus.
+func TestXLookupClassifiesTransientVsTerminal(t *testing.T) {
+	newClient := func(status int, transportErr error) *XAPIClient {
+		return &XAPIClient{
+			bearer:   "x-token",
+			joinBase: mustURL(t, "https://coordinator.streamvc.live/j"),
+			client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				if transportErr != nil {
+					return nil, transportErr
+				}
+				header := make(http.Header)
+				header.Set("Content-Type", "application/json")
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("{}")), Header: header}, nil
+			})},
+		}
+	}
+	terminalStatuses := []int{http.StatusNotFound, http.StatusGone, http.StatusForbidden}
+	for _, st := range terminalStatuses {
+		_, err := newClient(st, nil).LookupPostAuthor(context.Background(), "123")
+		if !errors.Is(err, ErrXPostTerminal) {
+			t.Fatalf("status %d: want terminal, got %v", st, err)
+		}
+	}
+	transientStatuses := []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable}
+	for _, st := range transientStatuses {
+		_, err := newClient(st, nil).LookupPostAuthor(context.Background(), "123")
+		if !errors.Is(err, ErrXPostTransient) {
+			t.Fatalf("status %d: want transient, got %v", st, err)
+		}
+	}
+	// Transport error is transient.
+	if _, err := newClient(0, io.ErrUnexpectedEOF).LookupPostAuthor(context.Background(), "123"); !errors.Is(err, ErrXPostTransient) {
+		t.Fatalf("transport error: want transient, got %v", err)
+	}
 }

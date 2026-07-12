@@ -153,13 +153,40 @@ private struct DashboardView: View {
                     Text("This invite has been retired. Your provider remains live; contact Malibu if you need a new invite.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                case ProviderReferralStatus.pendingSocialReview:
+                    // PROD-M3: a valid X post is submitted and under review. Show
+                    // the keep-post-public guidance and, when known, the time the
+                    // review is due so refreshes no longer erase this state.
+                    Text("Your X post was received and is being verified.")
+                        .font(.callout)
+                    if let due = status.reviewDueAt {
+                        Text("Verification finishes around \(due.formatted(date: .omitted, time: .shortened)). Keep your X post public until then — deleting or hiding it before review cancels the bonus.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Keep your X post public for about 30–35 minutes so it can be verified. Deleting or hiding it before review cancels the bonus.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Refresh status") { Task { await referralInvites.refresh() } }
+                        .buttonStyle(.bordered)
+                case "social_review_failed":
+                    // PROD-M3: terminal failure — the post could not be verified.
+                    // Explain what happened; the provider stays live and the
+                    // private invite still works.
+                    Text("Your X post could not be verified for the bonus. This can happen if the post was edited, made private, or removed before review finished. Your provider remains live and your private invite still works.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button(status.remaining > 0 ? "Copy private invite" : "Invite used") { referralInvites.copyPrivateInvite() }
+                        .buttonStyle(.bordered)
+                        .disabled(status.remaining == 0)
                 default:
                     Text(status.remaining == 0
                         ? (status.socialBonusEnabled
-                            ? "Your private invite has been used. Optionally share on X to unlock \(status.bonusUsesPhrase)."
+                            ? "Your private invite has been used. Optionally share on X to unlock \(status.shareIncentivePhrase)."
                             : "Your private invite has been used.")
                         : (status.socialBonusEnabled
-                            ? "Your provider is live. Share privately, or optionally post on X to unlock \(status.bonusUsesPhrase)."
+                            ? "Your provider is live. Share privately, or optionally post on X to unlock \(status.shareIncentivePhrase)."
                             : "Your provider is live. You can share this invite privately."))
                         .font(.callout)
                         .foregroundStyle(.secondary)

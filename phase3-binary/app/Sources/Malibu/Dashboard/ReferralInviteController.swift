@@ -2,6 +2,10 @@ import AppKit
 import Foundation
 
 struct ProviderReferralStatus: Decodable, Equatable {
+    // PROD-M3: durable advocacy status set by the coordinator once a valid X
+    // post has been submitted and is awaiting review.
+    static let pendingSocialReview = "pending_social_review"
+
     let advocacyStatus: String
     let inviteCode: String
     let remaining: Int
@@ -9,10 +13,17 @@ struct ProviderReferralStatus: Decodable, Equatable {
     let firstServingSeen: Bool
     let socialBonusEnabled: Bool
     let inviteURL: URL?
-    // PROD-M4: the coordinator advertises the configured X-share bonus size.
-    // Absent/zero ⇒ fall back to the historical default of 2 so older
-    // coordinators keep rendering a sensible value.
+    // Currently-AWARDED bonus capacity: 0 until the X post is verified and
+    // promoted. Use this only for the post-grant state, never for the
+    // pre-verification incentive copy (PROD-M2).
     let bonusUses: Int?
+    // PROD-M2: the coordinator advertises the CONFIGURED X-share bonus size
+    // independently of whether it has been awarded yet. This is what the user
+    // unlocks BY sharing, so the "share to unlock N" copy must use it.
+    let configuredBonusUses: Int?
+    // PROD-M3: when a valid X post is under review the coordinator returns the
+    // time by which the review is due. The post must stay public until then.
+    let reviewDueAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case advocacyStatus = "advocacy_status"
@@ -23,19 +34,33 @@ struct ProviderReferralStatus: Decodable, Equatable {
         case socialBonusEnabled = "social_bonus_enabled"
         case inviteURL = "invite_url"
         case bonusUses = "bonus_uses"
+        case configuredBonusUses = "configured_bonus_uses"
+        case reviewDueAt = "review_due_at"
     }
 
-    /// Effective X-share bonus size for display copy. Defaults to 2 when the
-    /// coordinator omits `bonus_uses` or reports a non-positive value.
-    var effectiveBonusUses: Int {
-        guard let bonusUses, bonusUses > 0 else { return 2 }
-        return bonusUses
+    /// True once a valid X post has been submitted and is awaiting review.
+    var isPendingSocialReview: Bool {
+        advocacyStatus == Self.pendingSocialReview
     }
 
-    /// "two more invite uses" / "one more invite use" — matches the dashboard
-    /// copy that previously hardcoded "two".
-    var bonusUsesPhrase: String {
-        let count = effectiveBonusUses
+    /// Configured X-share bonus size for the pre-verification incentive copy.
+    /// PROD-M2: reflects `configured_bonus_uses` (what sharing unlocks), never
+    /// the awarded `bonus_uses` which is 0 until promotion. Falls back to the
+    /// awarded value, then to the historical default of 2, only when the
+    /// coordinator advertises neither field (older coordinators).
+    var shareIncentiveBonusUses: Int {
+        if let configuredBonusUses, configuredBonusUses > 0 { return configuredBonusUses }
+        if let bonusUses, bonusUses > 0 { return bonusUses }
+        return 2
+    }
+
+    /// "two more invite uses" / "one more invite use" — the pre-verification
+    /// copy describing what sharing on X unlocks.
+    var shareIncentivePhrase: String {
+        Self.bonusPhrase(for: shareIncentiveBonusUses)
+    }
+
+    static func bonusPhrase(for count: Int) -> String {
         let word: String
         switch count {
         case 1: word = "one"
@@ -224,9 +249,12 @@ final class ReferralInviteController: ObservableObject {
     }
 
     func shareOnX() async {
-        // ADV-M2: ignore re-entrant taps while a challenge request is active.
+        // ADV-M2: claim the in-flight flag and bump the generation BEFORE the
+        // first `await`. `@MainActor` methods are reentrant across suspension,
+        // so setting `isSharing` after `await credentials()` would let two rapid
+        // taps both pass the guard. Setting it synchronously here means the
+        // second tap sees `isSharing == true` and returns immediately.
         guard !isSharing else { return }
-        guard let credentials = await credentials() else { return }
         shareGeneration += 1
         let generation = shareGeneration
         isSharing = true
@@ -237,6 +265,7 @@ final class ReferralInviteController: ObservableObject {
             // Only clear the in-flight flag if this invocation is still current.
             if generation == shareGeneration { isSharing = false }
         }
+        guard let credentials = await credentials() else { return }
         do {
             let challenge = try await credentials.client.createXChallenge(bearerToken: credentials.token)
             // Discard a superseded response: a newer shareOnX() (or startOver)
