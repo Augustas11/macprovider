@@ -167,6 +167,22 @@ func TestJoinLandingValidatesCodeAndOffersDownloadAndCopy(t *testing.T) {
 	}
 }
 
+func TestJoinServesOpenBetaLandingWhenGateDisabled(t *testing.T) {
+	policy := apiPolicy()
+	policy.RequireForRegistration = false
+	// Store is intentionally nil: when the gate is off HandleJoin must not
+	// validate a code, so it must not touch the store.
+	h := Handler{Policy: policy, Now: time.Now, PublicLimiter: NewBoundedLimiter(10, time.Minute, 10)}
+	req := httptest.NewRequest(http.MethodGet, "/j/MAL1-S-k1-anything-AAAAAAAAAAAAAAAAAAAAAAAAAA", nil)
+	w := httptest.NewRecorder()
+	h.HandleJoin(w, req)
+	if w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), "Malibu is now open") ||
+		!strings.Contains(w.Body.String(), "https://download.malibu.tech/latest.dmg") {
+		t.Fatalf("open-beta join status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestValidateIsRateLimitedAndDoesNotExposeIssuer(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
@@ -192,6 +208,82 @@ func TestValidateIsRateLimitedAndDoesNotExposeIssuer(t *testing.T) {
 	h.HandleValidate(second, request())
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
+	}
+}
+
+func TestReserveClaimsCapacityIdempotentlyAndReportsExhaustion(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := apiPolicy()
+	code, err := store.CreateSeedReferral(context.Background(), policy, "reserveseed", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	h := Handler{Store: store, Policy: policy, PublicLimiter: NewBoundedLimiter(50, time.Minute, 64), Now: func() time.Time { return now }}
+	reserve := func(code, providerID string) *httptest.ResponseRecorder {
+		body := `{"code":"` + code + `","provider_id":"` + providerID + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/referrals/reserve", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.HandleReserve(w, req)
+		return w
+	}
+
+	first := reserve(code, "prov-a")
+	var firstBody struct {
+		Reserved      bool   `json:"reserved"`
+		ReservationID string `json:"reservation_id"`
+		Reason        string `json:"reason"`
+	}
+	if first.Code != http.StatusOK {
+		t.Fatalf("first reserve status=%d body=%s", first.Code, first.Body.String())
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
+		t.Fatal(err)
+	}
+	if !firstBody.Reserved || firstBody.ReservationID == "" {
+		t.Fatalf("first reserve body=%s", first.Body.String())
+	}
+
+	// Same provider + code -> same reservation id (idempotent extension).
+	second := reserve(code, "prov-a")
+	var secondBody struct {
+		Reserved      bool   `json:"reserved"`
+		ReservationID string `json:"reservation_id"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondBody); err != nil {
+		t.Fatal(err)
+	}
+	if !secondBody.Reserved || secondBody.ReservationID != firstBody.ReservationID {
+		t.Fatalf("expected same reservation id, got %q vs %q", secondBody.ReservationID, firstBody.ReservationID)
+	}
+
+	// A different provider against a cap-1 code that is already reserved is exhausted.
+	third := reserve(code, "prov-b")
+	var thirdBody struct {
+		Reserved bool   `json:"reserved"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(third.Body.Bytes(), &thirdBody); err != nil {
+		t.Fatal(err)
+	}
+	if thirdBody.Reserved || thirdBody.Reason != "exhausted" {
+		t.Fatalf("expected exhausted for second provider, body=%s", third.Body.String())
+	}
+}
+
+func TestReserveDisabledReturnsNotRequired(t *testing.T) {
+	policy := apiPolicy()
+	policy.RequireForRegistration = false
+	h := Handler{Policy: policy, PublicLimiter: NewBoundedLimiter(10, time.Minute, 10)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/referrals/reserve", strings.NewReader(`{"code":"x","provider_id":"prov-a"}`))
+	w := httptest.NewRecorder()
+	h.HandleReserve(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"required":false`) || strings.Contains(w.Body.String(), `"reserved":true`) {
+		t.Fatalf("disabled reserve status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

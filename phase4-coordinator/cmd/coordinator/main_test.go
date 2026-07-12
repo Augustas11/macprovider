@@ -102,7 +102,7 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence, nil, nil, nil, nil, nil, nil, nil)
+	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence, nil, nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", nil)
 	rr := httptest.NewRecorder()
 	disabled.ServeHTTP(rr, req)
@@ -123,7 +123,7 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 		t.Fatalf("disabled wallet route status=%d body=%s, want 501 wallet_change_requires_spec_027", rr.Code, rr.Body.String())
 	}
 
-	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence, nil, nil, nil, nil, nil, nil, nil)
+	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence, nil, nil, nil, nil, nil, nil, nil, nil)
 	rr = httptest.NewRecorder()
 	enabled.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {

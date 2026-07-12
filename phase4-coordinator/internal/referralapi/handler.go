@@ -147,7 +147,7 @@ func (h *Handler) HandleReserve(w http.ResponseWriter, r *http.Request) {
 	if h.SourceIP != nil {
 		key = h.SourceIP(r)
 	}
-	if h.PublicLimiter == nil || !h.PublicLimiter.Allow("reserve:" + key) {
+	if h.PublicLimiter == nil || !h.PublicLimiter.Allow("reserve:"+key) {
 		h.observe("reserve", "rate_limited")
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many referral checks")
