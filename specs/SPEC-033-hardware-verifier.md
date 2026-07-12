@@ -1,6 +1,6 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.3-draft
+**Status:** v0.4-draft
 **Date:** 2026-07-12
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
@@ -207,8 +207,10 @@ benchmarks []{
 ```
 
 A **lowercase hex SHA-256** is exactly 64 chars in `[0-9a-f]` (`isLowerSHA256`). The optional
-`candidate_row_identity` (emitted by the producer) is validated at the HTTP handler (§3.1) — 64
-lowercase hex if non-empty — but is not consumed by the `Evaluate` gate pipeline (§5).
+`candidate_row_identity` shown above is a field of the **HTTP handler's** request/benchmark struct
+only (validated there — 64 lowercase hex if non-empty); it is **not** a field of the verifier's
+`hardwareverify.Benchmark`, so `Evaluate` discards it during JSON decode. (The `hardware`/`benchmark`
+field names/types above otherwise match `hardwareverify.Evidence`/`Hardware`/`Benchmark` exactly.)
 
 ### 3.1 Submission and replay (enqueue path)
 
@@ -226,8 +228,10 @@ authenticated bearer identity; the handler (`HandleHardwareEvidence`) binds the 
   minutes (`hardware_evidence.go`), so a provider cannot flood the queue while one job is
   outstanding;
 - computes a **canonical** SHA-256 of the evidence (`canonicalEvidenceSHA`) → `evidence_sha256`;
-- in the **same transaction**, upserts a **`source='cli_hello'` profile row** (with `verified`
-  left to trigger A, i.e. `FALSE`) *before* inserting the job, then inserts a `pending` job
+- in the **same transaction**, upserts a **`source='cli_hello'` profile row** *before* inserting
+  the job (the upsert **omits `verified`**, so trigger A governs it: `FALSE` on an initial insert or
+  a chip/memory change, but **`OLD.verified` preserved** on an unchanged existing tuple — so a
+  re-submitting already-verified provider keeps `verified=TRUE`), then inserts a `pending` job
   (unique on `evidence_sha256`);
 - returns a **replay state machine** result (`hardwareEvidenceResponseStatus`), **fail-closed**: a
   duplicate is accepted (2xx) **only** while `pending`, while `waiting_trust`, or when already
@@ -258,9 +262,10 @@ row to convert.
 **two distinct consumer classes**:
 
 - **Exact-v2 (job-reason) consumers** require `decision_reason = VerifiedDecisionReason`: onboarding
-  replay (`hardware_evidence.go`; its test rejects `hardware-verifier.v1:verified`) and SPEC-032's
-  evidence lookup (`internal/autotune/evidence_pg.go`). A legacy `v1:verified` row is **not** a
-  current trusted verdict for these.
+  replay (`hardware_evidence.go`; its test rejects `hardware-verifier.v1:verified`), SPEC-032's
+  evidence lookup (`internal/autotune/evidence_pg.go` `LatestVerified`), and the same `LatestVerified`
+  feeding the config-gated telemetry-drift evaluator (`internal/pow/drift.go`). A legacy `v1:verified`
+  row is **not** a current trusted verdict for these.
 - **Verified-bit consumers** gate on `provider_hardware_profiles.verified = TRUE` **without**
   inspecting any job reason: the **SPEC-017 hardware cache** (`internal/stats/hardware/cache.go`
   selects `WHERE verified = TRUE`) and the demotion predicate's supporting-job clause (§7.3), which
@@ -366,20 +371,22 @@ matches **zero rows** — the existing (newer) profile is left intact — yet th
 `provider_hardware_profiles.verified` is not permanent, but demotion is **best-effort and has
 documented escape paths (§10.4)** — it is NOT a reliable revocation guarantee. The operator
 inventory sync (`cmd/stats-inventory-sync`, role `stats_inventory_writer`) runs
-`applyTrustDemotions`, which sets `verified = FALSE` only for a profile that satisfies **all** of:
-(i) `source = 'cli_hello'`; (ii) no matching **active** trust row (trust removed or `expires_at`
-passed); **and** (iii) a `status='verified'` job **exactly** matching the profile's chip, memory,
-`os_version→macos_version`, `binary_version→app_version`, and `generated_at→last_reported_at`.
-Consequences of that predicate:
+`applyTrustDemotions`. The exact predicate (`main.go`) sets `verified = FALSE` for every profile
+where `verified = TRUE` **AND** `source = 'cli_hello'` **AND `NOT EXISTS`** a **combined witness** —
+a `status='verified'` job that **both** exactly matches the profile's tuple (provider, chip, memory,
+`os_version→macos_version`, `binary_version→app_version`, `generated_at→last_reported_at`) **and**
+is joined to an **active** trust row (`expires_at IS NULL OR > now()`). In words: **retention
+requires that one combined (matching-verified-job ∧ active-trust) proof still exist; demotion fires
+when it does not** — so *either* trust loss/expiry *or* profile-tuple drift (no matching job) is
+independently sufficient. Consequences:
 
 - It only touches `source='cli_hello'` profiles — a profile converted to `app_register` (§10.4 R1)
-  is never demoted.
-- `applyTrustDemotions` (and the whole trust reconciliation) runs **only when the sync input
-  contains ≥ 1 trusted-hardware identity** (`validateInventory` rejects an empty `trusted_hardware`
-  section, and omitting it leaves trust roots untouched), so it cannot express "remove the last
-  root / zero trust" (§10.4 R2).
-- Because it also requires an exact tuple-matching verified job, tuple/profile drift can demote a
-  profile **even while its trust row remains** — trust removal is *sufficient but not exhaustive*.
+  is never demoted (the load-bearing escape).
+- Because the witness needs *both* the matching job and active trust, **tuple/profile drift can
+  demote even while a trust row remains** — trust removal is sufficient but not the only trigger.
+- `applyTrustDemotions` (and trust reconciliation) runs only when the sync input carries ≥ 1
+  trusted-hardware identity; an operator reaches **zero *active* trust** by supplying a placeholder
+  identity with a past `expires_at` (§10.4 R2) rather than an empty section.
 
 The same tool also directly upserts operator profiles (`source='operator'`, `verified` from an
 operator-authored YAML) — an operator-authority write path outside the evidence pipeline (§10.1).
@@ -486,12 +493,18 @@ them is code follow-up, not a spec change:
   removal/expiry** (SPEC-032 admission is then bounded only by the evidence-TTL freshness join, not
   by trust). MUST-close: demotion should not be `source='cli_hello'`-scoped, or admission should
   re-check current trust.
-- **R2 — last-trust-root / zero-trust non-removal.** `validateInventory` rejects an **empty**
-  `trusted_hardware` section (and omitting it means "leave roots untouched"), and trust
-  reconciliation + `applyTrustDemotions` run **only when ≥ 1 trust identity is present**. So the
-  inventory tool **cannot express removing the last root or operating at zero trust**, and in that
-  state no demotion runs at all — an active final root keeps authorizing promotions. MUST-close:
-  support an explicit zero-trust reconciliation that also demotes.
+- **R2 — no direct empty-trust reconciliation (ergonomics, NOT a revocation impossibility).**
+  `validateInventory` rejects an **empty** `trusted_hardware` section and omitting it leaves roots
+  untouched, so there is no *direct* "delete the last physical trust row" operation. **However,
+  zero *active* trust IS reachable** and DOES demote: an operator supplies a **placeholder identity
+  with a past `expires_at`** (validation accepts any parseable RFC3339, not requiring a future
+  time). That keeps the trust count > 0 (so reconciliation and `applyTrustDemotions` run and delete
+  all other roots), while the placeholder is **inactive** everywhere the code applies the
+  `expires_at > now()` predicate — both promotion (`verify.go`) and the demotion witness
+  (`main.go`). So revocation to zero-active-trust is achievable; the residual is only the missing
+  *ergonomic* empty-section path (and the final physical row cannot be deleted, only expired).
+  Minor MUST-close: accept an explicit empty/zero-trust reconciliation so operators need not use an
+  expired-placeholder workaround.
 
 ---
 
@@ -525,9 +538,13 @@ them is code follow-up, not a spec change:
   MUST roll the batch back if it does not hold (§2.5, §7.1).
 - **AC-HV-2 (ordered reasons).** For each gate in §5, a job failing exactly that gate first MUST
   persist `decision_reason='hardware-verifier.v2:<that reason>'`. Gate order is normative.
-- **AC-HV-3 (waiting is non-terminal).** A job missing only a trust row or chip profile MUST become
-  `waiting_trust` (not `rejected`) and MUST promote on a later run once the operator-curated row
-  exists — no re-submission.
+- **AC-HV-3 (waiting is non-terminal, subject to freshness).** A job missing only a trust row or
+  chip profile MUST become `waiting_trust` (not `rejected`). Once the operator-curated row exists it
+  MUST promote on a later run **provided the job still passes every preceding §5 gate** — in
+  particular, `Evaluate` re-runs the `stale_job`/`stale_evidence` gates against the *current* `now`
+  before the trust gates, so a `waiting_trust` job whose evidence has aged past `maxEvidenceAge` is
+  **rejected**, not promoted, and requires resubmission. No re-submission is needed only while the
+  evidence remains fresh.
 - **AC-HV-4 (no self-certification of the profile bit).** No `provider_onboarding` write may set
   `provider_hardware_profiles.verified=TRUE` (no grant + trigger A). This is a statement about the
   **profile verified bit**, independent of job `status` (a compromised onboarding role could insert
@@ -548,19 +565,40 @@ them is code follow-up, not a spec change:
   `hardware-verifier.v2:verified_trusted_hardware` reason. **Verified-bit consumers** (SPEC-017
   cache, the §7.3 demotion supporting-job clause) gate on `verified=TRUE` without a reason check
   (§4) — the spec MUST NOT claim exact-v2 is universal.
-- **AC-HV-10 (demotion is best-effort).** Removing/expiring a trust row demotes an affected profile
-  to `verified=FALSE` on the next sync **only** when all three §7.3 conditions hold (`source='cli_hello'`,
-  no active trust, exact tuple-matching verified job) **and** the sync input carries ≥ 1 trust
-  identity. Demotion is best-effort, not a guarantee (§10.4).
+- **AC-HV-10 (demotion is best-effort, correct predicate).** On the next sync, a `verified`,
+  `source='cli_hello'` profile is demoted to `verified=FALSE` **iff no combined witness exists** —
+  i.e. no `status='verified'` job that both exactly matches the profile tuple and is joined to an
+  **active** trust row (§7.3). So *either* trust loss/expiry *or* profile-tuple drift is sufficient
+  to demote; retention requires the combined proof. Demotion runs only when the sync input carries
+  ≥ 1 trust identity (zero *active* trust is reachable via an expired placeholder — §10.4 R2). It
+  does **not** touch `source='app_register'` profiles (§10.4 R1). Demotion is best-effort, not a
+  guarantee.
 - **AC-HV-11 (chip/memory re-verification).** A `provider_onboarding` update that changes
   `chip_normalized` or `unified_memory_gb` MUST clear `verified` (trigger A).
-- **AC-HV-12 (revocation gaps documented).** The spec MUST disclose the R1 (`app_register`
-  source-flip escape) and R2 (last-root/zero-trust non-removal) revocation gaps (§10.4) as known
-  shipped weaknesses rather than assert unconditional revocability.
+- **AC-HV-12 (revocation calibration documented).** The spec MUST disclose the R1 `app_register`
+  source-flip escape (a genuine revocation gap) and the R2 empty-trust *ergonomics* limitation
+  (zero *active* trust is reachable via an expired placeholder and does demote — §10.4) as known
+  shipped behavior, rather than assert unconditional revocability **or** overstate R2 as a hard
+  impossibility.
 
 ---
 
 ## Change log
+
+**v0.4-draft (2026-07-12) — audit reconciliation (SPEC-033 R3, 3-lane codex).**
+R3 confirmed every v0.3 scope/consumer/grant fix and narrowed to predicate-precision:
+- **§7.3 + AC-HV-10 demotion predicate corrected** (unanimous HIGH): the shipped SQL demotes a
+  `cli_hello` verified profile **iff no combined (exact-tuple verified job ∧ active trust) witness
+  exists** — so trust loss *or* tuple drift each suffice; the prior "all three conjunctive
+  conditions" wording was inverted.
+- **§10.4 R2 recalibrated** (unanimous HIGH): zero *active* trust is reachable (expired-placeholder
+  identity) and does demote, so R2 is an empty-section **ergonomics** limitation, not a hard
+  revocation impossibility (v0.3 overstated it). R1 `app_register` escape unchanged (confirmed real).
+- **§3.1** pre-job `cli_hello` upsert **preserves** `OLD.verified` on an unchanged existing tuple
+  (only insert/chip/memory-change forces FALSE) — reinforcing R1.
+- **AC-HV-3** qualified: `waiting_trust` promotes only if the job still passes the §5 freshness gates.
+- **§3** `candidate_row_identity` is an HTTP-handler field, not part of the `hardwareverify.Benchmark`
+  decode shape. **§4** adds the telemetry-drift (`internal/pow/drift.go`) exact-v2 consumer.
 
 **v0.3-draft (2026-07-12) — audit reconciliation (SPEC-033 R2, 3-lane codex).**
 R2 confirmed the §3/§5/§6/§8 core and the no-initial-self-certification property, and caught a
