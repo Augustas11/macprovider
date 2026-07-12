@@ -410,12 +410,19 @@ chain (see Section 3 for the hook-point diagram).
 The request chain is Tier-aware. The critical ordering difference:
 
 **Tier 1 path:** Validate → Stage 1 pre-flight → [TrustGate: pass] →
-Stage 2 pre-flight (tokenize) → Queue → Inference → [ResponseSeal: pass] → Format
+Stage 2 pre-flight (tokenize) → Semaphore gate (FR-11, blocking; no queue) →
+Inference → [ResponseSeal: pass] → Format
 
 **Tier 2 path:** Validate → Stage 1 pre-flight (envelope bytes) →
 [TrustGate: attest] → [InputDecryptor: decrypt] →
-Stage 2 pre-flight (tokenize plaintext) → Queue → Inference →
-[ResponseSeal: sign/encrypt] → Format
+Stage 2 pre-flight (tokenize plaintext) → Semaphore gate (FR-11, blocking) →
+Inference → [ResponseSeal: sign/encrypt] → Format
+
+(The "Queue" stage of the ≤ v1.6 chain is the FR-11 blocking semaphore, not a
+depth-bounded reject-queue; reconciled v1.7. The `[TrustGate]` /
+`[InputDecryptor]` / `[ResponseSeal]` middleware brackets are the *original
+Phase-3 Tier-2 design* — Tier-1 passthrough no-ops that never shipped as the
+tier-2 mechanism; see the Tier-2 reconciliation note in the scope section.)
 
 `InputDecryptor` MUST run before Stage 2 pre-flight in Tier 2, because
 encrypted prompts cannot be tokenized. Stage 1 (envelope byte-size
@@ -424,16 +431,28 @@ obviously oversized payloads.
 
 ### Tier 2 hook points summary
 
-| Hook point | Location | Tier 1 behavior | Tier 2 behavior |
+> **Reconciled v1.7 — original design, not the shipped Tier-2 mechanism.** This
+> hook-point table describes the *original Phase-3 design* for how Tier-2 would
+> be added: request-chain middleware protocols with Tier-1 passthrough no-ops.
+> That middleware design **never shipped** — none of these four Swift protocols
+> exist in the binary. The Tier-2 that actually shipped (`binary_version`
+> 1.8.31) is a **coordinator-wire pipeline owned by SPEC-008** (v2 `auth_request`
+> `tier2_capabilities`, proof-stage `attestation_token`, `se_liveness`, encrypted
+> leg; §6.15), which is orthogonal to the request-chain middleware below. The
+> "hardware attestation blob" phrasing also overstates assurance: SPEC-008's
+> default `self_signed` tier proves key custody and session binding, **not**
+> hardware provenance. The table is retained as design context only.
+
+| Hook point (original design) | Location | Tier 1 behavior | Envisioned Tier 2 behavior |
 |---|---|---|---|
 | `TrustGate` | After Stage 1 pre-flight | Passthrough (all requests accepted) | Validate buyer attestation token |
 | `InputDecryptor` | Before Stage 2 pre-flight | Skip entirely | Decrypt buyer-encrypted prompt |
 | `ResponseSeal` | After inference, before formatter | Passthrough (plaintext output) | Sign or encrypt output |
-| `AttestationProvider` | Coordinator handshake | Omitted from handshake payload | Provides hardware attestation blob |
+| `AttestationProvider` | Coordinator handshake | Omitted from handshake payload | (envisioned) attestation token on handshake |
 
-Each hook point is a Swift protocol. Tier 1 ships with a single conforming
-struct (e.g. `PassthroughTrustGate`). Tier 2 adds alternative conformances
-without modifying the request chain.
+Each hook point *was* to be a Swift protocol with a Tier-1 passthrough conformance
+(e.g. `PassthroughTrustGate`). In the shipped binary these protocols were never
+created; SPEC-008's wire pipeline supersedes them.
 
 ---
 
@@ -547,8 +566,9 @@ measurement; default concurrency is locked to the runtime-safe value:
 Until provider runtime parallel generation is proven safe under MLX
 (catalog reasoning, memory pressure analysis, stability validation),
 advertised `max_concurrency` MUST be 1 for all RAM tiers. The provider
-runtime enforces this via a process-local semaphore of 1 around MLX
-generation calls. Operators MAY set `max_concurrency_override` in
+runtime enforces the advertised concurrency via a process-local semaphore
+sized to `max(1, max_concurrency)` around MLX generation calls (FR-11) — 1 at
+the normative default; an operator override sizes it higher. Operators MAY set `max_concurrency_override` in
 `~/.config/macprovider/config.yaml` (or via
 `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE` env) for experimental use, but
 the default and recommended value is 1.
@@ -599,8 +619,15 @@ of pre-engine-cancelled queued requests" contract (SPEC-001 ≤ v1.6) was **neve
 implemented** and is retired.
 
 The semaphore's waiter list is **unbounded** (`AsyncSemaphore.swift` appends
-every excess acquirer); admission is not depth-capped. A waiter is removed only
-when *its own* Swift task is cancelled. On the HTTP inference path this
+every excess acquirer); admission is not depth-capped. Waiters are drained
+**FIFO** — a normal permit release resumes the first waiter (`removeFirst()`) —
+and a waiter is *also* removed if its own Swift task is cancelled. On the HTTP
+inference path this cancellation is **not** wired to client disconnect: requests
+run in detached tasks (`HTTPServer.swift`) and the non-streaming path passes
+`shouldCancel: { false }`, so a client that disconnects while awaiting a permit
+does **not** release its waiter or its later compute. FR-11's earlier assurance
+that awaiting clients are freed by structured-concurrency cancellation on
+disconnect is therefore **not** shipped; a flood of (including disconnected)
 cancellation is **not** wired to client disconnect: requests run in detached
 tasks (`HTTPServer.swift`) and the non-streaming path passes
 `shouldCancel: { false }`, so a client that disconnects while awaiting a permit
@@ -647,11 +674,16 @@ ships with the client protocol fully implemented, tested against a mock.
 Provider authentication to the coordinator is out of scope for this
 binary (deferred to SPEC-002).
 
-**FR-14. Tier capability announcement.**
-On successful WebSocket handshake, the binary sends a `hello` message
-that includes `tier: 1`. This field is the Tier 2 upgrade vector — a
-future binary version sends `tier: 2` with an attached attestation blob
-from the `AttestationProvider` hook.
+**FR-14. Tier capability announcement (reconciled v1.7).**
+On the legacy `hello` message the shipped binary sends `tier: 1` with
+`attestation: null` (`CoordinatorClient.swift`) — that frame never advanced to
+`tier: 2`. The Tier-2 upgrade did **not** happen via the originally-envisioned
+`AttestationProvider` hook / `hello.tier = 2` "attestation blob" path (that
+middleware design never shipped). Instead, the shipped Tier-2 rides the **v2
+`auth_request` handshake** owned by **SPEC-008**: `tier2_capabilities`
+advertisement in the initial stage, a proof-stage `attestation_token`, and
+`se_liveness` challenge/response (§6.15). The legacy `hello.tier`/`attestation`
+fields are inert with respect to that pipeline.
 
 **FR-15. Health state reporting.**
 The binary reports its health state to the coordinator via the WebSocket.
@@ -750,7 +782,7 @@ On receiving `inference_request` (§ 6.6), the provider:
 1. Parses the embedded `body` field through the existing request
    validation pipeline (§ 6.2).
 2. Runs inference through the existing pipeline (validation,
-   pre-flight, queue, inference engine, response formatter) but
+   pre-flight, FR-11 semaphore gate, inference engine, response formatter) but
    captures output internally instead of writing to an HTTP response.
 3. For streaming requests: emits each SSE chunk as an
    `inference_response_chunk` WS message.
@@ -789,11 +821,15 @@ well as local HTTP requests.
 
 **FR-26. Cancellation handling.**
 On receiving `cancel_request` (§ 6.6), the provider aborts the
-in-flight inference for the specified `request_id` within 5 seconds.
-The provider sends `inference_response_end` with `status: "cancelled"`
-to acknowledge. If the `request_id` is unknown or already completed,
-the provider sends `inference_response_end` with
-`status: "cancelled"` and `chunks_sent: 0` (idempotent).
+in-flight inference for the specified `request_id` within 5 seconds
+and sends `inference_response_end` with `status: "cancelled"`.
+For an unknown or already-completed `request_id` the acknowledgement is
+**path-dependent in the shipped relay** (reconciled v1.7, `InferenceRelay.swift`):
+on the plaintext relay path it replies idempotently with
+`status: "cancelled"` and `chunks_sent: 0`; on the Tier-2 (encrypted) path an
+unknown ID is **silently dropped with no ack**. The ≤ v1.6 "always acknowledge
+unknown IDs" contract does not hold uniformly — see the detailed §6.6
+`cancel_request` note.
 
 **FR-27. Error mapping.**
 Inference errors map to `status` values in `inference_response_end`:
@@ -1254,8 +1290,9 @@ The `serve` command gains the following additive flags:
 - `--ctl-socket-path <path>` — override the macOS-native default per
   SPEC-011 v0.5 R-3.1.5. Default `$TMPDIR/macprovider-cli/ctl.sock`,
   resolved via `FileManager.default.temporaryDirectory`. Socket parent
-  directory mode is `0700`; socket mode is `0600`. Only meaningful when
-  `--enable-warm-swap` is set.
+  directory mode is `0700`; socket mode is `0600`. Meaningful whenever the
+  control socket opens — i.e. when `--enable-warm-swap` **or** receipt rotation
+  is enabled (R-6.9.1 reconciled v1.7), not warm-swap only.
 - `--switch-state-path <path>` — override the cooldown state file per
   SPEC-011 v0.5 R-3.1.4. Default
   `$HOME/Library/Application Support/macprovider-cli/last-switch.ts`.
@@ -1371,8 +1408,12 @@ close code **4002 `unknown_provider_id`** (per § 6.5 close codes and
 SPEC-002 FR-P13), so dev-fallback UUIDs cannot connect to a production
 pool without first being enumerated in the coordinator config.
 
-`attestation` is `null` in Tier 1. Tier 2 populates it with the
-`AttestationProvider` hook output.
+`attestation` is `null` on the legacy `hello` frame and **stays `null`** in the
+shipped binary (`CoordinatorClient.swift` always emits `attestation: null`
+here). The originally-envisioned "Tier 2 populates it via the
+`AttestationProvider` hook" never shipped; the shipped Tier-2 attestation rides
+the v2 `auth_request` proof stage (`attestation_token`) owned by SPEC-008 (FR-14
+reconciled v1.7), not this legacy field.
 
 **`endpoint_url` determines inference routing mode (v1.2 addition).**
 This field is OPTIONAL (may be absent or null). When present and
@@ -1880,9 +1921,12 @@ seconds waiting for the missing chunk. If the gap is not filled, the
 coordinator treats it as a provider error, sends `cancel_request`, and
 returns HTTP 502 to the buyer.
 
-**Across `request_id` values:** No ordering guarantee. Chunks from
-different requests may interleave freely. The `request_id` is the
-demultiplexing key.
+**Across `request_id` values:** No cross-request ordering guarantee, and the
+`request_id` is the demultiplexing key. In practice, however, the shipped WS
+relay is **capacity 1** (§6.6 Multiplexing / FR-25), so on a single WebSocket
+only one request is in flight at a time and cross-request chunk interleaving
+does not actually occur; the "may interleave freely" allowance is a protocol
+statement for a hypothetical multi-capacity relay, not current behavior.
 
 #### Multiplexing
 
@@ -1945,7 +1989,7 @@ The initial-stage frame field table is the SPEC-010 v1.5 §3.1.A table:
 | Message type | `type` | string, exactly `"auth_request"` | REQUIRED by frame validator | parser rejects with `bad_message_type` otherwise |
 | Protocol version | `version` | int, exactly `2` | REQUIRED by frame validator | parser rejects with `bad_version` otherwise |
 | Stage | `stage` | string, exactly `"initial"` here | REQUIRED by frame validator | parser routes to `parseAuthInitial` for `"initial"`, `parseAuthProof` for `"proof"` |
-| Provider ID | `provider_id` | string ULID | REQUIRED by `parseAuthInitial` | |
+| Provider ID | `provider_id` | string (operator-provided; **not** constrained to ULID by the provider — an arbitrary configured string is accepted, else a generated UUID; `Config.swift` / `CoordinatorClient.swift`) | REQUIRED by `parseAuthInitial` | ULID is the *recommended* operator format, not a provider-enforced constraint |
 | Hostname | `hostname` | string | REQUIRED by `parseAuthInitial` | struct tag is `omitempty` but parser requires it |
 | Loaded model | `model_id` | string | REQUIRED by `parseAuthInitial` | struct tag is `omitempty` but parser requires it |
 | Model hash | `model_hash` | string sha256-hex | optional | SPEC-008 Pillar A |
@@ -1957,9 +2001,9 @@ The initial-stage frame field table is the SPEC-010 v1.5 §3.1.A table:
 | Model load time | `model_load_time_ms` | int64 | optional | |
 | Binary version | `binary_version` | string | REQUIRED by `parseAuthInitial` | |
 | Endpoint URL | `endpoint_url` | string pointer (nullable) | optional | |
-| Provider ECDH public key | `provider_ecdh_public_key` | string base64 | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2 |
+| Provider ECDH public key | `provider_ecdh_public_key` | string **unpadded base64url** (32-byte x25519) | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2; base64url per SPEC-008, not standard padded base64 |
 | Provider receipt public key | `provider_receipt_public_key` | string standard padded base64 of 32-byte ed25519 public key | optional, ADDED by SPEC-015 v0.1.3 / SPEC-001 v1.6 | parser-optional; initial-stage only; absent means the provider is not receipt-issuing |
-| Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string}` | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2 |
+| Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string, response_chunk_plaintext_envelope: bool}` | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2; shipped 1.8.31 sends `encrypted_leg:true, attestation:true, aead_suites:["A256GCM"], response_chunk_plaintext_envelope:true`. The 4th sub-field's schema is carried in §6.15.1 (SPEC-008 defines only the first three) |
 | Supported models | `supported_models` | array of strings | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.1 through R-3.1.9 and R-3.6.1 through R-3.6.3 |
 | Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.6 and R-3.6.4 |
 
@@ -1999,12 +2043,13 @@ Wire example with all parser-required fields plus SPEC-010 additions
   "max_context_tokens": 32768,
   "max_concurrency": 1,
   "throughput_tps_estimate": 42.5,
-  "binary_version": "1.3.0",
-  "provider_ecdh_public_key": "<base64url-32-byte-x25519-public-key>",
+  "binary_version": "1.8.31",
+  "provider_ecdh_public_key": "<unpadded-base64url-32-byte-x25519-public-key>",
   "tier2_capabilities": {
-    "encrypted_leg": false,
-    "attestation": false,
-    "aead_suites": []
+    "encrypted_leg": true,
+    "attestation": true,
+    "aead_suites": ["A256GCM"],
+    "response_chunk_plaintext_envelope": true
   },
   "supported_models": [
     "mlx-community/Qwen2.5-7B-Instruct-4bit",
@@ -2015,10 +2060,17 @@ Wire example with all parser-required fields plus SPEC-010 additions
 }
 ```
 
-Tier-2 fields (`provider_ecdh_public_key`, `tier2_capabilities`) are
-parser-required in the v2 initial-stage frame and remain handled by the
-existing SPEC-008 v0.3 §5.3-§5.7 pipeline. v1.3 adds no encrypted-leg,
-attestation, or TEE behavior beyond current SPEC-008 scope.
+**Reconciled v1.7.** The shipped binary (`binary_version` 1.8.31)
+**unconditionally** advertises `tier2_capabilities` with `encrypted_leg: true`,
+`attestation: true`, `aead_suites: ["A256GCM"]`, and the 4th sub-field
+`response_chunk_plaintext_envelope: true` (`CoordinatorClient.swift`) — the
+earlier all-`false`/empty example reflected the never-shipped "v1.3 adds no
+encrypted-leg/attestation behavior" stance and is corrected above.
+`provider_ecdh_public_key` is **unpadded base64url** (not standard padded
+base64) per SPEC-008. Tier-2 fields (`provider_ecdh_public_key`,
+`tier2_capabilities`) are parser-required in the v2 initial-stage frame; their
+semantics and the encrypted-leg / attestation pipeline are owned by **SPEC-008**
+(§6.15). See §6.15.1 for `response_chunk_plaintext_envelope`.
 
 #### 6.7.2. Proof-stage frame (P->C)
 
@@ -2100,6 +2152,15 @@ R-3.6.4 and SPEC-011 v0.5 R-3.1.0 / R-3.3.0.
 | set | unset | SPEC-010 only: provider publishes the explicit catalog list per SPEC-010 v1.5 R-3.6.1, with `publishes_supported_models: true` (when `--publish-supported-models=true`) per SPEC-010 v1.5 R-3.6.4. No warm swap; no `model_hash` / `loading` heartbeat fields per SPEC-011 v0.5 R-3.3.0; no control socket per SPEC-011 v0.5 R-3.1.0. |
 | unset | set | SPEC-011 only: warm swap enabled per SPEC-011 v0.5 R-3.1.0; heartbeat carries `model_hash` / `loading` per SPEC-011 v0.5 R-3.3.0 / R-3.3.1; effective catalog is `supported_models: [model_id]` (single-entry, from R-3.6.2 default resolution) and `publishes_supported_models` remains OMITTED per SPEC-010 v1.5 R-3.6.4 / AC-21. |
 | set | set | BOTH: explicit catalog emitted per SPEC-010 v1.5 R-3.6.1 / R-3.6.4 and warm swap surfaces enabled per SPEC-011 v0.5 R-3.1.0 / R-3.3.0. |
+
+> **Socket caveat (reconciled v1.7).** The "no control socket" phrasing in the
+> two warm-swap-*unset* cells is scoped to the SPEC-011 warm-swap surface. A
+> third orthogonal opt-in — **receipt rotation** (`--enable-receipts` with a
+> provider ID + coordinator) — opens the *same* control socket independently of
+> warm swap (R-6.9.1, `enableWarmSwap || receiptRotator != nil`). So a
+> warm-swap-unset binary in receipts mode **does** have an open control socket
+> (which answers `status_request` but rejects `switch_request`). "No control
+> socket" holds only when neither warm-swap nor receipts is enabled.
 
 #### 6.7.4. Back-compat with legacy hello
 
@@ -2212,9 +2273,12 @@ rotation is enabled. (The SPEC-011 warm-swap *frames* remain gated on
 `status_request` **whenever the socket is open** — including receipts-only mode
 (`ControlSocket.swift`), so `models list` against a receipts-only socket gets a
 `status_response` and treats the socket as *present and responsive*, **not** the
-§6.9.3 case-3 "warm-swap not enabled" path. That warm-swap-disabled signal
-surfaces only when an actual `switch_request` is rejected, not from the
-`status_request` probe.)
+§6.9.3 case-3 "warm-swap not enabled" path. There is in fact **no
+machine-distinguishable "warm-swap disabled" result** on a receipts-only socket:
+a `switch_request` is rejected with a **generic** error (`ControlSocket.swift`
+returns `.other`; `models` prints only "switch rejected", `ModelsSubcommand.swift`),
+which an operator *interprets* as warm-swap-not-enabled but which is not a
+distinct status code. The `status_request` probe never surfaces it at all.)
 
 The macOS-native default path is `$TMPDIR/macprovider-cli/ctl.sock`,
 resolved via `FileManager.default.temporaryDirectory`, per SPEC-011
@@ -2305,6 +2369,28 @@ schema inline (request `provider_id`; result `status` ∈
 `error`) as the transport owner of last resort until a downstream spec fully
 specifies it.
 
+**App-track frame schemas (SPEC-025) — carried here.** SPEC-025 §5.2 gives only
+abbreviated signatures for the App-track control frames; the shipped
+`ControlSocketFrame` codec (`ControlSocket.swift`) is the concrete schema, carried
+here as owner of last resort:
+
+- `metrics_request` — `{type}` (no payload).
+- `metrics_response` — `{type, earnings_usdc, malibu_accrued, uptime_sec}` REQUIRED,
+  plus optional `gpu_c`, `latency_p50_ms`, `requests_served_today`,
+  `requests_served_all_time`, `requests_per_minute`, `input_tokens_today`,
+  `output_tokens_today`, `input_tokens_all_time`, `output_tokens_all_time`,
+  `queue_depth` (each omitted when nil).
+- `pause_request` / `resume_request` — `{type}` (no payload).
+- `pause_ack` / `resume_ack` — `{type, accepted: bool}` plus optional `reason`.
+- `shutdown_request` — `{type, grace_seconds: int}`; `shutdown_ack` — `{type}`.
+
+**`identity_signature_request.binary_version` is a JSON string.** The shipped
+codec (`ControlSocket.swift`) requires `binary_version` as a **string** and
+rejects a JSON number. The SPEC-026 §4.3 example renders it as numeric `2`, which
+is an error in SPEC-026's example — a spec-literal App emitting a number would
+fail to produce the byte-identical JCS auth tuple and break identity signing.
+Implementers MUST send a string (e.g. `"1.8.31"`).
+
 #### 6.9.3. Detection precedence
 
 R-6.9.5 The `models` CLI MUST use the SPEC-011 v0.5 R-3.1.5.x
@@ -2323,7 +2409,11 @@ MUST be `0600`; the socket opens on `serve` startup when `--enable-warm-swap`
 **or** receipt rotation is enabled (R-6.9.1 reconciled v1.7) and closes on
 `serve` shutdown per SPEC-011 v0.5 R-3.1.5. Stale-socket reclaim after
 ECONNREFUSED requires operator removal of the socket file before restart per
-SPEC-011 v0.5 R-3.1.5.x case 2.
+SPEC-011 v0.5 R-3.1.5.x case 2. **Implementation note (v1.7):** the shipped
+server sets these modes with `chmod` but does **not** check the return value —
+it proceeds to listen even if `chmod` fails (`ControlSocket.swift`); the
+independent EUID peer check (§6.9.2) is the load-bearing access control, with the
+`0700`/`0600` modes as defense-in-depth.
 
 ### 6.10. Heartbeat extension (NEW in v1.3, additive when warm-swap opt-in is enabled)
 
@@ -2627,8 +2717,9 @@ plus `appendCatalogAdmissionMetadata`).
 Initial-stage fields:
 
 - `tier2_capabilities.response_chunk_plaintext_envelope: true` — a 4th sub-field
-  beyond the §6.7.1 `{encrypted_leg, attestation, aead_suites}` schema
-  (**SPEC-008** Tier-2).
+  beyond the §6.7.1 `{encrypted_leg, attestation, aead_suites}` schema. SPEC-008
+  defines only the first three capability fields, so SPEC-001 carries this one as
+  transport owner of last resort (schema below).
 - `credential_bootstrap: true` — provider opt-in to the provisional
   credential-bootstrap / TOFU token-mint path (**SPEC-003** open onboarding,
   FR-C9 / `allow_tokenless_provisional_bootstrap`). SPEC-026 §4.3 does **not**
@@ -2637,7 +2728,27 @@ Initial-stage fields:
   `catalog_candidate_sha256`, `catalog_signer_key_id`, `catalog_row_identity`
   (**SPEC-010 / SPEC-022** signed-catalog admission). This block is **also**
   appended to the legacy `hello` frame (`CoordinatorClient.swift`), not only to
-  the initial-stage `auth_request`.
+  the initial-stage `auth_request`. Neither SPEC-010 (which leaves catalog
+  *signing* out of scope) nor SPEC-022 (which delegates hash authority to
+  SPEC-008) defines this block's wire schema, so SPEC-001 carries it (schema below).
+
+**`response_chunk_plaintext_envelope` — schema carried here (SPEC-008 owns only
+the capability bit).** The provider advertises the capability `true` in the
+initial-stage `tier2_capabilities`. The coordinator confirms it in the
+**auth-response** at `tier2_session.encrypted_leg.response_chunk_plaintext_envelope:
+true` (`CoordinatorClient.swift`). When confirmed, each encrypted
+`inference_response_chunk` wraps its plaintext in an inner JSON envelope
+**before** AEAD sealing: `{ "type": "inference_response_chunk_plaintext", "seq":
+<int>, "data": <string> }` (JCS/sorted-keys, `Tier2ProviderSession.swift`); when
+not confirmed, the sealed plaintext is the raw UTF-8 string with no envelope.
+
+**Signed-catalog admission block — schema carried here.** Five **independent
+optional strings** (`catalog_release_id`, `catalog_policy_version`,
+`catalog_candidate_sha256`, `catalog_signer_key_id`, `catalog_row_identity`;
+`CoordinatorClient.swift`). None is individually required; the provider emits any
+partial subset that is populated, subject to model-match and
+catalog-invalidation guards (a field is dropped if its catalog admission was
+invalidated). A coordinator MUST treat each field as independently optional.
 
 Proof-stage `auth_request` (the second handshake message) can additionally
 carry `credential_bootstrap` (**SPEC-003** FR-C9), `identity_signature`, and
@@ -2658,7 +2769,8 @@ Builder: `CoordinatorClient.swift` heartbeat frame.
   `ProviderHardwareSummary.swift`): an object of up to five optional members —
   `chip` (string), `bandwidth_gb_per_s` (number), `network_power_kw` (number),
   `gpu_cores_total` (int), `cpu_cores_total` (int); each member is omitted when
-  zero/empty, and the whole object is omitted if all are absent.
+  zero/empty (and `chip` is additionally omitted when it is the literal
+  `"unknown"`), and the whole object is omitted if all are absent.
 - All six speculative-decoding fields (**SPEC-028**): `spec_decode_enabled`,
   `spec_decode_draft_model_id`, `spec_decode_num_draft_tokens`,
   `spec_decode_drafted_tokens_since_last`, `spec_decode_accepted_tokens_since_last`,
@@ -2787,8 +2899,14 @@ PERMITTED references:
 
 Patent analysis is separate from license. Darkbloom holds patents around
 their privacy/attestation model. Tier 1 of this binary does not implement
-that model; Tier 2 hooks are designed-in but unimplemented. Patent risk
-analysis for Tier 2 is deferred to its eventual SPEC.
+that model. **Reconciled v1.7:** the original *middleware hooks*
+(`TrustGate` / `InputDecryptor` / `ResponseSeal` / `AttestationProvider`) remain
+designed-in but unimplemented — however Tier-2 itself is **no longer entirely
+future**: a coordinator-wire Tier-2 pipeline owned by **SPEC-008** (v2
+`auth_request` `tier2_capabilities`, proof-stage `attestation_token`,
+`se_liveness`; §6.15) has shipped in `binary_version` 1.8.31 via a different
+mechanism than the middleware hooks. Patent-risk analysis for the SPEC-008
+Tier-2 pipeline lives in SPEC-008, not here.
 
 If during implementation you are uncertain how Darkbloom solved a problem,
 STOP and add an open question to implementation-notes.html. Do not resolve
@@ -2919,8 +3037,10 @@ requirement.
   OpenAI fields. No extra fields. Clean contract.
 
 **Server stops on client disconnect (BrokenPipeError):**
-- **FR-10** (disconnect cleanup): Binary must do at least as well, with
-  a guaranteed 5-second slot release.
+- **FR-10** (disconnect cleanup): *aspirational* — the 5-second slot release is
+  **not shipped** (streaming runs in a detached task with `shouldCancel: false`,
+  no channel-close → cancel wiring; see FR-10 reconciled v1.7). Carried
+  follow-up, not a current guarantee.
 
 **mlx_lm.server omits usage from SSE streams:**
 - **FR-7** (usage synthesis): Binary counts tokens and emits usage chunk.
@@ -3125,11 +3245,17 @@ A v1.3 binary built per this spec, invoked with neither
 R-3.6.2 / AC-19 and OMITS `publishes_supported_models` per SPEC-010
 v1.5 R-3.6.4 / AC-21;
 (b) heartbeat frame OMITS `model_hash` and `loading` fields entirely
-(REAL byte-identical, not "additional fields tolerated") per SPEC-011
-v0.5 R-3.3.0 / AC-18;
+(byte-identical **with respect to the SPEC-011 warm-swap fields**, not
+"additional fields tolerated") per SPEC-011 v0.5 R-3.3.0 / AC-18. **Reconciled
+v1.7:** this byte-identical guarantee is scoped to `model_hash` / `loading`; the
+v1.7 additive heartbeat fields (`hardware_summary`, spec-decode,
+`last_autoupdate_event`, §6.15.2) may still be present, as they ride the
+heartbeat independently of `--enable-warm-swap`;
 (c) no control socket file exists at
 `$TMPDIR/macprovider-cli/ctl.sock` while serve is running per
-SPEC-011 v0.5 R-3.1.0 / R-3.1.5 / AC-18;
+SPEC-011 v0.5 R-3.1.0 / R-3.1.5 / AC-18 — **provided receipt rotation is also
+disabled** (R-6.9.1 reconciled v1.7: receipts-mode opens the socket
+independently of warm swap);
 (d) coordinator-observable routing, `/v1/status`, and `/v1/models`
 behavior is indistinguishable from a pre-SPEC-010 binary per SPEC-010
 v1.5 §4.1 back-compat analysis.
@@ -3161,9 +3287,9 @@ take the R-6.9.5 / R-3.1.5.x ENOENT case-1 path: exit code 4 with
 stderr containing `"macprovider-cli serve is not running on this
 host (no control socket at"` (followed by the resolved socket path).
 Traces to SPEC-011 v0.5 AC-18 case-1 and SPEC-001 v1.3 R-6.9.5. (Note: a
-receipts-only socket **does** exist and answers `status_request`; the
-`models` CLI then reports warm-swap-not-enabled only when an actual
-`switch_request` is rejected — see R-6.9.1.)
+receipts-only socket **does** exist and answers `status_request`; a
+`switch_request` against it is rejected with a generic error, not a distinct
+"warm-swap disabled" status — see R-6.9.1.)
 
 **AC-18.4. SPEC-011 opt-in gate — enabled mode.**
 A v1.3 binary `serve --enable-warm-swap` MUST create the control socket
@@ -3387,10 +3513,14 @@ HTTP 413.
 
 **Step 8. Semaphore serialization and concurrency.**
 Implement FR-11 (blocking `AsyncSemaphore`, value = `max(1, max_concurrency)`;
-excess requests await a permit, no queue, no 429). Wire disconnect detection
-(FR-10). Deliverable: requests beyond max concurrency block on the semaphore
-until a permit frees; the WS-tunneled relay (capacity 1) rejects a concurrent
-second with `error_queue_full`. (The ≤ v1.6 "bounded queue + HTTP 429" plan was
+excess requests await a permit via an **unbounded FIFO waiter list** — not a
+depth-capped queue — and no 429). Deliverable: requests beyond max concurrency
+block on the semaphore until a permit frees (FIFO); the WS-tunneled relay
+(capacity 1) rejects a concurrent second with `error_queue_full`. **Carried
+follow-up (not shipped):** FR-10 mid-stream disconnect detection →
+`Task.cancel` and 5-second slot release is *not* wired in the shipped binary
+(detached tasks, `shouldCancel: false`); implementers should treat it as
+outstanding, not done. (The ≤ v1.6 "bounded queue + HTTP 429" plan was
 never shipped and is retired in v1.7.)
 
 **Step 9. Coordinator WebSocket client.**
@@ -3435,10 +3565,10 @@ phase3-binary/
 │       ├── RuntimeStateMachine.swift    # §6.8 state machine + atomic swap
 │       ├── IdlePrewarmer.swift          # FR-16 (idle prewarm; shipped name — was WarmupManager.swift in the v1.3 design layout)
 │       ├── SelfTest.swift               # FR-20
-│       ├── Middleware/
-│       │   ├── TrustGate.swift          # Tier 2 hook (passthrough)
-│       │   ├── InputDecryptor.swift     # Tier 2 hook (passthrough)
-│       │   └── ResponseSeal.swift       # Tier 2 hook (passthrough)
+│       ├── Middleware/                   # NOTE (v1.7): original design layout —
+│       │   ├── TrustGate.swift          #   these Tier-2 middleware-hook files
+│       │   ├── InputDecryptor.swift     #   were NEVER created; shipped Tier-2
+│       │   └── ResponseSeal.swift       #   is SPEC-008 wire (Tier2ProviderSession.swift)
 │       └── Logging.swift                # NFR-7
 │   └── MacProviderCore/
 │       └── SupportedModels.swift        # §6.2 SPEC-010 resolution/pre-flight
