@@ -63,7 +63,7 @@ SPEC-024 (v0.1) specified the billing treatment for provider-reported prefix-cac
 
 - KV-cache implementation **internals** on the provider are out of scope. SPEC-024 defines the reported `cached_prompt_tokens` semantics and (v0.2, §11) the **observable cache-key/reuse invariant**; the mlx-swift cache pinning, materialization, and eviction *mechanism* between `generate()` calls remain IMPL concerns and SPEC-024 MUST NOT prescribe internal mlx APIs. (v0.2 pins the *behavior* — what may be reused for which key — not the mechanism.)
 - ~~Cache-hit fraud detection algorithms are out of scope. Section 7 defines the v0.1 fraud model and defers cross-checked coordinator verification to v0.2.~~ **(v0.2: resolved.)** Coordinator cross-checking of `cached_prompt_tokens` is now in scope — §14. Specific ML-based anomaly-scoring *algorithms* remain out of scope; §14 pins only the deterministic route/attribution gates the coordinator already applies.
-- Cross-provider KV-cache handoff is out of scope. A request that does not route through a sticky hit is priced as `cached_prompt_tokens = 0` — but this is the **coordinator's** billing-eligibility normalization, **not** a provider wire obligation: the provider reports its *actual* reuse (FR-CI3) without seeing `sticky_result`, so a positive non-hit report is legitimate-but-non-creditable (quarantined `ambiguous_cache`), not a wire violation (§3 layering / FR-CI11).
+- Cross-provider KV-cache handoff is out of scope. A request that does not route through a sticky hit earns **no** cache discount — but this is the **coordinator's** billing-eligibility decision, **not** a provider wire obligation: the provider reports its *actual* reuse (FR-CI3) without seeing `sticky_result`, so a positive non-hit report is legitimate-but-non-creditable and is **quarantined** `ambiguous_cache` (shipped credit effect — whole-row-zero or recovery flag-only — is canonical in SPEC-005 §2.7 / §5.3.1), not a wire violation (§3 layering / FR-CI11).
 - **Tool-call replies (reconciled to shipped billing, v0.2).** The v0.1 draft said prefix-cache reuse for tool-call replies was "out of scope" and that accounting was "restricted to system, user, and assistant message-content prefixes." **That is NOT what shipped, and v0.2 supersedes it.** The provider renders tool messages and assistant tool-call content into the prompt (`ToolPromptRenderer`, `ModelRuntime.swift`), that full rendered prompt (`prompt_token_ids ‖ generated_token_ids`) is tokenized and cached (§11 FR-CI3), and the coordinator prices the **entire undifferentiated `cached_prompt_tokens` aggregate at the cache-hit rate with no message-type/role segmentation** (`phase4-coordinator/internal/billing/formula.go`). So tool-history tokens **do** participate in the cache LCP **and do** receive the discount. There is no shipped role filter; v0.1's "tool-call replies out of scope" is retired. (Out-of-scope items below are the ones that remain genuinely excluded.)
 - Buyer-side cache-hint headers are out of scope. Buyers MUST NOT send `X-MacProvider-Expect-Cached-Prefix` or an equivalent v0.1 hint. Providers are the source of truth for actual cache reuse; buyers observe `usage.cached_prompt_tokens`.
 - Rate-card hot reload for the new field is out of scope. SPEC-005 Wave 0/1 work continues to govern hot-reload semantics. v0.1 IMPL MAY require coordinator restart to activate `prompt_cache_hit_rate_per_mtok`.
@@ -211,7 +211,7 @@ when `prompt_cache_hit_rate_per_mtok <= prompt_rate_per_mtok`. Provider over-rep
 
 Provider under-reporting `cached_prompt_tokens` makes the buyer pay more than the actual cached-prefill economics justify. The gateway records buyer-visible prompt tokens, and buyers can estimate expected cache hits offline from prior-turn prompt and completion growth on sticky-hit conversations. v0.1 MUST log `cached_prompt_tokens = 0` explicitly on sticky-hit billing writes so buyer-side and operator analytics can flag providers with suspiciously low cache-hit rates. **Coordinator-side cross-checking is specified in §14 (v0.2, resolving the v0.1 deferral).**
 
-Provider-reported cached tokens on a non-sticky-hit route are **non-creditable** and MUST be quarantined (`ambiguous_cache`) per Section 3. This is **not** a provider wire-contract violation: the provider reports the actual reuse it performed (FR-CI3) and cannot see the coordinator-internal `sticky_result`, so a positive non-hit report (e.g. the FR-CI10a post-deletion same-provider return under the deterministic key) is legitimate — the coordinator simply withholds the discount because provenance is not sticky-attributable. Either way it is not a revenue-increasing fraud vector because the discounted rate reduces payable credits.
+Provider-reported cached tokens on a non-sticky-hit route are **non-creditable** and MUST be quarantined (`ambiguous_cache`) per Section 3. This is **not** a provider wire-contract violation: the provider reports the actual reuse it performed (FR-CI3) and cannot see the coordinator-internal `sticky_result`, so a positive non-hit report (e.g. the FR-CI10a post-deletion same-provider return under the deterministic key) is legitimate but non-creditable. The shipped coordinator **quarantines** such a row (`ambiguous_cache`; whole-row-zero on the hot-path/receipt paths, flag-only on recovery — canonical: SPEC-005 §2.7 / §5.3.1), rather than merely re-pricing it with `cached = 0`. Either way it is not a revenue-increasing fraud vector, because the cache discount only ever **reduces** payable credits (§5 ceiling `0 <= cache_hit_rate <= prompt_rate`).
 
 **Cross-account cache collision (v0.2, §11–§13).** The provider-local cache is keyed only on `conversation_key` (§11); it has no account dimension. If two distinct buyers could ever present the **same** `conversation_key` to the same provider process, buyer B would obtain KV reuse — and a positive, buyer-visible `cached_prompt_tokens` — against buyer A's cached prefix. That is simultaneously (a) a **confidentiality** leak (a prefix-content + TTFT oracle, §13) and (b) a **billing-attribution** fault (a cache-hit discount priced against another account's work). This vector is closed **not at the provider** but by the §12 invariant that `conversation_key` is unforgeable and account-scoped before it reaches the provider or the coordinator sticky map; §7's provider-report analysis assumes that invariant holds.
 
@@ -463,13 +463,17 @@ ML-based anomaly scoring remains out of scope (§2).
 **FR-CI11 (route gate — a billing-eligibility gate, not a wire rule).** A positive
 `cached_prompt_tokens` MUST be accepted for the discounted price only when the request was
 served on a **sticky hit** (`sticky_result == "hit"`). A positive value on any non-hit route
-MUST be quarantined (`ambiguous_cache`) and priced as if `cached_prompt_tokens = 0` (§3). This
-gate operates on the **coordinator** side: the provider reports the actual reuse it performed
-(FR-CI3) without seeing `sticky_result`, so a positive report on a non-hit route (e.g. the
-FR-CI10a post-deletion same-provider return under the deterministic key) is a **legitimate,
-non-creditable** reuse — not a provider violation. FR-CI11 simply withholds the discount when
-provenance is not sticky-attributable. FR-CI11's soundness depends on `sticky_result`
-describing the provider **actually dispatched to** — see FR-CI11a.
+MUST be quarantined (`ambiguous_cache`). This gate operates on the **coordinator** side: the
+provider reports the actual reuse it performed (FR-CI3) without seeing `sticky_result`, so a
+positive report on a non-hit route (e.g. the FR-CI10a post-deletion same-provider return under
+the deterministic key) is a **legitimate, non-creditable** reuse — not a provider violation.
+**Shipped credit effect (canonical: SPEC-005 §2.7 / §5.3.1):** the coordinator does **not**
+merely re-price the row with `cached = 0` (keeping the uncached-prompt + completion credit); the
+`ambiguous_cache` quarantine **zeroes the whole row** on the hot-path / receipt-time paths (a
+recovery-path flag-only quarantine instead leaves stored credits intact — SPEC-005 §2.7). Whether
+to withhold only the **discount** rather than the whole row is a carried SPEC-005 money-path
+follow-up. FR-CI11's soundness depends on `sticky_result` describing the provider **actually
+dispatched to** — see FR-CI11a.
 
 **FR-CI11a (final-provider provenance — known shipped gap, MUST close).** `sticky_result`
 MUST reflect the provider that ultimately served the request, not the provider sticky ordering
