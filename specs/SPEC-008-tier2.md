@@ -1,8 +1,37 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.4 (2026-07-11, attestation-reconciliation pass)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-004 v0.3.1,
-               SPEC-006 v0.8.1
+**Version:** 0.4.1 (2026-07-12, §2.2 invariant (b) narrowed for the SPEC-024 prefix-cache provider-visibility carve-out)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
+               SPEC-006 v0.9.8
+
+**Change log v0.4.1 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out):**
+- **§2.2 invariant (b) narrowed.** Previously the provider could not see/derive `conv:` at all.
+  v0.4.1 permits the coordinator to send the **derived, opaque, account-scoped** `conv:` key to
+  the provider in the inference request for provider-local prefix caching (SPEC-024 v0.2
+  §11–§12; SPEC-004 v0.3.2 FR-SR-2), while keeping the load-bearing half: the raw buyer tag /
+  `account_id` remain unrecoverable (one-way HMAC) and non-reconstructable from side-channel
+  traffic. Error/close/preflight/attestation paths still MUST NOT reveal `conv:`; the inference
+  `conversation_key` field is the single authorized provider-visible channel. No code change.
+- **v0.4.1 R2-audit reconciliation (2026-07-12, spec-only).** Swept residual normative text
+  that still forbade the newly-authorized channel, so the carve-out has one unambiguous
+  definition: **§6.6 / §10.6** now document the shipped `inference_request_plaintext` JSON
+  envelope (ciphertext decrypts to `{type, body, conversation_key?}`, **not** the bare `body`
+  string — the prior text was byte-incompatible with the shipped
+  `encryptedInferencePlaintext` and its regression tests); **§2.5 survivability conclusion (b)**
+  narrowed to distinguish the coordinator-internal sticky *map* from the provider-visible
+  derived key; **§1.2 scope** and **§1.3 relationship-to-locked-specs** updated to reference
+  SPEC-004 v0.3.2 / SPEC-006 v0.9.8 and to carve out provider-local prefix caching; **§2.2**
+  now discloses cross-provider linkability (the key reaches >1 provider across misses/re-routes).
+  No code change.
+- **v0.4.1 R3-audit reconciliation (2026-07-12, spec-only).** Closed the shared byte-fidelity
+  HIGH at its last location: the **§2.2 normative-preservation rule** said "Pillar B ciphertext
+  MUST carry only the provider request body" — now includes the authorized `conversation_key`
+  inside the `inference_request_plaintext` envelope (§6.6), while the AAD bar keeps it out of
+  AAD/nonce/outer metadata. No code change.
+- **v0.4.1 R4-audit correction (2026-07-12, spec-only).** Updated the **§2.2 threat-model
+  observer inventory** to reflect that the provider now legitimately *holds* the derived `conv:`
+  key: the threat is no longer "reconstruct the key" but reversing the raw tag/`account_id`
+  behind the one-way HMAC or deriving the key via an unauthorized side-channel. No code change.
 
 **Change log v0.4 (runbook item 7 — spec-only reconciliation of shipped attestation):**
 The shipped, default-enabled self-signed Secure-Enclave attestation path
@@ -305,7 +334,10 @@ SPEC-008 does not cover:
 - Buyer-to-provider end-to-end encryption.
 - Any design in which the coordinator cannot see buyer plaintext.
 - Prompt privacy from the selected provider runtime.
-- Provider-side result caching beyond SPEC-004 sticky-affinity routing state.
+- Provider-side result caching **internals** beyond SPEC-004 sticky-affinity
+  routing state. (v0.4.1: SPEC-024 v0.2 governs provider-*local* prefix caching
+  keyed on the derived `conv:` key; SPEC-008 covers only the trust/visibility
+  boundary of that key — §2.2 — not the cache mechanism.)
 - Editing SPEC-001, SPEC-002, SPEC-004, or SPEC-006 in this session.
 - d-inference source inspection or any dependency on NOASSERTION-licensed
   private source.
@@ -320,11 +352,14 @@ SPEC-002 v1.3.3 remains the authoritative coordinator router spec. SPEC-008
 adds routing predicates and audit categories. It does not replace SPEC-002's
 state machine, preflight, warm-up gate, breaker, or routing-mode resolution.
 
-SPEC-004 v0.3.1 remains the authoritative smart-router and sticky-affinity
+SPEC-004 v0.3.2 remains the authoritative smart-router and sticky-affinity
 spec. SPEC-008 MUST preserve SPEC-004's hard-pin precedence, `conv:` namespace,
-soft sticky preference semantics, TTL expiry, and coordinator-only sticky map.
+soft sticky preference semantics, TTL expiry, and the coordinator-only sticky
+**map**. (v0.4.1: the *derived* `conv:` key MAY additionally be provider-visible
+in the inference request for prefix caching per the SPEC-004 v0.3.2 FR-SR-2
+carve-out — §2.2 — while the sticky *map* itself stays coordinator-internal.)
 
-SPEC-006 v0.8.1 remains the authoritative buyer API gateway spec and Tier-1
+SPEC-006 v0.9.8 remains the authoritative buyer API gateway spec and Tier-1
 disclosure baseline. SPEC-008 updates enforcement state in `/v1/models`
 without changing the locked buyer chat/completions contract.
 
@@ -401,15 +436,29 @@ session key MUST never be an input to the `conv:` HMAC.
 If a proposed Tier-2 design requires deriving sticky keys after the request is
 encrypted for the provider, that design is rejected.
 
-### 2.2 Invariant (b): provider cannot derive `conv:` from traffic
+### 2.2 Invariant (b): provider cannot **recover raw account/tag**; the derived `conv:` MAY be provided for prefix caching
 
-**Invariant.** The `conv:` value is NOT derivable by the provider from any
-observable traffic, even under Tier 2 where the coordinator-to-provider
-channel may change.
+**Invariant (narrowed, v0.4.1 — SPEC-024 prefix-cache carve-out).** The provider MUST NOT be
+able to recover the raw buyer conversation tag or `account_id` — the `conv:` value is a
+one-way, account-scoped HMAC (SPEC-006 §1.3), not reversible or forgeable, and is NOT
+reconstructable by the provider from side-channel traffic (ciphertext/nonce/AAD/timing/model
+IDs). **However**, the *derived opaque `conv:` value itself* MAY be **explicitly provided** to
+the provider for **provider-local prefix caching** (SPEC-024 v0.2 §11–§12): unlike the
+original invariant (which barred the provider from seeing `conv:` at all), v0.4.1 permits the
+coordinator to send the derived key to the provider. The disclosed consequence is that the
+provider learns a **stable per-conversation identifier** (enabling the cross-turn
+correlation sticky affinity already grants) — but never the raw tag/account behind it, and
+captured network frames still contain no raw `account_id`/tag (Pillar B survivability, §6,
+AC-T2-2, unchanged). Note the identifier is forwarded on cache **misses** and **re-routes**
+too, so over a conversation's lifetime it MAY reach more than one provider — a cross-provider
+linkability slightly broader than single-provider sticky pinning (SPEC-024 v0.2 §13
+disclosure-completeness item).
 
 **Threat model.** A provider observes:
 
 - plaintext prompts and completions at the local MLX runtime,
+- **the authorized derived `conv:` key itself** (v0.4.1: received in the
+  inference request's `conversation_key` field for prefix caching),
 - Tier-1 WebSocket frames when Pillar B is disabled,
 - Pillar B ciphertext, nonce, AAD, and frame metadata when Pillar B is enabled,
 - request timing,
@@ -417,30 +466,48 @@ channel may change.
 - provider assignment history,
 - sticky-hit routing behavior.
 
-The provider attempts to reconstruct the buyer's internal `conv:` value or raw
-conversation tag.
+Since the provider now legitimately **holds** the derived `conv:` value, the
+threat is not "reconstruct the key" but: the provider attempts to **reverse the
+raw inputs behind it** (the buyer conversation tag or `account_id`) from the
+one-way HMAC, or to **derive** the key through an **unauthorized** side-channel
+(ciphertext/nonce/AAD/frame metadata/timing/model IDs) rather than the
+authorized `conversation_key` field. Both must remain infeasible.
 
 **Tier-1 mechanism.** The `conv:` value is gateway-to-coordinator internal
-state. SPEC-004 §4 says `routing_internal.conversation_key` is not a provider
-protocol field. SPEC-006 §1.3 says raw buyer tag and raw account ID are not
-logged as the opaque suffix and are not sent to providers.
+state whose one-way HMAC derivation (SPEC-006 §1.3) makes the raw buyer tag and
+raw `account_id` unrecoverable from it. Those **raw** values are never logged as
+the opaque suffix and never sent to providers. (v0.4.1: the *derived opaque
+`conv:` key* itself MAY be sent to the provider in the inference request for
+provider-local prefix caching — SPEC-004 FR-SR-2 provider-visibility carve-out,
+SPEC-024 v0.2 §11–§12 — but the raw values behind it remain unrecoverable.)
 
 **Tier-2 finding.** Cleared.
 
 **Normative preservation rule.** Pillar B AEAD AAD MUST NOT include
 `routing_internal.conversation_key`, raw buyer conversation tags, raw
 `account_id`, or sticky-entry IDs. Pillar B ciphertext MUST carry only the
-provider request body and response payload needed for inference. Pillar C
+provider request body — **plus, on the c2p `inference_request`, the authorized
+derived `conversation_key` inside the `inference_request_plaintext` envelope
+(§6.6, v0.4.1)** — and the response payload needed for inference; the AAD
+restriction above still bars the `conv:` value from AAD/nonce/outer metadata,
+so the key travels only inside the ciphertext. Pillar C
 attestation challenges and tokens MUST NOT encode sticky state. Pillar D
 output-safety logs MUST NOT expose `conv:` values to provider-originated
 messages.
 
-The coordinator MAY log sticky outcomes internally, but provider-visible error
-messages, close reasons, preflight messages, inference messages, and
-attestation challenges MUST NOT reveal the `conv:` key.
+The coordinator MAY log sticky outcomes internally. Provider-visible error
+messages, close reasons, preflight messages, and attestation challenges MUST NOT
+reveal the `conv:` key. **Exception (v0.4.1):** the **inference request** MAY
+carry the derived opaque `conv:` key in its `conversation_key` field for
+provider-local prefix caching (SPEC-024 v0.2 §11–§12) — this is the single
+authorized provider-visible channel for the derived value.
 
-If a provider can compute or read the `conv:` value from any Tier-2 field,
-frame, token, nonce, or error path, the design is rejected.
+If a provider can **reconstruct or reverse** the raw buyer tag / `account_id`, or
+**derive** the `conv:` value from any Tier-2 side-channel (ciphertext, nonce,
+AAD, frame metadata, token, timing, or error path) rather than receiving it in
+the authorized `conversation_key` field, the design is rejected. The raw
+tag/`account_id` MUST remain unrecoverable, and the derived key MUST remain
+one-way and unforgeable.
 
 ### 2.3 Invariant (c): deletion remains account-scoped and authenticated
 
@@ -506,7 +573,10 @@ The Tier-2 design in this spec is non-regressive with respect to SPEC-006
 §F-1.5 because:
 
 - (a) sticky keys remain gateway-derived and account-scoped,
-- (b) sticky keys remain coordinator-internal,
+- (b) the coordinator sticky **map** remains coordinator-internal; the
+  **derived** opaque `conv:` key MAY be provider-visible in the inference
+  request for prefix caching (v0.4.1 carve-out, §2.2), but the raw
+  tag/`account_id` behind it stay unrecoverable and are never wire-forwarded,
 - (c) sticky deletion remains authenticated and account-scoped,
 - (d) sticky TTL remains coordinator-enforced,
 - provider-leg encryption and attestation are deliberately orthogonal to
@@ -1340,8 +1410,31 @@ every frame.
 ### 6.6 Encrypted request behavior
 
 When Pillar B is enabled for a provider session, the coordinator MUST encrypt
-the `body` value of SPEC-001 `inference_request` before that body crosses the
-provider WebSocket.
+the SPEC-001 `inference_request` payload before it crosses the provider
+WebSocket.
+
+**Encrypted plaintext envelope (v0.4.1).** The ciphertext MUST decrypt to a
+canonical `inference_request_plaintext` JSON envelope, **not** the bare v1
+`body` string:
+
+```json
+{
+  "type": "inference_request_plaintext",
+  "body": "<the exact v1 inference_request body string>",
+  "conversation_key": "conv:<opaque-id>"
+}
+```
+
+- `body` carries the exact v1 `body` string bytes the provider feeds to its
+  existing validation path.
+- `conversation_key` carries the SPEC-024 prefix-cache key. It is **omitted**
+  (JSON `omitempty`) when the request has no derived key. This is the **single
+  authorized provider-visible channel** for the derived `conv:` value (§2.2);
+  it MUST NOT appear in AAD, nonce, or any cleartext outer metadata.
+
+(Shipped: `encryptedInferencePlaintext`,
+`phase4-coordinator/internal/ws/relay.go`; decoded by
+`Tier2ProviderSession.swift`; regression-tested in `relay_test.go`.)
 
 The encrypted request MUST preserve cleartext metadata needed for routing and
 correlation:
@@ -2778,7 +2871,13 @@ Encrypted v2:
 Rules:
 
 - `body` MUST be absent when `encrypted: true`.
-- `enc.ciphertext` decrypts to the exact v1 `body` string bytes.
+- `enc.ciphertext` decrypts to the canonical `inference_request_plaintext`
+  JSON envelope defined in §6.6 (v0.4.1): `{"type":
+  "inference_request_plaintext", "body": <exact v1 body string>,
+  "conversation_key": <derived conv: key, omitted when absent>}`. The provider
+  extracts `body` for its validation path and reads `conversation_key` for
+  SPEC-024 prefix caching (§2.2 authorized channel). It does **not** decrypt to
+  the bare `body` string.
 - Old providers that omit encrypted-leg support MUST receive v1 cleartext
   `inference_request` unless `tier2.require_encrypted_leg: true`.
 

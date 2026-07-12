@@ -1,8 +1,8 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3.1 (2026-05-30, independent-audit follow-up: 1 MiB ingress cap + test-discipline coverage)
+**Version:** 0.3.2 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out for the derived conversation_key)
 **Extends:** SPEC-002 v1.3.3 § 5 (routing algorithm)
-**Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.7 (Pillar A gated on SPEC-006 v0.8)
+**Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.9.8 (Pillar A gated on SPEC-006 v0.8; the v0.3.2 FR-SR-2 provider-visibility carve-out is coordinated with SPEC-006 v0.9.8 / SPEC-008 v0.4.1)
 
 SPEC-004 is additive. With every new `routing.*` key at its default value,
 the coordinator MUST preserve SPEC-002 v1.3.3 routing behavior, including
@@ -10,6 +10,24 @@ deterministic equal-metric tie-breaking, one-shot F-4 failover only, exact
 model ID routing, and no sticky affinity.
 
 ## Changelog
+
+### v0.3.2 (2026-07-12)
+
+- **FR-SR-2 provider-visibility carve-out (SPEC-024 v0.2 prefix caching).** The
+  gateway-derived, opaque, account-scoped `conversation_key` MAY now be forwarded to the
+  provider for provider-local prefix caching. It was previously "not part of the SPEC-001
+  provider protocol"; that is amended under an explicit privacy disclosure (the provider learns
+  a stable per-conversation identifier — the same correlation sticky affinity already grants —
+  but never the raw buyer tag / `account_id`). Paired with SPEC-006 v0.9.8 and SPEC-008 v0.4.1.
+- **R2-audit reconciliation (2026-07-12).** Swept residual §6 "Provider protocol" and §9
+  "SPEC-001 is not changed" text that still denied the FR-SR-2 field, so the carve-out is
+  consistent across the whole document; bumped the SPEC-006 dependency to v0.9.8; disclosed
+  cross-provider linkability (the key is forwarded on misses/re-routes, so it MAY reach more
+  than one provider over a conversation's life).
+- **R3-audit reconciliation (2026-07-12).** Extended the sweep to the top-level document scope:
+  §1 Mission and §2 Scope (in/out-of-scope) previously stated a categorical "no SPEC-001
+  provider-wire change / no provider-managed cache" boundary that contradicted the §6 FR-SR-2
+  carve-out; both now carry the single-field exception explicitly.
 
 ### v0.3.1 (2026-05-30)
 
@@ -79,8 +97,10 @@ Make the coordinator route smartly: reuse warm provider caches across a
 buyer's turns, expose latency/quality-tiered model classes, spread load
 evenly across equivalent providers, and recover transient failures more
 aggressively than the existing one-shot failover, without breaking
-reproducible audit logs, the locked SPEC-001 provider protocol, or the
-current money path.
+reproducible audit logs or the current money path. (v0.3.2: the SPEC-001
+provider protocol is preserved **except** for the single additive
+`conversation_key` field the FR-SR-2 carve-out authorizes for provider-local
+prefix caching — see §2 Scope and §6.)
 
 ---
 
@@ -103,11 +123,17 @@ current money path.
 
 ### Out of scope
 
-- Any SPEC-001 / phase3-binary provider wire-protocol change.
+- Any SPEC-001 / phase3-binary provider wire-protocol change, **except** the
+  single additive `conversation_key` field on the coordinator→provider
+  inference request authorized by the v0.3.2 FR-SR-2 carve-out (§6) for
+  provider-local prefix caching. No other provider wire-protocol change.
 - Rewards, billing, settlement, or contributor distribution logic (SPEC-005).
 - AntFeed seller integration (SPEC-007).
 - Tier-2 attestation, provider-leg encryption, or model-weight verification.
-- New provider binary behavior or provider-managed session caches.
+- New provider binary behavior. **(v0.3.2:)** provider-*local* prefix caching
+  keyed on the derived `conversation_key` is now in scope for SPEC-024 v0.2;
+  SPEC-004 authorizes only the *forwarding* of that key (FR-SR-2), not the
+  cache mechanism.
 - Replacing SPEC-002 § 5. SPEC-004 extends that algorithm only.
 - Reading sticky affinity from raw buyer headers. In particular,
   `X-MacProvider-Session` is never a sticky key; it remains SPEC-002 FR-R3
@@ -183,9 +209,22 @@ existing `connected_at`-driven order remains unchanged.
 **FR-SR-2. Sticky affinity keying.**
 When `routing.sticky_enabled` is true, the coordinator MUST key sticky affinity
 only by the gateway-derived internal field
-`routing_internal.conversation_key`. This field is not a buyer header and is
-not part of the SPEC-001 provider protocol. SPEC-006 v0.8 owns its derivation,
-privacy disclosure, and transport from gateway to coordinator.
+`routing_internal.conversation_key`. This field is not a buyer header. SPEC-006
+§1.3 owns its derivation, privacy disclosure, and transport from gateway to
+coordinator.
+
+**Provider visibility (v0.3.2 — SPEC-024 prefix-cache carve-out).** The
+`conversation_key` was originally "not part of the SPEC-001 provider protocol."
+That is amended: the coordinator MAY forward the **derived, opaque,
+account-scoped** `conversation_key` to the provider for **provider-local prefix
+caching** (SPEC-024 v0.2 §11–§12). This makes the derived value a provider-visible
+field for that purpose only, under an explicit privacy disclosure: the provider
+thereby learns a **stable per-conversation identifier** and can correlate a
+conversation's turns — the **same** correlation SPEC-004 sticky affinity already
+grants by pinning the conversation to one provider — but MUST NOT be able to
+recover the raw buyer tag or `account_id` from the one-way HMAC value (SPEC-008
+§2.2, narrowed). No **raw** buyer secret or `account_id` is ever sent to the
+provider; only the derived opaque key.
 
 The value namespace MUST make it impossible to collide with a SPEC-002
 `assigned_id`. SPEC-004 reserves `conv:<opaque-id>` for
@@ -653,8 +692,15 @@ remain valid.
 
 ### Provider protocol
 
-No SPEC-001 provider protocol field, message, or behavior changes. All
-behavior is coordinator-internal or buyer-facing.
+No SPEC-001 provider protocol field, message, or behavior changes, **with one
+exception (v0.3.2 FR-SR-2 carve-out):** the coordinator→provider
+`inference_request` carries the derived, opaque, account-scoped
+`conversation_key` (top-level field on the cleartext relay; inside the Tier-2
+`inference_request_plaintext` envelope on encrypted legs) so the provider can
+key its local prefix cache (SPEC-024 v0.2 §11–§12; SPEC-008 v0.4.1 §2.2). The
+provider learns only a stable opaque per-conversation identifier — never the
+raw buyer tag or `account_id`. All other routing behavior remains
+coordinator-internal or buyer-facing.
 
 ---
 
@@ -855,9 +901,15 @@ attempted provider.
   deterministic. When randomization is explicitly enabled, the candidate set,
   metric values, epsilon, and selected provider are logged so the decision is
   explainable after the fact.
-- **SPEC-001 is not changed.** Providers do not learn about sticky affinity,
-  model classes, randomized tiebreaks, or coordinator-managed retry through new
-  wire fields.
+- **SPEC-001 is not changed**, with one v0.3.2 exception. Providers do not
+  learn about model classes, randomized tiebreaks, or coordinator-managed retry
+  through new wire fields. Providers **do** receive the derived opaque
+  `conversation_key` on the inference request (FR-SR-2 carve-out) for
+  provider-local prefix caching — a stable per-conversation identifier, which
+  grants the same cross-turn correlation sticky affinity already grants by
+  pinning a conversation to a provider, and (because the key is forwarded on
+  misses/re-routes) potentially across more than one provider over the
+  conversation's life. Providers never receive the raw tag or `account_id`.
 
 ---
 
