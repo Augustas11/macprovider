@@ -1,8 +1,17 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.4 (2026-07-11, attestation-reconciliation pass)
+**Version:** 0.4.1 (2026-07-12, §2.2 invariant (b) narrowed for the SPEC-024 prefix-cache provider-visibility carve-out)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-004 v0.3.1,
                SPEC-006 v0.8.1
+
+**Change log v0.4.1 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out):**
+- **§2.2 invariant (b) narrowed.** Previously the provider could not see/derive `conv:` at all.
+  v0.4.1 permits the coordinator to send the **derived, opaque, account-scoped** `conv:` key to
+  the provider in the inference request for provider-local prefix caching (SPEC-024 v0.2
+  §11–§12; SPEC-004 v0.3.2 FR-SR-2), while keeping the load-bearing half: the raw buyer tag /
+  `account_id` remain unrecoverable (one-way HMAC) and non-reconstructable from side-channel
+  traffic. Error/close/preflight/attestation paths still MUST NOT reveal `conv:`; the inference
+  `conversation_key` field is the single authorized provider-visible channel. No code change.
 
 **Change log v0.4 (runbook item 7 — spec-only reconciliation of shipped attestation):**
 The shipped, default-enabled self-signed Secure-Enclave attestation path
@@ -401,11 +410,20 @@ session key MUST never be an input to the `conv:` HMAC.
 If a proposed Tier-2 design requires deriving sticky keys after the request is
 encrypted for the provider, that design is rejected.
 
-### 2.2 Invariant (b): provider cannot derive `conv:` from traffic
+### 2.2 Invariant (b): provider cannot **recover raw account/tag**; the derived `conv:` MAY be provided for prefix caching
 
-**Invariant.** The `conv:` value is NOT derivable by the provider from any
-observable traffic, even under Tier 2 where the coordinator-to-provider
-channel may change.
+**Invariant (narrowed, v0.4.1 — SPEC-024 prefix-cache carve-out).** The provider MUST NOT be
+able to recover the raw buyer conversation tag or `account_id` — the `conv:` value is a
+one-way, account-scoped HMAC (SPEC-006 §1.3), not reversible or forgeable, and is NOT
+reconstructable by the provider from side-channel traffic (ciphertext/nonce/AAD/timing/model
+IDs). **However**, the *derived opaque `conv:` value itself* MAY be **explicitly provided** to
+the provider for **provider-local prefix caching** (SPEC-024 v0.2 §11–§12): unlike the
+original invariant (which barred the provider from seeing `conv:` at all), v0.4.1 permits the
+coordinator to send the derived key to the provider. The disclosed consequence is that the
+provider learns a **stable per-conversation identifier** (enabling the same cross-turn
+correlation sticky affinity already grants) — but never the raw tag/account behind it, and
+captured network frames still contain no raw `account_id`/tag (Pillar B survivability, §6,
+AC-T2-2, unchanged).
 
 **Threat model.** A provider observes:
 
@@ -421,9 +439,12 @@ The provider attempts to reconstruct the buyer's internal `conv:` value or raw
 conversation tag.
 
 **Tier-1 mechanism.** The `conv:` value is gateway-to-coordinator internal
-state. SPEC-004 §4 says `routing_internal.conversation_key` is not a provider
-protocol field. SPEC-006 §1.3 says raw buyer tag and raw account ID are not
-logged as the opaque suffix and are not sent to providers.
+state whose one-way HMAC derivation (SPEC-006 §1.3) makes the raw buyer tag and
+raw `account_id` unrecoverable from it. Those **raw** values are never logged as
+the opaque suffix and never sent to providers. (v0.4.1: the *derived opaque
+`conv:` key* itself MAY be sent to the provider in the inference request for
+provider-local prefix caching — SPEC-004 FR-SR-2 provider-visibility carve-out,
+SPEC-024 v0.2 §11–§12 — but the raw values behind it remain unrecoverable.)
 
 **Tier-2 finding.** Cleared.
 
@@ -435,12 +456,19 @@ attestation challenges and tokens MUST NOT encode sticky state. Pillar D
 output-safety logs MUST NOT expose `conv:` values to provider-originated
 messages.
 
-The coordinator MAY log sticky outcomes internally, but provider-visible error
-messages, close reasons, preflight messages, inference messages, and
-attestation challenges MUST NOT reveal the `conv:` key.
+The coordinator MAY log sticky outcomes internally. Provider-visible error
+messages, close reasons, preflight messages, and attestation challenges MUST NOT
+reveal the `conv:` key. **Exception (v0.4.1):** the **inference request** MAY
+carry the derived opaque `conv:` key in its `conversation_key` field for
+provider-local prefix caching (SPEC-024 v0.2 §11–§12) — this is the single
+authorized provider-visible channel for the derived value.
 
-If a provider can compute or read the `conv:` value from any Tier-2 field,
-frame, token, nonce, or error path, the design is rejected.
+If a provider can **reconstruct or reverse** the raw buyer tag / `account_id`, or
+**derive** the `conv:` value from any Tier-2 side-channel (ciphertext, nonce,
+AAD, frame metadata, token, timing, or error path) rather than receiving it in
+the authorized `conversation_key` field, the design is rejected. The raw
+tag/`account_id` MUST remain unrecoverable, and the derived key MUST remain
+one-way and unforgeable.
 
 ### 2.3 Invariant (c): deletion remains account-scoped and authenticated
 

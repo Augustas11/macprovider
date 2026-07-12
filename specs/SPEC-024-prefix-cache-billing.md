@@ -2,13 +2,13 @@
 
 **Version:** 0.2 (2026-07-12, provider-local cache-isolation reconciliation)
 **Status:** v0.1 billing sections locked; v0.2 adds the isolation baseline (§11–§16) reconciled to shipped code.
-**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.1 (sticky affinity), SPEC-005 v0.5 (billing), SPEC-006 v0.9.7 (buyer API; §1.3 conversation-key derivation), SPEC-008 v0.3 (Tier-2 trust; Pillar B conversation-key survivability — see the §12 provider-visibility reconciliation note), SPEC-018 v0.2.4 (tool calling)
+**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.5 (billing), SPEC-006 v0.9.8 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
 
 **Change log v0.2 (2026-07-12, provider-local cache-isolation baseline — spec-only, reconciled to shipped code):**
 v0.1 specified the *accounting* of a provider-reported `cached_prompt_tokens` but left the number's *provenance safety* unspecified: the entire provider-local KV/conversation cache keying, the cross-account isolation invariant, and coordinator cross-checking were deferred (§2/§7). v0.2 writes that missing normative baseline, matching the shipped Swift provider + Go coordinator + gateway.
 - **§11 (cache-key / isolation invariant):** the provider-local cache is partitioned **solely by the coordinator-supplied `conversation_key`**, and reuse additionally requires an exact token-level longest-common-prefix (LCP ≥ 32) with matching `model_id` and quantization (`kvBits`) — codifying the shipped guards. The provider cache has **no account/buyer dimension of its own**.
 - **§12 (account-namespacing — the load-bearing cross-component invariant):** cross-account isolation is inherited entirely from the requirement that `conversation_key` be **unforgeable and account-scoped before it reaches the provider or the coordinator sticky map** — shipped via the gateway's keyed HMAC derivation (`conv:` + unpadded-base64url(HMAC-SHA256(secret, scope‖`\n`‖account_id‖`\n`‖tag)), already normative in **SPEC-006 §1.3 / SPEC-008 §1.1**), public-ingress stripping of the `X-MacProvider-Internal-*` namespace, **and** the coordinator's operator/service-bearer gate on internal routing headers (which adds replay-resistance HMAC alone does not). v0.2's contribution is connecting this existing derivation to the cache-**isolation** property and reconciling the provider-visibility tension (next bullet) — not re-owning the derivation.
-- **§12 provider-visibility reconciliation (cross-spec — DECISION NEEDED):** the shipped prefix-cache design **sends the derived `conv:` key to the provider** (cleartext relay and inside the Tier-2 encrypted plaintext), because provider-local KV caching needs a stable per-conversation key. That **contradicts** the current SPEC-004 FR-SR-2 / SPEC-006 / SPEC-008 invariant that the provider cannot read/derive `conv:`. The outer network frames still conceal the key + raw account/tag (Pillar B survivability holds at the wire), but the provider **runtime** learns a stable per-conversation identifier (the same cross-turn correlation sticky affinity already grants). Reconciling the corpus — amend SPEC-004/006/008 to permit a provider-visible *derived* conversation identifier with an explicit privacy disclosure, **or** treat the shipped behavior as a privacy regression to fix in code — is a **cross-spec design decision carried out of v0.2**; §12 documents the tension.
+- **§12 provider-visibility reconciliation (cross-spec — RESOLVED via option (a)):** the shipped prefix-cache design **sends the derived `conv:` key to the provider** (cleartext relay and inside the Tier-2 encrypted plaintext), because provider-local KV caching needs a stable per-conversation key. This tensioned the prior SPEC-004 FR-SR-2 / SPEC-006 / SPEC-008 invariant that the provider cannot see `conv:`. **Resolution (operator decision, 2026-07-12): option (a) — ratify the shipped design.** The corpus is amended in this same change — **SPEC-004 v0.3.2** (FR-SR-2 provider-visibility carve-out), **SPEC-006 v0.9.8** (survivability invariant (b) narrowed), **SPEC-008 v0.4.1** (§2.2 invariant (b) narrowed) — now permitting the coordinator to provide the **derived, opaque, account-scoped** `conv:` key to the provider for prefix caching, under an explicit privacy disclosure: the provider learns a stable per-conversation identifier (the same cross-turn correlation sticky affinity already grants) but MUST NOT be able to recover the raw buyer tag or `account_id` (the HMAC is one-way), and captured network frames still contain no raw account/tag (Pillar B survivability, unchanged).
 - **§13 (non-leakage threat model):** cache reuse MUST NOT cross a `conversation_key` boundary, and `cached_prompt_tokens` (buyer-visible, §8) plus TTFT MUST NOT become a cross-account prefix-content/timing oracle.
 - **§14 (coordinator cross-check — the deferred §7 item):** resolves the v0.1 deferral; ties trust of a positive `cached_prompt_tokens` to `sticky_result == "hit"` and flags the shipped sticky-Lookup account-scope gap (account compared only on write, not on the routing read path).
 - **§15 (ingest paths without a fronting gateway):** direct/Tier-2/cleartext ingest trust `conversation_key` verbatim with no provider-side account binding; v0.2 states the deployment invariant these paths must preserve.
@@ -300,27 +300,36 @@ infrastructure and honored only on authenticated gateway-origin traffic.
 **FR-CI7 (wire survivability, with a provider-runtime caveat).** The account-scoping input
 (`account_id`) MUST remain in the key derivation and MUST NOT be strippable downstream. At the
 **wire** level this preserves SPEC-008 Pillar B survivability: captured provider-leg frames
-contain no raw `account_id` or raw buyer tag. **But** — and this is the §12 provider-visibility
-tension — the provider **runtime** does receive the derived `conv:` key in cleartext (relay
-path) or inside the decrypted Tier-2 plaintext (`Tier2ProviderSession.swift`), so it learns a
-stable per-conversation identifier. This **contradicts** the current SPEC-004 FR-SR-2 /
-SPEC-006 / SPEC-008 invariant (b) that the provider cannot read/derive `conv:`. FR-CI7 does
-**not** claim consistency with that invariant; it records the contradiction and defers its
-resolution to the cross-spec decision below.
+contain no raw `account_id` or raw buyer tag. The provider **runtime** does receive the
+**derived** `conv:` key in cleartext (relay path) or inside the decrypted Tier-2 plaintext
+(`Tier2ProviderSession.swift`), so it learns a stable per-conversation identifier. As of the
+option-(a) resolution (§12), this is **explicitly permitted** by the amended SPEC-004 v0.3.2
+FR-SR-2 / SPEC-006 v0.9.8 / SPEC-008 v0.4.1 §2.2 invariant (b): the derived opaque key MAY be
+provider-visible for prefix caching, provided the raw tag/`account_id` remain unrecoverable
+(one-way HMAC) — which FR-CI5/CI7 guarantee.
 
-**Provider-visibility reconciliation (DECISION NEEDED — carried out of v0.2).** Provider-local
+**Provider-visibility reconciliation (RESOLVED — option (a), 2026-07-12).** Provider-local
 prefix caching (SPEC-024's entire premise) requires a stable per-conversation key at the
-provider; the shipped design supplies the derived `conv:` key. This is inconsistent with the
-provider-nonvisibility invariant in SPEC-004/006/008. The corpus MUST resolve it one of two
-ways, which is an operator/architecture decision, not a v0.2 spec-text choice:
-(a) **amend** SPEC-004 FR-SR-2, SPEC-006, and SPEC-008 invariant (b) to permit a
-provider-visible *derived, account-scoped, opaque* conversation identifier, with an explicit
-privacy disclosure that the provider can correlate a conversation's turns (the same
-correlation sticky affinity already grants) but cannot recover the account/tag; **or**
-(b) treat the shipped provider-visible key as a **privacy regression** — in which case
-provider-local prefix caching as designed cannot stand and SPEC-024's reuse model must change.
-Until this is decided, §11–§16's isolation guarantees hold **only at the wire/account-scoping
-layer** and assume the provider is trusted to hold (not exfiltrate) the derived key.
+provider; the shipped design supplies the derived `conv:` key. This tensioned the prior
+provider-nonvisibility invariant in SPEC-004/006/008. The operator chose **option (a): ratify
+the shipped design**, and the corpus is amended in this same change:
+- **SPEC-004 v0.3.2** FR-SR-2 — provider-visibility carve-out: the coordinator MAY forward the
+  derived, opaque, account-scoped `conversation_key` to the provider for prefix caching.
+- **SPEC-006 v0.9.8** — survivability invariant (b) narrowed to "raw tag/`account_id`
+  unrecoverable + not side-channel-derivable" while permitting the derived key in the
+  inference request.
+- **SPEC-008 v0.4.1** §2.2 invariant (b) — same narrowing; the inference `conversation_key`
+  field is the single authorized provider-visible channel for the derived value; error/close/
+  preflight/attestation paths still MUST NOT reveal it.
+
+The disclosed privacy trade-off: the provider learns a **stable per-conversation identifier**
+and can correlate that conversation's turns (the **same** correlation SPEC-004 sticky affinity
+already grants by pinning the conversation to one provider), but **cannot** recover the raw
+buyer tag or `account_id` (one-way HMAC), and captured network frames still carry no raw
+account/tag. §11–§16's isolation guarantees therefore hold at the wire/account-scoping layer,
+and the residual trust assumption is narrowed to: the provider is trusted to **hold (not
+exfiltrate)** the opaque derived key — which it must be trusted to do for sticky affinity
+regardless.
 
 If FR-CI5/6 hold, §11's key-only partition is sufficient for cross-account **isolation**
 (no cross-buyer *reuse*); if either fails (a derivation bug, a stripped account input, or a

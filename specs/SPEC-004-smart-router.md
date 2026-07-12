@@ -1,6 +1,6 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3.1 (2026-05-30, independent-audit follow-up: 1 MiB ingress cap + test-discipline coverage)
+**Version:** 0.3.2 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out for the derived conversation_key)
 **Extends:** SPEC-002 v1.3.3 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.7 (Pillar A gated on SPEC-006 v0.8)
 
@@ -10,6 +10,15 @@ deterministic equal-metric tie-breaking, one-shot F-4 failover only, exact
 model ID routing, and no sticky affinity.
 
 ## Changelog
+
+### v0.3.2 (2026-07-12)
+
+- **FR-SR-2 provider-visibility carve-out (SPEC-024 v0.2 prefix caching).** The
+  gateway-derived, opaque, account-scoped `conversation_key` MAY now be forwarded to the
+  provider for provider-local prefix caching. It was previously "not part of the SPEC-001
+  provider protocol"; that is amended under an explicit privacy disclosure (the provider learns
+  a stable per-conversation identifier — the same correlation sticky affinity already grants —
+  but never the raw buyer tag / `account_id`). Paired with SPEC-006 v0.9.8 and SPEC-008 v0.4.1.
 
 ### v0.3.1 (2026-05-30)
 
@@ -183,9 +192,22 @@ existing `connected_at`-driven order remains unchanged.
 **FR-SR-2. Sticky affinity keying.**
 When `routing.sticky_enabled` is true, the coordinator MUST key sticky affinity
 only by the gateway-derived internal field
-`routing_internal.conversation_key`. This field is not a buyer header and is
-not part of the SPEC-001 provider protocol. SPEC-006 v0.8 owns its derivation,
-privacy disclosure, and transport from gateway to coordinator.
+`routing_internal.conversation_key`. This field is not a buyer header. SPEC-006
+§1.3 owns its derivation, privacy disclosure, and transport from gateway to
+coordinator.
+
+**Provider visibility (v0.3.2 — SPEC-024 prefix-cache carve-out).** The
+`conversation_key` was originally "not part of the SPEC-001 provider protocol."
+That is amended: the coordinator MAY forward the **derived, opaque,
+account-scoped** `conversation_key` to the provider for **provider-local prefix
+caching** (SPEC-024 v0.2 §11–§12). This makes the derived value a provider-visible
+field for that purpose only, under an explicit privacy disclosure: the provider
+thereby learns a **stable per-conversation identifier** and can correlate a
+conversation's turns — the **same** correlation SPEC-004 sticky affinity already
+grants by pinning the conversation to one provider — but MUST NOT be able to
+recover the raw buyer tag or `account_id` from the one-way HMAC value (SPEC-008
+§2.2, narrowed). No **raw** buyer secret or `account_id` is ever sent to the
+provider; only the derived opaque key.
 
 The value namespace MUST make it impossible to collide with a SPEC-002
 `assigned_id`. SPEC-004 reserves `conv:<opaque-id>` for

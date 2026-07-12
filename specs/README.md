@@ -12,11 +12,11 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.6 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
 | SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.5.3 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.10.1 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
-| SPEC-004 | Smart Router | 0.3.1 | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
+| SPEC-004 | Smart Router | 0.3.2 | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.5 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.7 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.8 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5 | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
-| SPEC-008 | Tier-2 Trust Layer | 0.4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
+| SPEC-008 | Tier-2 Trust Layer | 0.4.1 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
 | SPEC-010 | Provider Model Catalog | 1.5 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
