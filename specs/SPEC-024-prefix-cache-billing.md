@@ -1,18 +1,23 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.1 (2026-07-12, billing sections superseded by SPEC-005 v0.6)
-**Status:** **Billing (§3–§8) MOVED to SPEC-005 v0.6** (canonical); SPEC-024 retains the provider-local cache-**isolation** baseline (§11–§16).
+**Version:** 0.2.1 (2026-07-12, billing arithmetic superseded by SPEC-005 v0.6)
+**Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 restates.
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.8 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
 
 **Change log v0.2.1 (2026-07-12, billing ownership handoff to SPEC-005 v0.6):**
-- **SPEC-024 §3–§8 (the billing sections) are SUPERSEDED by SPEC-005 v0.6** and retained here only
-  as historical/reference text. SPEC-005 v0.6 is now the **canonical** owner of prefix-cache
-  billing: the `cached_prompt_tokens` ledger column (§4.3), the `uncached@prompt-rate +
-  cached@cache-hit-rate` formula split with the unset-rate ⇒ full-prompt-rate default and the
-  `0 <= cache_hit_rate <= prompt_rate` ceiling (§5.3 / §5.3.1), the eligibility gates
-  (sticky-hit / first-attempt / `ambiguous_cache` / `invalid_cached_prompt_tokens` quarantine,
-  §5.3.1), and the `prompt_cache_hit_credits_per_mtok` rate-card key (§13). Where §3–§8 below and
-  SPEC-005 v0.6 differ, **SPEC-005 v0.6 governs.**
+- **SPEC-024 §4 (ledger schema), §5 (rate card), and §6 (formula) — the billing ARITHMETIC — are
+  SUPERSEDED by SPEC-005 v0.6** and retained here only as historical/reference text. SPEC-005 v0.6 is
+  now the **canonical** owner of prefix-cache billing: the `cached_prompt_tokens` ledger column
+  (§4.3), the `uncached@prompt-rate + cached@cache-hit-rate` formula split with the unset-rate ⇒
+  full-prompt-rate default and the `0 <= cache_hit_rate <= prompt_rate` ceiling (§5.3 / §5.3.1), the
+  eligibility gates (sticky-hit / first-attempt / `ambiguous_cache` / `invalid_cached_prompt_tokens`
+  quarantine, §5.3.1), and the `prompt_cache_hit_credits_per_mtok` rate-card key (§13). Where §4–§6
+  below and SPEC-005 v0.6 differ, **SPEC-005 v0.6 governs.**
+- **SPEC-024 RETAINS ownership** of the surfaces SPEC-005 does not restate: the provider **wire
+  field** `cached_prompt_tokens` (§3, the SPEC-002 usage-object addendum), the **buyer-visible**
+  `cached_prompt_tokens` mirror (§8, the SPEC-006 response addendum), and the fraud model (§7). These
+  are wire/API contracts, not coordinator-ledger arithmetic; SPEC-005 v0.6 consumes the wire field
+  and prices it but does not define it.
 - SPEC-024 continues to **own** the provider-local cache-**isolation** invariant (§11–§16): cache
   keying, cross-account non-leakage, the coordinator cross-check semantics that the SPEC-005
   eligibility gates implement, and the ingest/deployment invariants.
@@ -41,14 +46,16 @@ v0.1 specified the *accounting* of a provider-reported `cached_prompt_tokens` bu
 
 ## 1. Scope
 
-> **⚠ Billing scope moved to SPEC-005 v0.6 (v0.2.1).** The prefix-cache **billing** treatment
+> **⚠ Billing ARITHMETIC moved to SPEC-005 v0.6 (v0.2.1).** The prefix-cache billing **arithmetic**
 > below — the `cached_prompt_tokens` ledger column, the rate-card `prompt_cache_hit_credits_per_mtok`
-> key, the cache-split formula, the eligibility gates, and the buyer-debit mirror — is **canonically
-> owned by SPEC-005 v0.6** (§4.3 / §5.3 / §5.3.1 / §13). SPEC-024's live scope is the provider-local
-> cache-**isolation** baseline (§11–§16). The billing description in this section is retained for
-> history; where it differs from SPEC-005 v0.6, **SPEC-005 v0.6 governs.**
+> key, the cache-split formula, and the eligibility gates — is **canonically owned by SPEC-005 v0.6**
+> (§4.3 / §5.3 / §5.3.1 / §13). SPEC-024 still **owns** the `cached_prompt_tokens` **provider wire
+> field** (§3, SPEC-002 addendum) and the **buyer-visible** mirror field (§8, SPEC-006 addendum),
+> plus the fraud model (§7) and the cache-**isolation** baseline (§11–§16). The billing-arithmetic
+> descriptions in §4–§6 are retained for history; where they differ from SPEC-005 v0.6,
+> **SPEC-005 v0.6 governs.**
 
-SPEC-024 (v0.1) specified the billing treatment for provider-reported prefix-cache reuse on sticky-affinity conversations (SPEC-004 FR-SR-*): a provider-reported `cached_prompt_tokens` field on the coordinator-provider usage report (SPEC-002), a `cached_prompt_tokens` column on `ledger_request_credits`, an additive rate-card row field, a cache-split billing / buyer-debit formula, and a mirror field in the buyer-visible OpenAI-shape usage object (SPEC-006). **All of that billing surface is now specified by SPEC-005 v0.6** (see banner above); the descriptions here are historical.
+SPEC-024 (v0.1) specified the billing treatment for provider-reported prefix-cache reuse on sticky-affinity conversations (SPEC-004 FR-SR-*): a provider-reported `cached_prompt_tokens` field on the coordinator-provider usage report (SPEC-002, §3), a `cached_prompt_tokens` column on `ledger_request_credits` (§4), an additive rate-card row field (§5), a cache-split billing / buyer-debit formula (§6), and a mirror field in the buyer-visible OpenAI-shape usage object (SPEC-006, §8). **The ledger/rate/formula arithmetic (§4–§6) is now specified by SPEC-005 v0.6** (see banner above); the **provider wire field (§3)** and **buyer-visible mirror (§8)** remain SPEC-024's canonical SPEC-002/006 addenda. The §4–§6 descriptions here are historical.
 
 **v0.2 adds the provider-local cache **isolation** baseline (§11–§16):** the normative cache-key/reuse invariant, the cross-account `conversation_key` unforgeability/namespacing invariant that isolation depends on, the non-leakage threat model, the coordinator cross-check of `cached_prompt_tokens`, and the acceptance criteria — because the discounted cache-hit price and the buyer-visible `cached_prompt_tokens` are only sound if cache reuse cannot cross a buyer/conversation boundary. v0.2 is spec-only and reconciled to shipped code; it specifies the isolation *invariant*, not the provider KV-cache implementation (still §2).
 
@@ -61,9 +68,12 @@ SPEC-024 (v0.1) specified the billing treatment for provider-reported prefix-cac
 - Buyer-side cache-hint headers are out of scope. Buyers MUST NOT send `X-MacProvider-Expect-Cached-Prefix` or an equivalent v0.1 hint. Providers are the source of truth for actual cache reuse; buyers observe `usage.cached_prompt_tokens`.
 - Rate-card hot reload for the new field is out of scope. SPEC-005 Wave 0/1 work continues to govern hot-reload semantics. v0.1 IMPL MAY require coordinator restart to activate `prompt_cache_hit_rate_per_mtok`.
 
-> **⚠ SUPERSEDED (v0.2.1): §3–§8 billing sections are now owned by SPEC-005 v0.6.** The text below
-> is retained for history; where it differs from SPEC-005 v0.6, **SPEC-005 v0.6 governs**. SPEC-024's
-> live scope is the provider-local cache-**isolation** baseline (§11–§16).
+> **⚠ SUPERSEDED (v0.2.1): the billing ARITHMETIC in §4 (ledger) / §5 (rate card) / §6 (formula) is
+> now owned by SPEC-005 v0.6.** That text is retained for history; where it differs from SPEC-005 v0.6,
+> **SPEC-005 v0.6 governs**. **§3 (the provider wire field) and §8 (the buyer-visible mirror) are NOT
+> superseded** — they remain SPEC-024's canonical SPEC-002 / SPEC-006 addenda for `cached_prompt_tokens`,
+> which SPEC-005 consumes but does not define. §7 (fraud model) and §11–§16 (cache isolation) also
+> remain live SPEC-024 scope.
 
 ## 3. Wire Contract (SPEC-002 Addendum)
 
