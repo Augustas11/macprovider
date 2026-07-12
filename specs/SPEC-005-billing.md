@@ -1,7 +1,45 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.5 (2026-07-08, force-credit + 24h pre-payout hold + corrective resolution — issue #253, closes §OQ-5 credit arm)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.2, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.9.1
+**Version:** 0.6 (2026-07-12, money-path reconciliation — reconcile the shipped billing formula, ledger schema, and rate-card resolution to code; fold in SPEC-024 prefix-cache billing — runbook item 11)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.2, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2 (prefix-cache billing, folded into §5.3 / §4.3 here)
+
+**Change log v0.6 (2026-07-12, money-path reconciliation — runbook item 11; spec-only, reconciled to shipped code):**
+
+v0.6 reconciles SPEC-005 to the shipped billing implementation
+(`phase4-coordinator/internal/billing/formula.go`, `store.go`,
+`internal/config/config.go`) — the code is the money-path source of truth and any
+disagreement is a spec bug. No behavior change. Six reconciliations:
+
+- **§4.3 — six ledger columns added** that ship but were unspecced:
+  `charged_prompt_tokens`, `provider_reported_prompt_tokens`, `cached_prompt_tokens`
+  (SPEC-024), `settlement_account_scope_hash`, `settlement_policy_mode`,
+  `settlement_policy_version`; plus the table-level
+  `CHECK(usage_source != 'null_error' OR gross_credits = 0)`.
+- **§5.3 — completion clamp (runbook item 2 / audit H1).** The billable completion is
+  `min(provider_reported, byte_estimate)`, and when the byte estimate is the smaller value
+  on a `provider_reported` row the clamp **downgrades `usage_source` to `byte_estimated`**.
+  The byte estimate is `ceil(wire_bytes/16)` (computed upstream in the buyer path). The G1
+  ledger probe (2026-07-11, re-confirmed 2026-07-12) measured this clamp as negligible
+  (~3–5% of reported rows, ~1-token median, ~$0.001 provider / 35 d), so v0.6 **documents**
+  the shipped `/16` clamp rather than reverting the divisor.
+- **§5.3 — SPEC-024 prefix-cache split folded in.** Prompt billing splits into
+  `uncached = prompt_tokens − cached_prompt_tokens` priced at the prompt rate plus
+  `cached_prompt_tokens` priced at the prompt-cache-hit rate. **Default:** an unconfigured
+  `prompt_cache_hit_credits_per_mtok` bills cached tokens at the **full prompt rate**
+  (no discount) — conservative, never over-discounts (`EffectivePromptCacheHitCreditsPerMtok`).
+  A `cached_prompt_tokens > prompt_tokens` row is a `null_usage_error`.
+- **§5.3 — 10,000,000-token per-field cap.** Any of `prompt_tokens`, `cached_prompt_tokens`,
+  or the billable completion exceeding `maxBillableTokens = 10_000_000`, or any
+  multiply/add overflow in the numerator, yields `null_usage_error` + zero credits.
+- **§5.5 (new) — model-key normalization + rate-card resolution order.** Rate lookup is
+  exact key → `NormalizeModelKey` (lowercase/trim, strip a known namespace prefix, strip
+  `-mxfp4-q8`/`-4bit`/`-8bit` quant suffixes, canonical `meta-llama`/`nvidia-nemotron`/
+  `gpt-oss` remaps) → `default` → empty, emitting `rate_card_normalized`.
+- **§13 — rate-card config key** `prompt_cache_hit_credits_per_mtok` added.
+
+SPEC-024's billing sections (v0.1/v0.2 §3–§8) are hereby **absorbed** into SPEC-005 v0.6 as
+the canonical home for prefix-cache billing arithmetic; SPEC-024 retains the provider-local
+cache-**isolation** invariant (§11–§16).
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -531,7 +569,10 @@ SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots
 | `model` | TEXT | NOT NULL | model id used for rate card | insert only |
 | `status` | INTEGER | NOT NULL | buyer-visible HTTP status | insert only |
 | `stream` | INTEGER | NOT NULL CHECK(stream IN (0,1)) | streaming flag | insert only |
-| `prompt_tokens` | INTEGER | NULL CHECK(prompt_tokens IS NULL OR prompt_tokens >= 0) | prompt tokens | insert only |
+| `prompt_tokens` | INTEGER | NULL CHECK(prompt_tokens IS NULL OR prompt_tokens >= 0) | prompt tokens (the value priced by §5.3) | insert only |
+| `charged_prompt_tokens` | INTEGER | NULL CHECK(charged_prompt_tokens IS NULL OR charged_prompt_tokens >= 0) | prompt tokens actually billed after any cache split (diagnostic) | insert only |
+| `provider_reported_prompt_tokens` | INTEGER | NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0) | raw provider-reported prompt count before normalization (diagnostic) | insert only |
+| `cached_prompt_tokens` | INTEGER | NULL CHECK(cached_prompt_tokens IS NULL OR (cached_prompt_tokens >= 0 AND cached_prompt_tokens <= prompt_tokens)) | prefix-cache-reused prompt tokens (SPEC-024), priced at the cache-hit rate in §5.3 | insert only |
 | `completion_tokens` | INTEGER | NULL CHECK(completion_tokens IS NULL OR completion_tokens >= 0) | reported completion tokens | insert only |
 | `estimated_completion_tokens` | INTEGER | NULL CHECK(estimated_completion_tokens IS NULL OR estimated_completion_tokens >= 0) | byte-estimated completion tokens | insert only |
 | `usage_source` | TEXT | NOT NULL CHECK(usage_source IN ('provider_reported','byte_estimated','null_error')) | usage source | insert only |
@@ -547,6 +588,9 @@ SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots
 | `settlement_id` | INTEGER | NULL | ledger_payout_ready id | set once |
 | `quarantined` | INTEGER | NOT NULL DEFAULT 0 CHECK(quarantined IN (0,1)) | operator-review marker | 0 to 1 only |
 | `quarantine_reason` | TEXT | NULL | quarantine explanation | set by recovery |
+| `settlement_account_scope_hash` | TEXT | NULL CHECK(settlement_account_scope_hash IS NULL OR (length = 64 AND lowercase-hex)) | 64-hex account-scope hash for settlement partitioning | insert only |
+| `settlement_policy_mode` | TEXT | NOT NULL DEFAULT 'legacy' CHECK(settlement_policy_mode IN ('legacy','observe','enforce')) | settlement-policy rollout mode at insert time | insert only |
+| `settlement_policy_version` | TEXT | NULL | settlement-policy version tag | insert only |
 | `recovery_source` | TEXT | NOT NULL DEFAULT 'hot_path' CHECK(recovery_source IN ('hot_path','startup_scan','nightly_reconcile')) | row origin | insert only |
 | `created_at_utc` | TEXT | NOT NULL | creation time | insert only |
 | `updated_at_utc` | TEXT | NULL | settlement/quarantine update time | bounded update |
@@ -559,7 +603,9 @@ Indexes and uniqueness constraints:
 - `INDEX idx_lrc_quarantine(quarantined, ts_utc)`
 - `INDEX idx_lrc_fault(provider_id, fault_flag, ts_utc)`
 
-Table-level CHECK note: when `usage_source = 'null_error'`, `gross_credits` MUST be 0. The hot path and recovery MUST enforce this before the formula in section  5.3 would otherwise evaluate nullable operands.
+Table-level CHECK: `CHECK(usage_source != 'null_error' OR gross_credits = 0)` — when `usage_source = 'null_error'`, `gross_credits` MUST be 0 (DB-enforced). The hot path and recovery MUST enforce this before the formula in section  5.3 would otherwise evaluate nullable operands.
+
+**Cache column CHECK.** `cached_prompt_tokens` additionally CHECKs `cached_prompt_tokens <= prompt_tokens` at the DB layer; the formula (§5.3) rejects a violating row as `null_usage_error` before insert, so the CHECK is defense-in-depth.
 
 ### 4.4 Table `ledger_operator_credits`
 
@@ -838,19 +884,62 @@ Operator credits equal gross minus provider credits so split sums exactly.
 
 ### 5.3 Closed-form request formula
 
+The shipped formula is `ComputeCreditsWithCache` (`internal/billing/formula.go`). It applies, in
+order: (1) fault/null short-circuits, (2) the completion clamp, (3) the token-validity gates,
+(4) the cache-split prompt numerator, (5) the multiplier + split.
+
 ```text
-effective_completion_tokens = completion_tokens when usage_source = provider_reported
-effective_completion_tokens = estimated_completion_tokens when usage_source = byte_estimated
-effective_completion_tokens = 0 when usage_source = null_error
-base_numerator = prompt_tokens * prompt_rate_per_mtok + effective_completion_tokens * completion_rate_per_mtok
+# (1) short-circuits (no arithmetic on NULL operands)
+usage_source = 'null_error'  OR  fault_flag = 'breaker_qualifying'
+    => gross = provider = operator = 0 (rate columns still snapshotted)
+
+# (2) completion clamp — billable completion is the SMALLER of reported and byte-estimate
+#     byte_estimate = ceil(wire_bytes / 16), computed upstream (buyer path)
+effective_completion_tokens =
+    min(completion_tokens, estimated_completion_tokens)   when both present
+    completion_tokens                                     when no estimate
+    estimated_completion_tokens                           when no reported value
+# a provider_reported row whose byte-estimate is the smaller value is CLAMPED and its
+# usage_source is DOWNGRADED to 'byte_estimated'; a byte_estimated row that reports a
+# smaller value uses the reported value (still 'byte_estimated').
+
+# (3) validity gates — any failure => usage_source='null_error', gross=provider=operator=0
+#   - prompt_tokens, cached_prompt_tokens, effective_completion_tokens each in [0, 10_000_000]
+#     (maxBillableTokens); a value <0 or >10_000_000 is a null_usage_error
+#   - cached_prompt_tokens <= prompt_tokens
+#   - any multiply/add below overflowing int64 is a null_usage_error (checked arithmetic)
+
+# (4) cache-split prompt numerator (SPEC-024, folded in)
+uncached_prompt_tokens = prompt_tokens - cached_prompt_tokens
+prompt_numerator = uncached_prompt_tokens * prompt_rate_per_mtok
+                 + cached_prompt_tokens   * effective_prompt_cache_hit_rate_per_mtok
+# effective_prompt_cache_hit_rate = prompt_cache_hit_credits_per_mtok if configured
+#   (or explicitly 0, or if prompt rate is 0); OTHERWISE defaults to prompt_rate_per_mtok
+#   (cached tokens billed at the FULL prompt rate — no discount unless configured, §5.5)
+
+# (5) numerator, multiplier, split
+base_numerator = prompt_numerator + effective_completion_tokens * completion_rate_per_mtok
 rate_scaled_numerator = base_numerator * global_multiplier_ppm
 gross_credits = round_half_even(rate_scaled_numerator, 1_000_000 * 1_000_000)
 provider_credits = round_half_even(gross_credits * provider_share_bps, 10_000)
 operator_credits = gross_credits - provider_credits
 ```
-When `usage_source = 'null_error'`, both `prompt_tokens` and `completion_tokens` MAY be NULL. The row MUST set `gross_credits = 0`, `provider_credits = 0`, and `operator_credits = 0` before the formula evaluates; the formula MUST NOT be evaluated on NULL operands.
-Fault and null-error overrides set gross, provider, and operator credits to 0 before split.
-Recovery rows MUST use the `ledger_config_snapshots` row selected by section  10.4; they MUST NOT price historical rows from current coordinator.yaml when a historical snapshot is required.
+
+When `usage_source = 'null_error'`, any of `prompt_tokens`, `cached_prompt_tokens`, and
+`completion_tokens` MAY be NULL. The row MUST set `gross_credits = 0`, `provider_credits = 0`, and
+`operator_credits = 0` before the formula evaluates; the formula MUST NOT be evaluated on NULL
+operands. Fault (`breaker_qualifying`) and null-error overrides set gross/provider/operator to 0
+before split (the rate/multiplier/share columns are still snapshotted for audit).
+Recovery rows MUST use the `ledger_config_snapshots` row selected by section  10.4; they MUST NOT
+price historical rows from current coordinator.yaml when a historical snapshot is required.
+
+**Clamp provenance (runbook item 2 / audit H1).** The `min(reported, byte_estimate)` clamp with a
+`byte_estimated` usage-source downgrade means an honest provider-reported completion larger than
+`ceil(wire_bytes/16)` is billed at the byte estimate. The 2026-07-11/07-12 production-ledger G1
+probe measured this as negligible (~3–5% of reported rows bound, ~1-token median loss, ~$0.001
+provider credit over 35 days), so v0.6 documents the shipped `/16` divisor and clamp rather than
+reverting it; any future change to the divisor or the clamp direction is a money-path decision that
+MUST re-run the G1 probe and append a `beta/DECISION_CRITERIA.md` entry.
 
 ### 5.4 Worked examples
 
@@ -859,6 +948,37 @@ Recovery rows MUST use the `ledger_config_snapshots` row selected by section  10
 - Null usage error path: gross=0, provider=0, operator=0.
 - Unknown model: default rates 500000 prompt and 1000000 completion are snapshotted.
 - global_multiplier 0.5: parse to 500000 PPM before the formula.
+- **Cache split (no configured cache-hit rate):** 1000 prompt of which 400 `cached_prompt_tokens`, 7B rates, no `prompt_cache_hit_credits_per_mtok`. Cached tokens default to the full prompt rate, so `prompt_numerator = 600*1_000_000 + 400*1_000_000 = 1000*1_000_000` — identical to no cache split. Cache accounting is a no-op on cost until a discount rate is configured.
+- **Cache split (discount configured):** same row with `prompt_cache_hit_credits_per_mtok = 250000`. `prompt_numerator = 600*1_000_000 + 400*250_000 = 700_000_000` — the 400 cached tokens billed at ¼ the prompt rate.
+- **Completion clamp:** provider reports 5000 completion tokens but `estimated_completion_tokens = ceil(wire_bytes/16) = 4200`. Billable completion clamps to 4200 and `usage_source` is recorded as `byte_estimated`.
+- **10M cap:** a row with `prompt_tokens = 10_000_001` (or a cached/completion field over 10M) is `null_usage_error` with gross=provider=operator=0.
+
+## 5.5 Model-key normalization and rate-card resolution
+
+Rate lookup (`RateFor`, `internal/billing/formula.go`) resolves a request `model` string against
+the coordinator.yaml rate card in this order, stopping at the first hit:
+
+1. **Exact** `model` key.
+2. **Normalized** key via `NormalizeModelKey(model)` (below), if it differs from `model`.
+3. **`default`** rate-card row.
+4. **Empty** entry (all-zero rates) if there is no `default` — priced at zero. (§13.x requires a
+   `default` row at config load; cold start without one fails.)
+
+Every fallback past the exact key emits a `rate_card_normalized` structured log with the
+requested key, the normalized key, and which tier matched (`normalized` / `default` / `""`).
+
+`NormalizeModelKey(model)`:
+
+1. Lowercase and trim whitespace.
+2. If the key has a `<namespace>/` prefix and `<namespace>` is a **known** namespace
+   (`mlx-community`, `openai`, `google`, `meta-llama`, `nvidia`, `qwen`), strip the prefix.
+3. Strip a trailing quantization suffix — one of `-mxfp4-q8`, `-4bit`, `-8bit`.
+4. Apply canonical remaps: a `meta-llama`-namespaced or `meta-llama-`/`llama-`-prefixed key →
+   `meta-llama/llama-…`; an `nvidia-nemotron-…` key → `nemotron-…`; a `gpt-oss-…` key →
+   `openai/gpt-oss-…`; otherwise the stripped key unchanged.
+
+Normalization affects **only rate-card lookup**; the original `model` string is stored verbatim in
+`ledger_request_credits.model` and the resolved rates are snapshotted per §4.3.
 
 ## 6. Credit calculation: D8 mapping
 
@@ -1773,8 +1893,10 @@ Config changes affect only new request-credit rows.
 | `rewards.provider_share` | number | `0.90` | parse to provider_share_bps=9000 |
 | `rewards.rate_card.default.prompt_credits_per_mtok` | integer | `500000` | default prompt rate |
 | `rewards.rate_card.default.completion_credits_per_mtok` | integer | `1000000` | default completion rate |
+| `rewards.rate_card.default.prompt_cache_hit_credits_per_mtok` | integer | *unset* → prompt rate | default cache-hit rate for prefix-cache-reused prompt tokens (SPEC-024); **when unset, cached tokens bill at the full prompt rate — no discount** (§5.3, §5.5) |
 | `rewards.rate_card.<model>.prompt_credits_per_mtok` | integer | `model-specific` | enumerated model prompt rate |
 | `rewards.rate_card.<model>.completion_credits_per_mtok` | integer | `model-specific` | enumerated model completion rate |
+| `rewards.rate_card.<model>.prompt_cache_hit_credits_per_mtok` | integer | *unset* → prompt rate | enumerated model cache-hit rate (SPEC-024); unset ⇒ full prompt rate |
 | `settlement.cadence_days` | integer | `7` | weekly cadence |
 | `settlement.min_payout_credits` | integer | `500000` | threshold |
 | `settlement.startup_reconcile_window_hours` | integer | `24` | startup scan window |
