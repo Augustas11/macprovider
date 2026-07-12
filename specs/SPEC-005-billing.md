@@ -1,7 +1,7 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
 **Version:** 0.6 (2026-07-12, money-path reconciliation — reconcile the shipped billing formula, ledger schema, and rate-card resolution to code; fold in SPEC-024 prefix-cache billing — runbook item 11)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.2, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2 (prefix-cache billing, folded into §5.3 / §4.3 here)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.2, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
 
 **Change log v0.6 (2026-07-12, money-path reconciliation — runbook item 11; spec-only, reconciled to shipped code):**
 
@@ -40,6 +40,8 @@ disagreement is a spec bug. No behavior change. Six reconciliations:
 SPEC-024's billing sections (v0.1/v0.2 §3–§8) are hereby **absorbed** into SPEC-005 v0.6 as
 the canonical home for prefix-cache billing arithmetic; SPEC-024 retains the provider-local
 cache-**isolation** invariant (§11–§16).
+
+- **R1-audit additions (3-lane codex).** The byte-estimate divisor is the configurable `tier2.output_bytes_per_token_ceiling` (default 16), swept across §6.7/§6.8/§15/AC-DISCONNECT/appendix (the stale `/4` superseded; SPEC-006 §17.7 `/4` flagged as a carried cross-spec drift). Added **§5.3.1** (cache-eligibility gates + NULL⇒COALESCE(0) + the `0<=cache_hit_rate<=prompt_rate` ceiling — SPEC-024 §14 folded in). Added **§7.5a** (settlement-policy `enforce` payout gate) and **§7.5b** (the verified-receipt re-pricing exception that the prior blanket no-update rule contradicted). Reconciled the byte_estimated+nil branch, the bare-`llama-` non-remap, the `rate_card_normalized` log shape, the cache-rate snapshot provenance (rate_card_json, not a §4.3 column), the exact settlement-hash CHECK SQL, and Appendix C's six columns. Amended **SPEC-024 → v0.2.1** to hand billing ownership to this spec (bundled).
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -588,7 +590,7 @@ SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots
 | `settlement_id` | INTEGER | NULL | ledger_payout_ready id | set once |
 | `quarantined` | INTEGER | NOT NULL DEFAULT 0 CHECK(quarantined IN (0,1)) | operator-review marker | 0 to 1 only |
 | `quarantine_reason` | TEXT | NULL | quarantine explanation | set by recovery |
-| `settlement_account_scope_hash` | TEXT | NULL CHECK(settlement_account_scope_hash IS NULL OR (length = 64 AND lowercase-hex)) | 64-hex account-scope hash for settlement partitioning | insert only |
+| `settlement_account_scope_hash` | TEXT | NULL CHECK(settlement_account_scope_hash IS NULL OR (length(settlement_account_scope_hash) = 64 AND settlement_account_scope_hash NOT GLOB '*[^0-9a-f]*')) | 64-lowercase-hex account-scope hash for settlement partitioning | insert only |
 | `settlement_policy_mode` | TEXT | NOT NULL DEFAULT 'legacy' CHECK(settlement_policy_mode IN ('legacy','observe','enforce')) | settlement-policy rollout mode at insert time | insert only |
 | `settlement_policy_version` | TEXT | NULL | settlement-policy version tag | insert only |
 | `recovery_source` | TEXT | NOT NULL DEFAULT 'hot_path' CHECK(recovery_source IN ('hot_path','startup_scan','nightly_reconcile')) | row origin | insert only |
@@ -893,15 +895,23 @@ order: (1) fault/null short-circuits, (2) the completion clamp, (3) the token-va
 usage_source = 'null_error'  OR  fault_flag = 'breaker_qualifying'
     => gross = provider = operator = 0 (rate columns still snapshotted)
 
-# (2) completion clamp — billable completion is the SMALLER of reported and byte-estimate
-#     byte_estimate = ceil(wire_bytes / 16), computed upstream (buyer path)
-effective_completion_tokens =
-    min(completion_tokens, estimated_completion_tokens)   when both present
-    completion_tokens                                     when no estimate
-    estimated_completion_tokens                           when no reported value
-# a provider_reported row whose byte-estimate is the smaller value is CLAMPED and its
-# usage_source is DOWNGRADED to 'byte_estimated'; a byte_estimated row that reports a
-# smaller value uses the reported value (still 'byte_estimated').
+# (2) completion clamp — billable completion is the SMALLER of reported and byte-estimate.
+#     byte_estimate = ceil(wire_bytes / tier2.output_bytes_per_token_ceiling) (default 16, §6.8).
+#     The selection is BRANCHED ON usage_source (billableCompletion, formula.go):
+#
+#   usage_source == 'byte_estimated':
+#       estimate == NULL                      => 0        (even if a reported value exists)
+#       reported != NULL and reported < est   => reported (stays 'byte_estimated')
+#       otherwise                             => estimate
+#   usage_source == 'provider_reported':
+#       reported == NULL, estimate == NULL    => 0
+#       reported == NULL, estimate present    => estimate  (CLAMP: downgrade usage_source -> 'byte_estimated')
+#       estimate == NULL                      => reported
+#       estimate < reported                   => estimate  (CLAMP: downgrade usage_source -> 'byte_estimated')
+#       otherwise                             => reported
+#
+# i.e. a provider_reported row whose byte-estimate is the smaller value is CLAMPED and its
+# usage_source is DOWNGRADED to 'byte_estimated'; a negative reported/estimate is a null_usage_error.
 
 # (3) validity gates — any failure => usage_source='null_error', gross=provider=operator=0
 #   - prompt_tokens, cached_prompt_tokens, effective_completion_tokens each in [0, 10_000_000]
@@ -941,6 +951,40 @@ provider credit over 35 days), so v0.6 documents the shipped `/16` divisor and c
 reverting it; any future change to the divisor or the clamp direction is a money-path decision that
 MUST re-run the G1 probe and append a `beta/DECISION_CRITERIA.md` entry.
 
+### 5.3.1 Cache-eligibility gating and NULL semantics (SPEC-024 §14, folded in)
+
+`cached_prompt_tokens` is a nullable optimization signal, and the cache **discount** is applied by
+the formula only for a row that has passed a coordinator eligibility gate on the hot path
+(`normalizeCachedPromptTokens`, `internal/billing/hotpath.go`) **before** §5.3 runs. The gate,
+applied in order:
+
+1. **NULL** `cached_prompt_tokens` — no cache term. The formula treats a NULL as **`COALESCE(cached,
+   0)`**: `uncached = prompt_tokens`, no cached numerator, and the row bills **identically to
+   pre-SPEC-024** (a legacy / non-cache row is unaffected — implementations MUST NOT null-propagate).
+2. **Invalid** — `cached < 0`, or `prompt_tokens` NULL, or `cached > prompt_tokens` — the row is
+   **quarantined** with `quarantine_reason = 'invalid_cached_prompt_tokens'`, `cached` is cleared,
+   and credits are **zeroed** (`quarantined = 1`, no payable credit).
+3. **Retry** (`attempt_n > 0`) — `cached` is cleared (set NULL); the row is priced **fully at the
+   prompt rate** (cache reuse is trusted only on the first attempt). Not quarantined.
+4. **Non-sticky-hit route** (`sticky_result != "hit"`): a **positive** `cached` is **quarantined**
+   with `quarantine_reason = 'ambiguous_cache'` and credits **zeroed**; a zero `cached` is simply
+   cleared (no discount, not quarantined). Cache reuse is trusted only on a sticky **hit**.
+5. **Sticky hit, first attempt, valid** — `cached` is kept and the §5.3 cache split applies (the
+   discount is earned).
+
+So the cache discount is earned **only** on a `sticky_result = "hit"`, `attempt_n = 0`, valid-`cached`
+row; every other case is either priced at the full prompt rate or **quarantined to zero payable
+credit** — never a partial/ambiguous discount. This is the SPEC-024 §14 (FR-CI11/CI11a/CI12/CI13)
+coordinator cross-check, now normative here. (A `cached_prompt_tokens > prompt_tokens` value is
+additionally rejected by the DB CHECK, §4.3.)
+
+**Cache-hit-rate ceiling (config-validated).** `prompt_cache_hit_credits_per_mtok` MUST satisfy
+`0 <= prompt_cache_hit_credits_per_mtok <= prompt_credits_per_mtok` for every rate-card row,
+enforced at config load (`internal/config/config.go`); a cache-hit rate above the prompt rate, or
+negative, fails startup. So a cached token can never be billed **higher** than an uncached one — the
+cache split can only reduce or hold cost, never increase it. Combined with the §5.5 default (unset ⇒
+full prompt rate), cache accounting is bounded in `[0, prompt_rate]` per token.
+
 ### 5.4 Worked examples
 
 - 200 with 1000 prompt and 2000 completion tokens on 7B rates: gross=5000, provider=4500, operator=500.
@@ -964,21 +1008,37 @@ the coordinator.yaml rate card in this order, stopping at the first hit:
 4. **Empty** entry (all-zero rates) if there is no `default` — priced at zero. (§13.x requires a
    `default` row at config load; cold start without one fails.)
 
-Every fallback past the exact key emits a `rate_card_normalized` structured log with the
-requested key, the normalized key, and which tier matched (`normalized` / `default` / `""`).
+The `rate_card_normalized` structured log is emitted **only when normalization changed the input**
+(`NormalizeModelKey(model) != model`) and a fallback tier was used; an exact hit on the original key
+logs nothing. Its `matched` field carries the **actual matched key** — the normalized key string on
+a normalized hit, `"default"` on the default fallback, or `""` when nothing matched — not a literal
+tier name.
 
 `NormalizeModelKey(model)`:
 
 1. Lowercase and trim whitespace.
 2. If the key has a `<namespace>/` prefix and `<namespace>` is a **known** namespace
-   (`mlx-community`, `openai`, `google`, `meta-llama`, `nvidia`, `qwen`), strip the prefix.
+   (`mlx-community`, `openai`, `google`, `meta-llama`, `nvidia`, `qwen`), strip the prefix
+   (recording the stripped namespace).
 3. Strip a trailing quantization suffix — one of `-mxfp4-q8`, `-4bit`, `-8bit`.
-4. Apply canonical remaps: a `meta-llama`-namespaced or `meta-llama-`/`llama-`-prefixed key →
-   `meta-llama/llama-…`; an `nvidia-nemotron-…` key → `nemotron-…`; a `gpt-oss-…` key →
-   `openai/gpt-oss-…`; otherwise the stripped key unchanged.
+4. Apply canonical remaps (exact, from the shipped `switch`):
+   - stripped namespace was exactly `meta-llama` **and** the remaining key starts with `llama-`
+     → `meta-llama/<key>`;
+   - else the key starts with `meta-llama-` → `meta-llama/` + (key with the `meta-` prefix removed);
+   - else the key starts with `nvidia-nemotron-` → key with the leading `nvidia-` removed;
+   - else the key starts with `gpt-oss-` → `openai/<key>`;
+   - otherwise the stripped key unchanged.
+   **A bare `llama-…` key (no `meta-llama` namespace and no `meta-llama-` prefix) is NOT remapped** —
+   it falls through unchanged, so it resolves to its own rate-card row or `default`, not
+   `meta-llama/…`.
 
 Normalization affects **only rate-card lookup**; the original `model` string is stored verbatim in
-`ledger_request_credits.model` and the resolved rates are snapshotted per §4.3.
+`ledger_request_credits.model`. The resolved **prompt and completion** rates are snapshotted as the
+`prompt_rate_per_mtok` / `completion_rate_per_mtok` columns (§4.3); the **cache-hit** rate has no
+dedicated column — it is captured only inside the full rate-card JSON in
+`ledger_config_snapshots.rate_card_json` (§4.7), which a request row is tied to through the
+`config_snapshot_id` linkage (§4.8), so historical cache-rate reconstruction goes through the
+config snapshot, not `ledger_request_credits`.
 
 ## 6. Credit calculation: D8 mapping
 
@@ -1041,17 +1101,26 @@ If a reconciliation summary needs to count provider-not-reached requests, it doe
 **SPEC-006 section  17.7 status:** client_disconnect.
 **Completion-token state:** provider reported actual.
 **Buyer debit:** prompt + actual completion.
-**SPEC-005 provider-credit rule:** Use provider usage exactly.
+**SPEC-005 provider-credit rule:** Use the provider-reported completion, **subject to the §5.3 clamp** (`min(reported, byte_estimate)` — when a byte estimate is present and smaller, the row is clamped and its `usage_source` downgraded to `byte_estimated`).
 **Closed form:** apply section  5.3 to this row after its token-source selection and overrides.
 
 ### 6.8 Client disconnect pre-v1.2.4
 
 **SPEC-006 section  17.7 status:** client_disconnect.
 **Completion-token state:** byte estimated.
-**Buyer debit:** prompt + `ceil(bytes_emitted_so_far / 4)`.
+**Buyer debit:** prompt + the §5.3 byte estimate.
 **SPEC-005 provider-credit rule:** Use the same estimate as buyer debit.
 **Closed form:** apply section  5.3 to this row after its token-source selection and overrides.
-The byte-estimate completion-token formula is exactly `ceil(bytes_emitted_so_far / 4)` per SPEC-006 v0.9.1 section  17.7 (formula introduced in v0.8.2, unchanged in v0.9.1). SPEC-005 v0.3.1 mirrors this formula here normatively; any future SPEC-006 byte-estimate change MUST trigger a coordinated SPEC-005 bump.
+**Byte-estimate formula (reconciled to shipped code, v0.6).** The completion byte estimate is
+`ceil(bytes_emitted_so_far / tier2.output_bytes_per_token_ceiling)`, floored at 1 token and
+capped at the request-log usage cap (`estimatedCompletionTokensFromBytes`,
+`internal/buyer/server.go`). The ceiling is a coordinator config knob with **default 16**; a
+non-positive ceiling falls back to a `4` divisor defensively (never the normal path). **This
+supersedes the prior `ceil(bytes/4)` text** (runbook item 2). The historical `ceil(bytes/4)` in
+**SPEC-006 v0.9.1 §17.7** is a documented **cross-spec drift** — SPEC-005 billing is authoritative
+on the coordinator estimate (default `/16`); reconciling the SPEC-006 §17.7 buyer-debit wording is
+a separate carried follow-up. Any change to `tier2.output_bytes_per_token_ceiling` or the clamp
+direction is a money-path decision (re-run the G1 probe + append a `beta/DECISION_CRITERIA.md` entry).
 
 ### 6.9 Null usage error path
 
@@ -1129,7 +1198,31 @@ and can roll forward into the next settlement run whose
 The hot path never updates ledger_request_credits.
 Settlement may update settled and settlement_id.
 Recovery may update quarantine fields.
-No process may update tokens, rates, split snapshots, or credit amounts.
+Tokens, rates, split snapshots, and credit amounts are otherwise immutable — **with one shipped
+exception (v0.6): verified-receipt finalization (§7.5b).**
+
+### 7.5a Settlement-policy mode (columns reconciled, v0.6)
+
+Each row records `settlement_policy_mode` (`legacy` / `observe` / `enforce`, default `legacy`) and
+`settlement_policy_version` at insert (§4.3). The payable-credits projection
+(`spec022_payable_request_credits`) treats them as: `legacy` and `observe` rows are payable on the
+usual `quarantined = 0` basis (observe is measure-only); an **`enforce`** row is payout-eligible
+only when it additionally has a **matched route, a matched settlement receipt, a matching policy
+version, a verified outcome, and no overlapping row** (`internal/billing/store.go` payable query).
+`settlement_account_scope_hash` is the 64-hex account partition the enforce gate matches on. This is
+the SPEC-022 settlement-policy enforcement surface; SPEC-022 is authoritative on the policy
+lifecycle, SPEC-005 documents only how the columns gate the payable projection.
+
+### 7.5b Verified-receipt finalization (re-pricing exception, v0.6)
+
+When a **verified settlement receipt** arrives for a request (SPEC-015/016), the coordinator
+**re-prices** the existing `ledger_request_credits` row from the receipt's authoritative token
+counts (`internal/billing/settlement_receipts.go`): it UPDATEs `prompt_tokens`,
+`charged_prompt_tokens`, `completion_tokens`, `estimated_completion_tokens` (→ NULL),
+`usage_source`, `gross_credits`, `provider_credits`, `fault_flag`, and `updated_at_utc` — running
+the row back through the §5.3 formula with the receipt's counts. This is the single sanctioned
+mutation of token/credit fields after insert; it is idempotent and applies only to a row matched by
+`id` under a verified receipt. Any OTHER process updating tokens/rates/credits remains forbidden.
 
 ## 8. Multi-attempt attribution (D10)
 
@@ -1893,7 +1986,7 @@ Config changes affect only new request-credit rows.
 | `rewards.provider_share` | number | `0.90` | parse to provider_share_bps=9000 |
 | `rewards.rate_card.default.prompt_credits_per_mtok` | integer | `500000` | default prompt rate |
 | `rewards.rate_card.default.completion_credits_per_mtok` | integer | `1000000` | default completion rate |
-| `rewards.rate_card.default.prompt_cache_hit_credits_per_mtok` | integer | *unset* → prompt rate | default cache-hit rate for prefix-cache-reused prompt tokens (SPEC-024); **when unset, cached tokens bill at the full prompt rate — no discount** (§5.3, §5.5) |
+| `rewards.rate_card.default.prompt_cache_hit_credits_per_mtok` | integer | *unset* → prompt rate | default cache-hit rate for prefix-cache-reused prompt tokens (SPEC-024); **when unset, cached tokens bill at the full prompt rate — no discount** (§5.3, §5.5). Config load enforces `0 <= value <= prompt_credits_per_mtok` (§5.3.1); a value above the prompt rate or negative fails startup. |
 | `rewards.rate_card.<model>.prompt_credits_per_mtok` | integer | `model-specific` | enumerated model prompt rate |
 | `rewards.rate_card.<model>.completion_credits_per_mtok` | integer | `model-specific` | enumerated model completion rate |
 | `rewards.rate_card.<model>.prompt_cache_hit_credits_per_mtok` | integer | *unset* → prompt rate | enumerated model cache-hit rate (SPEC-024); unset ⇒ full prompt rate |
@@ -1965,7 +2058,7 @@ resolution rows.
 ### 15.1 Pre-v1.2.4 cancel usage
 
 Use byte-estimation fallback only when usage is absent.
-Use the same estimate as SPEC-006 v0.9.1 section  17.7 buyer debit: `ceil(bytes_emitted_so_far / 4)`.
+Use the §5.3 byte estimate: `ceil(bytes_emitted_so_far / tier2.output_bytes_per_token_ceiling)` (default 16; the prior `/4` is superseded — runbook item 2 / § 6.8).
 Set usage_source=byte_estimated.
 
 ### 15.2 attempt_n derivation
@@ -2223,7 +2316,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-DISCONNECT-ESTIMATE: Cancel byte estimate
 
 **Verification:** Fixture bytes_emitted=120 prompt=1000 usage absent.
-**Expected:** estimated_completion_tokens=30 by SPEC-006 v0.9.1 section  17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
+**Expected:** estimated_completion_tokens=8 by `ceil(bytes_emitted_so_far / tier2.output_bytes_per_token_ceiling)` = ceil(120/16) = 8 (default ceiling; the prior `/4`→30 is superseded, § 6.8) and gross includes 8 completion.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -2705,7 +2798,31 @@ PARTIAL — credit-arm pending v0.5.
 
 - Type: INTEGER.
 - Constraint: NULL CHECK(prompt_tokens IS NULL OR prompt_tokens >= 0).
-- Meaning: prompt tokens.
+- Meaning: prompt tokens (the value priced by §5.3).
+- Update rule: insert only.
+- Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
+
+#### `ledger_request_credits.charged_prompt_tokens`
+
+- Type: INTEGER.
+- Constraint: NULL CHECK(charged_prompt_tokens IS NULL OR charged_prompt_tokens >= 0).
+- Meaning: prompt tokens actually billed after any cache split (diagnostic).
+- Update rule: insert only.
+- Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
+
+#### `ledger_request_credits.provider_reported_prompt_tokens`
+
+- Type: INTEGER.
+- Constraint: NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0).
+- Meaning: raw provider-reported prompt count before normalization (diagnostic).
+- Update rule: insert only.
+- Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
+
+#### `ledger_request_credits.cached_prompt_tokens`
+
+- Type: INTEGER.
+- Constraint: NULL CHECK(cached_prompt_tokens IS NULL OR (cached_prompt_tokens >= 0 AND cached_prompt_tokens <= prompt_tokens)).
+- Meaning: prefix-cache-reused prompt tokens (SPEC-024); priced at the cache-hit rate (§5.3) only on an eligible sticky-hit first-attempt row (§5.3.1).
 - Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
 
@@ -2825,8 +2942,32 @@ PARTIAL — credit-arm pending v0.5.
 
 - Type: TEXT.
 - Constraint: NULL.
-- Meaning: quarantine explanation.
+- Meaning: quarantine explanation (includes `invalid_cached_prompt_tokens` and `ambiguous_cache`, §5.3.1).
 - Update rule: set by recovery.
+- Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
+
+#### `ledger_request_credits.settlement_account_scope_hash`
+
+- Type: TEXT.
+- Constraint: NULL CHECK(settlement_account_scope_hash IS NULL OR (length(settlement_account_scope_hash) = 64 AND settlement_account_scope_hash NOT GLOB '*[^0-9a-f]*')).
+- Meaning: 64-lowercase-hex account-scope hash for settlement partitioning (SPEC-022 policy).
+- Update rule: insert only.
+- Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
+
+#### `ledger_request_credits.settlement_policy_mode`
+
+- Type: TEXT.
+- Constraint: NOT NULL DEFAULT 'legacy' CHECK(settlement_policy_mode IN ('legacy','observe','enforce')).
+- Meaning: settlement-policy rollout mode recorded at insert (§7.5a); `enforce` rows are payout-gated on matched route/receipt/policy-version/verified-outcome/non-overlap.
+- Update rule: insert only.
+- Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
+
+#### `ledger_request_credits.settlement_policy_version`
+
+- Type: TEXT.
+- Constraint: NULL.
+- Meaning: settlement-policy version tag at insert (§7.5a).
+- Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
 
 #### `ledger_request_credits.recovery_source`
@@ -3256,7 +3397,7 @@ PARTIAL — credit-arm pending v0.5.
 - SPEC-006 status: client_disconnect.
 - Completion-token state: provider reported actual.
 - Buyer debit basis: prompt + actual completion.
-- Provider credit action: Use provider usage exactly.
+- Provider credit action: Use provider-reported completion, subject to the § 5.3 clamp (min(reported, byte_estimate)).
 - Verification function: pass fixture through the section  5.3 arithmetic after row-specific token selection.
 - Expected network use: none.
 
@@ -3264,7 +3405,7 @@ PARTIAL — credit-arm pending v0.5.
 
 - SPEC-006 status: client_disconnect.
 - Completion-token state: byte estimated.
-- Buyer debit basis: prompt + `ceil(bytes_emitted_so_far / 4)`.
+- Buyer debit basis: prompt + `ceil(bytes_emitted_so_far / tier2.output_bytes_per_token_ceiling)` (default 16; § 6.8).
 - Provider credit action: Use the same estimate as buyer debit.
 - Verification function: pass fixture through the section  5.3 arithmetic after row-specific token selection.
 - Expected network use: none.
@@ -3444,7 +3585,7 @@ PARTIAL — credit-arm pending v0.5.
 
 - Claim: Cancel byte estimate.
 - Setup: Fixture bytes_emitted=120 prompt=1000 usage absent.
-- Oracle: estimated_completion_tokens=30 by SPEC-006 v0.9.1 section  17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
+- Oracle: estimated_completion_tokens=8 by `ceil(bytes_emitted_so_far / tier2.output_bytes_per_token_ceiling)` = ceil(120/16) = 8 (default ceiling; § 6.8) and gross includes 8 completion.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 

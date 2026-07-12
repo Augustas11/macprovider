@@ -1,8 +1,22 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2 (2026-07-12, provider-local cache-isolation reconciliation)
-**Status:** v0.1 billing sections locked; v0.2 adds the isolation baseline (§11–§16) reconciled to shipped code.
-**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.5 (billing), SPEC-006 v0.9.8 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+**Version:** 0.2.1 (2026-07-12, billing sections superseded by SPEC-005 v0.6)
+**Status:** **Billing (§3–§8) MOVED to SPEC-005 v0.6** (canonical); SPEC-024 retains the provider-local cache-**isolation** baseline (§11–§16).
+**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.8 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.1 (2026-07-12, billing ownership handoff to SPEC-005 v0.6):**
+- **SPEC-024 §3–§8 (the billing sections) are SUPERSEDED by SPEC-005 v0.6** and retained here only
+  as historical/reference text. SPEC-005 v0.6 is now the **canonical** owner of prefix-cache
+  billing: the `cached_prompt_tokens` ledger column (§4.3), the `uncached@prompt-rate +
+  cached@cache-hit-rate` formula split with the unset-rate ⇒ full-prompt-rate default and the
+  `0 <= cache_hit_rate <= prompt_rate` ceiling (§5.3 / §5.3.1), the eligibility gates
+  (sticky-hit / first-attempt / `ambiguous_cache` / `invalid_cached_prompt_tokens` quarantine,
+  §5.3.1), and the `prompt_cache_hit_credits_per_mtok` rate-card key (§13). Where §3–§8 below and
+  SPEC-005 v0.6 differ, **SPEC-005 v0.6 governs.**
+- SPEC-024 continues to **own** the provider-local cache-**isolation** invariant (§11–§16): cache
+  keying, cross-account non-leakage, the coordinator cross-check semantics that the SPEC-005
+  eligibility gates implement, and the ingest/deployment invariants.
+- Dependency on SPEC-005 bumped v0.5 → v0.6.
 
 **Change log v0.2 (2026-07-12, provider-local cache-isolation baseline — spec-only, reconciled to shipped code):**
 v0.1 specified the *accounting* of a provider-reported `cached_prompt_tokens` but left the number's *provenance safety* unspecified: the entire provider-local KV/conversation cache keying, the cross-account isolation invariant, and coordinator cross-checking were deferred (§2/§7). v0.2 writes that missing normative baseline, matching the shipped Swift provider + Go coordinator + gateway.
@@ -39,6 +53,10 @@ SPEC-024 specifies the billing treatment for provider-reported prefix-cache reus
 - **Tool-call replies (reconciled to shipped billing, v0.2).** The v0.1 draft said prefix-cache reuse for tool-call replies was "out of scope" and that accounting was "restricted to system, user, and assistant message-content prefixes." **That is NOT what shipped, and v0.2 supersedes it.** The provider renders tool messages and assistant tool-call content into the prompt (`ToolPromptRenderer`, `ModelRuntime.swift`), that full rendered prompt (`prompt_token_ids ‖ generated_token_ids`) is tokenized and cached (§11 FR-CI3), and the coordinator prices the **entire undifferentiated `cached_prompt_tokens` aggregate at the cache-hit rate with no message-type/role segmentation** (`phase4-coordinator/internal/billing/formula.go`). So tool-history tokens **do** participate in the cache LCP **and do** receive the discount. There is no shipped role filter; v0.1's "tool-call replies out of scope" is retired. (Out-of-scope items below are the ones that remain genuinely excluded.)
 - Buyer-side cache-hint headers are out of scope. Buyers MUST NOT send `X-MacProvider-Expect-Cached-Prefix` or an equivalent v0.1 hint. Providers are the source of truth for actual cache reuse; buyers observe `usage.cached_prompt_tokens`.
 - Rate-card hot reload for the new field is out of scope. SPEC-005 Wave 0/1 work continues to govern hot-reload semantics. v0.1 IMPL MAY require coordinator restart to activate `prompt_cache_hit_rate_per_mtok`.
+
+> **⚠ SUPERSEDED (v0.2.1): §3–§8 billing sections are now owned by SPEC-005 v0.6.** The text below
+> is retained for history; where it differs from SPEC-005 v0.6, **SPEC-005 v0.6 governs**. SPEC-024's
+> live scope is the provider-local cache-**isolation** baseline (§11–§16).
 
 ## 3. Wire Contract (SPEC-002 Addendum)
 
