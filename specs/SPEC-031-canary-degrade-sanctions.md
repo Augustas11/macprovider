@@ -549,8 +549,10 @@ containment:
   it never creates persistent containment state a malicious set of providers could
   weaponize.** This is the load-bearing Sybil-safety invariant, scoped precisely:
   no *correlated-majority verdict* (and no provider behavior of any trust level —
-  SPEC-008 `attested` proves device identity, not independent ownership, and one
-  operator can hold several attested/pinned IDs) may automatically trigger a bank
+  SPEC-008 `attested`, in shipped code the `self_signed` tier, proves **neither device
+  identity nor independent ownership** (SPEC-008 v0.4 §7.3: it is a self-signed software-key
+  custody + session binding; any software P-256 key satisfies it), and one operator can hold
+  several attested/pinned IDs) may automatically trigger a bank
   rollback, a config-fault attribution, a **persistent** fingerprint suspension, or
   any other durable *containment* state. The only automatic responses to
   correlation are *within* the current epoch (discard its results) plus a
@@ -1067,9 +1069,9 @@ FR-CAN14 is required before the breaker and canary coexist under load.
     re-fired as it had already PASSED at R3):
     - **FR-CAN23 correlated-fault redesigned to be Sybil-proof by construction**
       (both lanes HIGH). The R3 "≥2 operator-trusted (pinned/attested) identities
-      corroborate" rule was still exploitable — SPEC-008 `attested` proves device
-      identity, not independent ownership, so one operator with two attested/pinned
-      IDs met the bar and could force a bank rollback. Replaced the trusted-provider
+      corroborate" rule was still exploitable — SPEC-008 `attested` (shipped `self_signed`)
+      proves neither device identity nor independent ownership (SPEC-008 v0.4 §7.3), so one
+      operator with two attested/pinned IDs met the bar and could force a bank rollback. Replaced the trusted-provider
       quorum entirely: **provider correlation is now a suspicion signal only, and
       the sole thing that authorizes an automatic challenge-bank rollback is a
       coordinator-controlled known-good control failing** — no set of providers, of
