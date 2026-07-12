@@ -274,16 +274,21 @@ func (h *Handler) HandleJoin(w http.ResponseWriter, r *http.Request) {
 		_ = joinOpenBetaPage.Execute(w, nil)
 		return
 	}
-	if _, err := h.Store.ValidateReferral(r.Context(), h.Policy, code, h.now()); errors.Is(err, auth.ErrReferralExhausted) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		h.observe("join", "full")
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		_ = joinFullPage.Execute(w, nil)
+	// FIX-570 A6/B7 (H4-product): exhausted, expired, and revoked invites each
+	// render their OWN branded page carrying a working request-access link. Only
+	// malformed/forged/invalid codes fall through to a raw 404.
+	_, err := h.Store.ValidateReferral(r.Context(), h.Policy, code, h.now())
+	switch {
+	case errors.Is(err, auth.ErrReferralExhausted):
+		h.renderBrandedJoin(w, r, joinFullPage, "full")
 		return
-	} else if err != nil {
+	case errors.Is(err, auth.ErrReferralExpired):
+		h.renderBrandedJoin(w, r, joinExpiredPage, "expired")
+		return
+	case errors.Is(err, auth.ErrReferralRevoked):
+		h.renderBrandedJoin(w, r, joinRevokedPage, "revoked")
+		return
+	case err != nil:
 		h.observe("join", "not_found")
 		http.NotFound(w, r)
 		return
@@ -297,6 +302,24 @@ func (h *Handler) HandleJoin(w http.ResponseWriter, r *http.Request) {
 	if err := joinPage.Execute(w, struct{ Code string }{Code: code}); err != nil {
 		return
 	}
+}
+
+// brandedJoinView is the view model for the unavailable-invite pages. It carries
+// the request-access link so the exhausted/expired/revoked templates render a
+// working CTA (FIX-570 A6/B7 — previously joinFullPage executed with nil, leaving
+// {{.RequestAccessURL}} empty).
+type brandedJoinView struct {
+	RequestAccessURL string
+}
+
+func (h *Handler) renderBrandedJoin(w http.ResponseWriter, r *http.Request, tmpl *template.Template, outcome string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	h.observe("join", outcome)
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_ = tmpl.Execute(w, brandedJoinView{RequestAccessURL: h.requestAccessURL()})
 }
 
 func (h *Handler) acquireValidationSlot(w http.ResponseWriter, event string) bool {

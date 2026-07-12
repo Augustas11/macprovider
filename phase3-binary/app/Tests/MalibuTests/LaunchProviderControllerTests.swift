@@ -312,6 +312,34 @@ final class LaunchProviderControllerTests: XCTestCase {
         }
     }
 
+    // PROD-M4: after policy discovery leaves the invite non-required, an
+    // authoritative `referral_required` rejection from the install log must
+    // re-gate to a mandatory invite (not a generic Retry with no invite field).
+    func testAuthoritativeReferralRequiredReGatesToMandatoryInvite() async {
+        let harness = Harness()
+        harness.referralPreflight = ReferralPreflightResult(valid: true, reason: "disabled", required: false)
+        harness.installLogLines = ["macprovider-install FATAL: MACPROVIDER_REFERRAL_REJECTED referral_required"]
+        harness.cliInstallError = NSError(
+            domain: "tests", code: 6, userInfo: [NSLocalizedDescriptionKey: "install failed"]
+        )
+        let controller = makeController(harness)
+
+        await controller.refreshReferralPolicy()
+        XCTAssertFalse(controller.referralRequired)
+
+        await controller.launch()
+
+        XCTAssertTrue(controller.referralRequired)
+        XCTAssertEqual(
+            controller.stage,
+            .failed(
+                stage: "referral",
+                retryable: true,
+                message: "An invite code is required. Enter a new invite code."
+            )
+        )
+    }
+
     func testAttachFailureDoesNotRegisterLoginItemOrMarkLive() async {
         let harness = Harness()
         harness.attachHealthy = false
@@ -368,6 +396,7 @@ final class LaunchProviderControllerTests: XCTestCase {
                 runCLIInstall: { referralCode, onLogLine in
                     XCTAssertEqual(referralCode, self.expectedReferralCode)
                     self.cliInstallRuns += 1
+                    for line in self.installLogLines { onLogLine(line) }
                     if let error = self.cliInstallError { throw error }
                     self.localInstallSucceededAfterInstall = self.markLocalInstallSucceededAfterInstall
                     onLogLine("install.sh finished")

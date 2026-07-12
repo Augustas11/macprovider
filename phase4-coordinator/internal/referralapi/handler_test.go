@@ -252,6 +252,77 @@ func TestJoinLandingValidatesCodeAndOffersDownloadAndCopy(t *testing.T) {
 	}
 }
 
+// TestJoinBrandedUnavailablePagesCarryRequestAccessURL is the FIX-570 H4-product
+// regression: exhausted, expired, and revoked invites each render their OWN
+// branded page (not a raw 404) with a working request-access href; only
+// malformed/forged codes 404.
+func TestJoinBrandedUnavailablePagesCarryRequestAccessURL(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const requestAccess = "https://example.test/waitlist"
+	h := &Handler{Store: store, Policy: apiPolicy(), Now: time.Now, RequestAccessURL: requestAccess, PublicLimiter: NewBoundedLimiter(100, time.Minute, 100)}
+	hrefFor := func(code string) (int, string) {
+		w := httptest.NewRecorder()
+		h.HandleJoin(w, httptest.NewRequest(http.MethodGet, "/j/"+code, nil))
+		return w.Code, w.Body.String()
+	}
+
+	// Exhausted: cap-1 seed consumed once.
+	exhausted, err := store.CreateSeedReferral(context.Background(), apiPolicy(), "h4exhausted", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueTokenWithReferral(context.Background(), "h4-provider", "h4exhausted", exhausted, apiPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	// Expired: seed with a past expiry.
+	past := time.Now().UTC().Add(-time.Hour)
+	expired, err := store.CreateSeedReferral(context.Background(), apiPolicy(), "h4expired", 1, &past)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Revoked: seed then revoke the issuer.
+	revoked, err := store.CreateSeedReferral(context.Background(), apiPolicy(), "h4revoked", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeReferralIssuer(context.Background(), apiPolicy().Campaign, "h4revoked", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	wantHref := `href="` + requestAccess + `"`
+	cases := []struct {
+		name, code, marker string
+	}{
+		{"exhausted", exhausted, "This invite filled up"},
+		{"expired", expired, "This invite is no longer available"},
+		{"revoked", revoked, "This invite is no longer available"},
+	}
+	for _, tc := range cases {
+		status, body := hrefFor(tc.code)
+		if status != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", tc.name, status, body)
+		}
+		if !strings.Contains(body, tc.marker) {
+			t.Fatalf("%s: missing branded marker %q in %s", tc.name, tc.marker, body)
+		}
+		if !strings.Contains(body, wantHref) {
+			t.Fatalf("%s: missing request-access href %q in %s", tc.name, wantHref, body)
+		}
+		if strings.Contains(body, "download.malibu.tech") {
+			t.Fatalf("%s: unavailable page must not offer the download CTA: %s", tc.name, body)
+		}
+	}
+
+	// Malformed/forged codes still 404.
+	if status, _ := hrefFor("not-a-real-code"); status != http.StatusNotFound {
+		t.Fatalf("malformed code status=%d want 404", status)
+	}
+}
+
 func TestJoinServesOpenBetaLandingWhenGateDisabled(t *testing.T) {
 	policy := apiPolicy()
 	policy.RequireForRegistration = false

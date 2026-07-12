@@ -74,3 +74,77 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.thermalChip(snapshot), "Serious")
     }
 }
+
+/// PROD-M2 / PROD-M3: the dashboard renders the referral status envelope. These
+/// pin the new cross-lane fields (`configured_bonus_uses`, the
+/// `pending_social_review`/`social_review_failed` advocacy states, and
+/// `review_due_at`) and the corrected pre-verification bonus copy.
+final class ProviderReferralStatusDecodingTests: XCTestCase {
+    private func decode(_ json: String) throws -> ProviderReferralStatus {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ProviderReferralStatus.self, from: Data(json.utf8))
+    }
+
+    // PROD-M2: the "share to unlock N" copy uses configured_bonus_uses, NOT the
+    // awarded bonus_uses (0 until promotion). The explicit 0 must not become 2.
+    func testShareIncentiveUsesConfiguredBonusNotAwardedZero() throws {
+        let status = try decode("""
+        {"advocacy_status":"eligible","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":"https://malibu.tech/abc","bonus_uses":0,"configured_bonus_uses":2}
+        """)
+        XCTAssertEqual(status.bonusUses, 0)
+        XCTAssertEqual(status.configuredBonusUses, 2)
+        XCTAssertEqual(status.shareIncentiveBonusUses, 2)
+        XCTAssertEqual(status.shareIncentivePhrase, "two more invite uses")
+    }
+
+    func testShareIncentiveHonoursNonDefaultConfiguredBonus() throws {
+        let status = try decode("""
+        {"advocacy_status":"eligible","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null,"bonus_uses":0,"configured_bonus_uses":1}
+        """)
+        XCTAssertEqual(status.shareIncentiveBonusUses, 1)
+        XCTAssertEqual(status.shareIncentivePhrase, "one more invite use")
+    }
+
+    // Back-compat: an older coordinator advertising neither field falls back to
+    // the historical default of 2.
+    func testShareIncentiveFallsBackToTwoWhenFieldsAbsent() throws {
+        let status = try decode("""
+        {"advocacy_status":"eligible","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null}
+        """)
+        XCTAssertNil(status.configuredBonusUses)
+        XCTAssertNil(status.bonusUses)
+        XCTAssertEqual(status.shareIncentiveBonusUses, 2)
+    }
+
+    // PROD-M3: pending review decodes advocacy_status + review_due_at.
+    func testPendingSocialReviewDecodesReviewDueAt() throws {
+        let status = try decode("""
+        {"advocacy_status":"pending_social_review","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null,"bonus_uses":0,"configured_bonus_uses":2,
+         "review_due_at":"2026-07-12T18:30:00Z"}
+        """)
+        XCTAssertTrue(status.isPendingSocialReview)
+        XCTAssertEqual(status.advocacyStatus, ProviderReferralStatus.pendingSocialReview)
+        XCTAssertEqual(status.reviewDueAt, ISO8601DateFormatter().date(from: "2026-07-12T18:30:00Z"))
+    }
+
+    // PROD-M3: the terminal failed state decodes with no review_due_at.
+    func testFailedReviewStateDecodesWithoutReviewDueAt() throws {
+        let status = try decode("""
+        {"advocacy_status":"social_review_failed","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null}
+        """)
+        XCTAssertFalse(status.isPendingSocialReview)
+        XCTAssertNil(status.reviewDueAt)
+        XCTAssertEqual(status.advocacyStatus, "social_review_failed")
+    }
+}

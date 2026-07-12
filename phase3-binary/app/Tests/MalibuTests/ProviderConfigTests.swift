@@ -585,4 +585,40 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertEqual(lstat(url.path, &st), 0)
         return st.st_mode
     }
+
+    // PROD-H3: "Start as a new provider" must retire the COMPLETE identity
+    // bundle. Leaving the durable provider_id file (or the app marker) behind
+    // makes the installer's choose_provider_id reuse the old bound provider_id.
+    func testStartFreshArchivesCompleteIdentityBundle() throws {
+        let paths = try makeTempPaths()
+        let fm = FileManager.default
+        try paths.ensureDirectories()
+        let providerIDFile = ProviderConfig.providerIDFile(paths: paths)
+        try "provider_id: mp-old-bound-identity\nmodel: test\n"
+            .write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try "mp-old-bound-identity\n"
+            .write(to: providerIDFile, atomically: true, encoding: .utf8)
+        XCTAssertTrue(fm.createFile(atPath: paths.appMarkerFile.path, contents: Data()))
+
+        let archive = try ProviderConfig.startFreshMovingCLIConfigAside(paths: paths)
+
+        // The whole bundle is moved out of the live locations, so the next
+        // install generates a brand-new provider_id.
+        XCTAssertFalse(fm.fileExists(atPath: paths.configFile.path))
+        XCTAssertFalse(fm.fileExists(atPath: providerIDFile.path))
+        XCTAssertFalse(fm.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertNil(ProviderConfig.readProviderID(paths: paths))
+
+        // Every artifact is preserved in the returned archive directory.
+        let archiveDir = try XCTUnwrap(archive)
+        XCTAssertTrue(fm.fileExists(atPath: archiveDir.appendingPathComponent("config.yaml").path))
+        XCTAssertTrue(fm.fileExists(atPath: archiveDir.appendingPathComponent("provider_id").path))
+        XCTAssertTrue(fm.fileExists(atPath: archiveDir.appendingPathComponent(".installed-by-app").path))
+    }
+
+    func testStartFreshReturnsNilWhenNoIdentityPresent() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        XCTAssertNil(try ProviderConfig.startFreshMovingCLIConfigAside(paths: paths))
+    }
 }
