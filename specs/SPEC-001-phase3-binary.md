@@ -1,7 +1,7 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
 **Version:** 1.7 (2026-07-12, binary-1.8.31 drift reconciliation: FR-11 semaphore, FR-16 idle-prewarm, control-socket 17-frame inventory)
-**Revision:** v1.3.1 adds the `provider_token` (yaml, top-level) /
+**Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
 coordinator WS connect when the token is non-empty. Closes
@@ -34,7 +34,8 @@ plus the additive wire surface that accumulated in between. No code change.
   `idle_prewarm.*` config keys (FR-19), gated on idle-threshold **and** enabled /
   zero-in-flight / thermal / power / model-loaded, battery-gated off by default,
   emitting a single `idle_prewarm_event` frame type whose `event` field carries the
-  lifecycle (`fired`/`completed`/`failed`/`cancelled`/`idle_prewarm_skipped`) (§6.15.4).
+  raw lifecycle string (`idle_prewarm_fired`/`_completed`/`_failed`/
+  `_cancelled_by_real_request`/`_skipped`) (§6.15.4).
 - **Control socket (§6.9.2, R-6.9.3a).** The shipped `ControlSocketFrame` enum has
   **17** frame types; §6.9 previously documented 5. The 12 additions are enumerated
   with owner cross-refs — receipt-key rotation (SPEC-015), App-track
@@ -44,13 +45,14 @@ plus the additive wire surface that accumulated in between. No code change.
   rotation is enabled (not warm-swap only), and the peer is authenticated by
   effective UID only (not app identity).
 - **§6.15 (new) — additive coordinator-wire surface.** Enumerates the fields/frames
-  that later specs own but that transit the binary: `auth_request`
-  tier2/credential/catalog-admission fields (SPEC-008/010/022/026); heartbeat
-  `hardware_summary` (untrusted SPEC-017 display fallback) / all six spec-decode
-  fields (SPEC-028) / `last_autoupdate_event` on heartbeat **and** `state_update`
-  (SPEC-020); inbound `se_liveness_challenge` and the `losslessness_probe_v1.*`
-  family (SPEC-008); outbound `se_liveness_response` (SPEC-008) and the
-  SPEC-001-owned `idle_prewarm_event`. (Numbered §6.15 to avoid the existing §6.12.)
+  that later specs own but that transit the binary: `auth_request` tier2
+  (SPEC-008) / `credential_bootstrap` (SPEC-003 FR-C9) / catalog-admission
+  (SPEC-010/022) fields; heartbeat `hardware_summary` (untrusted SPEC-017 display
+  fallback, sub-schema carried here) / all six spec-decode fields (SPEC-028) /
+  `last_autoupdate_event` on heartbeat **and** `state_update` (SPEC-020); inbound
+  `se_liveness_challenge` (SPEC-008) and the `losslessness_probe_v1.*` family
+  (SPEC-030); outbound `se_liveness_response` (SPEC-008) and the SPEC-001-owned
+  `idle_prewarm_event`. (Numbered §6.15 to avoid the existing §6.12.)
 - **FR-19.** Adds the six `idle_prewarm.*` config keys / `--idle-prewarm*` flags.
 
 **Change log v1.6:**
@@ -229,7 +231,7 @@ behind the Phase 4 coordinator.
 - Two-stage context length pre-flight (envelope size + token count)
 - Per-RAM-tier capacity computation at startup (8 GB, 16 GB, 32 GB+ tiers)
 - Concurrent-request serialization via a blocking semaphore with configurable max concurrency (FR-11; the ≤ v1.6 "bounded reject-queue + 429" was never shipped)
-- Mid-stream client disconnect detection and slot release within 5 seconds
+- Mid-stream client disconnect detection and slot release within 5 seconds (FR-10 — aspirational; not fully wired in the shipped binary, see FR-10)
 - Graceful SIGTERM handling: drain in-flight requests before exit
 - Outbound coordinator WebSocket client (connects to configurable URL)
 - Coordinator handshake with tier, model, capacity, and throughput metadata
@@ -252,17 +254,30 @@ behind the Phase 4 coordinator.
   restart loop to change served model) and #2 (red-dashboard / WS
   reconnect on swap).
 
-### In Tier 2 roadmap scope (designed-in but not implemented)
+### In Tier 2 roadmap scope (original Phase-3 design intent)
 
 - `TrustGate` middleware: request-level trust evaluation (attestation-based auth)
 - `InputDecryptor` middleware: buyer-side encrypted prompt decryption
 - `ResponseSeal` middleware: output signing or encryption for buyer verification
-- `AttestationProvider` coordinator component: hardware attestation proof on handshake
+- `AttestationProvider` coordinator component: attestation token on handshake
 - Coordinator tier capability upgrade (`tier: 1` to `tier: 2`)
 
-Each of these is a named Swift protocol with a Tier 1 no-op (passthrough)
-implementation. The request handler chain has explicit insertion points
-for each. See Section 3 for hook-point diagram.
+Each of these was originally a named Swift protocol with a Tier 1 no-op
+(passthrough) implementation and explicit insertion points in the request handler
+chain (see Section 3 for the hook-point diagram).
+
+> **Reconciled v1.7 — no longer "not implemented".** The shipped binary
+> (`binary_version` 1.8.31) has since implemented substantial Tier-2 machinery
+> owned by **SPEC-008**: the fresh-connect `auth_request` advertises
+> `tier2_capabilities` (encrypted-leg / attestation / AEAD suites), the
+> proof-stage handshake generates an **attestation token**, and the binary
+> answers `se_liveness_challenge` (§6.15). This is **not** hardware-identity
+> proof — SPEC-008's default `self_signed` tier does **not** prove
+> Secure-Enclave residence or hardware identity; the earlier "hardware
+> attestation proof" wording overstated it. Legacy `hello.tier = 1` remains
+> accurate for the v1 path; the modern v2 trust pipeline is SPEC-008's and is
+> live, not roadmap. SPEC-001 carries only the transport (§6.15); SPEC-008 owns
+> the trust semantics.
 
 ### Out of scope
 
@@ -551,14 +566,19 @@ significantly less than expected for the tier (e.g., heavy background
 apps), it logs a warning and reduces the advertised context capacity
 proportionally.
 
-**FR-10. Mid-stream disconnect cleanup.**
-When a client disconnects during a streaming response, the binary
-detects the broken connection (via NIO channel close event), cancels
-the in-flight inference task, and releases the request slot. The slot
-must be available for a new request within 5 seconds of disconnect
-detection. Phase 2 adversarial testing (`midstream_disconnect` workload)
-found `mlx_lm.server` handles this via `BrokenPipeError`; the binary
-must do at least as well, without leaking long-running generation.
+**FR-10. Mid-stream disconnect cleanup (reconciled v1.7 — aspirational, not
+shipped).** The intended behavior is: when a client disconnects during a
+streaming response, the binary detects the broken connection (via NIO channel
+close event), cancels the in-flight inference task, and releases the request
+slot within 5 seconds. **Shipped reality diverges:** streaming inference runs in
+a **detached** task (`HTTPServer.swift`) and calls the runtime `stream` with no
+channel-derived cancellation predicate (`ModelRuntime` `shouldCancel` defaults to
+`false`); a failed response write is not propagated back into generation. So a
+mid-stream client disconnect does **not** cancel the in-flight generation or
+guarantee the 5-second slot release. Phase 2 testing found `mlx_lm.server`
+handles this via `BrokenPipeError`; the binary does **not** yet match that.
+Wiring channel-close → `Task.cancel` (shared with the FR-11 waiter-cancellation
+gap) is a carried follow-up, not a shipped v1.7 guarantee.
 
 **FR-11. Concurrent request handling — semaphore serialization (reconciled v1.7).**
 The binary bounds concurrent inference to advertised `max_concurrency`
@@ -690,11 +710,13 @@ default** (`idle_prewarm.run_on_battery`, default false; power source read via
 
 Lifecycle is reported on the coordinator wire as a **single frame type**,
 `type: "idle_prewarm_event"`, whose `event` field carries the transition —
-`fired`, `completed`, `failed`, `cancelled` (pre-empted by a real request), or
-`idle_prewarm_skipped`; a `reason` is attached only on the skipped event. There
+`idle_prewarm_fired`, `idle_prewarm_completed`, `idle_prewarm_failed`,
+`idle_prewarm_cancelled_by_real_request` (pre-empted by a real request), or
+`idle_prewarm_skipped` (the raw `IdlePrewarmer` strings, forwarded unchanged); a
+`reason` is attached only on the skipped event. There
 is **no** distinct `idle_prewarm_skipped` frame type, and a single run emits
-*multiple* lifecycle events (e.g. `fired` then `completed`), not one frame per
-run (§6.15.4). The prewarmer does **not** change the provider health state
+*multiple* lifecycle events (e.g. `idle_prewarm_fired` then
+`idle_prewarm_completed`), not one frame per run (§6.15.4). The prewarmer does **not** change the provider health state
 (`ready`/`degraded`); it warms the model cache in place. See FR-19 for the six
 `idle_prewarm.*` config keys / `--idle-prewarm*` flags.
 
@@ -1214,13 +1236,16 @@ The `serve` command gains the following additive flags:
   explicit `false` emission.
 - `--enable-warm-swap` — opt-in gate per SPEC-011 v0.5 R-3.1.0.
   Boolean: presence enables; explicit `=true` / `=false` are supported.
-  Default DISABLED. When disabled, the binary MUST NOT open the
-  control socket, MUST NOT host the §6.8 state machine (legacy
-  synchronous load path remains), and MUST NOT emit `loading` or
+  Default DISABLED. When disabled, the binary MUST NOT host the §6.8 state
+  machine (legacy synchronous load path remains), MUST NOT accept/emit the
+  warm-swap control frames, and MUST NOT emit `loading` or
   `model_hash` heartbeat fields. This preserves the SPEC-011 v0.5 L-1
-  byte-identical default (no NEW SPEC-011 fields, sockets, or state
-  appear on the wire or on disk when the flag is absent). This flag
-  is exclusive to `serve`; it is not valid on `models <subcommand>`.
+  byte-identical default for the **warm-swap** surface. **Reconciled v1.7:**
+  disabling warm-swap alone does **not** guarantee the control socket is
+  absent — receipt rotation independently opens it (R-6.9.1,
+  `enableWarmSwap || receiptRotator != nil`); the socket is absent only when
+  *neither* is enabled. This flag is exclusive to `serve`; it is not valid on
+  `models <subcommand>`.
 - `--swap-drain-timeout-seconds <N>` — drain budget per SPEC-011
   v0.5 §3.4 and R-3.9.1. Default `20`. Range `5 <= N <= 600` per
   SPEC-011 v0.5 R-3.9.1; out-of-range values cause `serve` to exit
@@ -1551,14 +1576,19 @@ coordinator `drain` command.
 
 If `accepted` is false, the provider includes a reason and relevant context:
 
+The shipped provider emits exactly these four rejection reasons
+(`CoordinatorClient.swift`); the ≤ v1.6 `queue_full` and `tier_mismatch` reasons
+were **never shipped** (there is no WS queue — FR-25; and no tier-mismatch
+preflight rejection) and are struck:
+
 | Reason | Additional fields | Meaning |
 |---|---|---|
 | `context_exceeds_capacity` | `max_context_tokens` | Prompt too large for this provider |
-| `queue_full` | `estimated_wait_ms` | All slots and queue occupied |
 | `draining` | — | Provider is shutting down |
 | `model_not_loaded` | — | Model failed to load or is loading |
 | `unhealthy` | — | Provider in unavailable state |
-| `tier_mismatch` | `provider_tier` | Coordinator requested Tier 2 but binary is Tier 1 |
+| ~~`queue_full`~~ | ~~`estimated_wait_ms`~~ | **not shipped (v1.7)** — no WS queue; capacity-1 relay rejects at dispatch with `error_queue_full`, not at preflight |
+| ~~`tier_mismatch`~~ | ~~`provider_tier`~~ | **not shipped (v1.7)** — no tier-mismatch preflight path |
 
 Example rejection:
 ```json
@@ -1799,16 +1829,18 @@ times out.
 | `request_id` | string | Yes | The `request_id` of the inference to cancel |
 | `reason` | string | Yes | One of: `"buyer_disconnected"`, `"timeout"`, `"coordinator_shutdown"` |
 
-**Provider behavior on receipt:**
+**Provider behavior on receipt (reconciled v1.7 — capacity-1 relay, no queue):**
 1. If the `request_id` is currently being processed: abort inference,
    release the slot, send `inference_response_end` with
    `status: "cancelled"`.
-2. If the `request_id` is unknown (already completed or never
-   received): send `inference_response_end` with
-   `status: "cancelled"` and `chunks_sent: 0`. This is idempotent.
-3. If the `request_id` is in the provider's request queue (not yet
-   started): remove from queue, send `inference_response_end` with
-   `status: "cancelled"` and `chunks_sent: 0`.
+2. If the `request_id` is unknown: behavior is path-dependent in the shipped
+   relay (`InferenceRelay.swift`). On the plaintext relay path it acknowledges
+   idempotently (`inference_response_end status: "cancelled"`, `chunks_sent: 0`);
+   on the Tier-2 path an unknown ID **silently returns** with no ack. The ≤ v1.6
+   "always send a cancelled ack for unknown IDs" contract does not hold uniformly.
+3. There is **no case-3 queue removal** — the relay has only an *active* request
+   map (capacity 1) and no pending queue (FR-25), so a not-yet-started queued
+   request cannot exist. The ≤ v1.6 "remove from queue" step is struck.
 
 #### Request ID lifecycle and error handling
 
@@ -1854,13 +1886,16 @@ demultiplexing key.
 
 #### Multiplexing
 
-A single provider WebSocket carries up to N concurrent inference
-requests, where N is the provider's advertised `max_concurrency` (from
-`hello`/`heartbeat`). By default N is 1; higher values are explicit
-operator overrides. The coordinator MUST NOT send more than N
-concurrent `inference_request` messages. Each WS text frame is one
-complete JSON message — no multi-frame messages, no application-layer
-fragmentation.
+A single provider WebSocket carries at most **one** in-flight inference
+request (reconciled v1.7): the shipped `InferenceRelay` fixes capacity to
+**1** (`maxActiveRequests = 1`) regardless of advertised `max_concurrency`, and
+hard-rejects a concurrent second with `error_queue_full` (FR-25/FR-27). The
+`max_concurrency` advertisement governs only the *local HTTP* semaphore (FR-11),
+not the tunnel; a coordinator MUST NOT send a second concurrent
+`inference_request` on one WS while the first is in flight. Each WS text frame is
+one complete JSON message — no multi-frame messages, no application-layer
+fragmentation. (The ≤ v1.6 "up to N = `max_concurrency`" multiplexing contract
+was never shipped for the tunnel.)
 
 #### Retransmission policy
 
@@ -2099,11 +2134,14 @@ does not introduce any receipt-specific WebSocket control frame.
 ### 6.8. Warm-swap opt-in gate + runtime state machine (NEW in v1.3)
 
 SPEC-011 v0.5 §2 L-1 locks the byte-identical default and L-2 locks
-operator initiation. The §6.8 state machine, §6.9 control socket, and
-§6.10 heartbeat extension activate ONLY when the operator invokes
-`serve` with `--enable-warm-swap`. In disabled mode, the binary follows
-the SPEC-001 v1.2.4 synchronous-load path: the current `ModelRuntime`
-actor populates a single immutable container at boot.
+operator initiation. The §6.8 state machine and §6.10 heartbeat extension
+activate ONLY when the operator invokes `serve` with `--enable-warm-swap`. In
+disabled mode, the binary follows the SPEC-001 v1.2.4 synchronous-load path: the
+current `ModelRuntime` actor populates a single immutable container at boot.
+**Reconciled v1.7:** the §6.9 control *socket* itself is **not** exclusive to
+warm-swap — receipt rotation opens the same socket independently (R-6.9.1). Only
+the warm-swap *frames* and state machine are gated on `--enable-warm-swap`; a
+receipts-only socket exists but rejects `switch_request`.
 
 #### 6.8.1. ModelRuntime refactor (REQUIRED when warm swap enabled)
 
@@ -2170,9 +2208,13 @@ non-empty `provider_id` and a configured coordinator (`MacProviderCLI.swift`:
 impossible in receipts-only mode and understates when this same-EUID privileged
 surface exists. The socket is absent only when **neither** warm-swap nor receipt
 rotation is enabled. (The SPEC-011 warm-swap *frames* remain gated on
-`--enable-warm-swap`; the `models` CLI detection at §6.9.3 still keys on
-`status_response`, so a receipts-only socket correctly reports "warm-swap not
-enabled".)
+`--enable-warm-swap`. Note the detection nuance: the server answers
+`status_request` **whenever the socket is open** — including receipts-only mode
+(`ControlSocket.swift`), so `models list` against a receipts-only socket gets a
+`status_response` and treats the socket as *present and responsive*, **not** the
+§6.9.3 case-3 "warm-swap not enabled" path. That warm-swap-disabled signal
+surfaces only when an actual `switch_request` is rejected, not from the
+`status_request` probe.)
 
 The macOS-native default path is `$TMPDIR/macprovider-cli/ctl.sock`,
 resolved via `FileManager.default.temporaryDirectory`, per SPEC-011
@@ -2277,11 +2319,11 @@ unresponsive); restart serve with --enable-warm-swap"`.
 #### 6.9.4. Permissions and lifecycle
 
 R-6.9.6 Socket parent directory mode MUST be `0700` and socket mode
-MUST be `0600`; the socket opens on `serve` startup only when
-`--enable-warm-swap` is set and closes on `serve` shutdown per
-SPEC-011 v0.5 R-3.1.5. Stale-socket reclaim after ECONNREFUSED requires
-operator removal of the socket file before restart per SPEC-011 v0.5
-R-3.1.5.x case 2.
+MUST be `0600`; the socket opens on `serve` startup when `--enable-warm-swap`
+**or** receipt rotation is enabled (R-6.9.1 reconciled v1.7) and closes on
+`serve` shutdown per SPEC-011 v0.5 R-3.1.5. Stale-socket reclaim after
+ECONNREFUSED requires operator removal of the socket file before restart per
+SPEC-011 v0.5 R-3.1.5.x case 2.
 
 ### 6.10. Heartbeat extension (NEW in v1.3, additive when warm-swap opt-in is enabled)
 
@@ -2587,8 +2629,10 @@ Initial-stage fields:
 - `tier2_capabilities.response_chunk_plaintext_envelope: true` — a 4th sub-field
   beyond the §6.7.1 `{encrypted_leg, attestation, aead_suites}` schema
   (**SPEC-008** Tier-2).
-- `credential_bootstrap: true` — provider-credential bootstrap opt-in
-  (**SPEC-026**).
+- `credential_bootstrap: true` — provider opt-in to the provisional
+  credential-bootstrap / TOFU token-mint path (**SPEC-003** open onboarding,
+  FR-C9 / `allow_tokenless_provisional_bootstrap`). SPEC-026 §4.3 does **not**
+  define this flag — it owns only the identity-signature binding it pairs with.
 - Signed-catalog admission block: `catalog_release_id`, `catalog_policy_version`,
   `catalog_candidate_sha256`, `catalog_signer_key_id`, `catalog_row_identity`
   (**SPEC-010 / SPEC-022** signed-catalog admission). This block is **also**
@@ -2596,19 +2640,25 @@ Initial-stage fields:
   the initial-stage `auth_request`.
 
 Proof-stage `auth_request` (the second handshake message) can additionally
-carry `credential_bootstrap`, `identity_signature`, and
-`identity_signature_transcript_sha256` (**SPEC-026** identity binding;
+carry `credential_bootstrap` (**SPEC-003** FR-C9), `identity_signature`, and
+`identity_signature_transcript_sha256` (**SPEC-026 §4.3** identity binding;
 `CoordinatorClient.swift`).
 
 #### 6.15.2. Heartbeat fields (beyond §6.5 / §6.10)
 
 Builder: `CoordinatorClient.swift` heartbeat frame.
 
-- `hardware_summary` — optional provider-reported hardware descriptor used as a
-  **display-capacity fallback** through the **SPEC-017** stats-rollup pipeline;
-  it is **untrusted** and verified `chip_hardware_profiles` inventory overrides
-  it (`beta/DECISION_CRITERIA.md` Entry 105/109). It is explicitly **not** a
-  trusted capacity source and cannot confer attestation.
+- `hardware_summary` — optional provider-reported hardware descriptor consumed
+  as a **display-capacity fallback** through the **SPEC-017** stats-rollup
+  pipeline; it is **untrusted** and verified `chip_hardware_profiles` inventory
+  overrides it (`beta/DECISION_CRITERIA.md` Entry 105/109). It is explicitly
+  **not** a trusted capacity source and cannot confer attestation. SPEC-017
+  defines the *aggregate stats output* fields, not this provider-heartbeat
+  *input* object, so SPEC-001 carries its wire sub-schema (owner of last resort,
+  `ProviderHardwareSummary.swift`): an object of up to five optional members —
+  `chip` (string), `bandwidth_gb_per_s` (number), `network_power_kw` (number),
+  `gpu_cores_total` (int), `cpu_cores_total` (int); each member is omitted when
+  zero/empty, and the whole object is omitted if all are absent.
 - All six speculative-decoding fields (**SPEC-028**): `spec_decode_enabled`,
   `spec_decode_draft_model_id`, `spec_decode_num_draft_tokens`,
   `spec_decode_drafted_tokens_since_last`, `spec_decode_accepted_tokens_since_last`,
@@ -2618,9 +2668,16 @@ Builder: `CoordinatorClient.swift` heartbeat frame.
   heartbeat **and** `state_update` payloads (`CoordinatorClient.swift`); the
   value is a structured object ≤4096 UTF-8 bytes.
 
-These are additive to the §6.10 opt-in-gated `model_hash` / `loading` fields and
-do not change the L-1 byte-identical default for a warm-swap-disabled binary
-(they ride the existing heartbeat only when their producing subsystem is active).
+These are additive to the §6.10 opt-in-gated `model_hash` / `loading` fields.
+**Correction (v1.7):** unlike the §6.10 warm-swap fields, several of these ride
+the heartbeat **independently of `--enable-warm-swap`** — in particular
+`hardware_summary` is built and emitted unconditionally
+(`CoordinatorClient.swift`; the warm-swap-*disabled* test explicitly expects it,
+`CoordinatorClientTests.swift`). So the §6.10 "L-1 byte-identical heartbeat when
+warm-swap is disabled" invariant does **not** hold once these v1.7 fields are
+present; the byte-identical claim is scoped to the SPEC-011 `model_hash` /
+`loading` additions only, not to `hardware_summary` / spec-decode /
+`last_autoupdate_event`.
 
 #### 6.15.3. New inbound (coordinator server-push) frames
 
@@ -2628,8 +2685,10 @@ Dispatch: `CoordinatorClient.swift`. The dispatcher recognizes the documented
 frame set and otherwise replies `nak unknown_message_type`.
 
 - `se_liveness_challenge` → binary replies `se_liveness_response` (§6.15.4) —
-  Secure-Enclave liveness challenge (**SPEC-008 Pillar C**). This is the only
-  genuinely new inbound wire frame in v1.7.
+  Secure-Enclave liveness challenge (**SPEC-008 Pillar C**). This is the only new
+  inbound *server-push control* frame in v1.7. (The `losslessness_probe_v1.*`
+  probe family below is also inbound, but is a distinct request/result protocol
+  owned by SPEC-030, not a control-frame push.)
 
 > **Not wire frames.** `encrypted_leg_invalidated`, `tier_demoted`,
 > `token_revoked`, and `attestation_state_degraded` are **not** inbound
@@ -2646,24 +2705,29 @@ These extend the §6.7 / §6.6 inbound frame set (`hello_ack`, `ownership_event`
 #### 6.15.4. New outbound (binary → coordinator) frames
 
 - `idle_prewarm_event` — the **single** frame type emitted by the `IdlePrewarmer`
-  (FR-16). Its `event` field carries the transition (`fired`, `completed`,
-  `failed`, `cancelled`, or `idle_prewarm_skipped`); a `reason` is attached only
-  on the skipped event. There is **no** distinct `idle_prewarm_skipped` frame
-  type, and one prewarm run emits *multiple* lifecycle frames (e.g. `fired`
-  then `completed`). Owner: SPEC-001 (FR-16) — this frame is SPEC-001's own, new
-  in v1.7.
+  (FR-16). Its `event` field carries the raw transition string forwarded
+  unchanged from `IdlePrewarmer`: `idle_prewarm_fired`, `idle_prewarm_completed`,
+  `idle_prewarm_failed`, `idle_prewarm_cancelled_by_real_request`, or
+  `idle_prewarm_skipped`; a `reason` is attached only on the skipped event. There
+  is **no** distinct `idle_prewarm_skipped` frame type, and one prewarm run emits
+  *multiple* lifecycle frames (e.g. `idle_prewarm_fired` then
+  `idle_prewarm_completed`). Owner: SPEC-001 (FR-16) — this frame is SPEC-001's
+  own, new in v1.7.
 - `se_liveness_response` — reply to `se_liveness_challenge`; fields `version`,
   `nonce`, `timestamp`, `public_key`, `signature` (**SPEC-008 Pillar C**). Per
   SPEC-008, the coordinator verifies the signature against the stored
   attestation-time key, **not** the response's `public_key`.
 
-**Losslessness-probe frames (SPEC-008).** The binary also handles a
-`losslessness_probe_v1.*` family (`LosslessnessProbeProtocol.swift`): inbound
-`losslessness_probe_v1.request` / `.encrypted_request` and outbound
-`losslessness_probe_v1.result` / `.encrypted_result` (plus the
-`.request_plaintext` / `.result_plaintext` plaintext-envelope variants). Owner:
-**SPEC-008** (tier-2 losslessness verification); SPEC-001 carries the transport
-only.
+**Losslessness-probe frames (SPEC-030).** The binary also handles a
+`losslessness_probe_v1.*` family (`LosslessnessProbeProtocol.swift`). The
+**top-level dispatched** wire types are: inbound `losslessness_probe_v1.request`
+and `losslessness_probe_v1.encrypted_request`; outbound
+`losslessness_probe_v1.result` and `losslessness_probe_v1.encrypted_result`. The
+`.request_plaintext` / `.result_plaintext` variants are **not** top-level frames
+— they exist only *inside* the encrypted envelope (`Tier2ProviderSession.swift`)
+and are never dispatched directly. Owner: **SPEC-030** (losslessness-probe
+protocol / transport; the canonical owner), with SPEC-008 owning the tier-2
+verification semantics that consume it; SPEC-001 carries the transit only.
 
 These extend the §6.5 outbound set (`auth_request`, `hello`, `heartbeat`,
 `state_update`, `drain_status`, `nak`, `preflight_ack`).
@@ -2949,7 +3013,8 @@ Two independent checks, since `warm_up` no longer performs inference:
    synthetic inference and no throughput change attributable to the command.
 2. **Idle prewarm.** After an idle period ≥ `idle_prewarm.idle_threshold_seconds`
    (with prewarm enabled, on AC power, model loaded), the binary emits an
-   `idle_prewarm_event` (`event: "fired"` then `"completed"`) and the next real
+   `idle_prewarm_event` (`event: "idle_prewarm_fired"` then
+   `"idle_prewarm_completed"`) and the next real
    request shows throughput within 95% of the long-running baseline (tok/s on
    `short_chat`). The prewarmer does **not** move the health state.
 
@@ -3005,12 +3070,14 @@ The request slot is freed (verifiable via `/v1/health`).
 
 **Run by:** `phase3-binary/scripts/test-ws-cancellation.sh`
 
-**AC-14. Concurrent multiplexing.**
-A mock coordinator sends 3 concurrent `inference_request` messages
-(the binary sets `max_concurrency_override: 3` for the test).
-All 3 produce interleaved `inference_response_chunk` messages on the
-same WebSocket. All 3 complete successfully with correct `request_id`
-correlation.
+**AC-14. WS capacity-1 rejection (reconciled v1.7).**
+A mock coordinator sends a second `inference_request` on a WebSocket while the
+first is still in flight. The relay (fixed capacity 1) accepts the first and
+rejects the second with `inference_response_end status: "error_queue_full"`
+(FR-25/FR-27); the first completes normally with correct `request_id`
+correlation. (The ≤ v1.6 "3 concurrent requests all succeed with
+`max_concurrency_override: 3`" test does not hold — the tunnel is fixed at 1
+regardless of `max_concurrency`.)
 
 **Run by:** `phase3-binary/scripts/test-ws-multiplexing.sh`
 
@@ -3085,13 +3152,18 @@ exit code 2 BEFORE opening the coordinator WS with stderr containing
 `"--model C not in --supported-models"`. Traces to SPEC-010 v1.5 AC-9.
 
 **AC-18.3. SPEC-011 opt-in gate — disabled mode (ENOENT path).**
-A v1.3 binary `serve` started without `--enable-warm-swap` MUST NOT
+A v1.3 binary `serve` started with **neither** `--enable-warm-swap` **nor**
+receipt rotation enabled (i.e. not `--enable-receipts` with a provider ID +
+coordinator; see R-6.9.1 reconciled v1.7) MUST NOT
 create any file at `$TMPDIR/macprovider-cli/ctl.sock`. A
 `macprovider-cli models list` invocation against that binary MUST
 take the R-6.9.5 / R-3.1.5.x ENOENT case-1 path: exit code 4 with
 stderr containing `"macprovider-cli serve is not running on this
 host (no control socket at"` (followed by the resolved socket path).
-Traces to SPEC-011 v0.5 AC-18 case-1 and SPEC-001 v1.3 R-6.9.5.
+Traces to SPEC-011 v0.5 AC-18 case-1 and SPEC-001 v1.3 R-6.9.5. (Note: a
+receipts-only socket **does** exist and answers `status_request`; the
+`models` CLI then reports warm-swap-not-enabled only when an actual
+`switch_request` is rejected — see R-6.9.1.)
 
 **AC-18.4. SPEC-011 opt-in gate — enabled mode.**
 A v1.3 binary `serve --enable-warm-swap` MUST create the control socket
@@ -3361,7 +3433,7 @@ phase3-binary/
 │       ├── ModelsSubcommand.swift       # §6.2, §6.9 models list/switch/status
 │       ├── ControlSocket.swift          # §6.9 newline-delimited JSON control socket
 │       ├── RuntimeStateMachine.swift    # §6.8 state machine + atomic swap
-│       ├── WarmupManager.swift          # FR-16
+│       ├── IdlePrewarmer.swift          # FR-16 (idle prewarm; shipped name — was WarmupManager.swift in the v1.3 design layout)
 │       ├── SelfTest.swift               # FR-20
 │       ├── Middleware/
 │       │   ├── TrustGate.swift          # Tier 2 hook (passthrough)
