@@ -41,7 +41,14 @@ v0.1 specified the *accounting* of a provider-reported `cached_prompt_tokens` bu
 
 ## 1. Scope
 
-SPEC-024 specifies the billing treatment for provider-reported prefix-cache reuse on sticky-affinity conversations (SPEC-004 FR-SR-*). It defines a provider-reported `cached_prompt_tokens` field on the coordinator-provider usage report (SPEC-002), a new `cached_prompt_tokens` column on `ledger_request_credits` (SPEC-005), an additive rate-card row field `prompt_cache_hit_rate_per_mtok`, an updated billing / buyer-debit formula that prices the cached fraction at the discounted rate, and a mirror field in the buyer-visible OpenAI-shape usage object (SPEC-006).
+> **⚠ Billing scope moved to SPEC-005 v0.6 (v0.2.1).** The prefix-cache **billing** treatment
+> below — the `cached_prompt_tokens` ledger column, the rate-card `prompt_cache_hit_credits_per_mtok`
+> key, the cache-split formula, the eligibility gates, and the buyer-debit mirror — is **canonically
+> owned by SPEC-005 v0.6** (§4.3 / §5.3 / §5.3.1 / §13). SPEC-024's live scope is the provider-local
+> cache-**isolation** baseline (§11–§16). The billing description in this section is retained for
+> history; where it differs from SPEC-005 v0.6, **SPEC-005 v0.6 governs.**
+
+SPEC-024 (v0.1) specified the billing treatment for provider-reported prefix-cache reuse on sticky-affinity conversations (SPEC-004 FR-SR-*): a provider-reported `cached_prompt_tokens` field on the coordinator-provider usage report (SPEC-002), a `cached_prompt_tokens` column on `ledger_request_credits`, an additive rate-card row field, a cache-split billing / buyer-debit formula, and a mirror field in the buyer-visible OpenAI-shape usage object (SPEC-006). **All of that billing surface is now specified by SPEC-005 v0.6** (see banner above); the descriptions here are historical.
 
 **v0.2 adds the provider-local cache **isolation** baseline (§11–§16):** the normative cache-key/reuse invariant, the cross-account `conversation_key` unforgeability/namespacing invariant that isolation depends on, the non-leakage threat model, the coordinator cross-check of `cached_prompt_tokens`, and the acceptance criteria — because the discounted cache-hit price and the buyer-visible `cached_prompt_tokens` are only sound if cache reuse cannot cross a buyer/conversation boundary. v0.2 is spec-only and reconciled to shipped code; it specifies the isolation *invariant*, not the provider KV-cache implementation (still §2).
 

@@ -27,7 +27,9 @@ disagreement is a spec bug. No behavior change. Six reconciliations:
   `cached_prompt_tokens` priced at the prompt-cache-hit rate. **Default:** an unconfigured
   `prompt_cache_hit_credits_per_mtok` bills cached tokens at the **full prompt rate**
   (no discount) — conservative, never over-discounts (`EffectivePromptCacheHitCreditsPerMtok`).
-  A `cached_prompt_tokens > prompt_tokens` row is a `null_usage_error`.
+  A `cached_prompt_tokens > prompt_tokens` (or negative) row is caught by the §5.3.1 hot-path gate as
+  an `invalid_cached_prompt_tokens` **quarantine** (zero credit); the §5.3 formula bound and the DB
+  CHECK are defense-in-depth backstops. Either way the row pays zero.
 - **§5.3 — 10,000,000-token per-field cap.** Any of `prompt_tokens`, `cached_prompt_tokens`,
   or the billable completion exceeding `maxBillableTokens = 10_000_000`, or any
   multiply/add overflow in the numerator, yields `null_usage_error` + zero credits.
@@ -42,6 +44,18 @@ the canonical home for prefix-cache billing arithmetic; SPEC-024 retains the pro
 cache-**isolation** invariant (§11–§16).
 
 - **R1-audit additions (3-lane codex).** The byte-estimate divisor is the configurable `tier2.output_bytes_per_token_ceiling` (default 16), swept across §6.7/§6.8/§15/AC-DISCONNECT/appendix (the stale `/4` superseded; SPEC-006 §17.7 `/4` flagged as a carried cross-spec drift). Added **§5.3.1** (cache-eligibility gates + NULL⇒COALESCE(0) + the `0<=cache_hit_rate<=prompt_rate` ceiling — SPEC-024 §14 folded in). Added **§7.5a** (settlement-policy `enforce` payout gate) and **§7.5b** (the verified-receipt re-pricing exception that the prior blanket no-update rule contradicted). Reconciled the byte_estimated+nil branch, the bare-`llama-` non-remap, the `rate_card_normalized` log shape, the cache-rate snapshot provenance (rate_card_json, not a §4.3 column), the exact settlement-hash CHECK SQL, and Appendix C's six columns. Amended **SPEC-024 → v0.2.1** to hand billing ownership to this spec (bundled).
+- **R2-audit additions (3-lane codex).** Completed the **§7.5b** verified-receipt exception: it also
+  re-prices `ledger_operator_credits` (gross/operator/fault) and is scoped to matched, `enforce`-mode,
+  verified, unsettled, non-quarantined rows with the receipt-count downward clamp and cache-snapshot
+  quarantines; carved the `insert only` rule in §4.1/§4.3/§4.4/Appendix C to name that one exception.
+  Added **§5.3.2** (charged-vs-provider-reported **prompt**-token bound — the money-affecting
+  `min(provider_reported, coordinator_estimate)` cap analogous to the completion clamp). Specified the
+  non-null-error **NULL `prompt_tokens` ⇒ COALESCE(0)** completion-only path (§5.3). Added the two
+  shipped `ledger_provider_identity_snapshots` columns (`config_snapshot_id`,
+  `provider_reported_prompt_tokens`, §4.8). Reconciled the `cached > prompt` classification to the
+  §5.3.1 `invalid_cached_prompt_tokens` quarantine in the changelog + §4.3. Bumped the stale boundary
+  labels (SPEC-004 v0.3.1→v0.3.2, SPEC-006 v0.9.1→v0.9.8) and finished the SPEC-024 §1 billing-handoff
+  banner. Security lane confirmed 0 C/H/M.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -412,16 +426,20 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - provider onboarding is stranger-readable.
 - provider docs must be honest that rewards/billing were deferred to SPEC-005.
 - SPEC-005 docs must avoid cash-payout promises.
-**SPEC-004 v0.3.1:**
+**SPEC-004 v0.3.2:**
 - smart-router attempts must preserve accounting.
 - retried is a fallback but not a full attempt ordinal.
 - FR-SR-18 composes routing with FR-P11a and eligibility checks.
-**SPEC-006 v0.9.1:**
+- (v0.3.2) FR-SR-2 provider-visibility carve-out permits the coordinator to hand the derived,
+  account-scoped `conv:` key to the provider for prefix caching — a SPEC-024 isolation concern with
+  no billing-boundary impact here.
+**SPEC-006 v0.9.8:**
 - gateway has no billing state.
 - section  17.7 is the buyer-debit source of truth.
 - section  17.7 includes the SPEC-001 null-usage error row with zero buyer debit.
-- SPEC-005 mirrors the matrix.
-- gateway MUST forward `X-MacProvider-Account` + upstream `Authorization` bearer on every chat forward (v0.9.1 / issue #211); the coordinator persists the account into `request_log.account_id` for SPEC-005's attempt-ordinal grouping rule.
+- SPEC-005 mirrors the matrix. (Cross-spec drift carried: SPEC-006 §17.7 still divides by `/4` where
+  SPEC-005 §6.8 uses the configurable default `/16`; reconciliation is a tracked follow-up, §6.8.)
+- gateway MUST forward `X-MacProvider-Account` + upstream `Authorization` bearer on every chat forward (issue #211); the coordinator persists the account into `request_log.account_id` for SPEC-005's attempt-ordinal grouping rule.
 **SPEC-007 future:**
 - owns AntFeed and USDC conversion.
 - consumes payout-ready rows.
@@ -543,7 +561,9 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 - No FLOAT or REAL credit arithmetic is allowed.
 - Every economic row snapshots config values used at issuance.
 - Hot-path ledger rows are append-only.
-- Settlement may update settled and settlement_id only.
+- Settlement may update settled and settlement_id only — **except** verified-receipt finalization
+  (§7.5b, v0.6), the one sanctioned re-price of token/credit/usage/fault columns on `enforce`-mode
+  verified rows.
 - Recovery may update quarantined and quarantine_reason only.
 - Migrations are additive and idempotent.
 
@@ -607,7 +627,13 @@ Indexes and uniqueness constraints:
 
 Table-level CHECK: `CHECK(usage_source != 'null_error' OR gross_credits = 0)` — when `usage_source = 'null_error'`, `gross_credits` MUST be 0 (DB-enforced). The hot path and recovery MUST enforce this before the formula in section  5.3 would otherwise evaluate nullable operands.
 
-**Cache column CHECK.** `cached_prompt_tokens` additionally CHECKs `cached_prompt_tokens <= prompt_tokens` at the DB layer; the formula (§5.3) rejects a violating row as `null_usage_error` before insert, so the CHECK is defense-in-depth.
+**Cache column CHECK.** `cached_prompt_tokens` additionally CHECKs `cached_prompt_tokens <= prompt_tokens` at the DB layer. A `cached > prompt_tokens` (or negative) value is caught **first** on the hot path by the §5.3.1 eligibility gate as an **`invalid_cached_prompt_tokens` quarantine** (zero credit, cache field cleared, usage source otherwise preserved) — not as `null_usage_error`; the §5.3 formula's cached-bound rejection and this DB CHECK are defense-in-depth backstops for a path that reaches the formula/insert without the §5.3.1 gate. Either way the row is zero-credit. (See §5.3.1 for the authoritative precedence.)
+
+**Insert-only exception (v0.6).** The `insert only` update rule on `prompt_tokens`,
+`charged_prompt_tokens`, `completion_tokens`, `estimated_completion_tokens`, `usage_source`,
+`gross_credits`, `provider_credits`, and `fault_flag` is subject to the single verified-receipt
+re-price of §7.5b (`enforce`-mode verified rows only); `updated_at_utc` is the "bounded update"
+column that records it. No other post-insert mutation of these columns is permitted.
 
 ### 4.4 Table `ledger_operator_credits`
 
@@ -630,6 +656,11 @@ Indexes and uniqueness constraints:
 - `INDEX idx_loc_request(request_id)`
 - `INDEX idx_loc_provider_ts(provider_id, ts_utc)`
 - `INDEX idx_loc_ts(ts_utc)`
+
+**Insert-only exception (v0.6).** As with `ledger_request_credits`, the `insert only` rule on
+`gross_credits`, `operator_credits`, and `fault_flag` is subject to the §7.5b verified-receipt
+re-price, which UPDATEs the linked operator-credit row (`WHERE request_credit_id = ?`) so the
+operator split tracks the re-priced gross. No other post-insert mutation is permitted.
 
 ### 4.5 Table `ledger_payout_ready`
 
@@ -753,6 +784,8 @@ If no snapshot exists for a recoverable row, recovery MUST quarantine instead of
 | `provider_id` | TEXT | NOT NULL | stable SPEC-002 FR-R3 provider id | insert only |
 | `resolved_from` | TEXT | NOT NULL CHECK(resolved_from IN ('pool_entry','response_header','admin_recovery')) | identity source | insert only |
 | `pool_session_started_at_utc` | TEXT | NULL | active session start if known | insert only |
+| `config_snapshot_id` | INTEGER | NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0) | `ledger_config_snapshots.id` the row was priced under; §5.5/§7.5b use it to reconstruct the historical cache-hit rate during verified-receipt re-pricing | insert only |
+| `provider_reported_prompt_tokens` | INTEGER | NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0) | raw provider-reported prompt count before the §5.3.2 charged-prompt bound (diagnostic; mirrors the `ledger_request_credits` column) | insert only |
 | `created_at_utc` | TEXT | NOT NULL | creation time | insert only |
 
 Indexes and uniqueness constraints:
@@ -911,13 +944,22 @@ usage_source = 'null_error'  OR  fault_flag = 'breaker_qualifying'
 #       otherwise                             => reported
 #
 # i.e. a provider_reported row whose byte-estimate is the smaller value is CLAMPED and its
-# usage_source is DOWNGRADED to 'byte_estimated'; a negative reported/estimate is a null_usage_error.
+# usage_source is DOWNGRADED to 'byte_estimated'; a negative reported/estimate is a null_usage_error
+# (exception: on a byte_estimated row with a NULL estimate the selection short-circuits to 0 before a
+# negative reported value is inspected — an edge `usageFor` construction makes effectively unreachable).
 
 # (3) validity gates — any failure => usage_source='null_error', gross=provider=operator=0
 #   - prompt_tokens, cached_prompt_tokens, effective_completion_tokens each in [0, 10_000_000]
 #     (maxBillableTokens); a value <0 or >10_000_000 is a null_usage_error
 #   - cached_prompt_tokens <= prompt_tokens
 #   - any multiply/add below overflowing int64 is a null_usage_error (checked arithmetic)
+#
+# Precedence note (v0.6): for cached_prompt_tokens specifically, the §5.3.1 hot-path gate runs
+# FIRST — a negative cached count or cached>prompt is classified there as
+# 'invalid_cached_prompt_tokens' QUARANTINE (not null_error). The cached bounds in this gate (3)
+# are therefore a defensive backstop that only fires for a code path reaching the formula without
+# the §5.3.1 gate; the prompt/completion bounds and overflow checks are the primary null_error
+# classifiers. Either way credits are zeroed.
 
 # (4) cache-split prompt numerator (SPEC-024, folded in)
 uncached_prompt_tokens = prompt_tokens - cached_prompt_tokens
@@ -940,6 +982,14 @@ When `usage_source = 'null_error'`, any of `prompt_tokens`, `cached_prompt_token
 `operator_credits = 0` before the formula evaluates; the formula MUST NOT be evaluated on NULL
 operands. Fault (`breaker_qualifying`) and null-error overrides set gross/provider/operator to 0
 before split (the rate/multiplier/share columns are still snapshotted for audit).
+
+**NULL `prompt_tokens` on a non-null-error row (v0.6).** On a row that is *not* classified
+`null_error`, a NULL `prompt_tokens` is treated as **`COALESCE(prompt_tokens, 0)` = 0** by the
+formula (`ComputeCreditsWithCache`, `formula.go`): the prompt numerator contributes 0 and a present
+`completion_tokens` is still billed normally. This path is only reachable when usage validation
+accepted the completion side while the prompt count was absent (e.g. a provider usage object carrying
+`total_tokens` but no `prompt_tokens`, which extraction does not backfill); it is not an error, and
+the row bills for completion alone. It is distinct from `null_error`, where the whole row zeroes.
 Recovery rows MUST use the `ledger_config_snapshots` row selected by section  10.4; they MUST NOT
 price historical rows from current coordinator.yaml when a historical snapshot is required.
 
@@ -984,6 +1034,31 @@ enforced at config load (`internal/config/config.go`); a cache-hit rate above th
 negative, fails startup. So a cached token can never be billed **higher** than an uncached one — the
 cache split can only reduce or hold cost, never increase it. Combined with the §5.5 default (unset ⇒
 full prompt rate), cache accounting is bounded in `[0, prompt_rate]` per token.
+
+### 5.3.2 Charged-vs-reported prompt-token bounding (v0.6)
+
+The prompt count the formula prices is **not** the raw provider-reported prompt count — it is bounded
+above by the coordinator's own independent estimate, exactly analogous to the §5.3 completion clamp.
+The hot path (`boundProviderReportedPromptTokens`, `internal/billing/hotpath.go`) applies:
+
+1. The coordinator estimates the request's prompt tokens from the buyer request itself at routing
+   time — `PromptTokenUpperBound = estimateTokens(req.raw)` (`internal/buyer/server.go`) — a value
+   derived **independently of the provider's report**.
+2. The **raw** provider-reported prompt count is preserved verbatim in
+   `provider_reported_prompt_tokens` (diagnostic; never zeroed by this step).
+3. The **billable** prompt is capped: if `provider_reported_prompt_tokens > PromptTokenUpperBound`,
+   the charged value is lowered to the bound —
+   `charged_prompt = min(provider_reported_prompt_tokens, PromptTokenUpperBound)` — and that bounded
+   value is stored as **both** `prompt_tokens` (the §5.3-priced value) and `charged_prompt_tokens`. A
+   `warn` log records any row where the bound reduced the charge. When the coordinator has no estimate
+   (`PromptTokenUpperBound == NULL`) or no provider prompt count, the provider value passes through
+   unbounded.
+
+This is a **money-affecting** normalization: a provider over-reporting prompt tokens beyond what the
+request text could contain is billed only for the coordinator's independent upper bound, so it cannot
+over-charge the buyer or over-credit itself on the prompt dimension. A conforming implementation MUST
+NOT price the raw `provider_reported_prompt_tokens`; it MUST price the bounded `prompt_tokens`.
+(§7.5b applies the same `min(receipt, existing)` discipline again at verified-receipt finalization.)
 
 ### 5.4 Worked examples
 
@@ -1216,13 +1291,37 @@ lifecycle, SPEC-005 documents only how the columns gate the payable projection.
 ### 7.5b Verified-receipt finalization (re-pricing exception, v0.6)
 
 When a **verified settlement receipt** arrives for a request (SPEC-015/016), the coordinator
-**re-prices** the existing `ledger_request_credits` row from the receipt's authoritative token
-counts (`internal/billing/settlement_receipts.go`): it UPDATEs `prompt_tokens`,
-`charged_prompt_tokens`, `completion_tokens`, `estimated_completion_tokens` (→ NULL),
-`usage_source`, `gross_credits`, `provider_credits`, `fault_flag`, and `updated_at_utc` — running
-the row back through the §5.3 formula with the receipt's counts. This is the single sanctioned
-mutation of token/credit fields after insert; it is idempotent and applies only to a row matched by
-`id` under a verified receipt. Any OTHER process updating tokens/rates/credits remains forbidden.
+**re-prices** the matched credit row from the receipt's authoritative token counts
+(`internal/billing/settlement_receipts.go`), running it back through the §5.3 formula. The re-price
+touches **two** tables (both otherwise insert-only, §4.3/§4.4):
+
+- `ledger_request_credits` — UPDATEs `prompt_tokens`, `charged_prompt_tokens`, `completion_tokens`,
+  `estimated_completion_tokens` (→ NULL), `usage_source`, `gross_credits`, `provider_credits`,
+  `fault_flag`, and `updated_at_utc`.
+- `ledger_operator_credits` — UPDATEs `gross_credits`, `operator_credits`, and `fault_flag` on the
+  linked row (`WHERE request_credit_id = ?`) so the operator split stays consistent with the
+  re-priced gross.
+
+**Scope of the exception (v0.6).** Re-pricing is **not** unconditional: it applies only to a row
+that is matched by `id`, in **`enforce`** settlement mode, carrying a **verified** receipt,
+**unsettled** (`settlement_id IS NULL`), and **not already quarantined**. Rows outside that set are
+untouched. If the receipt carries a positive `cached_prompt_tokens` but its historical cache-rate
+snapshot is unavailable or its snapshot rate/multiplier/share disagree with the row, the re-price
+**quarantines** the row (`missing_cache_config_snapshot` / `cache_config_snapshot_rate_mismatch`,
+zero credit) rather than guessing (`settlement_receipts.go`).
+
+**Prompt count is bounded, never inflated (v0.6).** Re-pricing MUST NOT raise the prompt charge
+above the count already on the row. The receipt's `billable_input_tokens` is applied under a
+downward clamp against the existing ledger `prompt_tokens`:
+`charged = min(receipt.billable_input_tokens, existing prompt_tokens)` when the row already carries a
+prompt count, and both `prompt_tokens` and `charged_prompt_tokens` are set to that bounded value
+(`settlement_receipts.go`). A verified receipt reporting **more** prompt tokens than the insert-time
+count therefore does **not** over-credit the provider or over-charge the buyer — it can only confirm
+or lower the charge. The receipt's `billable_output_tokens` sets `completion_tokens` directly.
+
+This is the single sanctioned mutation of token/credit fields after insert; it is idempotent and
+applies only to a row matched by `id` under a verified receipt (both the request-credit and the
+linked operator-credit row). Any OTHER process updating tokens/rates/credits remains forbidden.
 
 ## 8. Multi-attempt attribution (D10)
 
@@ -2719,6 +2818,13 @@ PARTIAL — credit-arm pending v0.5.
 | D12 | section  2.12 | section  9 | AC-D12 |
 
 ## Appendix C. Column contract detail
+
+> **v0.6 note on "insert only".** The per-column `Update rule` is a documentation contract, not a
+> schema constraint (SQLite cannot enforce immutability). The token/credit/usage/fault columns marked
+> `insert only` on `ledger_request_credits` and `ledger_operator_credits` are subject to the single
+> verified-receipt re-price of §7.5b (`enforce`-mode verified rows), and `settled` / `settlement_id` /
+> `quarantined` / `quarantine_reason` to their stated settlement/recovery transitions. No other
+> post-insert mutation is permitted.
 
 ### Appendix C - `ledger_request_credits` columns
 
