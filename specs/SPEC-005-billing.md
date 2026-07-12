@@ -142,6 +142,15 @@ model (§7) and the cache-**isolation** invariant (§11–§16).
   the v0.3.3 "Quarantine rule narrowing" changelog) and softened the overstated "monotonic-quarantine
   **schema** invariant" to application-enforced (the schema CHECK only constrains `quarantined IN (0,1)`,
   not the transition). Process fix: never edit this worktree while an audit lane is running in it.
+- **R10-audit corrections (3-lane codex).** Architect lane **PASSED 0 C/H/M**; the completion carve-out
+  confirmed normative by all lanes. Corrected the **snapshot-selection precedence** (code + security): my
+  R9 wording said non-cache recovery rows use timestamp-qualified selection, but code uses the **exact
+  identity-linked `config_snapshot_id` for EVERY row when present** — the timestamp-qualified latest
+  snapshot is only the **fallback when that id is absent**, and a positive first-attempt cache row
+  quarantines `missing_cache_config_snapshot` instead of falling back. Fixed in **§4.7**, **§10.2**, and
+  **§10.4**. LOW fixes: **§4.1** now lists `updated_at_utc` among recovery-updatable columns (matches
+  §2.7/§4.3); the remaining "monotonic-quarantine **schema** invariant" in normative **§4.10** softened to
+  application-enforced.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -717,7 +726,7 @@ ratify it as optimal.
 - Settlement may update settled and settlement_id only — **except** verified-receipt finalization
   (§7.5b, v0.6), the one sanctioned re-price of token/credit/usage/fault columns on `enforce`-mode
   verified rows.
-- Recovery may update quarantined and quarantine_reason only.
+- Recovery may update quarantined, quarantine_reason, and the accompanying updated_at_utc only.
 - Migrations are additive and idempotent.
 
 ### 4.2 request_log read-only contract
@@ -934,8 +943,8 @@ defense-in-depth drift rather than a demonstrated risk. Recovery selects a snaps
 `effective_at_utc` ordering (§10.4), which is well-defined even with duplicate hashes.
 
 The coordinator MUST insert a config snapshot on startup and whenever a valid SPEC-005 config reload is acknowledged.
-Recovery MUST price historical rows from the latest snapshot whose effective_at_utc is less than or equal to request_log.ts_utc.
-If no snapshot exists for a recoverable row, recovery MUST quarantine instead of pricing with current config.
+Recovery prices historical rows from the **exact `ledger_provider_identity_snapshots.config_snapshot_id`** the row was priced under at insert **when that id is present** (all rows, cache and non-cache); the timestamp-qualified "latest snapshot whose effective_at_utc ≤ request_log.ts_utc" rule is the **fallback used only when that id is absent** (§10.2/§10.4). A positive first-attempt cache row is the exception that does **not** fall back — it quarantines `missing_cache_config_snapshot` when the exact id is absent.
+If no snapshot can be selected for a recoverable row, recovery MUST quarantine instead of pricing with current config.
 
 ### 4.8 Table `ledger_provider_identity_snapshots`
 
@@ -1001,7 +1010,9 @@ Added by SPEC-005 v0.4 (issue #169) and widened by v0.5
 quarantined `ledger_request_credits` row. The base row's
 `quarantined=1` marker remains immutable — this table records the
 OUTCOME of operator review without violating the v0.3.3
-monotonic-quarantine schema invariant. v0.5 supports `force_void`
+monotonic-quarantine invariant (application-enforced; the schema
+CHECK only constrains `quarantined IN (0,1)`, not the 0→1-only
+transition). v0.5 supports `force_void`
 and `force_credit`; force-credit rows are held from settlement until
 `force_credit_matures_at_utc`.
 
@@ -1648,17 +1659,20 @@ If no such config snapshot exists, the row is quarantined (`missing_config_snaps
 Recovery rows use `ledger_provider_identity_snapshots` to resolve provider_assigned_id to stable provider_id.
 The scan is idempotent.
 
-**Stricter snapshot rule for positive first-attempt cache rows (v0.6).** When a recovery row carries a
-**positive `cached_prompt_tokens` on `attempt_n = 0`** (`cacheProvenanceRequired`, `recovery.go`),
-recovery does **not** use the timestamp-qualified latest-snapshot rule above. It requires the row's
-**exact** `ledger_provider_identity_snapshots.config_snapshot_id` (the snapshot the row was priced
-under at insert): if that id is present it prices from that exact snapshot; if it is **absent**, recovery
-**quarantines** as **`missing_cache_config_snapshot`** rather than falling back to the timestamp lookup —
-because a cache discount must be reconstructed from the exact historical rate, not an approximate
-by-timestamp one. Non-cache rows (and cache rows on retries) use the timestamp-qualified rule and
-quarantine `missing_config_snapshot` only when no snapshot at or before `ts_utc` exists. (This mirrors
-the §7.5b receipt-time `missing_cache_config_snapshot` strictness for the same reason.) This stricter
-rule applies to §10.4's snapshot-selection step below as well.
+**Snapshot selection precedence — identity snapshot first (v0.6).** Recovery does **not** use the
+timestamp-qualified "latest snapshot ≤ `ts_utc`" rule as its primary. For **every** recovery row (cache
+and non-cache), recovery first uses the **exact** `ledger_provider_identity_snapshots.config_snapshot_id`
+the row was priced under at insert, **when that id is present** (`recovery.go` — `identityConfigSnapshotID`
+is normally set for all provider-reached rows). The timestamp-qualified latest-snapshot rule is the
+**fallback used only when that id is absent**. Behavior when the id is absent then diverges:
+- a **positive `cached_prompt_tokens` on `attempt_n = 0`** (`cacheProvenanceRequired`) does **NOT** fall
+  back — it **quarantines** `missing_cache_config_snapshot`, because a cache discount must be
+  reconstructed from the exact historical rate, not an approximate by-timestamp one;
+- every **other** row falls back to the timestamp-qualified latest snapshot and quarantines
+  `missing_config_snapshot` only when no snapshot at or before `ts_utc` exists.
+
+(This mirrors the §7.5b receipt-time `missing_cache_config_snapshot` strictness.) §10.4's snapshot-selection
+step follows this same identity-first precedence.
 
 ### 10.3 Nightly reconcile
 
@@ -1681,7 +1695,7 @@ Time is explicit input.
 No live network call may affect output.
 `scanWindow.to_utc` MUST be no closer to wall-clock now than `settlement.recovery_grace_seconds` (default 30s). Rows with `request_log.ts_utc` newer than this cutoff are excluded from the scan to prevent races with in-flight hot-path transactions.
 SPEC-002 v1.5.1 indexes `request_log.ts_utc`, `(request_id, id)`, `external_request_id` (partial-NULL), and `(account_id, external_request_id)` (partial-NULL composite) are preconditions for production-scale reconciliation scans. Any reconciliation surface that performs closing-the-books joins between coordinator `request_log` and gateway `usage_events` / `audit_events` by composite reconciliation key — whether run as an out-of-process harness OR as a future coordinator-hosted reconciliation endpoint — MUST read per-key migration state via `coordinator migrate-indexes --check --format json` (`requestlog.Store.MigrationState`) and fail closed when any depended-on composite key is in state `legacy` or `unindexed`, per the SPEC-002 v1.5.1 operational binding. Fixture / dev / one-shot recovery runs MAY pass an explicit bounded `--allow-unindexed-scan` override; the override MUST NOT be the default. Coordinator's own in-process AttemptN paths (`hotpath.go`, `recovery.go`, `endpoints.go` `/admin/ledger/reconcile`) use single-table SQLite `IS` clustering and are correct (just unindexed-slow) under state `unindexed`; they do NOT fail closed during the rollout window. (v0.3.2 / issue #197; v0.3.1 / issue #211 added the composite index dependency.)
-For each recoverable request_log row, the algorithm selects the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc — **except** a positive first-attempt cache row, which requires the exact identity-snapshot `config_snapshot_id` and quarantines `missing_cache_config_snapshot` if absent (the §10.2 stricter rule, no timestamp fallback).
+For each recoverable request_log row, the algorithm uses the exact identity-linked `config_snapshot_id` when present (all rows); only when that id is absent does it fall back to the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc — **except** a positive first-attempt cache row, which does not fall back and quarantines `missing_cache_config_snapshot` (the §10.2 identity-first precedence).
 If no config snapshot or provider identity snapshot can be selected for a provider-reached row, the row is quarantined.
 
 ### 10.5 Quarantine
