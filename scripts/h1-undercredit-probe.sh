@@ -21,7 +21,12 @@ START="${2:?start RFC3339 UTC, e.g. 2026-07-04T00:00:00Z}"
 END="${3:?end RFC3339 UTC, e.g. 2026-07-11T00:00:00Z}"
 
 sqlite3 -readonly -box "file:${DB}?mode=ro" <<SQL
-PRAGMA query_only = ON;
+-- Read-only is enforced by \`-readonly\` + \`?mode=ro\` on the main (snapshot) DB above.
+-- Do NOT add \`PRAGMA query_only = ON;\` here: it also blocks the temp DB, so the
+-- \`.parameter set\` below cannot create temp.sqlite_parameters — it then fails with
+-- "no such table: temp.sqlite_parameters" and the query silently binds :start/:end to
+-- NULL and returns all-zeros (a false "no under-credit"). The temp DB is independent
+-- of the read-only main DB, so parameter binding is safe without query_only.
 .parameter set :start '${START}'
 .parameter set :end   '${END}'
 WITH base AS (
