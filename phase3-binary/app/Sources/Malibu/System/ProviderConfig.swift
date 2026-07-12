@@ -530,6 +530,22 @@ enum ProviderConfig {
         return await KeychainStore.readProviderToken(providerID: providerID) != nil
     }
 
+    // PROD-H6: an app-owned config (config + app marker + provider_id) whose
+    // Keychain bearer is gone. This is distinct from "unconfigured": reusing
+    // the existing provider_id for a fresh referral loops because the
+    // coordinator rejects the already-confirmed bootstrap identity. Callers
+    // must offer proven recovery or an explicit "start fresh", never silently
+    // ask for a new invite.
+    static func existingIdentityMissingBearer(paths: ProviderPaths = .current) async -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path),
+              fm.fileExists(atPath: paths.appMarkerFile.path),
+              let providerID = readProviderID(paths: paths) else {
+            return false
+        }
+        return await KeychainStore.readProviderToken(providerID: providerID) == nil
+    }
+
     private static func writeAppMarker(paths: ProviderPaths, fileManager fm: FileManager) throws {
         if fm.fileExists(atPath: paths.appMarkerFile.path) { return }
         guard fm.createFile(atPath: paths.appMarkerFile.path, contents: Data()) else {

@@ -1545,12 +1545,32 @@ func (s *Server) rejectCredentialBootstrap(conn net.Conn, err error) {
 		s.observeCredentialBootstrap("rejected_referral_required")
 		s.close(conn, CloseInvalidToken, "referral_required")
 	case errors.Is(err, auth.ErrReferralInvalid), errors.Is(err, auth.ErrReferralExpired), errors.Is(err, auth.ErrReferralRevoked), errors.Is(err, auth.ErrReferralExhausted), errors.Is(err, auth.ErrReferralConflict):
+		// FIX-570 A10 / contract C-1: preserve the specific referral reason token in
+		// the close frame (referral_<token>) so the client can route the user back to
+		// the invite step with the right message instead of collapsing all failures
+		// to a generic referral_invalid.
 		s.observeCredentialBootstrap("rejected_referral")
-		s.close(conn, CloseInvalidToken, "referral_invalid")
+		s.close(conn, CloseInvalidToken, referralCloseReason(err))
 	default:
 		s.observeCredentialBootstrap("store_error")
 		s.log.Warn().Err(err).Msg("credential bootstrap token transaction failed")
 		s.close(conn, CloseInvalidToken, "invalid_token")
+	}
+}
+
+// referralCloseReason maps a referral sentinel to its contract C-1 close-frame
+// reason token (referral_<token>). ErrReferralConflict has no canonical token, so
+// it maps to referral_invalid to stay within the enumerated set.
+func referralCloseReason(err error) string {
+	switch {
+	case errors.Is(err, auth.ErrReferralExpired):
+		return "referral_expired"
+	case errors.Is(err, auth.ErrReferralRevoked):
+		return "referral_revoked"
+	case errors.Is(err, auth.ErrReferralExhausted):
+		return "referral_exhausted"
+	default:
+		return "referral_invalid"
 	}
 }
 

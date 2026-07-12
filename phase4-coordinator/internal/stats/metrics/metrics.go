@@ -66,6 +66,7 @@ type Metrics struct {
 	RegisterRateLimitHits    *prometheus.CounterVec
 	RegisterSource           *prometheus.CounterVec
 	RegisterHardwareErrors   prometheus.Counter
+	RegisterReconcileDeferred prometheus.Counter
 	IdlePrewarmEventTotal    *prometheus.CounterVec
 	ModelHashMismatchTotal   prometheus.Counter
 	CredentialBootstrapTotal *prometheus.CounterVec
@@ -151,6 +152,12 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Count of accepted provider register requests whose best-effort hardware profile persistence failed.",
 			},
 		),
+		RegisterReconcileDeferred: f.NewCounter(
+			prometheus.CounterOpts{
+				Name: "provider_register_reconcile_deferred_total",
+				Help: "Count of committed App-track referral mints whose durable saga acknowledgement failed and was deferred to the reconciler (FIX-570 A1).",
+			},
+		),
 		IdlePrewarmEventTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "stats_idle_prewarm_event_total",
@@ -210,6 +217,13 @@ func (m *Metrics) IncRegisterHardwareProfileError() {
 		return
 	}
 	m.RegisterHardwareErrors.Inc()
+}
+
+func (m *Metrics) IncRegisterReconcileDeferred() {
+	if m == nil || m.RegisterReconcileDeferred == nil {
+		return
+	}
+	m.RegisterReconcileDeferred.Inc()
 }
 
 func (m *Metrics) IncIdlePrewarmEvent(event, reason string) {

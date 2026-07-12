@@ -138,6 +138,9 @@ SELECT j.generated_at, j.evidence
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_register_nonces LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_register_nonces read: %w", err)
 	}
+	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_register_attempts LIMIT 1`); err != nil {
+		return fmt.Errorf("provider_onboarding smoke provider_register_attempts read: %w", err)
+	}
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_auth_policy LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_auth_policy read: %w", err)
 	}
@@ -432,6 +435,16 @@ INSERT INTO provider_register_nonces (provider_id, source_ip, nonce, ts_utc)
 VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 		return err
 	}
+	// FIX-570 A1: durable, attempt-bound commitment marker written in the SAME
+	// transaction as the identity prepare. Unlike provider_register_nonces this
+	// row is never touched by the replay-nonce pruner, so reconciliation can
+	// prove this exact attempt committed even after the replay cache is pruned.
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO provider_register_attempts (provider_id, source_ip, nonce, ts_utc)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (provider_id, source_ip, nonce, ts_utc) DO NOTHING`, providerID, sourceIP, nonce, observedAt); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		if isSerializationFailure(err) {
 			return ErrNonceReplay
@@ -442,9 +455,11 @@ VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 }
 
 // ProviderRegistrationPrepared proves that the exact PostgreSQL half of a
-// cross-store App-track registration committed. Checking both its nonce row
-// and identity row avoids mistaking an older identity for the current attempt
-// during crash recovery.
+// cross-store App-track registration committed. FIX-570 A1: it reads the durable
+// provider_register_attempts marker (attempt-bound, never pruned by the
+// replay-nonce cleaner) instead of JOINing the prunable replay cache. Pruning the
+// replay nonce no longer flips a committed attempt to prepared=false, which had
+// caused destructive compensation of a live credential in the 65s..2min window.
 func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, errors.New("onboarding postgres store is nil")
@@ -453,12 +468,11 @@ func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, 
 	err := s.db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1
-      FROM provider_register_nonces n
-      JOIN provider_identities i ON i.provider_id = n.provider_id
-     WHERE n.provider_id = $1
-       AND n.source_ip = $2
-       AND n.nonce = $3
-       AND n.ts_utc = $4
+      FROM provider_register_attempts a
+     WHERE a.provider_id = $1
+       AND a.source_ip = $2
+       AND a.nonce = $3
+       AND a.ts_utc = $4
 )`, providerID, sourceIP, nonce, observedAt.UTC()).Scan(&prepared)
 	return prepared, err
 }

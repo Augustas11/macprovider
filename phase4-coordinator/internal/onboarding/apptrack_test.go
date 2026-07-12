@@ -1422,9 +1422,22 @@ type fakeAuthStore struct {
 	referralRollbackCalled bool
 	referralAckCalled      bool
 	referralRollbackErr    error
+	referralAckErr         error
+	referralRecoverCalled  bool
+	referralRecoverToken   string
+	referralRecovered      bool
+	referralRecoverErr     error
 	pendingReferralMints   []auth.PendingAppTrackReferralMint
 	resolvedPending        []auth.PendingAppTrackReferralMint
 	resolvedPrepared       []bool
+}
+
+func (f *fakeAuthStore) RecoverAppTrackReferralMint(_ context.Context, _ string, _ *string, _ string, _ auth.ReferralPolicy, _ auth.AppTrackRegistrationAttempt) (string, bool, error) {
+	f.referralRecoverCalled = true
+	if f.referralRecoverErr != nil {
+		return "", false, f.referralRecoverErr
+	}
+	return f.referralRecoverToken, f.referralRecovered, nil
 }
 
 func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
@@ -1474,7 +1487,7 @@ func (f *fakeAuthStore) MintProviderTokenAppTrackWithReferralReservation(context
 
 func (f *fakeAuthStore) AcknowledgeAppTrackReferralMint(context.Context, string, string) error {
 	f.referralAckCalled = true
-	return nil
+	return f.referralAckErr
 }
 
 func (f *fakeAuthStore) RollbackAppTrackReferralMint(context.Context, string, string) error {
@@ -1498,6 +1511,7 @@ type fakeMetrics struct {
 	limitIP               int
 	limitASN              int
 	hardwareProfileErrors int
+	reconcileDeferred     int
 }
 
 type fakeASNResolver struct {
@@ -1540,6 +1554,15 @@ func (f *fakeMetrics) IncRegisterHardwareProfileError() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hardwareProfileErrors++
+}
+
+func (f *fakeMetrics) IncRegisterReconcileDeferred() {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconcileDeferred++
 }
 
 func (f *fakeStatsDB) hardwareCallsCount() int {
@@ -1594,4 +1617,45 @@ func (denyLimiter) Allow(string) bool { return false }
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+// TestWriteReferralErrorIncludesReasonToken is the FIX-570 contract C-1
+// regression: the App-track register referral error envelope must carry a
+// top-level machine-readable "reason" token alongside the existing error code.
+func TestWriteReferralErrorIncludesReasonToken(t *testing.T) {
+	cases := []struct {
+		err        error
+		wantStatus int
+		wantCode   string
+		wantReason string
+	}{
+		{auth.ErrReferralRequired, http.StatusBadRequest, "referral_required", "missing"},
+		{auth.ErrReferralInvalid, http.StatusBadRequest, "referral_invalid", "invalid"},
+		{auth.ErrReferralExpired, http.StatusGone, "referral_expired", "expired"},
+		{auth.ErrReferralRevoked, http.StatusGone, "referral_revoked", "revoked"},
+		{auth.ErrReferralExhausted, http.StatusConflict, "referral_exhausted", "exhausted"},
+		{auth.ErrReferralConflict, http.StatusConflict, "referral_conflict", "invalid"},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		writeReferralError(rec, c.err)
+		if rec.Code != c.wantStatus {
+			t.Errorf("%v status = %d, want %d", c.err, rec.Code, c.wantStatus)
+		}
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%v body: %v", c.err, err)
+		}
+		if body.Error.Code != c.wantCode {
+			t.Errorf("%v code = %q, want %q", c.err, body.Error.Code, c.wantCode)
+		}
+		if body.Reason != c.wantReason {
+			t.Errorf("%v reason = %q, want %q", c.err, body.Reason, c.wantReason)
+		}
+	}
 }

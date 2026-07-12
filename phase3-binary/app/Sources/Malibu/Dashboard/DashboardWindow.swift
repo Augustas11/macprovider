@@ -156,10 +156,10 @@ private struct DashboardView: View {
                 default:
                     Text(status.remaining == 0
                         ? (status.socialBonusEnabled
-                            ? "Your private invite has been used. Optionally share on X to unlock two more invite uses."
+                            ? "Your private invite has been used. Optionally share on X to unlock \(status.bonusUsesPhrase)."
                             : "Your private invite has been used.")
                         : (status.socialBonusEnabled
-                            ? "Your provider is live. Share privately, or optionally post on X to unlock two more invite uses."
+                            ? "Your provider is live. Share privately, or optionally post on X to unlock \(status.bonusUsesPhrase)."
                             : "Your provider is live. You can share this invite privately."))
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -168,15 +168,18 @@ private struct DashboardView: View {
                             .buttonStyle(.bordered)
                             .disabled(status.remaining == 0)
                         if status.socialBonusEnabled {
+                            // ADV-M2: disable while a challenge request is in
+                            // flight so a double-click can't start two.
                             Button("Share on X") {
                                 Task { await referralInvites.shareOnX() }
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(MalibuBrand.coral)
+                            .disabled(referralInvites.isSharing)
                         }
                     }
                     if referralInvites.pendingChallenge != nil {
-                        Text("After posting, paste the public X post URL to verify the bonus. Your provider remains live and keeps serving if you skip this.")
+                        Text("After posting, copy the URL of your published X post and paste it below to verify the bonus. Your provider remains live and keeps serving if you skip this.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if let expiry = referralInvites.pendingExpiryText {
@@ -190,8 +193,10 @@ private struct DashboardView: View {
                             }
                             .disabled(!referralInvites.canVerify || referralInvites.isLoading)
                         }
+                        // PROD-L1: this reopens the X compose window (intent URL),
+                        // not the already-published post — label it accordingly.
                         HStack(spacing: 8) {
-                            Button("Reopen X post") { referralInvites.reopenXPost() }
+                            Button("Reopen post composer") { referralInvites.reopenPostComposer() }
                             Button("Start over") { Task { await referralInvites.startOver() } }
                         }
                         .buttonStyle(.plain)

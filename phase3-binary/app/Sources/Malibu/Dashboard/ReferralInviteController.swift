@@ -9,6 +9,10 @@ struct ProviderReferralStatus: Decodable, Equatable {
     let firstServingSeen: Bool
     let socialBonusEnabled: Bool
     let inviteURL: URL?
+    // PROD-M4: the coordinator advertises the configured X-share bonus size.
+    // Absent/zero ⇒ fall back to the historical default of 2 so older
+    // coordinators keep rendering a sensible value.
+    let bonusUses: Int?
 
     enum CodingKeys: String, CodingKey {
         case advocacyStatus = "advocacy_status"
@@ -18,6 +22,28 @@ struct ProviderReferralStatus: Decodable, Equatable {
         case firstServingSeen = "first_serving_seen"
         case socialBonusEnabled = "social_bonus_enabled"
         case inviteURL = "invite_url"
+        case bonusUses = "bonus_uses"
+    }
+
+    /// Effective X-share bonus size for display copy. Defaults to 2 when the
+    /// coordinator omits `bonus_uses` or reports a non-positive value.
+    var effectiveBonusUses: Int {
+        guard let bonusUses, bonusUses > 0 else { return 2 }
+        return bonusUses
+    }
+
+    /// "two more invite uses" / "one more invite use" — matches the dashboard
+    /// copy that previously hardcoded "two".
+    var bonusUsesPhrase: String {
+        let count = effectiveBonusUses
+        let word: String
+        switch count {
+        case 1: word = "one"
+        case 2: word = "two"
+        case 3: word = "three"
+        default: word = "\(count)"
+        }
+        return "\(word) more invite use\(count == 1 ? "" : "s")"
     }
 }
 
@@ -152,6 +178,13 @@ final class ReferralInviteController: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published var postURL = ""
     @Published var dismissed = false
+    // ADV-M2: guard concurrent Share-on-X requests. `isSharing` disables the
+    // control while a challenge request is in flight; `shareGeneration`
+    // discards a response whose request was superseded (the coordinator
+    // deletes the prior challenge when a new one is minted, so an out-of-order
+    // reply would otherwise leave the UI holding a server-side-deleted one).
+    @Published private(set) var isSharing = false
+    private var shareGeneration = 0
     private var restoredProviderID: String?
 
     var isVisible: Bool {
@@ -191,12 +224,24 @@ final class ReferralInviteController: ObservableObject {
     }
 
     func shareOnX() async {
+        // ADV-M2: ignore re-entrant taps while a challenge request is active.
+        guard !isSharing else { return }
         guard let credentials = await credentials() else { return }
+        shareGeneration += 1
+        let generation = shareGeneration
+        isSharing = true
         isLoading = true
         errorMessage = nil
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            // Only clear the in-flight flag if this invocation is still current.
+            if generation == shareGeneration { isSharing = false }
+        }
         do {
             let challenge = try await credentials.client.createXChallenge(bearerToken: credentials.token)
+            // Discard a superseded response: a newer shareOnX() (or startOver)
+            // bumped the generation while this request was in flight.
+            guard generation == shareGeneration else { return }
             guard challenge.challenge?.count == 64 else {
                 throw ReferralInviteClientError.invalidResponse
             }
@@ -207,6 +252,7 @@ final class ReferralInviteController: ObservableObject {
             )
             NSWorkspace.shared.open(challenge.intentURL)
         } catch {
+            guard generation == shareGeneration else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -230,13 +276,19 @@ final class ReferralInviteController: ObservableObject {
         }
     }
 
-    func reopenXPost() {
+    // PROD-L1: reopens the X compose window (intent URL), not the published
+    // post — the published post URL is what the user pastes to verify.
+    func reopenPostComposer() {
         if let intentURL = pendingChallenge?.intentURL {
             NSWorkspace.shared.open(intentURL)
         }
     }
 
     func startOver() async {
+        // ADV-M2: supersede any in-flight Share-on-X request so its response is
+        // discarded and the control re-enables.
+        shareGeneration += 1
+        isSharing = false
         pendingChallenge = nil
         postURL = ""
         if let providerID = ProviderConfig.readProviderID() {

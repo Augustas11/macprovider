@@ -38,6 +38,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{15, "provider_onboarding_hardware_decision_reason"},
 		{16, "hardware_profile_memory_reverification"},
 		{17, "autotune_current_hardware_gate_grants"},
+		{18, "apptrack_register_attempts"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -557,4 +558,50 @@ func extractBetween(body, start, end string) string {
 		return rest
 	}
 	return rest[:j+len(end)]
+}
+
+// TestApptrackRegisterAttemptsMigrationShape locks the FIX-570 A1 durable
+// attempt-marker migration (018) and its rollback artifact.
+func TestApptrackRegisterAttemptsMigrationShape(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	var body string
+	for _, m := range all {
+		if m.Name == "apptrack_register_attempts" {
+			body = m.SQL
+		}
+	}
+	if body == "" {
+		t.Fatal("apptrack_register_attempts migration body is empty")
+	}
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS provider_register_attempts",
+		"PRIMARY KEY (provider_id, source_ip, nonce, ts_utc)",
+		"CREATE OR REPLACE FUNCTION prune_provider_register_attempts",
+		"retain_for must be at least 7 days",
+		"SET search_path = pg_catalog, public, pg_temp",
+		"GRANT SELECT, INSERT ON provider_register_attempts TO provider_onboarding",
+		"REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM PUBLIC",
+		"REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM provider_onboarding",
+	} {
+		mustContain(t, body, needle, "FIX-570 A1 durable attempt marker migration")
+	}
+	// The durable marker must never grant DELETE/UPDATE to the runtime role.
+	mustNotContain(t, body, "GRANT DELETE ON provider_register_attempts",
+		"runtime onboarding role must not delete the durable attempt marker")
+
+	down, err := os.ReadFile("018_apptrack_register_attempts.down.sql")
+	if err != nil {
+		t.Fatalf("read A1 rollback artifact: %v", err)
+	}
+	downSQL := string(down)
+	for _, needle := range []string{
+		"REVOKE ALL ON provider_register_attempts FROM provider_onboarding",
+		"DROP FUNCTION IF EXISTS prune_provider_register_attempts(INTERVAL)",
+		"DROP TABLE IF EXISTS provider_register_attempts",
+	} {
+		mustContain(t, downSQL, needle, "FIX-570 A1 rollback artifact")
+	}
 }

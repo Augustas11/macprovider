@@ -485,3 +485,145 @@ func TestSocialChallengeIsProviderBoundSingleUseAndAwardsBonusOnce(t *testing.T)
 		t.Fatalf("duplicate post err=%v", err)
 	}
 }
+
+// TestCustodyProvenRecoveryIgnoresIssuerRevocation is the FIX-570 A3 regression:
+// once a provider is bound to a redemption, presenting the same code must succeed
+// even after the issuer is revoked. Pre-fix redeemReferralTx re-validated the
+// issuer lifecycle and returned ErrReferralRevoked, stranding the provider.
+func TestCustodyProvenRecoveryIgnoresIssuerRevocation(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	code, err := store.CreateSeedReferral(context.Background(), policy, "revoke_recover", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	record, _, err := store.IssueTokenWithReferral(context.Background(), "bound-provider", "bound", code, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(context.Background(), record.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeReferralIssuer(context.Background(), policy.Campaign, "revoke_recover", now); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh, unbound provider is correctly rejected once the issuer is revoked.
+	if _, _, err := store.IssueTokenWithReferral(context.Background(), "fresh-provider", "fresh", code, policy); !errors.Is(err, auth.ErrReferralRevoked) {
+		t.Fatalf("fresh redeem after revoke err=%v, want ErrReferralRevoked", err)
+	}
+	// The already-bound provider recovers regardless of the later revocation.
+	if _, _, err := store.IssueTokenWithReferral(context.Background(), "bound-provider", "bound", code, policy); err != nil {
+		t.Fatalf("custody-proven recovery after issuer revoke failed: %v", err)
+	}
+}
+
+// TestCommittedUndeliveredAppTrackMintIsRecoverable is the FIX-570 A2 regression:
+// a gated mint that committed (referral redeemed, unused token minted) but whose
+// cleartext response was lost must remain recoverable without re-consuming
+// capacity. Pre-fix the only retry path (MintProviderTokenAppTrackWithReferralReservation
+// with no bearer) dead-ended with ErrAppTrackExistingTokenNoProof.
+func TestCommittedUndeliveredAppTrackMintIsRecoverable(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	code, err := store.CreateSeedReferral(context.Background(), policy, "recover_undelivered", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	reservation, err := store.ReserveReferralCapacity(context.Background(), policy, code, "lost-app", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstToken, err := store.MintProviderTokenAppTrackWithReferralReservation(
+		context.Background(), "lost-app", nil, code, policy, reservation, appTrackAttempt(now),
+	)
+	if err != nil || firstToken == "" {
+		t.Fatalf("first mint token=%q err=%v", firstToken, err)
+	}
+	// Response lost; reconciliation with prepared=true keeps the credential.
+	pending, err := store.ListPendingAppTrackReferralMints(context.Background(), now.Add(time.Hour))
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	if err := store.ResolvePendingAppTrackReferralMint(context.Background(), pending[0], true); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pre-fix dead-end: a bearer-less retry through the normal mint path is
+	// rejected because an active (undeliverable) token exists.
+	retryReservation, err := store.ReserveReferralCapacity(context.Background(), policy, code, "lost-app", now.Add(time.Minute), time.Minute)
+	if err != nil {
+		t.Fatalf("idempotent re-reserve err=%v", err)
+	}
+	if _, err := store.MintProviderTokenAppTrackWithReferralReservation(
+		context.Background(), "lost-app", nil, code, policy, retryReservation, appTrackAttempt(now.Add(time.Minute)),
+	); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+		t.Fatalf("bearer-less retry err=%v, want the pre-recovery dead-end", err)
+	}
+
+	// A2 recovery resolves the dead-end by rotating the unused token.
+	recovered, ok, err := store.RecoverAppTrackReferralMint(
+		context.Background(), "lost-app", nil, code, policy, appTrackAttempt(now.Add(2*time.Minute)),
+	)
+	if err != nil || !ok || recovered == "" {
+		t.Fatalf("recover token=%q ok=%v err=%v", recovered, ok, err)
+	}
+	if recovered == firstToken {
+		t.Fatalf("recovery must rotate to a fresh token, got the old one")
+	}
+	providerID, valid, err := store.ValidateToken(context.Background(), recovered)
+	if err != nil || !valid || providerID != "lost-app" {
+		t.Fatalf("recovered token provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+	if _, valid, err := store.ValidateToken(context.Background(), firstToken); err != nil || valid {
+		t.Fatalf("old undelivered token must be revoked (valid=%v err=%v)", valid, err)
+	}
+	// Capacity (1) was not re-consumed: still exhausted, one redemption only.
+	if _, err := store.ReserveReferralCapacity(context.Background(), policy, code, "other-app", now.Add(3*time.Minute), time.Minute); !errors.Is(err, auth.ErrReferralExhausted) {
+		t.Fatalf("post-recovery capacity err=%v, want ErrReferralExhausted", err)
+	}
+}
+
+// TestUsedAppTrackTokenIsNotRecoverable guards A2: once the active token has been
+// used, recovery must not rotate it (the caller must prove custody instead).
+func TestUsedAppTrackTokenIsNotRecoverable(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	code, err := store.CreateSeedReferral(context.Background(), policy, "used_norecover", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	reservation, err := store.ReserveReferralCapacity(context.Background(), policy, code, "used-app", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := store.MintProviderTokenAppTrackWithReferralReservation(
+		context.Background(), "used-app", nil, code, policy, reservation, appTrackAttempt(now),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := store.ValidateAndMarkTokenUsed(context.Background(), token); err != nil || !valid {
+		t.Fatalf("mark used valid=%v err=%v", valid, err)
+	}
+	recovered, ok, err := store.RecoverAppTrackReferralMint(
+		context.Background(), "used-app", nil, code, policy, appTrackAttempt(now.Add(time.Minute)),
+	)
+	if err != nil || ok || recovered != "" {
+		t.Fatalf("used token recovery ok=%v token=%q err=%v, want no recovery", ok, recovered, err)
+	}
+}

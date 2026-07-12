@@ -469,14 +469,24 @@ SELECT issuer_id, code_digest FROM referral_redemptions WHERE campaign = ? AND p
 		return ErrReferralInvalid
 	}
 	if err == nil {
-		validated, validationErr := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false)
 		digest := sha256.Sum256([]byte(code))
 		presentedDigest := fmt.Sprintf("%x", digest[:])
-		if validationErr == nil && existingIssuer == parsed.IssuerID && validated.IssuerID == existingIssuer &&
-			hmac.Equal([]byte(existingDigest), []byte(presentedDigest)) {
+		// FIX-570 A3 (PROD-H7): once (provider_id, campaign, issuer_id, code_digest)
+		// are bound in referral_redemptions the binding is immutable. Custody-proven
+		// recovery / re-disclosure for THAT binding must succeed regardless of the
+		// issuer's later lifecycle (expiry/revocation) — those apply only to NEW
+		// redemptions. Authenticate the presented code's MAC and match it to the
+		// stored binding, then accept without re-validating issuer expiry/revocation.
+		if existingIssuer == parsed.IssuerID && hmac.Equal([]byte(existingDigest), []byte(presentedDigest)) {
+			wantMAC, macErr := referralMAC(policy, parsed.Type, parsed.KeyID, parsed.IssuerID)
+			if macErr != nil || !hmac.Equal(wantMAC, parsed.Tag) {
+				return ErrReferralInvalid
+			}
 			return nil
 		}
-		if validationErr != nil {
+		// A different code presented for an already-attributed provider: run full
+		// validation to surface the precise reason, else report the conflict.
+		if _, validationErr := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false); validationErr != nil {
 			return validationErr
 		}
 		return ErrReferralConflict

@@ -80,8 +80,8 @@ final class MalibuAgent: ObservableObject {
 
         // App-owned identities keep their bearer in Keychain, never in config.yaml
         // or a launchd plist. Run the provider as Malibu's child so the bearer is
-        // supplied through the sanitized process environment and removed by the
-        // CLI immediately after configuration is resolved.
+        // supplied over an anonymous stdin pipe (--token-fd 0) — never argv or the
+        // initial environment — so KERN_PROCARGS2 inspection cannot recover it.
         if await startManagedProvider() {
             return
         }
@@ -154,7 +154,11 @@ final class MalibuAgent: ObservableObject {
                     controlSocketPath: paths.controlSocket,
                     httpPort: port,
                     logFileURL: paths.cliLogFile,
-                    extraEnvironment: ["MACPROVIDER_PROVIDER_TOKEN": bearer]
+                    // ADV-C1: the bearer travels over an anonymous stdin pipe
+                    // (--token-fd 0), never the child's initial environment,
+                    // so it cannot be read from KERN_PROCARGS2 or captured by
+                    // an installer recovery snapshot.
+                    providerToken: bearer
                 )
             )
             managed.onUnexpectedExit = { [weak self] code in

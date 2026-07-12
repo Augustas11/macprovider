@@ -186,6 +186,7 @@ type AuthTokenStore interface {
 
 type ReferralStore interface {
 	ReserveReferralCapacity(ctx context.Context, policy auth.ReferralPolicy, code, providerID string, now time.Time, ttl time.Duration) (string, error)
+	RecoverAppTrackReferralMint(ctx context.Context, providerID string, currentBearer *string, referralCode string, policy auth.ReferralPolicy, attempt auth.AppTrackRegistrationAttempt) (cleartext string, recovered bool, err error)
 	MintProviderTokenAppTrackWithReferral(ctx context.Context, providerID string, currentBearer *string, referralCode string, policy auth.ReferralPolicy) (cleartext string, err error)
 	MintProviderTokenAppTrackWithReferralReservation(ctx context.Context, providerID string, currentBearer *string, referralCode string, policy auth.ReferralPolicy, reservationID string, attempt auth.AppTrackRegistrationAttempt) (cleartext string, err error)
 	AcknowledgeAppTrackReferralMint(ctx context.Context, providerID, cleartextToken string) error
@@ -228,6 +229,10 @@ type Metrics interface {
 	IncRegisterRateLimitHit(scope string) // scope = "ip" | "asn"
 	IncRegisterSource(track string)       // track = "app" | "cli" | "portal"
 	IncRegisterHardwareProfileError()
+	// IncRegisterReconcileDeferred counts committed App-track mints whose durable
+	// saga acknowledgement failed and was intentionally deferred to the
+	// reconciler (FIX-570 A1) rather than compensated inline.
+	IncRegisterReconcileDeferred()
 }
 
 // Sentinel errors surfaced by StatsDB / AuthTokenStore. The HTTP handler
@@ -413,6 +418,7 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 	currentBearer := bearerFromRequest(r)
 	var token string
 	var referralReservationID string
+	recoveryMode := false
 	if h.ReferralPolicy.RequireForRegistration {
 		if h.ReferralStore == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
@@ -428,14 +434,34 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			bearerExempt = ok && boundProviderID == req.ProviderID
 		}
 		if !bearerExempt {
-			reservationCtx, cancelReservation := context.WithTimeout(r.Context(), 2*time.Second)
-			referralReservationID, err = h.ReferralStore.ReserveReferralCapacity(
-				reservationCtx, h.ReferralPolicy, req.ReferralCode, req.ProviderID, now, appTrackReferralReservationTTL,
+			// FIX-570 A2: a prior gated mint may have committed (referral redeemed +
+			// unused token minted) but lost its response. Before claiming fresh
+			// capacity, attempt idempotent re-disclosure by rotating the unused
+			// token bound to the SAME redemption (no capacity re-consumed, no issuer
+			// re-validation). Only when there is nothing to recover do we reserve.
+			recoverCtx, cancelRecover := context.WithTimeout(r.Context(), 2*time.Second)
+			recoveredToken, recovered, recoverErr := h.ReferralStore.RecoverAppTrackReferralMint(
+				recoverCtx, req.ProviderID, currentBearer, req.ReferralCode, h.ReferralPolicy,
+				auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, ObservedAt: now},
 			)
-			cancelReservation()
-			if err != nil {
-				writeReferralError(w, err)
+			cancelRecover()
+			if recoverErr != nil {
+				writeAppTrackMintError(w, recoverErr)
 				return
+			}
+			if recovered {
+				token = recoveredToken
+				recoveryMode = true
+			} else {
+				reservationCtx, cancelReservation := context.WithTimeout(r.Context(), 2*time.Second)
+				referralReservationID, err = h.ReferralStore.ReserveReferralCapacity(
+					reservationCtx, h.ReferralPolicy, req.ReferralCode, req.ProviderID, now, appTrackReferralReservationTTL,
+				)
+				cancelReservation()
+				if err != nil {
+					writeReferralError(w, err)
+					return
+				}
 			}
 		}
 	}
@@ -459,14 +485,17 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		}
 		return err
 	}
-	if referralReservationID != "" {
+	if referralReservationID != "" || recoveryMode {
 		// Fresh gated registrations cross the credential authority first. A
 		// referral failure therefore cannot create a PostgreSQL identity or
 		// reward/auth anchor. The cleartext token is not exposed until the
-		// subsequent atomic PostgreSQL prepare succeeds.
-		if err := mintCredential(); err != nil {
-			writeAppTrackMintError(w, err)
-			return
+		// subsequent atomic PostgreSQL prepare succeeds. In recovery mode the token
+		// was already minted with a durable saga row, so only prepare + ack remain.
+		if !recoveryMode {
+			if err := mintCredential(); err != nil {
+				writeAppTrackMintError(w, err)
+				return
+			}
 		}
 		prepareErr := prepareIdentity()
 		if prepareErr != nil {
@@ -493,8 +522,18 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		ackCtx, cancelAck := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = h.ReferralStore.AcknowledgeAppTrackReferralMint(ackCtx, req.ProviderID, token)
+		ackErr := h.ReferralStore.AcknowledgeAppTrackReferralMint(ackCtx, req.ProviderID, token)
 		cancelAck()
+		if ackErr != nil {
+			// FIX-570 A1: do NOT ignore the acknowledgement error. PostgreSQL
+			// preparation committed (prepared implied by reaching this branch), so
+			// leaving the pending-mint row lets the reconciler resolve it with
+			// prepared=true, which PRESERVES the credential + referral redemption.
+			// Deleting or compensating here would risk stranding a live credential.
+			if h.Metrics != nil {
+				h.Metrics.IncRegisterReconcileDeferred()
+			}
+		}
 	} else {
 		// Existing-bearer reissues and open registration have no fresh referral
 		// boundary. Keep PostgreSQL nonce/identity preparation ahead of minting.
@@ -696,21 +735,35 @@ func bearerFromRequest(r *http.Request) *string {
 	return &token
 }
 
+// writeReferralError emits the referral failure envelope. FIX-570 / contract C-1:
+// in addition to the existing {"error":{"code","message"}} envelope it adds a
+// top-level machine-readable "reason" token (one of missing|invalid|expired|
+// revoked|exhausted) so the App / installer can route the user back to the invite
+// step with the right message. HTTP statuses are unchanged.
 func writeReferralError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, auth.ErrReferralRequired):
-		writeJSONError(w, http.StatusBadRequest, "referral_required", "a valid pre-beta referral is required")
+		writeReferralJSONError(w, http.StatusBadRequest, "referral_required", "missing", "a valid pre-beta referral is required")
 	case errors.Is(err, auth.ErrReferralExpired):
-		writeJSONError(w, http.StatusGone, "referral_expired", "referral code expired")
+		writeReferralJSONError(w, http.StatusGone, "referral_expired", "expired", "referral code expired")
 	case errors.Is(err, auth.ErrReferralRevoked):
-		writeJSONError(w, http.StatusGone, "referral_revoked", "referral code revoked")
+		writeReferralJSONError(w, http.StatusGone, "referral_revoked", "revoked", "referral code revoked")
 	case errors.Is(err, auth.ErrReferralExhausted):
-		writeJSONError(w, http.StatusConflict, "referral_exhausted", "all spots on this referral are taken")
+		writeReferralJSONError(w, http.StatusConflict, "referral_exhausted", "exhausted", "all spots on this referral are taken")
 	case errors.Is(err, auth.ErrReferralConflict):
-		writeJSONError(w, http.StatusConflict, "referral_conflict", "provider is already attributed to another referral")
+		// ErrReferralConflict has no canonical C-1 token; report "invalid" to stay
+		// within the enumerated set while keeping the distinct referral_conflict code.
+		writeReferralJSONError(w, http.StatusConflict, "referral_conflict", "invalid", "provider is already attributed to another referral")
 	default:
-		writeJSONError(w, http.StatusBadRequest, "referral_invalid", "referral code is invalid")
+		writeReferralJSONError(w, http.StatusBadRequest, "referral_invalid", "invalid", "referral code is invalid")
 	}
+}
+
+func writeReferralJSONError(w http.ResponseWriter, status int, code, reason, message string) {
+	writeJSON(w, status, map[string]any{
+		"error":  map[string]any{"code": code, "message": message},
+		"reason": reason,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

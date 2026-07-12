@@ -56,6 +56,19 @@ type Handler struct {
 	Now             func() time.Time
 	JoinBaseURL     string
 	Metrics         Metrics
+	// RequestAccessURL is a lightweight, non-authorizing waitlist / support link
+	// shown on the branded expired/revoked/exhausted invite pages (FIX-570 A6/B7).
+	// It MUST NOT itself grant registration. Empty falls back to a default.
+	RequestAccessURL string
+}
+
+const defaultRequestAccessURL = "https://malibu.tech/request-access"
+
+func (h *Handler) requestAccessURL() string {
+	if u := strings.TrimSpace(h.RequestAccessURL); u != "" {
+		return u
+	}
+	return defaultRequestAccessURL
 }
 
 func (h *Handler) HandleValidate(w http.ResponseWriter, r *http.Request) {
@@ -114,11 +127,35 @@ var joinPage = template.Must(template.New("join").Parse(`<!doctype html>
 <p id="copied" aria-live="polite"></p><p>You choose when to launch the provider after installing Malibu.</p></div></main>
 <script>document.getElementById('copy').addEventListener('click',async()=>{await navigator.clipboard.writeText(document.getElementById('invite').textContent);document.getElementById('copied').textContent='Invite code copied.'})</script></body></html>`))
 
+const brandedUnavailableStyle = `body{margin:0;background:#101116;color:#f7f3ee;font:17px system-ui,sans-serif}main{max-width:620px;margin:10vh auto;padding:32px}h1{font-size:42px}.card{background:#1b1d25;border-radius:18px;padding:26px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}a{display:inline-block;border-radius:9px;padding:12px 16px;background:#ff765f;color:#171717;text-decoration:none;font-weight:650}a.secondary{background:#343744;color:#fff}`
+
 var joinFullPage = template.Must(template.New("join-full").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title>
-<style>body{margin:0;background:#101116;color:#f7f3ee;font:17px system-ui,sans-serif}main{max-width:620px;margin:10vh auto;padding:32px}h1{font-size:42px}.card{background:#1b1d25;border-radius:18px;padding:26px}a{display:inline-block;border-radius:9px;padding:12px 16px;background:#ff765f;color:#171717;text-decoration:none;font-weight:650}</style></head>
-<body><main><p>Malibu pre-beta</p><h1>This invite filled up.</h1><div class="card"><p>All early-access spots on this invite have been claimed. Malibu is building a network that lets Macs contribute useful compute.</p><a href="https://malibu.tech">Learn more about Malibu</a></div></main></body></html>`))
+<style>` + brandedUnavailableStyle + `</style></head>
+<body><main><p>Malibu pre-beta</p><h1>This invite filled up.</h1><div class="card"><p>All early-access spots on this invite have been claimed. Ask your inviter for another invite, or request access below.</p><div class="actions"><a href="{{.RequestAccessURL}}">Request access</a><a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
+
+// FIX-570 A6: expired and revoked invites render a branded state instead of a raw
+// 404. Raw 404 is reserved for malformed/forged codes.
+var joinExpiredPage = template.Must(template.New("join-expired").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title>
+<style>` + brandedUnavailableStyle + `</style></head>
+<body><main><p>Malibu pre-beta</p><h1>This invite is no longer available.</h1><div class="card"><p>This invite has expired. Ask your inviter for another invite, or request access below.</p><div class="actions"><a href="{{.RequestAccessURL}}">Request access</a><a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
+
+var joinRevokedPage = template.Must(template.New("join-revoked").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title>
+<style>` + brandedUnavailableStyle + `</style></head>
+<body><main><p>Malibu pre-beta</p><h1>This invite is no longer available.</h1><div class="card"><p>This invite is no longer active. Ask your inviter for another invite, or request access below.</p><div class="actions"><a href="{{.RequestAccessURL}}">Request access</a><a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
+
+// FIX-570 A9: when the referral gate is disabled the /j route stays mounted and
+// serves an open-beta landing rather than 404ing links already in circulation.
+var joinOpenBetaPage = template.Must(template.New("join-open").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>You're invited to Malibu</title>
+<style>` + brandedUnavailableStyle + `</style></head>
+<body><main><p>Malibu</p><h1>Put your Mac to work.</h1><div class="card"><p>Malibu is now open. You don't need an invite code — download Malibu and choose when to launch the provider.</p><div class="actions"><a href="https://download.malibu.tech/latest.dmg">Download Malibu</a><a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
 
 func (h *Handler) HandleJoin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

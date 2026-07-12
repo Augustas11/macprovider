@@ -56,6 +56,9 @@ private struct OnboardingRootView: View {
         .padding(28)
         .frame(minWidth: 460, minHeight: 560)
         .task {
+            // PROD-H6: an app-owned identity with a missing bearer takes over
+            // the stage; skip the invite flow when it does.
+            if await controller.evaluateExistingIdentityState() { return }
             await controller.refreshReferralPolicy()
             await controller.refreshFromExistingInstall()
         }
@@ -72,9 +75,9 @@ private struct OnboardingRootView: View {
                     : "Install the provider CLI and register this Mac."
             ) {
                 VStack(alignment: .leading, spacing: 10) {
-                    if controller.referralRequired {
+                    if controller.showsReferralField {
                         HStack(spacing: 8) {
-                            TextField("MAL1-…", text: $controller.referralCode)
+                            TextField("MAL1-… or invite link", text: $controller.referralCode)
                                 .textFieldStyle(.roundedBorder)
                                 .font(.system(.body, design: .monospaced))
                                 .accessibilityLabel("Malibu invite code")
@@ -83,6 +86,13 @@ private struct OnboardingRootView: View {
                                     controller.referralCode = value.trimmingCharacters(in: .whitespacesAndNewlines)
                                 }
                             }
+                        }
+                        if !controller.referralRequired {
+                            // PROD-M3: policy is unknown/optional — the invite is
+                            // not blocking; registration decides.
+                            Text("Have an invite? Paste it here. Registration will confirm whether one is required.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         if !controller.normalizedReferralCode.isEmpty && !controller.referralCodeIsValid {
                             Text("That invite code does not match Malibu's expected format.")
@@ -151,6 +161,32 @@ private struct OnboardingRootView: View {
             ) {
                 ProgressView().controlSize(.small)
             }
+        case let .existingIdentityMissingBearer(providerID):
+            stageRow(
+                title: "Provider credential missing",
+                detail: "This Mac already has a Malibu provider identity"
+                    + (providerID.isEmpty ? "" : " (\(providerID))")
+                    + ", but its saved credential is gone. Recover it, or start over as a new provider."
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Button("Recover this provider") {
+                        Task { await controller.recoverExistingIdentity() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(MalibuBrand.coral)
+                    Text("Tries to restore the existing provider's credential. No new invite needed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Divider()
+                    Button("Start as a new provider") {
+                        Task { await controller.startAsNewProvider() }
+                    }
+                    .buttonStyle(.bordered)
+                    Text("Moves the existing provider aside and sets up a fresh one. This does not delete your earnings history, but the old provider identity is retired on this Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         case let .live(model, tier):
             VStack(alignment: .leading, spacing: 16) {
                 stageRow(title: "Provider live", detail: "Serving \(model). Trust tier: \(tier.rawValue).") {
@@ -171,11 +207,17 @@ private struct OnboardingRootView: View {
             stageRow(title: retryable ? "Needs retry" : "Setup failed", detail: message) {
                 if retryable {
                     if stage == "referral" || (stage == "cliInstall" && controller.referralRequired) {
-                        Text(stage == "referral" ? "Use a different invite" : "Change invite code (optional)")
+                        // PROD-M2: when the server demanded an invite, entering a
+                        // new invite code is required — not optional.
+                        Text(stage == "referral" ? "Enter a new invite code" : "Change invite code")
                             .font(.caption.weight(.semibold))
-                        TextField("MAL1-…", text: $controller.referralCode)
+                        TextField("MAL1-… or invite link", text: $controller.referralCode)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
+                        // PROD-M6: no working inviter? Offer a non-authorizing
+                        // request-access affordance.
+                        Link("No working invite? Request access", destination: LaunchProviderController.requestAccessURL)
+                            .font(.caption)
                     }
                     launchButton(title: "Retry")
                         .disabled(controller.referralRequired && (stage == "referral" || stage == "cliInstall") && !controller.referralCodeIsValid)

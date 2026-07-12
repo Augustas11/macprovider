@@ -34,6 +34,10 @@ public struct AppConfig: Equatable, Sendable {
     public var coordinatorURL: String?
     /// Pre-beta referral code used only while obtaining first credentials.
     public var referralCode: String?
+    /// PROD-H1: reservation id from the installer's /v1/referrals/reserve
+    /// preflight, forwarded on the credential-bootstrap path so the mint
+    /// consumes the same short-lived reservation the installer claimed.
+    public var referralReservationID: String? = nil
     public var providerID: String?
     public var endpointURL: String?
     public var wsTunneledMode: Bool?
@@ -375,6 +379,7 @@ public enum ConfigLoader {
         try assign(&config.modelCatalogHash, from: dict, key: "model_catalog_hash", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
         try assign(&config.referralCode, from: dict, key: "referral_code", expected: "string")
+        try assign(&config.referralReservationID, from: dict, key: "referral_reservation_id", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
         try assign(&config.wsTunneledMode, from: dict, key: "ws_tunneled_mode", expected: "boolean")
@@ -431,6 +436,7 @@ public enum ConfigLoader {
         try assign(&config.publishesSpecDecodeTelemetry, from: environment, env: "MACPROVIDER_PUBLISHES_SPEC_DECODE_TELEMETRY", expected: "boolean")
         try assign(&config.coordinatorURL, from: environment, env: "MACPROVIDER_COORDINATOR_URL", expected: "string")
         try assign(&config.referralCode, from: environment, env: "MACPROVIDER_REFERRAL_CODE", expected: "string")
+        try assign(&config.referralReservationID, from: environment, env: "MACPROVIDER_REFERRAL_RESERVATION_ID", expected: "string")
         try assign(&config.providerID, from: environment, env: "MACPROVIDER_PROVIDER_ID", expected: "string")
         try assign(&config.endpointURL, from: environment, env: "MACPROVIDER_ENDPOINT_URL", expected: "string")
         try assign(&config.wsTunneledMode, from: environment, env: "MACPROVIDER_WS_TUNNELED_MODE", expected: "boolean")

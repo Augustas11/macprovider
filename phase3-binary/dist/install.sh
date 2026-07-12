@@ -1668,6 +1668,21 @@ if len(environment) > 512 or any(len(entry) > 8192 for entry in environment) or 
 environment_keys = [entry.split(b"=", 1)[0] for entry in environment]
 if any(not key or b"=" in key for key in environment_keys) or len(set(environment_keys)) != len(environment_keys):
     raise SystemExit("manual provider environment is invalid")
+# ADV-C1: never serialize a secret to disk. Drop the provider bearer and any
+# token/secret/key/password/bearer-shaped env entry from the recovery snapshot.
+# The restored serving child obtains its bearer from Keychain (app-managed) or
+# its 0600 config/token-file (CLI track), not from this recovered environment.
+def _is_secret_env_key(key):
+    upper = key.upper()
+    if upper == b"MACPROVIDER_PROVIDER_TOKEN":
+        return True
+    for needle in (b"TOKEN", b"SECRET", b"PASSWORD", b"PASSWD", b"BEARER", b"APIKEY"):
+        if needle in upper:
+            return True
+    return upper.endswith(b"_KEY") or upper == b"KEY"
+environment = [
+    entry for entry in environment if not _is_secret_env_key(entry.split(b"=", 1)[0])
+]
 working_directory = os.path.realpath(observed_cwd)
 if not os.path.isabs(working_directory) or not os.path.isdir(working_directory):
     raise SystemExit("manual provider working directory is invalid")
@@ -3184,8 +3199,24 @@ ensure_provider_credentials() {
     *) die 6 "tokenless credential bootstrap requires a fresh high-entropy mp-* provider ID; this existing predictable ID needs an operator-issued ownership credential" ;;
   esac
   log "Acquiring first-install provider credential before evidence admission."
+  # PROD-M2: capture bootstrap-auth stderr so we can distinguish a referral
+  # rejection (machine-readable MACPROVIDER_REFERRAL_REJECTED marker) from a
+  # generic failure, and surface the specific reason so the app can route the
+  # user back to the invite step.
+  bootstrap_err="$(mktemp -t macprovider-bootstrap-err 2>/dev/null || mktemp)"
+  bootstrap_rc=0
   run_macprovider_cli_with_amfi_retry bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH" \
-    || die 6 "provider credential bootstrap failed before evidence admission"
+    2>"$bootstrap_err" || bootstrap_rc=$?
+  cat "$bootstrap_err" >&2
+  if [ "$bootstrap_rc" -ne 0 ]; then
+    referral_reason="$(sed -n 's/.*MACPROVIDER_REFERRAL_REJECTED reason=referral_\([a-z]*\).*/\1/p' "$bootstrap_err" | head -n1)"
+    rm -f "$bootstrap_err"
+    if [ -n "$referral_reason" ]; then
+      die 7 "provider registration rejected the invite (referral_$referral_reason); enter a new invite and try again"
+    fi
+    die 6 "provider credential bootstrap failed before evidence admission"
+  fi
+  rm -f "$bootstrap_err"
   [ -n "$(read_config_provider_token || true)" ] \
     || die 6 "provider credential bootstrap completed without persisting provider_token"
   if [ -n "${STAGED_CONFIG_PATH:-}" ] && [ "$CONFIG_PATH" = "$STAGED_CONFIG_PATH" ]; then

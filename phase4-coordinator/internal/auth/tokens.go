@@ -1062,6 +1062,133 @@ func (s *Store) MintProviderTokenAppTrackWithReferralReservation(ctx context.Con
 	return s.mintProviderTokenAppTrackWithReferral(ctx, providerID, currentBearer, referralCode, policy, strings.TrimSpace(reservationID), attempt)
 }
 
+// RecoverAppTrackReferralMint implements FIX-570 A2 (PROD-C1). When a prior gated
+// App-track mint committed (a referral redemption already exists for this
+// provider) but its cleartext token was never delivered — leaving an UNUSED active
+// token whose cleartext exists nowhere — this rotates to a fresh unused token
+// bound to the SAME referral redemption WITHOUT re-consuming capacity and WITHOUT
+// re-validating issuer expiry/revocation (identity-key custody was already proven
+// upstream by the signed registration; see A3 for the lifecycle-independent
+// binding check). It returns recovered=false and a nil error when the
+// preconditions are absent, so the caller proceeds with the normal
+// reserve+mint flow. A fresh reissue-cooldown row bounds re-disclosure so a
+// lost-token loop cannot mint unboundedly.
+func (s *Store) RecoverAppTrackReferralMint(ctx context.Context, providerID string, currentBearer *string, referralCode string, policy ReferralPolicy, attempt AppTrackRegistrationAttempt) (string, bool, error) {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return "", false, err
+	}
+	if !policy.RequireForRegistration {
+		return "", false, nil
+	}
+	if strings.TrimSpace(attempt.SourceIP) == "" || strings.TrimSpace(attempt.Nonce) == "" || attempt.ObservedAt.IsZero() {
+		return "", false, ErrReferralConflict
+	}
+	var token string
+	var recovered bool
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		nowText := nowString()
+		var active struct {
+			ID       int64
+			Hash     string
+			LastUsed sql.NullString
+		}
+		lookupErr := conn.QueryRowContext(ctx, `
+SELECT id, token_hash, last_used_at
+  FROM provider_tokens
+ WHERE provider_id = ? AND revoked_at IS NULL
+ LIMIT 1`, providerID).Scan(&active.ID, &active.Hash, &active.LastUsed)
+		if errors.Is(lookupErr, sql.ErrNoRows) {
+			return nil // no active token → nothing to recover; caller mints normally
+		}
+		if lookupErr != nil {
+			return lookupErr
+		}
+		// A valid current bearer means custody can be proven the normal way; do not
+		// rotate — the caller's proof-based reissue path handles it.
+		if currentBearer != nil && strings.TrimSpace(*currentBearer) != "" && tokenHash(strings.TrimSpace(*currentBearer)) == active.Hash {
+			return nil
+		}
+		if active.LastUsed.Valid {
+			return nil // token already used → not recoverable; caller returns no-proof
+		}
+		var existingRedemption int
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM referral_redemptions WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&existingRedemption); err != nil {
+			return err
+		}
+		if existingRedemption == 0 {
+			return nil // prior mint never committed the referral → not this path
+		}
+		// Bound-code check (A3): the presented code must match the immutable
+		// redemption binding regardless of the issuer's later lifecycle. This also
+		// authenticates that the caller holds the same invite. No new redemption is
+		// created and no capacity is consumed.
+		if err := redeemReferralTx(ctx, conn, policy, referralCode, providerID, time.Now().UTC()); err != nil {
+			return err
+		}
+		var recent int
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM apptrack_register_reissues WHERE provider_id = ? AND ts >= ?`,
+			providerID, timeText(time.Now().UTC().Add(-5*time.Minute))).Scan(&recent); err != nil {
+			return err
+		}
+		if recent > 0 {
+			return ErrAppTrackReissueCooldown
+		}
+		res, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = ?
+ WHERE id = ? AND revoked_at IS NULL AND last_used_at IS NULL`, nowText, active.ID)
+		if err != nil {
+			return err
+		}
+		if affected, affErr := res.RowsAffected(); affErr != nil || affected != 1 {
+			// Raced a concurrent use of the token; recovery is no longer safe.
+			return ErrAppTrackExistingTokenNoProof
+		}
+		newToken, err := randomHex(32)
+		if err != nil {
+			return err
+		}
+		prefix := newToken[:tokenDisplayPrefixLength]
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
+VALUES (?, ?, ?, ?, ?)`, tokenHash(newToken), prefix, providerID, "malibu-app", nowText); err != nil {
+			if isActiveProviderTokenConstraintFailure(err) {
+				return ErrActiveTokenAlreadyExists
+			}
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO apptrack_register_reissues (provider_id, ts) VALUES (?, ?)`, providerID, nowText); err != nil {
+			return err
+		}
+		// Replace any stale saga row (PK is provider_id) with a fresh one for the
+		// new token. created_redemption=0 so a non-commit reconcile outcome never
+		// deletes the pre-existing committed redemption.
+		if _, err := conn.ExecContext(ctx, `
+DELETE FROM apptrack_pending_referral_mints WHERE provider_id = ?`, providerID); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO apptrack_pending_referral_mints (
+    provider_id, token_hash, campaign, registration_source_ip,
+    registration_nonce, registration_observed_at, created_redemption, created_at
+) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+			providerID, tokenHash(newToken), policy.Campaign, strings.TrimSpace(attempt.SourceIP),
+			strings.TrimSpace(attempt.Nonce), attempt.ObservedAt.UTC().Format(time.RFC3339Nano), nowText); err != nil {
+			return err
+		}
+		token = newToken
+		recovered = true
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return token, recovered, nil
+}
+
 // AcknowledgeAppTrackReferralMint removes the durable cross-store saga only
 // after PostgreSQL preparation is known to have committed. The token and
 // referral redemption remain authoritative.
