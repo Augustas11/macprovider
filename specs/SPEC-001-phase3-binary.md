@@ -3304,7 +3304,10 @@ port). The binary MUST:
 
 1. Reply `drain_status: complete` per § 6.5.
 2. Close the WS.
-3. Within 30 seconds of the close, send a fresh `hello` over a new WS.
+3. Within 30 seconds of the close, re-connect over a new WS using the
+   **mode-selected handshake** (R-6.7.8): a fresh `hello` in legacy
+   HTTP-forwarding mode, or a fresh v2 `auth_request` challenge/proof in
+   WS-tunneled / credential-bootstrap mode.
 4. Reach `state: ready` again in the coordinator pool within 60 seconds
    total elapsed from drain initiation.
 
