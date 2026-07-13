@@ -76,8 +76,18 @@ state; codex 3-lane audit in progress)
     audit-log scoped to 401/200/429; callback origin must equal portal
     proxied origin; `/v1/install/pair/refresh` unreachable via coordinator
     ingress; `{"providers":null}` empty case; state-cap non-empty-`code`;
-    bind `{}`≠empty-body; `assigned_id`. All R4 C/H/M addressed in this
-    revision; re-audit pending.
+    bind `{}`≠empty-body; `assigned_id`. All R4 C/H/M addressed.
+    R5 (commit `5b93db4`): code 0C/0H/2M, security 0C/0H/3M/2L, architect
+    0C/0H/3M/1L — all lanes HIGH-free. Straggler sweep of R4 facts
+    (pool-404 "shown"→recorded-not-rendered at every site; `{}`≠empty-body
+    everywhere; providers `array|null` in the §5 row; `§5(c)`→§5.3) plus
+    genuine precision: callback origin needs scheme+hostname+**port**
+    equality (not just host); `/v1/auth/*` + pair-refresh upstream is the
+    provider mux `:8444`; sibling-domain cookie-planting session-fixation
+    residual (future fix `__Host-` cookie); the shipped misconfig banner's
+    pair-refresh proxy instruction is misleading; logout has no
+    forced-logout CSRF defense. All R5 C/H/M addressed in this revision;
+    re-audit pending.
 **Depends on:**
   - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
     ownership frame shapes — `ownership_event` / `needs_claim` — consumed by
@@ -516,8 +526,14 @@ logout is best-effort revocation — see the §2.5.7 disclosure.
 **The bearer-authed install-pair-refresh endpoint (SPEC-014-owned transport,
 reconciled v0.9).** The coordinator exposes `POST /v1/install/pair/refresh` to mint
 a fresh `pair_ot` + `claim_url`; it is a provider-CLI/install surface, **not called
-by the portal** (though the portal's misconfig banner *names* the path
-informationally, see §8(b) allowlist note). No other spec owns its HTTP transport
+by the portal**. (The portal's shipped misconfig banner does more than *name* the
+path: it **instructs operators to proxy `/v1/install/pair/refresh` through the
+portal origin** — which is **misleading**, since the CLI actually POSTs it to the
+**coordinator** origin (`ClaimCommand.swift`). Following the banner would widen the
+portal's exposed surface **without** fixing refresh; the real fix is a
+coordinator-ingress route (below). This banner copy is a **carried UI/deployment
+gap**, reconciled v0.9 — see §8(b) allowlist note.) No other spec owns its HTTP
+transport
 (SPEC-003 FR-C10 assigns the rate limit "to the downstream consumer"), so SPEC-014
 records it here: **POST, FR-P12 provider-bearer auth**, `200 {pair_ot, claim_url,
 expires_in: 600}`; a per-provider mint cap (**~5 successful mints/hour**) returns
@@ -637,9 +653,14 @@ SPEC-003 FR-C10's.
     **no CSRF token and no Origin/Referer check**, and `bind` does not enforce
     `Content-Type`. Their only cross-site defense is `SameSite=Lax` on `mp_session`
     (which does not protect against same-site sibling subdomains — see the cookie
-    `Domain` residual in §2.5.3) plus their being POST. This is a carried security
-    residual, stated honestly rather than dressed up as protection the code does
-    not provide.
+    `Domain` residual in §2.5.3) plus their being POST. **`logout` has essentially no
+    forced-logout defense (reconciled v0.9):** the handler always clears the cookie
+    and returns 204 **regardless of whether the request even carried `mp_session`**,
+    so a cross-site top-level POST to `/v1/auth/logout` can force-log-out a victim
+    without holding their cookie — `SameSite=Lax`+POST does not stop it. Impact is
+    low (it only ends the session; it grants no access), but the spec does not claim
+    logout is CSRF-protected. This is a carried security residual, stated honestly
+    rather than dressed up as protection the code does not provide.
 - **`return_to`** MUST be a local path: it MUST start with `/`, MUST NOT start
   with `//` or `/\`, is regex-constrained, and is double-decode-checked to reject
   open redirects.
@@ -674,8 +695,9 @@ SPEC-003 FR-C10's.
     (body-provided).
   - *Was logged out* → the `pair_ot` given to `/v1/auth/github/start?pair_ot=…` is
     carried through the OAuth `oauth_state` row into the new session's
-    `mp_session.pending_pair_ot`; the post-OAuth bind then posts an **empty body
-    `{}`** and the coordinator consumes the session-pending `pair_ot`
+    `mp_session.pending_pair_ot`; the post-OAuth bind then posts a **JSON `{}`
+    body** (a serialized empty object — NOT a raw-empty HTTP body, which would 400;
+    §2.5.2) and the coordinator consumes the session-pending `pair_ot`
     (`auth_github.go`, `tokens.go`). SPEC-014 owns this transport, so it documents
     **both** the body-provided and the session-pending binding paths.
 
@@ -735,6 +757,18 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
   cookie `Domain` may be a parent domain and the session id is never rotated
   (§2.5.3). This is a strictly larger auth surface than paste-bearer mode and is why
   it is opt-in/off-by-default.
+- **Session fixation via sibling-domain cookie planting (reconciled v0.9 — carried
+  gap, broader than the parent-`Domain` case).** Even when the portal uses the
+  recommended host-only cookie, `mp_session` has **no `__Host-` prefix**, so an
+  attacker who controls **any HTTPS sibling** under a shared parent domain can set a
+  parent-`Domain` `mp_session` carrying the **attacker's** valid session in the
+  victim's browser. Before the victim has established their own portal cookie, the
+  `/claim` flow would then bind the victim's `pair_ot` to the **attacker's**
+  identity — durable ownership, no unlink (§2.5.6). §2.5.3 only documented the risk
+  of the *portal itself* configuring a parent `Domain`; this planting attack does
+  not need that. The future fix is a **`__Host-` prefixed cookie with no `Domain`
+  attribute**; until then this is a carried residual and a reason to isolate the
+  portal on a domain with no untrusted HTTPS siblings.
 - **Logout is not a full revocation boundary (reconciled v0.9 — carried gap).**
   `POST /v1/auth/logout` **attempts to delete only the current cookie's** session id
   (best-effort — it ignores a delete error and always 204s, §2.5.2). But an
@@ -916,8 +950,9 @@ Issue taxonomy (v0.1) is restricted to existing observable
 signals:
 
 - **Unavailable** — `/v1/pool/check.state` returns `"unavailable"`
-  (reconciled v0.9: a missing provider is a **404** shown as a
-  pool-check error, not this row and not the §2.2 auth path; `degraded`
+  (reconciled v0.9: a missing provider is a **404** recorded in
+  `state.pool.err` but **not surfaced by the header** (§4.1 A.1) — it is
+  not this row and not the §2.2 auth path; `degraded`
   does not trigger this row per the pill note above. The shipped portal
   JS still tests `unavailable || unknown`, but the coordinator no longer
   emits `unknown`, so the `unknown` branch is **latent-dead**, not
@@ -1235,7 +1270,7 @@ exactly one of them.
 | C.1 | lifetime / window / last-payout credit cards | `GET /providers/{id}/earnings` | `total_credits`, `current_window_credits`, `last_payout_ready.{window_start_utc, window_end_utc, provider_credits}` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | E.1 | tier badge | `GET /v1/pool/check?provider_id=<id>` | `tier` | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | E.1 | state | `GET /v1/pool/check?provider_id=<id>` | `state` | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
-| OAuth chooser (§2.5.5) | owned-provider rows: `provider_id`, `claimed_at`, `last_seen_at` | `GET /v1/auth/me/providers` (cookie) | `body.providers[]` (object-root `{"providers":[…]}` envelope, NOT a bare array): `provider_id`, `claimed_at`, `last_seen_at` | on OAuth home load / popstate | in-memory | §2.5.2 SPEC-014 transport (reconciled v0.9); GitHub-OAuth mode only |
+| OAuth chooser (§2.5.5) | owned-provider rows: `provider_id`, `claimed_at`, `last_seen_at` | `GET /v1/auth/me/providers` (cookie) | `body.providers[]` (object-root `{"providers": <array \| null>}` envelope, NOT a bare array; empty owns → `null`, portal normalizes to `[]`, §2.5.2): `provider_id`, `claimed_at`, `last_seen_at` | on OAuth home load / popstate | in-memory | §2.5.2 SPEC-014 transport (reconciled v0.9); GitHub-OAuth mode only |
 
 **Note on the `state` source citation (reconciled v0.9).** The `state` rows above
 cite SPEC-002 §7.4 as the *endpoint* owner, but the **enum values and
@@ -1517,8 +1552,10 @@ Layered, NOT a flat checklist. Six required groups.
       (`/v1/pool/check`, `/providers/{id}/earnings`) and, for GitHub-OAuth mode,
       the §2.5.2 `/v1/auth/*` allowlist — no other `/v1/auth/*` or `/admin/*`. A
       **non-called informational literal** is permitted: the shipped misconfig
-      banner names `/v1/install/pair/refresh` as text (reconciled v0.9), which the
-      portal does not call (§2.5.2); the allowlist grep MUST target fetch/XHR call
+      banner mentions `/v1/install/pair/refresh` as text (reconciled v0.9), which the
+      portal does not call — though that banner copy is itself misleading (it tells
+      operators to proxy the path through the portal origin, but the CLI calls the
+      coordinator origin; carried UI gap, §2.5.2); the allowlist grep MUST target fetch/XHR call
       sites, not every string occurrence. **Reconciled v0.9 — shipped enforcement
       is a denylist:** the shipped `check-bundle.sh` enforces this as a **denylist**
       of the six privileged route prefixes above, not a positive call-site
@@ -1552,7 +1589,7 @@ Layered, NOT a flat checklist. Six required groups.
       §2.5.0, is indistinguishable from a session 401 and auto-relaunches.)
 - [ ] `/claim?ot=<pair_ot>` strips `?ot=` from the URL via `history.replaceState`
       before any render, then binds via `POST /v1/auth/me/providers/bind` — with a
-      `{"pair_ot": …}` body when already signed in, or an empty `{}` body
+      `{"pair_ot": …}` body when already signed in, or a JSON `{}` body (serialized empty object, not a raw-empty body — §2.5.2)
       (session-pending `pair_ot`, §2.5.5) after a logged-out OAuth round-trip.
       `410 pair_ot_invalid` / `409 already_owned` render claim-error copy; a `401`
       re-launches OAuth (there is **no** distinct `session_invalid` claim-error
@@ -1632,7 +1669,7 @@ asserts X actually happens.
 - [ ] Q3 (fiat payout rail): portal renders the "future spec"
       badge in C.2; no withdrawal flow exists anywhere.
 - [ ] Q4 (earnings breakdown): C.3 + C.4 are not rendered.
-- [ ] Q5 (omnibus SPEC-002 / SPEC-001 amendments): every §5(c)
+- [ ] Q5 (omnibus SPEC-002 / SPEC-001 amendments): every §5.3 (table (c))
       row pointing at Q5 has its associated UI element
       not-rendered in v0.1.
 - [ ] Q6 (rotation + removal): no rotation button, no remove-
@@ -1935,11 +1972,19 @@ The user shared screenshots from a competitor seller portal
 - **GitHub-OAuth deployment prerequisites (reconciled v0.9 — required to
   turn `github_oauth_enabled:true` into a working mode; the reference
   `dist/nginx-portal.streamvc.live.conf` does NOT yet include these):**
-  - **Proxy `/v1/auth/*` to the coordinator** at the portal origin. Without it
-    the OAuth calls hit the SPA `index.html` fallback (200 HTML), which the portal
-    parses as an empty provider list — a **silent** failure, not the misconfig
-    banner (§2.3 wiring caveat). This is the single most load-bearing missing
-    route.
+  - **Proxy `/v1/auth/*` to the coordinator's PROVIDER mux (`:8444`)** at the portal
+    origin — **not** the buyer mux. All six `/v1/auth/*` routes **and**
+    `/v1/install/pair/refresh` are registered on `wsServer.Handler()`, which is
+    mounted on `providerMux` (`cmd/coordinator/main.go`), whose production port is
+    `:8444` (`dist/coordinator.yaml`). The public coordinator nginx
+    (`dist/nginx-coordinator.streamvc.live.conf`) intentionally 404s generic
+    `/v1/*`, so the operator must add explicit ingress routes targeting `:8444` for
+    (a) the browser `/v1/auth/*` paths at the portal origin **and** (b) the
+    CLI-called `/v1/install/pair/refresh` at the coordinator origin (§2.5.2's
+    pair-refresh gap). Without (a) the OAuth calls hit the SPA `index.html` fallback
+    (200 HTML), which the portal parses as an empty provider list — a **silent**
+    failure, not the misconfig banner (§2.3 wiring caveat). This is the single most
+    load-bearing missing route.
   - **Coordinator config (all validated by `validateGitHubOAuth`, which
     fail-closes OAuth startup on any miss):** `GITHUB_OAUTH_ENABLED=true` (env /
     `auth.github_oauth.enabled`); `GITHUB_OAUTH_CLIENT_ID` + `GITHUB_OAUTH_CLIENT_SECRET`;
@@ -1952,14 +1997,18 @@ The user shared screenshots from a competitor seller portal
     be within the `PORTAL_BASE_URL` host scope; operators SHOULD scope it to the
     exact portal host (a parent domain widens cookie exposure to sibling
     subdomains, §2.5.3), but omitting it is valid (defaults to host-only cookie).
-  - **Origin constraint (reconciled v0.9 — the validator's "any host" is not
-    operational latitude).** Although `validateGitHubOAuth` accepts any HTTPS host
-    for `redirect_uri`, the **`redirect_uri` host, `PORTAL_BASE_URL` host, and the
-    portal's proxied origin MUST all be the same host.** The session cookie is
-    host-only by default and `return_to` is a **relative path**, so a callback that
-    lands on a different (but validator-accepted) host would set the cookie on the
-    wrong origin and the relative post-callback redirect would leave the OAuth
-    origin — breaking authentication. Do not exploit the validator's host latitude.
+  - **Origin constraint (reconciled v0.9 — the validator's latitude is not
+    operational latitude).** `validateGitHubOAuth` validates `redirect_uri` and
+    `PORTAL_BASE_URL` **independently** and accepts any HTTPS host **and any port**,
+    so it does not enforce that they match. Operationally, the **`redirect_uri`,
+    `PORTAL_BASE_URL`, and the proxied portal origin MUST share identical scheme,
+    hostname, AND effective port** — not merely the same host. The session cookie is
+    host-only by default (cookies are **port-agnostic**, but that is not a licence to
+    differ — see the redirect) and `return_to` is a **relative path**, so a callback
+    that lands on a different host *or port* (e.g. `https://portal.example:8444/…callback`
+    while `PORTAL_BASE_URL=https://portal.example/`) leaves the user stranded on the
+    callback port after the relative redirect — breaking authentication. Do not
+    exploit the validator's host/port latitude.
   - **Ingress query-log redaction:** redact `ot` / `pair_ot` / `code` / `state`
     at the reverse-proxy / CDN layer; coordinator app-log redaction does not cover
     ingress access logs that see `/claim?ot=…` (§2.5.4).
