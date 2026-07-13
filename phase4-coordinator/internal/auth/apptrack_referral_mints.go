@@ -28,19 +28,24 @@ type PendingAppTrackReferralMint struct {
 }
 
 // MintProviderTokenAppTrackWithReferralAttempt validates and redeems the
-// referral, creates an undisclosed credential, and records an exact pending
-// saga in one SQLite transaction. It never rotates an existing credential.
+// referral, commits the client's signed credential candidate, and records an
+// exact pending saga in one SQLite transaction. It never rotates an existing
+// credential; the client already has custody if the HTTP response is lost.
 func (s *Store) MintProviderTokenAppTrackWithReferralAttempt(
 	ctx context.Context,
-	providerID, referralCode string,
+	providerID, referralCode, tokenCandidate string,
 	policy ReferralPolicy,
 	attempt AppTrackRegistrationAttempt,
 ) (string, error) {
 	if err := config.ValidateProviderID(providerID); err != nil {
 		return "", err
 	}
+	tokenCandidate = strings.TrimSpace(tokenCandidate)
 	if !policy.RequireForRegistration || strings.TrimSpace(attempt.SourceIP) == "" ||
 		strings.TrimSpace(attempt.Nonce) == "" || attempt.AttemptTS.IsZero() {
+		return "", ErrReferralConflict
+	}
+	if len(tokenCandidate) != 64 || !isLowerHexToken(tokenCandidate) {
 		return "", ErrReferralConflict
 	}
 
@@ -61,16 +66,12 @@ SELECT COUNT(1) FROM provider_tokens
 		if err != nil {
 			return err
 		}
-		newToken, err := randomHex(32)
-		if err != nil {
-			return err
-		}
-		hash := tokenHash(newToken)
+		hash := tokenHash(tokenCandidate)
 		if _, err := conn.ExecContext(ctx, `
 INSERT INTO provider_tokens
     (token_hash, token_prefix, provider_id, provider_name, created_at)
 VALUES (?, ?, ?, 'malibu-app', ?)`,
-			hash, newToken[:tokenDisplayPrefixLength], providerID, timeText(now),
+			hash, tokenCandidate[:tokenDisplayPrefixLength], providerID, timeText(now),
 		); err != nil {
 			if isActiveProviderTokenConstraintFailure(err) {
 				return ErrActiveTokenAlreadyExists
@@ -88,13 +89,22 @@ INSERT INTO apptrack_pending_referral_mints (
 		); err != nil {
 			return err
 		}
-		token = newToken
+		token = tokenCandidate
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+func isLowerHexToken(value string) bool {
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // AcknowledgeAppTrackReferralMint removes the saga only after PostgreSQL has
