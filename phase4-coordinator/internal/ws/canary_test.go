@@ -177,13 +177,64 @@ func TestCanaryBuyerServingAppliesTier2Gate(t *testing.T) {
 	if s.canaryBuyerServing(p) {
 		t.Fatal("Tier-2-excluded provider must not be buyer-serving (would falsely lift the floor)")
 	}
-	// A busy provider (no free slots) is still buyer-serving capacity.
+	s.SetTier2Config(config.Tier2Config{})
+	// A busy provider (no free slots but positive total capacity) is still
+	// buyer-serving capacity — it frees up and buyers queue behind it.
 	busy := p
 	busy.State = pool.StateBusy
 	busy.SlotsFree = 0
-	s.SetTier2Config(config.Tier2Config{})
 	if !s.canaryBuyerServing(busy) {
-		t.Fatal("busy provider should still be buyer-serving")
+		t.Fatal("busy provider (SlotsTotal>0) should still be buyer-serving")
+	}
+	// A zero-TOTAL-capacity peer (provider-authored max_concurrency=0) can never be
+	// routed to and MUST NOT be buyer-serving — otherwise it would lift the floor
+	// and let the real provider be sanctioned into an empty pool.
+	zero := p
+	zero.SlotsTotal = 0
+	zero.SlotsFree = 0
+	zero.MaxConcurrency = 0
+	if s.canaryBuyerServing(zero) {
+		t.Fatal("zero-total-capacity provider must not be buyer-serving")
+	}
+}
+
+// TestFloorUsesInstalledPredicateExcludesTier2Peer drives RecordCanaryResult
+// through the NewServer-installed buyer-serving predicate (not an arbitrary test
+// closure): a same-model peer that is Tier-2-excluded must not lift the floor, so
+// the sole real provider is spared. Removing the NewServer injection would fail
+// this test.
+func TestFloorUsesInstalledPredicateExcludesTier2Peer(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	cfg := config.Default()
+	cfg.Pool.CanaryFailureThreshold = 1
+	// Tier-2 requires an encrypted leg; the peer lacks it → Tier-2-excluded.
+	cfg.Tier2.RequireEncryptedLeg = true
+	s := NewServer(cfg, registry, zerolog.Nop())
+	_ = s // NewServer installs the predicate on registry via SetBuyerServingPredicate
+
+	// Target: real, buyer-serving (encrypted leg present). HashStatus pinned so the
+	// encrypted-leg requirement is the sole Tier-2 discriminator in this test.
+	registry.Register(&pool.Provider{
+		ProviderID: "target", AssignedID: "st", ModelID: "model-a",
+		Tier: pool.TierProvisional, State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		EncryptedLeg: true, HashStatus: pool.HashStatusVerified,
+	}, nil)
+	// Peer: ready + same model + capacity, but Tier-2-excluded (no encrypted leg).
+	registry.Register(&pool.Provider{
+		ProviderID: "tier2-excluded-peer", AssignedID: "sp", ModelID: "model-a",
+		Tier: pool.TierProvisional, State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		EncryptedLeg: false, HashStatus: pool.HashStatusVerified,
+	}, nil)
+
+	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 1 (Tier-2-excluded peer omitted)", n)
+	}
+	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	res := registry.RecordCanaryResult("target", "st", false, at, 1)
+	if res.Tripped != pool.CanaryTripFloorHeld {
+		t.Fatalf("with only a Tier-2-excluded peer, result = %+v, want CanaryTripFloorHeld", res)
 	}
 }
 

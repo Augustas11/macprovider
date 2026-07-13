@@ -115,7 +115,7 @@ currently disabled on Pearl; see §16).
 | **Latency failure** | A probe that echoed correctly but breached a wall-time SLO — `ttft_breach`, `tps_breach`. |
 | **Sanction** | A coordinator-owned state change removing a provider from routing: **degrade** (pinned) or **admission-reject/ban** (provisional). |
 | **Recovery hold** | A coordinator-owned lock preventing a degraded provider from self-reporting its way back to `ready`. Reasons are enumerated (breaker, canary, provider-failure, warm-up, operator-clear); see §7 for composition. |
-| **Sole provider** | The only **buyer-serving** provider (`ServingCapable` + Tier-2/quota gates, per `buyer.Server.providerBuyerServing`) for a given model at a given instant. |
+| **Sole provider** | The only **buyer-serving** provider (`ServingCapable` + positive total capacity `SlotsTotal>0` + Tier-2 gates) for a given model at a given instant. |
 
 Provider **tiers** — `provisional` (self-onboarded, bearer-validated or tokenless)
 vs `pinned` (operator-configured) — are defined by SPEC-002's F-2 amendment and
@@ -520,8 +520,9 @@ cross-spec inconsistency — runbook item 22 — not re-litigated here.)
 
 **FR-CAN22 — The sole provider is never removed by a canary-only signal.** When a
 provider is the **only** buyer-serving provider for a model — the implementation
-uses the injected buyer-serving predicate (`ServingCapable` + Tier-2/quota gates,
-mirroring `buyer.Server.providerBuyerServing`), keyed on the active model — **no
+uses the injected buyer-serving predicate (`ServingCapable` [ready or busy] +
+positive total capacity `SlotsTotal>0` + not Tier-2-excluded; provisional quota is
+deliberately excluded, see §14), keyed on the active model — **no
 canary signal alone may remove it** — not `nonce_mismatch`, not `incomplete`, not a
 latency or soft-deadline `relay_error`, and not a canary-specific HTTP non-200
 (`status` sub-class). The reason is the corrected threat model (§1): a canary
@@ -553,7 +554,7 @@ containment.** With **≥2** routing-eligible providers, a `nonce_mismatch` or a
 non-`max_tokens`-attributable `incomplete` MAY remove a provider (it is not
 producing usable responses — *not* because the canary proved wrong weights, §1),
 always **subject to the FR-CAN22 last-provider floor** (the pool never drops below
-one routing-eligible provider on a canary-only signal) and to correlated-fault
+one buyer-serving provider on a canary-only signal) and to correlated-fault
 containment:
 
 - **A correlated-majority verdict produces only ephemeral, self-limiting effects —
@@ -618,8 +619,9 @@ containment:
 > **Conformance status (§14).** **Implemented in v0.2:** the last-provider floor —
 > a canary-only signal never removes the sole **buyer-serving** provider.
 > `RecordCanaryResult` consults `hasOtherBuyerServingForModelLocked` (the injected
-> buyer-serving predicate: `ServingCapable` + Tier-2 admission gates + quota, keyed
-> on the active model) before the tier branch and returns `CanaryTripFloorHeld`. A
+> buyer-serving predicate: `ServingCapable` + positive total capacity `SlotsTotal>0`
+> + not Tier-2-excluded, keyed on the active model) before the tier branch and
+> returns `CanaryTripFloorHeld`. A
 > sole provider can therefore no longer be removed by a coordinator-config fault
 > (incidents #1/#2 are closed) — including a max_tokens truncation, which the floor
 > protects against regardless of how it is classified. **Still Gap:** runtime
@@ -781,7 +783,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN4/5 transport, admitted model | Implemented | WS vs HTTP split; `MaxAdmittedModelKey`. FR-CAN5 explicitly not an identity binding. |
 | FR-CAN6 echo-first, skip-neutral | **Partial** | Order + counter skip-neutral implemented; OPoI skip-neutrality is a gap (see FR-CAN29). |
 | FR-CAN7 observe default; global-latency reject | **Partial** | Default `observe` (#513). Global-bank latency is un-logged in observe but **applied in enforce** (not rejected at validation) — accept-and-partially-honor (gap). |
-| FR-CAN8 enforce preconditions + buyer-path QoS owner | **Gap** | `enforce` reachable today single-shot/non-streaming/unguarded; no concrete sub-timeout QoS enforcement exists. |
+| FR-CAN8 enforce preconditions + buyer-path QoS owner | **Gap** | `enforce` reachable today single-shot/non-streaming/unguarded; no concrete sub-timeout QoS enforcement exists. Additionally the TPS numerator is the **provider-authored** `usage.completion_tokens` (`canaryCompletionTokens`), so a nonce-correct but slow provider could inflate it to suppress a `tps_breach` — a pre-existing reason `enforce` MUST stay gated until a coordinator-measured token/timing basis exists. (Carried, not introduced by the 1(b)/1(c) change; observe mode + prod `canary_enabled:false` bound current impact.) |
 | FR-CAN9 cold-start grace | Implemented | #512. |
 | FR-CAN10 sub-threshold no-op | Implemented | `RecordCanaryResult` returns below threshold. |
 | FR-CAN11 tier sanction | Implemented | Provisional ban / pinned degrade+persist. |
@@ -794,7 +796,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN19 conjunctive eligibility | Implemented | `RoutingEligible()` enforces auth/publication + state + slots. |
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Follows SPEC-010 R-3.3.4 `ModelKnown()` union (#555, authoritative); SPEC-002 R-3.X.6 `MAY` / SPEC-006 §17.2 wording is the carried item-22 cross-spec inconsistency, not claimed as fully aligned. |
-| FR-CAN22 sole-provider floor | **Implemented** (v0.2) | `RecordCanaryResult` spares the **sole buyer-serving provider** on **any** canary-only signal: it returns `CanaryTripFloorHeld` (no state change, keeps accruing the counter) instead of degrading/banning, and the caller emits `canary_floor_held` / `pool_redundancy_low` redundancy telemetry (`hasOtherBuyerServingForModelLocked`). "Buyer-serving" is the **injected predicate** mirroring `buyer.Server.providerBuyerServing` — `ServingCapable` (ready or busy) AND not Tier-2-excluded (hash/encryption/attestation) AND within provisional quota — keyed on the **active** model (case-folded `ModelID`, not declared-but-cold `SupportedModels`), so a Tier-2/quota-excluded or slotless-only peer cannot falsely lift the floor and empty the real pool. Applies to both tiers (precedes the tier branch). Removing a sole provider still requires evidence independent of the canary — the FR-P11a buyer-path breaker, a confirmed transport death, or item-9 weight evidence. |
+| FR-CAN22 sole-provider floor | **Implemented** (v0.2) | `RecordCanaryResult` spares the **sole buyer-serving provider** on **any** canary-only signal: it returns `CanaryTripFloorHeld` (no state change, keeps accruing the counter) instead of degrading/banning, and the caller emits `canary_floor_held` / `pool_redundancy_low` redundancy telemetry (`hasOtherBuyerServingForModelLocked`). The **injected predicate** (`canaryBuyerServing`) counts a peer only when it is `ServingCapable` (ready **or** busy) AND has **positive total capacity** (`SlotsTotal>0`) AND is **not Tier-2-excluded** (hash/encryption/attestation), keyed on the **active** model (case-folded `ModelID`, not declared-but-cold `SupportedModels`). So a peer that only *declares* the model, is degraded, is Tier-2-excluded, or reports zero total capacity (provider-authored `max_concurrency=0`, never routable) cannot falsely lift the floor and empty the real pool — while a merely **busy** peer (`SlotsFree==0`, `SlotsTotal>0`) DOES count (its capacity frees up and buyers queue behind it). **Provisional quota is deliberately NOT part of the predicate**: quota exhaustion is transient (self-heals in ≤1 h), so a quota-throttled peer counting toward the floor is at most a bounded transient gap — whereas checking `admission.CheckQuota` under the registry lock would couple `pool.mu` to the admission mutex (held across synchronous DB writes in `TryReserveRequest`), an availability convoy that could freeze registry snapshots/heartbeats/routing. This diverges from `buyer.Server.providerBuyerServing` only by (a) requiring positive total capacity — stricter — and (b) omitting the transient quota gate. Applies to both tiers (precedes the tier branch). Removing a sole provider still requires evidence independent of the canary — the FR-P11a buyer-path breaker, a confirmed transport death, or item-9 weight evidence. |
 | FR-CAN23 correlated-fault epoch (multi-provider) | **Gap** | The correlation epoch with **staged results** (pre-sweep snapshot + shared-fingerprint re-dispatch + bank-generation fencing + discard-on-suspicion) and the `relay_error` **hard/status/soft** sub-class split are **not** implemented — `RecordCanaryResult` still receives only a pass/fail bool with no per-signal class. The FR-CAN22 floor already prevents the single-provider outage (incidents #1/#2); the correlation epoch matters only at **≥2** providers and remains the authorized follow-up. (Its v0.1 design: ephemeral discard + alert only, no correlated-majority verdict creating persistent containment; ordinary per-provider FR-CAN11/15 sanctions still apply — see FR-CAN23.) |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
@@ -823,10 +825,15 @@ Testable against the current build (happy paths against the shipped code):
   after `canary_failure_threshold` consecutive such failures it is degraded
   (pinned) or admission-rejected (provisional). A single failure does **not**
   change routing state (FR-CAN10).
-- **AC-3 (WS path).** A WS probe truncated before the nonce (undersized
-  `max_tokens`) is classified `incomplete`, not `nonce_mismatch`. *(HTTP probes
-  do not inspect `finish_reason` and classify a truncated body as
-  `nonce_mismatch`; HTTP truncation classification is forward AC-F8.)*
+- **AC-3 (WS path).** A WS max_tokens truncation is **not** classified
+  `incomplete`: the shipped provider emits `finish_reason:"length"` inside a
+  terminal `status:"complete"` frame (ModelRuntime.swift), so the coordinator
+  evaluates the truncated echo and returns `nonce_mismatch`. The `incomplete`
+  reason (`status != "complete"`) is reserved for a genuinely non-completed
+  terminal frame (e.g. `cancelled`/error), not a max_tokens truncation. The
+  FR-CAN22 floor protects a sole provider from either; coordinator-verifiable
+  attribution of a truncation is deferred (FR-CAN3, §14). *(HTTP probes likewise do
+  not inspect `finish_reason`; HTTP truncation classification is forward AC-F8.)*
 - **AC-4.** In `observe` mode, a nonce-correct probe with an arbitrarily high
   measured *sub-timeout* TTFT passes; `canary_fail_count` does not increment.
   (A probe exceeding `canary_timeout_s` still fails — that is the soft-deadline
@@ -853,9 +860,12 @@ Testable against the current build (happy paths against the shipped code):
   independent buyer-path failure, confirmed transport death, or item-9 weight
   evidence. At the failure threshold it reports `CanaryTripFloorHeld`, stays
   routable, and keeps accruing the counter. A second **buyer-serving** provider for
-  the **active** model (ready or busy) restores the normal trip path; a peer that
-  only **declares** the model via `SupportedModels`, or that is Tier-2/quota-excluded,
-  does **not** lift the floor.
+  the **active** model — ready **or** busy, with positive total capacity — restores
+  the normal trip path; a peer that only **declares** the model via
+  `SupportedModels`, is degraded, is Tier-2-excluded, or reports zero total capacity
+  (`max_concurrency=0`) does **not** lift the floor. (Provisional quota is not part
+  of the predicate — see §14 — so a quota-throttled peer *can* lift it; that is an
+  accepted transient, not a floor bug.)
 
 Forward criteria (expected to FAIL against the current build; each corresponds to
 a §14 Partial/Gap row and defines part of the follow-up IMPL's done bar):
@@ -1006,8 +1016,13 @@ before the breaker and canary coexist under load.
   autotune hello-gate. Per SPEC-032 FR-PW1/PW3, OPoI as implemented is **not** a real
   anti-downgrade guarantee (it is the same plaintext-nonce echo); a genuine
   weight-integrity test (statistical/attested) is a forward requirement there, not yet
-  a shipped guarantee. FR-CAN8/22 consume the hello-gate's live eligible-provider
-  count (incident #2).
+  a shipped guarantee. Note the FR-CAN22 floor does **not** consume the hello-gate's
+  count — it evaluates its own injected buyer-serving predicate
+  (`hasOtherBuyerServingForModelLocked`) under the registry lock; the hello-gate
+  rejection path only emits a separate `buyer_serving_for_model` redundancy telemetry
+  field (§12 note / SPEC-032, still a Gap for the full FR-HG5 alert). The forward
+  FR-CAN8 latency-`enforce` precondition (≥2 buyer-serving providers) is a distinct,
+  unshipped gate.
 
 ## 18. Changelog
 
@@ -1017,13 +1032,17 @@ before the breaker and canary coexist under load.
     sole **buyer-serving** provider for the **active** model on any canary-only
     signal (`CanaryTripFloorHeld` + `hasOtherBuyerServingForModelLocked`), for both
     tiers, instead of degrading/banning it — the direct fix for the single-provider
-    incidents #1/#2 outage. "Buyer-serving" is an **injected predicate** mirroring
-    `buyer.Server.providerBuyerServing` (`ServingCapable` (ready or busy) + Tier-2
-    admission gates + provisional quota), keyed on the case-folded ACTIVE `ModelID`
-    (matching buyer routing), **not** declared-but-cold `SupportedModels` — so a
-    declared-only, degraded, or Tier-2/quota-excluded peer does not falsely lift the
-    floor and empty the real pool. The provider keeps accruing its counter; the
-    caller raises `canary_floor_held` / `pool_redundancy_low` telemetry.
+    incidents #1/#2 outage. "Buyer-serving" is an **injected predicate**
+    (`canaryBuyerServing`): `ServingCapable` (ready or busy) + **positive total
+    capacity** (`SlotsTotal>0`) + **not Tier-2-excluded**, keyed on the case-folded
+    ACTIVE `ModelID` (matching buyer routing), **not** declared-but-cold
+    `SupportedModels` — so a declared-only, degraded, Tier-2-excluded, or
+    zero-total-capacity (`max_concurrency=0`, never routable) peer does not falsely
+    lift the floor and empty the real pool, while a merely busy peer still counts.
+    Provisional **quota is deliberately excluded** from the predicate (transient/
+    self-healing, and checking it under the registry lock would couple `pool.mu` to
+    the admission-DB mutex — an availability convoy). The provider keeps accruing its
+    counter; the caller raises `canary_floor_held` / `pool_redundancy_low` telemetry.
   - **FR-CAN3 coordinator-attribution → NOT shipped (stays Gap).** Runtime
     attribution of a max_tokens truncation was prototyped but **deliberately dropped**
     after audit: the shipped provider represents a truncation as `finish_reason:"length"`
@@ -1040,6 +1059,12 @@ before the breaker and canary coexist under load.
     is partial rejection/floor **telemetry**, NOT the full SPEC-032 **FR-HG5**
     below-two operator alert (structural demand-filtered count + dedup/cooldown
     across all gate actions), which stays a SPEC-032 Gap.
+  - **Carried LOWs:** (a) the floor's Tier-2 check reads the ws server's Tier-2
+    snapshot while buyer routing reads its own; a SIGHUP reload updates them
+    sequentially, so a concurrent strict→relaxed reload can momentarily let the
+    floor count a peer buyer routing still excludes (bounded to the reload window,
+    fail-toward-spare). (b) The enforce-mode TPS numerator is provider-authored
+    (FR-CAN8 row) — pre-existing, gated by observe mode.
   - **Deferred (still Gap):** runtime FR-CAN3 attribution (needs coordinator-verifiable
     evidence — see above); FR-CAN23 multi-provider correlation epoch + the
     `relay_error` hard/status/soft sub-class split; FR-HG5; FR-CAN15/18/14/26.

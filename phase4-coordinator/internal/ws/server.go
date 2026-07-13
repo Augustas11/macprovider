@@ -514,20 +514,35 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	return s
 }
 
-// canaryBuyerServing reports whether p is currently buyer-serving: ServingCapable
-// (ready or busy) AND not Tier-2-excluded (hash/encryption/attestation gates) AND
-// within its provisional quota. Mirrors buyer.Server.providerBuyerServing using the
-// shared admission manager and this server's Tier-2 config. Read-only:
-// admission.CheckQuota only prunes expired request-window entries, it does not
-// consume quota.
+// canaryBuyerServing reports whether p provides real, permanent buyer-serving
+// capacity for the FR-CAN22 last-provider floor. It requires:
+//   - ServingCapable (state ready or busy, auth/catalog/receipt gates), AND
+//   - positive TOTAL serving capacity (SlotsTotal > 0). ServingCapable ignores
+//     slot counts, but a peer with zero total slots can NEVER be routed to (buyer
+//     selection needs SlotsFree>0 and the buyer queue needs SlotsTotal>0), so a
+//     provider-authored `max_concurrency=0` heartbeat must not lift the floor. A
+//     merely BUSY peer (SlotsFree==0, SlotsTotal>0) still counts — its capacity
+//     frees up, and buyers queue behind it. AND
+//   - not Tier-2-excluded (hash/encryption/attestation) — the PERMANENT
+//     buyer-routability exclusions, evaluated from in-memory config + catalog.
+//
+// Provisional quota is deliberately NOT checked here. Quota exhaustion is
+// transient (an hourly window that self-heals), so a quota-throttled peer counting
+// toward the floor causes at most a bounded transient availability gap, never a
+// permanent empty pool. More importantly, calling admission.CheckQuota under the
+// registry lock (RecordCanaryResult holds pool.mu; BuyerServingCountForModel holds
+// pool.mu.RLock) would couple pool.mu to the admission mutex, which is held across
+// synchronous single-connection DB writes in TryReserveRequest — an availability
+// convoy that could freeze registry snapshots, heartbeats, and routing. See
+// DECISION_CRITERIA Entry 139.
 func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 	if !p.ServingCapable() {
 		return false
 	}
-	if s.tier2WarmupExcluded(p) {
+	if p.SlotsTotal <= 0 {
 		return false
 	}
-	if s.admission != nil && !s.admission.CheckQuota(p) {
+	if s.tier2WarmupExcluded(p) {
 		return false
 	}
 	return true

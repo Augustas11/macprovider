@@ -1269,13 +1269,15 @@ func (r *Registry) SetBuyerServingPredicate(fn func(Provider) bool) {
 	r.buyerServing = fn
 }
 
-// isBuyerServingLocked applies the injected buyer-serving predicate (or the
-// ServingCapable fallback) to p. Caller MUST hold r.mu (read or write).
+// isBuyerServingLocked applies the injected buyer-serving predicate, or a
+// capacity-aware ServingCapable fallback, to p. Caller MUST hold r.mu (read or
+// write). The fallback also requires SlotsTotal>0 so a zero-total-capacity peer
+// never lifts the floor even in the (unit-test-only) uninjected path.
 func (r *Registry) isBuyerServingLocked(p *Provider) bool {
 	if r.buyerServing != nil {
 		return r.buyerServing(*p)
 	}
-	return p.ServingCapable()
+	return p.ServingCapable() && p.SlotsTotal > 0
 }
 
 // hasOtherBuyerServingForModelLocked reports whether some provider other than
