@@ -861,9 +861,14 @@ func revokeReferral(args []string, stdout io.Writer) error {
 	apply := fs.Bool("apply", false, "apply the revocation (default is a dry-run preview)")
 	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
 	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
+	// FIX-570 M5(prod): revoking a seed can invalidate every circulated link, so
+	// --apply requires confirming the blast-radius counts shown by the dry-run.
+	expectRedeemed := fs.Int("expect-redeemed", -1, "expected redemption count from the dry-run preview (required with --apply)")
+	expectReservations := fs.Int("expect-reservations", -1, "expected live-reservation count from the dry-run preview (required with --apply)")
 	fs.Usage = referralUsage(fs, "revoke-referral",
 		"coordinator-cli revoke-referral --db coordinator.db --campaign prebeta \\\n"+
-			"    --issuer-id <issuer> --apply --actor ops@malibu --reason 'abuse report #42'")
+			"    --issuer-id <issuer> --apply --actor ops@malibu --reason 'abuse report #42' \\\n"+
+			"    --expect-redeemed 3 --expect-reservations 0")
 	if err := fs.Parse(args); err != nil {
 		return referralParseError(err)
 	}
@@ -873,12 +878,19 @@ func revokeReferral(args []string, stdout io.Writer) error {
 	if *apply && (strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "") {
 		return fmt.Errorf("--actor and --reason are required with --apply")
 	}
+	var expect *auth.ReferralRevokeExpectation
+	if *apply {
+		if *expectRedeemed < 0 || *expectReservations < 0 {
+			return fmt.Errorf("--expect-redeemed and --expect-reservations are required with --apply (run the dry-run first and pass the shown counts)")
+		}
+		expect = &auth.ReferralRevokeExpectation{Redeemed: *expectRedeemed, LiveReservations: *expectReservations}
+	}
 	store, err := auth.OpenStore(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	result, err := store.RevokeReferralIssuerAudited(context.Background(), *campaign, *issuerID, *apply, strings.TrimSpace(*actor), strings.TrimSpace(*reason), time.Now().UTC())
+	result, err := store.RevokeReferralIssuerAudited(context.Background(), *campaign, *issuerID, *apply, strings.TrimSpace(*actor), strings.TrimSpace(*reason), expect, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -886,8 +898,8 @@ func revokeReferral(args []string, stdout io.Writer) error {
 	if result.Applied {
 		mode = "applied"
 	}
-	_, err = fmt.Fprintf(stdout, "mode=%s\ncampaign=%s\nissuer_id=%s\ncode_type=%s\nprovider_id=%s\n",
-		mode, result.Campaign, result.IssuerID, result.CodeType, result.ProviderID)
+	_, err = fmt.Fprintf(stdout, "mode=%s\ncampaign=%s\nissuer_id=%s\ncode_type=%s\nprovider_id=%s\nredeemed=%d\nlive_reservations=%d\nremaining_capacity=%d\n",
+		mode, result.Campaign, result.IssuerID, result.CodeType, result.ProviderID, result.Redeemed, result.LiveReservations, result.RemainingCapacity)
 	return err
 }
 

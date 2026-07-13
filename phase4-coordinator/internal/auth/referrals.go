@@ -239,20 +239,37 @@ UPDATE referral_issuers
 
 // ReferralRevocation is the preview/result of RevokeReferralIssuerAudited.
 type ReferralRevocation struct {
-	Campaign   string
-	IssuerID   string
-	CodeType   string
-	ProviderID string
-	Applied    bool
+	Campaign          string
+	IssuerID          string
+	CodeType          string
+	ProviderID        string
+	Redeemed          int // redemptions already bound to this issuer (permanent)
+	LiveReservations  int // unredeemed, unexpired reservations that will be dropped
+	RemainingCapacity int // uses still available before revoke (>= 0)
+	Applied           bool
+}
+
+// ReferralRevokeExpectation is the operator's expected blast-radius snapshot,
+// required at apply time. FIX-570 M5(prod): revoking a seed can invalidate every
+// circulated link, so the operator must confirm the exact redemption/reservation
+// counts they previewed; if the live state has drifted the apply is refused.
+type ReferralRevokeExpectation struct {
+	Redeemed         int
+	LiveReservations int
 }
 
 // RevokeReferralIssuerAudited previews (apply=false) or applies (apply=true) a
 // revocation of a seed or provider issuer within a campaign. Applying requires a
 // non-empty actor and reason and writes an append-only referral_admin_audit row
 // in the SAME transaction as the revoke. FIX-570 M6: the operator revoke path
-// must be attributable. The preview reports the target issuer's type and bound
-// provider so an operator can confirm before mutating.
-func (s *Store) RevokeReferralIssuerAudited(ctx context.Context, campaign, issuerID string, apply bool, actor, reason string, now time.Time) (ReferralRevocation, error) {
+// must be attributable.
+//
+// FIX-570 M5(prod): the preview reports the full blast radius — redemption count,
+// live reservation count, and remaining capacity — not just the issuer type and
+// bound provider. When apply is true an `expect` snapshot is REQUIRED and the
+// revoke is refused if the live redemption/reservation counts have drifted from
+// what the operator confirmed, so a seed is never revoked against a stale preview.
+func (s *Store) RevokeReferralIssuerAudited(ctx context.Context, campaign, issuerID string, apply bool, actor, reason string, expect *ReferralRevokeExpectation, now time.Time) (ReferralRevocation, error) {
 	campaign = strings.TrimSpace(campaign)
 	issuerID = strings.TrimSpace(issuerID)
 	if !referralPartPattern.MatchString(campaign) || !referralPartPattern.MatchString(issuerID) {
@@ -261,14 +278,18 @@ func (s *Store) RevokeReferralIssuerAudited(ctx context.Context, campaign, issue
 	if apply && (strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "") {
 		return ReferralRevocation{}, fmt.Errorf("actor and reason are required to apply a revocation")
 	}
+	if apply && expect == nil {
+		return ReferralRevocation{}, fmt.Errorf("an expected-snapshot confirmation is required to apply a revocation (re-run the dry-run and pass the shown counts)")
+	}
 	out := ReferralRevocation{Campaign: campaign, IssuerID: issuerID}
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		var providerID sql.NullString
 		var revokedAt sql.NullString
+		var baseCap, bonusCap int
 		if err := conn.QueryRowContext(ctx, `
-SELECT code_type, provider_id, revoked_at
+SELECT code_type, provider_id, revoked_at, base_capacity, bonus_capacity
   FROM referral_issuers
- WHERE campaign = ? AND issuer_id = ?`, campaign, issuerID).Scan(&out.CodeType, &providerID, &revokedAt); err != nil {
+ WHERE campaign = ? AND issuer_id = ?`, campaign, issuerID).Scan(&out.CodeType, &providerID, &revokedAt, &baseCap, &bonusCap); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrReferralInvalid
 			}
@@ -278,8 +299,33 @@ SELECT code_type, provider_id, revoked_at
 		if revokedAt.Valid {
 			return fmt.Errorf("issuer %s is already revoked", issuerID)
 		}
+		// FIX-570 M5(prod): compute the blast radius.
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?`, issuerID).Scan(&out.Redeemed); err != nil {
+			return err
+		}
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM referral_reservations r
+ WHERE r.issuer_id = ? AND r.expires_at > ?
+   AND NOT EXISTS (
+       SELECT 1 FROM referral_redemptions d
+        WHERE d.campaign = r.campaign
+          AND d.provider_id = r.provider_id
+          AND d.issuer_id = r.issuer_id
+   )`, issuerID, timeText(now.UTC())).Scan(&out.LiveReservations); err != nil {
+			return err
+		}
+		out.RemainingCapacity = baseCap + bonusCap - (out.Redeemed + out.LiveReservations)
+		if out.RemainingCapacity < 0 {
+			out.RemainingCapacity = 0
+		}
 		if !apply {
 			return nil
+		}
+		// Refuse to apply against a drifted snapshot.
+		if expect.Redeemed != out.Redeemed || expect.LiveReservations != out.LiveReservations {
+			return fmt.Errorf("revocation snapshot drift: expected redeemed=%d reservations=%d but live redeemed=%d reservations=%d; re-run the dry-run",
+				expect.Redeemed, expect.LiveReservations, out.Redeemed, out.LiveReservations)
 		}
 		result, err := conn.ExecContext(ctx, `
 UPDATE referral_issuers SET revoked_at = ? WHERE campaign = ? AND issuer_id = ? AND revoked_at IS NULL`,
@@ -290,7 +336,8 @@ UPDATE referral_issuers SET revoked_at = ? WHERE campaign = ? AND issuer_id = ? 
 		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 			return ErrReferralInvalid
 		}
-		detail := fmt.Sprintf("code_type=%s provider=%s", out.CodeType, out.ProviderID)
+		detail := fmt.Sprintf("code_type=%s provider=%s redeemed=%d reservations=%d remaining_capacity=%d",
+			out.CodeType, out.ProviderID, out.Redeemed, out.LiveReservations, out.RemainingCapacity)
 		if err := recordReferralAdminAuditTx(ctx, conn, actor, reason, "revoke_issuer", campaign+"/"+issuerID, detail, now); err != nil {
 			return err
 		}

@@ -296,19 +296,39 @@ func TestRevokeReferralInvalidatesSeedCode(t *testing.T) {
 	}, func(string) string { return secret }, &created); err != nil {
 		t.Fatal(err)
 	}
-	// FIX-570 M6: revoke without --apply is a dry-run preview that must NOT mutate.
+	// FIX-570 M6/M5(prod): revoke without --apply is a dry-run preview that must NOT
+	// mutate and must disclose the blast radius (redeemed / reservations / capacity).
 	var preview bytes.Buffer
 	if err := revokeReferral([]string{"--db", dbPath, "--campaign", "prebeta_2026", "--issuer-id", "launch"}, &preview); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(preview.String(), "mode=dry-run") || !strings.Contains(preview.String(), "issuer_id=launch") {
+	if !strings.Contains(preview.String(), "mode=dry-run") || !strings.Contains(preview.String(), "issuer_id=launch") ||
+		!strings.Contains(preview.String(), "redeemed=0") || !strings.Contains(preview.String(), "live_reservations=0") || !strings.Contains(preview.String(), "remaining_capacity=") {
 		t.Fatalf("unexpected preview output: %s", preview.String())
 	}
-	// Applying requires actor + reason and writes an audit row.
+	// FIX-570 M5(prod): --apply without the expected-snapshot flags is refused.
+	var missingSnapshot bytes.Buffer
+	if err := revokeReferral([]string{
+		"--db", dbPath, "--campaign", "prebeta_2026", "--issuer-id", "launch",
+		"--apply", "--actor", "ops@malibu", "--reason", "abuse report",
+	}, &missingSnapshot); err == nil || !strings.Contains(err.Error(), "expect-redeemed") {
+		t.Fatalf("apply without snapshot must be refused, err=%v", err)
+	}
+	// A drifted snapshot is refused.
+	var drift bytes.Buffer
+	if err := revokeReferral([]string{
+		"--db", dbPath, "--campaign", "prebeta_2026", "--issuer-id", "launch",
+		"--apply", "--actor", "ops@malibu", "--reason", "abuse report",
+		"--expect-redeemed", "5", "--expect-reservations", "0",
+	}, &drift); err == nil || !strings.Contains(err.Error(), "snapshot drift") {
+		t.Fatalf("drifted snapshot must be refused, err=%v", err)
+	}
+	// Applying with the confirmed snapshot writes an audit row.
 	var revoked bytes.Buffer
 	if err := revokeReferral([]string{
 		"--db", dbPath, "--campaign", "prebeta_2026", "--issuer-id", "launch",
 		"--apply", "--actor", "ops@malibu", "--reason", "abuse report",
+		"--expect-redeemed", "0", "--expect-reservations", "0",
 	}, &revoked); err != nil {
 		t.Fatal(err)
 	}
