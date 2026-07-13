@@ -2212,9 +2212,16 @@ R-3.6.4 and SPEC-011 v0.5 R-3.1.0 / R-3.3.0.
 
 #### 6.7.4. Back-compat with legacy hello
 
-R-6.7.8 A v1.3 binary uses v2 `auth_request` for the first connection
-attempt with a coordinator per SPEC-010 v1.5 §3.1 and R-3.1.1 through
-R-3.1.10, whether or not either opt-in is set.
+R-6.7.8 (reconciled v1.7) A v1.3 binary selects the first-connection handshake
+**by mode**, not universally: a **WS-tunneled or credential-bootstrap**
+connection uses the v2 `auth_request` two-stage handshake per SPEC-010 v1.5 §3.1
+and R-3.1.1 through R-3.1.10; a **legacy HTTP-forwarding-mode** connection uses
+the legacy §6.5 `hello` (`CoordinatorClient.swift` `connectAndRun()` selects on
+`wsTunneledMode` / credential-bootstrap; the first-connect test confirms
+`wsTunneledMode=false` sends `hello`). The SPEC-010 catalog / SPEC-011 warm-swap
+opt-ins do not themselves force v2 — the transport mode does. The coordinator
+accepts the v1 `hello` path unless encrypted-leg enforcement is enabled
+(`server.go`).
 
 R-6.7.9 (reconciled v1.7) The legacy `hello` handshake at §6.5 is the reconnect
 mid-session path **only for legacy HTTP-forwarding-mode connections** (per
@@ -2547,10 +2554,13 @@ R-6.11.3 WS drop MUST NOT abort an in-flight load; the in-process state
 machine continues independently of WS connectivity per SPEC-011 v0.5
 R-3.8.1 and R-3.8.5.
 
-R-6.11.4 Reconnect uses legacy `hello` per SPEC-011 v0.5 R-3.8.3, not
-v2 `auth_request`. Reconnect carries the same `provider_id` identity
-and the OLD `model_hash` while the load remains in progress, using the
-§6.10.4 source-of-truth rule per SPEC-011 v0.5 R-3.8.3.
+R-6.11.4 (scope reconciled v1.7) **In legacy HTTP-forwarding mode**, reconnect
+uses legacy `hello` per SPEC-011 v0.5 R-3.8.3, not v2 `auth_request`, carrying
+the same `provider_id` identity and the OLD `model_hash` while the load remains
+in progress, using the §6.10.4 source-of-truth rule per SPEC-011 v0.5 R-3.8.3. A
+**WS-tunneled or credential-bootstrap** connection instead re-runs the full v2
+`auth_request` handshake on reconnect (R-6.7.9 / R-6.10.5) and carries the same
+`model_hash` continuity on its post-reconnect heartbeat rather than via `hello`.
 
 #### 6.11.3. Cooldown soft guard
 
