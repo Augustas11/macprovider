@@ -940,13 +940,21 @@ func main() {
 			Tokens:          tokenStore,
 			ServingEvidence: referralapi.SQLiteServingEvidence{Path: cfg.Storage.DBPath},
 			Policy:          referralPolicy,
+			PublicLimiter:   referralapi.NewBoundedLimiter(60, time.Minute, 4096),
 			ProviderLimiter: referralapi.NewBoundedLimiter(10, time.Minute, 4096),
+			AuthSlots:       make(chan struct{}, 16),
 			VerifySlots:     make(chan struct{}, 16),
 			JoinBaseURL:     cfg.Referrals.JoinBaseURL,
 			Metrics:         metricsHandle,
+			SourceIP: func(r *http.Request) string {
+				return onboarding.ClientIP(r, trustedReferralProxies)
+			},
 		}
 		if cfg.Referrals.EnableSocialInviteBonus {
-			xClient := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
+			xClient, err := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("invalid social verification configuration")
+			}
 			advocacy.PostVerifier = xClient
 			startSocialVerificationPromotionReconciler(shutdownCtx, tokenStore, referralPolicy, xClient, metricsHandle, logger)
 		}
@@ -1264,7 +1272,7 @@ func startAppTrackReferralMintReconciler(ctx context.Context, handler *onboardin
 }
 
 type socialAuthorLookup interface {
-	LookupPostAuthor(context.Context, string) (string, error)
+	RecheckPost(context.Context, string, string) (string, error)
 }
 
 func startSocialVerificationPromotionReconciler(
@@ -1278,8 +1286,8 @@ func startSocialVerificationPromotionReconciler(
 	if store == nil || verifier == nil || !policy.EnableSocialBonus {
 		return
 	}
-	recheck := func(ctx context.Context, postID, boundAuthorID string) error {
-		authorID, err := verifier.LookupPostAuthor(ctx, postID)
+	recheck := func(ctx context.Context, postID, boundAuthorID, shareURLHash string) error {
+		authorID, err := verifier.RecheckPost(ctx, postID, shareURLHash)
 		if err != nil {
 			if errors.Is(err, referralapi.ErrXPostTransient) {
 				return fmt.Errorf("%w: %v", auth.ErrSocialRecheckTransient, err)

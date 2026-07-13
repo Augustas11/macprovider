@@ -36,6 +36,7 @@ const (
 )
 
 var socialPrincipalIDPattern = regexp.MustCompile(`^[0-9]{1,24}$`)
+var socialShareURLHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // ProviderReferral is the authoritative provider-invite snapshot. Capacity is
 // redemption-only: no public hold or reservation state is represented here.
@@ -78,6 +79,7 @@ func referralSocialSchemaStatements() []string {
 			issuer_id TEXT NOT NULL REFERENCES referral_issuers(issuer_id),
 			post_id TEXT NOT NULL UNIQUE,
 			author_id TEXT NOT NULL,
+			share_url_hash TEXT NOT NULL,
 			verification_method TEXT NOT NULL,
 			submitted_at TEXT NOT NULL,
 			pending_since TEXT NOT NULL,
@@ -88,6 +90,21 @@ func referralSocialSchemaStatements() []string {
 		`CREATE INDEX IF NOT EXISTS idx_referral_social_pending
 			ON referral_social_verifications(campaign, pending_since)
 			WHERE granted_at IS NULL AND failed_at IS NULL`,
+		`CREATE TABLE IF NOT EXISTS referral_social_verification_history (
+			archive_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			issuer_id TEXT NOT NULL,
+			post_id TEXT NOT NULL UNIQUE,
+			author_id TEXT NOT NULL,
+			share_url_hash TEXT NOT NULL,
+			verification_method TEXT NOT NULL,
+			submitted_at TEXT NOT NULL,
+			pending_since TEXT NOT NULL,
+			granted_at TEXT,
+			failed_at TEXT NOT NULL,
+			archived_at TEXT NOT NULL
+		)`,
 	}
 }
 
@@ -225,14 +242,45 @@ SELECT issuer_id, key_id, first_serving_at
 		if strings.TrimSpace(firstServingAt) == "" {
 			return ErrReferralLocked
 		}
-		var exists bool
-		if err := conn.QueryRowContext(ctx, `
-SELECT EXISTS(SELECT 1 FROM referral_social_verifications WHERE provider_id = ? AND campaign = ?)`,
-			providerID, policy.Campaign).Scan(&exists); err != nil {
+		var grantedAt, failedAt sql.NullString
+		err := conn.QueryRowContext(ctx, `
+SELECT granted_at, failed_at
+  FROM referral_social_verifications
+ WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(&grantedAt, &failedAt)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
 			return err
-		}
-		if exists {
+		case grantedAt.Valid || !failedAt.Valid:
 			return ErrSocialChallenge
+		default:
+			archiveResult, err := conn.ExecContext(ctx, `
+INSERT INTO referral_social_verification_history (
+    provider_id, campaign, issuer_id, post_id, author_id, share_url_hash,
+    verification_method, submitted_at, pending_since, granted_at, failed_at, archived_at
+)
+SELECT provider_id, campaign, issuer_id, post_id, author_id, share_url_hash,
+       verification_method, submitted_at, pending_since, granted_at, failed_at, ?
+  FROM referral_social_verifications
+ WHERE provider_id = ? AND campaign = ? AND failed_at IS NOT NULL`,
+				timeText(now.UTC()), providerID, policy.Campaign)
+			if err != nil {
+				return err
+			}
+			archived, err := archiveResult.RowsAffected()
+			if err != nil || archived != 1 {
+				return ErrSocialChallenge
+			}
+			deleteResult, err := conn.ExecContext(ctx, `
+DELETE FROM referral_social_verifications
+	WHERE provider_id = ? AND campaign = ? AND failed_at IS NOT NULL`, providerID, policy.Campaign)
+			if err != nil {
+				return err
+			}
+			deleted, err := deleteResult.RowsAffected()
+			if err != nil || deleted != 1 {
+				return ErrSocialChallenge
+			}
 		}
 		if _, err := conn.ExecContext(ctx,
 			`DELETE FROM referral_social_challenges WHERE provider_id = ? AND campaign = ?`,
@@ -286,7 +334,7 @@ SELECT c.expires_at, c.consumed_at
 	return nil
 }
 
-func (s *Store) CompleteSocialVerification(ctx context.Context, policy ReferralPolicy, providerID, challenge, postID, authorID, method string, now time.Time) (ProviderReferral, error) {
+func (s *Store) CompleteSocialVerification(ctx context.Context, policy ReferralPolicy, providerID, challenge, postID, authorID, shareURLHash, method string, now time.Time) (ProviderReferral, error) {
 	if err := policy.Validate(); err != nil {
 		return ProviderReferral{}, err
 	}
@@ -295,8 +343,9 @@ func (s *Store) CompleteSocialVerification(ctx context.Context, policy ReferralP
 	}
 	postID = strings.TrimSpace(postID)
 	authorID = strings.TrimSpace(authorID)
+	shareURLHash = strings.TrimSpace(shareURLHash)
 	method = strings.TrimSpace(method)
-	if !socialPrincipalIDPattern.MatchString(postID) || !socialPrincipalIDPattern.MatchString(authorID) || method != "x_api" {
+	if !socialPrincipalIDPattern.MatchString(postID) || !socialPrincipalIDPattern.MatchString(authorID) || !socialShareURLHashPattern.MatchString(shareURLHash) || method != "x_api" {
 		return ProviderReferral{}, ErrSocialChallenge
 	}
 	digest := sha256.Sum256([]byte(strings.TrimSpace(challenge)))
@@ -320,12 +369,20 @@ SELECT c.issuer_id, c.expires_at, c.consumed_at
 		if err != nil || consumedAt.Valid || !expires.After(now.UTC()) {
 			return ErrSocialChallenge
 		}
+		var archivedPost bool
+		if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM referral_social_verification_history WHERE post_id = ?)`, postID).Scan(&archivedPost); err != nil {
+			return err
+		}
+		if archivedPost {
+			return ErrSocialChallenge
+		}
 		if _, err := conn.ExecContext(ctx, `
 INSERT INTO referral_social_verifications (
-    provider_id, campaign, issuer_id, post_id, author_id,
+    provider_id, campaign, issuer_id, post_id, author_id, share_url_hash,
     verification_method, submitted_at, pending_since
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			providerID, policy.Campaign, issuerID, postID, authorID, method,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			providerID, policy.Campaign, issuerID, postID, authorID, shareURLHash, method,
 			timeText(now.UTC()), timeText(now.UTC())); err != nil {
 			if isConstraintFailure(err) {
 				return ErrSocialChallenge
@@ -356,7 +413,7 @@ UPDATE referral_social_challenges
 // was active when the pending row was selected. If replacement occurs during
 // recheck, the conditional issuer update is a no-op and a later pass processes
 // the verification after it has been rebound to the successor.
-func (s *Store) PromoteMaturedSocialVerifications(ctx context.Context, policy ReferralPolicy, now time.Time, recheck func(context.Context, string, string) error) (int, error) {
+func (s *Store) PromoteMaturedSocialVerifications(ctx context.Context, policy ReferralPolicy, now time.Time, recheck func(context.Context, string, string, string) error) (int, error) {
 	if err := policy.Validate(); err != nil {
 		return 0, err
 	}
@@ -364,7 +421,7 @@ func (s *Store) PromoteMaturedSocialVerifications(ctx context.Context, policy Re
 		return 0, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT provider_id, issuer_id, post_id, author_id
+SELECT provider_id, issuer_id, post_id, author_id, share_url_hash
   FROM referral_social_verifications
  WHERE campaign = ?
    AND granted_at IS NULL
@@ -375,11 +432,11 @@ SELECT provider_id, issuer_id, post_id, author_id
 	if err != nil {
 		return 0, err
 	}
-	type pending struct{ providerID, issuerID, postID, authorID string }
+	type pending struct{ providerID, issuerID, postID, authorID, shareURLHash string }
 	var items []pending
 	for rows.Next() {
 		var item pending
-		if err := rows.Scan(&item.providerID, &item.issuerID, &item.postID, &item.authorID); err != nil {
+		if err := rows.Scan(&item.providerID, &item.issuerID, &item.postID, &item.authorID, &item.shareURLHash); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -393,7 +450,7 @@ SELECT provider_id, issuer_id, post_id, author_id
 
 	granted := 0
 	for _, item := range items {
-		checkErr := recheck(ctx, item.postID, item.authorID)
+		checkErr := recheck(ctx, item.postID, item.authorID, item.shareURLHash)
 		if errors.Is(checkErr, ErrSocialRecheckTransient) {
 			continue
 		}

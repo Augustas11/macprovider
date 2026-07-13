@@ -60,7 +60,7 @@ struct ProviderReferralStatus: Decodable, Equatable {
 
     var canStartSocialChallenge: Bool {
         socialBonusEnabled
-            && socialState == Self.eligible
+            && [Self.eligible, Self.failed].contains(socialState)
             && configuredBonusCapacity > 0
             && availableInviteURL != nil
     }

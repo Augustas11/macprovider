@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var testSocialShareURLHash = strings.Repeat("a", 64)
+
 func socialReferralPolicy() ReferralPolicy {
 	policy := coreReferralPolicy()
 	policy.EnableSocialBonus = true
@@ -40,7 +42,7 @@ func createPendingSocialVerification(t *testing.T, store *Store, policy Referral
 	}
 	status, err = store.CompleteSocialVerification(
 		context.Background(), policy, providerID, challenge.Cleartext,
-		"123456789", "456", "x_api", now,
+		"123456789", "456", testSocialShareURLHash, "x_api", now,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -89,16 +91,19 @@ func TestSocialVerificationIsAuthorBoundPendingThenGrantedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "123", "", "x_api", now); !errors.Is(err, ErrSocialChallenge) {
+	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "123", "", testSocialShareURLHash, "x_api", now); !errors.Is(err, ErrSocialChallenge) {
 		t.Fatalf("empty author error=%v, want social challenge", err)
 	}
-	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "not-numeric", "123", "x_api", now); !errors.Is(err, ErrSocialChallenge) {
+	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "not-numeric", "123", testSocialShareURLHash, "x_api", now); !errors.Is(err, ErrSocialChallenge) {
 		t.Fatalf("non-numeric post error=%v, want social challenge", err)
 	}
-	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "123", strings.Repeat("1", 25), "x_api", now); !errors.Is(err, ErrSocialChallenge) {
+	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "123", strings.Repeat("1", 25), testSocialShareURLHash, "x_api", now); !errors.Is(err, ErrSocialChallenge) {
 		t.Fatalf("oversized author error=%v, want social challenge", err)
 	}
-	pending, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "123", "456", "x_api", now)
+	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "123", "456", "not-a-digest", "x_api", now); !errors.Is(err, ErrSocialChallenge) {
+		t.Fatalf("invalid share digest error=%v, want social challenge", err)
+	}
+	pending, err := store.CompleteSocialVerification(ctx, policy, providerID, challenge.Cleartext, "123", "456", testSocialShareURLHash, "x_api", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,9 +111,9 @@ func TestSocialVerificationIsAuthorBoundPendingThenGrantedOnce(t *testing.T) {
 		t.Fatalf("pending status=%+v", pending)
 	}
 
-	var gotPost, gotAuthor string
-	recheck := func(_ context.Context, postID, authorID string) error {
-		gotPost, gotAuthor = postID, authorID
+	var gotPost, gotAuthor, gotShareURLHash string
+	recheck := func(_ context.Context, postID, authorID, shareURLHash string) error {
+		gotPost, gotAuthor, gotShareURLHash = postID, authorID, shareURLHash
 		return nil
 	}
 	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(time.Minute), recheck); err != nil || granted != 0 {
@@ -117,8 +122,8 @@ func TestSocialVerificationIsAuthorBoundPendingThenGrantedOnce(t *testing.T) {
 	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(31*time.Minute), recheck); err != nil || granted != 1 {
 		t.Fatalf("mature promotion granted=%d err=%v", granted, err)
 	}
-	if gotPost != "123" || gotAuthor != "456" {
-		t.Fatalf("recheck post=%q author=%q", gotPost, gotAuthor)
+	if gotPost != "123" || gotAuthor != "456" || gotShareURLHash != testSocialShareURLHash {
+		t.Fatalf("recheck post=%q author=%q digest=%q", gotPost, gotAuthor, gotShareURLHash)
 	}
 	matured, err := store.ProviderReferralStatus(ctx, policy, providerID)
 	if err != nil || matured.SocialState != SocialStateMatured || matured.BonusCapacity != 2 || matured.Remaining != 3 {
@@ -137,7 +142,7 @@ func TestSocialPromotionDistinguishesTransientAndTerminalRechecks(t *testing.T) 
 	providerID := "provider-recheck"
 	createPendingSocialVerification(t, store, policy, providerID, now)
 
-	transient := func(context.Context, string, string) error { return ErrSocialRecheckTransient }
+	transient := func(context.Context, string, string, string) error { return ErrSocialRecheckTransient }
 	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(31*time.Minute), transient); err != nil || granted != 0 {
 		t.Fatalf("transient promotion granted=%d err=%v", granted, err)
 	}
@@ -146,7 +151,7 @@ func TestSocialPromotionDistinguishesTransientAndTerminalRechecks(t *testing.T) 
 		t.Fatalf("transient status=%+v err=%v", status, err)
 	}
 
-	terminal := func(context.Context, string, string) error { return errors.New("post unavailable") }
+	terminal := func(context.Context, string, string, string) error { return errors.New("post unavailable") }
 	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(32*time.Minute), terminal); err != nil || granted != 0 {
 		t.Fatalf("terminal promotion granted=%d err=%v", granted, err)
 	}
@@ -166,7 +171,7 @@ func TestReplacementRebindsPendingReviewAndBlocksStalePromotion(t *testing.T) {
 	oldIssuerID := pending.IssuerID
 
 	replacedDuringRecheck := false
-	recheck := func(context.Context, string, string) error {
+	recheck := func(context.Context, string, string, string) error {
 		if replacedDuringRecheck {
 			return nil
 		}
@@ -189,7 +194,7 @@ func TestReplacementRebindsPendingReviewAndBlocksStalePromotion(t *testing.T) {
 		t.Fatalf("rebound status=%+v err=%v", status, err)
 	}
 	newIssuerID := status.IssuerID
-	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(32*time.Minute), func(context.Context, string, string) error { return nil }); err != nil || granted != 1 {
+	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(32*time.Minute), func(context.Context, string, string, string) error { return nil }); err != nil || granted != 1 {
 		t.Fatalf("successor promotion granted=%d err=%v", granted, err)
 	}
 	status, err = store.ProviderReferralStatus(ctx, policy, providerID)
@@ -205,5 +210,52 @@ func TestReplacementRebindsPendingReviewAndBlocksStalePromotion(t *testing.T) {
 	}
 	if oldBonus != 0 || auditRows != 1 {
 		t.Fatalf("old bonus=%d audit rows=%d", oldBonus, auditRows)
+	}
+}
+
+func TestFailedSocialVerificationCanRetryWithoutReusingArchivedPost(t *testing.T) {
+	store := openSocialStore(t)
+	policy := socialReferralPolicy()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	providerID := "provider-social-retry"
+	_, firstChallenge := createPendingSocialVerification(t, store, policy, providerID, now)
+
+	terminal := func(context.Context, string, string, string) error { return errors.New("post removed") }
+	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(31*time.Minute), terminal); err != nil || granted != 0 {
+		t.Fatalf("terminal promotion granted=%d err=%v", granted, err)
+	}
+	status, err := store.ProviderReferralStatus(ctx, policy, providerID)
+	if err != nil || status.SocialState != SocialStateFailed {
+		t.Fatalf("failed status=%+v err=%v", status, err)
+	}
+
+	retryChallenge, err := store.CreateSocialChallenge(ctx, policy, providerID, now.Add(32*time.Minute))
+	if err != nil || retryChallenge.Cleartext == firstChallenge.Cleartext {
+		t.Fatalf("retry challenge=%+v err=%v", retryChallenge, err)
+	}
+	var historyRows, currentRows int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_social_verification_history WHERE provider_id = ?`, providerID).Scan(&historyRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_social_verifications WHERE provider_id = ?`, providerID).Scan(&currentRows); err != nil {
+		t.Fatal(err)
+	}
+	if historyRows != 1 || currentRows != 0 {
+		t.Fatalf("history rows=%d current rows=%d", historyRows, currentRows)
+	}
+	if _, err := store.CompleteSocialVerification(ctx, policy, providerID, retryChallenge.Cleartext, "123456789", "456", strings.Repeat("b", 64), "x_api", now.Add(33*time.Minute)); !errors.Is(err, ErrSocialChallenge) {
+		t.Fatalf("archived post reuse error=%v", err)
+	}
+	status, err = store.CompleteSocialVerification(ctx, policy, providerID, retryChallenge.Cleartext, "987654321", "654", strings.Repeat("b", 64), "x_api", now.Add(33*time.Minute))
+	if err != nil || status.SocialState != SocialStatePending {
+		t.Fatalf("retry pending status=%+v err=%v", status, err)
+	}
+	if granted, err := store.PromoteMaturedSocialVerifications(ctx, policy, now.Add(64*time.Minute), func(context.Context, string, string, string) error { return nil }); err != nil || granted != 1 {
+		t.Fatalf("retry promotion granted=%d err=%v", granted, err)
+	}
+	status, err = store.ProviderReferralStatus(ctx, policy, providerID)
+	if err != nil || status.SocialState != SocialStateMatured || status.BonusCapacity != policy.SocialBonusUses {
+		t.Fatalf("matured retry status=%+v err=%v", status, err)
 	}
 }

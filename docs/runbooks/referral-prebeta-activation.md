@@ -55,6 +55,9 @@ Confirm all of the following:
 - every configured HMAC secret is at least 32 bytes and supplied through
   `env:NAME` indirection, never argv, logs, shell history, or Git;
 - `referrals.join_base_url` is the public HTTPS `/j` route;
+- production nginx exposes the exact validation, provider-status, X-challenge,
+  and X-verification routes to the buyer mux while the `/v1/` catch-all remains
+  deny-by-default;
 - `referrals.request_access_url` is empty unless it points to a delivery-tested
   access-request flow; do not relabel the host download or troubleshooting
   pages as access request;
@@ -190,8 +193,12 @@ Preconditions:
 - `referrals.x_api_bearer_token` is supplied through environment indirection
   and can perform the deployed verification call without appearing in logs;
 - challenge creation, expiry, replay rejection, X-post verification, dwell
-  time, maturity promotion, and replacement-race tests pass in the deployed
-  version;
+  time, maturity promotion, failed-verification retry, and replacement-race
+  tests pass in the deployed version;
+- the maturity recheck requires the same public post, the same X author, and
+  the exact canonical invite URL digest accepted at submission; a removed or
+  changed link fails without granting capacity, while X API auth, access-tier,
+  quota, rate-limit, and server failures remain retryable;
 - the app displays base capacity, pending verification, matured bonus, used
   capacity, and remaining capacity from authoritative server state; and
 - the share composer uses the permanent HTTPS `/j/<code>` URL and does not
@@ -207,9 +214,11 @@ referrals:
 
 Restart through the normal coordinator deployment path. Verify one controlled
 provider end to end: first-serving disclosure, invite retrieval, X composer,
-challenge verification, dwell period, promotion, and exactly the configured
-bonus capacity. Confirm a replay and a challenge bound to a replaced issuer do
-not grant capacity.
+challenge verification, dwell period, exact-link recheck, promotion, and
+exactly the configured bonus capacity. Confirm a replay and a challenge bound
+to a replaced issuer do not grant capacity. Also drive one terminal review
+failure, create a fresh challenge with a different post, and confirm the old
+post remains archived and cannot be reused.
 
 ## Rollback
 

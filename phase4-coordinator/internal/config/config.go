@@ -1783,6 +1783,9 @@ func (c Config) validateReferrals() error {
 	if !r.RequireForRegistration && !r.EnableSocialInviteBonus {
 		return nil
 	}
+	if r.EnableSocialInviteBonus && !r.RequireForRegistration {
+		return fmt.Errorf("referrals.enable_social_invite_bonus requires require_for_registration")
+	}
 	if !referralConfigPartPattern.MatchString(r.Campaign) {
 		return fmt.Errorf("referrals.campaign must contain 1-32 letters, digits, or underscores")
 	}
@@ -1818,8 +1821,8 @@ func (c Config) validateReferrals() error {
 		}
 	}
 	joinURL, err := url.Parse(strings.TrimSpace(r.JoinBaseURL))
-	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.RawQuery != "" || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
-		return fmt.Errorf("referrals.join_base_url must be an absolute https URL ending in /j")
+	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.User != nil || joinURL.RawQuery != "" || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
+		return fmt.Errorf("referrals.join_base_url must be a credential-free absolute https URL ending in /j")
 	}
 	return nil
 }

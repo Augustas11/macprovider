@@ -55,6 +55,28 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 	}
 }
 
+func TestReferralSocialBonusRequiresAdmissionGate(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Referrals.EnableSocialInviteBonus = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires require_for_registration") {
+		t.Fatalf("social-only policy error=%v", err)
+	}
+}
+
+func TestReferralJoinURLRejectsCredentials(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Referrals.RequireForRegistration = true
+	cfg.Referrals.Campaign = "prebeta_2026"
+	cfg.Referrals.CurrentKeyID = "k1"
+	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
+	cfg.Referrals.JoinBaseURL = "https://user:secret@coordinator.example.test/j"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "credential-free") {
+		t.Fatalf("credentialed join URL error=%v", err)
+	}
+}
+
 func TestReferralRequestAccessURLMustBeCredentialFreeHTTPSEvenWhenGateIsOff(t *testing.T) {
 	for _, raw := range []string{
 		"http://access.example.test/waitlist",

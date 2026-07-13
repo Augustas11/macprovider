@@ -2,6 +2,7 @@ package referralapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,10 +42,13 @@ type XAPIClient struct {
 	joinBase *url.URL
 }
 
-func NewXAPIClient(bearer, joinBaseURL string) *XAPIClient {
+func NewXAPIClient(bearer, joinBaseURL string) (*XAPIClient, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 4 * time.Second
-	joinBase, _ := url.Parse(strings.TrimRight(strings.TrimSpace(joinBaseURL), "/"))
+	joinBase, err := parseJoinBaseURL(joinBaseURL)
+	if err != nil {
+		return nil, err
+	}
 	return &XAPIClient{
 		bearer:   strings.TrimSpace(bearer),
 		joinBase: joinBase,
@@ -55,7 +59,7 @@ func NewXAPIClient(bearer, joinBaseURL string) *XAPIClient {
 				return http.ErrUseLastResponse
 			},
 		},
-	}
+	}, nil
 }
 
 type xPostPayload struct {
@@ -89,10 +93,15 @@ func (c *XAPIClient) fetchPost(ctx context.Context, postID string) (xPostPayload
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		switch response.StatusCode {
 		case http.StatusNotFound, http.StatusGone:
 			return payload, fmt.Errorf("x lookup status %d: %w", response.StatusCode, ErrXPostTerminal)
+		case http.StatusForbidden:
+			if describesProtectedOrPrivatePost(body) {
+				return payload, fmt.Errorf("x post is protected or private: %w", ErrXPostTerminal)
+			}
+			return payload, fmt.Errorf("x lookup status %d: %w", response.StatusCode, ErrXPostTransient)
 		default:
 			return payload, fmt.Errorf("x lookup status %d: %w", response.StatusCode, ErrXPostTransient)
 		}
@@ -131,12 +140,74 @@ func (c *XAPIClient) VerifyPost(ctx context.Context, postID, expectedURL string)
 	return "", errors.New("expected invite URL missing")
 }
 
-func (c *XAPIClient) LookupPostAuthor(ctx context.Context, postID string) (string, error) {
+// RecheckPost proves that the same public post still contains the exact
+// canonical invite URL accepted during submission. The digest keeps the
+// challenge and invite code bound without retaining or logging the URL.
+func (c *XAPIClient) RecheckPost(ctx context.Context, postID, expectedURLHash string) (string, error) {
+	if !socialChallengePattern.MatchString(strings.TrimSpace(expectedURLHash)) {
+		return "", fmt.Errorf("invalid expected share URL digest: %w", ErrXPostTerminal)
+	}
 	payload, err := c.fetchPost(ctx, postID)
 	if err != nil {
 		return "", err
 	}
-	return payload.Data.AuthorID, nil
+	for _, entity := range payload.Data.Entities.URLs {
+		for _, candidate := range []string{entity.Expanded, entity.Unwound} {
+			canonical, err := canonicalShareURL(candidate, c.joinBase)
+			if err != nil {
+				continue
+			}
+			digest := sha256.Sum256([]byte(canonical))
+			if fmt.Sprintf("%x", digest[:]) == expectedURLHash {
+				return payload.Data.AuthorID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("exact invite URL no longer present: %w", ErrXPostTerminal)
+}
+
+func ShareURLDigest(raw, joinBaseURL string) (string, error) {
+	joinBase, err := parseJoinBaseURL(joinBaseURL)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := canonicalShareURL(raw, joinBase)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func parseJoinBaseURL(raw string) (*url.URL, error) {
+	joinBase, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
+	if err != nil || joinBase.Scheme != "https" || joinBase.Host == "" || joinBase.User != nil ||
+		joinBase.RawQuery != "" || joinBase.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinBase.Path, "/"), "/j") {
+		return nil, errors.New("join base URL must be a credential-free absolute https URL ending in /j")
+	}
+	return joinBase, nil
+}
+
+func describesProtectedOrPrivatePost(body []byte) bool {
+	var problem struct {
+		Type   string `json:"type"`
+		Errors []struct {
+			Type string `json:"type"`
+			Code int    `json:"code"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &problem) != nil {
+		return false
+	}
+	if strings.HasSuffix(problem.Type, "/not-authorized-for-resource") {
+		return true
+	}
+	for _, item := range problem.Errors {
+		if strings.HasSuffix(item.Type, "/not-authorized-for-resource") || item.Code == 179 {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalShareURL(raw string, joinBase *url.URL) (string, error) {

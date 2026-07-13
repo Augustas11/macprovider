@@ -33,6 +33,55 @@ func bootstrapPrincipal(label string) string {
 	return "mp-" + hex.EncodeToString(sum[:16])
 }
 
+func TestValidateTokenReadOnlyDoesNotMutateTokenState(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	_, ordinaryToken, err := store.IssueToken(ctx, "provider-read-only", "dashboard polling")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID, valid, err := store.ValidateTokenReadOnly(ctx, ordinaryToken)
+	if err != nil || !valid || providerID != "provider-read-only" {
+		t.Fatalf("ordinary provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+	records, err := store.ListTokens(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].LastUsedAt.Valid {
+		t.Fatalf("read-only validation mutated last_used_at: %#v", records)
+	}
+
+	req := bootstrapRequest("read-only-expired", "192.0.2.80", bytes.Repeat([]byte{0x42}, 32), time.Now().UTC())
+	mint, err := store.MintBootstrapToken(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE provider_tokens SET bootstrap_expires_at = ? WHERE id = ?`,
+		timeTextForTest(time.Now().UTC().Add(-time.Minute)), mint.TokenRecord.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if providerID, valid, err := store.ValidateTokenReadOnly(ctx, mint.ProviderToken); err != nil || valid || providerID != "" {
+		t.Fatalf("expired bootstrap provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+	var revokedAt, lastUsedAt sql.NullString
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT revoked_at, last_used_at FROM provider_tokens WHERE id = ?`, mint.TokenRecord.ID,
+	).Scan(&revokedAt, &lastUsedAt); err != nil {
+		t.Fatal(err)
+	}
+	if revokedAt.Valid || lastUsedAt.Valid {
+		t.Fatalf("read-only expiry check mutated token revoked_at=%v last_used_at=%v", revokedAt, lastUsedAt)
+	}
+}
+
 func TestBootstrapTokenRecoveryRequiresExactUnusedRetainedIdentity(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {

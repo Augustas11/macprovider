@@ -177,6 +177,21 @@ final class ProviderReferralStatusTests: XCTestCase {
         XCTAssertFalse(status.canStartSocialChallenge)
         XCTAssertEqual(status.reviewDueAt, ISO8601DateFormatter().date(from: "2026-07-13T10:30:00Z"))
     }
+
+    func testFailedStatusCanStartFreshSocialChallenge() throws {
+        let status = try decode("""
+        {
+          "campaign":"prebeta", "social_state":"failed",
+          "base_capacity":1, "configured_bonus_capacity":2, "bonus_capacity":0,
+          "redemptions":0, "remaining":1, "first_serving_seen":true,
+          "social_bonus_enabled":true, "invite_code":"MAL1-P-retry",
+          "invite_url":"https://malibu.tech/j/MAL1-P-retry"
+        }
+        """)
+
+        XCTAssertTrue(status.canStartSocialChallenge)
+        XCTAssertEqual(status.availableInviteURL?.absoluteString, "https://malibu.tech/j/MAL1-P-retry")
+    }
 }
 
 final class ReferralInviteClientTests: XCTestCase {

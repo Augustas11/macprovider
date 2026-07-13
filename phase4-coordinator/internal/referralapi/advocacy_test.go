@@ -18,9 +18,13 @@ import (
 type advocacyTokens struct {
 	providerID string
 	err        error
+	calls      *int
 }
 
-func (s advocacyTokens) ValidateAndMarkTokenUsed(_ context.Context, token string) (string, bool, error) {
+func (s advocacyTokens) ValidateTokenReadOnly(_ context.Context, token string) (string, bool, error) {
+	if s.calls != nil {
+		(*s.calls)++
+	}
 	return s.providerID, token == "valid-token", s.err
 }
 
@@ -94,6 +98,8 @@ func TestAdvocacyStatusLocksThenIssuesAfterVerifiedServing(t *testing.T) {
 		Tokens:          advocacyTokens{providerID: "provider-status"},
 		ServingEvidence: advocacyServing{eligible: false},
 		Policy:          advocacyPolicy(),
+		PublicLimiter:   NewBoundedLimiter(100, time.Minute, 32),
+		AuthSlots:       make(chan struct{}, 1),
 		JoinBaseURL:     "https://malibu.tech/j",
 		Metrics:         metrics,
 	}
@@ -131,7 +137,9 @@ func TestAdvocacyXFlowBindsAuthorAndReturnsPendingState(t *testing.T) {
 		ServingEvidence: advocacyServing{when: now.Add(-time.Minute), eligible: true},
 		PostVerifier:    verifier,
 		Policy:          advocacyPolicy(),
+		PublicLimiter:   NewBoundedLimiter(100, time.Minute, 32),
 		ProviderLimiter: NewBoundedLimiter(10, time.Minute, 32),
+		AuthSlots:       make(chan struct{}, 1),
 		VerifySlots:     make(chan struct{}, 1),
 		Now:             func() time.Time { return now },
 		JoinBaseURL:     "https://malibu.tech/j",
@@ -170,6 +178,17 @@ func TestAdvocacyXFlowBindsAuthorAndReturnsPendingState(t *testing.T) {
 	if verifier.postID != "123456789" || verifier.expectedURL != challengeBody.ShareURL {
 		t.Fatalf("verifier post=%q url=%q want=%q", verifier.postID, verifier.expectedURL, challengeBody.ShareURL)
 	}
+	wantDigest, err := ShareURLDigest(challengeBody.ShareURL, handler.JoinBaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedDigest string
+	if err := store.DB().QueryRow(`SELECT share_url_hash FROM referral_social_verifications WHERE provider_id = ?`, "provider-x").Scan(&storedDigest); err != nil {
+		t.Fatal(err)
+	}
+	if storedDigest != wantDigest {
+		t.Fatalf("stored digest=%q want=%q", storedDigest, wantDigest)
+	}
 	if !containsEvent(metrics.events, "challenge/created") || !containsEvent(metrics.events, "x_verify/pending") {
 		t.Fatalf("metrics=%v", metrics.events)
 	}
@@ -189,7 +208,9 @@ func TestAdvocacyRejectsUnboundXAuthor(t *testing.T) {
 		Store: store, Tokens: advocacyTokens{providerID: "provider-unbound"},
 		ServingEvidence: advocacyServing{when: now.Add(-time.Minute), eligible: true},
 		PostVerifier:    verifier, Policy: advocacyPolicy(),
+		PublicLimiter:   NewBoundedLimiter(100, time.Minute, 32),
 		ProviderLimiter: NewBoundedLimiter(10, time.Minute, 32),
+		AuthSlots:       make(chan struct{}, 1),
 		Now:             func() time.Time { return now }, JoinBaseURL: "https://malibu.tech/j",
 	}
 	challengeResponse := httptest.NewRecorder()
@@ -217,7 +238,9 @@ func TestAdvocacyTransientXFailureIsRetryableWithSameChallenge(t *testing.T) {
 		Store: store, Tokens: advocacyTokens{providerID: "provider-retry"},
 		ServingEvidence: advocacyServing{when: now.Add(-time.Minute), eligible: true},
 		PostVerifier:    verifier, Policy: advocacyPolicy(),
+		PublicLimiter:   NewBoundedLimiter(100, time.Minute, 32),
 		ProviderLimiter: NewBoundedLimiter(10, time.Minute, 32),
+		AuthSlots:       make(chan struct{}, 1),
 		Now:             func() time.Time { return now }, JoinBaseURL: "https://malibu.tech/j",
 	}
 	challengeResponse := httptest.NewRecorder()
@@ -246,11 +269,49 @@ func TestAdvocacyTransientXFailureIsRetryableWithSameChallenge(t *testing.T) {
 }
 
 func TestAdvocacyAuthenticationFailsClosed(t *testing.T) {
-	handler := AdvocacyHandler{Store: openAdvocacyStore(t), Tokens: advocacyTokens{providerID: "provider-auth", err: errors.New("db unavailable")}, Policy: advocacyPolicy()}
+	handler := AdvocacyHandler{
+		Store: openAdvocacyStore(t), Tokens: advocacyTokens{providerID: "provider-auth", err: errors.New("db unavailable")},
+		Policy: advocacyPolicy(), PublicLimiter: NewBoundedLimiter(100, time.Minute, 32), AuthSlots: make(chan struct{}, 1),
+	}
 	response := httptest.NewRecorder()
 	handler.HandleStatus(response, bearerRequest(http.MethodGet, "/v1/provider/referrals", ""))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdvocacyPublicLimitRunsBeforeTokenValidation(t *testing.T) {
+	store := openAdvocacyStore(t)
+	limiter := NewBoundedLimiter(1, time.Minute, 32)
+	if !limiter.Allow("advocacy:203.0.113.8") {
+		t.Fatal("failed to prime public limiter")
+	}
+	calls := 0
+	handler := AdvocacyHandler{
+		Store: store, Tokens: advocacyTokens{providerID: "provider-limited", calls: &calls},
+		Policy: advocacyPolicy(), PublicLimiter: limiter, AuthSlots: make(chan struct{}, 1),
+		SourceIP: func(*http.Request) string { return "203.0.113.8" },
+	}
+	response := httptest.NewRecorder()
+	handler.HandleStatus(response, bearerRequest(http.MethodGet, "/v1/provider/referrals", ""))
+	if response.Code != http.StatusTooManyRequests || calls != 0 {
+		t.Fatalf("status=%d token calls=%d body=%s", response.Code, calls, response.Body.String())
+	}
+}
+
+func TestAdvocacyAuthConcurrencyRunsBeforeTokenValidation(t *testing.T) {
+	store := openAdvocacyStore(t)
+	authSlots := make(chan struct{}, 1)
+	authSlots <- struct{}{}
+	calls := 0
+	handler := AdvocacyHandler{
+		Store: store, Tokens: advocacyTokens{providerID: "provider-busy", calls: &calls},
+		Policy: advocacyPolicy(), PublicLimiter: NewBoundedLimiter(100, time.Minute, 32), AuthSlots: authSlots,
+	}
+	response := httptest.NewRecorder()
+	handler.HandleStatus(response, bearerRequest(http.MethodGet, "/v1/provider/referrals", ""))
+	if response.Code != http.StatusServiceUnavailable || calls != 0 {
+		t.Fatalf("status=%d token calls=%d body=%s", response.Code, calls, response.Body.String())
 	}
 }
 

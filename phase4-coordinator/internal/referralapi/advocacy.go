@@ -16,11 +16,11 @@ type AdvocacyStore interface {
 	EnsureProviderReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ProviderReferral, error)
 	CreateSocialChallenge(context.Context, auth.ReferralPolicy, string, time.Time) (auth.SocialChallenge, error)
 	ValidateSocialChallenge(context.Context, auth.ReferralPolicy, string, string, time.Time) error
-	CompleteSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, string, string, time.Time) (auth.ProviderReferral, error)
+	CompleteSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, string, string, string, time.Time) (auth.ProviderReferral, error)
 }
 
 type ProviderTokenValidator interface {
-	ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error)
+	ValidateTokenReadOnly(context.Context, string) (string, bool, error)
 }
 
 type ServingEvidence interface {
@@ -39,8 +39,11 @@ type AdvocacyHandler struct {
 	ServingEvidence ServingEvidence
 	PostVerifier    PostVerifier
 	Policy          auth.ReferralPolicy
+	PublicLimiter   *BoundedLimiter
 	ProviderLimiter *BoundedLimiter
+	AuthSlots       chan struct{}
 	VerifySlots     chan struct{}
+	SourceIP        func(*http.Request) string
 	Now             func() time.Time
 	JoinBaseURL     string
 	Metrics         ReferralMetrics
@@ -220,8 +223,14 @@ func (h *AdvocacyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "post_not_verified", "post is unavailable or does not contain the invite link")
 		return
 	}
+	shareURLHash, err := ShareURLDigest(expectedURL, h.JoinBaseURL)
+	if err != nil {
+		h.observe("x_verify", "error")
+		writeError(w, http.StatusInternalServerError, "verification_config_invalid", "social verification is unavailable")
+		return
+	}
 	status, err = h.Store.CompleteSocialVerification(
-		r.Context(), h.Policy, providerID, request.Challenge, postID, authorID, "x_api", h.now(),
+		r.Context(), h.Policy, providerID, request.Challenge, postID, authorID, shareURLHash, "x_api", h.now(),
 	)
 	if err != nil {
 		h.observe("x_verify", "conflict")
@@ -233,13 +242,32 @@ func (h *AdvocacyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdvocacyHandler) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
+	key := r.RemoteAddr
+	if h.SourceIP != nil {
+		key = h.SourceIP(r)
+	}
+	if h.PublicLimiter == nil || !h.PublicLimiter.Allow("advocacy:"+key) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many provider referral requests")
+		return "", false
+	}
+	if h.AuthSlots != nil {
+		select {
+		case h.AuthSlots <- struct{}{}:
+			defer func() { <-h.AuthSlots }()
+		default:
+			w.Header().Set("Retry-After", "5")
+			writeError(w, http.StatusServiceUnavailable, "auth_busy", "provider authentication is temporarily busy")
+			return "", false
+		}
+	}
 	raw := strings.TrimSpace(r.Header.Get("Authorization"))
 	token, ok := strings.CutPrefix(raw, "Bearer ")
 	if !ok || strings.TrimSpace(token) == "" || h.Tokens == nil || h.Store == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
 		return "", false
 	}
-	providerID, valid, err := h.Tokens.ValidateAndMarkTokenUsed(r.Context(), strings.TrimSpace(token))
+	providerID, valid, err := h.Tokens.ValidateTokenReadOnly(r.Context(), strings.TrimSpace(token))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "auth_unavailable", "provider authentication unavailable")
 		return "", false
@@ -252,11 +280,15 @@ func (h *AdvocacyHandler) authenticate(w http.ResponseWriter, r *http.Request) (
 }
 
 func (h *AdvocacyHandler) writeStatus(w http.ResponseWriter, status auth.ProviderReferral) {
+	configuredBonusCapacity := 0
+	if h.Policy.EnableSocialBonus {
+		configuredBonusCapacity = h.Policy.SocialBonusUses
+	}
 	body := map[string]any{
 		"campaign":                  status.Campaign,
 		"social_state":              status.SocialState,
 		"base_capacity":             status.BaseCapacity,
-		"configured_bonus_capacity": h.Policy.SocialBonusUses,
+		"configured_bonus_capacity": configuredBonusCapacity,
 		"bonus_capacity":            status.BonusCapacity,
 		"redemptions":               status.Redemptions,
 		"remaining":                 status.Remaining,

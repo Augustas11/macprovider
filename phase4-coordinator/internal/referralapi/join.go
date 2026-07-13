@@ -53,6 +53,11 @@ var joinRevokedPage = template.Must(template.New("join-revoked").Parse(joinUnava
 	"This invite is no longer active. Ask your inviter for another invite.",
 )))
 
+var joinInvalidPage = template.Must(template.New("join-invalid").Parse(joinUnavailableDocument(
+	"This invite link isn't valid.",
+	"Check the link with your inviter or request access to Malibu's pre-beta.",
+)))
+
 func joinUnavailableDocument(title, message string) string {
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title><style>` + joinCSS + `</style></head><body><main><p>Malibu pre-beta</p><h1>` + title + `</h1><div class="card"><p>` + message + `</p><div class="actions">{{if .RequestAccessURL}}<a href="{{.RequestAccessURL}}">Request access</a>{{end}}<a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`
 }
@@ -110,7 +115,7 @@ func (h *JoinHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrReferralRevoked):
 		h.render(w, r, http.StatusOK, joinRevokedPage, view)
 	case errors.Is(err, auth.ErrReferralInvalid), errors.Is(err, auth.ErrReferralRequired):
-		http.NotFound(w, r)
+		h.render(w, r, http.StatusNotFound, joinInvalidPage, view)
 	case err != nil:
 		h.renderOperationalFailure(w, r, err)
 	default:

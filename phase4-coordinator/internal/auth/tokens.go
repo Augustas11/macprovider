@@ -459,6 +459,9 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 	if err := ensureColumnTx(ctx, tx, "referral_issuers", "replaced_by", `ALTER TABLE referral_issuers ADD COLUMN replaced_by TEXT`); err != nil {
 		return err
 	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "share_url_hash", `ALTER TABLE referral_social_verifications ADD COLUMN share_url_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {
 		return err
 	}
@@ -1314,6 +1317,37 @@ UPDATE provider_tokens
 		return "", false, nil
 	}
 	return providerID, true, nil
+}
+
+// ValidateTokenReadOnly authenticates provider API reads without taking a
+// write transaction or refreshing last_used_at. Expired provisional bootstrap
+// credentials fail closed but are left for the normal auth/retention paths to
+// revoke, keeping high-frequency dashboard polling off the SQLite write path.
+func (s *Store) ValidateTokenReadOnly(ctx context.Context, token string) (string, bool, error) {
+	if token == "" {
+		return "", false, nil
+	}
+	var providerID string
+	var bootstrapIssued int
+	var bootstrapExpiresAt, lastUsedAt sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, tokenHash(token)).Scan(
+		&providerID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if bootstrapIssued == 1 && !lastUsedAt.Valid {
+		expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+		if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(time.Now().UTC()) {
+			return "", false, nil
+		}
+	}
+	return providerID, providerID != "", nil
 }
 
 // LookupBootstrapIdentityPubkey returns the durable receipt-key owner for an

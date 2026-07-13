@@ -108,6 +108,16 @@ private struct OnboardingRootView: View {
                                 .font(.caption)
                                 .foregroundStyle(.red)
                         }
+                        if controller.referralRequired {
+                            if let requestAccessURL = controller.requestAccessURL {
+                                Link("No invite yet? Request access", destination: requestAccessURL)
+                                    .font(.caption)
+                            } else {
+                                Text("No invite yet? Ask a current provider for one.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     launchButton(title: "Launch Provider")
                         .disabled(controller.referralRequired && !controller.referralCodeIsValid)

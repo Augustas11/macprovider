@@ -185,7 +185,9 @@ private struct DashboardView: View {
 
             HStack(alignment: .top, spacing: 18) {
                 ReferralCapacityMetric(label: "Base", value: status.baseCapacity)
-                ReferralCapacityMetric(label: "X bonus offered", value: status.configuredBonusCapacity)
+                if status.socialBonusEnabled {
+                    ReferralCapacityMetric(label: "X bonus offered", value: status.configuredBonusCapacity)
+                }
                 ReferralCapacityMetric(label: "Bonus earned", value: status.bonusCapacity)
                 ReferralCapacityMetric(label: "Redeemed", value: status.redemptions)
                 ReferralCapacityMetric(label: "Remaining", value: status.remaining)
@@ -217,7 +219,15 @@ private struct DashboardView: View {
             Text("The post may have been unavailable, private, changed, or removed during review. Your provider and any remaining base invite capacity are unchanged.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            privateInviteButton
+            HStack(spacing: 10) {
+                privateInviteButton
+                if status.canStartSocialChallenge && referralInvites.pendingChallenge == nil {
+                    Button("Try a new X post") { Task { await referralInvites.shareOnX() } }
+                        .buttonStyle(.borderedProminent)
+                        .tint(MalibuBrand.coral)
+                        .disabled(!referralInvites.canShareOnX)
+                }
+            }
 
         case ProviderReferralStatus.eligible:
             if status.socialBonusEnabled && status.configuredBonusCapacity > 0 {
@@ -240,33 +250,33 @@ private struct DashboardView: View {
                 }
             }
 
-            if referralInvites.pendingChallenge != nil {
-                Text("After publishing, paste the public X post URL below. Verification only submits it for review; the bonus remains unearned until the server later reports it as matured.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let expiry = referralInvites.pendingExpiryText {
-                    Text(expiry)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                HStack(spacing: 8) {
-                    TextField("https://x.com/…/status/…", text: $referralInvites.postURL)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Submit for review") { Task { await referralInvites.verifyPost() } }
-                        .disabled(!referralInvites.canVerify || referralInvites.isLoading)
-                }
-                HStack(spacing: 12) {
-                    Button("Reopen X composer") { referralInvites.reopenPostComposer() }
-                    Button("Start over") { Task { await referralInvites.startOver() } }
-                }
-                .buttonStyle(.plain)
-            }
-
         default:
             Text("The coordinator returned an unrecognized social verification state. No bonus is being claimed.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             privateInviteButton
+        }
+
+        if referralInvites.pendingChallenge != nil {
+            Text("After publishing, paste the public X post URL below. Verification only submits it for review; the bonus remains unearned until the server later reports it as matured.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let expiry = referralInvites.pendingExpiryText {
+                Text(expiry)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                TextField("https://x.com/…/status/…", text: $referralInvites.postURL)
+                    .textFieldStyle(.roundedBorder)
+                Button("Submit for review") { Task { await referralInvites.verifyPost() } }
+                    .disabled(!referralInvites.canVerify || referralInvites.isLoading)
+            }
+            HStack(spacing: 12) {
+                Button("Reopen X composer") { referralInvites.reopenPostComposer() }
+                Button("Start over") { Task { await referralInvites.startOver() } }
+            }
+            .buttonStyle(.plain)
         }
     }
 

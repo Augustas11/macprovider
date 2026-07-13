@@ -37,7 +37,7 @@ func TestJoinHandlerRendersLifecycleStates(t *testing.T) {
 		{name: "exhausted", err: auth.ErrReferralExhausted, wantStatus: http.StatusOK, wantBody: "invite filled up"},
 		{name: "expired", err: auth.ErrReferralExpired, wantStatus: http.StatusOK, wantBody: "invite has expired"},
 		{name: "revoked", err: auth.ErrReferralRevoked, wantStatus: http.StatusOK, wantBody: "no longer active"},
-		{name: "invalid", err: auth.ErrReferralInvalid, wantStatus: http.StatusNotFound, wantBody: "404 page not found"},
+		{name: "invalid", err: auth.ErrReferralInvalid, wantStatus: http.StatusNotFound, wantBody: "invite link isn't valid"},
 		{name: "operational", err: errors.New("database is locked"), wantStatus: http.StatusServiceUnavailable, wantBody: "try again"},
 	}
 	for _, tc := range cases {
@@ -52,6 +52,9 @@ func TestJoinHandlerRendersLifecycleStates(t *testing.T) {
 			}
 			if tc.err == auth.ErrReferralExpired && !strings.Contains(response.Body.String(), "https://access.example.test/waitlist") {
 				t.Fatal("request-access CTA missing")
+			}
+			if tc.err == auth.ErrReferralInvalid && (!strings.Contains(response.Body.String(), "Request access") || strings.Contains(response.Body.String(), "MAL1-S-k1-seed")) {
+				t.Fatal("invalid invite page must offer access without echoing the code")
 			}
 			if tc.name == "operational" && response.Header().Get("Retry-After") != "5" {
 				t.Fatal("operational failure missing Retry-After")
