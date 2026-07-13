@@ -1,6 +1,26 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.15 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.16 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.16 (2026-07-13, R3 audit-loop deep-tail convergence — code source of
+truth).** R3 (code 0C/2H/7M, security 0C/2H/2M, architect 0C/0H/4M) caught the tail of
+the v0.15 sweep, including two self-inflicted items: the App Attest JCS member was
+renamed `ts_utc_unix` (a NEW hash mismatch — coordinator keeps member `ts_utc`, only the
+VALUE is Unix seconds; reverted), and §4.3 rotation was over-corrected. **Money-path
+(rewritten against code):** §4.3 `identity_signature` is verified against a **stable**
+identity selected by principal type — bootstrap identity for `mp-*`
+(`identity_signature.go:118-159`), stored receipt key for legacy — never the proposed
+key, and the new receipt key rotates **in-band** (staged/committed, `provider.go:779,839`);
+§4.2/§4.5/§9.3/§10-step4 wallet binding+swap uniformly **SPEC-027-gated `501`** (no
+interim EIP-712 path); App Attest degrades **only** on transient/missing evidence
+(shipped verifier returns `(true,nil)` on success, typed error otherwise —
+`appattest.go:127,144`). **Fidelity:** §6.4/§7.2 retry re-enters `launch()` from start;
+§6.1 restart routing dispatches per §8 table (not unconditional `install.sh` rerun);
+§9.1 reinstall keeps the `mp-*` principal unless clean-wiped (`install.sh:2484-2506`);
+§8.4 disk token is NOT "redundant" (launchd reads bearer from `config.yaml`,
+`install.sh:3425`); §10 checklist gates the designed §4 surface, not the already-live
+onboarding; §0 `provider_id` `p_*` dormant qualifier; AC-026-16 exercises the
+unused-token case.
 
 **Change log v0.15 (2026-07-13, R2 audit-loop straggler sweep — code source of truth).**
 The v0.14 reconciliation stated the correct fail-closed rules in the §intro v0.13
@@ -8,9 +28,10 @@ changelog but left the §4 body and several live sections carrying pre-hardening
 pre-#418 prose. The R2 codex 3-lane audit (code / security / architect) surfaced the
 tail; v0.15 sweeps it. **Security money-path:** §4.1 duplicate-register now requires
 current-bearer proof for **any** active token (no never-handshaked bypass, matching
-`tokens.go:945-975`); §4.3 receipt-key rotation is verified against the **stored** key
-and a differing initial-frame key is REJECTED as self-declared proof
-(`identity_signature.go:153-159`); §4.2 wallet binding carries a **SPEC-027-gated /
+`tokens.go:945-975`); §4.3 receipt-key rotation `identity_signature` is verified against
+a **stable** identity selected by principal type (bootstrap identity for `mp-*`, stored
+receipt key for legacy — `identity_signature.go:118-159`), never the proposed new key,
+and the new key is staged/committed **in-band** (`provider.go:779,839`); §4.2 wallet binding carries a **SPEC-027-gated /
 `501`** banner (not live EIP-712); App Attest **rejects** malformed/binding/invalid
 evidence (`400`/`409`) and degrades **only** transient failures (`apptrack.go:346-388`);
 the §5.3 hash algorithm now hashes `ts_utc` as **Unix seconds** (`apptrack.go:518`).
@@ -602,11 +623,14 @@ against v0.3 landed 0 CRITICAL / 4 HIGH / 18 MEDIUM
   key when it differs from the stored key, then commits the
   rotation after auth acceptance. This preserves SPEC-015's
   reconnect-based rotation model.
-  **(Superseded by v0.13 / reconciled §4.3 — the shipped verifier
-  validates against the STORED key and REJECTS a differing
-  initial-frame key as self-declared proof; rotation is authorized
-  out-of-band by SPEC-015 §7.5's old-key-signed path. See
-  `identity_signature.go:153-159`.)**
+  **(Reconciled §4.3 — the shipped verifier selects the
+  `identity_signature` key by principal type: for `mp-*` bootstrap
+  principals it verifies against the stable durable **bootstrap
+  identity** (`identity_signature.go:132-138`), for legacy principals
+  against the stored receipt key (`:153-159`) — never a self-signed new
+  key. The new receipt key is then rotated **in-band**, staged and
+  committed via `provider.go:779,839`. So a rotated key CAN authenticate,
+  but only when the frame is signed by the stable identity.)**
 - **§5.2 Trust unlock requires at least one economic criterion.**
   v0.3 "any two of five" allowed 72h uptime + valid App Attest
   to unlock Trusted with zero economic cost — a hole the audit
@@ -806,10 +830,14 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   itself is out of scope for v0.2 (open question §13).
 - **Receipt key** — Ed25519 keypair defined by [SPEC-015 §12](./SPEC-015-receipts.md),
   generated and rotated per that spec. UNCHANGED by SPEC-026.
-- **provider_id** — `p_` + base32(sha256(identity_pubkey_bytes)),
-  deterministic from the identity key. Self-verifiable by anyone with
-  the pubkey. Distinct from CLI-track provider_ids which are opaque
-  coordinator-issued strings.
+- **provider_id** — the App-track designed form is `p_` +
+  base32(sha256(identity_pubkey_bytes)), deterministic from the identity
+  key and self-verifiable by anyone with the pubkey. **DORMANT
+  client-side (reconciled v0.16):** the shipped provider ID is the
+  CLI-track `mp-<32hex>` principal — opaque, generated locally by
+  `install.sh` (`openssl rand`, `install.sh:2500`), NOT a `p_*`
+  derivation and NOT a coordinator-issued string (§3 banner, §4.1). The
+  `p_*` form applies only to the designed App-track identity model.
 - **Provisional tier** — trust bucket every new provider starts in.
   Capped concurrent slots, capped $MALIBU emissions (non-withdrawable),
   delayed payout. Trust unlock per §5.2.
@@ -850,7 +878,10 @@ and without entering a wallet address unless they want to.
   `onboarding.json` is legacy decode-only and production writes no
   progress checkpoint (`OnboardingState.swift`, §7.5). On a full app
   restart mid-install, routing re-derives state from disk evidence +
-  Keychain (§8) and re-runs `install.sh` if incomplete.
+  Keychain and dispatches per the §8 precedence table (markerless
+  CLI-owned config → import dialog; app-owned-but-incomplete →
+  onboarding, which re-runs `install.sh`; healthy + launchd evidence →
+  monitor) — not an unconditional `install.sh` rerun.
 - **Wording.** No user-facing string contains "node". Everywhere it
   currently reads "node", the App track reads "provider".
 
@@ -1095,11 +1126,14 @@ return `413 Payload Too Large`. Malformed evidence returns `400`
 (reconciled v0.15 to shipped `internal/onboarding/apptrack.go:346-388`:
 malformed base64/CBOR, a missing/invalid `app_attest_key_id`, or an
 App-Attest **binding** failure all return `400`; cross-provider key
-reuse returns `409`; unconfigured pins return `503`). Only a
-**cleanly-parsed attestation that verifies false** OR a **transient
-Apple-service error** (`ErrAppAttestTransient` / timeout) degrades to
-`trust.attested = false` — structurally invalid evidence is rejected,
-not silently downgraded.
+reuse returns `409`; unconfigured pins return `503`). Only a **transient
+Apple-service error** (`ErrAppAttestTransient` / timeout) or **missing**
+evidence degrades to `trust.attested = false` (reconciled v0.16 — the
+shipped Apple verifier returns `(true,nil)` only on full success and a
+typed binding/invalid ERROR otherwise, `appattest.go:127,144`, which the
+handler rejects; a `(false,nil)` "verified-false" degrade is permitted by
+the handler interface but the shipped verifier never emits it).
+Structurally invalid evidence is rejected, not silently downgraded.
 
 `signature` is Ed25519 over `JCS(body_without_signature)` per RFC
 8785. The App target owns an App-local Swift canonicalizer under
@@ -1134,12 +1168,14 @@ Coordinator MUST:
       keyId and has not been seen for a DIFFERENT `provider_id`
       (uniqueness: reject with `409` on cross-provider-id reuse).
    c. On successful verification, record `trust.attested = true`.
-      Reconciled v0.15 to shipped `apptrack.go:346-388`: **malformed,
-      structurally invalid, binding-failed, or key-reused** evidence is
-      REJECTED (`400`/`409`/`413`/`503`), NOT downgraded. Only a
-      cleanly-parsed attestation that verifies false, a transient
-      Apple-service error, or a **missing** `app_attest_object` yields
-      `trust.attested = false`.
+      Reconciled v0.15/v0.16 to shipped `apptrack.go:346-388` +
+      `appattest.go:127,144`: **malformed, structurally invalid,
+      binding-failed, or key-reused** evidence is REJECTED
+      (`400`/`409`/`413`/`503`), NOT downgraded. Only a **transient**
+      Apple-service error or a **missing** `app_attest_object` yields
+      `trust.attested = false`; the shipped verifier returns `(true,nil)`
+      only on full success and a typed error otherwise, so no
+      "verified-false-but-accepted" path is reachable.
 6. Upsert into `provider_identities` keyed by `provider_id`. TOFU: if
    a row exists with a different `identity_pubkey`, reject `409
    CONFLICT`.
@@ -1484,30 +1520,35 @@ observability, never for auth policy.
   `phase4-coordinator/internal/receipts.LookupCurrentPubKey(providerID)`)
   that fetches from the same source.
 - **SPEC-015 receipt-key rotation composes as follows (reconciled
-  v0.15 to shipped `phase4-coordinator/internal/ws/identity_signature.go`
-  and the §intro v0.13 old-key rule).** The shipped proof-stage verifier
-  looks up the **stored** receipt pubkey and validates
-  `identity_signature` against it; an initial-stage-declared key that
-  differs from the stored row is **self-declared proof and is REJECTED**.
-  `identity_signature.go:153-159` computes
-  `stored, ok := s.currentReceiptPubkey(...)` and returns `nil, false`
-  unless `bytes.Equal(initial.ProviderReceiptPubkey, stored)`. There is
-  NO inline "validate against the proposed new key" path — a client
-  cannot rotate by presenting a new key in the initial-stage frame.
-  Coordinator auth-policy for the proof-stage validation:
-  1. If the initial-stage `provider_receipt_public_key` matches the
-     stored row, the flow is ordinary steady-state auth — the only
-     case the shipped verifier authorizes.
-  2. If it differs, the frame is rejected (self-declared proof, per
-     §intro v0.13: "a signature that verifies only against the proposed
-     replacement key … MUST be rejected"). Receipt-key rotation is
-     authorized out-of-band by SPEC-015 §7.5's existing old-key-signed
-     rotation model (proof of control of the currently-published key),
-     which updates the stored pubkey and moves the old one to
-     `receipt_pubkey_prev`; only after that update does the new key
-     match `stored` and pass proof-stage auth.
+  v0.16 to shipped `phase4-coordinator/internal/ws/identity_signature.go`
+  + `internal/pool/provider.go` and the §intro v0.13 old-key rule).** The
+  key the coordinator uses to VERIFY `identity_signature` is selected by
+  principal type (`identitySignaturePubkey`, `identity_signature.go:118-159`):
+  1. **`p_*` App-track principal** → the durable App identity pubkey
+     (`LookupProviderIdentityPubkey`). Client-dormant (§3).
+  2. **`mp-*` credential-bootstrap principal** → the durable **bootstrap
+     identity** pubkey (`LookupBootstrapIdentityPubkey`, `:132-138`), which
+     is **stable across receipt-key rotation**. A revoked/inactive durable
+     binding → reject (`nil,false`, `:142-149`); only a proven ABSENCE of
+     any durable bootstrap row falls through to the legacy path.
+  3. **Legacy / no durable row** → the **stored** receipt pubkey
+     (`currentReceiptPubkey`, `:153-159`); the frame is authorized only if
+     `bytes.Equal(initial.ProviderReceiptPubkey, stored)` — a differing key
+     is rejected.
 
-This keeps both tracks fail-closed against self-declared rotation.
+  So a rotating provider re-authenticates by signing under a **stable**
+  identity (the bootstrap identity for `mp-*`, or the still-stored old
+  receipt key for legacy), **never** by self-signing the proposed new key —
+  satisfying the §intro v0.13 rule. The new receipt key rides the
+  register/reconnect frame and is rotated **in-band**: staged as
+  `PendingReceiptPubkey` and committed after the grace window
+  (`stageReceiptPublicationLocked` / `commitPendingReceiptPubkeyLocked`,
+  `provider.go:779,839`), moving the old key to `receipt_pubkey_prev`. A
+  differing key presented while a grace window is active is refused
+  (`RegisterRefusalReceiptRotationGraceActive`).
+
+This keeps both tracks fail-closed against self-declared rotation while
+supporting in-band receipt-key rotation authorized by a stable identity.
 SPEC-001 v1.7 candidate will absorb this normative text with the exact
 field names.
 
@@ -1548,12 +1589,14 @@ instead:
 - Fresh-install re-ratification at first wallet bind
 - Rate-limiting (1 change per 7 days)
 
-Until SPEC-027 lands, wallet-swap protection for App-track
-providers relies on SPEC-016 §3 EIP-712 wallet
-proof-of-possession + cooling-window semantics unchanged. The
-App-track UI does not yet surface an out-of-band cancellation
-channel; §9.3 in this spec is the operator-visible pointer to
-SPEC-027.
+Until SPEC-027 lands, **App-track wallet binding/swap is not available
+at all** (reconciled v0.16): the shipped coordinator returns
+`501 wallet_change_requires_spec_027` (§4.2, `main.go:1284`) and
+`setPayoutWallet` throws, so there is no interim EIP-712 swap path to
+protect — the SPEC-016 §3 EIP-712 composition is the *designed*
+post-SPEC-027 mechanism, not an active interim one. The App-track UI does
+not surface a wallet-binding or cancellation channel; §9.3 is the
+operator-visible pointer to SPEC-027.
 
 
 ## 5. Sybil resistance — layered, no single gate
@@ -1683,11 +1726,12 @@ provided qualification lapses.
 > passthrough params that default to `nil` (`RegisterClient.swift:125`), and that
 > register path is itself unwired (§4.1). So "valid App Attest evidence unlocks trust
 > benefits" is a **coordinator-verifier contract + future client**, not shipped
-> behavior. **Hash-contract note:** this section hashes `ts_utc` as its RFC3339 string,
-> but the coordinator converts `ts_utc` to Unix seconds before hashing
-> (`apptrack.go:518,527`) — a future client implementing §5.3 literally would produce
-> an unverifiable attestation; the client MUST match the coordinator's Unix-seconds
-> hashing.
+> behavior. **Hash-contract note (reconciled v0.16):** the coordinator hashes the JCS
+> member **named `ts_utc`** with an **integer Unix-seconds value** (it parses the RFC3339
+> `ts_utc` and converts to Unix seconds before hashing — `apptrack.go:518,527`). A future
+> client implementing §5.3 MUST keep the member name `ts_utc` and hash the **Unix-seconds
+> integer** — NOT the RFC3339 string, and NOT a renamed `ts_utc_unix` member; either would
+> produce a different JCS hash and an unverifiable attestation.
 
 App-track binary calls `DCAppAttestService.attestKey(_:clientDataHash:)`
 with:
@@ -1700,7 +1744,7 @@ clientDataHash = SHA256(JCS({
   coordinator_domain,      // canonical "coordinator.streamvc.live" (bare host, lowercase, no scheme, no trailing slash)
   bundle_id,               // "tech.malibu.app"
   team_id,                 // Apple Developer Team ID that signed the app
-  ts_utc_unix              // /register `ts_utc` converted to Unix SECONDS (int64) — matches coordinator apptrack.go:518-527; NOT the RFC3339 string (see §5.3 hash-contract banner)
+  ts_utc                   // member NAME stays `ts_utc`; VALUE is the Unix-SECONDS integer (int64) from parsing /register `ts_utc` — matches coordinator apptrack.go:518-527; NOT the RFC3339 string (see §5.3 hash-contract banner)
 }))
 ```
 
@@ -1772,7 +1816,7 @@ slower payout release. Not required for this spec to ship.
 > step 8, steady state §6.2, §6.3) is a **guarded SPEC-027 stub in the shipped app**:
 > `setPayoutWallet` throws unconditionally, the button is disabled
 > (`LaunchProviderController.swift:94-100`, `OnboardingWindow.swift:137`), and the
-> coordinator returns `501 wallet_change_requires_spec_027` (§4.5 / v0.13 change log).
+> coordinator returns `501 wallet_change_requires_spec_027` (§4.2 / v0.13 change log).
 > The prose below describes the intended UX; treat all active wallet-binding language
 > as SPEC-027-gated, not shipped. The read-only "unclaimed earnings" / "add a wallet"
 > **prompts** (display only) are fine; the binding **action** is not wired.
@@ -2031,7 +2075,7 @@ final class LaunchProviderController: ObservableObject {
     @Published private(set) var stage: Stage = .idle
 
     func launch() async     // runs install.sh, imports token, attaches the monitor
-    func retry() async      // retries from last-failed stage
+    func retry() async      // reconciled v0.16: re-enters launch() from the START (not the failed stage) — LaunchProviderController.swift:89
     // Reconciled v0.14 — wallet binding is a guarded SPEC-027 follow-up:
     // setPayoutWallet always throws until SPEC-027 defines the non-bearer proof.
     func setPayoutWallet(_ address: String) async throws
@@ -2266,8 +2310,12 @@ would throw `existingConfigNotOwnedByApp` at
      and verify the SHA-256 matches the pending marker.
   4. Persist a 0600 `config.yaml.import-backup` copy of the original
      YAML, then rewrite `config.yaml` with the `provider_token` field
-     removed (the disk-side secret is now redundant with the
-     Keychain copy).
+     removed. **Reconciled v0.16 — NOT "redundant":** the launchd CLI is
+     started with `serve --config <config.yaml>` only (`install.sh:3425`)
+     and reads its bearer from that file, so stripping the token leaves
+     the launchd-managed CLI **bearerless on unattended restart** (the
+     documented token-custody gap — §6.1 step 7c, SPEC-025 §7). The App
+     holds the live bearer in Keychain; the CLI does not read Keychain.
   5. Create the `.installed-by-app` marker file at
      `ProviderPaths.appMarkerFile` (per `ProviderPaths.swift:24`
      that path is
@@ -2289,7 +2337,12 @@ would throw `existingConfigNotOwnedByApp` at
   import dialog to reappear.
 
   The install transitions to `v1-complete` state (§8.1). No
-  re-onboarding required.
+  re-onboarding required **provided launchd install evidence is also
+  present** (reconciled v0.16): the import sets config + marker + bearer,
+  but `route()` still checks launchd evidence — an imported config whose
+  launchd install is missing routes to `.showOnboarding` to (re-)run
+  `install.sh` (`LaunchProviderController.swift:352`, §8 precedence
+  table).
 - Option B: **Start fresh with a new provider** — moves the
   existing `config.yaml` file to
   `~/.config/macprovider/config.yaml.cli-backup-<UTC-timestamp>`
@@ -2311,12 +2364,17 @@ three outcomes.
 
 ### 9.1 Fresh reinstall / Mac wipe
 
-Fresh reinstall re-runs `install.sh`, which generates a new
-`mp-<32hex>` principal and re-acquires a `provider_token` via
-`bootstrap-auth` (reconciled v0.15 — the shipped provider identity is
+Fresh reinstall re-runs `install.sh` and re-acquires a `provider_token`
+via `bootstrap-auth` (reconciled v0.15 — the shipped provider identity is
 the CLI-track `mp-*` principal, NOT the dormant App-track `p_*` Ed25519
-identity; §2, §4.1) → fresh provisional tier. Prior unpaid earnings are
-lost UNLESS a
+identity; §2, §4.1). **A new `mp-<32hex>` principal is generated ONLY on a
+clean wipe (reconciled v0.16):** `choose_provider_id` reuses a saved
+`$PROVIDER_ID_PATH` or an existing `config.yaml` provider_id first and
+generates a fresh `mp-*` only when neither survives (`install.sh:2484-2506`).
+So an ordinary App reinstall that leaves the CLI config/ID in place keeps
+the same principal + provisional standing; a full Mac wipe (Keychain +
+config gone) yields a new principal → fresh provisional tier. Prior unpaid
+earnings are lost UNLESS a
 payout wallet was bound before the wipe. If bound, earnings settle to
 that wallet on the SPEC-016 next payout batch cycle regardless of the
 Mac's presence — the SPEC-016 pipeline is coordinator-owned and does
@@ -2348,9 +2406,11 @@ intentional against wallet-sharing sybil variants.
 
 ### 9.3 Wallet swap
 
-Wallet swap uses SPEC-016 §3's existing swap flow (EIP-712 wallet
-proof-of-possession + cooling window + hot-wallet reconfirm)
-unchanged.
+Wallet swap for App-track providers is **SPEC-027-gated and NOT
+available in the shipped build** (reconciled v0.16 — coordinator returns
+`501 wallet_change_requires_spec_027`, §4.2). The SPEC-016 §3 EIP-712
+swap flow (proof-of-possession + cooling window + hot-wallet reconfirm)
+is the *designed* post-SPEC-027 mechanism, not an active one.
 
 **App-track additions deferred to SPEC-027.** v0.6 defined an
 out-of-band coordinator-authored email cancellation channel with
@@ -2365,8 +2425,9 @@ transition. See §4.5 for the full moved-out list.
 
 **Until SPEC-027 lands:**
 
-- SPEC-016 §3 EIP-712 wallet proof-of-possession + cooling-window
-  semantics are the sole App-track wallet-swap protection.
+- App-track wallet binding/swap is **blocked with `501`** (§4.2); there
+  is no interim EIP-712 swap path (the SPEC-016 §3 mechanism activates
+  only once SPEC-027 defines the required non-bearer proof).
 - **Before SPEC-027 ships, `Malibu.app` MAY show only a
   read-only pending-swap row and MUST NOT add a Cancel
   affordance or cancellation action.** Identical rule as §6.2.
@@ -2436,15 +2497,15 @@ runs.
    `clientDataHash` binding and `app_attest_key_id` cross-provider
    reuse rejection. Fallback to `trust.attested = false` on
    Apple-service outage verified by fault-injection test.
-4. **SPEC-016 §3 EIP-712 payout-wallet-binding path** MUST be
-   deployed and operating in **production** (not just staging), and
-   the App-track composition MUST be verified end-to-end using a
-   real App-track `provider_token` against the production endpoint
-   (integration test proves the two layers compose — Ed25519
-   identity auth on the bearer token + EIP-712 wallet
-   proof-of-possession on the body). SPEC-016 §3 being staging-only
-   is not sufficient because the App flag flip goes to all
-   production users.
+4. **SPEC-016 §3 EIP-712 payout-wallet-binding path — DEFERRED to
+   SPEC-027 (reconciled v0.16).** This gate is **moot for the current
+   release**: the shipped App-track wallet-binding endpoint returns
+   `501 wallet_change_requires_spec_027` (§4.2, `main.go:1284`), so there
+   is no live App-track EIP-712 binding to verify E2E. The
+   deployed-and-operating-in-production requirement (Ed25519 bearer auth
+   + EIP-712 proof-of-possession composition) becomes a **SPEC-027
+   release gate**, not a SPEC-026 one. The CLI-wrapper onboarding that
+   this checklist gates does not bind wallets.
 5. **FR-C9 self-mint TOFU regression check** via the new register
    endpoint (existing CLI-track providers still mint tokens
    correctly).
@@ -2486,8 +2547,14 @@ runs.
    PR #418 removed the flag, §8. The CLI-wrapper onboarding is
    unconditional; "flag flip" here means simply shipping the release.)
 
-Only when every step is done does the App-side ship the CLI-wrapper
-onboarding release.
+This checklist gates when the coordinator may **serve the designed §4
+contract** (register / App Attest / identity-signature auth-policy). It
+does NOT gate the shipped CLI-wrapper **onboarding**, which already ships
+and runs unconditionally at startup (`MalibuApp.swift:115`, §8) using
+`bootstrap-auth` / WS admission — no §4 dependency. (Reconciled v0.16: the
+"App-side ships only after every step" framing applied to the pre-#418
+in-app register→spawn client that these steps gated; that client is
+dormant, §4.1.)
 
 ## 11. Biggest risk and mitigation
 
@@ -2698,9 +2765,12 @@ criteria in §5.2 by 25%.
   - **Cancel:** closes the dialog and quits the App with no file
     changes.
 - **AC-026-16.** §4.1 duplicate-register bearer-proof mechanic
-  covers three scenarios against a `provider_tokens` row seeded
-  with `last_used_at IS NOT NULL, revoked_at IS NULL` for the
-  same `identity_pubkey`:
+  covers the following scenarios against an active `provider_tokens`
+  row (`revoked_at IS NULL`) for the same `identity_pubkey`. **Both an
+  in-use row (`last_used_at IS NOT NULL`) AND a never-handshaked row
+  (`last_used_at IS NULL`) MUST be exercised (reconciled v0.16 — proof
+  is required for ANY active row; there is no never-handshaked bypass,
+  `tokens.go:945-975`):**
   - No `Authorization: Bearer` header → coordinator returns
     `409 existing_active_token_no_proof` and does NOT touch the
     existing token row. The App-track request body never carries

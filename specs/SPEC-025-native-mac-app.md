@@ -1,6 +1,18 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.3 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.4 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.4 (2026-07-13, R3 audit-loop deep-tail convergence — code source of
+truth).** R3 architect/code caught remaining "two live definitions" contradictions: §1
+coexistence "unchanged" now carries the post-import token-custody caveat (launchd CLI
+bearerless on restart); §2 config table corrected — the wrapper DOES rewrite the live
+`config.yaml` to strip the token (`ProviderConfig.swift:312`); §3.3 states there ARE two
+update authorities (Sparkle for `.app`; the CLI's own coordinator-driven `AutoUpdater`,
+enabled by default — `AutoUpdateTrustState.swift:148`), not "no second authority"; §5.1
+bundle layout — the bundled `macprovider-cli` in `Contents/MacOS/` is **required** by
+the release pipeline (`release.yml:544`, `verify-tier2-provider-release.sh:405`), not
+optional; §7 token backup documented as not-guaranteed-transient (best-effort delete,
+recovery retains).
 
 **Change log v0.3 (2026-07-13, R2 audit-loop straggler sweep — code source of truth).**
 The v0.2 reconciliation left live sections asserting the pre-#418 model that the R2
@@ -59,7 +71,7 @@ Ship a **click-and-forget provider experience** for non-developer Mac users. Rep
 - Non-technical Apple Silicon user goes from `malibu.tech/host` → running provider in **≤ 3 minutes**, zero terminal.
 - Same coordinator behavior, same receipts as the CLI track (the shipped app onboards a **CLI-track** provider via `install.sh` — SPEC-026 §6.1; no separate App-track registration).
 - Auto-update ships silently (Sparkle, the whole `.app`). **Uninstall goal NOT met as shipped (reconciled v0.2):** the "Quit and Uninstall" action is compiled but unreachable, so **drag-to-trash leaves the launchd `macprovider-cli` behind** (§3.4). Zero-leftover is a carried gap.
-- The CLI track keeps working unchanged; both tracks coexist via the shared `config.yaml` + `.installed-by-app` marker (§7), with the CLI-owned config routed to the import dialog (SPEC-026 §8).
+- The CLI track coexists via the shared `config.yaml` + `.installed-by-app` marker (§7), with the CLI-owned config routed to the import dialog (SPEC-026 §8). **Caveat (reconciled v0.3):** "unchanged" holds only until an App import — importing strips the `provider_token` from `config.yaml`, leaving the launchd-managed CLI **bearerless on unattended restart** (documented token-custody gap, §7); a pure CLI user who never imports is unaffected.
 
 ### Non-goals (v1)
 
@@ -79,7 +91,7 @@ From reading `phase3-binary/`:
 | Control-plane IPC | `Sources/macprovider-cli/ControlSocket.swift` — typed JSON frames on Unix socket | **NOT used in the shipped monitor-only flow (reconciled v0.2).** `ControlSocketClient` / `MalibuAgent.connectControl` compile but have no production call site — legacy/test surface only. The wrapper does not open the control socket (§5.2). |
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
 | Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | **Reconciled v0.2:** `install.sh` obtains the token; the wrapper **imports** it from `config.yaml` into the app Keychain via `ProviderConfig.importExistingCLIConfig()` (`ProviderConfig.swift:280-352`), stripping it from `config.yaml`. The wrapper never receives a token from a portal deep-link (that `malibu://` path is removed). |
-| Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2:** `install.sh` writes `config.yaml` (shared with the CLI track). The wrapper does **not** write the live `config.yaml`; it reads `provider_id`/model/port and moves the token to Keychain. **Token custody (reconciled v0.3 — nuanced, see §7):** the import transiently writes a token-bearing 0600 `config.yaml.import-backup` and deletes it after the Keychain write succeeds, so the token is briefly on disk during import; the *live* `config.yaml` ends token-free. |
+| Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2/v0.3:** `install.sh` writes the *initial* `config.yaml` (shared with the CLI track). The wrapper does **not** create it, but on import it **DOES rewrite** the live `config.yaml` to strip the `provider_token` (`ProviderConfig.swift:312`); it reads `provider_id`/model/port and moves the token to Keychain. **Token custody (reconciled v0.3 — nuanced, see §7):** the import transiently writes a token-bearing 0600 `config.yaml.import-backup` and deletes it after the Keychain write succeeds, so the token is briefly on disk during import; the *live* `config.yaml` ends token-free. |
 | Watchdog LaunchAgent | the launchd watchdog installed by `install.sh` (evidence: `~/Library/Application Support/macprovider/install_manifest.json` or `~/Library/LaunchAgents/live.streamvc.macprovider.plist`) | **Reconciled v0.2 — the App track DOES install and rely on the watchdog** (via `install.sh`); it is what owns the CLI's lifecycle/restarts. `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
 | Portal | `portal.streamvc.live` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
 | Release manifest / checksum | `scripts/sign-catalog.go`, tier2 release scripts | Feeds the same manifest that Sparkle appcast references |
@@ -180,8 +192,12 @@ time (60–240 s for the first model) in the background.
   `CLIUpdateRunner` (invoke `macprovider-cli update`) and `MalibuAgent.updateCLINow()`
   exist (`CLIUpdateRunner.swift:30-60`, `MalibuAgent.swift:130-155`) but have **no
   production caller**; even the unused `.updateCLI` handler maps to Sparkle
-  (`MalibuApp.swift:89-90`). So there is no live second update authority — the CLI is
-  updated by the launchd watchdog / its own `update` mechanism, not by the app.
+  (`MalibuApp.swift:89-90`). **Reconciled v0.3 — there ARE two live update authorities
+  for separate artifacts:** Sparkle owns `Malibu.app`; the launchd-managed CLI updates
+  ITSELF via its own coordinator-driven `AutoUpdater`, enabled by default
+  (`AutoUpdateTrustState.swift:148`, `CoordinatorClient.swift:2710`) — NOT via the app's
+  (unwired) `CLIUpdateRunner`. The launchd args do not set `managed_by=malibu-app`
+  (`install.sh:3425`), so the app never drives CLI updates.
 
 ### 3.4 Uninstall
 
@@ -276,10 +292,13 @@ Malibu.app/Contents/
   _CodeSignature/
 ```
 
-Note (reconciled v0.2): `macprovider-cli` is **installed by `install.sh` into
-`~/macprovider/`** (the launchd-managed location), not required to sit in
-`Contents/MacOS/`. A bundled CLI binary MAY exist as a fallback for `CLIUpdateRunner`,
-but the running provider is the launchd install. `Info.plist` carries **no**
+Note (reconciled v0.3): the **running** provider is the `macprovider-cli` that
+`install.sh` installs into `~/macprovider/` (the launchd-managed location). Separately,
+the release pipeline **REQUIRES** a `macprovider-cli` binary bundled in
+`Contents/MacOS/`: `release.yml:544` copies it in and
+`verify-tier2-provider-release.sh:405` **rejects an App bundle without it** (reconciled
+v0.3 — required, not optional). The bundled copy backs `CLIUpdateRunner` (itself
+unwired, §3.3); the live daemon remains the launchd install. `Info.plist` carries **no**
 `malibu://` URL scheme (removed by PR #418; tombstone at `MalibuApp.swift:35-38`).
 
 ### 5.2 IPC: the shipped monitor path is HTTP-poll only
@@ -438,10 +457,14 @@ Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`)
   on disk"):** the import strips `provider_token` from `config.yaml` and adds a
   `link_state` key (`ProviderConfig.swift:312-335`), so the *live* `config.yaml` holds
   no token — **but** the import also writes a token-bearing `config.yaml.import-backup`
-  (0600), so the token IS briefly on disk there, and stripping it from `config.yaml`
-  leaves the launchd-managed CLI unable to re-authenticate on restart (it reads the
-  bearer from `config.yaml`; SPEC-026 §6.1 token-custody gap). So the App track is not
-  a clean "token never on disk" win.
+  (0600), so the token IS on disk there. **The backup is not guaranteed transient
+  (reconciled v0.3):** deletion is best-effort — the delete error is ignored
+  (`ProviderConfig.swift:336`), and exceptional recovery paths remove the marker while
+  **retaining** the backup (`ProviderConfig.swift:354`), so a token-bearing 0600 backup
+  can persist. Stripping the token from `config.yaml` also leaves the launchd-managed
+  CLI unable to re-authenticate on restart (it reads the bearer from `config.yaml`;
+  SPEC-026 §6.1 token-custody gap). So the App track is not a clean "token never on
+  disk" win.
 - **CLI track never touches** `~/Library/Application Support/Malibu/` or the app's
   Keychain entries.
 
