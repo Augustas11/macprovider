@@ -2,7 +2,8 @@
 
 **Version:** 0.9
 **Status:** Draft (v0.9 GitHub-OAuth drift reconciliation — reconciled to shipped
-config-gated dual-mode auth; pending codex 3-lane audit)
+config-gated dual-mode auth, incl. the shipped OAuth mode's incompletely-wired
+state; codex 3-lane audit in progress)
 **Date drafted:** 2026-06-21 (v0.9 reconciliation 2026-07-13)
 **Change log v0.9 (2026-07-13, GitHub-OAuth dual-mode drift reconciliation — spec matched to shipped code; code is source of truth):**
   The portal + coordinator shipped a full **config-gated GitHub-OAuth
@@ -17,7 +18,14 @@ config-gated dual-mode auth; pending codex 3-lane audit)
   CSRF origin-binding, `return_to` guard, `/claim` + `pair_ot`) as owner of last
   resort, cross-referencing **SPEC-003 FR-C10** for the coordinator mint/ownership
   *policy* and **SPEC-001 v1.5** for frame shapes rather than re-specifying them.
-  No code change.
+  The GitHub-OAuth mode is documented **honestly as shipped-but-incompletely-wired**
+  (§2.5.0): in cookie mode the aggregate-earnings surfaces (A.2/C.1) cannot load —
+  the earnings route requires an FR-P12 provider bearer that cookie mode
+  deliberately does not hold, and the coordinator earnings handler has no
+  cookie/ownership path; the reference nginx does not yet proxy `/v1/auth/*`. The
+  mode's functional scope today is **GitHub identity + owned-provider listing +
+  `pair_ot` binding only**; the earnings/status data surfaces and the deployment
+  wiring are carried gaps, not working behavior. No code change.
 **Audit history:**
   - v0.1 → codex round 1 → 0 CRITICAL / 3 HIGH / 2 MEDIUM / 2 MINOR /
     0 QUESTION → all HIGH + MEDIUM addressed in v0.2.
@@ -36,7 +44,13 @@ config-gated dual-mode auth; pending codex 3-lane audit)
     operator instruction; remaining MEDIUM/MINORs accepted as
     backlog for next audit cycle).
   - v0.9 → GitHub-OAuth dual-mode drift reconciliation (see change log
-    above) → pending codex 3-lane audit.
+    above) → codex 3-lane audit in progress. R1 (commit `bad1068`):
+    code 0C/1H/6M/4L, security 0C/2H/7M/2L, architect 0C/2H/6M/0L —
+    all three lanes converged on the shipped OAuth mode being
+    **incompletely wired** (earnings-401 loop; no nginx `/v1/auth/*`
+    proxy) plus scattered mode-conditional / security-precision
+    reconciliations. All R1 C/H/M addressed in this revision; re-audit
+    pending.
 **Depends on:**
   - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
     ownership frame shapes — `ownership_event` / `needs_claim` — consumed by
@@ -72,8 +86,14 @@ dual-mode (reconciled v0.9):** the default and current-prod path is a per-Mac
 `provider_id` + `provider_token` **paste-bearer** sign-in (§2.1); an opt-in
 **GitHub-OAuth cookie-session** mode (§2.5), gated by
 `portal-config.json:github_oauth_enabled` + coordinator `GITHUB_OAUTH_ENABLED`,
-lets a provider sign in with GitHub and manage the Mac(s) bound to their GitHub
-identity. Both are shipped; GitHub-OAuth is disabled in current prod.
+lets a provider sign in with GitHub, **list** the Mac(s) bound to their GitHub
+identity, and **bind** a new Mac by claiming a one-time `pair_ot`. Both modes are
+shipped; GitHub-OAuth is disabled in current prod. **The GitHub-OAuth mode is
+incompletely wired (§2.5.0):** its shipped functional scope is identity +
+owned-provider listing + `pair_ot` binding — the aggregate-earnings and pool
+status surfaces (A.2/C.1, A.1) do **not** load in cookie mode today, because the
+data routes require the provider bearer that cookie mode does not carry. That is a
+documented carried gap, not working behavior.
 
 Five surfaces ship in v0.1: **A Machine** (default), **B Setup &
 Updates**, **C Earn**, **D Monitoring** (placeholder card, zero API
@@ -94,10 +114,19 @@ explicit reason rooted in upstream specs:
 
 - **Multi-Mac aggregation.** No `provider_id` is multi-Mac — each
   Mac mints its own at install (SPEC-003 §4 / FR-C2 step 10) and
-  SPEC-005 §11.4 binds earnings on a single `provider_id`. No
-  multi-Mac owner identity exists upstream. Cut: any "N/M machines
-  online" header, "x3 machines" attention chip, or machine grid.
-  See Open Q1.
+  SPEC-005 §11.4 binds earnings on a single `provider_id`. Cut: any
+  "N/M machines online" header, "x3 machines" attention chip, or
+  machine grid. **Reconciled v0.9 — a multi-Mac *owner* identity DOES
+  exist in GitHub-OAuth mode:** the coordinator `provider_ownership`
+  table (SPEC-003 FR-C10) binds several `provider_id`s to one
+  `github_user_id`, and the OAuth-mode portal renders a "Choose a Mac"
+  provider chooser when the identity owns more than one (§2.5.5). This
+  is a *selector across single-Mac dashboards*, not fleet
+  aggregation — there is still no cross-Mac earnings rollup (SPEC-005
+  §11.4 remains single-subject) and no fleet header/grid. The
+  single-machine cuts in this section and the §8(f) ACs are scoped to
+  the per-Mac dashboard; the OAuth provider chooser is the documented
+  exception. See Open Q1.
 - **Stripe / fiat / checkout / withdraw / card-link UX.**
   SPEC-005 §1.3 lists Stripe, checkout, and fiat invoices as
   out-of-scope; §2.1 D1 reiterates "no Stripe, no checkout, no
@@ -243,11 +272,14 @@ intentional second auth path. The alternatives not built remain out of scope:
   route. AC group (b) enforces this via a build-time grep. The GitHub-OAuth
   endpoints the portal *may* call are the closed allowlist in §2.5 (the
   `/v1/auth/*` set), and no others.
-- HTTP status handling (per SPEC-005 §11.5):
-  - **401** (missing or malformed token) → sign-in prompt; do not
-    leak that the token was malformed vs absent.
-  - **403** (subject != path or token revoked) → "sign-in
-    rejected" message; do not reveal which mismatch.
+- HTTP status handling (reconciled v0.9 to the shipped earnings
+  handler — `endpoints.go`: **401** covers missing/malformed **and
+  revoked** tokens; **403** is reserved for a valid token whose
+  subject != path):
+  - **401** (missing, malformed, or **revoked** token) → sign-in
+    prompt; do not leak which of the three it was.
+  - **403** (valid token, subject != path `provider_id`) → "sign-in
+    rejected" message; do not reveal the mismatch.
   - **404** (unknown `provider_id`) → identical "sign-in rejected"
     message to 403; SPEC-005 §11.5 explicitly does not enumerate
     valid providers and the portal MUST preserve that property.
@@ -287,6 +319,18 @@ Mechanism:
   calls 404 and the portal surfaces a misconfiguration banner directing the
   operator to deploy the OAuth-enabled coordinator. The portal MUST NOT fall back
   to paste-bearer mode when its flag is `true`.
+  - **Wiring caveat (reconciled v0.9 — the misconfig banner depends on a real
+    404).** The banner fires only if `/v1/auth/me/providers` actually returns a
+    404. That requires the operator's reverse proxy to route `/v1/auth/*` to the
+    coordinator (§10.4). **The reference nginx (`dist/nginx-portal.streamvc.live.conf`)
+    does NOT yet proxy `/v1/auth/*`** — those paths fall through to the SPA
+    `index.html` fallback and return **200 HTML**, which the portal parses as an
+    *empty provider list* and shows the "no Mac bound yet" waiting state, **not**
+    the misconfig banner. So an operator who flips `github_oauth_enabled:true`
+    without also adding the OAuth proxy routes gets a **silent empty list**, not a
+    loud error. Adding the `/v1/auth/*` proxy routes is a hard deployment
+    prerequisite for OAuth mode (§10.4); this is a carried wiring gap, documented
+    here rather than fixed in this spec-only change.
 - The portal fetches `/portal-config.json` on load BEFORE any
   authenticated call.
 - **Missing file OR HTTP non-200 → fail-CLOSED.** Render the
@@ -316,9 +360,16 @@ Stale-config guard:
 - AC group (b) requires: when an authenticated API call returns
   401, 403, or 404 in `require_provider_tokens: true` mode, the
   portal MUST NOT silently fall back to the unavailable-mode page.
-  Persistence threshold (binding for v0.1): **after two
-  consecutive authenticated provider-endpoint failures on the
-  same surface within the same signed-in session**, the portal
+  Persistence threshold (binding for v0.1, reconciled v0.9 to the
+  shipped `authFailBySurface` counter): **after two consecutive
+  authenticated provider-endpoint failures on the same surface**,
+  the portal surfaces the misconfiguration notice. The per-surface
+  failure counter is **reset only on explicit sign-out**, not on a
+  new sign-in — so the two failures need not fall within a single
+  signed-in session; a failure, a re-sign-in, and a second failure
+  on the same surface also trip it. (The shipped code clears
+  `state.session` on the first failure but does not reset
+  `authFailBySurface` at the next sign-in.) The portal
   surfaces an explicit "your deployment may be misconfigured —
   ask your operator to verify `portal-config.json`" notice. The
   first failure routes through AUTH-2 (401 → sign-in prompt;
@@ -356,6 +407,39 @@ prod**. SPEC-014 owns the **OAuth transport** documented here; the coordinator
 ownership frame shapes by **SPEC-001 v1.5** — this section cross-references those
 and does not re-specify them. On any conflict, the owner spec governs.
 
+#### 2.5.0 Shipped scope — incompletely wired (honest disclosure)
+
+GitHub-OAuth mode is **shipped but not wired end-to-end**. Its working functional
+scope today is exactly three things: **(1)** authenticate a GitHub identity and set
+the `mp_session` cookie; **(2)** list the `provider_id`s owned by that identity
+(`GET /v1/auth/me/providers`); **(3)** bind a new Mac to that identity by claiming a
+`pair_ot` (`POST /v1/auth/me/providers/bind`). Two shipped gaps mean the *data*
+surfaces do not function in cookie mode — both are documented as carried gaps, not
+fixed here (this is a spec-only change):
+
+- **The aggregate-earnings surfaces (A.2, C.1) cannot load in cookie mode.** The
+  coordinator mounts `/providers/{id}/earnings` directly to the billing handler,
+  which accepts **only** an FR-P12 provider bearer and never consults `mp_session`
+  or `provider_ownership` (`endpoints.go`; `main.go` route mount). The OAuth-mode
+  portal deliberately strips `Authorization` and holds no provider token
+  (`makeCookieFetch`), so the earnings call returns **401**, which the portal
+  treats as a session failure and **re-launches OAuth** — an earnings→401→OAuth
+  loop. Selecting a GitHub-bound Mac therefore cannot show earnings today. (Current
+  prod being flag-off means this has no live impact, but it is not functional.)
+  Making it work needs a coordinator change: cookie-authorize the earnings read
+  **and** enforce a server-side ownership check
+  `mp_session.github_user_id → provider_ownership(provider_id) == path provider_id`
+  (without that check a spec-literal cookie-auth earnings route would be an IDOR —
+  any signed-in GitHub user reading any provider's earnings). That check does not
+  exist yet; the spec MUST NOT imply cookie mode grants earnings access.
+- **The reference nginx does not proxy `/v1/auth/*`** (§2.3 wiring caveat, §10.4).
+  Without the proxy routes the OAuth calls hit the SPA fallback (200 HTML) and
+  parse as an empty provider list.
+
+Everything below documents the OAuth **transport** as it is actually built; where
+a claim describes the binding/listing path it is functional, and where it touches
+earnings/status data it is subject to the gaps above.
+
 #### 2.5.1 Purpose and identity model
 
 GitHub-OAuth mode authenticates the *person* (their GitHub identity) and lists
@@ -379,17 +463,32 @@ calls exactly this closed set and no others (AUTH-2 allowlist):
 
 (The coordinator additionally exposes a bearer-authed
 `POST /v1/install/pair/refresh` to mint a fresh `pair_ot` + `claim_url`; that is a
-provider-CLI/install surface, not called by the portal.) The `callback` is
-reached by the browser via GitHub's 302 redirect, not by a portal `fetch`.
+provider-CLI/install surface, not called by the portal — though the portal's
+misconfig banner *names* the path informationally, see §8(b) allowlist note.) The
+`callback` is reached by the browser via GitHub's 302 redirect, not by a portal
+`fetch`. **All of these paths require the operator's reverse proxy to route
+`/v1/auth/*` to the coordinator (§10.4); the reference nginx does not yet do so
+(§2.3 wiring caveat).**
 
 #### 2.5.3 Session cookie (`mp_session`)
 
 - Name `mp_session`; value is an **opaque server-side session id** (not a
   signed/JWT payload) — the session row lives in the coordinator DB.
 - Flags: `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000` (30 days),
-  optional `Domain=<MP_SESSION_COOKIE_DOMAIN>` scoped to the portal host.
-- Sliding re-issue ~every 24h; `POST /v1/auth/logout` deletes the session row and
-  clears the cookie.
+  optional `Domain=<MP_SESSION_COOKIE_DOMAIN>`. **Reconciled v0.9 — the `Domain`
+  MAY be a parent domain**, not necessarily the exact portal host: the coordinator
+  `validateGitHubOAuth` accepts a parent-domain cookie value, so an operator who
+  sets `Domain=streamvc.live` scopes the session cookie to **every** sibling
+  subdomain (`coordinator.`, `console.`, `get.`, …), widening theft exposure. The
+  operator SHOULD scope `Domain` to the exact portal host; the spec cannot force it
+  because the shipped validator permits the parent. Carried security residual.
+- **30-day sliding *idle* window with no session-id rotation (reconciled v0.9).**
+  The reissue path (`NeedsReissue`, ~24h) updates the session row's `last_seen`
+  and re-sends the cookie but **keeps the same opaque session id** — it is not
+  rotated. So an active thief who keeps using a stolen cookie holds it indefinitely
+  (each use slides the 30-day idle expiry forward) and the id never changes.
+  `POST /v1/auth/logout` deletes the session row and clears the cookie; there is no
+  server-side "rotate on privilege change." Carried residual.
 - The portal's cookie-mode fetch uses `credentials: "include"`, `cache:
   "no-store"`, and **strips any `Authorization` header** — cookie mode never
   sends a bearer token. Same-origin path-only requests rely on the operator
@@ -397,55 +496,118 @@ reached by the browser via GitHub's 302 redirect, not by a portal `fetch`.
 
 #### 2.5.4 CSRF / open-redirect protections (transport-owned here)
 
-- **OAuth `state`** is a 32-byte random single-use token, TTL-bounded and
-  rate-limited, bound to an **origin hash** = HMAC-SHA256 over
-  `sha256(peer-IP) || sha256(User-Agent)` keyed by the operator key (fallback
-  OAuth client secret). The callback consumes it single-use and rejects a
-  mismatch. `Referrer-Policy: no-referrer` is set on the start redirect.
+- **OAuth `state`** is a 32-byte random single-use token, bound to an **origin
+  hash** = HMAC-SHA256 over `sha256(peer-IP) || sha256(User-Agent)` keyed by the
+  operator key (fallback OAuth client secret). Concrete shipped thresholds
+  (reconciled v0.9): **TTL ~10 minutes**, **rate-limited to ~20 states per origin
+  hash per 10-minute window** (`tokens.go`). The callback consumes it single-use
+  and rejects a mismatch. `Referrer-Policy: no-referrer` is set on the start
+  redirect.
+  - **Scope of `state` (reconciled v0.9 — do NOT overstate it).** `state` protects
+    **only the `/github/start` → `/github/callback` handshake** against CSRF /
+    fixation on the login step. It is **not** a general CSRF or session-theft
+    control: `POST /v1/auth/me/providers/bind` and `POST /v1/auth/logout` carry
+    **no CSRF token and no Origin/Referer check**, and `bind` does not enforce
+    `Content-Type`. Their only cross-site defense is `SameSite=Lax` on `mp_session`
+    (which does not protect against same-site sibling subdomains — see the cookie
+    `Domain` residual in §2.5.3) plus their being POST. This is a carried security
+    residual, stated honestly rather than dressed up as protection the code does
+    not provide.
 - **`return_to`** MUST be a local path: it MUST start with `/`, MUST NOT start
   with `//` or `/\`, is regex-constrained, and is double-decode-checked to reject
   open redirects.
-- Logs redact `ot` / `pair_ot` / `code` / `state` / nested `return_to`.
+- **Log redaction is coordinator-app-log-scoped only (reconciled v0.9).** The
+  coordinator redacts `ot` / `pair_ot` / `code` / `state` / nested `return_to`
+  from its own application logs. It does **not** cover ingress: `GET /claim?ot=…`
+  reaches the reverse proxy / CDN access logs (and any upstream) **before** the
+  portal JS strips `?ot=` client-side, and the reference nginx has no query-string
+  redaction. Operators MUST redact these query params at the ingress layer too;
+  until then the `pair_ot` can land in proxy access logs. Carried residual.
 
 #### 2.5.5 Portal sign-in state machine
 
 `githubAuthState` ∈ { `idle`, `loading`, `signin`, `waiting`, `providers`,
 `dashboard`, `claim` }:
 
-- Load → `loading` → `GET /v1/auth/me/providers`: `401`/error → `signin`
-  (offer "Sign in with GitHub" → `/v1/auth/github/start`); empty list →
-  `waiting` (no Mac bound yet); >1 with no `?p=` match → `providers` (chooser);
-  single or matched → `dashboard`.
+- Load → `loading` → `GET /v1/auth/me/providers`: **`401`/error → `signin`**,
+  which renders a "Continue with GitHub" button and **waits for a user click**
+  before hitting `/v1/auth/github/start` — the initial unauthenticated load does
+  **not** auto-redirect to OAuth (reconciled v0.9; the auto-relaunch below is only
+  for a 401 *after* the user is signed in). Empty list → `waiting` (no Mac bound
+  yet); >1 with no `?p=` match → `providers` (chooser); single or matched →
+  `dashboard`.
 - `/claim` route: captures `?ot=<pair_ot>` and immediately `history.replaceState`
   to strip it from the URL; `GET /v1/auth/me/providers` (401 → OAuth start with
-  `return_to=/claim`); then `POST /v1/auth/me/providers/bind {pair_ot}` →
-  success redirects to `/`; error codes `pair_ot_invalid` (410),
+  `return_to=/claim` **and `pair_ot` carried on the start URL**); then binds.
+  **Two shipped bind bodies (reconciled v0.9):**
+  - *Already signed in* → `POST /v1/auth/me/providers/bind {"pair_ot": "<ot>"}`
+    (body-provided).
+  - *Was logged out* → the `pair_ot` given to `/v1/auth/github/start?pair_ot=…` is
+    carried through the OAuth `oauth_state` row into the new session's
+    `mp_session.pending_pair_ot`; the post-OAuth bind then posts an **empty body
+    `{}`** and the coordinator consumes the session-pending `pair_ot`
+    (`auth_github.go`, `tokens.go`). SPEC-014 owns this transport, so it documents
+    **both** the body-provided and the session-pending binding paths.
+
+  Success redirects to `/`; error codes `pair_ot_invalid` (410),
   `already_owned` (409), `session_invalid` (401).
-- On a `401` from a data call in cookie mode, the portal clears the session and
-  re-launches OAuth (`return_to` preserved) — it does not show the paste form.
+- On a `401` from a data or `me/providers` call **after sign-in** in cookie mode,
+  the portal clears the session and re-launches OAuth (`return_to` preserved) — it
+  does not show the paste form. (Note the earnings-401 loop of §2.5.0: an earnings
+  401 is indistinguishable to the portal from a session 401, so it re-launches
+  OAuth instead of surfacing the missing-wiring.)
 
 #### 2.5.6 Bind semantics (cross-ref SPEC-003 FR-C10)
 
 `POST /v1/auth/me/providers/bind` consumes the `pair_ot` and inserts
-`provider_ownership(provider_id, github_user_id)` in one transaction, emitting an
-`ownership_event` (SPEC-001 v1.5 frame) on commit; a `pair_ot` already owned by a
-different identity returns `409 already_owned` (SPEC-003 FR-C10 anti-check). Body
-parsing is strict (only the `pair_ot` key; trailing tokens rejected).
+`provider_ownership(provider_id, github_user_id)` in one transaction. A `pair_ot`
+already owned by a **different** identity returns `409 already_owned`; the 409 is
+surfaced by this SPEC-014-owned transport but the *rule* is the SPEC-003 FR-C10
+`provider_ownership` anti-check (SPEC-014 does not re-own the policy). Body parsing
+is strict (only the `pair_ot` key; trailing tokens rejected).
+
+**`ownership_event` is emitted BEFORE commit (reconciled v0.9 — contradicts the
+owner spec, carried gap).** SPEC-003 FR-C10 requires the `ownership_event`
+(SPEC-001 v1.5 frame) to be emitted **after** a successful commit. The shipped
+coordinator invokes the push callback **before** `tx.Commit()` (`tokens.go`;
+callback wired at `auth_github.go`). A successful push followed by a failed commit
+would therefore tell the Mac it is bound while ownership was never persisted. This
+is a real ordering bug in the owner's domain (SPEC-003 FR-C10), recorded here as a
+carried gap; the fix belongs in the coordinator, not in this spec-only change.
+
 **There is no unbind/unlink path** in v0.9 — neither the portal nor the
 coordinator exposes one; FR-C10.1 reserves an `unbound` ownership event for a
 future operator-driven unlink flow. Document this as a known gap, not a control.
+(The shipped portal UI copy that says to "contact your operator to unlink" is an
+**overstated recovery promise** — no such operator flow exists yet; §2.5.7.)
 
 #### 2.5.7 Security disclosures (carried, honest)
 
 - GitHub scope requested is `read:user` only.
 - The session is a bearer-equivalent **cookie** — its theft grants access to the
-  bound providers' read-only surfaces until logout/expiry; `HttpOnly` + `Secure`
-  + `SameSite=Lax` + origin-bound CSRF state are the mitigations. This is a
-  strictly larger auth surface than paste-bearer mode and is why it is
-  opt-in/off-by-default.
-- The two independent flags (§2.3) MUST be set together; a portal-on /
-  coordinator-off split yields 404s + a misconfig banner, never a silent
-  downgrade.
+  session identity's owned-provider list (and, once wired, their read-only
+  surfaces) until logout/expiry. The effective mitigations are `HttpOnly` +
+  `Secure` + `SameSite=Lax`; the OAuth `state` is **not** among them — it protects
+  only the login handshake, and `bind`/`logout` have no CSRF token or Origin check
+  (§2.5.4). The cookie `Domain` may be a parent domain and the session id is never
+  rotated (§2.5.3). This is a strictly larger auth surface than paste-bearer mode
+  and is why it is opt-in/off-by-default.
+- **Missing ownership authorization on data reads (IDOR — carried gap).** The
+  earnings read is not cookie-authorized today (§2.5.0); when it is wired, it MUST
+  enforce `mp_session.github_user_id → provider_ownership(provider_id) == path
+  provider_id`. No such check exists in the shipped earnings handler, so the spec
+  MUST NOT describe cookie mode as granting earnings access.
+- **`pair_ot` can reach ingress logs (carried gap).** Coordinator app-log
+  redaction does not cover the reverse-proxy / CDN access logs that see
+  `/claim?ot=…` before the JS strips it (§2.5.4).
+- **The "contact operator to unlink" UI copy overstates recovery** — there is no
+  unbind path (§2.5.6). Carried; the copy should be softened in a future code
+  change.
+- The two independent flags (§2.3) MUST be set together, and the operator MUST
+  also add the `/v1/auth/*` reverse-proxy routes (§10.4). A portal-on /
+  coordinator-off split with the proxy present yields 404s + a misconfig banner;
+  **without the proxy routes it yields a silent empty provider list**, never a
+  silent downgrade to paste-bearer (§2.3 wiring caveat).
 
 ---
 
@@ -485,7 +647,10 @@ Sidebar items (v0.1, in this order):
 5. Identity
 6. (spacer)
 7. API Docs (external link to `https://api.streamvc.live/docs`)
-8. Sign out (clears in-memory session; returns to AUTH-1 prompt)
+8. Sign out — **mode-dependent (reconciled v0.9)**: paste-bearer mode clears the
+   in-memory session and returns to the AUTH-1 prompt; GitHub-OAuth mode also
+   `POST`s `/v1/auth/logout` to delete the server-side session row and clear the
+   `mp_session` cookie (§2.5.3), then returns to the §2.5.5 `signin` state.
 
 **Mobile (< 720 px) breakpoint (SPEC-014 normative).** Below
 720 px viewport width, the sidebar MUST collapse behind a
@@ -522,7 +687,9 @@ Single-pane status of THIS machine.
 
 **A.1 Header strip.** Fields:
 
-- `provider_id` — pasted session value (no API).
+- `provider_id` — paste-bearer mode: pasted session value (no API); GitHub-OAuth
+  mode: the selected owned-provider id from `/v1/auth/me/providers` (§2.5.5). No
+  dedicated API call for the value itself in either mode.
 - `tier` — from `GET /v1/pool/check?provider_id=<id>` (SPEC-002
   §7.4); enum `"pinned"` or `"provisional"`.
 - `state` — from same response; enum `"ready"` / `"draining"` /
@@ -560,6 +727,12 @@ Display units MUST match wire shape verbatim — integer credits in
 the units SPEC-005 §11.4 emits. The portal MUST NOT invent fiat
 conversions, "withdrawable balance", or USD amounts. SPEC-005
 §1.3 lists fiat as out of scope.
+
+**Mode note (reconciled v0.9).** A.2 is functional in **paste-bearer mode**, which
+holds the FR-P12 provider bearer the earnings route requires. In **GitHub-OAuth
+cookie mode** A.2 does **not** load — the earnings route is not cookie-authorized
+(§2.5.0), so the call 401-loops. A.2 counters are a paste-bearer-mode surface
+until the coordinator earnings read is cookie-authorized with an ownership check.
 
 **A.3 Needs-attention panel.** One row per active issue on THIS
 machine; no machine-count chips (v0.1 is single-machine).
@@ -612,6 +785,15 @@ spec MUST NOT cite `/v1/health` as a source for fields it does
 not return. `/poolz` is NOT a fallback source — it is operator-
 keyed and forbidden from browser code. A.4 lives entirely in §5
 table (c).
+
+**A.5 Idle-prewarm panel (reconciled v0.9 — shipped, previously undocumented).**
+The Machine surface renders an idle-prewarm status panel with **five counters**
+(fired / completed / failed / cancelled-by-real-request / skipped) plus the most
+recent **skip reason**. Source: the `/providers/{id}/earnings` response, which
+carries idle-prewarm fields alongside the credit rollups (`endpoints.go`). It is
+provider-only telemetry (no buyer data; see §8(d)). Same mode caveat as A.2:
+earnings-sourced, so functional in paste-bearer mode only until cookie mode is
+wired (§2.5.0). Enumerated in §5 table (a).
 
 ### 4.2 Surface B — Setup & updates
 
@@ -692,10 +874,12 @@ list of binary releases.
     application response header (browsers do not expose it
     unless listed in `Access-Control-Expose-Headers`, which
     GitHub does not list).
-- Each entry: version, ship date, expandable release notes
-  (markdown rendered from the GitHub release body), and a
-  copy-to-clipboard `macprovider-cli update` CTA. No remote
-  execution from the portal (§7).
+- Each entry: version, ship date, expandable release notes, and a
+  copy-to-clipboard `macprovider-cli update` CTA. **Reconciled v0.9:** the shipped
+  portal inserts the GitHub release body as **raw preformatted text in a `<pre>`
+  block, not markdown-rendered** (`index.html`). v0.1 documents the raw-`<pre>`
+  behavior; markdown rendering is a future enhancement, not a v0.1 requirement. No
+  remote execution from the portal (§7).
 - "You are N versions behind" badge: DEFERRED to v0.2 alongside
   A.1 update pill and A.3 update row. Installed `binary_version`
   is only carried on the SPEC-001 §6.5 hello WS frame and has no
@@ -782,10 +966,14 @@ with three bullets (static text, no API call):
   what redaction applies to buyer prompts, completions,
   identity, API keys, and IPs).
 
-Each bullet links to its §9 Open Q. AC group (a) verifies the
-placeholder card emits ZERO network requests. Sub-cards D.1,
-D.2, D.3 are defined informationally below so a future v0.2 has a
-target to wire against:
+Each bullet **names** its §9 Open Q (reconciled v0.9 — the shipped placeholder
+renders plain `<li>` text, not hyperlinks; "links to" was aspirational). AC group
+(a) verifies **Surface D itself initiates ZERO network requests** — note this is
+scoped to the surface's own fetches: the shipped portal does **not** stop the
+Machine/Earn background pollers when the user navigates to Monitoring, so ambient
+pool/earnings polls may still be in flight; the AC asserts D adds none of its own,
+not that the page is network-silent while D is shown. Sub-cards D.1, D.2, D.3 are
+defined informationally below so a future v0.2 has a target to wire against:
 
 - D.1 Uptime ribbon (24 h / 7 d / 30 d) — Open Q5.
 - D.2 Current routing weight — Open Q5.
@@ -796,11 +984,15 @@ target to wire against:
 Notifications dropped entirely; SPEC-005 §2.11 D11 forbids
 adding email or Slack delivery infrastructure.
 
-**E.1 Identity card.** Fields:
+**E.1 Identity card.** Fields (reconciled v0.9 — the `provider_id` **source is
+mode-dependent**: in paste-bearer mode it is the pasted session value; in
+GitHub-OAuth mode it is derived from the **selected `provider_ownership` record**
+returned by `/v1/auth/me/providers`, not pasted):
 
-- `provider_id` — pasted session value (also persisted on the Mac
+- `provider_id` — paste-bearer mode: pasted session value; OAuth mode: the
+  selected owned-provider id (§2.5.5 chooser). Also persisted on the Mac
   at `~/.config/macprovider/provider_id`, SPEC-003 §4 / FR-C2
-  step 10; no runtime API call here).
+  step 10; no runtime API call here.
 - Provider tier badge — `tier` field from `GET /v1/pool/check`
   (SPEC-002 §7.4). NOT from `hello_ack.tier`, which is WS traffic
   the browser cannot read.
@@ -845,6 +1037,7 @@ exactly one of them.
 | A.2 | total credits | `GET /providers/{id}/earnings` | `total_credits` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | A.2 | current window credits | `GET /providers/{id}/earnings` | `current_window_credits` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | A.2 | last payout-ready window | `GET /providers/{id}/earnings` | `last_payout_ready.{window_start_utc, window_end_utc, provider_credits}` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
+| A.5 | idle-prewarm counters (fired / completed / failed / cancelled-by-real-request / skipped) + last skip reason | `GET /providers/{id}/earnings` | idle-prewarm fields on the earnings response (`endpoints.go`) | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 earnings response (reconciled v0.9); paste-bearer mode only per §2.5.0 |
 | A.3 | "Unavailable" row | `GET /v1/pool/check?provider_id=<id>` | `state` (when `"unavailable"` or `"unknown"`) | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | B.3 | release list | `GET https://api.github.com/repos/{owner}/{name}/releases` | array root (`tag_name`, `published_at`, `body`); also reads response header `X-RateLimit-Remaining` (which GitHub does expose to browser code) | on demand + 5 min TTL | in-memory; rate-limit aware | Open Q2 (host) + GitHub Releases API |
 | B.3 | rate-limit fallback notice | derived from the B.3 release-list response header `X-RateLimit-Remaining: 0` | n/a (header-derived); rendered as static notice text "GitHub API rate limit reached — release feed paused; refresh later." | re-evaluated on each B.3 fetch | in-memory; cleared on next non-zero remaining | GitHub Releases API rate-limit posture (Open Q2 records the 60 req/IP/hr cap) |
@@ -857,13 +1050,13 @@ exactly one of them.
 
 | Surface | Field | Source artifact | Display mode |
 |---|---|---|---|
-| A.1 | `provider_id` | pasted session value (AUTH-1) | inline text |
+| A.1 | `provider_id` | paste-bearer: pasted session value (AUTH-1); OAuth: selected ownership record (§2.5.5) | inline text |
 | A.1 | manual refresh button | static UI control; on click, re-issues the A.1 `/v1/pool/check` call (table (a) row) | static button + click handler |
 | A.3 | "Unavailable" row text | literal "This machine is currently `<state>`." (state interpolated from the A.3 table (a) row) | static text with one interpolation |
 | A.3 | "Unavailable" row remediation hint | literal "Run `macprovider-cli status` to inspect local state; if the binary is healthy, re-check in a few seconds." | static text |
 | A.3 | "Unavailable" row copy-to-clipboard CTA | `macprovider-cli status` (SPEC-003 §4 / FR-C4, per SPEC-003 §6.2) | code snippet + copy-to-clipboard |
 | B.3 | per-entry `macprovider-cli update` copy-to-clipboard CTA | SPEC-003 §4 / FR-C3 (per SPEC-003 §6.2) | code snippet + copy-to-clipboard |
-| E.1 | `provider_id` | pasted session value (AUTH-1; also persisted on the Mac at `~/.config/macprovider/provider_id`, SPEC-003 §4 / FR-C2 step 10) | inline text |
+| E.1 | `provider_id` | paste-bearer: pasted session value; OAuth: selected ownership record (§2.5.5) — also persisted on the Mac at `~/.config/macprovider/provider_id`, SPEC-003 §4 / FR-C2 step 10 | inline text |
 | B.1 | "Apple Silicon Mac (M1, M2, M3, M4)" | SPEC-003 §5 / FR-D1 README block | static card |
 | B.1 | "macOS 14 (Sonoma) or later" | SPEC-003 §5 / FR-D1 README block | static card |
 | B.1 | "~4-8 GB free disk space" | SPEC-003 §5 / FR-D1 README block | static card |
@@ -970,7 +1163,12 @@ In addition to the §1.2 scope cuts:
 - **No anomaly-detection ML.** Thresholds-only diagnostics.
 - **No mobile-native app.** Responsive web only.
 - **No `localStorage` of the provider auth token in v0.1.**
-  In-memory only. Closing the tab discards the session.
+  In-memory only in **paste-bearer mode** — closing the tab discards the session.
+  (Reconciled v0.9: **GitHub-OAuth mode deliberately persists** an `HttpOnly`
+  `mp_session` cookie, §2.5.3, which survives a tab close for up to the 30-day
+  sliding-idle window; that is the mode's design, not a violation of this
+  paste-mode rule. The prohibition is on `localStorage` of the *provider token*,
+  which neither mode does.)
 
 ---
 
@@ -1008,6 +1206,10 @@ Layered, NOT a flat checklist. Six required groups.
       `macprovider-cli status` CTA.
 - [ ] A.3 row never executes a command remotely.
 - [ ] A.4 is not rendered in v0.1 (entirely in §5 table (c)).
+- [ ] A.5 idle-prewarm panel renders the five counters (fired /
+      completed / failed / cancelled-by-real-request / skipped) +
+      last skip reason from the `/providers/{id}/earnings` response
+      (paste-bearer mode); no buyer-attributed data appears.
 
 **Surface B (Setup & Updates).**
 
@@ -1084,7 +1286,9 @@ Layered, NOT a flat checklist. Six required groups.
       unknown).
 - [ ] In `require_provider_tokens: true` **paste-bearer** mode, after **two
       consecutive authenticated provider-endpoint failures on
-      the same surface within the same signed-in session**, the
+      the same surface** (the `authFailBySurface` counter is reset
+      only on explicit sign-out, not on a new sign-in — so the two
+      failures need not share one signed-in session), the
       portal surfaces the explicit "deployment may be
       misconfigured" notice AND does NOT silently fall back to
       the unavailable-mode page. The first failure follows
@@ -1092,10 +1296,15 @@ Layered, NOT a flat checklist. Six required groups.
 - [ ] Static grep / build-time check: bundle contains zero
       references to `/poolz`, `/admin/blacklist`,
       `/admin/provisional`, `/admin/promote`, `/admin/reject`,
-      `/admin/ledger` (matches the §10 dependency table). The only coordinator
-      paths the bundle may reference are the paste-mode data paths
+      `/admin/ledger` (matches the §10 dependency table). The check governs
+      **network-call targets**, not informational literals: the only coordinator
+      paths the bundle may **call** are the paste-mode data paths
       (`/v1/pool/check`, `/providers/{id}/earnings`) and, for GitHub-OAuth mode,
-      the §2.5.2 `/v1/auth/*` allowlist — no other `/v1/auth/*` or `/admin/*`.
+      the §2.5.2 `/v1/auth/*` allowlist — no other `/v1/auth/*` or `/admin/*`. A
+      **non-called informational literal** is permitted: the shipped misconfig
+      banner names `/v1/install/pair/refresh` as text (reconciled v0.9), which the
+      portal does not call (§2.5.2); the allowlist grep MUST target fetch/XHR call
+      sites, not every string occurrence.
 - [ ] Portal never prompts for, parses, or transmits the operator
       key. The loader accepts exactly the four `portal-config.json` keys
       (`coordinator_base_url`, `releases_repo_owner_name`,
@@ -1109,13 +1318,22 @@ Layered, NOT a flat checklist. Six required groups.
       `GET /v1/auth/me/providers` (cookie, `credentials:"include"`, no
       `Authorization` header) and NOT the paste sign-in form; with the flag
       absent/`false`, load renders the paste form and never calls `/v1/auth/*`.
-- [ ] Cookie-mode `401` on a data or `me/providers` call re-launches
-      `GET /v1/auth/github/start` (preserving `return_to`) — it does NOT show
-      the paste form and does NOT fall back to bearer.
+- [ ] Initial-load `401`: the first `GET /v1/auth/me/providers` returning `401`
+      routes to the `signin` state, which renders a "Continue with GitHub" button
+      and **waits for a user click** before calling `/v1/auth/github/start` — it
+      does NOT auto-redirect to OAuth on the initial unauthenticated load.
+- [ ] Post-sign-in `401`: a `401` on a data or `me/providers` call **after** the
+      user is signed in clears the session and re-launches
+      `GET /v1/auth/github/start` (preserving `return_to`) — it does NOT show the
+      paste form and does NOT fall back to bearer. (An earnings `401` from the
+      unwired earnings route, §2.5.0, is indistinguishable and takes this path.)
 - [ ] `/claim?ot=<pair_ot>` strips `?ot=` from the URL via `history.replaceState`
-      before any render, then binds via `POST /v1/auth/me/providers/bind`;
-      `410 pair_ot_invalid` / `409 already_owned` / `401 session_invalid` render
-      distinct claim-error copy; success redirects to `/`.
+      before any render, then binds via `POST /v1/auth/me/providers/bind` — with a
+      `{"pair_ot": …}` body when already signed in, or an empty `{}` body
+      (session-pending `pair_ot`, §2.5.5) after a logged-out OAuth round-trip.
+      `410 pair_ot_invalid` / `409 already_owned` render claim-error copy; a `401`
+      re-launches OAuth (there is **no** distinct `session_invalid` claim-error
+      branch — reconciled v0.9); success redirects to `/`.
 - [ ] `return_to` rejects a value that does not start with `/`, or starts with
       `//` or `/\`, or fails the double-decode check (open-redirect guard).
 - [ ] Coordinator sets the `mp_session` cookie `HttpOnly; Secure; SameSite=Lax;
@@ -1155,6 +1373,8 @@ Layered, NOT a flat checklist. Six required groups.
       - `total_credits`, `current_window_credits`,
         `last_payout_ready.*` (provider's earnings rollups; no
         per-request data; no buyer attribution).
+      - A.5 idle-prewarm counters + last skip reason (provider's own
+        prewarm telemetry; no buyer data; reconciled v0.9).
       - GitHub Releases body (public artifact; no buyer data).
 - [ ] D.3 live request stream is NOT rendered in v0.1, closing
       the privacy-redaction policy gap by deferral (Open Q5).
@@ -1164,9 +1384,12 @@ Layered, NOT a flat checklist. Six required groups.
 Each Open Q has an "if not answered, portal does X" line; the AC
 asserts X actually happens.
 
-- [ ] Q1 (multi-Mac): portal contains no "N machines" copy and no
-      machine grid; all copy uses singular "this Mac" / "this
-      machine".
+- [ ] Q1 (multi-Mac): portal contains no fleet-**aggregation** UI —
+      no "N/M machines online" header, no cross-Mac rollup, no machine
+      grid. The GitHub-OAuth "Choose a Mac" chooser (§2.5.5) is the
+      documented exception: it is a selector across single-Mac
+      dashboards, not aggregation, and once a Mac is selected the
+      dashboard copy is singular ("this Mac").
 - [ ] Q2 (releases repo): until answered, portal reads from
       `Augustas11/macprovider` and surfaces a rate-limit fallback
       when GitHub returns 0 remaining.
@@ -1193,19 +1416,27 @@ asserts X actually happens.
 
 ### 8(f) Single-machine ACs
 
-- [ ] UI has NO concept of "N machines" — no machine count
-      header, no machine grid, no "x3" chip on attention rows.
-- [ ] Copy uses "this Mac" or "this machine"; the strings
-      "your fleet", "your machines", "across machines", "all
-      machines" do NOT appear anywhere in the bundle.
-- [ ] Build-time grep enforces the union of bullet 1 + bullet 2
-      prohibited strings: at minimum `"your fleet"`,
-      `"your machines"`, `"across machines"`, `"all machines"`,
-      `"N machines"`, `"N/M"`, `"x3"`, `"machine grid"`, plus
-      any locale-specific variant the implementation introduces.
-      The grep MUST be run against the rendered bundle (HTML +
-      JS + CSS), and the CI step MUST fail loudly when any
-      prohibited string appears.
+- [ ] The per-Mac **dashboard** has NO concept of a fleet — no
+      machine-count header, no machine grid, no "x3" chip on
+      attention rows, no cross-Mac earnings rollup. (Reconciled
+      v0.9: the GitHub-OAuth "Choose a Mac" chooser that lists an
+      identity's owned Macs, §2.5.5, is the documented exception —
+      it is a pre-dashboard selector, not a fleet view; selecting a
+      Mac lands on the singular dashboard governed by these ACs.)
+- [ ] Dashboard copy uses "this Mac" or "this machine"; the
+      fleet-aggregation strings "your fleet", "across machines",
+      "all machines" do NOT appear anywhere in the bundle. ("your
+      machines" / "Choose a Mac" plural framing is permitted **only**
+      in the OAuth chooser, which is a selector, not aggregation.)
+- [ ] Build-time grep enforces the fleet-aggregation prohibited
+      strings: at minimum `"your fleet"`, `"across machines"`,
+      `"all machines"`, `"N machines"`, `"N/M"`, `"x3"`,
+      `"machine grid"`, plus any locale-specific variant the
+      implementation introduces. (`"your machines"` is excluded
+      from the grep because the OAuth chooser legitimately lists an
+      identity's owned Macs — reconciled v0.9.) The grep MUST be run
+      against the rendered bundle (HTML + JS + CSS), and the CI step
+      MUST fail loudly when any prohibited string appears.
 
 ---
 
@@ -1220,14 +1451,24 @@ not yet available.
 - **Question:** Is there (or will there be) a first-class
   multi-Mac owner identity that aggregates several `provider_id`s
   under one person?
-- **Why:** Without it, the portal cannot show a fleet view.
-  Adding one requires a new identity model in SPEC-002 (or a new
-  spec); this would also reshape SPEC-005 §11.4 to support
-  multi-subject aggregation.
+- **Answered in part (reconciled v0.9):** a multi-Mac *owner
+  identity* now **exists** in GitHub-OAuth mode — `provider_ownership`
+  binds several `provider_id`s to one `github_user_id` (SPEC-003
+  FR-C10), and the portal renders a "Choose a Mac" chooser (§2.5.5,
+  §1.2). What still does **not** exist is fleet *aggregation*: no
+  cross-Mac earnings rollup (SPEC-005 §11.4 stays single-subject) and
+  no "N/M online" fleet header/grid. So the open part of Q1 narrows to
+  aggregation, not identity.
+- **Why:** Without aggregation, the portal shows one Mac at a time
+  (paste mode) or a chooser across single-Mac dashboards (OAuth mode);
+  a true fleet view would still reshape SPEC-005 §11.4 for
+  multi-subject rollups.
 - **Who decides:** operator + SPEC-002 author + SPEC-005 author.
-- **Spec assumes:** single-machine v0.1; no aggregation.
-- **Portal renders if unanswered:** the single-machine layout in
-  §4 (no machine count, no grid).
+- **Spec assumes:** per-Mac dashboards in v0.1; owner-scoped chooser
+  in OAuth mode; no cross-Mac aggregation.
+- **Portal renders if unanswered:** the per-Mac layout in §4 (no
+  fleet count, no grid); the OAuth chooser selects one Mac's
+  dashboard at a time.
 
 ### Q2 — Releases repository + GitHub API rate limit + CORS posture
 
@@ -1390,10 +1631,10 @@ owning amendment.
 
 | Spec | What SPEC-014 uses |
 |---|---|
-| SPEC-001 v1.3 | §6.5 hello / hello_ack field set (referenced for Q5 deferral rationale); §6.4 `/v1/health` shape (referenced for A.4 / A.3 deferral rationale). No edits required for v0.1. |
+| SPEC-001 v1.5 | §6.5 hello / hello_ack field set (referenced for Q5 deferral rationale); §6.4 `/v1/health` shape (referenced for A.4 / A.3 deferral rationale); `ownership_event` / `needs_claim` frame shapes consumed by the GitHub-OAuth bind flow (§2.5.6). No edits required for v0.1. |
 | SPEC-002 v1.3.5 | §7.3 token storage opacity; §7.4 `/v1/pool/check` (the portal's ONLY status/identity endpoint — the `tier` label exposed there originates in §7.5 provisional admission state, but the portal MUST NOT call §7.5's operator-keyed endpoints directly); FR-P12 bearer auth. No edits required for v0.1. |
-| SPEC-003 v0.9.2 | §4 / FR-C2 install flow; §5 / FR-D1 + FR-D2 + FR-D2.1 requirements & sizing; §6.2 CLI subcommand table; FR-C7 advisory version nudge; FR-C9 provisional self-mint token path. No edits required for v0.1. |
-| SPEC-005 v0.3 | §1.3 out-of-scope; §2.1 D1 donation-only; §2.11 D11 no-new-auth-or-delivery surface; §11.4 `/providers/{id}/earnings`; §11.5 route-disabled mode + 401/403/404 contract; §13 `endpoints.provider_earnings.rate_limit_per_minute`. No edits required for v0.1. |
+| SPEC-003 v0.10 | §4 / FR-C2 install flow; §5 / FR-D1 + FR-D2 + FR-D2.1 requirements & sizing; §6.2 CLI subcommand table; FR-C7 advisory version nudge; FR-C9 provisional self-mint token path; **FR-C10 GitHub-OAuth coordinator mint/ownership policy** (pair_ot mint, `provider_ownership` anti-check, `ownership_event`, `claim_url`) consumed by §2.5. No edits required for v0.1. |
+| SPEC-005 v0.3 | §1.3 out-of-scope; §2.1 D1 donation-only; §2.11 D11 no-new-**delivery** infra; §11.4 `/providers/{id}/earnings`; §11.5 route-disabled mode + 401/403/404 contract; §13 `endpoints.provider_earnings.rate_limit_per_minute`. **Reconciled v0.9:** the GitHub-OAuth cookie-session **is** a new server-side auth surface — it does not violate D11 (D11 forbids *delivery* infra, not auth); the auth policy is owned by SPEC-003 FR-C10, and the OAuth transport by this spec's §2.5. No edits required for v0.1. |
 | SPEC-009 v0.1 | §2 ASCII layout precedent; §6 visual tokens (inherited verbatim). No edits required for v0.1. |
 | SPEC-013 v0.3 | §6 / NFR-4 telemetry / privacy egress contract (binds B.2 autotune CTA). No edits required for v0.1. |
 
@@ -1446,6 +1687,27 @@ The user shared screenshots from a competitor seller portal
   proxies the portal origin's `/v1/pool/check` and
   `/providers/{id}/earnings` to the coordinator. Bundle MUST
   fail loudly when the proxy is absent.
+- **GitHub-OAuth deployment prerequisites (reconciled v0.9 — required to
+  turn `github_oauth_enabled:true` into a working mode; the reference
+  `dist/nginx-portal.streamvc.live.conf` does NOT yet include these):**
+  - **Proxy `/v1/auth/*` to the coordinator** at the portal origin. Without it
+    the OAuth calls hit the SPA `index.html` fallback (200 HTML), which the portal
+    parses as an empty provider list — a **silent** failure, not the misconfig
+    banner (§2.3 wiring caveat). This is the single most load-bearing missing
+    route.
+  - **Coordinator config:** run with `GITHUB_OAUTH_ENABLED=true` (env /
+    `auth.github_oauth.enabled`) **and** a configured GitHub OAuth app —
+    `client_id` / `client_secret`, an **exact-match** `redirect_uri` (validated by
+    `validateGitHubOAuth`), and `MP_SESSION_COOKIE_DOMAIN` **scoped to the exact
+    portal host** (a parent domain widens cookie exposure to sibling subdomains,
+    §2.5.3).
+  - **Ingress query-log redaction:** redact `ot` / `pair_ot` / `code` / `state`
+    at the reverse-proxy / CDN layer; coordinator app-log redaction does not cover
+    ingress access logs that see `/claim?ot=…` (§2.5.4).
+  - **Known unwired data path:** even with the above, aggregate earnings (A.2 /
+    C.1) do not load in OAuth cookie mode until the coordinator earnings read is
+    cookie-authorized with an ownership check (§2.5.0). Operators enabling OAuth
+    mode today get identity + provider-list + `pair_ot` binding only.
 
 ---
 
