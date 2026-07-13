@@ -39,10 +39,11 @@ type canaryProbeMetrics struct {
 	// diagnosable. Empty on a pass.
 	FailReason canaryFailReason
 	// CoordinatorAttributed marks a failure caused by the coordinator's own probe
-	// configuration — specifically a max_tokens truncation of the fixed echo prompt
-	// (a clean, error-free `incomplete`) — rather than provider misbehavior. Such a
-	// failure is NEUTRAL at any fleet size (SPEC-031 FR-CAN3 / FR-CAN23(f)): it
-	// never increments the sanction counter and never sanctions.
+	// configuration — a max_tokens truncation of the fixed echo prompt, evidenced by
+	// the provider-declared finish_reason:"length" AND completion_tokens >= the
+	// configured max_tokens — rather than provider misbehavior. Such a failure is
+	// NEUTRAL at any fleet size (SPEC-031 FR-CAN3 / FR-CAN23(f)): it never increments
+	// the sanction counter and is skip-neutral for the OPoI flag.
 	CoordinatorAttributed bool
 }
 
@@ -212,4 +213,21 @@ func canaryCompletionTokens(raw []byte) int {
 		return 0
 	}
 	return resp.Usage.CompletionTokens
+}
+
+// canaryFinishReason extracts choices[0].finish_reason (lowercased, trimmed) from
+// a non-streaming chat-completion response body. Empty when absent/unparseable.
+// The shipped provider sets finish_reason:"length" exactly when the generation
+// hit max_tokens (ModelRuntime.swift), so it is the authoritative signal that the
+// coordinator's own probe budget — not the provider — truncated the echo.
+func canaryFinishReason(raw []byte) string {
+	var resp struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil || len(resp.Choices) == 0 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(resp.Choices[0].FinishReason))
 }

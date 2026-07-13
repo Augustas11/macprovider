@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -151,13 +152,16 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	}
 }
 
-// TestRunCanaryProbeIncompleteAttributedToCoordinatorIsNeutral verifies SPEC-031
-// FR-CAN3 / FR-CAN23(f): a clean (error-free) incomplete — a max_tokens
-// truncation of the coordinator's own echo probe — is neutral at any fleet size.
-// A peer is registered so the last-provider floor does NOT apply, proving the
-// neutrality comes from coordinator-attribution. A provider-signaled failure
-// still counts and trips.
-func TestRunCanaryProbeIncompleteAttributedToCoordinatorIsNeutral(t *testing.T) {
+// TestRunCanaryProbeMaxTokensTruncationAttributedToCoordinatorIsNeutral verifies
+// SPEC-031 FR-CAN3 / FR-CAN23(f) against the REAL provider wire shape: a
+// max_tokens truncation surfaces as finish_reason:"length" with
+// completion_tokens >= max_tokens inside a terminal status:"complete" frame (a
+// truncated-echo nonce_mismatch), and is coordinator-attributed → neutral. It
+// requires BOTH signals: a provider that fakes finish_reason:"length" with a
+// short body (< max_tokens) is NOT attributed and counts, and a normal
+// finish_reason:"stop" nonce_mismatch counts. A floor peer is registered so the
+// last-provider floor is NOT what spares the neutral case.
+func TestRunCanaryProbeMaxTokensTruncationAttributedToCoordinatorIsNeutral(t *testing.T) {
 	serverConn, providerConn := net.Pipe()
 	defer providerConn.Close()
 	defer serverConn.Close()
@@ -177,7 +181,7 @@ func TestRunCanaryProbeIncompleteAttributedToCoordinatorIsNeutral(t *testing.T) 
 	registry.Register(provider, serverConn)
 	registerCanaryFloorPeer(registry, "model-a") // floor does NOT shelter inc-p1
 	cfg := config.Default()
-	cfg.Pool.CanaryFailureThreshold = 1
+	cfg.Pool.CanaryFailureThreshold = 2
 	cfg.Pool.CanaryTimeoutS = 1
 	cfg.Pool.CanaryMaxTokens = 8
 	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
@@ -186,46 +190,57 @@ func TestRunCanaryProbeIncompleteAttributedToCoordinatorIsNeutral(t *testing.T) 
 	s.sessions.Store(sessionKey("inc-p1", "inc-s1"), session)
 	go session.runWriter()
 
-	// Truncated (incomplete) generation, no provider error → coordinator-attributed,
-	// neutral: no counter increment, provider stays ready — even at threshold 1 with
-	// a peer present (so the floor is not what spares it).
-	done := make(chan struct{})
-	go func() { s.runCanaryProbe(*provider); close(done) }()
-	req := readCanaryInferenceRequest(t, providerConn)
-	s.handleInferenceEnd("inc-p1", "inc-s1", mustJSON(InferenceResponseEnd{
-		Type:       "inference_response_end",
-		RequestID:  req.RequestID,
-		Status:     "incomplete",
-		ChunksSent: 0,
-	}))
-	waitForCanary(t, done)
+	// Drive one probe whose response body carries the given finish_reason +
+	// completion_tokens and a deliberately wrong (truncated) nonce echo.
+	runProbe := func(finishReason string, completionTokens int) {
+		done := make(chan struct{})
+		go func() { s.runCanaryProbe(*provider); close(done) }()
+		req := readCanaryInferenceRequest(t, providerConn)
+		body := fmt.Sprintf(
+			`{"choices":[{"message":{"content":"WRONG-NONCE"},"finish_reason":%q}],"usage":{"completion_tokens":%d}}`,
+			finishReason, completionTokens)
+		s.handleInferenceChunk("inc-p1", "inc-s1", mustJSON(InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: req.RequestID,
+			Seq:       0,
+			Data:      body,
+		}))
+		s.handleInferenceEnd("inc-p1", "inc-s1", mustJSON(InferenceResponseEnd{
+			Type:       "inference_response_end",
+			RequestID:  req.RequestID,
+			Status:     "complete",
+			ChunksSent: 1,
+		}))
+		waitForCanary(t, done)
+	}
+
+	// (1) Real truncation: finish_reason:"length" + full budget → attributed, neutral.
+	runProbe("length", 8)
 	got, ok := registry.Resolve("inc-p1", "inc-s1")
 	if !ok {
 		t.Fatal("provider not found")
 	}
 	if got.CanaryFailCount != 0 || got.State != pool.StateReady {
-		t.Fatalf("after coordinator-attributed incomplete = %+v, want neutral (fail count 0, ready)", got)
+		t.Fatalf("after coordinator-attributed truncation = %+v, want neutral (fail count 0, ready)", got)
 	}
 
-	// A provider-signaled failure is NOT attributed to the coordinator → it counts
-	// and (threshold 1, peer present) trips the provisional ban.
-	done2 := make(chan struct{})
-	go func() { s.runCanaryProbe(*provider); close(done2) }()
-	req2 := readCanaryInferenceRequest(t, providerConn)
-	s.handleInferenceEnd("inc-p1", "inc-s1", mustJSON(InferenceResponseEnd{
-		Type:       "inference_response_end",
-		RequestID:  req2.RequestID,
-		Status:     "error",
-		Error:      "provider boom",
-		ChunksSent: 0,
-	}))
-	waitForCanary(t, done2)
+	// (2) Faked attribution: finish_reason:"length" but a SHORT body (< max_tokens)
+	// is NOT coordinator-attributed → counts.
+	runProbe("length", 3)
+	got, _ = registry.Resolve("inc-p1", "inc-s1")
+	if got.CanaryFailCount != 1 || got.State != pool.StateReady {
+		t.Fatalf("after short-body faked length = %+v, want counted (fail count 1, ready)", got)
+	}
+
+	// (3) Ordinary nonce_mismatch (finish_reason:"stop") → counts; at threshold 2
+	// with a peer present it trips the provisional ban.
+	runProbe("stop", 3)
 	got2, ok := registry.Resolve("inc-p1", "inc-s1")
 	if !ok {
-		t.Fatal("provider not found after provider-error probe")
+		t.Fatal("provider not found after non-truncation probe")
 	}
-	if got2.CanaryFailCount != 1 || got2.State != pool.StateUnavailable {
-		t.Fatalf("after provider-signaled failure = %+v, want counted + tripped (unavailable)", got2)
+	if got2.CanaryFailCount != 2 || got2.State != pool.StateUnavailable {
+		t.Fatalf("after genuine nonce_mismatch = %+v, want counted + tripped (unavailable)", got2)
 	}
 }
 

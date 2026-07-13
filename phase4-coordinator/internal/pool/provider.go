@@ -1202,7 +1202,7 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 		return result
 	}
 	// FR-CAN22 (SPEC-031 §10) last-provider floor: a canary-only signal MUST NOT
-	// remove the sole routing-eligible provider for a model. A canary probe is a
+	// remove the sole serving-capable provider for a model. A canary probe is a
 	// fingerprintable synthetic request, so a failed echo does not prove ordinary
 	// buyer traffic is failing; removing the last provider on it is the
 	// self-inflicted total outage of incidents #1/#2 (2026-07-09/10). The provider
@@ -1211,8 +1211,9 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	// evidence independent of the canary — the FR-P11a buyer-path breaker, a
 	// confirmed transport death, or item-9 weight evidence — none of which flow
 	// through this canary path. Applies to both tiers (provisional ban and pinned
-	// degrade), since it precedes the tier branch.
-	if !r.hasOtherEligibleForModelLocked(providerID, p.ModelID) {
+	// degrade), since it precedes the tier branch. "Sole" is keyed on the ACTIVE
+	// buyer-routing model (providerServesActiveModel), not declared SupportedModels.
+	if !r.hasOtherServingCapableForModelLocked(providerID, p.ModelID) {
 		result.Tripped = CanaryTripFloorHeld
 		return result
 	}
@@ -1232,49 +1233,51 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	return result
 }
 
-// providerServesModel reports whether p currently serves modelID, either as its
-// active model or via a declared supported model. Pure; performs no locking.
-func providerServesModel(p *Provider, modelID string) bool {
-	if p == nil {
-		return false
-	}
-	if p.ModelID == modelID {
-		return true
-	}
-	for _, m := range p.SupportedModels {
-		if m == modelID {
-			return true
-		}
-	}
-	return false
+// providerServesActiveModel reports whether p's ACTIVE loaded model is modelID,
+// using the same case-folded comparison as buyer routing (`modelIDEqual` →
+// `strings.EqualFold`, buyer/server.go). It deliberately does NOT consult
+// `SupportedModels`: a declared-but-cold model is buyer-unroutable (SPEC-031 §9 /
+// SPEC-010 R-3.3.4 — "known but temporarily unavailable", it 503s), so counting
+// it as live capacity would let a peer serving a different model falsely lift the
+// last-provider floor and empty the model's real pool. Pure; no locking. Model
+// classes are not resolved here (the registry has no class config), so for a
+// class-routed model the floor is conservatively over-protective (a same-class
+// peer with a different ModelID is not counted) — the safe direction.
+func providerServesActiveModel(p *Provider, modelID string) bool {
+	return p != nil && strings.EqualFold(p.ModelID, modelID)
 }
 
-// hasOtherEligibleForModelLocked reports whether some provider other than
-// excludeID is routing-eligible and serves modelID. Caller MUST hold r.mu.
-// Backs the FR-CAN22 last-provider floor in RecordCanaryResult: when this
-// returns false, the excluded provider is the sole server for the model and a
-// canary-only signal must not remove it.
-func (r *Registry) hasOtherEligibleForModelLocked(excludeID, modelID string) bool {
+// hasOtherServingCapableForModelLocked reports whether some provider other than
+// excludeID is ServingCapable and actively serves modelID. Caller MUST hold r.mu.
+// Backs the FR-CAN22 last-provider floor in RecordCanaryResult: when this returns
+// false, the excluded provider is the sole server for the model and a canary-only
+// signal must not remove it. Uses ServingCapable (ready OR busy) rather than
+// RoutingEligible so a peer that is merely momentarily out of free slots still
+// counts as redundancy.
+func (r *Registry) hasOtherServingCapableForModelLocked(excludeID, modelID string) bool {
 	for id, p := range r.providers {
 		if id == excludeID {
 			continue
 		}
-		if p.RoutingEligible() && providerServesModel(p, modelID) {
+		if p.ServingCapable() && providerServesActiveModel(p, modelID) {
 			return true
 		}
 	}
 	return false
 }
 
-// RoutingEligibleCountForModel returns the number of routing-eligible providers
-// serving modelID. Backs the SPEC-031 §10 / SPEC-032 redundancy alert
-// (below-two operator visibility); it never affects admission or routing.
-func (r *Registry) RoutingEligibleCountForModel(modelID string) int {
+// ServingCapableCountForModel returns the number of ServingCapable providers
+// actively serving modelID. Backs the redundancy telemetry on the hello-gate
+// rejection and canary floor-held paths (below-two operator visibility); it never
+// affects admission or routing. This is a raw structural count, NOT the full
+// SPEC-032 FR-HG5 below-two alert (which additionally requires catalogued-demand
+// filtering + episode dedup/cooldown across all gate actions — still a Gap).
+func (r *Registry) ServingCapableCountForModel(modelID string) int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	n := 0
 	for _, p := range r.providers {
-		if p.RoutingEligible() && providerServesModel(p, modelID) {
+		if p.ServingCapable() && providerServesActiveModel(p, modelID) {
 			n++
 		}
 	}

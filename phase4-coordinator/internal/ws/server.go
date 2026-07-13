@@ -1675,17 +1675,19 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 	if !ok {
 		// SPEC-032 redundancy decision (runbook item 1c): rejecting a would-be
 		// second provider for lack of verified hardware evidence is correct — the
-		// gate is NOT weakened here. But surface the redundancy cost so an operator
-		// sees a rejection that leaves the model non-redundant (the 2026-07-10 air5
-		// gated-out condition). Attach the current routing-eligible count for the
-		// model; flag pool_redundancy_low when it is below two.
-		eligible := s.pool.RoutingEligibleCountForModel(hello.ModelID)
+		// gate is NOT weakened here. Surface the redundancy cost so an operator sees
+		// a rejection that leaves the model non-redundant (the 2026-07-10 air5
+		// gated-out condition). NOTE: this is *partial rejection telemetry*, NOT the
+		// full SPEC-032 FR-HG5 below-two operator alert (which additionally requires
+		// a catalogued-demand-filtered structural count across ALL gate actions +
+		// episode dedup/cooldown — still a Gap). Count ServingCapable providers.
+		serving := s.pool.ServingCapableCountForModel(hello.ModelID)
 		event := s.log.Info().
 			Str("provider_id", hello.ProviderID).
 			Str("event", "autotune_evidence_required").
 			Str("model_id", hello.ModelID).
-			Int("routing_eligible_for_model", eligible)
-		if eligible < 2 {
+			Int("serving_capable_for_model", serving)
+		if serving < 2 {
 			event = event.Bool("pool_redundancy_low", true)
 		}
 		event.Msg("autotune hello gate rejected connect without verified hardware evidence")
@@ -2685,6 +2687,23 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		return false
 	}
 	outcome := attempt.outcome
+	if outcome == canaryProbeFail && attempt.metrics.CoordinatorAttributed {
+		// SPEC-031 FR-CAN3 / FR-CAN23(f): a max_tokens truncation of the
+		// coordinator's OWN echo probe is neutral at any fleet size — it never
+		// counts toward a sanction. Handled BEFORE the model-class OPoI/drift
+		// recording so a coordinator-caused truncation is also skip-neutral for the
+		// OPoI pass flag (FR-CAN29) and telemetry-drift, rather than logging a false
+		// OPoI failure. Do NOT call RecordCanaryResult; the counter is untouched and
+		// the provider stays routable. Direct fix for the 2026-07-10
+		// `canary_max_tokens` truncation that transiently degraded the sole prod
+		// provider (incident #3).
+		s.log.Info().
+			Str("provider_id", provider.ProviderID).
+			Str("canary_fail_reason", string(attempt.metrics.FailReason)).
+			Int("canary_max_tokens", s.canaryMaxTokens()).
+			Msg("canary probe truncated by coordinator max_tokens budget; neutral (no sanction)")
+		return true
+	}
 	if attempt.modelClassBank {
 		pass := outcome == canaryProbePass
 		s.pool.SetModelClassOPoIPass(provider.ProviderID, provider.AssignedID, &pass)
@@ -2732,20 +2751,6 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		// Correctness + model-class OPoI liveness (NOT a weight-identity proof;
 		// see SPEC-032 FR-PW1) were already recorded above.
 		s.enforceNextCanary.Store(provider.ProviderID, struct{}{})
-		return true
-	}
-	if outcome == canaryProbeFail && attempt.metrics.CoordinatorAttributed {
-		// SPEC-031 FR-CAN3 / FR-CAN23(f): a coordinator-attributable incomplete
-		// (our own max_tokens truncated the fixed echo probe) is neutral at any
-		// fleet size — it never counts toward a sanction. Do NOT call
-		// RecordCanaryResult: leave the counter untouched and keep the provider
-		// routable. This is the direct fix for the 2026-07-10 `canary_max_tokens`
-		// truncation that transiently degraded the sole prod provider (incident #3).
-		s.log.Info().
-			Str("provider_id", provider.ProviderID).
-			Str("canary_fail_reason", string(attempt.metrics.FailReason)).
-			Int("canary_max_tokens", s.canaryMaxTokens()).
-			Msg("canary probe incomplete attributed to coordinator max_tokens budget; neutral (no sanction)")
 		return true
 	}
 	passed := outcome == canaryProbePass
@@ -2804,12 +2809,12 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		})
 		s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider held degraded after canary threshold")
 	case pool.CanaryTripFloorHeld:
-		// SPEC-031 FR-CAN22 last-provider floor: the sole routing-eligible provider
+		// SPEC-031 FR-CAN22 last-provider floor: the sole serving-capable provider
 		// for this model reached the canary failure threshold but was spared to
 		// avoid emptying the pool (the incidents #1/#2 outage). It stays routable.
-		// This IS the below-two redundancy signal (SPEC-032 redundancy decision:
-		// surface, never auto-remove) — an operator must investigate the failing
-		// canary and/or add a second provider.
+		// This is canary-path redundancy telemetry (surface, never auto-remove) —
+		// NOT the full SPEC-032 FR-HG5 below-two operator alert (still a Gap). An
+		// operator must investigate the failing canary and/or add a second provider.
 		s.log.Warn().
 			Str("provider_id", provider.ProviderID).
 			Str("model_id", provider.ModelID).
@@ -2817,7 +2822,7 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 			Int("canary_fail_count", result.Count).
 			Int("canary_failure_threshold", result.Threshold).
 			Bool("pool_redundancy_low", true).
-			Msg("sole routing-eligible provider for model failed canary threshold; spared to preserve availability (SPEC-031 FR-CAN22) — operator investigation required")
+			Msg("sole serving-capable provider for model failed canary threshold; spared to preserve availability (SPEC-031 FR-CAN22) — operator investigation required")
 	}
 	return true
 }
@@ -2917,15 +2922,20 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 				}
 				metrics = canaryMetricsFromTiming(start, firstTokenAt, completedAt, tokens)
 			}
+			// FR-CAN3 coordinator attribution: a max_tokens truncation of the
+			// coordinator's own echo probe is neutral (not provider misbehavior).
+			// The shipped provider signals exhaustion as finish_reason:"length"
+			// (ModelRuntime.swift) inside a terminal status:"complete" frame, so a
+			// real truncation surfaces as a truncated-echo nonce_mismatch, NOT a
+			// non-complete status. Require BOTH the provider-declared
+			// finish_reason:"length" AND completion_tokens >= the configured
+			// max_tokens (independent evidence the budget was the binding
+			// constraint) so a provider cannot fake attribution with a short body
+			// to evade all canary sanctioning.
+			metrics.CoordinatorAttributed = canaryFinishReason([]byte(rawResponse.String())) == "length" &&
+				canaryCompletionTokens([]byte(rawResponse.String())) >= s.canaryMaxTokens()
 			if end.Status != "complete" {
 				metrics.FailReason = canaryFailIncomplete
-				// A clean, error-free non-complete end on a coordinator-authored,
-				// max_tokens-bounded echo probe is a coordinator-attributable
-				// truncation (SPEC-031 FR-CAN3, §5): the coordinator chose the token
-				// budget, so this is not evidence of provider misbehavior. A
-				// provider-signaled error (end.Error) is NOT attributed — it stays a
-				// countable failure.
-				metrics.CoordinatorAttributed = end.Error == ""
 				return canaryProbeFail, metrics
 			}
 			enforceLatency := s.cfg.Pool.CanaryLatencyEnforced()

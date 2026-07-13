@@ -602,9 +602,13 @@ func TestRecordCanaryResultFloorSparesSoleProvider(t *testing.T) {
 }
 
 // TestRecordCanaryResultFloorLiftsWithSecondProvider verifies the floor is scoped
-// to being the SOLE eligible provider: once a second eligible provider serves the
-// model, the failing provider trips normally. A merely-degraded second provider
-// does NOT satisfy the floor (it is not routing-eligible).
+// to being the SOLE serving-capable provider for the ACTIVE model. Peers that do
+// not add real capacity for the model do NOT lift the floor:
+//   - a degraded peer (not ServingCapable),
+//   - a ready peer serving a DIFFERENT active model but merely DECLARING model-a
+//     via SupportedModels (declared-but-cold; H1 regression).
+//
+// A ready OR busy peer actively serving model-a DOES lift it.
 func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 	registry := NewRegistry(nil)
 	registry.Register(&Provider{
@@ -617,7 +621,7 @@ func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 		SlotsTotal:     1,
 		MaxConcurrency: 1,
 	}, nil)
-	// A degraded second provider is not routing-eligible → floor still holds.
+	// A degraded peer is not serving-capable → floor still holds.
 	registry.Register(&Provider{
 		ProviderID:     "degraded-peer",
 		AssignedID:     "session-d",
@@ -628,33 +632,47 @@ func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 		SlotsTotal:     1,
 		MaxConcurrency: 1,
 	}, nil)
+	// H1 regression: a ready peer serving model-b that only DECLARES model-a in
+	// SupportedModels is buyer-unroutable for model-a → must NOT lift model-a's
+	// floor (declared-but-cold is 503, not live capacity).
+	registry.Register(&Provider{
+		ProviderID:      "cold-declarer",
+		AssignedID:      "session-c",
+		ModelID:         "model-b",
+		SupportedModels: []string{"model-a"},
+		Tier:            TierProvisional,
+		State:           StateReady,
+		SlotsFree:       1,
+		SlotsTotal:      1,
+		MaxConcurrency:  1,
+	}, nil)
 	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 
 	held := registry.RecordCanaryResult("target", "session-t", false, at, 1)
 	if held.Tripped != CanaryTripFloorHeld {
-		t.Fatalf("with only a degraded peer, result = %+v, want CanaryTripFloorHeld", held)
+		t.Fatalf("with no live model-a peer, result = %+v, want CanaryTripFloorHeld", held)
 	}
-	if n := registry.RoutingEligibleCountForModel("model-a"); n != 1 {
-		t.Fatalf("RoutingEligibleCountForModel = %d, want 1 (target only)", n)
+	if n := registry.ServingCapableCountForModel("model-a"); n != 1 {
+		t.Fatalf("ServingCapableCountForModel(model-a) = %d, want 1 (target only)", n)
 	}
 
-	// Bring a genuinely eligible second provider online; now the target may trip.
+	// A BUSY peer actively serving model-a is still serving-capable → lifts the floor.
 	registry.Register(&Provider{
-		ProviderID:     "ready-peer",
-		AssignedID:     "session-r",
+		ProviderID:     "busy-peer",
+		AssignedID:     "session-b",
 		ModelID:        "model-a",
 		Tier:           TierProvisional,
-		State:          StateReady,
-		SlotsFree:      1,
+		State:          StateBusy,
+		SlotsFree:      0,
 		SlotsTotal:     1,
 		MaxConcurrency: 1,
 	}, nil)
-	if n := registry.RoutingEligibleCountForModel("model-a"); n != 2 {
-		t.Fatalf("RoutingEligibleCountForModel = %d, want 2", n)
+	if n := registry.ServingCapableCountForModel("model-a"); n != 2 {
+		t.Fatalf("ServingCapableCountForModel(model-a) = %d, want 2", n)
 	}
 	tripped := registry.RecordCanaryResult("target", "session-t", false, at.Add(time.Minute), 1)
 	if tripped.Tripped != CanaryTripUnavailable {
-		t.Fatalf("with a second eligible provider, result = %+v, want CanaryTripUnavailable", tripped)
+		t.Fatalf("with a busy serving peer, result = %+v, want CanaryTripUnavailable", tripped)
 	}
 	got, _ := registry.Resolve("target", "session-t")
 	if got.State != StateUnavailable {
