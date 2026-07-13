@@ -67,6 +67,21 @@ func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
 	}
 }
 
+func TestWithReferralValidationMountsPermanentJoinRoute(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withReferralValidation(
+		base,
+		nil,
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) },
+	)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("join status=%d", response.Code)
+	}
+}
+
 func TestListenAddressParsesIPv4AndIPv6(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1", "::"} {
 		t.Run(host, func(t *testing.T) {
