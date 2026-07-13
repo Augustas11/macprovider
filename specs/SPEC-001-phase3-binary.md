@@ -1974,10 +1974,15 @@ The provider maintains a bounded write buffer for outgoing
 Locked SPEC-001 v1.2.4 §6.5 documents the legacy `hello` handshake.
 The v2 `auth_request` two-stage handshake has been in code since
 SPEC-001 v1.2.x but was never normatively documented in SPEC-001; this
-section closes that gap. The legacy `hello` handshake at §6.5 remains
-the back-compat reconnect path. The v2 `auth_request` handshake is the
-modern first-connect path that supports the SPEC-010 fields and the
-SPEC-008 Tier-2 attestation hooks.
+section closes that gap. **Reconciled v1.7 — handshake selection is
+mode-based, not first-connect-vs-reconnect.** Every (re)connect re-enters the
+same connect path (`connectAndRun()`): a **WS-tunneled or credential-bootstrap**
+connection performs a **fresh v2 `auth_request` challenge/proof handshake on
+each reconnect** (re-negotiating identity/attestation and the encrypted leg);
+the legacy `hello` handshake at §6.5 is used **only** by legacy
+HTTP-forwarding-mode connections. So `hello` is not a universal "back-compat
+reconnect path" — a WS-tunneled provider re-runs the full v2 handshake when it
+reconnects.
 
 #### 6.7.1. Initial-stage frame (P->C)
 
@@ -2095,8 +2100,8 @@ R-3.1.10.
 | Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 R-3.1.10 | absent is not a mismatch |
 
 R-6.7.5 The coordinator generates `auth_attempt_id` at
-`phase4-coordinator/internal/ws/server.go:354`
-(`authAttemptID := "auth-" + s.newUUID()`). The binary MUST NOT
+`phase4-coordinator/internal/ws/server.go` (`authAttemptID := "auth-" +
+s.newUUID()`, ~L1091). The binary MUST NOT
 generate this value; it echoes the value received on `auth_challenge`
 on the proof-stage frame per SPEC-010 v1.5 R-3.1.10.
 
@@ -2211,9 +2216,14 @@ R-6.7.8 A v1.3 binary uses v2 `auth_request` for the first connection
 attempt with a coordinator per SPEC-010 v1.5 §3.1 and R-3.1.1 through
 R-3.1.10, whether or not either opt-in is set.
 
-R-6.7.9 The legacy `hello` handshake at §6.5 remains the reconnect
-mid-session path per SPEC-011 v0.5 §3.8 and R-3.8.3, including WS drop
-reconnect after a warm-swap-in-flight.
+R-6.7.9 (reconciled v1.7) The legacy `hello` handshake at §6.5 is the reconnect
+mid-session path **only for legacy HTTP-forwarding-mode connections** (per
+SPEC-011 v0.5 §3.8 / R-3.8.3, including WS drop reconnect after a
+warm-swap-in-flight in that mode). A **WS-tunneled or credential-bootstrap**
+connection instead re-runs the **full v2 `auth_request` challenge/proof
+handshake on every reconnect** (`CoordinatorClient.swift` `connectAndRun()`); it
+does not fall back to `hello`. The mode, not the connect/reconnect distinction,
+selects the handshake.
 
 R-6.7.10 A pre-v1.3 (v1.2.x) binary uses legacy `hello` on first
 connect; the coordinator accepts both paths per SPEC-010 v1.5 §3.1 and
@@ -2419,7 +2429,9 @@ here as owner of last resort:
 
 - `metrics_request` — `{type}` (no payload).
 - `metrics_response` — `{type}` plus these members (types from
-  `ControlMetricsSnapshot.swift`, enforced by the decoder): REQUIRED
+  `ControlMetricsSnapshot.swift`; the decoder coerces via `NSNumber`, so integer
+  fields tolerate fractional/boolean JSON with truncation rather than strictly
+  rejecting): REQUIRED
   `earnings_usdc` (number/Double), `malibu_accrued` (number/Double),
   `uptime_sec` (int); OPTIONAL (omitted when nil) `gpu_c` (number/Double),
   `latency_p50_ms` (int), `requests_served_today` (int),
@@ -2504,10 +2516,13 @@ R-3.2.4 step 4.
 
 #### 6.10.4. Hash source-of-truth on reconnect (WS drop)
 
-R-6.10.5 After a WS drop mid-swap, the binary reconnects via legacy
-`hello` per SPEC-011 v0.5 §3.8 and R-3.8.3. The `hello.model_hash`
-field MUST carry the hash of the container currently referenced by
-`current_container` at reconnect time, not the in-progress load target.
+R-6.10.5 (scope reconciled v1.7) After a WS drop mid-swap **in legacy
+HTTP-forwarding mode**, the binary reconnects via legacy `hello` per SPEC-011
+v0.5 §3.8 and R-3.8.3, and the `hello.model_hash` field MUST carry the hash of
+the container currently referenced by `current_container` at reconnect time, not
+the in-progress load target. (A WS-tunneled / credential-bootstrap connection
+re-runs the v2 handshake on reconnect instead — R-6.7.9 — and communicates the
+same `model_hash` continuity via the post-reconnect heartbeat, not a `hello`.)
 If the swap was mid-`loading` when the WS dropped, the load continues
 independently of the WS; on reconnect `hello.model_hash` is the OLD
 hash, and the next post-reconnect heartbeat carries the new hash once
@@ -3395,16 +3410,18 @@ not "additional fields tolerated." Traces to SPEC-010 v1.5 AC-1, AC-2,
 AC-19, AC-21 and SPEC-011 v0.5 AC-10, AC-18, AC-20, AC-23.
 
 **AC-18.10. NEW §6.7 v2 handshake documented (scope reconciled v1.7).**
-The SPEC-001 §6.7 v2 `auth_request` handshake **initial/proof-stage** field set
-is consistent with the SPEC-010 v1.5 §3.1.A field table. The byte-for-byte
-"no field appears in one and not the other" equality holds **only for the
-SPEC-010 §3.1.A baseline**; v1.7 intentionally documents additional
-shipped fields that SPEC-010 does not define — the 4th `tier2_capabilities`
-sub-field, `credential_bootstrap`, the signed-catalog admission block (§6.15.1),
-and the coordinator-sent `auth_challenge` / accepted-`auth_response` fields
-(§6.7.1.5). This AC is therefore scoped to *SPEC-010 baseline parity plus the
-documented v1.7 extensions*, not literal set-equality. Traces to SPEC-010 v1.5
-AC-16 and AC-18.
+The check is a **projection test, not set-equality**: restricted to the fields
+**owned by the SPEC-010 v1.5 §3.1.A table**, the SPEC-001 §6.7 handshake
+documentation matches it byte-for-byte (no SPEC-010-owned field appears in one
+and not the other). Every field SPEC-010 does **not** own is explicitly **exempt**
+from this comparison — including, non-exhaustively, the 4th `tier2_capabilities`
+sub-field, `credential_bootstrap`, the signed-catalog admission block, the
+coordinator-sent `auth_challenge` / accepted-`auth_response` fields (§6.7.1.5),
+`provider_receipt_public_key` (SPEC-015 v0.1.3 / SPEC-001 v1.6), and the
+proof-stage `identity_signature` / `identity_signature_transcript_sha256`
+(SPEC-026 §4.3). These are owned/carried by their respective specs (§6.15.1) and
+are outside SPEC-010's field-table authority, so a literal whole-frame set-equality
+test is **not** the criterion. Traces to SPEC-010 v1.5 AC-16 and AC-18.
 
 **AC-18.11. No drift in §6.5.**
 SPEC-001 v1.3 §6.5 (Coordinator WebSocket envelope — legacy `hello`
@@ -3449,16 +3466,20 @@ returns `loadingInProgress` per SPEC-011 v0.5 R-3.1.x).
 Traces to SPEC-011 v0.5 R-3.1.2 / R-3.1.3 / R-3.1.4, AC-24, and
 v1.4 R-6.13.2.
 
-**AC-18.15. WS drop reconnect uses legacy `hello`, not v2.**
-A v1.3 binary `serve --enable-warm-swap` whose WebSocket connection
-drops mid-load MUST reconnect using the legacy §6.5 `hello`
-handshake per R-6.11.4 and SPEC-011 v0.5 R-3.8.3 / §3.8 — NOT a
-fresh v2 `auth_request`. The reconnect `hello.model_hash` MUST carry
-the hash of the container currently referenced by
-`current_container` at reconnect time per R-6.10.5 (the OLD hash if
-the swap is still in-flight). The first post-reconnect heartbeat
-after atomic swap MUST carry the new `model_hash`. Traces to
-SPEC-011 v0.5 R-3.8.3 / §3.8 and SPEC-001 v1.3 R-6.10.5 / R-6.11.4.
+**AC-18.15. WS drop reconnect — legacy `hello` in HTTP-forwarding mode (scope reconciled v1.7).**
+This AC applies to a warm-swap-enabled binary running in **legacy
+HTTP-forwarding mode**: when its WebSocket drops mid-load it reconnects using the
+legacy §6.5 `hello` handshake per R-6.11.4 and SPEC-011 v0.5 R-3.8.3 / §3.8 —
+NOT a fresh v2 `auth_request` — and the reconnect `hello.model_hash` MUST carry
+the hash of the container currently referenced by `current_container` at
+reconnect time per R-6.10.5 (the OLD hash if the swap is still in-flight), with
+the first post-reconnect heartbeat after atomic swap carrying the new
+`model_hash`. **A WS-tunneled or credential-bootstrap connection instead re-runs
+the full v2 `auth_request` handshake on reconnect** (R-6.7.9) — the `hello`
+reconnect assertion does not apply there; that path preserves model-hash
+continuity via the §6.10.4 reconnect rule on the post-reconnect heartbeat rather
+than via a `hello` frame. Traces to SPEC-011 v0.5 R-3.8.3 / §3.8 and SPEC-001
+v1.3 R-6.10.5 / R-6.11.4.
 
 **AC-18.16. Runtime state-value enumeration.**
 A v1.3 binary `serve --enable-warm-swap` runtime MUST expose
