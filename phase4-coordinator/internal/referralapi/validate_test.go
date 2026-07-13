@@ -14,6 +14,23 @@ import (
 
 type validationStoreFunc func(string) (auth.ReferralValidation, error)
 
+type validationMetrics struct {
+	events []string
+}
+
+func (m *validationMetrics) IncReferralEvent(event, outcome string) {
+	m.events = append(m.events, event+"/"+outcome)
+}
+
+func containsValidationEvent(events []string, want string) bool {
+	for _, event := range events {
+		if event == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (f validationStoreFunc) ValidateReferral(_ context.Context, _ auth.ReferralPolicy, code string, _ time.Time) (auth.ReferralValidation, error) {
 	return f(code)
 }
@@ -30,7 +47,7 @@ func validationPolicy() auth.ReferralPolicy {
 }
 
 func TestValidationHandlerReturnsStableReasonWithoutReserving(t *testing.T) {
-	metrics := &advocacyMetrics{}
+	metrics := &validationMetrics{}
 	h := &ValidationHandler{
 		Store: validationStoreFunc(func(code string) (auth.ReferralValidation, error) {
 			if code == "expired" {
@@ -63,7 +80,7 @@ func TestValidationHandlerReturnsStableReasonWithoutReserving(t *testing.T) {
 			t.Fatalf("configured access URL missing from status=%d body=%s", response.Code, response.Body.String())
 		}
 	}
-	if !containsEvent(metrics.events, "validate/valid") || !containsEvent(metrics.events, "validate/expired") {
+	if !containsValidationEvent(metrics.events, "validate/valid") || !containsValidationEvent(metrics.events, "validate/expired") {
 		t.Fatalf("metrics=%v", metrics.events)
 	}
 }
@@ -116,7 +133,7 @@ func TestValidationHandlerFailsClosedWhenAuthorityMissing(t *testing.T) {
 }
 
 func TestValidationHandlerDoesNotMisreportOperationalFailureAsInvalidCode(t *testing.T) {
-	metrics := &advocacyMetrics{}
+	metrics := &validationMetrics{}
 	h := &ValidationHandler{
 		Store: validationStoreFunc(func(string) (auth.ReferralValidation, error) {
 			return auth.ReferralValidation{}, errors.New("database busy")
@@ -130,7 +147,7 @@ func TestValidationHandlerDoesNotMisreportOperationalFailureAsInvalidCode(t *tes
 	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), `"reason":"invalid"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if !containsEvent(metrics.events, "validate/unavailable") {
+	if !containsValidationEvent(metrics.events, "validate/unavailable") {
 		t.Fatalf("metrics=%v", metrics.events)
 	}
 }
