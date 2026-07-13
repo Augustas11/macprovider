@@ -92,7 +92,7 @@ func TestProviderRegistrationPreparedSurvivesNoncePrune(t *testing.T) {
 		t.Fatalf("prune nonces: %v", err)
 	}
 
-	prepared, err := store.ProviderRegistrationPrepared(ctx, providerID, sourceIP, nonce, attemptTS)
+	prepared, err := store.ProviderRegistrationPrepared(ctx, providerID, nonce, attemptTS)
 	if err != nil {
 		t.Fatalf("prepared: %v", err)
 	}
@@ -100,9 +100,20 @@ func TestProviderRegistrationPreparedSurvivesNoncePrune(t *testing.T) {
 		t.Fatal("committed attempt reported prepared=false after nonce prune (A1 regression)")
 	}
 
+	// FIX-570 C1a: an identical signed replay arriving from a DIFFERENT source IP
+	// (NAT/proxy churn) must still resolve to the same committed marker. source_ip
+	// is non-authoritative metadata and is not part of the match key.
+	preparedDifferentIP, err := store.ProviderRegistrationPrepared(ctx, providerID, nonce, attemptTS)
+	if err != nil {
+		t.Fatalf("prepared(different source ip): %v", err)
+	}
+	if !preparedDifferentIP {
+		t.Fatal("committed attempt reported prepared=false for a signed replay from a different source IP (C1a regression)")
+	}
+
 	// The server-time observedAt must NOT match the attempt marker (C1: the marker
 	// is keyed on the signed attemptTS, replay-invariant).
-	if wrongKey, err := store.ProviderRegistrationPrepared(ctx, providerID, sourceIP, nonce, observedAt); err != nil {
+	if wrongKey, err := store.ProviderRegistrationPrepared(ctx, providerID, nonce, observedAt); err != nil {
 		t.Fatalf("prepared(observedAt): %v", err)
 	} else if wrongKey {
 		t.Fatal("attempt marker matched server-time observedAt; must key on signed attemptTS")
@@ -110,7 +121,7 @@ func TestProviderRegistrationPreparedSurvivesNoncePrune(t *testing.T) {
 
 	// A genuinely un-prepared attempt (no attempt row) must still report false so
 	// reconciliation still compensates a true non-commit.
-	notPrepared, err := store.ProviderRegistrationPrepared(ctx, "p_never", sourceIP, "ffffffffffff", attemptTS)
+	notPrepared, err := store.ProviderRegistrationPrepared(ctx, "p_never", "ffffffffffff", attemptTS)
 	if err != nil {
 		t.Fatalf("prepared(missing): %v", err)
 	}

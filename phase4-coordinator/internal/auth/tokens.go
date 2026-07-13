@@ -1193,6 +1193,32 @@ SELECT COUNT(1) FROM referral_redemptions WHERE campaign = ? AND provider_id = ?
 		if err := redeemReferralTx(ctx, conn, policy, referralCode, providerID, time.Now().UTC()); err != nil {
 			return err
 		}
+		// FIX-570 C1a bug 3 (ADV-H4 residual): the saga replacement is ATTEMPT-BOUND,
+		// not a blind provider-scoped delete. A saga row bound to a DIFFERENT signed
+		// attempt (different nonce or observed_at) belongs to a concurrent
+		// registration and MUST NEVER be clobbered. Prove this BEFORE any destructive
+		// mutation (revoke/rotate): in the normal lost-response case the original saga
+		// was already acknowledged (deleted) so no row exists and we may insert ours;
+		// if a foreign attempt's saga is present we refuse with a conflict rather than
+		// destroy its recovery marker. The whole recovery runs in ONE SQLite write
+		// transaction, which SQLite serializes, so there is no read/insert
+		// interleaving with a concurrent attempt.
+		attemptNonce := strings.TrimSpace(attempt.Nonce)
+		attemptObserved := attempt.ObservedAt.UTC().Format(time.RFC3339Nano)
+		var existingNonce, existingObserved string
+		sagaErr := conn.QueryRowContext(ctx, `
+SELECT registration_nonce, registration_observed_at
+  FROM apptrack_pending_referral_mints
+ WHERE provider_id = ?`, providerID).Scan(&existingNonce, &existingObserved)
+		switch {
+		case errors.Is(sagaErr, sql.ErrNoRows):
+			// No saga (original was acknowledged): safe to insert ours below.
+		case sagaErr != nil:
+			return sagaErr
+		case existingNonce != attemptNonce || existingObserved != attemptObserved:
+			// A saga bound to a different signed attempt is in flight; never clobber it.
+			return ErrReferralConflict
+		}
 		var recent int
 		if err := conn.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM apptrack_register_reissues WHERE provider_id = ? AND ts >= ?`,
@@ -1230,11 +1256,13 @@ VALUES (?, ?, ?, ?, ?)`, tokenHash(newToken), prefix, providerID, "malibu-app", 
 INSERT INTO apptrack_register_reissues (provider_id, ts) VALUES (?, ?)`, providerID, nowText); err != nil {
 			return err
 		}
-		// Replace any stale saga row (PK is provider_id) with a fresh one for the
-		// new token. created_redemption=0 so a non-commit reconcile outcome never
-		// deletes the pre-existing committed redemption.
+		// created_redemption=0 so a non-commit reconcile outcome never deletes the
+		// pre-existing committed redemption. Delete only our own attempt's row (the
+		// foreign-attempt guard above already refused any different-attempt saga).
 		if _, err := conn.ExecContext(ctx, `
-DELETE FROM apptrack_pending_referral_mints WHERE provider_id = ?`, providerID); err != nil {
+DELETE FROM apptrack_pending_referral_mints
+ WHERE provider_id = ? AND registration_nonce = ? AND registration_observed_at = ?`,
+			providerID, attemptNonce, attemptObserved); err != nil {
 			return err
 		}
 		if _, err := conn.ExecContext(ctx, `
@@ -1243,7 +1271,7 @@ INSERT INTO apptrack_pending_referral_mints (
     registration_nonce, registration_observed_at, created_redemption, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
 			providerID, tokenHash(newToken), policy.Campaign, strings.TrimSpace(attempt.SourceIP),
-			strings.TrimSpace(attempt.Nonce), attempt.ObservedAt.UTC().Format(time.RFC3339Nano), nowText); err != nil {
+			attemptNonce, attemptObserved, nowText); err != nil {
 			return err
 		}
 		token = newToken

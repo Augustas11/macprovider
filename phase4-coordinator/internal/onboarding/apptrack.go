@@ -163,11 +163,12 @@ type StatsDB interface {
 	// which is stable across a lost-response replay and identifies the durable
 	// provider_register_attempts commitment marker (FIX-570 C1).
 	PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt, attemptTS time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error
-	// ProviderRegistrationPrepared reports whether the exact attempt (keyed by the
-	// signed attemptTS, replay-invariant) committed. It resolves ambiguous
-	// PostgreSQL commit outcomes and drives recovery of durable cross-store
-	// App-track mint sagas.
-	ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, attemptTS time.Time) (bool, error)
+	// ProviderRegistrationPrepared reports whether the exact attempt committed. It
+	// is keyed on REPLAY-STABLE SIGNED fields only — (provider_id, nonce, ts_utc)
+	// — so a lost-response replay from a different source IP resolves to the same
+	// marker (FIX-570 C1a). It resolves ambiguous PostgreSQL commit outcomes and
+	// drives recovery of durable cross-store App-track mint sagas.
+	ProviderRegistrationPrepared(ctx context.Context, providerID, nonce string, attemptTS time.Time) (bool, error)
 
 	// UpsertProviderHardwareProfile persists provider-reported hardware identity
 	// for async stats enrichment. This must only run after rate-limit checks pass.
@@ -443,29 +444,52 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			bearerExempt = ok && boundProviderID == req.ProviderID
 		}
 		if !bearerExempt {
-			// FIX-570 A2: a prior gated mint may have committed (referral redeemed +
-			// unused token minted) but lost its response. Before claiming fresh
-			// capacity, attempt idempotent re-disclosure by rotating the unused
-			// token bound to the SAME redemption (no capacity re-consumed, no issuer
-			// re-validation). Only when there is nothing to recover do we reserve.
-			recoverCtx, cancelRecover := context.WithTimeout(r.Context(), 2*time.Second)
-			recoveredToken, recovered, recoverErr := h.ReferralStore.RecoverAppTrackReferralMint(
-				recoverCtx, req.ProviderID, currentBearer, req.ReferralCode, h.ReferralPolicy,
-				// FIX-570 C1: the attempt identity is the SIGNED ts_utc, not server
-				// `now`. ts_utc is stable across a lost-response replay, so the durable
-				// PostgreSQL attempt marker written at the original attempt is found on
-				// replay and recovery can prove the identity committed.
-				auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, ObservedAt: tsUTC},
-			)
-			cancelRecover()
-			if recoverErr != nil {
-				writeAppTrackMintError(w, recoverErr)
+			// FIX-570 C1a (adv-C1): a prior gated mint may have committed (referral
+			// redeemed + unused token minted + PostgreSQL identity prepared) but lost
+			// its response. The lost-response replay must NOT mutate any SQLite state
+			// (revoke/rotate/replace-saga) until the durable commitment of THIS exact
+			// signed attempt is PROVEN. Proving first — keyed on replay-stable signed
+			// fields (provider_id, nonce, ts_utc), never source_ip — closes the money
+			// path where a mis-keyed marker miss destroyed a live credential.
+			priorCtx, cancelPrior := context.WithTimeout(r.Context(), 2*time.Second)
+			priorCommitted, priorErr := h.StatsDB.ProviderRegistrationPrepared(priorCtx, req.ProviderID, req.Nonce, tsUTC)
+			cancelPrior()
+			if priorErr != nil {
+				writeJSONError(w, http.StatusInternalServerError, "internal_error", "provider registration outcome pending reconciliation")
 				return
 			}
-			if recovered {
-				token = recoveredToken
-				recoveryMode = true
+			if priorCommitted {
+				// Commitment proven. Only now may recovery rotate the unused token
+				// bound to the SAME redemption via an attempt/token-bound compare-and-
+				// swap (no capacity re-consumed, no issuer re-validation, never touches
+				// another signed attempt's saga). No post-rotate destructive check is
+				// needed because commitment was proven BEFORE any mutation.
+				recoverCtx, cancelRecover := context.WithTimeout(r.Context(), 2*time.Second)
+				recoveredToken, recovered, recoverErr := h.ReferralStore.RecoverAppTrackReferralMint(
+					recoverCtx, req.ProviderID, currentBearer, req.ReferralCode, h.ReferralPolicy,
+					// The attempt identity is the SIGNED ts_utc, not server `now`; it is
+					// stable across a lost-response replay.
+					auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, ObservedAt: tsUTC},
+				)
+				cancelRecover()
+				if recoverErr != nil {
+					writeAppTrackMintError(w, recoverErr)
+					return
+				}
+				if recovered {
+					token = recoveredToken
+					recoveryMode = true
+				} else {
+					// The attempt committed but its unused token is no longer rotatable
+					// (e.g. it was already used, so the client already holds a working
+					// credential). Re-minting would double-consume the invite, so require
+					// bearer proof instead of issuing a second credential.
+					writeJSONError(w, http.StatusConflict, "existing_active_token_no_proof", "existing active token requires proof")
+					return
+				}
 			} else {
+				// Not committed: never rotate or mutate. Reserve fresh capacity and take
+				// the normal mint+prepare path.
 				reservationCtx, cancelReservation := context.WithTimeout(r.Context(), 2*time.Second)
 				referralReservationID, err = h.ReferralStore.ReserveReferralCapacity(
 					reservationCtx, h.ReferralPolicy, req.ReferralCode, req.ProviderID, now, appTrackReferralReservationTTL,
@@ -502,31 +526,14 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		return err
 	}
 	if recoveryMode {
-		// FIX-570 C1: recovery mode means a prior gated attempt for THIS signed
-		// request already durably minted the credential + redemption; RecoverApp...
-		// rotated the still-unused token. The identity was already prepared at the
-		// original attempt, so we MUST NOT re-run prepareIdentity() (its nonce is
-		// consumed), MUST NOT re-mint, and MUST NOT run the fresh compensation
-		// branch (which previously destroyed the rotated credential). We only
-		// verify the durable commitment (keyed by the replay-invariant signed
-		// ts_utc), then resolve the saga and disclose.
-		checkCtx, cancelCheck := context.WithTimeout(context.Background(), 2*time.Second)
-		prepared, checkErr := h.StatsDB.ProviderRegistrationPrepared(checkCtx, req.ProviderID, sourceIP, req.Nonce, tsUTC)
-		cancelCheck()
-		if checkErr != nil {
-			writeJSONError(w, http.StatusInternalServerError, "internal_error", "provider registration outcome pending reconciliation")
-			return
-		}
-		if !prepared {
-			// The original identity never committed (e.g. crash between mint and
-			// prepare). Do NOT disclose the rotated token; roll it back and fail so
-			// the client retries a clean registration.
-			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = h.ReferralStore.RollbackAppTrackReferralMint(cleanupCtx, req.ProviderID, token)
-			cancelCleanup()
-			writeJSONError(w, http.StatusServiceUnavailable, "registration_incomplete", "prior registration did not complete; retry")
-			return
-		}
+		// FIX-570 C1a: recovery mode is only entered AFTER durable commitment of
+		// this signed attempt was proven (before any mutation). The prior gated
+		// attempt already durably minted the credential + redemption and prepared
+		// the identity; RecoverApp... rotated the still-unused token bound to the
+		// SAME redemption. We MUST NOT re-run prepareIdentity() (its nonce is
+		// consumed), MUST NOT re-mint, and MUST NOT run any destructive compensation
+		// (the removed pre-fix branch destroyed the rotated credential on a mis-keyed
+		// marker miss). We only acknowledge (drop) the saga and disclose.
 		ackCtx, cancelAck := context.WithTimeout(context.Background(), 2*time.Second)
 		ackErr := h.ReferralStore.AcknowledgeAppTrackReferralMint(ackCtx, req.ProviderID, token)
 		cancelAck()
@@ -559,7 +566,7 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			// attempt before deciding whether to preserve or compensate the
 			// undisclosed SQLite token.
 			checkCtx, cancelCheck := context.WithTimeout(context.Background(), 2*time.Second)
-			prepared, checkErr := h.StatsDB.ProviderRegistrationPrepared(checkCtx, req.ProviderID, sourceIP, req.Nonce, tsUTC)
+			prepared, checkErr := h.StatsDB.ProviderRegistrationPrepared(checkCtx, req.ProviderID, req.Nonce, tsUTC)
 			cancelCheck()
 			if checkErr != nil {
 				writeJSONError(w, http.StatusInternalServerError, "internal_error", "provider registration outcome pending reconciliation")
@@ -637,7 +644,9 @@ func (h *Handler) ReconcilePendingAppTrackReferralMints(ctx context.Context) err
 	var reconcileErrs []error
 	for _, item := range pending {
 		prepared, err := h.StatsDB.ProviderRegistrationPrepared(
-			ctx, item.ProviderID, item.Attempt.SourceIP, item.Attempt.Nonce, item.Attempt.ObservedAt,
+			// FIX-570 C1a: match on replay-stable signed fields only; source_ip is
+			// non-authoritative metadata and is not part of the commitment key.
+			ctx, item.ProviderID, item.Attempt.Nonce, item.Attempt.ObservedAt,
 		)
 		if err != nil {
 			reconcileErrs = append(reconcileErrs, fmt.Errorf("check pending App-track mint %s: %w", item.ProviderID, err))

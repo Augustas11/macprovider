@@ -442,10 +442,14 @@ VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 	// prove this exact attempt committed even after the replay cache is pruned.
 	// It is keyed by the SIGNED attemptTS (not server time) so a lost-response
 	// replay of the identical signed request resolves to the same marker.
+	// FIX-570 C1a: the key is (provider_id, nonce, ts_utc) — REPLAY-STABLE SIGNED
+	// fields only. source_ip is stored as non-authoritative diagnostic metadata
+	// and MUST NOT be part of the conflict key, so an identical signed replay from
+	// a different source IP resolves to the same marker instead of missing it.
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO provider_register_attempts (provider_id, source_ip, nonce, ts_utc)
+INSERT INTO provider_register_attempts (provider_id, nonce, ts_utc, source_ip)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (provider_id, source_ip, nonce, ts_utc) DO NOTHING`, providerID, sourceIP, nonce, attemptTS); err != nil {
+ON CONFLICT (provider_id, nonce, ts_utc) DO NOTHING`, providerID, nonce, attemptTS, sourceIP); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -463,7 +467,13 @@ ON CONFLICT (provider_id, source_ip, nonce, ts_utc) DO NOTHING`, providerID, sou
 // replay-nonce cleaner) instead of JOINing the prunable replay cache. Pruning the
 // replay nonce no longer flips a committed attempt to prepared=false, which had
 // caused destructive compensation of a live credential in the 65s..2min window.
-func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, attemptTS time.Time) (bool, error) {
+//
+// FIX-570 C1a (adv-C1): the match is keyed on REPLAY-STABLE SIGNED fields only —
+// (provider_id, nonce, ts_utc). source_ip is deliberately NOT a parameter: it is
+// unsigned and connection-dependent, so keying on it made an identical signed
+// replay from a different source IP miss a committed marker and destroy the
+// committed credential.
+func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, nonce string, attemptTS time.Time) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, errors.New("onboarding postgres store is nil")
 	}
@@ -473,10 +483,9 @@ SELECT EXISTS (
     SELECT 1
       FROM provider_register_attempts a
      WHERE a.provider_id = $1
-       AND a.source_ip = $2
-       AND a.nonce = $3
-       AND a.ts_utc = $4
-)`, providerID, sourceIP, nonce, attemptTS.UTC()).Scan(&prepared)
+       AND a.nonce = $2
+       AND a.ts_utc = $3
+)`, providerID, nonce, attemptTS.UTC()).Scan(&prepared)
 	return prepared, err
 }
 

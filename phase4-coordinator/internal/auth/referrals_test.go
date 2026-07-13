@@ -804,3 +804,63 @@ func TestUsedAppTrackTokenIsNotRecoverable(t *testing.T) {
 		t.Fatalf("used token recovery ok=%v token=%q err=%v, want no recovery", ok, recovered, err)
 	}
 }
+
+// TestRecoveryNeverClobbersConcurrentDifferentAttempt guards FIX-570 C1a bug 3
+// (ADV-H4 residual): recovery for one signed attempt must NEVER revoke the token
+// or clobber the durable saga of a DIFFERENT concurrent signed attempt. Here a
+// gated mint commits and leaves an unacknowledged saga bound to attempt-1; a
+// recovery invoked with a DIFFERENT attempt (different nonce) must refuse with a
+// conflict and leave attempt-1's token active and its saga intact.
+func TestRecoveryNeverClobbersConcurrentDifferentAttempt(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	code, err := store.CreateSeedReferral(context.Background(), policy, "concurrent_guard", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	reservation, err := store.ReserveReferralCapacity(context.Background(), policy, code, "concurrent-app", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// attempt-1 commits: mints an unused token and leaves a durable saga bound to
+	// its own (nonce, observed_at). The saga is intentionally NOT acknowledged, to
+	// model a concurrent in-flight attempt whose recovery marker still exists.
+	attempt1 := appTrackAttempt(now)
+	firstToken, err := store.MintProviderTokenAppTrackWithReferralReservation(
+		context.Background(), "concurrent-app", nil, code, policy, reservation, attempt1,
+	)
+	if err != nil || firstToken == "" {
+		t.Fatalf("attempt-1 mint token=%q err=%v", firstToken, err)
+	}
+	if pending, err := store.ListPendingAppTrackReferralMints(context.Background(), now.Add(time.Hour)); err != nil || len(pending) != 1 {
+		t.Fatalf("attempt-1 saga pending=%+v err=%v want exactly one", pending, err)
+	}
+
+	// A recovery for a DIFFERENT signed attempt (different nonce) must refuse to
+	// touch attempt-1's saga/token.
+	attempt2 := auth.AppTrackRegistrationAttempt{
+		SourceIP:   "203.0.113.9",
+		Nonce:      "a-different-register-nonce",
+		ObservedAt: now.Add(time.Second),
+	}
+	recovered, ok, err := store.RecoverAppTrackReferralMint(
+		context.Background(), "concurrent-app", nil, code, policy, attempt2,
+	)
+	if !errors.Is(err, auth.ErrReferralConflict) || ok || recovered != "" {
+		t.Fatalf("cross-attempt recovery ok=%v token=%q err=%v, want ErrReferralConflict and no rotation", ok, recovered, err)
+	}
+
+	// attempt-1's token is still active (never revoked) and its saga is intact.
+	if providerID, valid, err := store.ValidateToken(context.Background(), firstToken); err != nil || !valid || providerID != "concurrent-app" {
+		t.Fatalf("attempt-1 token must remain active: provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+	pending, err := store.ListPendingAppTrackReferralMints(context.Background(), now.Add(time.Hour))
+	if err != nil || len(pending) != 1 || pending[0].Attempt.Nonce != attempt1.Nonce {
+		t.Fatalf("attempt-1 saga must be intact: pending=%+v err=%v", pending, err)
+	}
+}

@@ -12,14 +12,22 @@
 -- prepare and is NEVER touched by the replay-nonce pruner. It gives
 -- reconciliation a durable, attempt-bound commitment marker. Its own pruner has a
 -- >= 7 day floor so it can never race the 2-minute reconcile horizon.
-
+--
+-- FIX-570 C1a (adv-C1): the commitment IDENTITY is keyed on REPLAY-STABLE SIGNED
+-- fields only — (provider_id, nonce, ts_utc). source_ip is UNSIGNED and
+-- connection-dependent (NAT/proxy churn between the original attempt and a
+-- lost-response replay), so including it in the key made an identical signed
+-- replay from a different source IP MISS the marker and be treated as
+-- uncommitted — destroying the committed credential. source_ip is retained ONLY
+-- as non-authoritative diagnostic metadata (nullable) and never participates in
+-- the match.
 CREATE TABLE IF NOT EXISTS provider_register_attempts (
     provider_id  TEXT NOT NULL,
-    source_ip    TEXT NOT NULL,
     nonce        TEXT NOT NULL,
     ts_utc       TIMESTAMPTZ NOT NULL,
+    source_ip    TEXT,
     committed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (provider_id, source_ip, nonce, ts_utc)
+    PRIMARY KEY (provider_id, nonce, ts_utc)
 );
 
 CREATE INDEX IF NOT EXISTS idx_provider_register_attempts_committed_at

@@ -578,7 +578,9 @@ func TestApptrackRegisterAttemptsMigrationShape(t *testing.T) {
 	}
 	for _, needle := range []string{
 		"CREATE TABLE IF NOT EXISTS provider_register_attempts",
-		"PRIMARY KEY (provider_id, source_ip, nonce, ts_utc)",
+		// FIX-570 C1a: commitment key is replay-stable signed fields only; source_ip
+		// is non-authoritative metadata and must NOT be part of the primary key.
+		"PRIMARY KEY (provider_id, nonce, ts_utc)",
 		"CREATE OR REPLACE FUNCTION prune_provider_register_attempts",
 		"retain_for must be at least 7 days",
 		"SET search_path = pg_catalog, public, pg_temp",

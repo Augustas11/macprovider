@@ -174,7 +174,10 @@ func TestReconcilePendingAppTrackReferralMintUsesExactPostgresAttempt(t *testing
 			ObservedAt: time.Now().UTC().Add(-time.Hour),
 		},
 	}
-	stats := &fakeStatsDB{registrationPrepared: true}
+	stats := &fakeStatsDB{}
+	// FIX-570 C1a: seed the durable marker keyed on signed fields (provider_id,
+	// nonce, ts_utc) — the reconciler must resolve prepared=true from it.
+	stats.markPrepared(pending.ProviderID, pending.Attempt.Nonce, pending.Attempt.ObservedAt)
 	authStore := &fakeAuthStore{pendingReferralMints: []auth.PendingAppTrackReferralMint{pending}}
 	handler := testRegisterHandler(stats, authStore, nil)
 	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
@@ -198,7 +201,8 @@ func TestReconcilePendingAppTrackReferralMintCompensatesAbsentPostgresAttempt(t 
 			ObservedAt: time.Now().UTC().Add(-time.Hour),
 		},
 	}
-	stats := &fakeStatsDB{registrationPrepared: false}
+	// No durable marker seeded: the reconciler must resolve prepared=false.
+	stats := &fakeStatsDB{}
 	authStore := &fakeAuthStore{pendingReferralMints: []auth.PendingAppTrackReferralMint{pending}}
 	handler := testRegisterHandler(stats, authStore, nil)
 	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
@@ -436,6 +440,110 @@ func TestHandleAppTrackRegisterLostResponseReplayRecoversCredential(t *testing.T
 	// lost-token loop cannot mint unboundedly.
 	if code3, _ := send(); code3 != http.StatusTooManyRequests {
 		t.Fatalf("third replay status=%d want 429 (reissue cooldown)", code3)
+	}
+}
+
+// TestHandleAppTrackRegisterLostResponseReplayDifferentSourceIPRecoversCredential
+// is the FIX-570 C1a (adv-C1) regression at the HTTP boundary. The original signed
+// register commits, its response is lost, and the IDENTICAL signed request replays
+// from a DIFFERENT source IP (NAT/proxy churn). Because the durable commitment
+// marker is keyed on replay-stable SIGNED fields only (provider_id, nonce, ts_utc)
+// and never source_ip, the replay must still prove commitment, recover a usable
+// rotated token, consume the invite exactly once, and NEVER delete the committed
+// credential. Pre-fix, the source_ip-keyed marker missed and the recovery path
+// destroyed the live credential.
+func TestHandleAppTrackRegisterLostResponseReplayDifferentSourceIPRecoversCredential(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := auth.ReferralPolicy{
+		RequireForRegistration: true,
+		Campaign:               "prebeta",
+		PolicyVersion:          "v1",
+		CurrentKeyID:           "K1",
+		HMACKeys:               map[string]string{"K1": strings.Repeat("r", 32)},
+		ProviderBaseUses:       1,
+		SocialBonusUses:        2,
+		ChallengeTTL:           10 * time.Minute,
+	}
+	code, err := store.CreateSeedReferral(context.Background(), policy, "app_replay_natchurn", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testNow := time.Now().UTC().Truncate(time.Second)
+	// No blanket registrationPrepared bool: the marker is recorded ONLY by the
+	// original attempt's PrepareProviderRegistration, keyed on signed fields, so the
+	// different-IP replay must resolve it purely from replay-stable fields.
+	stats := &fakeStatsDB{}
+	handler := &Handler{
+		StatsDB:           stats,
+		AuthTokenStore:    store,
+		ReferralStore:     store,
+		ReferralPolicy:    policy,
+		CoordinatorDomain: "coordinator.streamvc.live",
+		CoordinatorWSURL:  "wss://coordinator.streamvc.live/v2/provider",
+		IPRateLimiter:     allowLimiter{},
+		ASNRateLimiter:    allowLimiter{},
+		AppAttestConfig:   AppAttestConfig{BundleID: "live.streamvc.Malibu", TeamID: "MALIBU1234"},
+		Now:               func() time.Time { return testNow },
+	}
+	body, providerID := signedRegisterBody(t, func(m map[string]any) {
+		m["referral_code"] = code
+		m["ts_utc"] = testNow.Format(time.RFC3339)
+	})
+	send := func(remoteAddr string) (int, string) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+		req.RemoteAddr = remoteAddr
+		rr := httptest.NewRecorder()
+		handler.HandleAppTrackRegister(rr, req)
+		var resp RegisterResponse
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		return rr.Code, resp.ProviderToken
+	}
+
+	// Original attempt commits from source IP A.
+	code1, token1 := send("198.51.100.20:5000")
+	if code1 != http.StatusOK || token1 == "" {
+		t.Fatalf("original register status=%d token=%q", code1, token1)
+	}
+	if stats.nonceSourceIP != "198.51.100.20" {
+		t.Fatalf("original source ip=%q want 198.51.100.20", stats.nonceSourceIP)
+	}
+
+	// Response lost; identical signed request replays from a DIFFERENT source IP B.
+	code2, token2 := send("203.0.113.77:6100")
+	if code2 != http.StatusOK || token2 == "" {
+		t.Fatalf("different-IP replay status=%d token=%q", code2, token2)
+	}
+	if token2 == token1 {
+		t.Fatal("different-IP replay returned the same token; expected a rotated credential")
+	}
+
+	// The rotated token is usable; the original committed credential was revoked
+	// (rotated), never deleted, and the invite was consumed exactly once.
+	if bound, ok, err := store.ValidateToken(context.Background(), token2); err != nil || !ok || bound != providerID {
+		t.Fatalf("replay token invalid: bound=%q ok=%v err=%v", bound, ok, err)
+	}
+	if _, ok, err := store.ValidateToken(context.Background(), token1); err != nil || ok {
+		t.Fatalf("original token must be revoked (not deleted) after rotation: ok=%v err=%v", ok, err)
+	}
+	tokens, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := 0
+	for _, tok := range tokens {
+		if !tok.RevokedAt.Valid {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active tokens=%d want 1 (tokens=%+v)", active, tokens)
+	}
+	if _, err := store.ValidateReferral(context.Background(), policy, code, testNow); !errors.Is(err, auth.ErrReferralExhausted) {
+		t.Fatalf("invite should be exhausted (consumed once), got %v", err)
 	}
 }
 
@@ -1382,6 +1490,7 @@ type fakeStatsDB struct {
 	registrationPrepared       bool
 	registrationPreparedErr    error
 	registrationPreparedCalls  int
+	preparedMarkers            map[string]struct{}
 	nonceProviderID            string
 	nonceSourceIP              string
 	nonceObservedAt            time.Time
@@ -1410,6 +1519,24 @@ type fakeStatsDB struct {
 	existingEvidenceErr        error
 }
 
+func registerAttemptMarkerKey(providerID, nonce string, attemptTS time.Time) string {
+	// FIX-570 C1a: the durable commitment marker is keyed on replay-stable SIGNED
+	// fields only — source_ip is deliberately excluded so an identical signed
+	// replay from a different source IP resolves to the same marker.
+	return providerID + "|" + nonce + "|" + attemptTS.UTC().Format(time.RFC3339Nano)
+}
+
+// markPrepared seeds a durable commitment marker directly (used by reconciler
+// tests that do not exercise PrepareProviderRegistration).
+func (f *fakeStatsDB) markPrepared(providerID, nonce string, attemptTS time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.preparedMarkers == nil {
+		f.preparedMarkers = map[string]struct{}{}
+	}
+	f.preparedMarkers[registerAttemptMarkerKey(providerID, nonce, attemptTS)] = struct{}{}
+}
+
 func (f *fakeStatsDB) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt, attemptTS time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1418,20 +1545,34 @@ func (f *fakeStatsDB) PrepareProviderRegistration(ctx context.Context, providerI
 	f.nonceSourceIP = sourceIP
 	f.nonceObservedAt = observedAt
 	f.attemptTS = attemptTS
+	if f.preparedMarkers == nil {
+		f.preparedMarkers = map[string]struct{}{}
+	}
 	if f.nonceErr != nil {
+		// registrationPrepared models an AMBIGUOUS commit that actually landed: the
+		// durable marker is written even though the call returns an error.
+		if f.registrationPrepared {
+			f.preparedMarkers[registerAttemptMarkerKey(providerID, nonce, attemptTS)] = struct{}{}
+		}
 		return f.nonceErr
 	}
+	// Commit succeeded: record the replay-stable marker (source_ip NOT in the key).
+	f.preparedMarkers[registerAttemptMarkerKey(providerID, nonce, attemptTS)] = struct{}{}
 	f.upsertProviderID = providerID
 	f.upsertAttested = attested
 	f.upsertAppAttestKeyID = append([]byte(nil), appAttestKeyID...)
 	return f.upsertErr
 }
 
-func (f *fakeStatsDB) ProviderRegistrationPrepared(context.Context, string, string, string, time.Time) (bool, error) {
+func (f *fakeStatsDB) ProviderRegistrationPrepared(_ context.Context, providerID, nonce string, attemptTS time.Time) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.registrationPreparedCalls++
-	return f.registrationPrepared, f.registrationPreparedErr
+	if f.registrationPreparedErr != nil {
+		return false, f.registrationPreparedErr
+	}
+	_, ok := f.preparedMarkers[registerAttemptMarkerKey(providerID, nonce, attemptTS)]
+	return ok, nil
 }
 
 func (f *fakeStatsDB) UpsertProviderIdentity(ctx context.Context, providerID string, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
