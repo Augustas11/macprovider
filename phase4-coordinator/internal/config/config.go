@@ -1772,6 +1772,14 @@ var referralConfigPartPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
 
 func (c Config) validateReferrals() error {
 	r := c.Referrals
+	// The read-only validation response may advertise this URL even while the
+	// referral gate is disabled, so validate it independently of launch flags.
+	if raw := strings.TrimSpace(r.RequestAccessURL); raw != "" {
+		reqURL, err := url.Parse(raw)
+		if err != nil || reqURL.Scheme != "https" || reqURL.Host == "" || reqURL.User != nil {
+			return fmt.Errorf("referrals.request_access_url must be an absolute https URL without credentials when set")
+		}
+	}
 	if !r.RequireForRegistration && !r.EnableSocialInviteBonus {
 		return nil
 	}
@@ -1812,12 +1820,6 @@ func (c Config) validateReferrals() error {
 	joinURL, err := url.Parse(strings.TrimSpace(r.JoinBaseURL))
 	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.RawQuery != "" || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
 		return fmt.Errorf("referrals.join_base_url must be an absolute https URL ending in /j")
-	}
-	if raw := strings.TrimSpace(r.RequestAccessURL); raw != "" {
-		reqURL, err := url.Parse(raw)
-		if err != nil || reqURL.Scheme != "https" || reqURL.Host == "" {
-			return fmt.Errorf("referrals.request_access_url must be an absolute https URL when set")
-		}
 	}
 	return nil
 }
