@@ -1,14 +1,23 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.8 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.9 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.9 (2026-07-13, R8 audit-loop convergence — code source of truth).** R8
+code caught that the R7 "watchdog never restarts" was too absolute: the companion
+watchdog is a no-op for **routine** health failures (KeepAlive restarts those), but it
+DOES force-restart the provider service during **auto-update rollback recovery**
+(`launchctl kickstart`, `install.sh:4086,4113`). §8 + grounding table now state the
+routine/rollback boundary.
 
 **Change log v0.8 (2026-07-13, R7 audit-loop convergence — code source of truth).** R7
 architect/code caught the watchdog-ownership tail and a bundle-layout invention: the
-companion watchdog `live.streamvc.macprovider-watchdog` **does NOT restart the CLI** — its
-restart request is a no-op (`note_provider_restart_request`, `install.sh:3575`); the
-launchd **provider service** `live.streamvc.macprovider` (`KeepAlive`) is the sole runtime
-manager that restarts the daemon (swept §0/§2/§5/§8 topology + ASCII diagram + lifecycle
-+ grounding table); §5.1 bundle tree lists **only** `Sparkle.framework` as embedded (the
+companion watchdog `live.streamvc.macprovider-watchdog` **does not restart the CLI for
+routine health failures** — its routine restart request is a no-op
+(`note_provider_restart_request`, `install.sh:3575`); the launchd **provider service**
+`live.streamvc.macprovider` (`KeepAlive`) performs routine restarts (v0.8 further nuanced
+in v0.9: the watchdog CAN force-restart during auto-update rollback recovery,
+`install.sh:4086,4113`). Swept §0/§2/§5/§8 topology + ASCII diagram + lifecycle +
+grounding table; §5.1 bundle tree lists **only** `Sparkle.framework` as embedded (the
 app depends solely on Sparkle — `project.yml:21-24`; MLX runs in the CLI, `mlx.metallib`
 sits in `MacOS/` beside the executable, not as an embedded framework).
 
@@ -138,7 +147,7 @@ From reading `phase3-binary/`:
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
 | Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | **Reconciled v0.2:** `install.sh` obtains the token; the wrapper **imports** it from `config.yaml` into the app Keychain via `ProviderConfig.importExistingCLIConfig()` (`ProviderConfig.swift:280-352`), stripping it from `config.yaml`. The wrapper never receives a token from a portal deep-link (that `malibu://` path is removed). |
 | Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2/v0.3:** `install.sh` writes the *initial* `config.yaml` (shared with the CLI track). The wrapper does **not** create it, but on import it **DOES rewrite** the live `config.yaml` to strip the `provider_token` (`ProviderConfig.swift:312`); it reads `provider_id`/model/port and moves the token to Keychain. **Token custody (reconciled v0.3/v0.4 — nuanced, see §7):** the import writes a token-bearing 0600 `config.yaml.import-backup`; its deletion is **best-effort** (delete errors are ignored, and one recovery branch retains it — §7, `ProviderConfig.swift:336,354`), so the backup can persist on disk. The *live* `config.yaml` ends token-free. |
-| Provider service + watchdog LaunchAgents | `install.sh` installs BOTH the KeepAlive **provider service** `live.streamvc.macprovider` (plist `live.streamvc.macprovider.plist` — **this is the evidence the app checks**) and a SEPARATE **companion watchdog** `live.streamvc.macprovider-watchdog` (`StartInterval=60`, `install.sh:47,4264`) that health-observes the daemon but does NOT restart it — its restart request is a no-op; the provider service's `KeepAlive` restarts the CLI (reconciled v0.6/v0.7, §8 — the evidence plist is the provider service, NOT the watchdog). Evidence: `install_manifest.json` or the provider-service plist. | **The App track installs and relies on both** (via `install.sh`). `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
+| Provider service + watchdog LaunchAgents | `install.sh` installs BOTH the KeepAlive **provider service** `live.streamvc.macprovider` (plist `live.streamvc.macprovider.plist` — **this is the evidence the app checks**) and a SEPARATE **companion watchdog** `live.streamvc.macprovider-watchdog` (`StartInterval=60`, `install.sh:47,4264`) that health-observes the daemon; on routine ticks its restart request is a **no-op** (the provider service's `KeepAlive` performs routine restarts), except during auto-update rollback recovery where it force-restarts the provider service (`install.sh:4086,4113`) (reconciled v0.6/v0.8, §8 — the evidence plist is the provider service, NOT the watchdog). Evidence: `install_manifest.json` or the provider-service plist. | **The App track installs and relies on both** (via `install.sh`). `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
 | Portal | `portal.streamvc.live` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
 | Release manifest / checksum | `scripts/sign-catalog.go`, tier2 release scripts | Feeds the same manifest that Sparkle appcast references |
 | Signing + notarization pipeline | `.github/workflows/release.yml` "Sign + notarize binary" step + `phase3-binary/dist/release-signing-runbook.md` | Reuse the existing keychain-import / codesign / `notarytool submit --wait` / `stapler` pattern verbatim; extend to sign the `.app` and `.dmg` |
@@ -542,13 +551,18 @@ conflated them; v0.6 splits the provider service from its watchdog):
 
 2. **The companion watchdog — `live.streamvc.macprovider-watchdog`** (a SEPARATE
    `StartInterval=60` launchd job that runs the watchdog binary, `install.sh:47,4264`).
-   Distinct from the provider service. **Reconciled v0.7 — it does NOT restart the CLI:**
-   it health-observes and records a kick request, but the restart itself is a no-op
-   (`note_provider_restart_request` logs "skipped: launchd KeepAlive is the sole runtime
-   manager", `install.sh:3575-3577,4198-4225`) — the provider service's launchd
-   **`KeepAlive`** is what actually restarts the daemon. `install.sh` (run by the app
-   during onboarding) installs **both** the provider service and this watchdog — v0.1's
-   claim that the App track does NOT install the watchdog was false.
+   Distinct from the provider service. **Reconciled v0.7/v0.8 — it does NOT restart the
+   CLI for routine health failures:** on a routine unhealthy tick it only records a kick
+   request that is a **no-op** (`note_provider_restart_request` logs "skipped: launchd
+   KeepAlive is the sole runtime manager", `install.sh:3575-3577,4198-4225`) — the
+   provider service's launchd **`KeepAlive`** performs routine restarts. **The one
+   exception:** each watchdog tick first runs `autoupdate_recovery_tick`
+   (`install.sh:4192`), whose rollback path restores a rolled-back binary and DOES
+   force-restart the provider service via `launchctl bootstrap` + `kickstart -k`
+   (`install.sh:4086,4113`). So: routine health → KeepAlive; auto-update rollback →
+   watchdog force-kickstart. `install.sh` (run by the app during onboarding) installs
+   **both** the provider service and this watchdog — v0.1's claim that the App track does
+   NOT install the watchdog was false.
 
 3. **The app login item — `SMAppService.mainApp`.** Registers `Malibu.app` itself to
    launch at login (`AppLoginItem.swift:6-30`), called at the end of a successful

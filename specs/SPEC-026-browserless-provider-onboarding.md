@@ -1,6 +1,18 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.20 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.21 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.21 (2026-07-13, R8 audit-loop convergence — code source of truth;
+architect lane PASS 0/0/0).** R8 (code 0C/0H/1M, security 0C/0H/1M, architect
+**0C/0H/0M**). Two narrow fixes: **§10 self-consistency** — the banner/conclusion now
+acknowledge §4.3 `identity_signature` verification IS step 7 of this checklist (deployed
+→ **LIVE**, gating CLI-track `mp-*` admission), while §4.1 register + §5.3 App Attest are
+the CLIENT-DORMANT contracts; dropped the "onboarding that this checklist gates" wording
+(the checklist gates the coordinator backend rollout, not the onboarding flow — which
+nonetheless depends on the live §4.3). **Watchdog nuance** — the companion watchdog is a
+no-op restart for *routine* health failures (KeepAlive handles those), but it DOES
+force-restart the provider service during **auto-update rollback recovery** (`launchctl
+kickstart`, `install.sh:4086,4113`); the earlier "never restarts" was too absolute.
 
 **Change log v0.20 (2026-07-13, R7 audit-loop convergence — code source of truth).** R7
 (code 0C/2H/3M, security 0C/1H/1M, architect 0C/0H/2M). The re-fired security lane
@@ -1024,10 +1036,11 @@ and without entering a wallet address unless they want to.
   `ProviderConfig.isConfigured`) and drives a **monitor**, not a spawn (§7.6).
 - **Reconciled v0.14/v0.18 — NO CLI child is launched.** The app does not launch a CLI
   child with `MACPROVIDER_PROVIDER_TOKEN`; the launchd **provider service**
-  `live.streamvc.macprovider` (KeepAlive) runs AND restarts the CLI; a separate companion
-  watchdog `live.streamvc.macprovider-watchdog` only health-observes (its restart request
-  is a no-op — `install.sh:3575`) — both installed by `install.sh` (SPEC-025 §8) — and the
-  app monitors it over HTTP (SPEC-025 §5).
+  `live.streamvc.macprovider` (KeepAlive) runs AND performs routine restarts of the CLI; a
+  separate companion watchdog `live.streamvc.macprovider-watchdog` only health-observes on
+  routine ticks (its restart request is a no-op — `install.sh:3575`), except it force-restarts
+  the provider service during auto-update rollback recovery (`install.sh:4086,4113`; SPEC-025
+  §8) — both installed by `install.sh` — and the app monitors it over HTTP (SPEC-025 §5).
 - Landing page marketing copy at `/Users/augstar/projects/malibu/host/index.html`
   promises "One line in your terminal. … Your Mac picks up jobs
   whenever it's idle and online." This spec makes the App track
@@ -2618,18 +2631,21 @@ Out of scope for v0.2. Support-ticket path only. A future spec may
 introduce a challenge-response recovery for the case where the user
 still has provider identity but has lost the wallet keys.
 
-## 10. Backend deploy checklist (ordered gate for the App-track designed §4 surface)
+## 10. Backend deploy checklist (ordered gate for the coordinator §4 backend rollout)
 
-> **Reconciled v0.15/v0.20.** This is the coordinator-**backend** deploy gate for the
-> DESIGNED, client-dormant App-track surface: **§4.1 `/v1/providers/register` + §5.3 App
-> Attest** only. The **§4.3 `identity_signature` auth-policy is NOT part of this** — it
-> is already **live** and gates CLI-track `mp-*` admission (§4 banner / closing note
-> below); do not read it as gated-behind-this-checklist. "App-side flag flip" throughout
-> this section means **shipping the CLI-wrapper Sparkle release** (step 9) — PR #418
-> removed the `onboardingFlow` user default, so there is no runtime flag to flip (§8).
-> The steps below gate when the coordinator may serve the client-dormant §4.1/§5.3
-> contract; they do NOT gate the shipped monitor-only onboarding, which is already live
-> and uses `bootstrap-auth` / WS admission (with the live §4.3 dependency).
+> **Reconciled v0.15/v0.20/v0.21.** This is the coordinator-**backend** deploy checklist
+> for the §4 surface. It gates when the coordinator may serve three things: §4.1
+> `/v1/providers/register`, §5.3 App Attest, and §4.3 `identity_signature` verification
+> (step 7). The important distinction is **client** exercise, not whether a step exists:
+> **§4.1 register + §5.3 App Attest are CLIENT-DORMANT** (deployed as contracts; no shipped
+> client drives them — §4 banner), while **§4.3 `identity_signature` verification is now
+> LIVE** and gates CLI-track `mp-*` admission (step 7 has been deployed —
+> `identity_signature.go:127`, `server.go:1216`). "App-side flag flip" throughout this
+> section means **shipping the CLI-wrapper Sparkle release** (step 9) — PR #418 removed the
+> `onboardingFlow` user default, so there is no runtime flag to flip (§8). These steps gate
+> the coordinator BACKEND rollout; they do NOT gate the shipped onboarding FLOW itself,
+> which uses `bootstrap-auth` / WS admission — a flow that nonetheless DEPENDS on the
+> now-live §4.3 verification (step 7).
 
 The list is a strict ordering; each step MUST pass before the next
 runs.
@@ -2680,8 +2696,8 @@ runs.
    is no live App-track EIP-712 binding to verify E2E. The
    deployed-and-operating-in-production requirement (Ed25519 bearer auth
    + EIP-712 proof-of-possession composition) becomes a **SPEC-027
-   release gate**, not a SPEC-026 one. The CLI-wrapper onboarding that
-   this checklist gates does not bind wallets.
+   release gate**, not a SPEC-026 one. The shipped CLI-wrapper onboarding
+   does not bind wallets.
 5. **FR-C9 self-mint TOFU regression check** via the new register
    endpoint (existing CLI-track providers still mint tokens
    correctly).
@@ -2723,14 +2739,13 @@ runs.
    PR #418 removed the flag, §8. The CLI-wrapper onboarding is
    unconditional; "flag flip" here means simply shipping the release.)
 
-This checklist gates when the coordinator may **serve the designed §4.1
-register + §5.3 App Attest surface** (client-dormant). The §4.3
-`identity_signature` auth-policy is a SEPARATE matter — it is **already
-live** and gates CLI-track `mp-*` admission (`identity_signature.go:127`,
-`server.go:1216`), so the shipped onboarding DOES depend on it (via the
-CLI's bootstrap-identity signing). The checklist does NOT gate the
-onboarding FLOW itself, which already ships and runs unconditionally at
-startup (`MalibuApp.swift:115`, §8) using
+This checklist gates the coordinator-**backend** rollout of §4.1 register +
+§5.3 App Attest (client-dormant contracts) AND §4.3 `identity_signature`
+verification (step 7 — now **LIVE**, gating CLI-track `mp-*` admission via
+`identity_signature.go:127`, `server.go:1216`; the shipped onboarding DOES
+depend on it, via the CLI's bootstrap-identity signing). The checklist does
+NOT gate the onboarding FLOW itself, which already ships and runs
+unconditionally at startup (`MalibuApp.swift:115`, §8) using
 `bootstrap-auth` / WS admission — **no §4.1-register / §5.3-App-Attest dependency**,
 though it DOES depend on the live §4.3 `identity_signature` auth-policy (above).
 (Reconciled v0.16/v0.20: the "App-side ships only after every step" framing applied to
