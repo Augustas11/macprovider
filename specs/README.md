@@ -22,7 +22,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
 | SPEC-012 | Source spec history (Provider Model Catalog & Warm Swap, since split into SPEC-010/011/013) | 0.3 | [SPEC-012-source.md](SPEC-012-source.md) |
 | SPEC-013 | `macprovider-cli autotune` subcommand | 0.3 | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
-| SPEC-014 | Provider Portal (seller-facing web surface) | 0.8 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
+| SPEC-014 | Provider Portal (seller-facing web surface) | 0.9 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
 | SPEC-015 | Verifiable inference receipts | 0.4.2 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.20 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.1.8 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |

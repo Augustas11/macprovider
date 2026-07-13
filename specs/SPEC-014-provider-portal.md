@@ -1,8 +1,23 @@
 # SPEC-014 — Provider Portal (seller-facing web surface)
 
-**Version:** 0.8
-**Status:** Draft (post round-5 codex audit; 3 HIGH + 2 MEDIUM applied)
-**Date drafted:** 2026-06-21
+**Version:** 0.9
+**Status:** Draft (v0.9 GitHub-OAuth drift reconciliation — reconciled to shipped
+config-gated dual-mode auth; pending codex 3-lane audit)
+**Date drafted:** 2026-06-21 (v0.9 reconciliation 2026-07-13)
+**Change log v0.9 (2026-07-13, GitHub-OAuth dual-mode drift reconciliation — spec matched to shipped code; code is source of truth):**
+  The portal + coordinator shipped a full **config-gated GitHub-OAuth
+  cookie-session** provider-binding flow in commit `0935d1e` (2026-06-22, one day
+  after v0.8 froze the token-paste-only design). SPEC-014 was never reconciled, so
+  v0.8 still *forbids* GitHub OAuth while the code ships it (gated OFF in current
+  prod: `portal-config.json:github_oauth_enabled=false`, coordinator
+  `GITHUB_OAUTH_ENABLED=false`). v0.9 documents the shipped **dual-mode** contract
+  honestly: token-paste bearer (default, prod-active) **and** the opt-in
+  GitHub-OAuth cookie-session mode. It specifies the previously-unowned OAuth
+  **transport** (`/v1/auth/github/*`, `/v1/auth/me/*`, the `mp_session` cookie,
+  CSRF origin-binding, `return_to` guard, `/claim` + `pair_ot`) as owner of last
+  resort, cross-referencing **SPEC-003 FR-C10** for the coordinator mint/ownership
+  *policy* and **SPEC-001 v1.5** for frame shapes rather than re-specifying them.
+  No code change.
 **Audit history:**
   - v0.1 → codex round 1 → 0 CRITICAL / 3 HIGH / 2 MEDIUM / 2 MINOR /
     0 QUESTION → all HIGH + MEDIUM addressed in v0.2.
@@ -20,13 +35,19 @@
     0 QUESTION → both HIGH addressed in v0.8 (audit loop paused per
     operator instruction; remaining MEDIUM/MINORs accepted as
     backlog for next audit cycle).
+  - v0.9 → GitHub-OAuth dual-mode drift reconciliation (see change log
+    above) → pending codex 3-lane audit.
 **Depends on:**
-  - SPEC-001 v1.3 (`hello` / `hello_ack` fields; local `/v1/health`)
+  - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
+    ownership frame shapes — `ownership_event` / `needs_claim` — consumed by
+    the GitHub-OAuth bind flow)
   - SPEC-002 v1.3.5 (FR-P12 provider tokens; §7.3 token store; §7.4
     operator endpoints + `/v1/pool/check`; §7.5 provisional admission)
-  - SPEC-003 v0.9.2 (FR-C2 install; §5 / FR-D1 + FR-D2 requirements
+  - SPEC-003 v0.10 (FR-C2 install; §5 / FR-D1 + FR-D2 requirements
     + RAM sizing; FR-C7 advisory version nudge; FR-C9 provisional
-    self-mint token path)
+    self-mint token path; **FR-C10 GitHub-OAuth coordinator mint/ownership
+    policy** — pair_ot mint, `provider_ownership` anti-check, `ownership_event`
+    on bind, `claim_url` shape — which the portal's GitHub-OAuth mode consumes)
   - SPEC-005 v0.3 (§1.3 out-of-scope; §2.1 D1 donation-only; §2.11
     D11 no-new-delivery-infra; §11.4
     `GET /providers/{id}/earnings`; §11.5 route-disabled mode)
@@ -45,9 +66,14 @@ buyer-facing surface. The seller side has no web surface today: a
 provider runs `macprovider-cli serve` in a terminal, watches log
 lines, and may hit `GET /v1/health` for a number. SPEC-014 introduces
 **Provider Portal**, a single-pane read-only web surface that lets a
-provider sign in with their per-Mac `provider_id` + `provider_token`
-and see THIS machine's coordinator-side status (`provider_id`,
-`tier`, `state`) plus its aggregate earnings.
+provider sign in and see THIS machine's coordinator-side status (`provider_id`,
+`tier`, `state`) plus its aggregate earnings. **Sign-in is config-gated
+dual-mode (reconciled v0.9):** the default and current-prod path is a per-Mac
+`provider_id` + `provider_token` **paste-bearer** sign-in (§2.1); an opt-in
+**GitHub-OAuth cookie-session** mode (§2.5), gated by
+`portal-config.json:github_oauth_enabled` + coordinator `GITHUB_OAUTH_ENABLED`,
+lets a provider sign in with GitHub and manage the Mac(s) bound to their GitHub
+identity. Both are shipped; GitHub-OAuth is disabled in current prod.
 
 Five surfaces ship in v0.1: **A Machine** (default), **B Setup &
 Updates**, **C Earn**, **D Monitoring** (placeholder card, zero API
@@ -133,12 +159,20 @@ explicit reason rooted in upstream specs:
 
 ## 2. Auth & session model
 
-### 2.1 AUTH-1 — How the provider signs in
+### 2.1 AUTH-1 — How the provider signs in (paste-bearer mode; default)
 
-The portal asks the provider to paste BOTH `provider_id` AND
-`provider_token` at the sign-in screen. Both are required.
+**Mode selection (reconciled v0.9).** The portal has two shipped sign-in modes,
+selected at load time by `portal-config.json:github_oauth_enabled`:
 
-Rationale (the portal CANNOT use token-only):
+- `github_oauth_enabled` absent / `false` → **paste-bearer mode** (this section,
+  AUTH-1/AUTH-2). This is the default and the mode running in current prod.
+- `github_oauth_enabled: true` → **GitHub-OAuth cookie-session mode** (§2.5),
+  which requires the coordinator to also run with `GITHUB_OAUTH_ENABLED=true`.
+
+In **paste-bearer mode** the portal asks the provider to paste BOTH `provider_id`
+AND `provider_token` at the sign-in screen. Both are required.
+
+Rationale (paste-bearer mode is token-based, not token-only-derivable):
 
 - SPEC-002 §7.3 token storage is `(token_hash, token_prefix,
   provider_id, ...)` with SHA-256 hashed storage; tokens are
@@ -167,32 +201,48 @@ Rationale (the portal CANNOT use token-only):
     under other blocks are preserved verbatim by the persist
     routine).
 
-Storage in the browser: **in-memory only** for v0.1. No
+Storage in the browser (paste-bearer mode): **in-memory only**. No
 `localStorage`, no `sessionStorage`, no cookie. A page reload
-returns the provider to the sign-in screen. Justification against
-alternatives:
+returns the provider to the sign-in screen. (The GitHub-OAuth mode in §2.5 does
+use an `HttpOnly` `mp_session` cookie — that is the mode's deliberate design, not
+a violation of this paste-mode rule.)
 
-- GitHub OAuth would require a new server-side OAuth identity
-  binding to `provider_id` — new auth surface, blocked by
-  SPEC-005 §2.11 D11 ("no new auth surface required").
-- Sign-in-with-Apple has the same blocker plus an Apple-developer-
-  account dependency unrelated to the portal's value.
-- Email magic link would require email delivery infrastructure
-  that SPEC-005 §2.11 D11 explicitly forbids and that no
-  existing coordinator service speaks.
+**Reconciled v0.9 — GitHub OAuth is no longer forbidden; it shipped.** The v0.8
+text declared GitHub OAuth (and Sign-in-with-Apple / email magic link) out of
+scope as a v0.1 cut, citing SPEC-005 §2.11 D11 ("no new auth surface required").
+That was accurate for the v0.1 paste-only portal — but a GitHub-OAuth
+provider-binding surface was subsequently **built and shipped** (commit
+`0935d1e`, 2026-06-22): the coordinator half is owned by **SPEC-003 FR-C10**
+(pair_ot mint + `provider_ownership` binding + `ownership_event`), and the portal
++ OAuth transport half is documented here in §2.5. It ships **gated off by
+default** (two independent flags, §2.3) and is off in current prod, so it adds no
+new *always-on* auth surface; when an operator opts in, it is a real,
+intentional second auth path. The alternatives not built remain out of scope:
 
-### 2.2 AUTH-2 — Trust boundary against impersonation
+- **Sign-in-with-Apple** — not shipped; an Apple-developer-account dependency
+  unrelated to the portal's value.
+- **Email magic link** — not shipped; would require email delivery infrastructure
+  that SPEC-005 §2.11 D11 forbids and that no coordinator service speaks.
 
-- The browser sends `Authorization: Bearer <provider_token>` on
-  every authenticated call and embeds the pasted `provider_id` in
+### 2.2 AUTH-2 — Trust boundary against impersonation (paste-bearer mode)
+
+- In paste-bearer mode the browser sends `Authorization: Bearer <provider_token>`
+  on every authenticated call and embeds the pasted `provider_id` in
   the request path (`/providers/{provider_id}/earnings`).
-- The coordinator's existing FR-P12 middleware is the SOLE
-  authority. SPEC-014 introduces **no new server-side auth path**.
-- The portal MUST NOT possess, request, prompt for, or transmit
-  the operator key. The portal MUST NEVER call `/poolz`,
+- In paste-bearer mode the coordinator's existing FR-P12 bearer middleware is the
+  SOLE authority. **Reconciled v0.9:** the earlier absolute "SPEC-014 introduces
+  no new server-side auth path" holds **only for paste-bearer mode**. The
+  GitHub-OAuth mode (§2.5) *does* add a new server-side auth path — an OAuth
+  cookie-session authenticated by the `mp_session` cookie rather than the FR-P12
+  bearer — which is off by default and off in current prod; see §2.5 for its
+  trust boundary.
+- In **either** mode the portal MUST NOT possess, request, prompt for, or transmit
+  the operator key, and MUST NEVER call `/poolz`,
   `/admin/blacklist`, `/admin/provisional`, `/admin/promote/*`,
   `/admin/reject/*`, `/admin/ledger/*`, or any other operator-keyed
-  route. AC group (b) enforces this via a build-time grep.
+  route. AC group (b) enforces this via a build-time grep. The GitHub-OAuth
+  endpoints the portal *may* call are the closed allowlist in §2.5 (the
+  `/v1/auth/*` set), and no others.
 - HTTP status handling (per SPEC-005 §11.5):
   - **401** (missing or malformed token) → sign-in prompt; do not
     leak that the token was malformed vs absent.
@@ -212,14 +262,31 @@ discovery the upstream specs do not support).
 Mechanism:
 
 - The operator deploys `/portal-config.json` at the portal host
-  root. Shape:
+  root. Shape (reconciled v0.9 — adds `github_oauth_enabled`):
   ```json
   {
     "coordinator_base_url": "https://coordinator.streamvc.live",
     "releases_repo_owner_name": "Augustas11/macprovider",
-    "require_provider_tokens": true
+    "require_provider_tokens": true,
+    "github_oauth_enabled": false
   }
   ```
+  The loader accepts exactly these four keys and rejects any unknown top-level key
+  (`unknown-key:<k>`). `require_provider_tokens` MUST be `true` or the portal
+  hard-fails to the unavailable page (fail-closed). `github_oauth_enabled` is
+  **optional**, defaults to `false`, and MUST be boolean when present
+  (`invalid-github_oauth_enabled` otherwise); it selects paste-bearer (false) vs
+  GitHub-OAuth (true) mode per §2.1 / §2.5.
+
+- **Two-flag consistency (reconciled v0.9).** GitHub-OAuth mode is gated by **two
+  independent flags** that the operator MUST set together: the portal's
+  `portal-config.json:github_oauth_enabled` and the coordinator's own
+  `auth.github_oauth.enabled` (env `GITHUB_OAUTH_ENABLED`). The coordinator mounts
+  the `/v1/auth/*` routes **only** when its flag is on (otherwise they 404). If
+  the portal flag is `true` but the coordinator flag is off, the `/v1/auth/*`
+  calls 404 and the portal surfaces a misconfiguration banner directing the
+  operator to deploy the OAuth-enabled coordinator. The portal MUST NOT fall back
+  to paste-bearer mode when its flag is `true`.
 - The portal fetches `/portal-config.json` on load BEFORE any
   authenticated call.
 - **Missing file OR HTTP non-200 → fail-CLOSED.** Render the
@@ -277,6 +344,108 @@ Note: FR-C9.5 says **tokenless admission is allowed and tokens get
 minted** under `false`; under `true` tokenless admission is
 rejected pre-admission. The portal unavailability rationale is the
 ROUTE disablement (§11.5), not "no token exists."
+
+### 2.5 AUTH-4 — GitHub-OAuth cookie-session mode (config-gated, shipped; reconciled v0.9)
+
+When `github_oauth_enabled: true` (portal) **and** `GITHUB_OAUTH_ENABLED=true`
+(coordinator), the portal runs a GitHub-OAuth cookie-session sign-in instead of
+paste-bearer. This mode is **shipped** (commit `0935d1e`) and **off in current
+prod**. SPEC-014 owns the **OAuth transport** documented here; the coordinator
+**mint/ownership policy** (pair_ot mint, `provider_ownership` binding,
+`ownership_event`, `claim_url` shape) is owned by **SPEC-003 FR-C10** and the
+ownership frame shapes by **SPEC-001 v1.5** — this section cross-references those
+and does not re-specify them. On any conflict, the owner spec governs.
+
+#### 2.5.1 Purpose and identity model
+
+GitHub-OAuth mode authenticates the *person* (their GitHub identity) and lists
+the provider Mac(s) **bound** to that identity, rather than authenticating a
+single Mac by its pasted token. A GitHub user is linked to `provider_id`(s)
+through the coordinator's `provider_ownership` table (SPEC-003 FR-C10); a Mac is
+bound by claiming a one-time `pair_ot` minted at install/admission.
+
+#### 2.5.2 Transport endpoints (portal → coordinator)
+
+Mounted by the coordinator **only** when its flag is on (else 404). The portal
+calls exactly this closed set and no others (AUTH-2 allowlist):
+
+| Method + path | Purpose | Auth |
+|---|---|---|
+| `GET /v1/auth/github/start?return_to=<path>[&pair_ot=<ot>]` | Begin OAuth; 302 to GitHub | none (mints CSRF state) |
+| `GET /v1/auth/github/callback?state=&code=` | OAuth callback; sets session cookie; 302 to `return_to` | validated `state` |
+| `GET /v1/auth/me/providers` | List providers owned by the session's GitHub identity | `mp_session` cookie |
+| `POST /v1/auth/me/providers/bind` | Bind a `pair_ot` to the session identity | `mp_session` cookie |
+| `POST /v1/auth/logout` | Delete session, clear cookie (204) | `mp_session` cookie |
+
+(The coordinator additionally exposes a bearer-authed
+`POST /v1/install/pair/refresh` to mint a fresh `pair_ot` + `claim_url`; that is a
+provider-CLI/install surface, not called by the portal.) The `callback` is
+reached by the browser via GitHub's 302 redirect, not by a portal `fetch`.
+
+#### 2.5.3 Session cookie (`mp_session`)
+
+- Name `mp_session`; value is an **opaque server-side session id** (not a
+  signed/JWT payload) — the session row lives in the coordinator DB.
+- Flags: `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000` (30 days),
+  optional `Domain=<MP_SESSION_COOKIE_DOMAIN>` scoped to the portal host.
+- Sliding re-issue ~every 24h; `POST /v1/auth/logout` deletes the session row and
+  clears the cookie.
+- The portal's cookie-mode fetch uses `credentials: "include"`, `cache:
+  "no-store"`, and **strips any `Authorization` header** — cookie mode never
+  sends a bearer token. Same-origin path-only requests rely on the operator
+  reverse-proxying the coordinator under the portal origin.
+
+#### 2.5.4 CSRF / open-redirect protections (transport-owned here)
+
+- **OAuth `state`** is a 32-byte random single-use token, TTL-bounded and
+  rate-limited, bound to an **origin hash** = HMAC-SHA256 over
+  `sha256(peer-IP) || sha256(User-Agent)` keyed by the operator key (fallback
+  OAuth client secret). The callback consumes it single-use and rejects a
+  mismatch. `Referrer-Policy: no-referrer` is set on the start redirect.
+- **`return_to`** MUST be a local path: it MUST start with `/`, MUST NOT start
+  with `//` or `/\`, is regex-constrained, and is double-decode-checked to reject
+  open redirects.
+- Logs redact `ot` / `pair_ot` / `code` / `state` / nested `return_to`.
+
+#### 2.5.5 Portal sign-in state machine
+
+`githubAuthState` ∈ { `idle`, `loading`, `signin`, `waiting`, `providers`,
+`dashboard`, `claim` }:
+
+- Load → `loading` → `GET /v1/auth/me/providers`: `401`/error → `signin`
+  (offer "Sign in with GitHub" → `/v1/auth/github/start`); empty list →
+  `waiting` (no Mac bound yet); >1 with no `?p=` match → `providers` (chooser);
+  single or matched → `dashboard`.
+- `/claim` route: captures `?ot=<pair_ot>` and immediately `history.replaceState`
+  to strip it from the URL; `GET /v1/auth/me/providers` (401 → OAuth start with
+  `return_to=/claim`); then `POST /v1/auth/me/providers/bind {pair_ot}` →
+  success redirects to `/`; error codes `pair_ot_invalid` (410),
+  `already_owned` (409), `session_invalid` (401).
+- On a `401` from a data call in cookie mode, the portal clears the session and
+  re-launches OAuth (`return_to` preserved) — it does not show the paste form.
+
+#### 2.5.6 Bind semantics (cross-ref SPEC-003 FR-C10)
+
+`POST /v1/auth/me/providers/bind` consumes the `pair_ot` and inserts
+`provider_ownership(provider_id, github_user_id)` in one transaction, emitting an
+`ownership_event` (SPEC-001 v1.5 frame) on commit; a `pair_ot` already owned by a
+different identity returns `409 already_owned` (SPEC-003 FR-C10 anti-check). Body
+parsing is strict (only the `pair_ot` key; trailing tokens rejected).
+**There is no unbind/unlink path** in v0.9 — neither the portal nor the
+coordinator exposes one; FR-C10.1 reserves an `unbound` ownership event for a
+future operator-driven unlink flow. Document this as a known gap, not a control.
+
+#### 2.5.7 Security disclosures (carried, honest)
+
+- GitHub scope requested is `read:user` only.
+- The session is a bearer-equivalent **cookie** — its theft grants access to the
+  bound providers' read-only surfaces until logout/expiry; `HttpOnly` + `Secure`
+  + `SameSite=Lax` + origin-bound CSRF state are the mitigations. This is a
+  strictly larger auth surface than paste-bearer mode and is why it is
+  opt-in/off-by-default.
+- The two independent flags (§2.3) MUST be set together; a portal-on /
+  coordinator-off split yields 404s + a misconfig banner, never a silent
+  downgrade.
 
 ---
 
@@ -895,25 +1064,25 @@ Layered, NOT a flat checklist. Six required groups.
       makes ZERO network calls after the failed
       `/portal-config.json` fetch (verified by a network-panel
       observation or a spy on the fetch layer that asserts no
-      calls to `/v1/pool/check`, `/providers/{id}/earnings`, or
-      the GitHub Releases host).
+      calls to `/v1/pool/check`, `/providers/{id}/earnings`,
+      `/v1/auth/*`, or the GitHub Releases host). This fail-closed check runs
+      before mode selection, so it holds regardless of `github_oauth_enabled`.
 - [ ] On load with `portal-config.json.require_provider_tokens =
       false`, portal renders the unavailable-mode page AND makes
       ZERO network calls after the `/portal-config.json` fetch
       (verified by the same spy targets: `/v1/pool/check`,
-      `/providers/{id}/earnings`, GitHub Releases). The public
+      `/providers/{id}/earnings`, `/v1/auth/*`, GitHub Releases). The public
       `/v1/pool/check` and the unauthenticated GitHub Releases
       endpoint MUST NOT be polled in either of the two
       unavailable-mode entry points.
-- [ ] Authenticated call returning 401 → portal returns to the
-      sign-in prompt; error message does not distinguish "missing"
+- [ ] **Paste-bearer mode** — authenticated call returning 401 → portal returns
+      to the sign-in prompt; error message does not distinguish "missing"
       vs "malformed".
-- [ ] Authenticated call returning 403 → portal renders a
-      "sign-in rejected" message identical to the 404 case.
-- [ ] Authenticated call returning 404 → portal renders the same
-      "sign-in rejected" message (does NOT reveal that the
-      `provider_id` is unknown).
-- [ ] In `require_provider_tokens: true` mode, after **two
+- [ ] **Paste-bearer mode** — 403 → portal renders a
+      "sign-in rejected" message identical to the 404 case; 404 → the same
+      "sign-in rejected" message (does NOT reveal that the `provider_id` is
+      unknown).
+- [ ] In `require_provider_tokens: true` **paste-bearer** mode, after **two
       consecutive authenticated provider-endpoint failures on
       the same surface within the same signed-in session**, the
       portal surfaces the explicit "deployment may be
@@ -923,10 +1092,41 @@ Layered, NOT a flat checklist. Six required groups.
 - [ ] Static grep / build-time check: bundle contains zero
       references to `/poolz`, `/admin/blacklist`,
       `/admin/provisional`, `/admin/promote`, `/admin/reject`,
-      `/admin/ledger` (matches the §10 dependency table).
+      `/admin/ledger` (matches the §10 dependency table). The only coordinator
+      paths the bundle may reference are the paste-mode data paths
+      (`/v1/pool/check`, `/providers/{id}/earnings`) and, for GitHub-OAuth mode,
+      the §2.5.2 `/v1/auth/*` allowlist — no other `/v1/auth/*` or `/admin/*`.
 - [ ] Portal never prompts for, parses, or transmits the operator
-      key. The loader rejects unknown top-level keys in
-      `portal-config.json`.
+      key. The loader accepts exactly the four `portal-config.json` keys
+      (`coordinator_base_url`, `releases_repo_owner_name`,
+      `require_provider_tokens`, `github_oauth_enabled`) and rejects any unknown
+      top-level key; `github_oauth_enabled` must be boolean when present.
+
+**GitHub-OAuth mode ACs (reconciled v0.9; verified only when
+`github_oauth_enabled: true`):**
+
+- [ ] Mode selection: with `github_oauth_enabled: true`, load calls
+      `GET /v1/auth/me/providers` (cookie, `credentials:"include"`, no
+      `Authorization` header) and NOT the paste sign-in form; with the flag
+      absent/`false`, load renders the paste form and never calls `/v1/auth/*`.
+- [ ] Cookie-mode `401` on a data or `me/providers` call re-launches
+      `GET /v1/auth/github/start` (preserving `return_to`) — it does NOT show
+      the paste form and does NOT fall back to bearer.
+- [ ] `/claim?ot=<pair_ot>` strips `?ot=` from the URL via `history.replaceState`
+      before any render, then binds via `POST /v1/auth/me/providers/bind`;
+      `410 pair_ot_invalid` / `409 already_owned` / `401 session_invalid` render
+      distinct claim-error copy; success redirects to `/`.
+- [ ] `return_to` rejects a value that does not start with `/`, or starts with
+      `//` or `/\`, or fails the double-decode check (open-redirect guard).
+- [ ] Coordinator sets the `mp_session` cookie `HttpOnly; Secure; SameSite=Lax;
+      Path=/; Max-Age=2592000`; `POST /v1/auth/logout` clears it (204).
+- [ ] OAuth `state` is single-use and origin-bound; a replayed or
+      mismatched-origin `state` at `/v1/auth/github/callback` is rejected.
+- [ ] Two-flag misconfig: portal `github_oauth_enabled:true` + coordinator flag
+      off → `/v1/auth/*` 404 → misconfiguration banner; the portal does NOT fall
+      back to paste-bearer mode.
+- [ ] Coordinator mounts `/v1/auth/*` ONLY when `GITHUB_OAUTH_ENABLED=true`
+      (routes absent → 404 when off).
 
 ### 8(c) Field-source ACs
 
