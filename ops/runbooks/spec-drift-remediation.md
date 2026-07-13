@@ -51,7 +51,7 @@ and whether it needs production verification before code is touched.
 | **P3 — spec-debt consolidation + rewrites** |
 | 11 | SPEC-005 v0.6 money-path bump (houses #2 + 6 columns + clamps + 10M cap + model-key normalization + SPEC-024 fold-in) | M D | L | spec, money-path | `internal/billing/formula.go`, `store.go` |
 | 12 | SPEC-001 v1.7 consolidation (spec v1.6 vs binary **1.8.31**; FR-11 semaphore, FR-16 idle-prewarm, mode-based handshake, 17-frame control socket, §6.15 additive wire) — **✅ MERGED (squash `7b642ce`, 2026-07-13); 10-round audit 0 C/H/M** | D | L | spec | `CoordinatorClient.swift` (1.8.31) |
-| 13 | SPEC-014 v0.9 (canonical spec forbids the live GitHub-auth portal) | D | M | spec rewrite | `frontdoor/provider-portal/index.html` |
+| 13 | SPEC-014 v0.9 — GitHub-OAuth dual-mode drift reconciliation (verify-before-design corrected the one-liner: portal is config-gated dual-mode, GitHub-OAuth **shipped but prod-off + incompletely wired**; v0.9 documents it as owner-of-last-resort for the OAuth transport with carried security residuals) — **✅ MERGED (squash `5555383`, 2026-07-13); 8-round codex 3-lane audit 0 C/H/M** | D | M | spec | `frontdoor/provider-portal/index.html` |
 | 14 | SPEC-025/026 CLI-wrapper rewrite (arch inverted by PR #418) | D | L | spec rewrite | `phase3-binary/app/Sources/Malibu/` |
 | **P4 — housekeeping** |
 | 15 | SPEC-018 AC-45: `X-MacProvider-Streaming-Mode` stripped by gateway | D | S | spec + tiny code | `phase5-gateway/internal/router/server.go:889` |
