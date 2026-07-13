@@ -3,7 +3,7 @@
 **Version:** 0.9
 **Status:** Draft (v0.9 GitHub-OAuth drift reconciliation — reconciled to shipped
 config-gated dual-mode auth, incl. the shipped OAuth mode's incompletely-wired
-state; codex 3-lane audit in progress)
+state; codex 3-lane audit converged 0 C/H/M over 8 rounds)
 **Date drafted:** 2026-06-21 (v0.9 reconciliation 2026-07-13)
 **Change log v0.9 (2026-07-13, GitHub-OAuth dual-mode drift reconciliation — spec matched to shipped code; code is source of truth):**
   The portal + coordinator shipped a full **config-gated GitHub-OAuth
@@ -97,8 +97,11 @@ state; codex 3-lane audit in progress)
     both 0C/0H/1M, same single straggler — §4.1 A.3 self-signed
     deferral still called `/v1/pool/check` the "only STATUS/IDENTITY
     endpoint" (now scoped to STATUS; OAuth `/v1/auth/me/providers` is the
-    identity source, neither carries signing tier). Fixed; final
-    confirmation re-audit pending.
+    identity source, neither carries signing tier). Fixed.
+    R8 (commit `e959f45`, final confirmation, architect + code): **both
+    0C/0H/0M/0L — CONVERGED.** With security's R6 pass (0C/0H/0M), all
+    three lanes are at 0 CRITICAL / 0 HIGH / 0 MEDIUM. Convergence over 8
+    rounds; carried LOWs folded into the reconciled text and the PR body.
 **Depends on:**
   - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
     **the `pair_ot` / `claim_url` field + wire shape (§6.5.1) and the
