@@ -94,6 +94,32 @@ func (a *AdmissionManager) CheckAdmit(hello Hello, pinned bool, connectedProvisi
 	return a.evaluateAdmissionLocked(hello, connectedProvisional, false)
 }
 
+// ReserveAdmission holds in-memory pool capacity without creating durable
+// admission history. A failed referral/token transaction therefore leaves no
+// hourly admission record behind.
+func (a *AdmissionManager) ReserveAdmission(hello Hello, pinned bool, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
+	if pinned {
+		return pool.TierPinned, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tier, code, reason := a.evaluateAdmissionLocked(hello, connectedProvisional, false)
+	if code == 0 {
+		a.pending++
+	}
+	return tier, code, reason
+}
+
+func (a *AdmissionManager) CommitReservedAdmission(hello Hello, pinned bool) pool.Tier {
+	if pinned {
+		return pool.TierPinned
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.recordAdmissionLocked(hello, a.now())
+	return pool.TierProvisional
+}
+
 func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisional int, record bool) (pool.Tier, gobwas.StatusCode, string) {
 	if _, ok := a.rejected[hello.ProviderID]; ok {
 		return pool.TierRejected, CloseBanned, "banned: provider " + hello.ProviderID + " has been rejected by operator"
@@ -114,6 +140,11 @@ func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisi
 		return pool.TierProvisional, 0, ""
 	}
 	a.pending++
+	a.recordAdmissionLocked(hello, now)
+	return pool.TierProvisional, 0, ""
+}
+
+func (a *AdmissionManager) recordAdmissionLocked(hello Hello, now time.Time) {
 	rec := a.records[hello.ProviderID]
 	if rec == nil {
 		rec = &ProvisionalRecord{
@@ -129,7 +160,6 @@ func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisi
 	rec.ModelID = hello.ModelID
 	rec.BinaryVersion = hello.BinaryVersion
 	a.persistLocked()
-	return pool.TierProvisional, 0, ""
 }
 
 func (a *AdmissionManager) ReleasePendingProvisional() {

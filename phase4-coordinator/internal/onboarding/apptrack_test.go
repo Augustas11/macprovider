@@ -62,6 +62,147 @@ func TestHandleAppTrackRegisterSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleAppTrackRegisterBogusBearerDoesNotBypassReferralGate(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{referralMintErr: auth.ErrReferralRequired}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer bogus")
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, req)
+
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "referral_required") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authStore.referralMintCalls != 1 || stats.prepareCalls != 0 || stats.upsertProviderID != "" {
+		t.Fatalf("mintCalls=%d prepareCalls=%d upsert=%q", authStore.referralMintCalls, stats.prepareCalls, stats.upsertProviderID)
+	}
+}
+
+func TestHandleAppTrackRegisterValidBearerBypassesReferralConsumption(t *testing.T) {
+	body, providerID := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{
+		token:              "replacement-token",
+		validateOK:         true,
+		validateProviderID: providerID,
+		referralMintErr:    auth.ErrReferralRequired,
+	}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer current-token")
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, req)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authStore.referralMintCalls != 0 || stats.nonceCalls != 1 || stats.upsertProviderID != providerID {
+		t.Fatalf("referralMints=%d nonceCalls=%d upsert=%q", authStore.referralMintCalls, stats.nonceCalls, stats.upsertProviderID)
+	}
+}
+
+func TestHandleAppTrackRegisterFreshGateUsesSagaThenDiscloses(t *testing.T) {
+	body, providerID := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{
+		referralToken:      "fresh-token",
+		validateOK:         true,
+		validateProviderID: providerID,
+	}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, req)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "fresh-token") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authStore.referralMintCalls != 1 || stats.prepareCalls != 1 || authStore.ackCalls != 1 || authStore.rollbackCalls != 0 {
+		t.Fatalf("mint=%d prepare=%d ack=%d rollback=%d", authStore.referralMintCalls, stats.prepareCalls, authStore.ackCalls, authStore.rollbackCalls)
+	}
+	if stats.nonceCalls != 0 || stats.upsertProviderID != "" {
+		t.Fatalf("fresh gate used non-atomic legacy PG path: nonce=%d upsert=%q", stats.nonceCalls, stats.upsertProviderID)
+	}
+}
+
+func TestHandleAppTrackRegisterCommittedRetryNeverRotatesCredential(t *testing.T) {
+	body, _ := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepared: true}
+	authStore := &fakeAuthStore{referralToken: "must-not-mint"}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, req)
+
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "existing_active_token_no_proof") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authStore.referralMintCalls != 0 || stats.prepareCalls != 0 {
+		t.Fatalf("committed retry mutated state: mint=%d prepare=%d", authStore.referralMintCalls, stats.prepareCalls)
+	}
+}
+
+func TestHandleAppTrackRegisterCompensatesOnlyProvenAbsentPrepare(t *testing.T) {
+	body, providerID := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepareErr: ErrTOFUConflict, prepared: false}
+	authStore := &fakeAuthStore{
+		referralToken:      "undisclosed-token",
+		validateOK:         true,
+		validateProviderID: providerID,
+	}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, req)
+
+	if response.Code != http.StatusConflict || authStore.rollbackCalls != 1 || authStore.ackCalls != 0 {
+		t.Fatalf("status=%d rollback=%d ack=%d body=%s", response.Code, authStore.rollbackCalls, authStore.ackCalls, response.Body.String())
+	}
+}
+
+func TestReconcilePendingAppTrackReferralMintUsesExactSignedAttempt(t *testing.T) {
+	attemptTS := time.Date(2026, 7, 3, 11, 59, 30, 0, time.UTC)
+	pending := auth.PendingAppTrackReferralMint{
+		ProviderID: "provider-a",
+		TokenHash:  strings.Repeat("a", 64),
+		Attempt: auth.AppTrackRegistrationAttempt{
+			SourceIP: "203.0.113.10", Nonce: strings.Repeat("b", 64), AttemptTS: attemptTS,
+		},
+	}
+	stats := &fakeStatsDB{prepared: true}
+	authStore := &fakeAuthStore{pendingMints: []auth.PendingAppTrackReferralMint{pending}}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+
+	if err := handler.ReconcilePendingAppTrackReferralMints(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if stats.preparedProviderID != pending.ProviderID || stats.preparedNonce != pending.Attempt.Nonce || !stats.preparedAttemptTS.Equal(attemptTS) {
+		t.Fatalf("prepared lookup provider=%q nonce=%q ts=%s", stats.preparedProviderID, stats.preparedNonce, stats.preparedAttemptTS)
+	}
+	if len(authStore.resolvedMints) != 1 || !authStore.resolvedPrepared[0] {
+		t.Fatalf("resolved=%+v prepared=%+v", authStore.resolvedMints, authStore.resolvedPrepared)
+	}
+}
+
 func TestHandleHardwareEvidenceQueuesAuthenticatedAutotuneEvidence(t *testing.T) {
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	stats := &fakeStatsDB{}
@@ -1021,6 +1162,30 @@ type fakeStatsDB struct {
 	existingEvidenceRecord     HardwareEvidenceJobRecord
 	existingEvidenceFound      bool
 	existingEvidenceErr        error
+	prepareErr                 error
+	prepared                   bool
+	preparedErr                error
+	prepareCalls               int
+	preparedChecks             int
+	preparedProviderID         string
+	preparedNonce              string
+	preparedAttemptTS          time.Time
+}
+
+func (f *fakeStatsDB) PrepareProviderRegistration(_ context.Context, providerID, sourceIP, nonce string, observedAt, attemptTS time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
+	f.prepareCalls++
+	f.preparedProviderID = providerID
+	f.preparedNonce = nonce
+	f.preparedAttemptTS = attemptTS
+	return f.prepareErr
+}
+
+func (f *fakeStatsDB) ProviderRegistrationPrepared(_ context.Context, providerID, nonce string, attemptTS time.Time) (bool, error) {
+	f.preparedChecks++
+	f.preparedProviderID = providerID
+	f.preparedNonce = nonce
+	f.preparedAttemptTS = attemptTS
+	return f.prepared, f.preparedErr
 }
 
 func (f *fakeStatsDB) UpsertProviderIdentity(ctx context.Context, providerID string, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
@@ -1120,6 +1285,16 @@ type fakeAuthStore struct {
 	validateProviderID string
 	validateOK         bool
 	validateErr        error
+	referralToken      string
+	referralMintErr    error
+	referralMintCalls  int
+	ackErr             error
+	ackCalls           int
+	rollbackErr        error
+	rollbackCalls      int
+	pendingMints       []auth.PendingAppTrackReferralMint
+	resolvedMints      []auth.PendingAppTrackReferralMint
+	resolvedPrepared   []bool
 }
 
 func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
@@ -1142,6 +1317,35 @@ func (f *fakeAuthStore) ValidateToken(ctx context.Context, token string) (string
 		return f.validateProviderID, true, nil
 	}
 	return f.providerID, true, nil
+}
+
+func (f *fakeAuthStore) MintProviderTokenAppTrackWithReferralAttempt(_ context.Context, providerID, referralCode string, policy auth.ReferralPolicy, attempt auth.AppTrackRegistrationAttempt) (string, error) {
+	f.referralMintCalls++
+	f.providerID = providerID
+	if f.referralMintErr != nil {
+		return "", f.referralMintErr
+	}
+	return f.referralToken, nil
+}
+
+func (f *fakeAuthStore) AcknowledgeAppTrackReferralMint(context.Context, string, string) error {
+	f.ackCalls++
+	return f.ackErr
+}
+
+func (f *fakeAuthStore) RollbackAppTrackReferralMint(context.Context, string, string) error {
+	f.rollbackCalls++
+	return f.rollbackErr
+}
+
+func (f *fakeAuthStore) ListPendingAppTrackReferralMints(context.Context, time.Time) ([]auth.PendingAppTrackReferralMint, error) {
+	return append([]auth.PendingAppTrackReferralMint(nil), f.pendingMints...), nil
+}
+
+func (f *fakeAuthStore) ResolvePendingAppTrackReferralMint(_ context.Context, pending auth.PendingAppTrackReferralMint, prepared bool) error {
+	f.resolvedMints = append(f.resolvedMints, pending)
+	f.resolvedPrepared = append(f.resolvedPrepared, prepared)
+	return nil
 }
 
 type fakeMetrics struct {
