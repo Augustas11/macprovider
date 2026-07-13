@@ -86,19 +86,29 @@ state; codex 3-lane audit in progress)
     provider mux `:8444`; sibling-domain cookie-planting session-fixation
     residual (future fix `__Host-` cookie); the shipped misconfig banner's
     pair-refresh proxy instruction is misleading; logout has no
-    forced-logout CSRF defense. All R5 C/H/M addressed in this revision;
-    re-audit pending.
+    forced-logout CSRF defense. All R5 C/H/M addressed.
+    R6 (commit `047e97c`): **security PASS 0C/0H/0M/1L**; code 0C/0H/1M,
+    architect 0C/0H/2M/2L. Final precision: OAuth route count 5 (+refresh
+    = 6 gated); §10.1 "ONLY status/identity" scoped to paste-bearer;
+    `claim_url`/`pair_ot` **wire shape** attributed to SPEC-001 v1.5
+    §6.5.1 (SPEC-003 FR-C10 owns emission/mint); two content-wrong xrefs
+    fixed. All R6 C/H/M addressed; architect + code re-audit pending
+    (security accepted, carried LOW folded here).
 **Depends on:**
   - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
-    ownership frame shapes — `ownership_event` / `needs_claim` — consumed by
-    the GitHub-OAuth bind flow)
+    **the `pair_ot` / `claim_url` field + wire shape (§6.5.1) and the
+    ownership frame shapes `ownership_event` / `needs_claim` (§6.12 / §6.5.2)** —
+    all consumed by the GitHub-OAuth bind flow; SPEC-001 owns these *shapes*,
+    SPEC-003 FR-C10 owns their emission/mint *policy*)
   - SPEC-002 v1.3.5 (FR-P12 provider tokens; §7.3 token store; §7.4
     operator endpoints + `/v1/pool/check`; §7.5 provisional admission)
   - SPEC-003 v0.10 (FR-C2 install; §5 / FR-D1 + FR-D2 requirements
     + RAM sizing; FR-C7 advisory version nudge; FR-C9 provisional
     self-mint token path; **FR-C10 GitHub-OAuth coordinator mint/ownership
     policy** — pair_ot mint, `provider_ownership` anti-check, `ownership_event`
-    on bind, `claim_url` shape — which the portal's GitHub-OAuth mode consumes)
+    emission on bind, and computing `claim_url` from `PORTAL_BASE_URL` (the
+    *emission/mint policy*; the `claim_url` **wire shape** is SPEC-001 v1.5
+    §6.5.1's, above) — which the portal's GitHub-OAuth mode consumes)
   - SPEC-005 v0.3 (§1.3 out-of-scope; §2.1 D1 donation-only; §2.11
     D11 no-new-delivery-infra; §11.4
     `GET /providers/{id}/earnings`; §11.5 route-disabled mode)
@@ -454,9 +464,11 @@ When `github_oauth_enabled: true` (portal) **and** `GITHUB_OAUTH_ENABLED=true`
 paste-bearer. This mode is **shipped** (commit `0935d1e`) and **off in current
 prod**. SPEC-014 owns the **OAuth transport** documented here; the coordinator
 **mint/ownership policy** (pair_ot mint, `provider_ownership` binding,
-`ownership_event`, `claim_url` shape) is owned by **SPEC-003 FR-C10** and the
-ownership frame shapes by **SPEC-001 v1.5** — this section cross-references those
-and does not re-specify them. On any conflict, the owner spec governs.
+`ownership_event` emission, computing `claim_url`) is owned by **SPEC-003 FR-C10**,
+while the **wire shapes** of `pair_ot` / `claim_url` (§6.5.1) and the ownership
+frames `ownership_event` / `needs_claim` (§6.12 / §6.5.2) are owned by **SPEC-001
+v1.5** — this section cross-references those and does not re-specify them. On any
+conflict, the owner spec governs.
 
 #### 2.5.0 Shipped scope — incompletely wired (honest disclosure)
 
@@ -563,13 +575,14 @@ shipped handlers, not inferred):**
   (object root, key `providers`), **not** a bare array — the portal reads
   `body.providers` (`auth_github.go`, `index.html`). Each element is
   `{provider_id, claimed_at, last_seen_at}`; the chooser renders `last_seen_at` as
-  "last seen …" (§2.5.5, §4.5). **Edge case (reconciled v0.9):** with **zero** owned
+  "last seen …" (§2.5.5 chooser state; §5.1 field-source row). **Edge case (reconciled v0.9):** with **zero** owned
   providers the value serializes as `null`, i.e. `{"providers":null}` (Go returns a
   nil slice), which the portal defensively normalizes to `[]` — so the wire value is
   `array | null`, not strictly an array. Those UI/wire fields are enumerated in §5.
 - `POST /v1/auth/me/providers/bind` on success returns
-  `{provider_id, github_login, claimed_at}` (`auth_github.go`); the error codes are
-  §2.5.6's `410 pair_ot_invalid` / `409 already_owned` / `401`. Body handling
+  `{provider_id, github_login, claimed_at}` (`auth_github.go`); the full error-code
+  enumeration `410 pair_ot_invalid` / `409 already_owned` / `401` is in §2.5.5 (§2.5.6
+  covers the `409` anti-check). Body handling
   (reconciled v0.9): a **raw empty HTTP body** is rejected with `400`, but a JSON
   **`{}`** body **succeeds** when the session carries a pending `pair_ot`
   (§2.5.5's logged-out path) — `{}` ≠ empty body.
@@ -1907,7 +1920,7 @@ owning amendment.
 | Spec | What SPEC-014 uses |
 |---|---|
 | SPEC-001 v1.5 | §6.5 hello / hello_ack field set (referenced for Q5 deferral rationale); §6.4 `/v1/health` shape (referenced for A.4 / A.3 deferral rationale); `ownership_event` / `needs_claim` frame shapes consumed by the GitHub-OAuth bind flow (§2.5.6). No edits required for v0.1. |
-| SPEC-002 v1.3.5 | §7.3 token storage opacity; §7.4 `/v1/pool/check` (the portal's ONLY status/identity endpoint — the `tier` label exposed there originates in §7.5 provisional admission state, but the portal MUST NOT call §7.5's operator-keyed endpoints directly); FR-P12 bearer auth. **SPEC-014 reconciles the `state` enum + missing-provider behavior to the SHIPPED `/v1/pool/check` (§4.1: `ready`/`degraded`/`draining`/`unavailable`, 404 miss); SPEC-002 §7.4 is itself STALE on this (documents `unknown`/200) and needs its own reconciliation — see §10.2. That is a SPEC-002 edit, not a SPEC-014 one.** |
+| SPEC-002 v1.3.5 | §7.3 token storage opacity; §7.4 `/v1/pool/check` (the portal's ONLY status endpoint — **in paste-bearer mode** it is also the only identity source; in GitHub-OAuth mode identity + provider selection come from `/v1/auth/me/providers`, §2.5. The `tier` label exposed there originates in §7.5 provisional admission state, but the portal MUST NOT call §7.5's operator-keyed endpoints directly); FR-P12 bearer auth. **SPEC-014 reconciles the `state` enum + missing-provider behavior to the SHIPPED `/v1/pool/check` (§4.1: `ready`/`degraded`/`draining`/`unavailable`, 404 miss); SPEC-002 §7.4 is itself STALE on this (documents `unknown`/200) and needs its own reconciliation — see §10.2. That is a SPEC-002 edit, not a SPEC-014 one.** |
 | SPEC-003 v0.10 | §4 / FR-C2 install flow; §5 / FR-D1 + FR-D2 + FR-D2.1 requirements & sizing; §6.2 CLI subcommand table; FR-C7 advisory version nudge; FR-C9 provisional self-mint token path; **FR-C10 GitHub-OAuth coordinator mint/ownership policy** (pair_ot mint, `provider_ownership` anti-check, `ownership_event`, `claim_url`) consumed by §2.5. No edits required for v0.1. |
 | SPEC-005 v0.3 | §1.3 out-of-scope; §2.1 D1 donation-only; §2.11 D11 no-new-**delivery** infra; §11.4 `/providers/{id}/earnings`; §11.5 route-disabled mode + 401/403/404 contract; §13 `endpoints.provider_earnings.rate_limit_per_minute`. **Reconciled v0.9:** the GitHub-OAuth cookie-session **is** a new server-side auth surface — it does not violate D11 (D11 forbids *delivery* infra, not auth); the auth policy is owned by SPEC-003 FR-C10, and the OAuth transport by this spec's §2.5. No edits required for v0.1. |
 | SPEC-009 v0.1 | §2 ASCII layout precedent; §6 visual tokens (inherited verbatim). No edits required for v0.1. |
@@ -1973,8 +1986,9 @@ The user shared screenshots from a competitor seller portal
   turn `github_oauth_enabled:true` into a working mode; the reference
   `dist/nginx-portal.streamvc.live.conf` does NOT yet include these):**
   - **Proxy `/v1/auth/*` to the coordinator's PROVIDER mux (`:8444`)** at the portal
-    origin — **not** the buyer mux. All six `/v1/auth/*` routes **and**
-    `/v1/install/pair/refresh` are registered on `wsServer.Handler()`, which is
+    origin — **not** the buyer mux. All **five** `/v1/auth/*` routes (§2.5.2) **plus**
+    the separately-prefixed `/v1/install/pair/refresh` — **six gated routes total** —
+    are registered on `wsServer.Handler()`, which is
     mounted on `providerMux` (`cmd/coordinator/main.go`), whose production port is
     `:8444` (`dist/coordinator.yaml`). The public coordinator nginx
     (`dist/nginx-coordinator.streamvc.live.conf`) intentionally 404s generic
