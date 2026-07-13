@@ -941,6 +941,9 @@ func main() {
 			JoinBaseURL:      cfg.Referrals.JoinBaseURL,
 			RequestAccessURL: cfg.Referrals.RequestAccessURL,
 			Metrics:          metricsHandle,
+			ErrorLogger: func(op string, err error) {
+				logger.Error().Err(err).Str("op", op).Msg("referral endpoint operational error")
+			},
 		}
 		if cfg.Referrals.EnableSocialInviteBonus {
 			xClient := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)

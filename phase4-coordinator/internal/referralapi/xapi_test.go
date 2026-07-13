@@ -81,12 +81,16 @@ func mustURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-// TestXLookupClassifiesTransientVsTerminal is the FIX-570 M3 regression: only a
-// confirmed gone/protected post (404/410/403) is terminal; rate limits, server
-// errors, and transport failures are transient so promotion retries instead of
-// permanently denying the bonus.
+// TestXLookupClassifiesTransientVsTerminal is the FIX-570 M3 / M2(adv) regression:
+// 404/410 are terminal (post gone); a 403 is terminal ONLY when its body proves
+// the post/author is unavailable, and transient for a credential/project/access
+// 403; rate limits, server errors, and transport failures are transient so
+// promotion retries instead of permanently denying the bonus.
 func TestXLookupClassifiesTransientVsTerminal(t *testing.T) {
-	newClient := func(status int, transportErr error) *XAPIClient {
+	newClient := func(status int, body string, transportErr error) *XAPIClient {
+		if body == "" {
+			body = "{}"
+		}
 		return &XAPIClient{
 			bearer:   "x-token",
 			joinBase: mustURL(t, "https://coordinator.streamvc.live/j"),
@@ -96,26 +100,43 @@ func TestXLookupClassifiesTransientVsTerminal(t *testing.T) {
 				}
 				header := make(http.Header)
 				header.Set("Content-Type", "application/json")
-				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("{}")), Header: header}, nil
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
 			})},
 		}
 	}
-	terminalStatuses := []int{http.StatusNotFound, http.StatusGone, http.StatusForbidden}
+	terminalStatuses := []int{http.StatusNotFound, http.StatusGone}
 	for _, st := range terminalStatuses {
-		_, err := newClient(st, nil).LookupPostAuthor(context.Background(), "123")
+		_, err := newClient(st, "", nil).LookupPostAuthor(context.Background(), "123")
 		if !errors.Is(err, ErrXPostTerminal) {
 			t.Fatalf("status %d: want terminal, got %v", st, err)
 		}
 	}
 	transientStatuses := []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable}
 	for _, st := range transientStatuses {
-		_, err := newClient(st, nil).LookupPostAuthor(context.Background(), "123")
+		_, err := newClient(st, "", nil).LookupPostAuthor(context.Background(), "123")
 		if !errors.Is(err, ErrXPostTransient) {
 			t.Fatalf("status %d: want transient, got %v", st, err)
 		}
 	}
+
+	// FIX-570 M2(adv): a credential/project 403 is TRANSIENT (our access problem,
+	// not the post's).
+	credential403 := `{"title":"Forbidden","detail":"When authenticating requests to the Twitter API v2 endpoints, you must use keys and tokens from a developer App that is attached to a Project. Client is not enrolled.","reason":"client-not-enrolled"}`
+	if _, err := newClient(http.StatusForbidden, credential403, nil).LookupPostAuthor(context.Background(), "123"); !errors.Is(err, ErrXPostTransient) {
+		t.Fatalf("credential 403: want transient, got %v", err)
+	}
+	// A generic/empty 403 is ambiguous → transient (fail safe).
+	if _, err := newClient(http.StatusForbidden, "{}", nil).LookupPostAuthor(context.Background(), "123"); !errors.Is(err, ErrXPostTransient) {
+		t.Fatalf("ambiguous 403: want transient, got %v", err)
+	}
+	// A 403 proving the author is suspended/protected is TERMINAL.
+	postGone403 := `{"errors":[{"title":"Forbidden","detail":"User has been suspended.","reason":"suspended"}]}`
+	if _, err := newClient(http.StatusForbidden, postGone403, nil).LookupPostAuthor(context.Background(), "123"); !errors.Is(err, ErrXPostTerminal) {
+		t.Fatalf("post-unavailable 403: want terminal, got %v", err)
+	}
+
 	// Transport error is transient.
-	if _, err := newClient(0, io.ErrUnexpectedEOF).LookupPostAuthor(context.Background(), "123"); !errors.Is(err, ErrXPostTransient) {
+	if _, err := newClient(0, "", io.ErrUnexpectedEOF).LookupPostAuthor(context.Background(), "123"); !errors.Is(err, ErrXPostTransient) {
 		t.Fatalf("transport error: want transient, got %v", err)
 	}
 }

@@ -30,6 +30,56 @@ var (
 	ErrXPostTransient = errors.New("x post lookup transient failure")
 )
 
+// forbiddenProvesPostUnavailable parses a bounded X API v2 error body and reports
+// whether a 403 CONFIRMS the POST itself is unavailable (suspended/protected/
+// deleted author or tweet) rather than an issue with our own API credentials,
+// project, subscription, access level, or permissions. FIX-570 M2(adv): only a
+// proven post-unavailable 403 is terminal; everything else (client-not-enrolled,
+// insufficient access, generic Forbidden) is transient. Unparseable bodies are
+// treated as ambiguous → transient (fail safe: never permanently deny a bonus on
+// an unproven signal).
+func forbiddenProvesPostUnavailable(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var parsed struct {
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+		Reason string `json:"reason"`
+		Type   string `json:"type"`
+		Errors []struct {
+			Title   string `json:"title"`
+			Detail  string `json:"detail"`
+			Message string `json:"message"`
+			Reason  string `json:"reason"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return false
+	}
+	fields := []string{parsed.Title, parsed.Detail, parsed.Reason, parsed.Type}
+	for _, e := range parsed.Errors {
+		fields = append(fields, e.Title, e.Detail, e.Message, e.Reason)
+	}
+	// Markers that prove the POST/author is the reason (terminal).
+	postUnavailable := []string{"suspended", "protected", "deleted", "not-found", "not found", "unavailable"}
+	// Markers that prove OUR credentials/project are the reason (transient) — these
+	// veto a terminal classification even if an ambiguous word co-occurs.
+	credentialIssue := []string{"client-not-enrolled", "not enrolled", "access level", "insufficient", "unauthorized client", "product", "subscription", "usage cap", "consumer key"}
+	joined := strings.ToLower(strings.Join(fields, " \x00 "))
+	for _, m := range credentialIssue {
+		if strings.Contains(joined, m) {
+			return false
+		}
+	}
+	for _, m := range postUnavailable {
+		if strings.Contains(joined, m) {
+			return true
+		}
+	}
+	return false
+}
+
 func ParseXPostID(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "x.com") || u.Port() != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -97,13 +147,22 @@ func (c *XAPIClient) fetchPost(ctx context.Context, postID string) (xPostPayload
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		// FIX-570 M3: only a confirmed gone/inaccessible post is terminal. Rate
-		// limits and server errors are transient and must be retried, never used
-		// to permanently deny the bonus.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		// FIX-570 M3/M2(adv): only a CONFIRMED gone/inaccessible post is terminal.
+		// 404/410 prove the post is gone. A 403 is ambiguous — it may be the post
+		// (protected/suspended author) OR our own credential/project/permission/
+		// access-level failure. Parse the structured X error body and treat a 403 as
+		// terminal ONLY when it proves post deletion/protection; a credential/project
+		// 403 (and every other status, e.g. 429/5xx) is transient and must be
+		// retried, never used to permanently deny the bonus.
 		switch resp.StatusCode {
-		case http.StatusNotFound, http.StatusGone, http.StatusForbidden:
+		case http.StatusNotFound, http.StatusGone:
 			return payload, fmt.Errorf("x lookup status %d: %w", resp.StatusCode, ErrXPostTerminal)
+		case http.StatusForbidden:
+			if forbiddenProvesPostUnavailable(errBody) {
+				return payload, fmt.Errorf("x lookup status 403 (post unavailable): %w", ErrXPostTerminal)
+			}
+			return payload, fmt.Errorf("x lookup status 403 (ambiguous/credential): %w", ErrXPostTransient)
 		default:
 			return payload, fmt.Errorf("x lookup status %d: %w", resp.StatusCode, ErrXPostTransient)
 		}

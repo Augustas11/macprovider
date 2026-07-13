@@ -74,6 +74,16 @@ type Handler struct {
 	// validated deployment setting; when empty the request-access CTA is NOT
 	// rendered (no dead default link) — the pages still offer the "Learn more" CTA.
 	RequestAccessURL string
+	// ErrorLogger, when set, receives the underlying error behind an operational
+	// (non-referral) failure so it is not silently swallowed by a branded page
+	// (FIX-570 M1). The op string identifies the failing operation.
+	ErrorLogger func(op string, err error)
+}
+
+func (h *Handler) logError(op string, err error) {
+	if h.ErrorLogger != nil {
+		h.ErrorLogger(op, err)
+	}
 }
 
 // requestAccessURL returns the configured, validated request-access destination,
@@ -228,6 +238,15 @@ var joinRevokedPage = template.Must(template.New("join-revoked").Parse(`<!doctyp
 <style>` + brandedUnavailableStyle + `</style></head>
 <body><main><p>Malibu pre-beta</p><h1>This invite is no longer available.</h1><div class="card"><p>This invite is no longer active. Ask your inviter for another invite, or learn more below.</p><div class="actions">{{if .RequestAccessURL}}<a href="{{.RequestAccessURL}}">Request access</a>{{end}}<a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
 
+// FIX-570 M1(adv): a transient/operational validation failure renders this
+// branded retryable state instead of a raw 404 (which falsely presents a valid
+// code as malformed).
+var joinUnavailablePage = template.Must(template.New("join-unavailable").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title>
+<style>` + brandedUnavailableStyle + `</style></head>
+<body><main><p>Malibu pre-beta</p><h1>We couldn't check this invite.</h1><div class="card"><p>Something went wrong on our side while checking your invite. This is temporary — please try again in a moment.</p><div class="actions"><a href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
+
 // FIX-570 A9: when the referral gate is disabled the /j route stays mounted and
 // serves an open-beta landing rather than 404ing links already in circulation.
 var joinOpenBetaPage = template.Must(template.New("join-open").Parse(`<!doctype html>
@@ -294,9 +313,25 @@ func (h *Handler) HandleJoin(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrReferralRevoked):
 		h.renderBrandedJoin(w, r, joinRevokedPage, "revoked")
 		return
-	case err != nil:
+	case errors.Is(err, auth.ErrReferralInvalid):
+		// Genuinely malformed / forged code.
 		h.observe("join", "not_found")
 		http.NotFound(w, r)
+		return
+	case err != nil:
+		// FIX-570 M1(adv): an operational failure (DB lock, I/O, context cancel,
+		// corrupt stored time) must NOT be presented as a malformed code (raw 404).
+		// Render a branded retryable state and log the underlying error.
+		h.logError("join_validate", err)
+		h.observe("join", "error")
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = joinUnavailablePage.Execute(w, nil)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

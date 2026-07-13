@@ -323,6 +323,46 @@ func TestJoinBrandedUnavailablePagesCarryRequestAccessURL(t *testing.T) {
 	}
 }
 
+// joinErrStore returns an operational error from ValidateReferral; all other
+// Store methods are unimplemented (HandleJoin only calls ValidateReferral).
+type joinErrStore struct {
+	Store
+	err error
+}
+
+func (s joinErrStore) ValidateReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ReferralValidation, error) {
+	return auth.ReferralValidation{}, s.err
+}
+
+// TestJoinOperationalErrorRendersRetryableNot404 is the FIX-570 M1(adv)
+// regression: an operational failure (DB lock, I/O, ctx cancel, corrupt time)
+// while validating a VALID code must render a branded retryable 503 and log the
+// error — never a raw 404 that presents the code as malformed.
+func TestJoinOperationalErrorRendersRetryableNot404(t *testing.T) {
+	var logged error
+	h := &Handler{
+		Store:         joinErrStore{err: errors.New("database is locked")},
+		Policy:        apiPolicy(),
+		Now:           time.Now,
+		PublicLimiter: NewBoundedLimiter(100, time.Minute, 100),
+		ErrorLogger:   func(_ string, err error) { logged = err },
+	}
+	w := httptest.NewRecorder()
+	h.HandleJoin(w, httptest.NewRequest(http.MethodGet, "/j/MAL1-S-k1-launch-aaaaaaaaaaaaaaaaaaaaaaaaaa", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("operational error status=%d want 503; body=%s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatalf("503 must carry Retry-After")
+	}
+	if !strings.Contains(w.Body.String(), "We couldn't check this invite") {
+		t.Fatalf("expected branded retryable page, got %s", w.Body.String())
+	}
+	if logged == nil {
+		t.Fatalf("underlying operational error must be logged")
+	}
+}
+
 // TestJoinBrandedPagesHideRequestAccessWhenUnset is the FIX-570 PROD-H1
 // regression: with no configured request-access URL the branded pages must NOT
 // render a request-access CTA (and never the dead /request-access default), but
