@@ -58,6 +58,9 @@ Confirm all of the following:
 - production nginx exposes the exact validation, provider-status, X-challenge,
   and X-verification routes to the buyer mux while the `/v1/` catch-all remains
   deny-by-default;
+- validation, provider-status polling, and social mutations use their separate
+  `referral_*_rate` nginx zones rather than the provider WebSocket zone, and
+  `nginx -t` succeeds with both production vhosts loaded;
 - `referrals.request_access_url` is empty unless it points to a delivery-tested
   access-request flow; do not relabel the host download or troubleshooting
   pages as access request;
