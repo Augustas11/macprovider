@@ -13,6 +13,37 @@ fail() {
   exit 1
 }
 
+cat >"$TMP/libressl" <<'EOF'
+#!/usr/bin/env bash
+echo 'LibreSSL 3.3.6'
+EOF
+chmod +x "$TMP/libressl"
+if OPENSSL_BIN="$TMP/libressl" python3 "$VERIFY" verify \
+  >"$TMP/libressl.out" 2>"$TMP/libressl.err"; then
+  fail "catalog verifier accepted LibreSSL for Ed25519 verification"
+fi
+grep -q 'OPENSSL_BIN must identify a trusted OpenSSL 3 or newer executable' \
+  "$TMP/libressl.err"
+
+cat >"$TMP/openssl-1" <<'EOF'
+#!/usr/bin/env bash
+echo 'OpenSSL 1.1.1w  11 Sep 2023'
+EOF
+chmod +x "$TMP/openssl-1"
+if OPENSSL_BIN="$TMP/openssl-1" python3 "$VERIFY" verify \
+  >"$TMP/openssl-1.out" 2>"$TMP/openssl-1.err"; then
+  fail "catalog verifier accepted OpenSSL 1.1 for Ed25519 verification"
+fi
+grep -q 'OPENSSL_BIN must identify a trusted OpenSSL 3 or newer executable' \
+  "$TMP/openssl-1.err"
+
+if OPENSSL_BIN=openssl python3 "$VERIFY" verify \
+  >"$TMP/relative.out" 2>"$TMP/relative.err"; then
+  fail "catalog verifier accepted a relative OPENSSL_BIN override"
+fi
+grep -q 'OPENSSL_BIN must be an absolute path to OpenSSL 3 or newer' \
+  "$TMP/relative.err"
+
 stage_release() {
   rm -rf "$TMP/release"
   mkdir -p "$TMP/release"
@@ -47,6 +78,13 @@ spec.loader.exec_module(module)
 canonical = pathlib.Path(sys.argv[2])
 static = pathlib.Path(sys.argv[3])
 coordinator_config = pathlib.Path(sys.argv[4])
+
+assert module.root_trusted_executable("/usr/bin/true")
+with tempfile.TemporaryDirectory() as directory:
+    user_owned = pathlib.Path(directory) / "openssl"
+    user_owned.write_text("#!/bin/sh\nexit 0\n")
+    user_owned.chmod(0o755)
+    assert not module.root_trusted_executable(str(user_owned))
 
 def rejected(label, operation):
     try:

@@ -11,6 +11,8 @@ import math
 import os
 import pathlib
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -33,6 +35,8 @@ MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
+OPENSSL_PROBE_TIMEOUT_SECONDS = 5
+OPENSSL_VERIFY_TIMEOUT_SECONDS = 15
 
 
 class CatalogError(RuntimeError):
@@ -348,6 +352,73 @@ def parse_sidecar(data: bytes, label: str) -> tuple[str, bytes]:
     return value["key_id"], signature
 
 
+def root_trusted_executable(candidate: str) -> bool:
+    path = pathlib.Path(candidate)
+    if not path.is_absolute() or ".." in path.parts:
+        return False
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return False
+
+    for checked_path in {path, resolved}:
+        current = pathlib.Path(checked_path.anchor)
+        components = [current]
+        for component in checked_path.parts[1:]:
+            current /= component
+            components.append(current)
+        for component in components:
+            try:
+                metadata = component.lstat()
+            except OSError:
+                return False
+            if metadata.st_uid != 0:
+                return False
+            if not stat.S_ISLNK(metadata.st_mode) and metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+
+    try:
+        return resolved.is_file() and os.access(resolved, os.X_OK)
+    except OSError:
+        return False
+
+
+def openssl_executable() -> str:
+    override = os.environ.get("OPENSSL_BIN")
+    if override and not pathlib.Path(override).is_absolute():
+        fail("OPENSSL_BIN must be an absolute path to OpenSSL 3 or newer")
+    candidates = [override] if override else [
+        "/opt/homebrew/opt/openssl@3/bin/openssl",
+        "/usr/local/opt/openssl@3/bin/openssl",
+        shutil.which("openssl"),
+    ]
+
+    checked: list[str] = []
+    for candidate in candidates:
+        if not candidate or candidate in checked:
+            continue
+        checked.append(candidate)
+        if os.geteuid() == 0 and not root_trusted_executable(candidate):
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=OPENSSL_PROBE_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        version = re.match(r"^OpenSSL ([0-9]+)\.", result.stdout)
+        if result.returncode == 0 and version and int(version.group(1)) >= 3:
+            return candidate
+
+    if override:
+        fail("OPENSSL_BIN must identify a trusted OpenSSL 3 or newer executable; LibreSSL and OpenSSL 1.x are unsupported")
+    fail("OpenSSL 3 or newer is required for Ed25519 catalog verification; LibreSSL and OpenSSL 1.x are unsupported")
+
+
 def verify_ed25519(public_key: bytes, signature: bytes, message: bytes, label: str) -> None:
     # RFC 8410 SubjectPublicKeyInfo prefix for a raw Ed25519 public key.
     spki = bytes.fromhex("302a300506032b6570032100") + public_key
@@ -359,13 +430,17 @@ def verify_ed25519(public_key: bytes, signature: bytes, message: bytes, label: s
         pub_path.write_bytes(spki)
         sig_path.write_bytes(signature)
         msg_path.write_bytes(message)
-        result = subprocess.run(
-            ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(pub_path),
-             "-keyform", "DER", "-rawin", "-in", str(msg_path), "-sigfile", str(sig_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [openssl_executable(), "pkeyutl", "-verify", "-pubin", "-inkey", str(pub_path),
+                 "-keyform", "DER", "-rawin", "-in", str(msg_path), "-sigfile", str(sig_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=OPENSSL_VERIFY_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            fail(f"{label}: signature verification timed out")
     if result.returncode != 0:
         fail(f"{label}: signature verification failed")
 
