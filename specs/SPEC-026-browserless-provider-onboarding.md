@@ -1,6 +1,25 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.14 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.15 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.15 (2026-07-13, R2 audit-loop straggler sweep — code source of truth).**
+The v0.14 reconciliation stated the correct fail-closed rules in the §intro v0.13
+changelog but left the §4 body and several live sections carrying pre-hardening /
+pre-#418 prose. The R2 codex 3-lane audit (code / security / architect) surfaced the
+tail; v0.15 sweeps it. **Security money-path:** §4.1 duplicate-register now requires
+current-bearer proof for **any** active token (no never-handshaked bypass, matching
+`tokens.go:945-975`); §4.3 receipt-key rotation is verified against the **stored** key
+and a differing initial-frame key is REJECTED as self-declared proof
+(`identity_signature.go:153-159`); §4.2 wallet binding carries a **SPEC-027-gated /
+`501`** banner (not live EIP-712); App Attest **rejects** malformed/binding/invalid
+evidence (`400`/`409`) and degrades **only** transient failures (`apptrack.go:346-388`);
+the §5.3 hash algorithm now hashes `ts_utc` as **Unix seconds** (`apptrack.go:518`).
+**Dormant App-track apparatus** marked outside banners: §0 identity key, §1.1 success
+criteria, §4.1 caller (shipped uses `bootstrap-auth`/WS admission, NOT §4.1 register),
+§6.1 step 3, §6.2, §7.1 module, §7.6, §9.1 reinstall, §10 deploy-gate framing.
+**Shipped-fidelity:** §1.1 resumable claim, §6.4 retry-from-scratch + all-retryable,
+§6.1 success-card static counters, AC-026-02 installer-string exception, §8 route-row 2,
+§8.4 3-arg `saveProviderIdentity`, `Downloads/` capitalization, key-custody wording.
 
 **Change log v0.14 (2026-07-13, CLI-wrapper client-architecture reconciliation — spec
 matched to shipped code; code is source of truth):** The **CLI-wrapper refactor (PR
@@ -583,6 +602,11 @@ against v0.3 landed 0 CRITICAL / 4 HIGH / 18 MEDIUM
   key when it differs from the stored key, then commits the
   rotation after auth acceptance. This preserves SPEC-015's
   reconnect-based rotation model.
+  **(Superseded by v0.13 / reconciled §4.3 — the shipped verifier
+  validates against the STORED key and REJECTS a differing
+  initial-frame key as self-declared proof; rotation is authorized
+  out-of-band by SPEC-015 §7.5's old-key-signed path. See
+  `identity_signature.go:153-159`.)**
 - **§5.2 Trust unlock requires at least one economic criterion.**
   v0.3 "any two of five" allowed 72h uptime + valid App Attest
   to unlock Trusted with zero economic cost — a hole the audit
@@ -767,9 +791,13 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   `streamvc.live`, or "node".
 - **CLI track** — existing `macprovider-cli` binary launched via
   `install.sh` by developer users. Coexists unchanged.
-- **Provider identity key** — Ed25519 keypair generated on first launch
-  of the App track and stored in Keychain slot `provider_identity_v1`.
-  Distinct from the SPEC-015 receipt key. Same algorithm
+- **Provider identity key** — Ed25519 keypair DEFINED for the App track,
+  stored in Keychain slot `provider_identity_v1`, distinct from the
+  SPEC-015 receipt key. **DORMANT in the shipped build (reconciled
+  v0.15):** `ProviderIdentity.loadOrGenerate`/`isReady` have zero
+  production callers (§3, §7.1); the shipped monitor-only onboarding
+  never generates or uses this key — provider identity in the shipped
+  flow is the CLI-track `mp-<32hex>` principal (§2). Same algorithm
   (`Curve25519.Signing.PrivateKey`, generated the same way as the
   SPEC-015 receipt key at
   `phase3-binary/Sources/macprovider-cli/ReceiptKeyStore.swift:41`)
@@ -803,30 +831,42 @@ and without entering a wallet address unless they want to.
   No `portal.streamvc.live` URL appears in the UI or logs. No GitHub
   OAuth screen. No wallet-signing prompt.
 - **≤ 1 click of user intent.** After launch, a single button starts
-  every background step: identity generation, coordinator registration,
-  local autotune, model download, agent start, first heartbeat.
+  every background step. **Reconciled v0.15 to the shipped CLI-wrapper:**
+  the button runs the bundled `install.sh`, which performs
+  `bootstrap-auth` credential acquisition (`mp-*` principal over WS
+  admission — §2/§4.1), SPEC-023 autotune, model download, and launchd
+  watchdog install; the app then adopts and monitors the launchd CLI
+  (§3, §6.1). There is no in-app "identity generation" or HTTP
+  coordinator-registration step — that App-track apparatus is dormant
+  (§3/§4.1).
 - **In-window progress and success.** Every step's progress and the
   final "Provider live · <model> · <USDC/MALIBU counters>" success card
   render inside the same `NSWindow`. No menu-bar-only completion. No
   secondary dashboard window opening automatically.
-- **Resumable.** Closing the window mid-download does not cancel the
-  task. Reopening rehydrates state from disk + Keychain + partial
-  downloads and the progress ring picks up where it left off.
+- **Resumable.** Closing the window mid-install does not cancel the
+  underlying `LaunchProviderController` Task. **Reconciled v0.15:** the
+  shipped app resumes by retaining the in-memory controller (the window
+  rebinds to it, §6.3); it does NOT persist resumable onboarding state —
+  `onboarding.json` is legacy decode-only and production writes no
+  progress checkpoint (`OnboardingState.swift`, §7.5). On a full app
+  restart mid-install, routing re-derives state from disk evidence +
+  Keychain (§8) and re-runs `install.sh` if incomplete.
 - **Wording.** No user-facing string contains "node". Everywhere it
   currently reads "node", the App track reads "provider".
 
 ### 1.2 Non-goals (v0.2)
 
 - Wallet-signing UX **during onboarding**. Not in the onboarding
-  flow. Post-onboarding wallet binding IS supported and composes
-  with SPEC-016 §3 EIP-712 wallet proof-of-possession unchanged
-  (see §4.2 + §6.1 step 7j).
+  flow. Post-onboarding wallet binding is **SPEC-027-gated, not shipped**
+  (reconciled v0.15): the designed SPEC-016 §3 EIP-712 composition lives
+  behind the §4.2 / §6 SPEC-027 banner (coordinator returns `501`,
+  `setPayoutWallet` throws). See §4.2 + §6.1 step 8.
 - WalletConnect / Rainbow / Rabby deep-link integration.
 - In-app wallet creation.
 - Retiring the CLI-track `install.sh` path. This spec does not force
   any change on developer users.
 - Automated model-selection driven by coordinator. SPEC-023 autotune
-  stays on-device (§4.1 response, §6.1 step 7c).
+  stays on-device (run by `install.sh` during §6.1 step 7b).
 - Identity-key rotation semantics. Deferred to a follow-up spec (§13).
 
 ## 2. What already exists (grounding)
@@ -855,8 +895,9 @@ and without entering a wallet address unless they want to.
 - [SPEC-016 §3](./SPEC-016-payout-pipeline.md) — provider payout-address
   registration with EIP-712 wallet proof-of-possession, hot-wallet
   reconfirm, `provider_payout_addresses` table. SPEC-026 does not
-  modify this endpoint; it plugs the App-track wallet-binding UI into
-  it unchanged.
+  modify this endpoint; the App-track wallet-binding UI that would plug
+  into it is **SPEC-027-gated and disabled in the shipped build** (§4.2
+  banner — coordinator `501`, `setPayoutWallet` throws).
 - [SPEC-022](./SPEC-022-verified-model-settlement.md) — verified-model
   settlement, keyed off provider receipt-key identity. Unchanged.
 - [SPEC-023](./SPEC-023-installer-autotune-recommend.md) — local
@@ -904,9 +945,12 @@ and without entering a wallet address unless they want to.
 
 ### 3.1 Key generation
 
-On first launch of `Malibu.app`, `LaunchProviderController` (new
-class, see §7) generates a fresh Ed25519 keypair via
-`Curve25519.Signing.PrivateKey()`. The **32-byte raw representation**
+In the DESIGNED (client-dormant, see §3 banner) flow,
+`ProviderIdentity.loadOrGenerate()` (§7.1) generates a fresh Ed25519
+keypair via `Curve25519.Signing.PrivateKey()` on first launch —
+reconciled v0.15: **no production caller invokes this** in the shipped
+app; the shipped `LaunchProviderController` does not generate an
+identity key. The **32-byte raw representation**
 (`privkey.rawRepresentation`) is stored in the macOS Keychain with:
 
 - `kSecClass = kSecClassGenericPassword`
@@ -914,10 +958,13 @@ class, see §7) generates a fresh Ed25519 keypair via
 - `kSecAttrService` = the app bundle identifier (`tech.malibu.app`)
 - `kSecAttrAccount` = `provider_identity_v1`
 
-The key never leaves the Keychain and never enters any child
-process's environment. All signatures are produced by loading the
-private key inside the App target's `ProviderIdentity` module and
-signing in-process. See §7.1.
+The key is never passed to a child process or environment (reconciled
+v0.15 — the accurate guarantee: it is not exported to a subprocess. It
+IS read into the App target's own process memory to sign in-process —
+`ProviderIdentity.swift:172` — so "never leaves the Keychain" means no
+subprocess handoff, not that it stays out of app memory). All signatures
+are produced by loading the private key inside the App target's
+(dormant) `ProviderIdentity` module and signing in-process. See §7.1.
 
 ### 3.2 Relationship to the SPEC-015 receipt key
 
@@ -1004,9 +1051,15 @@ registration to succeed.
 
 ### 4.1 `POST /v1/providers/register`
 
-**Client note (reconciled v0.14).** This coordinator endpoint and its request/response
-schema are **unchanged and still conform**. What changed is the *caller*: in the shipped
-CLI-wrapper flow the **`install.sh`/CLI track performs the registration**, not the app.
+**Client note (reconciled v0.15).** This coordinator endpoint and its request/response
+schema are **unchanged and still conform as a coordinator contract**, but it has **NO
+shipped caller — neither the app nor `install.sh` calls §4.1.** The shipped onboarding
+does not use HTTP `/v1/providers/register` at all: `install.sh` runs `bootstrap-auth`
+(`phase3-binary/dist/install.sh:3112`), which acquires the `provider_token` over the
+coordinator **WebSocket** admission handshake (`BootstrapAuthCommand.swift:50`;
+`CoordinatorClient.swift:569-575,1989-2056`) using an `mp-<32hex>` receipt identity
+(`install.sh:2484`) — see §2 grounding. (Earlier reconciliations said "install.sh
+performs the §4.1 registration"; that was wrong — install.sh uses WS admission, not §4.1.)
 `Malibu.app`'s `RegisterClient` retains the full machinery to build a canonical,
 Ed25519-signed register body and validate the returned `coordinator_ws_url`
 (same-origin, redirect-Authorization-stripped — `RegisterClient.swift:74-228,319-361`),
@@ -1015,7 +1068,9 @@ and it is unit-tested (`RegisterClientTests`), but `RegisterClient.postRegister`
 App Attest fields (`app_attest_object` / `app_attest_key_id`) are optional passthrough
 params defaulting to `nil`; **no `DCAppAttestService` attestation is implemented in the
 app tree** (team/bundle pins are enforced coordinator-side per §5.3, not minted by the
-shipped app). The body below is the wire contract the CLI/installer conforms to.
+shipped app). The `p_*` body below is the DESIGNED wire contract for §4.1; it is **NOT**
+what the shipped `install.sh` sends (which uses `bootstrap-auth` / WS admission, above).
+Read it as a coordinator surface awaiting a client that drives it.
 
 ```
 Content-Type: application/json
@@ -1036,9 +1091,15 @@ Content-Type: application/json
 **Size limits (SEC-8):** request body ≤ 8 KiB.
 `app_attest_object` ≤ 4 KiB. CBOR parse is bounded (max depth 8, max
 elements 128) with a 2-second verification timeout. Oversized bodies
-return `413 Payload Too Large`. Malformed CBOR that fails to parse
-returns `400 Bad Request` (distinct from "parsed but did not verify"
-which continues with `trust.attested = false` per step 5 below).
+return `413 Payload Too Large`. Malformed evidence returns `400`
+(reconciled v0.15 to shipped `internal/onboarding/apptrack.go:346-388`:
+malformed base64/CBOR, a missing/invalid `app_attest_key_id`, or an
+App-Attest **binding** failure all return `400`; cross-provider key
+reuse returns `409`; unconfigured pins return `503`). Only a
+**cleanly-parsed attestation that verifies false** OR a **transient
+Apple-service error** (`ErrAppAttestTransient` / timeout) degrades to
+`trust.attested = false` — structurally invalid evidence is rejected,
+not silently downgraded.
 
 `signature` is Ed25519 over `JCS(body_without_signature)` per RFC
 8785. The App target owns an App-local Swift canonicalizer under
@@ -1072,9 +1133,13 @@ Coordinator MUST:
    b. Verify `app_attest_key_id` matches the attestation object's
       keyId and has not been seen for a DIFFERENT `provider_id`
       (uniqueness: reject with `409` on cross-provider-id reuse).
-   c. Record `trust.attested = true`. Missing / structurally invalid
-      / verify-failed attestation is NOT a rejection unless it fails
-      the size gate above — it means `trust.attested = false`.
+   c. On successful verification, record `trust.attested = true`.
+      Reconciled v0.15 to shipped `apptrack.go:346-388`: **malformed,
+      structurally invalid, binding-failed, or key-reused** evidence is
+      REJECTED (`400`/`409`/`413`/`503`), NOT downgraded. Only a
+      cleanly-parsed attestation that verifies false, a transient
+      Apple-service error, or a **missing** `app_attest_object` yields
+      `trust.attested = false`.
 6. Upsert into `provider_identities` keyed by `provider_id`. TOFU: if
    a row exists with a different `identity_pubkey`, reject `409
    CONFLICT`.
@@ -1090,13 +1155,14 @@ Coordinator MUST:
    `token_hash`, not cleartext, so a "return the existing token"
    idempotency is not buildable. Instead, on duplicate `/register`:
 
-   - **Same `identity_pubkey`, prior row with `revoked_at IS NULL AND
-     last_used_at IS NULL` (never-handshaked):** revoke the prior
-     row (`revoked_at = NOW()`) and mint a fresh token.
-     Idempotent-in-effect for onboarding retries where the previous
-     token was never used. Log `apptrack_register_reissue_fresh`.
-   - **Same `identity_pubkey`, prior row with `last_used_at IS NOT
-     NULL` (live session may exist):** the request MUST prove
+   - **Same `identity_pubkey`, ANY prior active row (`revoked_at IS
+     NULL`, regardless of `last_used_at`) (reconciled v0.15 to the
+     shipped fail-closed custody rule — §intro v0.13; the `provider_tokens`
+     mint at `phase4-coordinator/internal/auth/tokens.go:945-975`
+     sets `requiresProof := lookupErr == nil` and so requires proof
+     whenever an active row exists — there is NO never-handshaked
+     bypass; an unused active token is treated identically):** the
+     request MUST prove
 	     current-token possession via HTTP
 	     `Authorization: Bearer <current_provider_token>` header on this
 	     `/register` call (in addition to the request-body Ed25519
@@ -1104,14 +1170,17 @@ Coordinator MUST:
 	     JSON body, signed JCS payload, fixtures, or logs.
      Coordinator SHA-256 hashes the provided cleartext bearer
      and compares against the active row's `token_hash`. Mismatch
-     or absence → `409 CONFLICT existing_active_token_no_proof`.
+     or absence → `409 CONFLICT existing_active_token_no_proof`
+     (`ErrAppTrackExistingTokenNoProof`, `tokens.go:956`).
      Valid → coordinator revokes the prior row and mints a fresh
-     token. This closes the "spam-register to invalidate live
+     token. This closes the "spam-register to invalidate a live
      session" DoS: an attacker with identity-signing capability
      but not current-token possession cannot force revocation of
-     the honest live session. Additionally, per-provider register
+     the honest session. Additionally, a per-provider register
      cooldown of 5 minutes applies (max 1 successful re-issue per
-     5 minutes) to bound the reissue rate under legitimate use.
+     5 minutes — `apptrack_register_reissues` /
+     `ErrAppTrackReissueCooldown`, `tokens.go:960-969`) to bound the
+     reissue rate under legitimate use.
    - **Different `identity_pubkey`:** reject `409 CONFLICT
      provider_id_pubkey_mismatch` (TOFU, same rule as step 6). Do
      not touch the existing row.
@@ -1135,11 +1204,23 @@ Coordinator MUST:
    }
    ```
 
-   `recommended_model` is NOT returned here. The App runs
-   `macprovider-cli autotune --recommend --json` locally per SPEC-023
-   after minting (see §6.1 step 7c).
+   `recommended_model` is NOT returned here. In the shipped flow
+   `install.sh` runs `macprovider-cli autotune --recommend` on-device
+   per SPEC-023 (§6.1 step 7b); the app does not mint via §4.1 (§4.1
+   client note).
 
 ### 4.2 Payout-address binding — delegate to SPEC-016 §3
+
+> **SPEC-027-gated in the shipped build (reconciled v0.15).** Per the
+> §intro v0.13 rule, App-track wallet binding is **fail-closed**: the
+> shipped coordinator returns `501 wallet_change_requires_spec_027`
+> (`appTrackWalletNotImplementedHandler`, `cmd/coordinator/main.go:1284`)
+> and the app's `setPayoutWallet` throws unconditionally
+> (`LaunchProviderController.swift:94`) with both wallet buttons disabled
+> (`OnboardingWindow.swift:137`, `DashboardWindow.swift:59`). The
+> SPEC-016 §3 EIP-712 delegation described below is the **designed
+> post-SPEC-027 contract**, not shipped behavior. Read-only earnings /
+> "unclaimed backlog" display is fine; the binding **action** is not wired.
 
 **SPEC-026 does not define a new payout-address endpoint.** Wallet
 binding for App-track providers uses SPEC-016 §3
@@ -1173,9 +1254,11 @@ new auth path.
 On first bind, SPEC-016's next payout batch cycle sweeps the
 backlog to the bound wallet without a new spec-level trigger.
 
-**Migration for App-track users:** SPEC-025 §3.2 dashboard adds a
-"Set payout wallet" button that opens the SPEC-016 EIP-712 signing
-flow inline. If the user has no browser wallet, the button links to
+**Migration for App-track users (SPEC-027-gated):** SPEC-025 §3.2's
+dashboard "Set payout wallet" button is **present but disabled** in the
+shipped app (`DashboardWindow.swift:59`; `setPayoutWallet` throws). When
+SPEC-027 wires it, it will open the SPEC-016 EIP-712 signing flow
+inline. If the user has no browser wallet, the button links to
 guidance rather than a browser tab; this stays within the SPEC-026
 §1.1 "no browser tab during onboarding" constraint because wallet
 binding is post-onboarding.
@@ -1400,25 +1483,33 @@ observability, never for auth policy.
   SPEC-015 §12; an implementing PR MUST expose a helper (e.g.
   `phase4-coordinator/internal/receipts.LookupCurrentPubKey(providerID)`)
   that fetches from the same source.
-- **SPEC-015 receipt-key rotation composes as follows:** during a
-  `macprovider rotate-key` reconnect, the client's initial-stage
-  frame carries the new `provider_receipt_public_key` while the
-  coordinator's stored row still holds the old one. Coordinator
-  auth-policy for the proof-stage validation:
-  1. If the initial-stage `provider_receipt_public_key` differs
-     from the stored row, validate `identity_signature` against
-     the **initial-stage-declared** key (the new one). Success
-     means the client possesses the new private key.
-  2. On successful validation AND after any other rotation
-     preconditions in SPEC-015 §7.5 pass, the coordinator commits
-     the new pubkey as the stored value and the old one moves to
-     `receipt_pubkey_prev` per SPEC-015's existing rotation model.
-  3. If the initial-stage key matches the stored key, the flow is
-     the ordinary steady-state auth.
+- **SPEC-015 receipt-key rotation composes as follows (reconciled
+  v0.15 to shipped `phase4-coordinator/internal/ws/identity_signature.go`
+  and the §intro v0.13 old-key rule).** The shipped proof-stage verifier
+  looks up the **stored** receipt pubkey and validates
+  `identity_signature` against it; an initial-stage-declared key that
+  differs from the stored row is **self-declared proof and is REJECTED**.
+  `identity_signature.go:153-159` computes
+  `stored, ok := s.currentReceiptPubkey(...)` and returns `nil, false`
+  unless `bytes.Equal(initial.ProviderReceiptPubkey, stored)`. There is
+  NO inline "validate against the proposed new key" path — a client
+  cannot rotate by presenting a new key in the initial-stage frame.
+  Coordinator auth-policy for the proof-stage validation:
+  1. If the initial-stage `provider_receipt_public_key` matches the
+     stored row, the flow is ordinary steady-state auth — the only
+     case the shipped verifier authorizes.
+  2. If it differs, the frame is rejected (self-declared proof, per
+     §intro v0.13: "a signature that verifies only against the proposed
+     replacement key … MUST be rejected"). Receipt-key rotation is
+     authorized out-of-band by SPEC-015 §7.5's existing old-key-signed
+     rotation model (proof of control of the currently-published key),
+     which updates the stored pubkey and moves the old one to
+     `receipt_pubkey_prev`; only after that update does the new key
+     match `stored` and pass proof-stage auth.
 
-The cutover eliminates the trust-boundary asymmetry between the
-two tracks. SPEC-001 v1.7 candidate will absorb this normative
-text with the exact field names.
+This keeps both tracks fail-closed against self-declared rotation.
+SPEC-001 v1.7 candidate will absorb this normative text with the exact
+field names.
 
 ### 4.4 Retire portal OAuth for the App track
 
@@ -1609,7 +1700,7 @@ clientDataHash = SHA256(JCS({
   coordinator_domain,      // canonical "coordinator.streamvc.live" (bare host, lowercase, no scheme, no trailing slash)
   bundle_id,               // "tech.malibu.app"
   team_id,                 // Apple Developer Team ID that signed the app
-  ts_utc                   // the /register `ts_utc` RFC3339 UTC string
+  ts_utc_unix              // /register `ts_utc` converted to Unix SECONDS (int64) — matches coordinator apptrack.go:518-527; NOT the RFC3339 string (see §5.3 hash-contract banner)
 }))
 ```
 
@@ -1630,11 +1721,15 @@ Valid attestation:
 - bumps `/register` and heartbeat rate limits by 3×
 - displays a green "verified Mac hardware" chip on buyer-facing UI
 
-Invalid or missing attestation is NOT a rejection at the endpoint
-level. Reason: `DCAppAttestService` requires the app be signed by a
-paid Apple Developer Program certificate and Apple's attestation
-service be reachable; either can fail transiently in ways that would
-otherwise block 100% of new providers. Per §11 second-biggest risk,
+Missing attestation, and TRANSIENT attestation failures (Apple service
+unreachable / timeout — `ErrAppAttestTransient`), are NOT a rejection at
+the endpoint level. Reason: `DCAppAttestService` requires the app be
+signed by a paid Apple Developer Program certificate and Apple's
+attestation service be reachable; either can fail transiently in ways
+that would otherwise block 100% of new providers. **Structurally
+invalid / binding-failed / key-reused evidence IS rejected**
+(`apptrack.go:346-388`); only transient failures degrade to
+`trust.attested = false`. Per §11 second-biggest risk,
 attestation-service-error-rate is monitored and criterion #4 is
 loosened during Apple outages.
 
@@ -1687,9 +1782,10 @@ slower payout release. Not required for this spec to ship.
 1. User double-clicks `Malibu.app` from a downloaded `.dmg`.
 2. Menu-bar icon appears. `AppDelegate.applicationDidFinishLaunching`
    fires.
-3. `ProviderIdentity.isReady() == false` AND
-   `ProviderConfig.isConfigured == false`. Neither v1 nor v2 state
-   present.
+3. `ProviderConfig.isConfigured == false` (reconciled v0.15 — the
+   shipped cold-install path gates on config / `.installed-by-app`
+   marker / Keychain bearer only; the `ProviderIdentity.isReady()`
+   check is dormant, §7.1). No configured provider present.
 4. `presentOnboarding()` opens the launch window (same NSWindow as
    today, new content — see §7.2).
 5. Window contents:
@@ -1769,8 +1865,12 @@ slower payout release. Not required for this spec to ship.
 
    - Big check + "Provider live"
    - Model chip: `<autotune-recommended-model>`
-   - Two live counters (USDC today, MALIBU today) — animated
-     from 0. **The MALIBU counter carries a small lock icon +
+   - Two live counters (USDC today, MALIBU today). **Reconciled v0.15:**
+     the shipped success card renders static placeholders (`$—` /
+     `Locked`) until real earnings arrive rather than animating from 0
+     (`OnboardingWindow.swift:129`); the animated-counter + lock-microcopy
+     design below is intended UX, not yet wired.
+     **The MALIBU counter carries a small lock icon +
      inline microcopy "unlocks at Trusted" whenever the
      provider is in Provisional tier** (§5.2), so the
      non-withdrawable state is inherent to the display rather
@@ -1796,9 +1896,10 @@ slower payout release. Not required for this spec to ship.
 ### 6.2 Steady state
 
 Menu-bar icon shows live status per SPEC-025 §3.2. Onboarding window
-does not auto-reopen unless the provider identity or config is
-invalidated (uninstall + reinstall, or Keychain-item deletion
-detected).
+does not auto-reopen unless `ProviderConfig.isConfigured` becomes false
+(reconciled v0.15 — config / `.installed-by-app` marker / Keychain
+bearer, NOT the dormant App identity; e.g. uninstall + reinstall, or
+Keychain bearer-item deletion detected).
 
 **Persistent MALIBU-locked display invariant.** Anywhere in the
 App-track UI where a MALIBU balance or per-day counter is
@@ -1834,10 +1935,11 @@ SPEC-026.
 
 ### 6.3 Window closed mid-setup
 
-Any close during steps 7a–7i cancels the window but not the
-underlying Task. `LaunchProviderController` continues in the
-background. Reopening via the menu bar's "Set up…" item rebinds the
-SwiftUI view to the same controller and picks up mid-animation.
+Any close during the step-7 install sequence cancels the window but not
+the underlying Task. `LaunchProviderController` continues in the
+background (reconciled v0.15). Reopening via the menu bar rebinds the
+SwiftUI view to the same in-memory controller and picks up mid-progress.
+No resumable state is persisted (§1.1, §7.5).
 
 ### 6.4 Errors
 
@@ -1846,12 +1948,18 @@ Any step failure sets the controller to
 
 - Red icon + human copy for the failure (e.g. "Couldn't reach the
   marketplace. Check your connection.")
-- **Primary button: Retry** (retries from the failed stage, not from
-  scratch)
+- **Primary button: Retry** — **reconciled v0.15:** the shipped
+  `retry()` calls `launch()` from the **beginning** (it re-runs the whole
+  install → import → attach sequence, not just the failed stage —
+  `LaunchProviderController.swift:89`), relying on `install.sh`'s
+  short-circuit / idempotence to skip already-completed work.
 - Secondary: "Contact support" (opens `mailto:` — no browser tab)
 
-Non-retryable failures (Keychain unusable, disk full for model
-download) surface with a "Quit" secondary instead of Retry.
+**Reconciled v0.15:** the shipped controller marks **every** failure
+`retryable` (`LaunchProviderController.swift:126,173`), so there is no
+non-retryable "Quit-only" surface in the current build. The "Quit
+secondary for Keychain-unusable / disk-full" case is a designed state
+the shipped code does not yet distinguish.
 
 ### 6.5 Uninstall
 
@@ -1863,7 +1971,7 @@ SPEC-025 §3.4 uninstall flow additionally wipes:
   need to sign closure receipts for in-flight work). SPEC-015 §12
   owns its lifetime.
 - Any partial-download files under
-  `Application Support/Malibu/downloads/`
+  `Application Support/Malibu/Downloads/`
 - The onboarding state JSON at
   `Application Support/Malibu/onboarding.json`
 
@@ -1873,6 +1981,14 @@ settle to the bound wallet regardless of the Mac's fate. See §9.
 ## 7. Swift implementation
 
 ### 7.1 New module: `ProviderIdentity`
+
+> **DORMANT in the shipped build (reconciled v0.15).** This module
+> compiles but has **zero production callers** — `loadOrGenerate()` /
+> `isReady()` are referenced only by tests and the unreachable uninstall
+> / identity-signature responders (§3, §4.3). Shipped onboarding and
+> startup routing gate on `ProviderConfig.isConfigured` (CLI-track `mp-*`
+> bearer), never on `ProviderIdentity`. The signatures below are the
+> designed App-track identity surface, retained but not shipped.
 
 ```swift
 // phase3-binary/app/Sources/Malibu/System/ProviderIdentity.swift
@@ -2035,9 +2151,11 @@ guard await ProviderConfig.isConfigured else { … }                    // :74-7
 - `start()` then calls `monitorInstalledProviderIfPresent()` and **never instantiates
   `CLIChildProcess`** — the daemon is launchd-owned (§6.1, SPEC-025 §5).
 
-**Identity-only state** (Keychain identity present, not yet `isConfigured`) never
-reaches monitoring; `StartupState.route()` sends it to `.showOnboarding` to (re-)run
-`install.sh` (`StartupRouteTests.swift` `app-owned-missing-identity → .showOnboarding`).
+**App-owned-but-unconfigured state** (`.installed-by-app` marker present but not yet
+`isConfigured` — bearer/config incomplete) never reaches monitoring; `StartupState.route()`
+sends it to `.showOnboarding` to (re-)run `install.sh` (reconciled v0.15 — routing keys on
+`ProviderConfig.isConfigured`, not the dormant App identity; `StartupRouteTests.swift`
+`app-owned-missing-identity → .showOnboarding`).
 
 The v0.1 receipt-key env-var handoff (`MACPROVIDER_RECEIPT_KEY_RAW`) remains removed.
 
@@ -2060,7 +2178,7 @@ precedence is (evaluated top-down):
 | Precedence | State | Route |
 |---|---|---|
 | 1 | `config.yaml` present but **no** `.installed-by-app` marker (CLI-owned) → **wins even when the launchd provider is healthy** | `.showImportDialog` (§8.4) |
-| 2 | app-owned (marker) but not yet `isConfigured` / missing app ownership | `.showOnboarding` (run `install.sh`) |
+| 2 | app-owned (marker present) but not yet `isConfigured` (bearer/config incomplete) | `.showOnboarding` (run `install.sh`) |
 | 3 | healthy launchd provider, or launchd install evidence + config, App-owned | `.startAgent` (monitor) |
 | 4 | nothing configured | `.showOnboarding` |
 
@@ -2138,11 +2256,14 @@ would throw `existingConfigNotOwnedByApp` at
      source path, destination Keychain slot, timestamp, provider_id,
      SHA-256 of the token, SHA-256 of the original config, and the
      import backup path.
-  3. Save the `provider_token` to the App-track Keychain slot
-     under the same account/service that
-     `ProviderConfig.saveProviderIdentity(providerID:token:)`
-     uses, then read it back and verify the SHA-256 matches the
-     pending marker.
+  3. Save the `provider_token` to the App-track Keychain slot. The
+     shipped import path is `ProviderConfig.importExistingCLIConfig()`
+     (`ProviderConfig.swift:280-352`), using the same Keychain
+     account/service as
+     `ProviderConfig.saveProviderIdentity(providerID:token:coordinatorWSURL:)`
+     (reconciled v0.15 — note the shipped **3-arg** signature including
+     `coordinatorWSURL`, `ProviderConfig.swift:181`). Then read it back
+     and verify the SHA-256 matches the pending marker.
   4. Persist a 0600 `config.yaml.import-backup` copy of the original
      YAML, then rewrite `config.yaml` with the `provider_token` field
      removed (the disk-side secret is now redundant with the
@@ -2190,8 +2311,12 @@ three outcomes.
 
 ### 9.1 Fresh reinstall / Mac wipe
 
-New Keychain → new Ed25519 identity keypair → new `provider_id` →
-fresh provisional tier. Prior unpaid earnings are lost UNLESS a
+Fresh reinstall re-runs `install.sh`, which generates a new
+`mp-<32hex>` principal and re-acquires a `provider_token` via
+`bootstrap-auth` (reconciled v0.15 — the shipped provider identity is
+the CLI-track `mp-*` principal, NOT the dormant App-track `p_*` Ed25519
+identity; §2, §4.1) → fresh provisional tier. Prior unpaid earnings are
+lost UNLESS a
 payout wallet was bound before the wipe. If bound, earnings settle to
 that wallet on the SPEC-016 next payout batch cycle regardless of the
 Mac's presence — the SPEC-016 pipeline is coordinator-owned and does
@@ -2257,7 +2382,17 @@ Out of scope for v0.2. Support-ticket path only. A future spec may
 introduce a challenge-response recovery for the case where the user
 still has provider identity but has lost the wallet keys.
 
-## 10. Backend deploy checklist (ordered gate for the App-side flag flip)
+## 10. Backend deploy checklist (ordered gate for the App-track designed §4 surface)
+
+> **Reconciled v0.15.** This is the coordinator-**backend** deploy gate
+> for the DESIGNED App-track §4 surface (`/v1/providers/register`, App
+> Attest, `identity_signature` auth-policy). "App-side flag flip"
+> throughout this section means **shipping the CLI-wrapper Sparkle
+> release** (step 9) — PR #418 removed the `onboardingFlow` user default,
+> so there is no runtime flag to flip (§8). The steps below gate when the
+> coordinator may serve the (currently client-dormant) §4 contract; they
+> do NOT gate the shipped monitor-only onboarding, which is already live
+> and uses `bootstrap-auth` / WS admission (§4.1).
 
 The list is a strict ordering; each step MUST pass before the next
 runs.
@@ -2452,8 +2587,16 @@ criteria in §5.2 by 25%.
 - **AC-026-01.** Fresh install on a Mac with no prior Malibu state
   completes onboarding to `.live` in ≤ 3 minutes on a residential
   100 Mbps connection, with the model download counted.
-- **AC-026-02.** No user-visible string during the fresh-install flow
-  contains "node", "GitHub", "streamvc.live", "portal", or "sign in".
+- **AC-026-02 (reconciled v0.15).** No user-visible string in the App's
+  OWN chrome (window headers, buttons, success card) during the
+  fresh-install flow contains "node", "streamvc.live", "portal", or
+  "sign in". **Exception:** the transient progress line scraped from
+  `install.sh` may surface "Downloading provider release from GitHub…"
+  (`CLIInstallRunner.swift:124`), and the onboarding body references the
+  "macprovider CLI" (`OnboardingWindow.swift:43`) — these are the
+  managed-CLI installer's own output, not Malibu-authored marketing
+  copy. The no-"node"/no-"portal"/no-"sign in" brand rule still holds
+  for App-authored strings.
 - **AC-026-03.** No browser tab, external app, or URL scheme handler
   is invoked during a successful fresh install.
 - **AC-026-04 — SUPERSEDED (reconciled v0.14).** It referenced a

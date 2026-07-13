@@ -1,6 +1,20 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.2 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.3 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.3 (2026-07-13, R2 audit-loop straggler sweep — code source of truth).**
+The v0.2 reconciliation left live sections asserting the pre-#418 model that the R2
+codex 3-lane audit (code / security / architect) surfaced. v0.3 sweeps them to match
+shipped code: §2 token custody nuanced (transient 0600 import-backup, not "never on
+disk"); §3.1 normal stage order is `.idle→.runningCLIInstall→.startingAgent→.live`
+(`.importingProviderIdentity` is deferred-retry-only), the installer env is inherited
+(NOT sanitized; `PATH` set only when empty), and finalize gates on
+`ProviderConfig.isConfigured` (bearer), NOT an App Ed25519 identity; §3.2 removes the
+unshipped popover / earnings chart / "Copy diagnostics" / "Quit and Uninstall" (menu is
+plain Quit; left-click opens Dashboard), and refines "Reconnecting" (diagnosed failures
++ attach timeout → `.error`); §7 states the markerless-CLI-owned first-precedence
+`.showImportDialog` route; §12 corrects #2 (the app does NOT invoke `CLIUpdateRunner` —
+`.updateCLI` maps to Sparkle); per-gate launch-error messages distinguished.
 
 **Change log v0.2 (2026-07-13, CLI-wrapper architecture reconciliation — spec matched
 to shipped code; code is source of truth):** The **CLI-wrapper refactor (PR #418,
@@ -65,7 +79,7 @@ From reading `phase3-binary/`:
 | Control-plane IPC | `Sources/macprovider-cli/ControlSocket.swift` — typed JSON frames on Unix socket | **NOT used in the shipped monitor-only flow (reconciled v0.2).** `ControlSocketClient` / `MalibuAgent.connectControl` compile but have no production call site — legacy/test surface only. The wrapper does not open the control socket (§5.2). |
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
 | Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | **Reconciled v0.2:** `install.sh` obtains the token; the wrapper **imports** it from `config.yaml` into the app Keychain via `ProviderConfig.importExistingCLIConfig()` (`ProviderConfig.swift:280-352`), stripping it from `config.yaml`. The wrapper never receives a token from a portal deep-link (that `malibu://` path is removed). |
-| Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2:** `install.sh` writes `config.yaml` (shared with the CLI track). The wrapper does **not** write it; it reads `provider_id`/model/port and moves the token to Keychain (token never stays on disk in the App track). |
+| Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2:** `install.sh` writes `config.yaml` (shared with the CLI track). The wrapper does **not** write the live `config.yaml`; it reads `provider_id`/model/port and moves the token to Keychain. **Token custody (reconciled v0.3 — nuanced, see §7):** the import transiently writes a token-bearing 0600 `config.yaml.import-backup` and deletes it after the Keychain write succeeds, so the token is briefly on disk during import; the *live* `config.yaml` ends token-free. |
 | Watchdog LaunchAgent | the launchd watchdog installed by `install.sh` (evidence: `~/Library/Application Support/macprovider/install_manifest.json` or `~/Library/LaunchAgents/live.streamvc.macprovider.plist`) | **Reconciled v0.2 — the App track DOES install and rely on the watchdog** (via `install.sh`); it is what owns the CLI's lifecycle/restarts. `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
 | Portal | `portal.streamvc.live` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
 | Release manifest / checksum | `scripts/sign-catalog.go`, tier2 release scripts | Feeds the same manifest that Sparkle appcast references |
@@ -89,9 +103,12 @@ From reading `phase3-binary/`:
    (no config, no launchd evidence) routes to onboarding: a single window with a
    coral **Launch Provider** button (no wallet field, no node-link step, no browser).
 5. User clicks **Launch Provider** → `LaunchProviderController.launch()` drives a
-   stage machine `.idle → .runningCLIInstall → .startingAgent →
-   .importingProviderIdentity → .live(model, tier)` (or `.failed`)
-   (`LaunchProviderController.swift:14-21`). There is **no** in-app
+   stage machine whose normal-success order is
+   `.idle → .runningCLIInstall → .startingAgent → .live(model, tier)`
+   (or `.failed`); `.importingProviderIdentity` is a **deferred
+   missing-token retry** stage entered only after `.startingAgent`, NOT
+   on the happy path (reconciled v0.3 —
+   `LaunchProviderController.swift:14-21,117,165`). There is **no** in-app
    register / autotune / spawn step. The stages are:
    - **Short-circuit:** if a local provider is already healthy, skip the installer
      and just attach (`:79-87,144-163`).
@@ -99,8 +116,10 @@ From reading `phase3-binary/`:
      is bundled at `Contents/Resources/install.sh` (copied from
      `phase3-binary/dist/install.sh` at build time, `project.yml:72-75`), run via
      `/bin/bash <temp-copy 0700>` with **no CLI args** — behavior is env-driven:
+     the runner **inherits the full parent environment** and sets
      `MACPROVIDER_NO_PROMPT=1`, `HOME`, optional `MACPROVIDER_PORT` (from a free-port
-     probe when unset), sanitized `PATH` (`CLIInstallRunner.swift:42-51,168-204`).
+     probe when unset), and a default `PATH` **only when the inherited one is empty**
+     (NOT sanitized — reconciled v0.3, `CLIInstallRunner.swift:42-51`).
      `install.sh` performs the register + autotune (`autotune --recommend`) + model
      download + **launchd watchdog install**; the app only surfaces a progress hint
      by scraping `ps` for the autotune stage (`:110-149`). A non-zero installer exit
@@ -110,10 +129,13 @@ From reading `phase3-binary/`:
      out of `config.yaml` into the app Keychain; a not-yet-written token is a
      **retriable** deferred error (`:126-137`).
    - **Finalize** (`finalizeInstall`, `:165-199`): wait for the launchd provider's
-     `GET /v1/health`, retry the Keychain import, require the app Ed25519 identity,
-     attach the `MalibuAgent` monitor, then `SMAppService.mainApp.register()` the
-     login item and mark `.live(…, tier: .provisional)`. The login item is
-     registered **only after** a successful attach (`testAttachFailureDoesNotRegisterLoginItemOrMarkLive`).
+     `GET /v1/health`, retry the Keychain import, then check `appIdentityConfigured`
+     — which is actually `ProviderConfig.isConfigured` (config + `.installed-by-app`
+     marker + Keychain **bearer**, `:65`, `ProviderConfig.swift:503-511`), **NOT** the
+     app Ed25519 identity (reconciled v0.3) — attach the `MalibuAgent` monitor, then
+     `SMAppService.mainApp.register()` the login item and mark
+     `.live(…, tier: .provisional)`. The login item is registered **only after** a
+     successful attach (`testAttachFailureDoesNotRegisterLoginItemOrMarkLive`).
 
 Time budget: a few seconds of UI + `install.sh`'s own register/autotune/download
 time (60–240 s for the first model) in the background.
@@ -125,14 +147,19 @@ time (60–240 s for the first model) in the background.
   `network_state == "buyer_serving"` from `/v1/status`; a bare local-ready state is
   shown as "Reconnecting" (`MalibuAgent.swift:307-355`). Steady-state health poll
   every 15 s (`:381-407`); first-attach polls every 2 s up to 600 s (`:188-226`).
-- Popover: today's USDC, today's $MALIBU, uptime, current model, GPU temp, latency
-  p50, "Open Dashboard" — earnings/wallet/tier read-only from `EarningsClient` /
-  `MalibuAccrualClient`.
-- Dashboard (SwiftUI window): earnings chart, wallet card, live log tail, "Copy
-  diagnostics", "Quit and Uninstall". **Reconciled v0.2:** the model-swap-over-
-  ControlSocket affordance is **not** wired in the monitor-only flow (the control
-  socket is never connected, §5.2); model selection is owned by `install.sh` /
-  autotune and the CLI, not an in-app `switch_request`.
+- Menu (reconciled v0.3): the shipped menu-bar left-click opens the Dashboard
+  window directly — there is **no popover** with USDC/MALIBU/uptime/GPU/latency in
+  the shipped build (`MenuBarController.swift:56`); the menu exposes a plain **Quit**
+  only, with **no "Quit and Uninstall"** item (`MenuBarController.swift:108`).
+- Dashboard (SwiftUI window, reconciled v0.3): earnings/wallet/tier **panels** +
+  live **log tail** (`DashboardWindow.swift:22`) — read-only from `EarningsClient` /
+  `MalibuAccrualClient`. The shipped dashboard has **no earnings chart, no "Copy
+  diagnostics" action, and no "Quit and Uninstall" control** (those are designed, not
+  shipped). The wallet card's "Set payout wallet" button is **disabled**
+  (SPEC-027-gated, `DashboardWindow.swift:59`). The model-swap-over-ControlSocket
+  affordance is **not** wired in the monitor-only flow (the control socket is never
+  connected, §5.2); model selection is owned by `install.sh` / autotune and the CLI,
+  not an in-app `switch_request`.
 - On login: `SMAppService.mainApp.register()` starts `Malibu.app` in the background.
   No Dock icon. (This registers the **app** as a login item; the **CLI daemon** is
   owned by the launchd watchdog `install.sh` set up, a separate mechanism.)
@@ -225,8 +252,10 @@ and never opens the control socket in the live flow.
 `MalibuAgent.start()` **refuses to poll** unless `provider_id` is set, launchd
 install evidence exists (`install_manifest.json` or
 `live.streamvc.macprovider.plist`, `LaunchProviderController.swift:374-380`), and a
-Keychain token is bound — otherwise it shows "Click Launch Provider to run the
-installer" (`MalibuAgent.swift:64-73`). A legacy app-marker config with no launchd
+Keychain token is bound. **Reconciled v0.3 — the message is per-gate**
+(`MalibuAgent.swift:64-87`): a missing `provider_id` or a failed `isConfigured` shows
+"Not set up yet. Click Launch Provider to activate."; only missing launchd evidence
+shows "…to run the installer." A legacy app-marker config with no launchd
 evidence routes to onboarding, not a reconnect loop (`route()`
 `LaunchProviderController.swift:352-372`; `StartupRouteTests.swift:9`).
 
@@ -283,9 +312,12 @@ is only read to defensively release a child left by an *older* build
 
 What the app actually does around lifecycle:
 - **Attach/monitor:** poll `/v1/health` + `/v1/status`; first-attach every 2 s up to
-  600 s, steady every 15 s (`MalibuAgent.swift:188-226,381-407`). An unhealthy or
-  non-`buyer_serving` provider is surfaced as "Reconnecting"; recovery is the
-  watchdog's job, not an in-app restart loop.
+  600 s, steady every 15 s (`MalibuAgent.swift:188-226,381-407`). **Reconciled v0.3:**
+  a locally-ready but non-`buyer_serving` provider (or an undiagnosed connection loss)
+  is surfaced as "Reconnecting" (`MalibuAgent.swift:307`); **diagnosed**
+  startup/health failures and the first-attach timeout transition to **`.error`**, not
+  "Reconnecting" (`MalibuAgent.swift:89,391`). Recovery of the daemon is the watchdog's
+  job, not an in-app restart loop.
 - **Drain (app quit / Sparkle update):** `agent.shutdown(gracefulSeconds:)` pauses
   monitoring (`MalibuApp.swift:57-74`, `SparkleUpdaterController.swift:36-38`) — there
   is no child process to signal.
@@ -396,8 +428,13 @@ Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`)
 - **On Quit-and-Uninstall:** `ProviderConfig.wipeAppOwnedState()` deletes
   `config.yaml` **only if the marker is present** (`ProviderConfig.swift:478-501`).
 - **`isConfigured`** = `config.yaml` present AND `.installed-by-app` marker present
-  AND a Keychain token bound to the config's `provider_id` (`ProviderConfig.swift:503-511`);
-  missing any → onboarding. **Token custody (reconciled v0.2 — nuanced, not "never
+  AND a Keychain token bound to the config's `provider_id` (`ProviderConfig.swift:503-511`).
+  **Route precedence (reconciled v0.3):** a *markerless* CLI-owned `config.yaml` takes
+  FIRST precedence and routes to `.showImportDialog` — even when the launchd provider is
+  healthy (`LaunchProviderController.swift:352`), per the first bullet above; only when
+  the marker IS present but the bearer/config is otherwise incomplete does a failed
+  `isConfigured` route to onboarding, and a fully-absent config also routes to
+  onboarding. **Token custody (reconciled v0.2 — nuanced, not "never
   on disk"):** the import strips `provider_token` from `config.yaml` and adds a
   `link_state` key (`ProviderConfig.swift:312-335`), so the *live* `config.yaml` holds
   no token — **but** the import also writes a token-bearing `config.yaml.import-backup`
@@ -484,8 +521,11 @@ resolved them: **#1 CLI/App collision** — resolved by making the App track *us
 same* launchd install (`install.sh`) and coexist via the shared `config.yaml` +
 `.installed-by-app` marker (§7); the app adopts an existing healthy provider rather
 than running a second one. **#2 auto-update fights** — MOOT: the app never spawns a
-child with `--managed-by malibu-app`; instead Sparkle updates the `.app` and the app
-invokes `macprovider-cli update` via `CLIUpdateRunner` (§3.3). **#5 portal deep-link
+child with `--managed-by malibu-app`; instead Sparkle updates the `.app`
+(`.updateCLI` also maps to Sparkle — `MalibuApp.swift:90`), while the launchd CLI
+self-updates via `install.sh` / the watchdog. **Reconciled v0.3:** `CLIUpdateRunner` /
+`MalibuAgent.updateCLINow()` compile but have **no production caller** (§3.3) — the app
+does NOT invoke `macprovider-cli update` at runtime. **#5 portal deep-link
 handshake** — MOOT: the `malibu://` scheme and portal token handoff were removed;
 registration happens inside `install.sh`. **#4/#3 (library validation / linking)** and
 **#6/#7 (weights path / login-item rejection)** remain as build details. The list
