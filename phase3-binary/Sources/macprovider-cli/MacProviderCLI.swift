@@ -494,32 +494,6 @@ struct ServeCommand: AsyncParsableCommand {
         return factory()
     }
 
-    /// Read a provider bearer from an inherited file descriptor. The writer
-    /// (Malibu.app) sends the token bytes and closes its end; we read to EOF
-    /// and trim surrounding whitespace/newlines, mirroring --token-file. The
-    /// fd is never captured by KERN_PROCARGS2, so the bearer stays off both
-    /// argv and the process environment.
-    static func readProviderToken(fromFileDescriptor fd: Int32) throws -> String {
-        guard fd >= 0 else {
-            throw ValidationError("--token-fd must be a non-negative file descriptor")
-        }
-        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-        let data: Data
-        do {
-            data = try handle.readToEnd() ?? Data()
-        } catch {
-            throw ValidationError("could not read provider token from --token-fd \(fd): \(error)")
-        }
-        guard let raw = String(data: data, encoding: .utf8) else {
-            throw ValidationError("provider token on --token-fd \(fd) is not valid UTF-8")
-        }
-        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else {
-            throw ValidationError("provider token on --token-fd \(fd) was empty")
-        }
-        return token
-    }
-
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -566,9 +540,7 @@ struct ServeCommand: AsyncParsableCommand {
         // snapshot) can no longer read the token. Reading here — after config
         // load — lets the fd win over any env/config value, matching the
         // precedence of --token-file.
-        if let tokenFd {
-            resolved.providerToken = try Self.readProviderToken(fromFileDescriptor: Int32(tokenFd))
-        }
+        try ProviderTokenInput.apply(fileDescriptor: tokenFd, to: &resolved)
 
         // AUDIT R1 SECURITY S2 fix (PR #334): drop MACPROVIDER_PROVIDER_TOKEN
         // from the process env immediately after we've resolved it. Legacy

@@ -78,6 +78,9 @@ struct RegisterRequest: Equatable {
     let appAttestObject: String?
     let appAttestKeyID: String?
     let referralCode: String?
+    /// Client-generated credential held before transport. The coordinator
+    /// commits this exact value so a lost response cannot orphan the bearer.
+    let providerTokenCandidate: String
     let nonce: String
     let timestampUTC: String
     let signature: String
@@ -90,6 +93,7 @@ struct RegisterRequest: Equatable {
             "app_attest_object": appAttestObject ?? NSNull(),
             "app_attest_key_id": appAttestKeyID ?? NSNull(),
             "referral_code": referralCode ?? NSNull(),
+            "provider_token_candidate": providerTokenCandidate,
             "nonce": nonce,
             "ts_utc": timestampUTC,
             "signature": signature
@@ -130,6 +134,7 @@ struct RegisterClient {
         appAttestObject: Data? = nil,
         appAttestKeyID: Data? = nil,
         referralCode: String? = nil,
+        providerTokenCandidate: String = Self.makeProviderTokenCandidate(),
         nonce: String = Self.makeNonce(),
         timestamp: Date = Date()
     ) throws -> RegisterRequest {
@@ -142,6 +147,7 @@ struct RegisterClient {
             appAttestObject: appAttestObject?.base64EncodedString(),
             appAttestKeyID: appAttestKeyID?.base64EncodedString(),
             referralCode: referralCode,
+            providerTokenCandidate: providerTokenCandidate,
             nonce: nonce,
             timestampUTC: timestampUTC
         )
@@ -154,6 +160,7 @@ struct RegisterClient {
             appAttestObject: appAttestObject?.base64EncodedString(),
             appAttestKeyID: appAttestKeyID?.base64EncodedString(),
             referralCode: referralCode,
+            providerTokenCandidate: providerTokenCandidate,
             nonce: nonce,
             timestampUTC: timestampUTC,
             signature: signature
@@ -161,6 +168,16 @@ struct RegisterClient {
     }
 
     func postRegister(_ requestBody: RegisterRequest, bearerProof: String? = nil) async throws -> RegisterResponse {
+        if bearerProof == nil {
+            if let existing = await KeychainStore.readProviderToken(providerID: requestBody.providerID),
+               existing != requestBody.providerTokenCandidate {
+                throw RegisterClientError.candidateConflictsWithKeychain
+            }
+            try await KeychainStore.saveProviderToken(
+                providerID: requestBody.providerID,
+                token: requestBody.providerTokenCandidate
+            )
+        }
         var request = URLRequest(url: coordinatorBaseURL.appendingPathComponent("v1/providers/register"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -183,6 +200,9 @@ struct RegisterClient {
 		}
         let decoded = try JSONDecoder().decode(RegisterResponse.self, from: data)
         try Self.validateCoordinatorWSURL(decoded.coordinatorWebSocketURL, expectedBase: coordinatorBaseURL)
+        if bearerProof == nil, decoded.providerToken != requestBody.providerTokenCandidate {
+            throw RegisterClientError.coordinatorChangedCandidate
+        }
         return decoded
     }
 
@@ -240,6 +260,7 @@ struct RegisterClient {
             appAttestObject: request.appAttestObject,
             appAttestKeyID: request.appAttestKeyID,
             referralCode: request.referralCode,
+            providerTokenCandidate: request.providerTokenCandidate,
             nonce: request.nonce,
             timestampUTC: request.timestampUTC
         ))
@@ -283,6 +304,10 @@ struct RegisterClient {
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
+    static func makeProviderTokenCandidate() -> String {
+        makeNonce()
+    }
+
     static func rfc3339UTC(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -297,6 +322,7 @@ struct RegisterClient {
         appAttestObject: String?,
         appAttestKeyID: String?,
         referralCode: String?,
+        providerTokenCandidate: String,
         nonce: String,
         timestampUTC: String
     ) -> CanonicalJSONValue {
@@ -307,6 +333,7 @@ struct RegisterClient {
             "app_attest_object": appAttestObject.map(CanonicalJSONValue.string) ?? .null,
             "app_attest_key_id": appAttestKeyID.map(CanonicalJSONValue.string) ?? .null,
             "referral_code": referralCode.map(CanonicalJSONValue.string) ?? .null,
+            "provider_token_candidate": .string(providerTokenCandidate),
             "nonce": .string(nonce),
             "ts_utc": .string(timestampUTC)
         ])
@@ -316,6 +343,8 @@ struct RegisterClient {
 enum RegisterClientError: Error, Equatable {
     case httpStatus(Int)
     case invalidCoordinatorWSURL(reason: String)
+    case candidateConflictsWithKeychain
+    case coordinatorChangedCandidate
 }
 
 enum ProviderBearerURLSession {

@@ -71,8 +71,12 @@ private struct OnboardingRootView: View {
         switch controller.stage {
         case .idle:
             stageRow(
-                title: controller.referralRequired ? "Invite-only pre-beta" : "Set up Malibu",
-                detail: controller.referralRequired
+                title: controller.isDiscoveringReferralPolicy
+                    ? "Checking pre-beta access"
+                    : (controller.referralRequired ? "Invite-only pre-beta" : "Set up Malibu"),
+                detail: controller.isDiscoveringReferralPolicy
+                    ? "Checking whether this Mac needs an invite. You can enter one while Malibu checks."
+                    : controller.referralRequired
                     ? "Enter an invite to install the provider CLI and register this Mac."
                     : "Install the provider CLI and register this Mac."
             ) {
@@ -174,11 +178,9 @@ private struct OnboardingRootView: View {
                     + ", but its saved credential is gone. Malibu will not retry registration with that identity or ask for another invite in a loop."
             ) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Contact Malibu support if you believe the credential can be restored from another trusted backup. Otherwise, start as a new provider below.")
+                    Text("Restore the credential from a trusted backup if you have one. Otherwise, start as a new provider below. General troubleshooting cannot recreate this credential.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Link("Contact Malibu support", destination: LaunchProviderController.requestAccessURL)
-                        .font(.caption)
                     Divider()
                     Button("Start as a new provider") {
                         showStartFreshConfirm = true
@@ -229,10 +231,17 @@ private struct OnboardingRootView: View {
                         TextField("MAL1-… or invite link", text: $controller.referralCode)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
-                        // PROD-M6: no working inviter? Offer a non-authorizing
-                        // request-access affordance.
-                        Link("No working invite? Request access", destination: LaunchProviderController.requestAccessURL)
-                            .font(.caption)
+                        // Request-access is an operator-owned, optional URL
+                        // returned by the coordinator. Never invent a public
+                        // destination that cannot actually grant access.
+                        if let requestAccessURL = controller.requestAccessURL {
+                            Link("No working invite? Request access", destination: requestAccessURL)
+                                .font(.caption)
+                        } else {
+                            Text("Ask your inviter for another invite.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     launchButton(title: "Retry")
                         .disabled(controller.referralRequired && (stage == "referral" || stage == "cliInstall") && !controller.referralCodeIsValid)
@@ -245,28 +254,30 @@ private struct OnboardingRootView: View {
     // and where the bundle is archived so a destructive click is informed.
     private func startFreshConfirmationMessage(providerID: String) -> String {
         let subject = providerID.isEmpty ? "This Mac's provider identity" : "Provider \(providerID)"
-        return "\(subject) will be archived under ~/.config/macprovider and retired on this Mac. "
-            + "Your earnings history is not deleted, but this Mac stops serving under that identity until you restore it. "
-            + "You can undo this immediately afterward while the archive is still on disk."
+        return "\(subject)'s identity files will be archived under ~/.config/macprovider. "
+            + "Your earnings history is not deleted. These local identity files remain unusable unless the missing credential is recovered separately."
     }
 
-    // PROD-M6: session-scoped undo affordance after a "Start New". The archive
-    // stays on disk, so even after this session it can be restored manually from
-    // the shown path.
+    // PROD-M6: session-scoped local-file restore after a "Start New". The
+    // archive stays on disk, so even after this session its files can be
+    // restored manually from the shown path. This is not credential recovery.
     @ViewBuilder
     private func retiredIdentityBanner(_ retired: LaunchProviderController.RetiredIdentity) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(retired.providerID.isEmpty
-                ? "Previous provider retired and archived."
-                : "Retired provider \(retired.providerID) and archived it.")
+                ? "Previous provider identity files archived."
+                : "Provider \(retired.providerID) identity files archived.")
                 .font(.caption.weight(.semibold))
             Text("Archive: \(retired.archivePath)")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .lineLimit(2)
-            Button("Undo — restore the retired provider") {
-                Task { await controller.undoStartAsNewProvider() }
+            Text("Restoring these files does not recover the missing credential, reactivate this provider, or resume serving.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Button("Restore archived files") {
+                Task { await controller.restoreRetiredProviderFiles() }
             }
             .buttonStyle(.bordered)
         }

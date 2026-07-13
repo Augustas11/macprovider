@@ -10,6 +10,55 @@ final class LaunchProviderControllerTests: XCTestCase {
         return controller
     }
 
+    func testReferralPolicyStartsUnknownAndUsesBoundedLiveDiscovery() {
+        let controller = LaunchProviderController(dependencies: Harness().dependencies())
+
+        XCTAssertEqual(controller.referralPolicy, .unknown)
+        XCTAssertFalse(controller.referralRequired)
+        XCTAssertTrue(controller.showsReferralField)
+        XCTAssertLessThanOrEqual(LaunchProviderController.referralPolicyRequestTimeout, 8)
+        XCTAssertLessThanOrEqual(LaunchProviderController.referralPolicyResourceTimeout, 10)
+    }
+
+    func testReferralPreflightDecodesOnlyConfiguredAbsoluteHTTPSAccessURL() throws {
+        let present = try JSONDecoder().decode(
+            ReferralPreflightResult.self,
+            from: Data(#"{"valid":false,"reason":"expired","required":true,"request_access_url":"https://access.example.test/waitlist"}"#.utf8)
+        )
+        XCTAssertEqual(present.requestAccessURL?.absoluteString, "https://access.example.test/waitlist")
+
+        let absent = try JSONDecoder().decode(
+            ReferralPreflightResult.self,
+            from: Data(#"{"valid":false,"reason":"expired","required":true}"#.utf8)
+        )
+        XCTAssertNil(absent.requestAccessURL)
+
+        for raw in ["http://access.example.test", "/relative", "https://user:secret@access.example.test"] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "valid": false,
+                "reason": "expired",
+                "required": true,
+                "request_access_url": raw,
+            ])
+            let decoded = try JSONDecoder().decode(ReferralPreflightResult.self, from: data)
+            XCTAssertNil(decoded.requestAccessURL, "unexpected access URL for \(raw)")
+        }
+    }
+
+    func testRefreshRetainsCoordinatorConfiguredAccessURL() async {
+        let harness = Harness()
+        harness.referralPreflight = ReferralPreflightResult(
+            valid: false,
+            reason: "missing",
+            requestAccessURL: URL(string: "https://access.example.test/waitlist")
+        )
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.refreshReferralPolicy()
+
+        XCTAssertEqual(controller.requestAccessURL?.absoluteString, "https://access.example.test/waitlist")
+    }
+
     func testLaunchViaCLIInstallWhenNotAlreadyRunning() async {
         let harness = Harness()
         let controller = makeController(harness)
@@ -26,6 +75,7 @@ final class LaunchProviderControllerTests: XCTestCase {
 
     func testFreshInstallRequiresWellFormedReferral() async {
         let harness = Harness()
+        harness.referralPreflight = ReferralPreflightResult(valid: false, reason: "missing")
         let controller = LaunchProviderController(dependencies: harness.dependencies())
 
         await controller.launch()
@@ -33,8 +83,9 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(harness.cliInstallRuns, 0)
         XCTAssertEqual(
             controller.stage,
-            .failed(stage: "referral", retryable: true, message: "Enter a valid Malibu pre-beta invite code.")
+            .failed(stage: "referral", retryable: true, message: "An invite is required. Enter an invite code or link.")
         )
+        XCTAssertNil(controller.requestAccessURL)
     }
 
     func testExistingIdentityRepairRunsWithoutReferral() async {
@@ -95,6 +146,15 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertNil(repair["MACPROVIDER_PROVIDER_TOKEN"])
         XCTAssertEqual(repair["MACPROVIDER_APP_MANAGED_REPAIR"], "1")
         XCTAssertEqual(repair["MACPROVIDER_REFERRAL_CODE"], "")
+
+        XCTAssertEqual(
+            CLIInstallRunner.installerArguments(scriptPath: "/tmp/install.sh", appManagedRepair: false),
+            ["/tmp/install.sh"]
+        )
+        XCTAssertEqual(
+            CLIInstallRunner.installerArguments(scriptPath: "/tmp/install.sh", appManagedRepair: true),
+            ["/tmp/install.sh", "--provider-token-fd", "0"]
+        )
     }
 
     func testReferralFormatMatchesInstallerContract() {
@@ -103,9 +163,57 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertFalse(LaunchProviderController.isValidReferralCode("MAL1-X-key-seed-AAAAAAAAAAAAAAAAAAAAAAAAAA"))
     }
 
+    func testCanonicalInviteURLIsNormalizedBeforeInstaller() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        controller.referralCode = "https://coordinator.streamvc.live/j/\(Harness.validReferralCode)?c=x-post"
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(controller.normalizedReferralCode, Harness.validReferralCode)
+    }
+
+    func testNonCanonicalInviteURLIsNotExtracted() {
+        XCTAssertEqual(
+            LaunchProviderController.extractReferralCode(
+                "  https://coordinator.streamvc.live/j/\(Harness.validReferralCode)/?c=x-post#install  "
+            ),
+            Harness.validReferralCode
+        )
+        XCTAssertEqual(
+            LaunchProviderController.extractReferralCode(
+                "http://coordinator.streamvc.live/j/\(Harness.validReferralCode)"
+            ),
+            "http://coordinator.streamvc.live/j/\(Harness.validReferralCode)"
+        )
+        XCTAssertEqual(
+            LaunchProviderController.extractReferralCode(
+                "https://coordinator.streamvc.live/?next=/j/\(Harness.validReferralCode)"
+            ),
+            "https://coordinator.streamvc.live/?next=/j/\(Harness.validReferralCode)"
+        )
+        XCTAssertEqual(
+            LaunchProviderController.extractReferralCode(
+                "https://coordinator.streamvc.live/j/\(Harness.validReferralCode)/extra"
+            ),
+            "https://coordinator.streamvc.live/j/\(Harness.validReferralCode)/extra"
+        )
+        XCTAssertEqual(
+            LaunchProviderController.extractReferralCode(
+                "https://coordinator.streamvc.live/j/\(Harness.validReferralCode)//"
+            ),
+            "https://coordinator.streamvc.live/j/\(Harness.validReferralCode)//"
+        )
+    }
+
     func testFreshInstallRejectsExhaustedReferralBeforeInstaller() async {
         let harness = Harness()
-        harness.referralPreflight = ReferralPreflightResult(valid: false, reason: "exhausted")
+        harness.referralPreflight = ReferralPreflightResult(
+            valid: false,
+            reason: "exhausted",
+            requestAccessURL: URL(string: "https://access.example.test/waitlist")
+        )
         let controller = makeController(harness)
 
         await controller.launch()
@@ -113,8 +221,9 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(harness.cliInstallRuns, 0)
         XCTAssertEqual(
             controller.stage,
-            .failed(stage: "referral", retryable: true, message: "This invite has already been used. Use a different invite.")
+            .failed(stage: "referral", retryable: true, message: "All spots on this invite are taken. Use a different invite.")
         )
+        XCTAssertEqual(controller.requestAccessURL?.absoluteString, "https://access.example.test/waitlist")
     }
 
     func testDefaultOffPolicyAllowsFreshInstallWithoutReferral() async {
@@ -351,7 +460,7 @@ final class LaunchProviderControllerTests: XCTestCase {
             .failed(
                 stage: "referral",
                 retryable: true,
-                message: "An invite code is required. Enter a new invite code."
+                message: "An invite is required. Enter an invite code or link."
             )
         )
     }
@@ -375,7 +484,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(harness.cliInstallRuns, 0)
         XCTAssertEqual(
             controller.stage,
-            .failed(stage: "referral", retryable: true, message: "An invite code is required. Enter a new invite code.")
+            .failed(stage: "referral", retryable: true, message: "An invite is required. Enter an invite code or link.")
         )
     }
 
@@ -417,9 +526,9 @@ final class LaunchProviderControllerTests: XCTestCase {
     }
 
     // PROD-M6: "Start New" records the retired identity (id + archive path) so
-    // the UI can name it and offer an undo; the undo restores it and clears the
-    // banner.
-    func testStartAsNewProviderRecordsRetiredIdentityAndUndoRestores() async {
+    // the UI can name it and offer a local-file restore; restoring clears the
+    // archive banner without claiming credential or serving recovery.
+    func testStartAsNewProviderRecordsRetiredIdentityAndRestoresArchivedFiles() async {
         let harness = Harness()
         harness.providerID = "p_retire_me"
         let archive = URL(fileURLWithPath: "/tmp/malibu-archive-xyz")
@@ -432,21 +541,38 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.retiredIdentity?.archivePath, archive.path)
         XCTAssertEqual(controller.stage, .idle)
 
-        await controller.undoStartAsNewProvider()
+        await controller.restoreRetiredProviderFiles()
 
         XCTAssertEqual(harness.restoreRuns, 1)
         XCTAssertNil(controller.retiredIdentity)
         XCTAssertEqual(controller.stage, .idle)
     }
 
-    func testUndoStartAsNewProviderSurfacesRestoreFailure() async {
+    func testRestoreRetiredProviderFilesReturnsToMissingCredentialRecovery() async {
+        let harness = Harness()
+        harness.providerID = "p_still_missing"
+        harness.startFreshArchive = URL(fileURLWithPath: "/tmp/malibu-archive-xyz")
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.startAsNewProvider()
+        harness.existingIdentityMissingBearer = true
+        await controller.restoreRetiredProviderFiles()
+
+        XCTAssertEqual(harness.restoreRuns, 1)
+        XCTAssertEqual(
+            controller.stage,
+            .existingIdentityMissingBearer(providerID: "p_still_missing")
+        )
+    }
+
+    func testRestoreRetiredProviderFilesSurfacesRestoreFailure() async {
         let harness = Harness()
         harness.startFreshArchive = URL(fileURLWithPath: "/tmp/malibu-archive-xyz")
         harness.restoreError = NSError(domain: "tests", code: 9, userInfo: [NSLocalizedDescriptionKey: "occupied"])
         let controller = LaunchProviderController(dependencies: harness.dependencies())
 
         await controller.startAsNewProvider()
-        await controller.undoStartAsNewProvider()
+        await controller.restoreRetiredProviderFiles()
 
         // The retired banner remains so the user can retry / restore manually.
         XCTAssertNotNil(controller.retiredIdentity)
@@ -542,7 +668,7 @@ final class LaunchProviderControllerTests: XCTestCase {
                     if let error = self.startFreshError { throw error }
                     return self.startFreshArchive
                 },
-                restoreArchivedIdentity: { _ in
+                restoreArchivedFiles: { _ in
                     self.restoreRuns += 1
                     if let error = self.restoreError { throw error }
                 }

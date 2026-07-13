@@ -53,6 +53,12 @@ NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
 EMERGENCY_ROLLBACK="${MACPROVIDER_EMERGENCY_ROLLBACK:-0}"
 APP_MANAGED_REPAIR="${MACPROVIDER_APP_MANAGED_REPAIR:-0}"
+APP_MANAGED_PROVIDER_TOKEN_FD=""
+# This variable is populated only from an inherited descriptor. Clear any
+# same-named environment entry first so the bearer can never become exported
+# to installer subprocesses by accident.
+unset APP_MANAGED_PROVIDER_TOKEN
+APP_MANAGED_PROVIDER_TOKEN=""
 EMERGENCY_CONFIG_BACKUP="${MACPROVIDER_EMERGENCY_CONFIG_BACKUP:-}"
 EMERGENCY_CONFIG_SHA256="${MACPROVIDER_EMERGENCY_CONFIG_SHA256:-}"
 EMERGENCY_STAGED_CONFIG_SHA256=""
@@ -203,14 +209,24 @@ validate_port_value() {
 run_macprovider_cli_with_amfi_retry() {
   local rc=0
   local cli_path="$MACPROVIDER_CLI_EXECUTABLE"
-  "$cli_path" "$@" || rc=$?
+  _run_macprovider_cli_once() {
+    if [ "${MACPROVIDER_CLI_USE_APP_TOKEN:-0}" -eq 1 ]; then
+      # The token lives only in a non-exported shell variable and this
+      # anonymous pipe. Append the non-secret descriptor flag to the CLI argv.
+      printf "%s" "$APP_MANAGED_PROVIDER_TOKEN" | "$cli_path" "$@" --token-fd 0
+      local cli_rc="${PIPESTATUS[1]}"
+      return "$cli_rc"
+    fi
+    "$cli_path" "$@"
+  }
+  _run_macprovider_cli_once "$@" || rc=$?
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
   log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
   sleep 2
   rc=0
-  "$cli_path" "$@" || rc=$?
+  _run_macprovider_cli_once "$@" || rc=$?
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
@@ -241,7 +257,7 @@ run_macprovider_cli_with_amfi_retry() {
   fi
   rm -f "$tmp"
   rc=0
-  "$cli_path" "$@" || rc=$?
+  _run_macprovider_cli_once "$@" || rc=$?
   if [ "$rc" -eq 137 ]; then
     log "macprovider-cli was SIGKILL'd after the inode refresh; this is likely a genuine signature failure rather than the AMFI cache." >&2
   fi
@@ -268,17 +284,17 @@ fi
 
 usage() {
   cat <<'USAGE'
-Usage: bash install.sh [--dry-run] [--ref CODE]
+Usage: bash install.sh [--dry-run] [--ref CODE_OR_INVITE_URL]
 
 Referral invite:
-  curl -fsSL https://get.streamvc.live/install.sh | bash -s -- --ref CODE
+  curl -fsSL https://get.streamvc.live/install.sh | bash -s -- --ref CODE_OR_INVITE_URL
 
 Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
   MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
                                  (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
-  MACPROVIDER_REFERRAL_CODE      pre-beta referral code (same as --ref)
+  MACPROVIDER_REFERRAL_CODE      pre-beta code or canonical invite URL (same as --ref)
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
@@ -289,7 +305,8 @@ Environment overrides:
                                  launchd service but skip the watchdog
   MACPROVIDER_APP_MANAGED_REPAIR=1
                                  Malibu.app only: update an existing app-owned
-                                 install without starting credential-less launchd
+                                 install without starting credential-less launchd;
+                                 requires --provider-token-fd N
   MACPROVIDER_EMERGENCY_ROLLBACK=1
                                  operator-only signed rollback to an explicit
                                  MACPROVIDER_VERSION; commits only through an
@@ -302,16 +319,86 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --ref|--referral-code)
-      [ "$#" -ge 2 ] || die 7 "$1 requires a referral code"
+      [ "$#" -ge 2 ] || die 7 "$1 requires CODE_OR_INVITE_URL"
       REFERRAL_CODE="$2"
       shift
       ;;
     --ref=*|--referral-code=*) REFERRAL_CODE="${1#*=}" ;;
+    --provider-token-fd)
+      [ "$#" -ge 2 ] || die 7 "$1 requires a file descriptor"
+      APP_MANAGED_PROVIDER_TOKEN_FD="$2"
+      shift
+      ;;
+    --provider-token-fd=*) APP_MANAGED_PROVIDER_TOKEN_FD="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
     *) die 7 "unknown argument: $1" ;;
   esac
   shift
 done
+
+read_app_managed_provider_token() {
+  if [ "$APP_MANAGED_REPAIR" -ne 1 ]; then
+    [ -z "$APP_MANAGED_PROVIDER_TOKEN_FD" ] \
+      || die 7 "--provider-token-fd is reserved for app-managed repair"
+    return 0
+  fi
+  [ -n "$APP_MANAGED_PROVIDER_TOKEN_FD" ] \
+    || die 7 "app-managed repair requires --provider-token-fd"
+  case "$APP_MANAGED_PROVIDER_TOKEN_FD" in
+    *[!0-9]*) die 7 "--provider-token-fd must be a non-negative file descriptor" ;;
+  esac
+  APP_MANAGED_PROVIDER_TOKEN=""
+  if ! IFS= read -r APP_MANAGED_PROVIDER_TOKEN <&"$APP_MANAGED_PROVIDER_TOKEN_FD"; then
+    [ -n "$APP_MANAGED_PROVIDER_TOKEN" ] \
+      || die 7 "app-managed repair provider token descriptor was empty or unreadable"
+  fi
+  [ "${#APP_MANAGED_PROVIDER_TOKEN}" -eq 64 ] \
+    || die 7 "app-managed repair provider token must be 64 lowercase hex characters"
+  case "$APP_MANAGED_PROVIDER_TOKEN" in
+    *[!0-9a-f]*) die 7 "app-managed repair provider token must be 64 lowercase hex characters" ;;
+  esac
+}
+
+normalize_referral_code() {
+  local raw="$1"
+  local authority_and_path authority path code
+  # Match Malibu.app: accept harmless surrounding whitespace, then parse the
+  # value locally without fetching the invite URL.
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  case "$raw" in
+    https://*)
+      authority_and_path="${raw#https://}"
+      authority="${authority_and_path%%/*}"
+      case "$authority" in
+        ''|*@*) return 1 ;;
+      esac
+      [ "$authority_and_path" != "$authority" ] || return 1
+      path="/${authority_and_path#*/}"
+      path="${path%%\?*}"
+      path="${path%%\#*}"
+      # Accept exactly one optional trailing slash, but no path segment after
+      # the invite code.
+      case "$path" in
+        */) path="${path%/}" ;;
+      esac
+      case "$path" in
+        */j/*) code="${path##*/j/}" ;;
+        *) return 1 ;;
+      esac
+      case "$code" in
+        ''|*/*) return 1 ;;
+      esac
+      printf '%s' "$code"
+      ;;
+    *://*) return 1 ;;
+    *) printf '%s' "$raw" ;;
+  esac
+}
+
+if ! REFERRAL_CODE="$(normalize_referral_code "$REFERRAL_CODE")"; then
+  die 7 "referral invite URL must use the canonical https://<host>/j/CODE form"
+fi
 
 if [ -n "$REFERRAL_CODE" ] && [[ ! "$REFERRAL_CODE" =~ ^MAL1-[SP]-[A-Za-z0-9_]{1,32}-[A-Za-z0-9_]{1,32}-[A-Z2-7]{26}$ ]]; then
   die 7 "referral code has an invalid format"
@@ -2154,15 +2241,29 @@ advisory_validate_referral() {
   fi
   result="$(printf "%s" "$response" | python3 -c 'import json,sys
 try:
- d=json.load(sys.stdin); print(("valid" if d.get("valid") else "invalid") + ":" + str(d.get("reason", "invalid")))
+ d=json.load(sys.stdin)
+ required=d["required"]; valid=d["valid"]; reason=d["reason"]
+ if type(required) is not bool or type(valid) is not bool or type(reason) is not str: raise ValueError()
+ rejected={"missing","invalid","expired","revoked","exhausted","conflict"}
+ if required is False and valid is True and reason == "disabled": print("valid:disabled")
+ elif required is True and valid is True and reason == "valid": print("valid:valid")
+ elif required is True and valid is False and reason in rejected: print("invalid:" + reason)
+ else: print("unavailable:invalid")
 except Exception: print("unavailable:invalid")')"
   case "$result" in
     valid:*) return 0 ;;
-    invalid:expired) die 7 "referral code has expired; use a different invite" ;;
-    invalid:revoked) die 7 "referral code is no longer available; use a different invite" ;;
-    invalid:exhausted) die 7 "referral code has already been used; use a different invite" ;;
-    invalid:*) die 7 "referral code is not valid; check it or use a different invite" ;;
+    invalid:*) die 7 "$(referral_rejection_message "${result#invalid:}")" ;;
     *) log "Invite pre-check response was unavailable; authoritative validation will run during credential registration." ;;
+  esac
+}
+
+referral_rejection_message() {
+  case "$1" in
+    missing|required) printf '%s' 'An invite is required; rerun with --ref CODE_OR_INVITE_URL' ;;
+    expired) printf '%s' "This invite has expired; use a different invite" ;;
+    revoked) printf '%s' "This invite is no longer available; use a different invite" ;;
+    exhausted) printf '%s' "All spots on this invite are taken; use a different invite" ;;
+    *) printf '%s' "This invite is not valid; check it or use a different invite" ;;
   esac
 }
 
@@ -3281,7 +3382,7 @@ ensure_provider_credentials() {
     referral_reason="$(sed -n 's/.*MACPROVIDER_REFERRAL_REJECTED reason=referral_\([a-z]*\).*/\1/p' "$bootstrap_err" | head -n1)"
     rm -f "$bootstrap_err"
     if [ -n "$referral_reason" ]; then
-      die 7 "provider registration rejected the invite (referral_$referral_reason); enter a new invite and try again"
+      die 7 "$(referral_rejection_message "$referral_reason") (referral_$referral_reason)"
     fi
     die 6 "provider credential bootstrap failed before evidence admission"
   fi
@@ -3318,6 +3419,12 @@ ensure_provider_credentials() {
 
 submit_required_hardware_evidence() {
   log "Submitting the exact stored autotune evidence before provider service start."
+  local MACPROVIDER_CLI_USE_APP_TOKEN=0
+  if [ "${APP_MANAGED_REPAIR:-0}" -eq 1 ]; then
+    [ -n "$APP_MANAGED_PROVIDER_TOKEN" ] \
+      || die 6 "app-managed repair lost provider credential custody before evidence admission"
+    MACPROVIDER_CLI_USE_APP_TOKEN=1
+  fi
   run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check \
     --submit-hardware-evidence --require-hardware-evidence --config "$CONFIG_PATH" >/dev/null \
     || die 6 "authenticated hardware evidence admission failed before service start"
@@ -5124,6 +5231,7 @@ main() {
     0|1) ;;
     *) die 7 "MACPROVIDER_APP_MANAGED_REPAIR must be 0 or 1" ;;
   esac
+  read_app_managed_provider_token
   acquire_install_lock
   recover_orphaned_install_transactions
 

@@ -45,9 +45,19 @@ enum CLIInstallRunner {
                 let stdout = Pipe()
                 let stderr = Pipe()
                 process.executableURL = URL(fileURLWithPath: "/bin/bash")
-                process.arguments = [runnableURL.path]
+                process.arguments = installerArguments(
+                    scriptPath: runnableURL.path,
+                    appManagedRepair: appManagedRepair
+                )
                 process.standardOutput = stdout
                 process.standardError = stderr
+
+                var providerTokenPipe: Pipe?
+                if appManagedRepair, existingProviderToken?.isEmpty == false {
+                    let pipe = Pipe()
+                    process.standardInput = pipe.fileHandleForReading
+                    providerTokenPipe = pipe
+                }
 
                 process.environment = installerEnvironment(
                     base: ProcessInfo.processInfo.environment,
@@ -74,7 +84,19 @@ enum CLIInstallRunner {
 
                 do {
                     try process.run()
+                    if let providerTokenPipe, let existingProviderToken {
+                        try providerTokenPipe.fileHandleForWriting.write(contentsOf: Data(existingProviderToken.utf8))
+                        try providerTokenPipe.fileHandleForWriting.close()
+                        try providerTokenPipe.fileHandleForReading.close()
+                    }
                 } catch {
+                    try? providerTokenPipe?.fileHandleForWriting.close()
+                    try? providerTokenPipe?.fileHandleForReading.close()
+                    if process.isRunning {
+                        process.terminate()
+                    }
+                    stdout.fileHandleForReading.readabilityHandler = nil
+                    stderr.fileHandleForReading.readabilityHandler = nil
                     continuation.resume(throwing: Error.launchFailed(error.localizedDescription))
                     return
                 }
@@ -93,6 +115,16 @@ enum CLIInstallRunner {
         throw Error.nonZeroExit(exitCode)
     }
 
+    static func installerArguments(scriptPath: String, appManagedRepair: Bool) -> [String] {
+        var arguments = [scriptPath]
+        if appManagedRepair {
+            // The descriptor number is non-secret. The Keychain bearer itself
+            // is written through the anonymous stdin pipe after launch.
+            arguments.append(contentsOf: ["--provider-token-fd", "0"])
+        }
+        return arguments
+    }
+
     static func installerEnvironment(
         base: [String: String],
         referralCode: String,
@@ -106,9 +138,8 @@ enum CLIInstallRunner {
         environment.removeValue(forKey: "MACPROVIDER_PROVIDER_TOKEN")
         environment.removeValue(forKey: "MACPROVIDER_APP_MANAGED_REPAIR")
         if appManagedRepair {
-            // Deliberately non-secret: the Keychain bearer is reserved for
-            // Malibu's sanitized serving child and never enters the installer
-            // or any of its subprocesses.
+            // Deliberately non-secret. The Keychain bearer is delivered over
+            // the installer's inherited stdin descriptor, not its environment.
             environment["MACPROVIDER_APP_MANAGED_REPAIR"] = "1"
         }
         environment["HOME"] = home
