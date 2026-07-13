@@ -44,6 +44,22 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 }
 
+func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("validation status=%d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/reserve", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("reservation route unexpectedly mounted: status=%d", response.Code)
+	}
+}
+
 func TestListenAddressParsesIPv4AndIPv6(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1", "::"} {
 		t.Run(host, func(t *testing.T) {

@@ -138,6 +138,9 @@ SELECT j.generated_at, j.evidence
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_register_nonces LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_register_nonces read: %w", err)
 	}
+	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_register_attempts LIMIT 1`); err != nil {
+		return fmt.Errorf("provider_onboarding smoke provider_register_attempts read: %w", err)
+	}
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_auth_policy LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_auth_policy read: %w", err)
 	}
@@ -362,6 +365,103 @@ VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 		return err
 	}
 	return nil
+}
+
+// PrepareProviderRegistration atomically records replay protection, provider
+// identity, and an exact durable attempt marker. App-track referral minting
+// happens first in SQLite but remains undisclosed behind a pending saga until
+// this transaction is known to have committed.
+func (s *PGStore) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt, attemptTS time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
+	if s == nil || s.db == nil {
+		return errors.New("onboarding postgres store is nil")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	observedAt = observedAt.UTC()
+	attemptTS = attemptTS.UTC()
+	cutoffStart := observedAt.Add(-registerNonceWindow)
+	cutoffEnd := observedAt.Add(registerNonceWindow)
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM provider_register_nonces
+     WHERE provider_id = $1 AND nonce = $2 AND ts_utc BETWEEN $3 AND $4
+)`, providerID, nonce, cutoffStart, cutoffEnd).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return ErrNonceReplay
+	}
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM provider_register_nonces
+     WHERE source_ip = $1 AND nonce = $2 AND ts_utc BETWEEN $3 AND $4
+)`, sourceIP, nonce, cutoffStart, cutoffEnd).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return ErrNonceReplay
+	}
+
+	var key any
+	if len(appAttestKeyID) > 0 {
+		key = appAttestKeyID
+	}
+	var out string
+	err = tx.QueryRowContext(ctx, `
+INSERT INTO provider_identities (provider_id, identity_pubkey, attested, app_attest_key_id)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (provider_id) DO UPDATE
+   SET attested = provider_identities.attested OR EXCLUDED.attested,
+       app_attest_key_id = COALESCE(provider_identities.app_attest_key_id, EXCLUDED.app_attest_key_id)
+ WHERE provider_identities.identity_pubkey = EXCLUDED.identity_pubkey
+RETURNING provider_id`, providerID, identityPubkey, attested, key).Scan(&out)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTOFUConflict
+	}
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrAttestKeyReused
+		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO provider_register_nonces (provider_id, source_ip, nonce, ts_utc)
+VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO provider_register_attempts (provider_id, nonce, ts_utc, source_ip)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (provider_id, nonce, ts_utc) DO NOTHING`, providerID, nonce, attemptTS, sourceIP); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		if isSerializationFailure(err) {
+			return ErrNonceReplay
+		}
+		return err
+	}
+	return nil
+}
+
+// ProviderRegistrationPrepared checks only replay-stable, signed fields. The
+// source IP is diagnostic and deliberately excluded from the commitment key.
+func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, nonce string, attemptTS time.Time) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("onboarding postgres store is nil")
+	}
+	var prepared bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM provider_register_attempts
+     WHERE provider_id = $1 AND nonce = $2 AND ts_utc = $3
+)`, providerID, nonce, attemptTS.UTC()).Scan(&prepared)
+	return prepared, err
 }
 
 func normalizeChip(chip string) string {
