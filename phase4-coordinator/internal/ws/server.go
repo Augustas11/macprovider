@@ -504,11 +504,12 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		go s.runLosslessnessProbeLoop()
 	}
 	if registry != nil {
-		// Inject the routable-now buyer-serving predicate so the FR-CAN22 floor and
-		// the redundancy count reason about peers buyers can actually route to now
-		// (RoutingEligible + positive context + not Tier-2-excluded), not just
-		// ServingCapable — a busy, negative-slot, or transport-unreachable peer must not
-		// lift the floor. Request-dependent context/quota are omitted (see canaryBuyerServing).
+		// Inject the request-independent buyer-serving predicate so the FR-CAN22 floor
+		// and the redundancy count apply the coordinator's routability gates
+		// (RoutingEligible + transport-reachable + positive context + not
+		// Tier-2-excluded), not just ServingCapable — a busy, negative-slot, or
+		// transport-unreachable peer must not lift the floor. Request-dependent
+		// context/quota are omitted (deferred to FR-CAN23, see canaryBuyerServing).
 		registry.SetBuyerServingPredicate(s.canaryBuyerServing)
 	}
 	return s
@@ -519,8 +520,10 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 //   - RoutingEligible() — state ready AND SlotsFree>0 AND auth/catalog/receipt gates
 //     (excludes busy [SlotsFree==0] and negative-slot peers, stored verbatim from
 //     heartbeats); AND
-//   - transport-reachable (IsWSTunneled OR non-empty EndpointURL) — excludes an
-//     HTTPForwardingOnly peer with no endpoint; AND
+//   - transport-reachable — a WS-tunneled peer needs a live STORED session
+//     (storedSessionFor; excludes the registration/disconnect windows where
+//     IsWSTunneled holds but no session is stored), else a non-empty EndpointURL;
+//     excludes an HTTPForwardingOnly peer with no endpoint; AND
 //   - MaxContextTokens > 0 — a sanity gate excluding the degenerate zero window; AND
 //   - not Tier-2-excluded (hash/encryption/attestation) — in-memory config + catalog.
 //
@@ -547,12 +550,19 @@ func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 	if !p.RoutingEligible() {
 		return false
 	}
-	// Transport reachability: a WS-tunneled peer is reachable over its session; an
-	// HTTP-forwarding peer needs a non-empty endpoint. A provider-controlled
-	// `unknown_message_type` NAK can set HTTPForwardingOnly (dropping IsWSTunneled)
-	// WITHOUT establishing an endpoint — such a peer can receive no inference and
-	// must not lift the floor.
-	if !p.IsWSTunneled() && strings.TrimSpace(p.EndpointURL) == "" {
+	// Transport reachability, matching dispatch. A WS-tunneled peer is dispatchable
+	// only via a live STORED session — dispatch returns ErrRelayClosed otherwise,
+	// e.g. during the registration/disconnect windows where IsWSTunneled holds but
+	// the session is not yet stored / already deleted (checked via storedSessionFor,
+	// which touches only the sessions map — no pool.mu, so it is safe under the
+	// floor's registry lock). An HTTP-forwarding peer needs a non-empty endpoint; a
+	// provider-controlled `unknown_message_type` NAK can drop IsWSTunneled without
+	// establishing one. Either way an unreachable peer must not lift the floor.
+	if p.IsWSTunneled() {
+		if _, ok := s.storedSessionFor(p.ProviderID, p.AssignedID); !ok {
+			return false
+		}
+	} else if strings.TrimSpace(p.EndpointURL) == "" {
 		return false
 	}
 	// Sanity gate: a zero/negative context window can serve no request. NOTE this

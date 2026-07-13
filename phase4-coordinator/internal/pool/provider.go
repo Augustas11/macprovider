@@ -429,14 +429,15 @@ type Registry struct {
 	providers map[string]*Provider
 	sessions  map[string]*Provider
 	endpoints map[string]config.ProviderConfig
-	// buyerServing, when set, decides whether a provider is a peer buyers can
-	// actually route to RIGHT NOW (RoutingEligible + positive context window + not
-	// Tier-2-excluded) for the FR-CAN22 last-provider floor and the redundancy
-	// count. Injected by the ws layer via SetBuyerServingPredicate because the
-	// Tier-2 gate needs config outside the pool package. Provisional quota is
-	// deliberately NOT part of it (admission-DB convoy — see canaryBuyerServing).
-	// Nil falls back to RoutingEligible + positive context (the routable-now core,
-	// minus Tier-2) — used only in registry unit tests; production injects the full
+	// buyerServing, when set, decides whether a provider passes the coordinator's
+	// REQUEST-INDEPENDENT buyer-routability gates (RoutingEligible + transport-
+	// reachable + positive context window + not Tier-2-excluded) for the FR-CAN22
+	// last-provider floor and the redundancy count. Injected by the ws layer via
+	// SetBuyerServingPredicate because the transport (session) and Tier-2 gates need
+	// state/config outside the pool package. Request-dependent context/quota are NOT
+	// evaluated (deferred to FR-CAN23 — see canaryBuyerServing). Nil falls back to
+	// RoutingEligible + positive context (omitting the ws-only transport/Tier-2
+	// gates) — used only in registry unit tests; production injects the full
 	// predicate so a busy, negative-slot, transport-unreachable, or Tier-2-excluded
 	// peer cannot falsely lift the floor and empty the real routable pool.
 	buyerServing func(Provider) bool
@@ -1224,9 +1225,11 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	// through this canary path. Applies to both tiers (provisional ban and pinned
 	// degrade), since it precedes the tier branch. "Sole" is keyed on the ACTIVE
 	// buyer-routing model (providerServesActiveModel, not declared SupportedModels)
-	// AND the routable-now buyer-serving predicate (RoutingEligible + context +
-	// not Tier-2-excluded), so a peer buyers cannot actually route to right now
-	// does not lift the floor.
+	// AND the injected request-independent buyer-serving predicate (RoutingEligible
+	// + transport + context + not Tier-2-excluded); request-dependent context/quota
+	// are deferred to FR-CAN23, so a peer that passes the request-independent gates
+	// but is filtered per-request can still lift the floor (not a regression — the
+	// floor only ever spares; see canaryBuyerServing).
 	if !r.hasOtherBuyerServingForModelLocked(providerID, p.ModelID) {
 		result.Tripped = CanaryTripFloorHeld
 		return result

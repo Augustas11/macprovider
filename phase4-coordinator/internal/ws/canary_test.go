@@ -105,7 +105,7 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	s := NewServer(cfg, registry, zerolog.Nop())
 	session := newProviderSession("p1", "s1", serverConn, 1)
 	s.sessions.Store(sessionKey("p1", "s1"), session)
-	registerCanaryFloorPeer(registry, "model-a")
+	registerCanaryFloorPeer(s, registry, "model-a")
 	go session.runWriter()
 
 	passDone := make(chan struct{})
@@ -165,15 +165,18 @@ func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 		State:         pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
 		MaxContextTokens: 4096, EncryptedLeg: false,
 	}
+	// canaryBuyerServing requires a live stored session for WS-tunneled peers.
+	baseConn, _ := net.Pipe()
+	s.sessions.Store(sessionKey("p", "s"), newProviderSession("p", "s", baseConn, 1))
 	if !s.canaryBuyerServing(base) {
-		t.Fatal("baseline ready+free-slot+context+WS-tunneled provider should be buyer-serving")
+		t.Fatal("baseline ready+free-slot+context+WS-tunneled+session provider should be buyer-serving")
 	}
 	mutate := func(f func(p *pool.Provider)) pool.Provider {
 		p := base
 		f(&p)
 		return p
 	}
-	// Not routable now / not routable ever — none may be buyer-serving.
+	// Not routable now / not routable ever / unreachable — none may be buyer-serving.
 	for name, p := range map[string]pool.Provider{
 		"busy/zero-free":   mutate(func(p *pool.Provider) { p.State = pool.StateBusy; p.SlotsFree = 0 }),
 		"negative-free":    mutate(func(p *pool.Provider) { p.SlotsFree = -1 }),
@@ -183,6 +186,8 @@ func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 		"degraded":         mutate(func(p *pool.Provider) { p.State = pool.StateDegraded }),
 		// HTTPForwardingOnly (drops IsWSTunneled) with no endpoint → unreachable.
 		"http-no-endpoint": mutate(func(p *pool.Provider) { p.HTTPForwardingOnly = true; p.EndpointURL = "" }),
+		// WS-tunneled but no stored session (registration/disconnect window) → unreachable.
+		"ws-no-session": mutate(func(p *pool.Provider) { p.ProviderID = "no-session-peer"; p.AssignedID = "x" }),
 	} {
 		if s.canaryBuyerServing(p) {
 			t.Fatalf("%s provider must not be buyer-serving (would falsely lift the floor)", name)
@@ -207,23 +212,27 @@ func TestFloorUsesInstalledPredicateExcludesTier2Peer(t *testing.T) {
 	// Tier-2 requires an encrypted leg; the peer lacks it → Tier-2-excluded.
 	cfg.Tier2.RequireEncryptedLeg = true
 	s := NewServer(cfg, registry, zerolog.Nop())
-	_ = s // NewServer installs the predicate on registry via SetBuyerServingPredicate
 
-	// Target: real, buyer-serving (encrypted leg present). HashStatus pinned so the
-	// encrypted-leg requirement is the sole Tier-2 discriminator in this test.
+	// Target: real, buyer-serving (encrypted leg present + live WS session).
+	// HashStatus pinned so the encrypted-leg requirement is the sole Tier-2
+	// discriminator in this test.
+	tConn, _ := net.Pipe()
 	registry.Register(&pool.Provider{
 		ProviderID: "target", AssignedID: "st", ModelID: "model-a",
 		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled,
 		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 		EncryptedLeg: true, HashStatus: pool.HashStatusVerified,
-	}, nil)
-	// Peer: routable + same model, but Tier-2-excluded (no encrypted leg).
+	}, tConn)
+	s.sessions.Store(sessionKey("target", "st"), newProviderSession("target", "st", tConn, 1))
+	// Peer: routable + same model + session, but Tier-2-excluded (no encrypted leg).
+	pConn, _ := net.Pipe()
 	registry.Register(&pool.Provider{
 		ProviderID: "tier2-excluded-peer", AssignedID: "sp", ModelID: "model-a",
 		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled,
 		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 		EncryptedLeg: false, HashStatus: pool.HashStatusVerified,
-	}, nil)
+	}, pConn)
+	s.sessions.Store(sessionKey("tier2-excluded-peer", "sp"), newProviderSession("tier2-excluded-peer", "sp", pConn, 1))
 
 	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
 		t.Fatalf("BuyerServingCountForModel = %d, want 1 (Tier-2-excluded peer omitted)", n)
@@ -262,7 +271,7 @@ func TestRunCanaryProbePersistsPinnedSanctionAndClearsOnPass(t *testing.T) {
 	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
 	session := newProviderSession("pinned-p1", "pinned-s1", serverConn, 1)
 	s.sessions.Store(sessionKey("pinned-p1", "pinned-s1"), session)
-	registerCanaryFloorPeer(registry, "model-a")
+	registerCanaryFloorPeer(s, registry, "model-a")
 	go session.runWriter()
 
 	runFailedCanaryProbe(t, s, providerConn, provider)
@@ -337,7 +346,7 @@ func TestRunCanaryProbeDoesNotDeletePersistedSanctionOnStaleTerminalPass(t *test
 	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
 	session := newProviderSession("pinned-stale", "pinned-stale-s1", serverConn, 1)
 	s.sessions.Store(sessionKey("pinned-stale", "pinned-stale-s1"), session)
-	registerCanaryFloorPeer(registry, "model-a")
+	registerCanaryFloorPeer(s, registry, "model-a")
 	go session.runWriter()
 
 	runFailedCanaryProbe(t, s, providerConn, provider)
@@ -838,15 +847,17 @@ func testCanaryChallenge() config.CanaryChallengeConfig {
 	}
 }
 
-// registerCanaryFloorPeer registers a second routing-eligible provider for
-// modelID so the FR-CAN22 last-provider floor does not spare the provider under
-// test — letting canary tests still exercise the normal trip path. The peer has
-// no session/conn; it exists only as an eligible registry entry and is never
-// probed.
-func registerCanaryFloorPeer(registry *pool.Registry, modelID string) {
+// registerCanaryFloorPeer registers a second buyer-serving provider for modelID so
+// the FR-CAN22 last-provider floor does not spare the provider under test — letting
+// canary tests still exercise the normal trip path. It is WS-tunneled with a LIVE
+// stored session (canaryBuyerServing requires storedSessionFor for WS peers), and
+// is never itself probed.
+func registerCanaryFloorPeer(s *Server, registry *pool.Registry, modelID string) {
+	const id, session = "canary-floor-peer", "canary-floor-peer-session"
+	peerConn, _ := net.Pipe()
 	registry.Register(&pool.Provider{
-		ProviderID:       "canary-floor-peer",
-		AssignedID:       "canary-floor-peer-session",
+		ProviderID:       id,
+		AssignedID:       session,
 		ModelID:          modelID,
 		Tier:             pool.TierProvisional,
 		InferencePath:    pool.InferencePathWSTunneled,
@@ -855,7 +866,8 @@ func registerCanaryFloorPeer(registry *pool.Registry, modelID string) {
 		SlotsTotal:       1,
 		MaxConcurrency:   1,
 		MaxContextTokens: 4096,
-	}, nil)
+	}, peerConn)
+	s.sessions.Store(sessionKey(id, session), newProviderSession(id, session, peerConn, 1))
 }
 
 func runFailedCanaryProbe(t *testing.T, s *Server, providerConn net.Conn, provider *pool.Provider) {

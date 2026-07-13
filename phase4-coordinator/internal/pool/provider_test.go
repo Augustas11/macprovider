@@ -605,10 +605,11 @@ func TestRecordCanaryResultFloorSparesSoleProvider(t *testing.T) {
 }
 
 // TestRecordCanaryResultFloorLiftsWithSecondProvider verifies the floor is scoped
-// to being the sole provider buyers can ROUTE TO RIGHT NOW for the ACTIVE model.
-// Only a RoutingEligible (ready + free slots) peer with a positive context window
-// lifts the floor; provider-asserted-but-unroutable peers do NOT (a peer that
-// lifts must actually receive buyer traffic so FR-P11a can catch it if it lies):
+// to being the sole provider passing the request-INDEPENDENT routability gates for
+// the ACTIVE model. Only a RoutingEligible (ready + free slots) peer with a positive
+// context window lifts the floor (in this pool-package test via the nil fallback,
+// which omits the ws-only transport/Tier-2 gates); peers unroutable on a
+// request-independent field do NOT:
 //   - degraded (not RoutingEligible),
 //   - busy / zero free slots (not routable now — over-protective, safe),
 //   - negative free slots (heartbeat-authored, stored verbatim),
@@ -670,9 +671,10 @@ func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 }
 
 // TestRecordCanaryResultFloorRespectsBuyerServingPredicate verifies the floor uses
-// the injected buyer-serving predicate (a custom closure here), not
-// its default: a ready same-model peer that the predicate rejects (e.g.
-// Tier-2-excluded or quota-exhausted) must NOT lift the floor.
+// the injected buyer-serving predicate (a custom closure here), not its default: a
+// ready same-model peer that the injected predicate rejects (standing in for the
+// production Tier-2 / transport exclusions the pool package cannot evaluate) must
+// NOT lift the floor.
 func TestRecordCanaryResultFloorRespectsBuyerServingPredicate(t *testing.T) {
 	registry := NewRegistry(nil)
 	registry.Register(&Provider{
