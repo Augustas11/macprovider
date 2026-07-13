@@ -1,13 +1,29 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.19 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.20 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.20 (2026-07-13, R7 audit-loop convergence — code source of truth).** R7
+(code 0C/2H/3M, security 0C/1H/1M, architect 0C/0H/2M). The re-fired security lane
+(vindicating the money-path re-audit) caught that the v0.19 §4.3-live reframe was
+INCOMPLETE — §10 still contradicted it. **Fixes:** §10 opening banner scopes the
+client-dormant surface to **§4.1 register + §5.3 App Attest only** (§4.3 is live, not
+gated by this checklist); §10 conclusion "no §4 dependency" → "no §4.1/§5.3 dependency
+(live §4.3 dependency remains)". **New HIGH:** §4.3 in-band receipt-key rotation is
+available **only to durable `mp-*` bootstrap principals** — a legacy principal (no
+durable row) is admission-verified by receipt-key byte-equality, so a rotating frame
+carrying a NEW key is rejected before staging (`identity_signature.go:149-160`); legacy
+principals must re-provision, not rotate in place. **Fidelity:** receipt key is generated
+during `bootstrap-auth` (before first `serve`), not on first serve; the dormant
+App-responder frame's `binary_version` MUST be a string (numeric fails closed); the
+companion watchdog does **not** restart the CLI (no-op — `install.sh:3575`), the provider
+service `KeepAlive` does; auth citations corrected `server.go:1210`→`:1216`.
 
 **Change log v0.19 (2026-07-13, R6 audit-loop convergence — code source of truth;
 security lane PASS 0/0/0).** R6 (code 0C/1H/3M, security **0C/0H/0M**, architect
 0C/0H/3M). The HIGH was an over-statement of dormancy: **§4.3 `identity_signature` is
 LIVE via the CLI track** — the `macprovider-cli` the app monitors signs it with its
 stable **bootstrap identity** for `mp-*` admission (`CoordinatorClient.swift:1842`,
-`identity_signature.go:127`, `server.go:1210`), only the App-side `p_*` responder is
+`identity_signature.go:127`, `server.go:1216`), only the App-side `p_*` responder is
 dormant. Corrected the §4 scope banner, §10 checklist ("gates §4.1 register + §5.3 App
 Attest only; §4.3 auth-policy is already live"), §3.2 table (bootstrap-identity distinct
 non-rotating lifecycle), and the v0.14 changelog note. **Fidelity:** §4.3 legacy fallback
@@ -94,8 +110,9 @@ matched to shipped code; code is source of truth):** The **CLI-wrapper refactor 
 #418, 2026-07-06)** replaced the in-app onboarding client. The v0.1–v0.13 §6.1/§7.2
 in-app **register → autotune → spawn-child** flow is gone: `LaunchProviderController`
 now runs the bundled CLI-track **`install.sh`** (which registers, autotunes, downloads
-the model, and installs the launchd watchdog) and `MalibuAgent` **monitors** the
-launchd-managed `macprovider-cli` over local HTTP — it does not spawn a child.
+the model, and installs the launchd provider service + companion watchdog) and
+`MalibuAgent` **monitors** the launchd-managed `macprovider-cli` over local HTTP — it
+does not spawn a child.
 `RegisterClient.postRegister` and the `MALIBU_ONBOARD_V2` flag are gone from the live
 path (so §8's migration matrix and AC-026-09 no longer apply). v0.14 rewrites §6.1 /
 §7.2 / §7.5 / §7.6 / §8 to the shipped model and marks the removed pieces as shipped-
@@ -919,8 +936,8 @@ and without entering a wallet address unless they want to.
   the button runs the bundled `install.sh`, which performs
   `bootstrap-auth` credential acquisition (`mp-*` principal over WS
   admission — §2/§4.1), SPEC-023 autotune, model download, and launchd
-  watchdog install; the app then adopts and monitors the launchd CLI
-  (§3, §6.1). There is no in-app "identity generation" or HTTP
+  provider-service + watchdog install; the app then adopts and monitors the
+  launchd CLI (§3, §6.1). There is no in-app "identity generation" or HTTP
   coordinator-registration step — that App-track apparatus is dormant
   (§3/§4.1).
 - **In-window progress and success.** Every step's progress and the
@@ -1007,9 +1024,10 @@ and without entering a wallet address unless they want to.
   `ProviderConfig.isConfigured`) and drives a **monitor**, not a spawn (§7.6).
 - **Reconciled v0.14/v0.18 — NO CLI child is launched.** The app does not launch a CLI
   child with `MACPROVIDER_PROVIDER_TOKEN`; the launchd **provider service**
-  `live.streamvc.macprovider` (KeepAlive) runs the CLI and a separate companion watchdog
-  `live.streamvc.macprovider-watchdog` supervises it — both installed by `install.sh`
-  (SPEC-025 §8) — and the app monitors it over HTTP (SPEC-025 §5).
+  `live.streamvc.macprovider` (KeepAlive) runs AND restarts the CLI; a separate companion
+  watchdog `live.streamvc.macprovider-watchdog` only health-observes (its restart request
+  is a no-op — `install.sh:3575`) — both installed by `install.sh` (SPEC-025 §8) — and the
+  app monitors it over HTTP (SPEC-025 §5).
 - Landing page marketing copy at `/Users/augstar/projects/malibu/host/index.html`
   promises "One line in your terminal. … Your Mac picks up jobs
   whenever it's idle and online." This spec makes the App track
@@ -1071,7 +1089,7 @@ THREE services — see the bootstrap-identity note below the table):
 | Concern              | Identity key (SPEC-026)            | Receipt key (SPEC-015)      |
 |----------------------|-------------------------------------|-----------------------------|
 | Keychain slot        | account `provider_identity_v1` (App identity, dormant §3) | services `com.streamvc.macprovider.receipt-key` (rotatable — signs receipts), `com.streamvc.macprovider.receipt-key.prev` (rotation grace), and `com.streamvc.macprovider.bootstrap-identity-key` (**stable admission identity — never rotates**; verifies `mp-*` `identity_signature`), all account `<provider_id>` — reconciled v0.17 to `ReceiptKeyStore.swift:22-25,66`; NOT `receipt_key_v1` |
-| Generated by         | App target on first `Malibu.app` launch | CLI on first `serve`    |
+| Generated by         | App target on first `Malibu.app` launch | CLI during `bootstrap-auth`, **before** first `serve` (the bootstrap identity snapshots this first key — `BootstrapAuthCommand.swift:50`) |
 | Rotation             | NOT rotated in v0.2 (open question §13) | SPEC-015 rotate-key       |
 | Signs                | `/register` body + WS `identity_signature` | receipt frames |
 | provider_id anchor   | YES — `provider_id = p_ + base32(sha256(identity_pubkey))` | NO |
@@ -1154,7 +1172,7 @@ registration to succeed.
 >   launchd-managed `macprovider-cli` signs `identity_signature` with its stable
 >   **bootstrap identity** on the v2 auth handshake (`CoordinatorClient.swift:1842`), the
 >   coordinator verifies it (`identity_signature.go:127`), and admission requires it under
->   `provider_auth_policy` (`server.go:1210`). The Malibu **app** itself does not sign
+>   `provider_auth_policy` (`server.go:1216`). The Malibu **app** itself does not sign
 >   (its App-`p_*` identity-signature responder is unreachable, §3), but the shipped
 >   onboarding DOES depend on §4.3.
 > - **§5.3 App Attest** — **client-dormant**: not minted by app or CLI.
@@ -1463,11 +1481,17 @@ protocol adds:
   "type": "identity_signature_request",
   "auth_attempt_id": "<server-issued from auth_challenge>",
   "provider_id": "p_…",
-  "binary_version": 2,
+  "binary_version": "1.8.31",
   "provider_ecdh_public_key": "<base64-32-byte>",
   "transcript_sha256": "<base64-32-byte>"
 }
 ```
+
+**`binary_version` MUST be a JSON string (reconciled v0.20).** The bridge requires a
+string (`IdentitySignatureBridge.swift:32`) and the coordinator binds the retained string
+value into the transcript (`identity_signature.go:58`); a numeric value decodes to an
+empty string (`ControlSocketFrame.swift:213`) and would fail closed. (Earlier drafts
+showed a numeric `2` — incorrect.)
 
 The App verifies `provider_id` matches the configured provider, loads
 `provider_identity_v1` from Keychain, computes the exact JCS payload
@@ -1629,23 +1653,33 @@ observability, never for auth policy.
      is rejected.
 
   So a rotating provider re-authenticates by signing under a **stable**
-  identity (the bootstrap identity for `mp-*`, or the still-stored old
-  receipt key for legacy), **never** by self-signing the proposed new key —
-  satisfying the v0.13 change-log rule. The new receipt key rides the
-  register/reconnect frame and is rotated **in-band**: it is first staged
-  as `PendingReceiptPubkey` at register (`stageReceiptPublicationLocked`,
-  `provider.go:779`), then **committed on the first accepted `state_update`**
-  (`commitPendingReceiptPubkeyLocked` via `ApplyStateUpdate`,
-  `provider.go:839,1753`) — at which point the new key becomes current and
-  the **old key is moved to `receipt_pubkey_prev` and the grace window
-  STARTS** (`ExpiresAt = now + ReceiptRotationGrace`). So commitment
-  precedes the grace period; the grace window keeps the OLD key valid for
-  in-flight work AFTER commit, it is not a pre-commit delay. A differing
-  key presented while a grace window is already active is refused
+  identity that is **independent of the key being rotated** — the
+  **bootstrap identity** for durable `mp-*` principals — **never** by
+  self-signing the proposed new key (satisfying the v0.13 change-log rule).
+  The new receipt key rides the register/reconnect frame and is rotated
+  **in-band**: staged as `PendingReceiptPubkey` at register
+  (`stageReceiptPublicationLocked`, `provider.go:779`), then **committed on
+  the first accepted `state_update`** (`commitPendingReceiptPubkeyLocked`
+  via `ApplyStateUpdate`, `provider.go:839,1753`) — at which point the new
+  key becomes current and the **old key moves to `receipt_pubkey_prev` and
+  the grace window STARTS** (`ExpiresAt = now + ReceiptRotationGrace`).
+  Commitment precedes the grace period; the grace window keeps the OLD key
+  valid for in-flight work AFTER commit, not as a pre-commit delay. A
+  differing key presented while a grace window is already active is refused
   (`RegisterRefusalReceiptRotationGraceActive`).
 
+  **Legacy principals (no durable bootstrap row) CANNOT rotate via this
+  path (reconciled v0.20).** Their `identity_signature` is verified against
+  the STORED receipt key with byte-equality (case 3 above,
+  `identity_signature.go:149-160`), so a rotating initial frame carrying the
+  NEW key (`CoordinatorClient.swift:941`) is rejected at admission **before**
+  it can reach the staging logic. In-band receipt-key rotation is therefore
+  available only to durable `mp-*` bootstrap principals, whose admission
+  does not depend on the rotating key; a legacy principal must re-provision
+  (obtain a durable bootstrap identity) rather than rotate in-place.
+
 This keeps both tracks fail-closed against self-declared rotation while
-supporting in-band receipt-key rotation authorized by a stable identity.
+supporting in-band receipt-key rotation for bootstrap principals.
 SPEC-001 v1.7 candidate will absorb this normative text with the exact
 field names.
 
@@ -1974,7 +2008,7 @@ slower payout release. Not required for this spec to ship.
       `bootstrap-auth`, which acquires the `provider_token` via the coordinator's
       **tokenless WS admission** handshake (NOT the App-track `/v1/providers/register`,
       §4.1); it also runs the SPEC-023 `autotune --recommend`, downloads model
-      weights, and installs the launchd watchdog. The app surfaces a progress hint by
+      weights, and installs the launchd provider service + watchdog. The app surfaces a progress hint by
       scraping `ps` for the autotune stage (`:110-149`). **The initial token import
       happens here, still in `.runningCLIInstall`.**
    c. **Import the token** (`ProviderConfig.importExistingCLIConfig()`, `:128`,
@@ -2341,7 +2375,7 @@ precedence is (evaluated top-down):
 | 1 | `config.yaml` present but **no** `.installed-by-app` marker (CLI-owned) → **wins even when the launchd provider is healthy** | `.showImportDialog` (§8.4) |
 | 2 | app-owned (marker present) but not yet `isConfigured` (bearer/config incomplete) | `.showOnboarding` (run `install.sh`) |
 | 3 | App-owned + `isConfigured` AND launchd install evidence present (healthy or attachable) | `.startAgent` (monitor) |
-| 4 | App-owned + `isConfigured` but **launchd install evidence missing** (e.g. watchdog uninstalled / unhealthy with no evidence) | `.showOnboarding` (re-run `install.sh`) |
+| 4 | App-owned + `isConfigured` but **launchd install evidence missing** (e.g. the provider-service plist `live.streamvc.macprovider.plist` / `install_manifest.json` removed — the app's gate checks these, NOT the watchdog) | `.showOnboarding` (re-run `install.sh`) |
 | 5 | launchd install evidence present but **no config** | `.showOnboarding` |
 | 6 | nothing configured | `.showOnboarding` |
 
@@ -2586,15 +2620,16 @@ still has provider identity but has lost the wallet keys.
 
 ## 10. Backend deploy checklist (ordered gate for the App-track designed §4 surface)
 
-> **Reconciled v0.15.** This is the coordinator-**backend** deploy gate
-> for the DESIGNED App-track §4 surface (`/v1/providers/register`, App
-> Attest, `identity_signature` auth-policy). "App-side flag flip"
-> throughout this section means **shipping the CLI-wrapper Sparkle
-> release** (step 9) — PR #418 removed the `onboardingFlow` user default,
-> so there is no runtime flag to flip (§8). The steps below gate when the
-> coordinator may serve the (currently client-dormant) §4 contract; they
-> do NOT gate the shipped monitor-only onboarding, which is already live
-> and uses `bootstrap-auth` / WS admission (§4.1).
+> **Reconciled v0.15/v0.20.** This is the coordinator-**backend** deploy gate for the
+> DESIGNED, client-dormant App-track surface: **§4.1 `/v1/providers/register` + §5.3 App
+> Attest** only. The **§4.3 `identity_signature` auth-policy is NOT part of this** — it
+> is already **live** and gates CLI-track `mp-*` admission (§4 banner / closing note
+> below); do not read it as gated-behind-this-checklist. "App-side flag flip" throughout
+> this section means **shipping the CLI-wrapper Sparkle release** (step 9) — PR #418
+> removed the `onboardingFlow` user default, so there is no runtime flag to flip (§8).
+> The steps below gate when the coordinator may serve the client-dormant §4.1/§5.3
+> contract; they do NOT gate the shipped monitor-only onboarding, which is already live
+> and uses `bootstrap-auth` / WS admission (with the live §4.3 dependency).
 
 The list is a strict ordering; each step MUST pass before the next
 runs.
@@ -2692,14 +2727,15 @@ This checklist gates when the coordinator may **serve the designed §4.1
 register + §5.3 App Attest surface** (client-dormant). The §4.3
 `identity_signature` auth-policy is a SEPARATE matter — it is **already
 live** and gates CLI-track `mp-*` admission (`identity_signature.go:127`,
-`server.go:1210`), so the shipped onboarding DOES depend on it (via the
+`server.go:1216`), so the shipped onboarding DOES depend on it (via the
 CLI's bootstrap-identity signing). The checklist does NOT gate the
 onboarding FLOW itself, which already ships and runs unconditionally at
 startup (`MalibuApp.swift:115`, §8) using
-`bootstrap-auth` / WS admission — no §4 dependency. (Reconciled v0.16: the
-"App-side ships only after every step" framing applied to the pre-#418
-in-app register→spawn client that these steps gated; that client is
-dormant, §4.1.)
+`bootstrap-auth` / WS admission — **no §4.1-register / §5.3-App-Attest dependency**,
+though it DOES depend on the live §4.3 `identity_signature` auth-policy (above).
+(Reconciled v0.16/v0.20: the "App-side ships only after every step" framing applied to
+the pre-#418 in-app register→spawn client that these steps gated; that client is dormant,
+§4.1.)
 
 ## 11. Biggest risk and mitigation
 
