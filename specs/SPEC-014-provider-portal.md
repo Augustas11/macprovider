@@ -92,8 +92,13 @@ state; codex 3-lane audit in progress)
     = 6 gated); §10.1 "ONLY status/identity" scoped to paste-bearer;
     `claim_url`/`pair_ot` **wire shape** attributed to SPEC-001 v1.5
     §6.5.1 (SPEC-003 FR-C10 owns emission/mint); two content-wrong xrefs
-    fixed. All R6 C/H/M addressed; architect + code re-audit pending
-    (security accepted, carried LOW folded here).
+    fixed. All R6 C/H/M addressed.
+    R7 (commit `1bb8df2`, architect + code only — security accepted):
+    both 0C/0H/1M, same single straggler — §4.1 A.3 self-signed
+    deferral still called `/v1/pool/check` the "only STATUS/IDENTITY
+    endpoint" (now scoped to STATUS; OAuth `/v1/auth/me/providers` is the
+    identity source, neither carries signing tier). Fixed; final
+    confirmation re-audit pending.
 **Depends on:**
   - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
     **the `pair_ot` / `claim_url` field + wire shape (§6.5.1) and the
@@ -983,11 +988,14 @@ signals:
   source today. The portal MUST NOT introduce a "below minimum /
   hard floor" variant.
 - **Self-signed binary** — DEFERRED to v0.2. The only
-  browser-callable per-provider STATUS / IDENTITY endpoint today
+  browser-callable per-provider STATUS endpoint today
   is `/v1/pool/check`, whose default response is `{provider_id,
   assigned_id?, tier, state}` (reconciled v0.9 — `assigned_id` is
   emitted `omitempty`; the portal reads only `tier`/`state`) and
-  which exposes no signing tier. Earnings (`/providers/{id}/earnings`) is a separate
+  which exposes no signing tier. (In GitHub-OAuth mode
+  `/v1/auth/me/providers` is an additional identity/ownership source, §2.5,
+  but it too carries no signing tier — so no browser-callable endpoint exposes
+  signing tier in either mode.) Earnings (`/providers/{id}/earnings`) is a separate
   browser-callable endpoint but does not expose signing tier.
   Owning amendment: Open Q5 (signing tier is in the Q5 omnibus).
   Q10 (browser-local bridge) is NOT an owning Q for this row.
