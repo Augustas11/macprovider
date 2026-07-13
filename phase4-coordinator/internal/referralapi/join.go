@@ -40,17 +40,17 @@ var joinValidPage = template.Must(template.New("join-valid").Parse(`<!doctype ht
 
 var joinFullPage = template.Must(template.New("join-full").Parse(joinUnavailableDocument(
 	"This invite filled up.",
-	"All early-access spots on this invite have been claimed. Ask your inviter for another invite, or request access.",
+	"All early-access spots on this invite have been claimed. Ask your inviter for another invite.",
 )))
 
 var joinExpiredPage = template.Must(template.New("join-expired").Parse(joinUnavailableDocument(
 	"This invite is no longer available.",
-	"This invite has expired. Ask your inviter for another invite, or request access.",
+	"This invite has expired. Ask your inviter for another invite.",
 )))
 
 var joinRevokedPage = template.Must(template.New("join-revoked").Parse(joinUnavailableDocument(
 	"This invite is no longer available.",
-	"This invite is no longer active. Ask your inviter for another invite, or request access.",
+	"This invite is no longer active. Ask your inviter for another invite.",
 )))
 
 func joinUnavailableDocument(title, message string) string {

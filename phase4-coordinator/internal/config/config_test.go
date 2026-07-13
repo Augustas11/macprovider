@@ -55,6 +55,28 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 	}
 }
 
+func TestReferralRequestAccessURLMustBeCredentialFreeHTTPSEvenWhenGateIsOff(t *testing.T) {
+	for _, raw := range []string{
+		"http://access.example.test/waitlist",
+		"/relative-access",
+		"https://user:secret@access.example.test/waitlist",
+	} {
+		cfg := Default()
+		cfg.Auth.OperatorKey = "operator-key"
+		cfg.Referrals.RequestAccessURL = raw
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_access_url") {
+			t.Fatalf("request_access_url=%q error=%v", raw, err)
+		}
+	}
+
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Referrals.RequestAccessURL = "https://access.example.test/waitlist?campaign=prebeta"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid request access URL: %v", err)
+	}
+}
+
 func TestAutotuneFeedsRejectInvalidPublicKeys(t *testing.T) {
 	tests := []struct {
 		name    string
