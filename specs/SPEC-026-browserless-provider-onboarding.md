@@ -1,15 +1,26 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.13 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.14 · Owner: augstar · Target: 2026 Q3
 
-**Note (2026-07-10, honesty pass):** The §6.1/§7.2 in-app register→autotune→spawn
-client flow was SUPERSEDED by the CLI-wrapper refactor (PR #418, 2026-07-06):
-`LaunchProviderController` now runs `install.sh` and Malibu monitors the
-launchd-managed CLI; `RegisterClient.postRegister` and the `MALIBU_ONBOARD_V2`
-flag (hence §8's migration matrix and AC-026-09) no longer exist in the app
-sources. Coordinator-side surfaces (App-track `/v1/providers/register`, App Attest
-team/bundle pins, `identity_signature`, wallet-change 501) still conform. This
-spec needs a revision to match the shipped client architecture.
+**Change log v0.14 (2026-07-13, CLI-wrapper client-architecture reconciliation — spec
+matched to shipped code; code is source of truth):** The **CLI-wrapper refactor (PR
+#418, 2026-07-06)** replaced the in-app onboarding client. The v0.1–v0.13 §6.1/§7.2
+in-app **register → autotune → spawn-child** flow is gone: `LaunchProviderController`
+now runs the bundled CLI-track **`install.sh`** (which registers, autotunes, downloads
+the model, and installs the launchd watchdog) and `MalibuAgent` **monitors** the
+launchd-managed `macprovider-cli` over local HTTP — it does not spawn a child.
+`RegisterClient.postRegister` and the `MALIBU_ONBOARD_V2` flag are gone from the live
+path (so §8's migration matrix and AC-026-09 no longer apply). v0.14 rewrites §6.1 /
+§7.2 / §7.5 / §7.6 / §8 to the shipped model and marks the removed pieces as shipped-
+removed. **The coordinator API (§4) still conforms** — App-track `/v1/providers/register`,
+App Attest team/bundle pins, `identity_signature`, and the wallet-change `501` are
+unchanged *as coordinator contracts*; but §4.1/§4.3 now note that the **client** that
+exercises them moved: registration is done by `install.sh`/the CLI (not the app), and
+the app's per-auth `identity_signature` responder has **no wired transport** in the
+monitor-only flow (present but unreachable — a carried gap, §4.3). No code change.
+**See the paired SPEC-025 v0.2** (same PR #418 reconciliation, app-shell side).
+
+Earlier honesty note (2026-07-10): flagged the same supersession pending this revision.
 
 **Numbering:** earlier revisions of this spec referred to the MALIBU rewards
 emission ledger by the number 028. That was a mislabel — the number 028 belongs
@@ -946,6 +957,19 @@ registration to succeed.
 
 ### 4.1 `POST /v1/providers/register`
 
+**Client note (reconciled v0.14).** This coordinator endpoint and its request/response
+schema are **unchanged and still conform**. What changed is the *caller*: in the shipped
+CLI-wrapper flow the **`install.sh`/CLI track performs the registration**, not the app.
+`Malibu.app`'s `RegisterClient` retains the full machinery to build a canonical,
+Ed25519-signed register body and validate the returned `coordinator_ws_url`
+(same-origin, redirect-Authorization-stripped — `RegisterClient.swift:74-228,319-361`),
+and it is unit-tested (`RegisterClientTests`), but `RegisterClient.postRegister` has
+**zero production callers** — it is a signing/validation library, not a live call path.
+App Attest fields (`app_attest_object` / `app_attest_key_id`) are optional passthrough
+params defaulting to `nil`; **no `DCAppAttestService` attestation is implemented in the
+app tree** (team/bundle pins are enforced coordinator-side per §5.3, not minted by the
+shipped app). The body below is the wire contract the CLI/installer conforms to.
+
 ```
 Content-Type: application/json
 
@@ -1110,6 +1134,18 @@ guidance rather than a browser tab; this stays within the SPEC-026
 binding is post-onboarding.
 
 ### 4.3 v2 auth handshake — `identity_signature` on the proof-stage frame
+
+**Client-transport gap (reconciled v0.14 — carried).** The coordinator-side
+`identity_signature` contract below is unchanged and still conforms. But in the shipped
+**monitor-only** app, the App-track `identity_signature` responder has **no wired
+transport**: `MalibuAgent.handleIdentitySignatureRequest` (which signs the payload with
+the app's Keychain Ed25519 key, `MalibuAgent.swift:629-679`) is only reachable via a
+**control-socket frame**, and the control socket is never connected in production
+(SPEC-025 §5.2). So the app does not actually participate in per-auth identity signing
+at runtime — the launchd-managed CLI holds and uses its own key material for the v2
+handshake. Treat the app-side responder as **present-but-unreachable**; where this spec
+implies the *app* signs the proof-stage frame at runtime, that is not exercised by
+shipped code. This is a documented gap, not a functional path.
 
 Per SPEC-001 v1.6 §6.7, fresh-connect authentication is a two-frame
 challenge/response over the v2 pipeline:
@@ -1599,45 +1635,50 @@ slower payout release. Not required for this spec to ship.
    - Secondary link: "How does this work?" (opens an in-App info
      sheet, not a browser tab)
 
-6. User clicks **Launch Provider**. From this moment the button is
-   replaced by an in-window progress ring + step label; the state
-   machine in §7 owns the flow.
-7. Steps happen in the background:
+6. User clicks **Launch Provider**. The button is replaced by an
+   in-window progress ring + step label; the `LaunchProviderController`
+   stage machine (§7.2) owns the flow.
+7. Steps happen in the background (reconciled v0.14 to the shipped
+   CLI-wrapper flow — `LaunchProviderController.launch()`):
 
-   a. Generate Ed25519 identity keypair → store in Keychain (~10ms).
-   b. Call `POST /v1/providers/register` → receive `provider_token`
-      (~1s over LAN).
-   c. Run `macprovider-cli autotune --recommend --json` locally per
-      SPEC-023 against the local signed catalog. **SPEC-023 uses
-      its own HMAC-derived diversification identity (SPEC-023
-      §3.1), which is distinct from and unchanged by SPEC-026's
-      Ed25519 identity key.** The Ed25519 identity key never
-      leaves the Keychain per §3.1; SPEC-023's HMAC identity is
-      derived from hardware entropy per its existing contract.
-      Preserves SPEC-023's HMAC-local-identity + rate-card
-      privacy invariants.
-   d. Persist `provider_id` + `provider_token` via existing
-      `ProviderConfig.saveProviderIdentity(providerID:token:)`.
-      Additionally write `onboardingSchemaVersion = 2` to
-      `~/Library/Application Support/Malibu/onboarding.json` (see
-      §7.5 and §8 migration matrix). The config YAML is not the v2
-      schema authority.
-   e. Download `macprovider-cli` binary if not bundled with `.app`
-      (SPEC-025 bundles it, so this is a no-op in v1).
-   f. Download model weights per autotune output. Resumable partial
-      files under `~/Library/Application Support/Malibu/downloads/`.
-   g. Register SMAppService login item.
-   h. Start `MalibuAgent` (existing code, unchanged) which spawns CLI
-      child. CLI reads its own receipt key from its Keychain slot
-      per SPEC-015; the App does NOT export identity or receipt key
-      material to the CLI's environment.
-   i. Wait for first `.serving` control-socket frame.
-   j. Show success card. Wallet binding is NOT part of the
-      launch flow — the "no wallet-signing prompt during
-      onboarding" invariant in §1.1 forbids opening the
-      SPEC-016 EIP-712 signing UI inline. The success card's
-      "Add wallet" affordance is where post-onboarding binding
-      happens.
+   a. **Short-circuit:** if a local provider is already healthy
+      (`GET /v1/health`), skip the installer and go straight to attach
+      (`LaunchProviderController.swift:79-87,144-163`).
+   b. **Run the bundled `install.sh`** (`.runningCLIInstall`,
+      `:117-125`) via `/bin/bash <temp-copy>` with **no CLI args**;
+      env-driven only (`MACPROVIDER_NO_PROMPT=1`, `HOME`, optional
+      `MACPROVIDER_PORT`, sanitized `PATH` — `CLIInstallRunner.swift:42-51`).
+      **`install.sh` performs, in the CLI track:** the App-track
+      registration (`POST /v1/providers/register`), the SPEC-023
+      `autotune --recommend`, the model-weight download, and the
+      **launchd watchdog install**. The app does NOT do these in-process;
+      it surfaces a progress hint by scraping `ps` for the autotune stage
+      (`:110-149`). SPEC-023's HMAC-derived diversification identity
+      (§3.1) is unchanged and lives in the CLI track.
+   c. **Import the token to Keychain** (`.importingProviderIdentity` →
+      `ProviderConfig.importExistingCLIConfig()`, `:128`,
+      `ProviderConfig.swift:280-352`): move `provider_token` out of the
+      `install.sh`-written `config.yaml` into the app Keychain (token
+      never remains on disk in the App track). A not-yet-written token is
+      a **retriable** deferred error retried during finalize
+      (`:126-137,205-223`).
+   d. **Finalize** (`.startingAgent` → `finalizeInstall`, `:165-199`):
+      wait for the launchd provider's `GET /v1/health`, retry the
+      Keychain import, require the app Ed25519 identity, attach the
+      `MalibuAgent` **monitor** (no child spawn), then register the
+      `SMAppService` login item and mark `.live(model, tier: .provisional)`.
+      The login item is registered **only after** a successful attach.
+   e. **App Ed25519 identity** is generated/loaded from the app Keychain
+      (`ProviderIdentity`, slot `provider_identity_v1`, service
+      `tech.malibu.app`; §3, §7.1) and is used for uninstall + the
+      `identity_signature` responder — but note the responder has no
+      wired transport in monitor mode (§4.3, carried gap).
+   f. **Wallet binding is NOT part of the launch flow** — the "no
+      wallet-signing prompt during onboarding" invariant (§1.1) holds;
+      `setPayoutWallet` is a stub that throws a guarded SPEC-027 error
+      (`LaunchProviderController.swift:94-100`). The success card's "Add
+      wallet" affordance is where post-onboarding binding will happen once
+      SPEC-027 ships.
 
 8. Success card, in the same window:
 
@@ -1774,35 +1815,44 @@ in one move.
 @MainActor
 final class LaunchProviderController: ObservableObject {
 
+    // Reconciled v0.14 — shipped stage machine (LaunchProviderController.swift:14-21).
+    // The in-app registering/autotuning/downloading/authenticating stages are gone;
+    // install.sh owns register+autotune+download and launchd owns the daemon.
     enum Stage: Equatable {
         case idle
-        case identityReady
-        case registering
-        case autotuning
-        case downloadingCLI(progressPct: Double)   // no-op in v1
-        case downloadingModel(name: String, progressPct: Double)
-        case startingAgent
-        case authenticating
+        case runningCLIInstall            // running the bundled install.sh
+        case startingAgent                // finalize: wait /v1/health, attach monitor
+        case importingProviderIdentity    // move provider_token config.yaml → Keychain
         case live(model: String, tier: TrustTier)
         case failed(stage: String, retryable: Bool, message: String)
     }
 
     @Published private(set) var stage: Stage = .idle
 
-    func launch() async     // fires the state machine; safe to re-invoke
+    func launch() async     // runs install.sh, imports token, attaches the monitor
     func retry() async      // retries from last-failed stage
-    func setPayoutWallet(_ address: String) async throws   // wraps SPEC-016 §3 EIP-712 signing
+    // Reconciled v0.14 — wallet binding is a guarded SPEC-027 follow-up:
+    // setPayoutWallet always throws until SPEC-027 defines the non-bearer proof.
+    func setPayoutWallet(_ address: String) async throws
 }
 ```
 
-Persist non-secret state at
-`~/Library/Application Support/Malibu/onboarding.json`. Rehydrate on
-`init`. See §7.5 for the schema.
+**Reconciled v0.14:** the controller does NOT register, autotune, download, or spawn
+in-process. `runCLIInstall` runs the bundled `install.sh`;
+`importCLIConfigAfterInstall` moves the token to Keychain; `finalizeInstall` waits for
+`/v1/health` and attaches the `MalibuAgent` monitor (§6.1). Production onboarding no
+longer writes `onboarding.json` (§7.5).
 
-### 7.3 Delete: `PendingLinkState`, `URLSchemeHandler.malibu`
+### 7.3 Delete: `PendingLinkState`, `URLSchemeHandler.malibu` — SHIPPED (reconciled v0.14)
 
-Removals required (each an explicit line-level touch point, not a
-grep-and-hope):
+**These removals are DONE — PR #418 removed the `malibu://` onboarding.** Grep over
+`phase3-binary/app/Sources` + `Tests` confirms: no `MalibuOnboardingPolicy`, no
+`MALIBU_ONBOARD_V2`, no `resumeOnboarding`/`setupPaused`, no `application(_:open:)` /
+`CFBundleURLSchemes` (only a tombstone comment at `MalibuApp.swift:35-38` records the
+v0.11 removal). `RegisterClient.postRegister` still *compiles* but has **zero callers**
+(unwired; §4.1). The original line-level removal list below is retained as provenance.
+
+Removals (historical — now completed):
 
 - `phase3-binary/app/Sources/Malibu/System/PendingLinkState.swift` —
   delete the file wholesale.
@@ -1848,66 +1898,92 @@ Grep and replace across the App-track sources. Notable strings:
 - Any `MenuBarController` copy — "node status" → "provider status"
 - Any `DashboardView` copy — same
 
-### 7.5 Onboarding state persistence
+### 7.5 Onboarding state persistence — legacy decode-only (reconciled v0.14)
+
+**Reconciled v0.14 — production onboarding no longer writes this file.** The
+`OnboardingState` struct still exists as a **decode-only legacy** shape (its
+doc-comment says so, `OnboardingState.swift:3-5`; fields
+`onboardingSchemaVersion` / `provider_id` / `created_at` / `last_stage` /
+`first_serving_at` / `model_download`, pinned by
+`OnboardingStateTests.testOnboardingStateUsesSnakeCaseAndFirstServingAt`), so an
+older `onboarding.json` still parses — but the shipped flow does **not** write it and
+does **not** use `onboardingSchemaVersion` as a live migration disambiguator.
+
+Instead, install/onboarding state is derived from **disk evidence** at startup
+(`StartupState.detect().route()`, §7.6): the `.installed-by-app` marker, the
+`config.yaml`, the Keychain token, and the **launchd install evidence**
+(`install_manifest.json` / `live.streamvc.macprovider.plist`). There is no `v2` vs
+`v1` schema flag on the live path.
+
+The historical v2 JSON shape (retained for provenance):
 
 ```json
-{
-  "onboardingSchemaVersion": 2,
-  "provider_id": "p_abcd…",
-  "created_at":  "2026-07-03T09:41:00Z",
-  "last_stage":  "downloadingModel",
-  "first_serving_at": null,
-  "model_download": {
-    "model_id": "llama-3.3-70b-instruct",
-    "target_url": "https://…",
-    "target_sha256": "…",
-    "partial_bytes": 12345678
-  }
-}
+{ "onboardingSchemaVersion": 2, "provider_id": "p_abcd…",
+  "created_at": "…", "last_stage": "…", "first_serving_at": null,
+  "model_download": { "model_id": "…", "partial_bytes": 12345678 } }
 ```
 
-File mode 0600. Never contains the private key or bearer token —
-those live in Keychain (which handles encryption + ACL).
+File mode 0600. Never contains the private key or bearer token — those live in
+Keychain.
 
-`onboardingSchemaVersion` is the migration disambiguator (§8). v1
-installs have no such file, or a file without this field.
-`first_serving_at` is the v2-complete marker: null or absent means
-v2-partial; a timestamp means the agent has seen `.serving` at least
-once.
+### 7.6 `MalibuAgent.start()` — monitor gate with launchd evidence (reconciled v0.14)
 
-### 7.6 `MalibuAgent.start()` — unchanged gate, add identity-mint side effect
-
-The launch gate stays exactly as it is today at
-`MalibuAgent.swift:46-50`:
+**Reconciled v0.14 — the gate now has THREE conditions, and it drives a MONITOR, not a
+spawn.** `MalibuAgent.start()` (`MalibuAgent.swift:64-87`) refuses unless, in order:
 
 ```swift
-guard await ProviderConfig.isConfigured else { return }
+guard ProviderConfig.readProviderID() != nil else { … }              // :64-68
+guard StartupState.launchdInstallEvidenceExists() else { … }          // :69-73
+guard await ProviderConfig.isConfigured else { … }                    // :74-78
+// → releases any legacy spawned child, then monitorInstalledProviderIfPresent()  :81-87
 ```
 
-`ProviderConfig.isConfigured` requires (per
-`ProviderConfig.swift:14-24`) config file present, app marker
-present, provider_id set, AND Keychain token present. All four hold
-after either the v1 browser-OAuth flow OR the v2 SPEC-026 flow
-completes — the v2 flow explicitly writes both the provider_id +
-Keychain token via
-`ProviderConfig.saveProviderIdentity(providerID:token:)` in §6.1
-step 7d before it lets the agent start.
+- `launchdInstallEvidenceExists()` is true iff `install_manifest.json` OR
+  `live.streamvc.macprovider.plist` is readable
+  (`LaunchProviderController.swift:374-380`). When it is false the agent **refuses to
+  poll** and shows "Click Launch Provider to run the installer" — a legacy app-marker
+  config (config + marker but no launchd) routes to onboarding, not a reconnect loop
+  (the PR #418 bugbot follow-up; `route()` at `LaunchProviderController.swift:352-372`,
+  `StartupRouteTests.swift:9`).
+- `ProviderConfig.isConfigured` = config present AND `.installed-by-app` marker AND
+  Keychain token bound to the config's `provider_id` (`ProviderConfig.swift:503-511`).
+- `start()` then calls `monitorInstalledProviderIfPresent()` and **never instantiates
+  `CLIChildProcess`** — the daemon is launchd-owned (§6.1, SPEC-025 §5).
 
-**Identity-only ("v2-partial") state — Keychain identity present
-but `ProviderConfig.isConfigured == false` — MUST NOT reach
-`MalibuAgent.start()`.** That state is handled entirely by the
-`LaunchProviderController` resume path (§7.2). The onboarding
-window presents on next app foreground (§8.1 matrix) and drives
-registration to completion before the agent runs. This closes the
-CODE-M2 finding.
+**Identity-only state** (Keychain identity present, not yet `isConfigured`) never
+reaches monitoring; `StartupState.route()` sends it to `.showOnboarding` to (re-)run
+`install.sh` (`StartupRouteTests.swift` `app-owned-missing-identity → .showOnboarding`).
 
-The receipt-key env-var handoff (`MACPROVIDER_RECEIPT_KEY_RAW`)
-introduced in v0.1 is REMOVED for v0.2 per §3.2 and remains removed
-in v0.3.
+The v0.1 receipt-key env-var handoff (`MACPROVIDER_RECEIPT_KEY_RAW`) remains removed.
 
-## 8. Migration & feature flag
+## 8. Migration & feature flag — flag REMOVED, routing is disk-evidence-based (reconciled v0.14)
 
-The SPEC-026 flow ships behind a single flag readable at App launch:
+**Reconciled v0.14 — there is no onboarding feature flag in the shipped app.** PR #418
+removed `MALIBU_ONBOARD_V2` (and the `onboardingFlow="v2"` user default); grep over
+`Sources` + `Tests` finds neither. The CLI-wrapper onboarding is **always** the flow —
+there is no v1-vs-v2 gate. Consequently the §8.1 State × flag matrix, the §8.2 rollback
+behavior keyed on the flag, and **AC-026-09** (which asserted flag-gated behavior) **no
+longer apply** and are retained below only as provenance.
+
+**What replaced the flag matrix: `StartupState.detect().route()`** (a pure disk-state
+router, `LaunchProviderController.swift:302-372`, pinned by
+`StartupRouteTests.testStartupRouteInstallStates`). The live routing table:
+
+| Disk state | Route |
+|---|---|
+| healthy launchd provider, or launchd install evidence + config | `.startAgent` (monitor) |
+| config + `.installed-by-app` marker but **no** launchd evidence (legacy app-marker) | `.showOnboarding` (re-run `install.sh`) |
+| app-owned but missing app identity | `.showOnboarding` |
+| `config.yaml` present but **no** app marker (CLI-owned) | `.showImportDialog` (§8.4) |
+| nothing configured | `.showOnboarding` |
+
+The import/migration dialog (§8.4) and the CLI-owned-config handling are unchanged in
+spirit; they are now reached by `.showImportDialog` rather than a flag column.
+
+---
+
+**Historical (pre-#418) — the flag design, retained for provenance:** the SPEC-026 flow
+shipped behind a single flag readable at App launch:
 
 - Environment variable `MALIBU_ONBOARD_V2` (dev + CI)
 - User default key `onboardingFlow` = `"v2"` (production Sparkle
@@ -2181,11 +2257,13 @@ runs.
    is not. Providers displayed a "Provisional — earn up to 25
    MALIBU/day (non-withdrawable until Trusted)" tier chip per §6
    are still consistent under either operational stance.
-9. **`Malibu.app` Sparkle release** with `onboardingFlow = "v2"` as
-   the default user default.
+9. **`Malibu.app` Sparkle release** shipping the CLI-wrapper onboarding.
+   (Reconciled v0.14: there is no `onboardingFlow` user default to flip —
+   PR #418 removed the flag, §8. The CLI-wrapper onboarding is
+   unconditional; "flag flip" here means simply shipping the release.)
 
-Only when every step is done does the App-side ship with
-`onboardingFlow = "v2"` as the default.
+Only when every step is done does the App-side ship the CLI-wrapper
+onboarding release.
 
 ## 11. Biggest risk and mitigation
 
@@ -2313,12 +2391,14 @@ criteria in §5.2 by 25%.
   prior one), landing the user back at the launch screen. The
   SPEC-015 receipt-key Keychain slot is untouched and its rotation
   history is preserved.
-- **AC-026-09.** `MALIBU_ONBOARD_V2=0` overrides UserDefaults
-  `onboardingFlow = "v2"` and keeps fresh installs in the local
-  setup-paused state: no browser tab, portal URL, `malibu://` URL
-  scheme, URL-scheme handler, or `PendingLinkState` path is invoked.
-  Existing configured installs still run through
-  `ProviderConfig.isConfigured`.
+- **AC-026-09 — SUPERSEDED (reconciled v0.14).** This criterion asserted
+  `MALIBU_ONBOARD_V2=0` / `onboardingFlow` flag behavior, which PR #418 **removed**
+  (§8): there is no onboarding flag and no setup-paused state. The still-valid *residual*
+  invariant — **no browser tab, portal URL, `malibu://` scheme, URL-scheme handler, or
+  `PendingLinkState` path is ever invoked** — is retained and enforced by the §7.3 CI
+  grep (zero hits for `PendingLinkState` / `URLSchemeHandler` / `malibu://` /
+  `CFBundleURLSchemes` in App sources). The routing that replaced the flag is verified by
+  `StartupRouteTests.testStartupRouteInstallStates` (§8).
 - **AC-026-10.** Uninstall wipes the `provider_identity_v1` Keychain
   item and all onboarding artifacts under
   `Application Support/Malibu/`, but does NOT wipe the SPEC-015
