@@ -1,6 +1,19 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.4 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.5 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.5 (2026-07-13, R4 audit-loop convergence — code source of truth).** R4
+architect/code caught app-side build/distribution twins: §2 token-backup documented as
+best-effort/may-persist (aligned to §7); §4 `.dmg` table — post-install runs `install.sh`
+(SMAppService only registers the app login item, §8), and the pipeline already emits an
+optional signed App `.pkg`; §5.1 bundle tree adds the **required** `macprovider-cli` +
+`mlx.metallib` under `Contents/MacOS/` (`release.yml:556`,
+`verify-tier2-provider-release.sh:405`); §6.2 CI recipe bannered as design-intent
+(`release.yml` authoritative — archive-copy + `hdiutil`, not `-exportArchive`/`create-dmg`);
+§7 receipt-key Keychain coordinates corrected to `com.streamvc.macprovider.receipt-key`
+(+`.prev`/`.bootstrap-identity-key`), account `<provider_id>`; §9 Sparkle trust anchor is
+`SUPublicEDKey` in `Info.plist` (no `appcast-key.pub`), with deltas/phased-rollout marked
+design-not-shipped (`generate-malibu-appcast.sh:67`).
 
 **Change log v0.4 (2026-07-13, R3 audit-loop deep-tail convergence — code source of
 truth).** R3 architect/code caught remaining "two live definitions" contradictions: §1
@@ -91,7 +104,7 @@ From reading `phase3-binary/`:
 | Control-plane IPC | `Sources/macprovider-cli/ControlSocket.swift` — typed JSON frames on Unix socket | **NOT used in the shipped monitor-only flow (reconciled v0.2).** `ControlSocketClient` / `MalibuAgent.connectControl` compile but have no production call site — legacy/test surface only. The wrapper does not open the control socket (§5.2). |
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
 | Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | **Reconciled v0.2:** `install.sh` obtains the token; the wrapper **imports** it from `config.yaml` into the app Keychain via `ProviderConfig.importExistingCLIConfig()` (`ProviderConfig.swift:280-352`), stripping it from `config.yaml`. The wrapper never receives a token from a portal deep-link (that `malibu://` path is removed). |
-| Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2/v0.3:** `install.sh` writes the *initial* `config.yaml` (shared with the CLI track). The wrapper does **not** create it, but on import it **DOES rewrite** the live `config.yaml` to strip the `provider_token` (`ProviderConfig.swift:312`); it reads `provider_id`/model/port and moves the token to Keychain. **Token custody (reconciled v0.3 — nuanced, see §7):** the import transiently writes a token-bearing 0600 `config.yaml.import-backup` and deletes it after the Keychain write succeeds, so the token is briefly on disk during import; the *live* `config.yaml` ends token-free. |
+| Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2/v0.3:** `install.sh` writes the *initial* `config.yaml` (shared with the CLI track). The wrapper does **not** create it, but on import it **DOES rewrite** the live `config.yaml` to strip the `provider_token` (`ProviderConfig.swift:312`); it reads `provider_id`/model/port and moves the token to Keychain. **Token custody (reconciled v0.3/v0.4 — nuanced, see §7):** the import writes a token-bearing 0600 `config.yaml.import-backup`; its deletion is **best-effort** (delete errors are ignored, and one recovery branch retains it — §7, `ProviderConfig.swift:336,354`), so the backup can persist on disk. The *live* `config.yaml` ends token-free. |
 | Watchdog LaunchAgent | the launchd watchdog installed by `install.sh` (evidence: `~/Library/Application Support/macprovider/install_manifest.json` or `~/Library/LaunchAgents/live.streamvc.macprovider.plist`) | **Reconciled v0.2 — the App track DOES install and rely on the watchdog** (via `install.sh`); it is what owns the CLI's lifecycle/restarts. `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
 | Portal | `portal.streamvc.live` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
 | Release manifest / checksum | `scripts/sign-catalog.go`, tier2 release scripts | Feeds the same manifest that Sparkle appcast references |
@@ -230,12 +243,12 @@ Recommendation: **`.dmg`**.
 |---|---|---|
 | Non-dev familiarity | High (Slack, Signal, Tailscale) | Medium |
 | Requires elevation | No | Yes (or user-scope pkgs, clunky) |
-| Post-install steps | App handles via `SMAppService` on first click | Installer scripts (extra attack surface) |
+| Post-install steps | App runs the bundled `install.sh` on first Launch (installs the launchd CLI); `SMAppService` only registers the app's own login item after attach (reconciled v0.4, §8) | Installer scripts (extra attack surface) |
 | Update path | Sparkle replaces `.app` in place | Works but clunkier |
 | CI complexity | `create-dmg` one-liner | `pkgbuild` + `productbuild` + component plist |
 | MDM/enterprise | Weaker | Stronger |
 
-Ship `.dmg` for v1. Add signed `.pkg` **later** for enterprise/MDM only; content is the same `.app`.
+Ship `.dmg` for v1. **Reconciled v0.4:** the pipeline already emits an **optional signed App `.pkg`** alongside the `.dmg` (`release.yml:599,616`); the earlier "later, enterprise/MDM only" framing is superseded — content is the same `.app`.
 
 ## 5. Wrapper ↔ CLI: architecture (reconciled v0.2 — monitor-only)
 
@@ -283,6 +296,8 @@ Malibu.app/Contents/
                                    # (Sparkle); NO CFBundleURLSchemes (malibu:// removed)
   MacOS/
     Malibu                         # Swift binary (wrapper)
+    macprovider-cli                # REQUIRED — signed CLI copied in by release.yml:556; verify-tier2-provider-release.sh:405 rejects a bundle without it
+    mlx.metallib                   # REQUIRED — MLX Metal shader library (release.yml)
   Resources/
     install.sh                     # bundled CLI-track installer (mode 755, project.yml:72-75)
     Assets.car
@@ -372,6 +387,13 @@ Only one new secret needed: the Sparkle EdDSA key.
 
 ### 6.2 New CI steps added by this spec
 
+> **Reconciled v0.4 — `release.yml` is authoritative.** The shipped pipeline differs in
+> mechanics from the recipe below: it copies the archive product directly rather than
+> running `-exportArchive` (`release.yml:184,194`), builds the `.dmg` with `hdiutil`
+> (not `create-dmg`), and additionally emits an **optional signed App `.pkg`**
+> (`release.yml:599,616`). Treat the steps below as design intent; the exact commands
+> live in `.github/workflows/release.yml`.
+
 Runs on the same macOS runner as the existing job, after the CLI binary is signed and notarized. The signed CLI binary from the existing step is the input.
 
 1. `xcodebuild -scheme Malibu -configuration Release archive -archivePath Malibu.xcarchive` (new Xcode project lives at `phase3-binary/app/Malibu.xcodeproj`).
@@ -434,7 +456,7 @@ The single biggest risk in this spec is stomping a config that a developer previ
 | App-track marker | `~/Library/Application Support/Malibu/.installed-by-app` (**empty file**, reconciled v0.2 — not dated; `ProviderConfig.swift:513-518`) | App track only |
 | Logs (rolling, 100 MB cap) | `~/Library/Logs/malibu/` | Shared, app tags its own lines |
 | `provider_token` | Keychain, service `tech.malibu.provider`, account `<provider_id>` | App track; CLI track keeps YAML |
-| Session receipt keys | Keychain, service `tech.malibu.receipt`, account `<key_id>` | Unchanged from CLI track (reuse existing key store) |
+| Session receipt keys | Keychain, services `com.streamvc.macprovider.receipt-key` / `.prev` / `.bootstrap-identity-key`, account `<provider_id>` (reconciled v0.4 to shipped `ReceiptKeyStore.swift:22-25,232-249`) | Unchanged from CLI track (reuses the existing CLI key store) |
 
 Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`):
 
@@ -499,10 +521,16 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
 
 ## 9. Sparkle appcast
 
-- Public key baked into `Contents/Resources/appcast-key.pub`. Private key lives in CI secret; rotate quarterly; keep the previous key valid for one grace release.
-- Appcast entries include: version, min OS, download URL (signed .dmg), EdDSA signature, release notes URL, phased rollout percentage (Sparkle 2 supports this).
-- Delta updates: publish full `.dmg` + BSDiff patch from previous release. Wrapper picks whichever is smaller.
-- Failure handling: if patch application fails signature check, fall back to full download. If full download fails, keep running current version and retry on next check.
+> **Reconciled v0.4 to shipped tooling.** The trust anchor is `SUPublicEDKey` in
+> `Info.plist` (`project.yml:61`; verified by `verify-malibu-sparkle-signature.py:54`) —
+> there is **no** `Contents/Resources/appcast-key.pub`. The shipped appcast generator
+> stages a **single full `.dmg`** and configures **neither BSDiff delta updates nor
+> phased rollout** (`generate-malibu-appcast.sh:67`); the delta/phased items below are
+> DESIGN intent, not shipped behavior.
+
+- Public key: `SUPublicEDKey` (Ed25519) in `Info.plist`. Private key lives in a CI secret; rotate quarterly, keeping the previous key valid for one grace release.
+- Appcast entries include: version, min OS, download URL (signed `.dmg`), EdDSA signature, release notes URL. (Phased-rollout percentage and BSDiff deltas are Sparkle-2 features the shipped generator does not yet configure — DESIGN, per banner.)
+- Failure handling: if a download fails its signature check or transfer, keep running the current version and retry on the next check.
 
 ## 10. Landing page changes (`malibu.tech/host/`)
 
