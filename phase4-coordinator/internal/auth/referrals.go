@@ -395,20 +395,36 @@ UPDATE referral_issuers SET base_capacity = ? WHERE issuer_id = ? AND campaign =
 	return out, nil
 }
 
-// ReferralReplacement is the result of ReplaceReferralIssuer.
+// ReferralReplacement is the result (or dry-run preview) of ReplaceReferralIssuer.
 type ReferralReplacement struct {
-	ProviderID   string
-	OldIssuerID  string
-	NewIssuerID  string
-	NewCode      string
-	BaseCapacity int
+	ProviderID       string
+	OldIssuerID      string
+	OldBaseCapacity  int
+	OldBonusCapacity int
+	NewIssuerID      string // empty on a dry-run preview (no successor minted yet)
+	NewCode          string // empty on a dry-run preview
+	KeyID            string
+	BaseCapacity     int // proposed/applied successor base capacity
+	BonusCapacity    int // proposed/applied successor bonus capacity (carried forward)
+	// PendingSocialReview is true when a social verification is still PENDING for
+	// this provider. FIX-570 M2(prod): the successor carries the earned bonus AND
+	// the pending verification is rebound to it, so no earned/pending capacity is
+	// dropped by the replacement.
+	PendingSocialReview bool
+	Applied             bool
 }
 
 // ReplaceReferralIssuer mints a fresh usable provider issuer to succeed a revoked
 // one within a campaign. The revoked issuer is detached from the provider slot
 // (its code stays revoked) and linked to the new issuer via replaced_by plus an
 // audit row. Requires a non-empty actor and reason. FIX-570 H4.
-func (s *Store) ReplaceReferralIssuer(ctx context.Context, policy ReferralPolicy, issuerID, actor, reason string, now time.Time) (ReferralReplacement, error) {
+//
+// When apply is false the call is a rollback-safe DRY RUN: it validates the
+// target and returns the old→proposed capacity/key preview WITHOUT mutating
+// (FIX-570 PROD-H4). FIX-570 M2(prod): the successor carries the old issuer's
+// earned bonus_capacity and any pending social verification/challenge is rebound
+// to the successor, so a granted or pending X bonus is never silently dropped.
+func (s *Store) ReplaceReferralIssuer(ctx context.Context, policy ReferralPolicy, issuerID, actor, reason string, apply bool, now time.Time) (ReferralReplacement, error) {
 	if err := policy.Validate(); err != nil {
 		return ReferralReplacement{}, err
 	}
@@ -416,7 +432,7 @@ func (s *Store) ReplaceReferralIssuer(ctx context.Context, policy ReferralPolicy
 	if !referralPartPattern.MatchString(issuerID) {
 		return ReferralReplacement{}, ErrReferralInvalid
 	}
-	if strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "" {
+	if apply && (strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "") {
 		return ReferralReplacement{}, fmt.Errorf("actor and reason are required to replace an issuer")
 	}
 	var out ReferralReplacement
@@ -425,10 +441,11 @@ func (s *Store) ReplaceReferralIssuer(ctx context.Context, policy ReferralPolicy
 		var providerID sql.NullString
 		var firstServingAt sql.NullString
 		var revokedAt sql.NullString
+		var oldBase, oldBonus int
 		if err := conn.QueryRowContext(ctx, `
-SELECT code_type, provider_id, first_serving_at, revoked_at
+SELECT code_type, provider_id, first_serving_at, revoked_at, base_capacity, bonus_capacity
   FROM referral_issuers
- WHERE issuer_id = ? AND campaign = ?`, issuerID, policy.Campaign).Scan(&codeType, &providerID, &firstServingAt, &revokedAt); err != nil {
+ WHERE issuer_id = ? AND campaign = ?`, issuerID, policy.Campaign).Scan(&codeType, &providerID, &firstServingAt, &revokedAt, &oldBase, &oldBonus); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrReferralInvalid
 			}
@@ -439,6 +456,30 @@ SELECT code_type, provider_id, first_serving_at, revoked_at
 		}
 		if !revokedAt.Valid {
 			return fmt.Errorf("issuer %s is not revoked; only a revoked issuer can be replaced", issuerID)
+		}
+		// FIX-570 M2(prod): detect a still-pending social verification so the preview
+		// discloses it and the operator understands the pending bonus is carried.
+		var pendingReview bool
+		if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM referral_social_verifications
+     WHERE provider_id = ? AND campaign = ? AND granted_at IS NULL AND failed_at IS NULL
+)`, providerID.String, policy.Campaign).Scan(&pendingReview); err != nil {
+			return err
+		}
+		out = ReferralReplacement{
+			ProviderID:          providerID.String,
+			OldIssuerID:         issuerID,
+			OldBaseCapacity:     oldBase,
+			OldBonusCapacity:    oldBonus,
+			KeyID:               policy.CurrentKeyID,
+			BaseCapacity:        policy.ProviderBaseUses,
+			BonusCapacity:       oldBonus, // carry earned bonus forward
+			PendingSocialReview: pendingReview,
+		}
+		if !apply {
+			// Dry run: no mutation, no successor minted.
+			return nil
 		}
 		newID, err := randomReferralID()
 		if err != nil {
@@ -455,23 +496,42 @@ UPDATE referral_issuers SET provider_id = NULL, replaced_by = ? WHERE issuer_id 
 			newID, issuerID, policy.Campaign); err != nil {
 			return err
 		}
+		// FIX-570 M2(prod): carry the earned bonus_capacity into the successor.
 		if _, err := conn.ExecContext(ctx, `
 INSERT INTO referral_issuers (
     issuer_id, code_type, key_id, campaign, provider_id,
     base_capacity, bonus_capacity, created_at, first_serving_at
-) VALUES (?, 'P', ?, ?, ?, ?, 0, ?, ?)`,
-			newID, policy.CurrentKeyID, policy.Campaign, providerID.String, policy.ProviderBaseUses, timeText(now.UTC()), firstServing); err != nil {
+) VALUES (?, 'P', ?, ?, ?, ?, ?, ?, ?)`,
+			newID, policy.CurrentKeyID, policy.Campaign, providerID.String, policy.ProviderBaseUses, oldBonus, timeText(now.UTC()), firstServing); err != nil {
+			return err
+		}
+		// FIX-570 M2(prod): rebind any social verification/challenge from the revoked
+		// issuer to the successor. A GRANTED verification stays consistent with the
+		// active issuer; a PENDING one is promoted onto the unrevoked successor by the
+		// reconciler (which grants only WHERE revoked_at IS NULL), so a pending bonus
+		// is not lost to the detached issuer.
+		if _, err := conn.ExecContext(ctx, `
+UPDATE referral_social_verifications SET issuer_id = ? WHERE provider_id = ? AND campaign = ? AND issuer_id = ?`,
+			newID, providerID.String, policy.Campaign, issuerID); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+UPDATE referral_social_challenges SET issuer_id = ? WHERE provider_id = ? AND campaign = ? AND issuer_id = ?`,
+			newID, providerID.String, policy.Campaign, issuerID); err != nil {
 			return err
 		}
 		code, err := EncodeReferralCode(policy, ReferralTypeProvider, policy.CurrentKeyID, newID)
 		if err != nil {
 			return err
 		}
-		detail := fmt.Sprintf("provider=%s replaced_by=%s base_capacity=%d", providerID.String, newID, policy.ProviderBaseUses)
+		detail := fmt.Sprintf("provider=%s replaced_by=%s base_capacity=%d bonus_capacity=%d pending_social_review=%t",
+			providerID.String, newID, policy.ProviderBaseUses, oldBonus, pendingReview)
 		if err := recordReferralAdminAuditTx(ctx, conn, actor, reason, "replace_issuer", policy.Campaign+"/"+issuerID, detail, now); err != nil {
 			return err
 		}
-		out = ReferralReplacement{ProviderID: providerID.String, OldIssuerID: issuerID, NewIssuerID: newID, NewCode: code, BaseCapacity: policy.ProviderBaseUses}
+		out.NewIssuerID = newID
+		out.NewCode = code
+		out.Applied = true
 		return nil
 	})
 	if err != nil {

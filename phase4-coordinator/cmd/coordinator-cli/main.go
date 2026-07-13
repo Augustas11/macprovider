@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/config"
 )
 
 func main() {
@@ -751,66 +752,101 @@ func replaceReferralIssuer(args []string, getenv func(string) string, stdout io.
 	fs := flag.NewFlagSet("replace-referral-issuer", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
-	campaign := fs.String("campaign", "", "referral campaign identifier")
-	keyID := fs.String("key-id", "", "HMAC key identifier")
-	secretEnv := fs.String("secret-env", "", "environment variable containing the HMAC secret")
+	// FIX-570 PROD-H4/ADV-M3: the successor's signing key and capacity are taken
+	// from the coordinator's AUTHORITATIVE resolved config, not from operator flags.
+	// The command no longer verifies its result against its own ad-hoc policy (which
+	// always reported verified=true); it compares the operator-stated key/capacity
+	// against the deployed policy, rejects any mismatch, and validates the generated
+	// code under the DEPLOYED policy.
+	configPath := fs.String("config", "", "path to the coordinator YAML config (authoritative referral policy; required)")
+	campaign := fs.String("campaign", "", "referral campaign identifier (must match the deployed campaign)")
+	keyID := fs.String("key-id", "", "expected HMAC key identifier (must match the deployed current_key_id)")
+	secretEnv := fs.String("secret-env", "", "environment variable containing the expected HMAC secret (must match the deployed secret)")
 	issuerID := fs.String("issuer-id", "", "revoked provider issuer identifier to replace")
-	// FIX-570 M4: the successor issuer's base capacity must match the campaign's
-	// effective provider base capacity. It is no longer hardcoded to 1; the
-	// operator supplies the reviewed value so a campaign that grants 3 is not
-	// silently downgraded to 1.
-	baseUses := fs.Int("base-uses", 0, "successor issuer base capacity (campaign ProviderBaseUses; required, must be > 0)")
-	actor := fs.String("actor", "", "operator identity recorded in the audit log")
-	reason := fs.String("reason", "", "reason recorded in the audit log")
+	baseUses := fs.Int("base-uses", 0, "expected successor base capacity (must match the deployed provider_base_uses; required, must be > 0)")
+	apply := fs.Bool("apply", false, "apply the replacement (default is a rollback-safe dry-run preview)")
+	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
+	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
 	fs.Usage = referralUsage(fs, "replace-referral-issuer",
-		"coordinator-cli replace-referral-issuer --db coordinator.db --campaign prebeta \\\n"+
-			"    --key-id k1 --secret-env MAL_REFERRAL_SECRET --issuer-id <revoked-issuer> \\\n"+
-			"    --base-uses 3 --actor ops@malibu --reason 'issuer key rotation'")
+		"coordinator-cli replace-referral-issuer --db coordinator.db --config coordinator.yaml \\\n"+
+			"    --campaign prebeta --key-id k1 --secret-env MAL_REFERRAL_SECRET \\\n"+
+			"    --issuer-id <revoked-issuer> --base-uses 3 \\\n"+
+			"    --apply --actor ops@malibu --reason 'issuer key rotation'")
 	if err := fs.Parse(args); err != nil {
 		return referralParseError(err)
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*secretEnv) == "" {
 		return fmt.Errorf("--secret-env is required; referral HMAC secrets are not accepted on argv")
 	}
-	if strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "" {
-		return fmt.Errorf("--actor and --reason are required")
+	if strings.TrimSpace(*configPath) == "" {
+		return fmt.Errorf("--config is required; the successor policy is loaded from the coordinator's authoritative config")
+	}
+	if *apply && (strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "") {
+		return fmt.Errorf("--actor and --reason are required with --apply")
 	}
 	if *baseUses <= 0 {
-		return fmt.Errorf("--base-uses is required and must be > 0 (set it to the campaign's ProviderBaseUses)")
+		return fmt.Errorf("--base-uses is required and must be > 0")
+	}
+	cfg, err := config.Load(strings.TrimSpace(*configPath))
+	if err != nil {
+		return fmt.Errorf("load coordinator config: %w", err)
+	}
+	if !cfg.Referrals.RequireForRegistration && !cfg.Referrals.EnableSocialInviteBonus {
+		return fmt.Errorf("the deployed config has no active referral policy; refusing to replace an issuer")
+	}
+	// Build the DEPLOYED (authoritative) policy exactly as the coordinator does.
+	deployed := auth.ReferralPolicy{
+		RequireForRegistration: cfg.Referrals.RequireForRegistration,
+		EnableSocialBonus:      cfg.Referrals.EnableSocialInviteBonus,
+		Campaign:               cfg.Referrals.Campaign,
+		PolicyVersion:          cfg.Referrals.PolicyVersion,
+		CurrentKeyID:           cfg.Referrals.CurrentKeyID,
+		HMACKeys:               cfg.Referrals.HMACKeys,
+		ProviderBaseUses:       cfg.Referrals.ProviderBaseUses,
+		SocialBonusUses:        cfg.Referrals.SocialBonusUses,
+		ChallengeTTL:           time.Duration(cfg.Referrals.ChallengeTTLS) * time.Second,
+	}
+	if err := deployed.Validate(); err != nil {
+		return fmt.Errorf("deployed referral policy is invalid: %w", err)
+	}
+	// Reject any mismatch between the operator's stated intent and the deployed
+	// policy — signing-key identity, signing secret, campaign, and capacity — BEFORE
+	// mutating anything.
+	if strings.TrimSpace(*campaign) != deployed.Campaign {
+		return fmt.Errorf("campaign mismatch: --campaign=%q but deployed campaign=%q", strings.TrimSpace(*campaign), deployed.Campaign)
+	}
+	if strings.TrimSpace(*keyID) != deployed.CurrentKeyID {
+		return fmt.Errorf("signing key mismatch: --key-id=%q but deployed current_key_id=%q", strings.TrimSpace(*keyID), deployed.CurrentKeyID)
 	}
 	secret := getenv(strings.TrimSpace(*secretEnv))
-	if len(secret) < 32 {
-		return fmt.Errorf("referral HMAC secret from %s must be at least 32 bytes", *secretEnv)
+	if deployedSecret := deployed.HMACKeys[deployed.CurrentKeyID]; secret != deployedSecret {
+		return fmt.Errorf("signing secret mismatch: %s does not match the deployed secret for key %q", strings.TrimSpace(*secretEnv), deployed.CurrentKeyID)
 	}
-	policy := auth.ReferralPolicy{
-		Campaign:         strings.TrimSpace(*campaign),
-		PolicyVersion:    "v1",
-		CurrentKeyID:     strings.TrimSpace(*keyID),
-		HMACKeys:         map[string]string{strings.TrimSpace(*keyID): secret},
-		ProviderBaseUses: *baseUses,
-		SocialBonusUses:  1,
-		ChallengeTTL:     15 * time.Minute,
-	}
-	if err := policy.Validate(); err != nil {
-		return err
+	if *baseUses != deployed.ProviderBaseUses {
+		return fmt.Errorf("capacity mismatch: --base-uses=%d but deployed provider_base_uses=%d", *baseUses, deployed.ProviderBaseUses)
 	}
 	store, err := auth.OpenStore(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	replacement, err := store.ReplaceReferralIssuer(context.Background(), policy, strings.TrimSpace(*issuerID), strings.TrimSpace(*actor), strings.TrimSpace(*reason), time.Now().UTC())
+	replacement, err := store.ReplaceReferralIssuer(context.Background(), deployed, strings.TrimSpace(*issuerID), strings.TrimSpace(*actor), strings.TrimSpace(*reason), *apply, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	// FIX-570 M4: verify the generated code validates under the effective policy
-	// before reporting success, so a wrong key/secret cannot silently mint an
-	// unusable successor code.
-	if _, verifyErr := store.ValidateReferral(context.Background(), policy, replacement.NewCode, time.Now().UTC()); verifyErr != nil {
-		return fmt.Errorf("successor code failed verification under the supplied policy (wrong key/secret?): %w", verifyErr)
+	if !replacement.Applied {
+		_, err = fmt.Fprintf(stdout, "mode=dry-run campaign=%s provider_id=%s old_issuer_id=%s key_id=%s old_base_capacity=%d proposed_base_capacity=%d old_bonus_capacity=%d proposed_bonus_capacity=%d pending_social_review=%t\n",
+			deployed.Campaign, replacement.ProviderID, replacement.OldIssuerID, replacement.KeyID,
+			replacement.OldBaseCapacity, replacement.BaseCapacity, replacement.OldBonusCapacity, replacement.BonusCapacity, replacement.PendingSocialReview)
+		return err
 	}
-	_, err = fmt.Fprintf(stdout, "replaced campaign=%s provider_id=%s old_issuer_id=%s new_issuer_id=%s new_referral_code=%s base_capacity=%d verified=true\n",
-		policy.Campaign, replacement.ProviderID, replacement.OldIssuerID, replacement.NewIssuerID, replacement.NewCode, replacement.BaseCapacity)
+	// Validate the generated code under the DEPLOYED policy (not an ad-hoc one) so a
+	// wrong key/secret cannot report success on an unusable successor code.
+	if _, verifyErr := store.ValidateReferral(context.Background(), deployed, replacement.NewCode, time.Now().UTC()); verifyErr != nil {
+		return fmt.Errorf("successor code failed verification under the DEPLOYED policy: %w", verifyErr)
+	}
+	_, err = fmt.Fprintf(stdout, "mode=applied campaign=%s provider_id=%s old_issuer_id=%s new_issuer_id=%s new_referral_code=%s base_capacity=%d bonus_capacity=%d pending_social_review=%t verified=true\n",
+		deployed.Campaign, replacement.ProviderID, replacement.OldIssuerID, replacement.NewIssuerID, replacement.NewCode, replacement.BaseCapacity, replacement.BonusCapacity, replacement.PendingSocialReview)
 	return err
 }
 

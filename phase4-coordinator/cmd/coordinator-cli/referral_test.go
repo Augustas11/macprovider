@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,13 +153,44 @@ func TestAdjustSeedReferralDryRunDoesNotMutateAndApplyRefusesBelowUsed(t *testin
 	}
 }
 
-func TestReplaceReferralIssuerMintsFreshUsableIssuer(t *testing.T) {
+// replaceIssuerSecret is used both as the deployed HMAC secret and the operator's
+// --secret-env value; matching is asserted against the loaded config.
+const replaceIssuerSecret = "referral-hmac-secret-0123456789ab"
+
+// writeReplaceConfig writes a minimal but fully-valid coordinator config with an
+// active referral policy so replaceReferralIssuer can load the AUTHORITATIVE
+// deployed policy (FIX-570 PROD-H4). baseUses is the deployed provider base
+// capacity.
+func writeReplaceConfig(t *testing.T, baseUses int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "coordinator.yaml")
+	yaml := "auth:\n" +
+		"  operator_key: \"Kp9mZ2xQ7vL4wR8tN3jB6yH1cF5dG0sAe7uW4iP\"\n" +
+		"referrals:\n" +
+		"  require_for_registration: true\n" +
+		"  campaign: prebeta_2026\n" +
+		"  policy_version: v1\n" +
+		"  current_key_id: k1\n" +
+		"  hmac_keys:\n" +
+		"    k1: \"" + replaceIssuerSecret + "\"\n" +
+		"  provider_base_uses: " + itoa(baseUses) + "\n" +
+		"  social_bonus_uses: 1\n" +
+		"  challenge_ttl_s: 900\n" +
+		"  join_base_url: \"https://coordinator.streamvc.live/j\"\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }
+
+func TestReplaceReferralIssuerVerifiesAgainstDeployedPolicy(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
-	secret := strings.Repeat("s", 32)
-	getenv := func(string) string { return secret }
+	getenv := func(string) string { return replaceIssuerSecret }
 	policy := auth.ReferralPolicy{
 		RequireForRegistration: true, PolicyVersion: "v1", Campaign: "prebeta_2026", CurrentKeyID: "k1",
-		HMACKeys: map[string]string{"k1": secret}, ProviderBaseUses: 3, SocialBonusUses: 1, ChallengeTTL: time.Minute,
+		HMACKeys: map[string]string{"k1": replaceIssuerSecret}, ProviderBaseUses: 3, SocialBonusUses: 1, ChallengeTTL: time.Minute,
 	}
 	store, err := auth.OpenStore(dbPath)
 	if err != nil {
@@ -172,20 +205,52 @@ func TestReplaceReferralIssuerMintsFreshUsableIssuer(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Close()
+	cfgPath := writeReplaceConfig(t, 3)
 
+	// FIX-570 PROD-H4: a capacity mismatch vs the deployed policy is rejected BEFORE
+	// any mutation (deployed provider_base_uses=3, operator states 1).
+	var mismatch bytes.Buffer
+	if err := replaceReferralIssuer([]string{
+		"--db", dbPath, "--config", cfgPath, "--campaign", "prebeta_2026", "--key-id", "k1",
+		"--secret-env", "REF_SECRET", "--issuer-id", prov.IssuerID, "--base-uses", "1",
+		"--apply", "--actor", "ops@malibu", "--reason", "reissue",
+	}, getenv, &mismatch); err == nil || !strings.Contains(err.Error(), "capacity mismatch") {
+		t.Fatalf("capacity mismatch must be rejected, err=%v", err)
+	}
+
+	// A wrong signing secret is rejected too.
+	var wrongSecret bytes.Buffer
+	if err := replaceReferralIssuer([]string{
+		"--db", dbPath, "--config", cfgPath, "--campaign", "prebeta_2026", "--key-id", "k1",
+		"--secret-env", "REF_SECRET", "--issuer-id", prov.IssuerID, "--base-uses", "3",
+		"--apply", "--actor", "ops@malibu", "--reason", "reissue",
+	}, func(string) string { return strings.Repeat("z", 32) }, &wrongSecret); err == nil || !strings.Contains(err.Error(), "signing secret mismatch") {
+		t.Fatalf("signing secret mismatch must be rejected, err=%v", err)
+	}
+
+	// Dry-run (no --apply) previews old→proposed and does NOT mutate.
+	var dry bytes.Buffer
+	if err := replaceReferralIssuer([]string{
+		"--db", dbPath, "--config", cfgPath, "--campaign", "prebeta_2026", "--key-id", "k1",
+		"--secret-env", "REF_SECRET", "--issuer-id", prov.IssuerID, "--base-uses", "3",
+	}, getenv, &dry); err != nil {
+		t.Fatalf("dry-run err=%v", err)
+	}
+	if !strings.Contains(dry.String(), "mode=dry-run") || !strings.Contains(dry.String(), "proposed_base_capacity=3") {
+		t.Fatalf("dry-run output=%s", dry.String())
+	}
+
+	// Apply mints the successor and validates it under the DEPLOYED policy.
 	var out bytes.Buffer
 	if err := replaceReferralIssuer([]string{
-		"--db", dbPath, "--campaign", "prebeta_2026", "--key-id", "k1",
-		"--secret-env", "REF_SECRET", "--issuer-id", prov.IssuerID,
-		"--base-uses", "3",
-		"--actor", "ops@malibu", "--reason", "reissue after compromise",
+		"--db", dbPath, "--config", cfgPath, "--campaign", "prebeta_2026", "--key-id", "k1",
+		"--secret-env", "REF_SECRET", "--issuer-id", prov.IssuerID, "--base-uses", "3",
+		"--apply", "--actor", "ops@malibu", "--reason", "reissue after compromise",
 	}, getenv, &out); err != nil {
 		t.Fatalf("replace err=%v", err)
 	}
-	// FIX-570 M4: the successor inherits the campaign's base capacity (3), not a
-	// hardcoded 1.
-	if !strings.Contains(out.String(), "base_capacity=3") {
-		t.Fatalf("successor should keep base_capacity=3, got: %s", out.String())
+	if !strings.Contains(out.String(), "mode=applied") || !strings.Contains(out.String(), "base_capacity=3") || !strings.Contains(out.String(), "verified=true") {
+		t.Fatalf("successor apply output=%s", out.String())
 	}
 	newCode := ""
 	for _, field := range strings.Fields(out.String()) {
@@ -201,11 +266,9 @@ func TestReplaceReferralIssuerMintsFreshUsableIssuer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	// New issuer validates.
 	if _, err := store.ValidateReferral(context.Background(), policy, newCode, now); err != nil {
 		t.Fatalf("new code should validate, err=%v", err)
 	}
-	// Old issuer stays revoked.
 	oldCode, err := auth.EncodeReferralCode(policy, auth.ReferralTypeProvider, "k1", prov.IssuerID)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +276,7 @@ func TestReplaceReferralIssuerMintsFreshUsableIssuer(t *testing.T) {
 	if _, err := store.ValidateReferral(context.Background(), policy, oldCode, now); !errors.Is(err, auth.ErrReferralRevoked) {
 		t.Fatalf("old code should stay revoked, err=%v", err)
 	}
-	// Audit row written.
+	// Exactly one replace audit row (the dry-run and rejected attempts wrote none).
 	var audits int
 	if err := store.DB().QueryRowContext(context.Background(), `SELECT COUNT(1) FROM referral_admin_audit WHERE action = 'replace_issuer'`).Scan(&audits); err != nil {
 		t.Fatal(err)

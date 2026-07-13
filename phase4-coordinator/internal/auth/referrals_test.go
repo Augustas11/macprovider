@@ -678,6 +678,70 @@ func TestReservationCannotBeExtendedPastAbsoluteLifetime(t *testing.T) {
 // the H3 regression can assert the exact clamp deadline.
 const maxReservationLifetimeForTest = 60 * time.Minute
 
+// TestReplaceIssuerCarriesBonusAndRebindsPendingVerification is the FIX-570
+// M2(prod) regression: replacing a revoked provider issuer must carry the earned
+// bonus capacity into the successor and rebind any pending social verification to
+// it, so a granted or pending X bonus is never dropped onto the detached issuer.
+func TestReplaceIssuerCarriesBonusAndRebindsPendingVerification(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	prov, err := store.EnsureProviderReferral(context.Background(), policy, "prov-bonus", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := store.DB()
+	// Simulate an earned bonus already granted on the issuer.
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE referral_issuers SET bonus_capacity = 2 WHERE issuer_id = ? AND campaign = ?`, prov.IssuerID, policy.Campaign); err != nil {
+		t.Fatal(err)
+	}
+	// And a PENDING social verification bound to that issuer.
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO referral_social_verifications (provider_id, campaign, issuer_id, post_id, verification_method, verified_at, author_id, pending_since)
+		 VALUES (?, ?, ?, ?, 'x_api', ?, 'author-1', ?)`,
+		"prov-bonus", policy.Campaign, prov.IssuerID, "post-123", now.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeReferralIssuer(context.Background(), policy.Campaign, prov.IssuerID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	repl, err := store.ReplaceReferralIssuer(context.Background(), policy, prov.IssuerID, "ops@malibu", "rotate", true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repl.Applied || !repl.PendingSocialReview {
+		t.Fatalf("expected applied replacement disclosing pending review, got %+v", repl)
+	}
+	if repl.BonusCapacity != 2 || repl.OldBonusCapacity != 2 {
+		t.Fatalf("successor must carry bonus_capacity=2, got proposed=%d old=%d", repl.BonusCapacity, repl.OldBonusCapacity)
+	}
+	// Successor issuer row carries the bonus.
+	var successorBonus int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT bonus_capacity FROM referral_issuers WHERE issuer_id = ? AND campaign = ?`, repl.NewIssuerID, policy.Campaign).Scan(&successorBonus); err != nil {
+		t.Fatal(err)
+	}
+	if successorBonus != 2 {
+		t.Fatalf("successor issuer bonus_capacity=%d want 2", successorBonus)
+	}
+	// The pending verification is rebound to the (unrevoked) successor so the
+	// promotion reconciler can grant it.
+	var boundIssuer string
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT issuer_id FROM referral_social_verifications WHERE provider_id = ? AND campaign = ?`, "prov-bonus", policy.Campaign).Scan(&boundIssuer); err != nil {
+		t.Fatal(err)
+	}
+	if boundIssuer != repl.NewIssuerID {
+		t.Fatalf("pending verification issuer_id=%q want rebound to successor %q", boundIssuer, repl.NewIssuerID)
+	}
+}
+
 // TestCustodyProvenRecoveryIgnoresIssuerRevocation is the FIX-570 A3 regression:
 // once a provider is bound to a redemption, presenting the same code must succeed
 // even after the issuer is revoked. Pre-fix redeemReferralTx re-validated the
