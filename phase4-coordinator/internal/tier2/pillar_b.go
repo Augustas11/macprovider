@@ -372,7 +372,7 @@ func LogEncryptedLegSessionClosed(logger zerolog.Logger, providerID, assignedID,
 		Msg("tier2 encrypted leg session closed")
 }
 
-func LogAEADRekey(logger zerolog.Logger, providerID, assignedID, requestID, reason string) {
+func LogAEADRekey(logger zerolog.Logger, providerID, assignedID, requestID, oldKID, reason string) {
 	configFlag := "tier2.encrypted_leg_rekey_after_requests"
 	if reason == "age_threshold" {
 		configFlag = "tier2.encrypted_leg_rekey_after_seconds"
@@ -385,10 +385,49 @@ func LogAEADRekey(logger zerolog.Logger, providerID, assignedID, requestID, reas
 		Str("assigned_id", assignedID).
 		Str("request_id", requestID).
 		Str("pillar", "B").
-		Str("decision", "close").
+		Str("alg", PillarBAEADA256GCM).
+		Str("kid", oldKID).
+		Str("decision", "rotate_in_band").
 		Str("reason", reason).
 		Str("config_flag", configFlag).
-		Msg("tier2 encrypted leg session rekeyed")
+		Msg("tier2 encrypted leg rekey required")
+}
+
+func LogAEADRekeyCommitted(logger zerolog.Logger, providerID, assignedID, requestID, rekeyID, oldKID, newKID, reason string) {
+	logger.Info().
+		Str("event", "aead_rekey_committed").
+		Str("category", "T2.B").
+		Str("severity", "INFO").
+		Str("provider_id", providerID).
+		Str("assigned_id", assignedID).
+		Str("request_id", requestID).
+		Str("rekey_id", rekeyID).
+		Str("old_kid", oldKID).
+		Str("new_kid", newKID).
+		Str("pillar", "B").
+		Str("alg", PillarBAEADA256GCM).
+		Str("kid", newKID).
+		Str("reason", reason).
+		Str("decision", "continue_same_session").
+		Msg("tier2 encrypted leg rekey committed")
+}
+
+func LogAEADRekeyFailed(logger zerolog.Logger, providerID, assignedID, requestID, rekeyID, oldKID, reason string) {
+	logger.Warn().
+		Str("event", "aead_rekey_failed").
+		Str("category", "T2.B").
+		Str("severity", "WARN").
+		Str("provider_id", providerID).
+		Str("assigned_id", assignedID).
+		Str("request_id", requestID).
+		Str("rekey_id", rekeyID).
+		Str("old_kid", oldKID).
+		Str("pillar", "B").
+		Str("alg", PillarBAEADA256GCM).
+		Str("kid", oldKID).
+		Str("reason", reason).
+		Str("decision", "close_fail_closed").
+		Msg("tier2 encrypted leg rekey failed")
 }
 
 func newA256GCM(key []byte) (cipher.AEAD, error) {

@@ -57,6 +57,44 @@ func TestApplyHeartbeatSwapEmitterCalledWithoutPoolLock(t *testing.T) {
 	}
 }
 
+func TestReplaceTier2SessionRequiresCurrentAssignedIDAndKeyEpoch(t *testing.T) {
+	registry := NewRegistry(nil)
+	oldSession := &Tier2Session{KeyID: "old-kid"}
+	provider := &Provider{
+		ProviderID: "provider-rekey", AssignedID: "assigned-current", ModelID: "model-a",
+		State: StateReady, SlotsFree: 1, SlotsTotal: 1, Tier2Session: oldSession,
+	}
+	if _, ok := registry.Register(provider, nil); !ok {
+		t.Fatal("register provider")
+	}
+	next := &Tier2Session{
+		KeyID:        "next-kid",
+		C2PKey:       bytes.Repeat([]byte{0x11}, 32),
+		P2CKey:       bytes.Repeat([]byte{0x22}, 32),
+		C2PNonceBase: []byte{0x01, 0x02, 0x03, 0x04},
+		P2CNonceBase: []byte{0x05, 0x06, 0x07, 0x08},
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-stale", "old-kid", next) {
+		t.Fatal("stale assigned ID replaced Tier-2 session")
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-current", "wrong-kid", next) {
+		t.Fatal("wrong prior KID replaced Tier-2 session")
+	}
+	if !registry.ReplaceTier2Session("provider-rekey", "assigned-current", "old-kid", next) {
+		t.Fatal("current assigned session and prior KID did not advance epoch")
+	}
+	resolved, ok := registry.Resolve("provider-rekey", "assigned-current")
+	if !ok || resolved.Tier2Session != next {
+		t.Fatalf("resolved Tier-2 session = %#v ok=%v, want next epoch", resolved.Tier2Session, ok)
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-current", "old-kid", &Tier2Session{KeyID: "attacker-kid"}) {
+		t.Fatal("replayed old epoch replaced current Tier-2 session")
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-current", "next-kid", &Tier2Session{KeyID: "next-kid"}) {
+		t.Fatal("same or incomplete key epoch replaced current Tier-2 session")
+	}
+}
+
 // TestApplyHeartbeatSlowSwapEmitterDoesNotStallHeartbeat asserts the
 // audit-store contention story from M2-2: with a slow emitter (sleep 1s),
 // ApplyHeartbeat itself MUST complete within <50ms because in production

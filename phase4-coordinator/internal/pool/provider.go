@@ -297,6 +297,7 @@ func truncateUTF8Bytes(s string, maxBytes int) string {
 type Tier2Session struct {
 	AEADSuite                      string
 	ResponseChunkPlaintextEnvelope bool
+	InBandAEADRekeyV1              bool
 	C2PKey                         []byte
 	P2CKey                         []byte
 	C2PNonceBase                   []byte
@@ -307,6 +308,24 @@ type Tier2Session struct {
 	RequestsDispatched             uint64
 	KeyID                          string
 	StartedAt                      time.Time
+}
+
+// ReplaceTier2Session atomically advances the encrypted-leg epoch for the
+// currently registered assigned session. It cannot mutate a replacement
+// connection or a stale rekey attempt because both the assigned ID and prior
+// key ID must still match.
+func (r *Registry) ReplaceTier2Session(providerID, assignedID, expectedKID string, next *Tier2Session) bool {
+	if next == nil || next.KeyID == "" || next.KeyID == expectedKID || len(next.C2PKey) != 32 || len(next.P2CKey) != 32 || len(next.C2PNonceBase) != 4 || len(next.P2CNonceBase) != 4 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || r.sessions[assignedID] != p || p.Tier2Session == nil || p.Tier2Session.KeyID != expectedKID {
+		return false
+	}
+	p.Tier2Session = next
+	return true
 }
 
 type ReceiptPubkeyPrevious struct {

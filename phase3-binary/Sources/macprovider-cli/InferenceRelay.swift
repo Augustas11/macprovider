@@ -212,12 +212,19 @@ actor InferenceRelay {
     }
 
     func waitUntilIdle(timeoutSeconds: Int) async -> Bool {
-        let deadline = Date().addingTimeInterval(TimeInterval(max(0, timeoutSeconds)))
+        let seconds = UInt64(max(0, timeoutSeconds))
+        let (product, overflow) = seconds.multipliedReportingOverflow(by: 1_000_000_000)
+        let timeoutNanoseconds = overflow ? UInt64.max : product
+        let start = DispatchTime.now().uptimeNanoseconds
         while !active.isEmpty {
-            if Date() >= deadline {
+            if Task.isCancelled || DispatchTime.now().uptimeNanoseconds &- start >= timeoutNanoseconds {
                 return false
             }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                return false
+            }
         }
         return true
     }

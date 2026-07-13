@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.7 (2026-07-12, binary-1.8.31 drift reconciliation: FR-11 semaphore, FR-16 idle-prewarm, control-socket 17-frame inventory)
+**Version:** 1.8 (2026-07-13, zero-gap in-band Tier-2 AEAD rekey transport)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -17,6 +17,18 @@ coordinator is the compatibility cutoff for old binaries.
 
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §10 OQ-1 (streaming usage chunk client compat) and OQ-2 (tier announcement format) are marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-001.
+
+**Change log v1.8 (2026-07-13, issue #540 — in-band AEAD rekey):**
+- The release carrying this capability is `binary_version` **1.8.32** (Malibu
+  build 32), so 1.8.31 installations can discover it through the normal
+  coordinator-advertised update path.
+- The v2 initial-stage `tier2_capabilities` object adds
+  `in_band_aead_rekey_v1: true`, confirmed by the coordinator in the accepted
+  encrypted-leg session.
+- §6.15 adds inbound `aead_rekey_request` / `aead_rekey_commit` and outbound
+  `aead_rekey_response` / `aead_rekey_committed`. SPEC-008 v0.5 owns their
+  cryptographic and lifecycle semantics. The binary keeps one WebSocket and one
+  assigned identity; no application inference frame is retransmitted.
 
 **Change log v1.7 (2026-07-12, binary-1.8.31 drift reconciliation — spec-only, reconciled to shipped code; code is source of truth):**
 The spec header had drifted to 1.6 (2026-06-22) while the shipped `binary_version`
@@ -2017,7 +2029,7 @@ The initial-stage frame field table is the SPEC-010 v1.5 §3.1.A table:
 | Endpoint URL | `endpoint_url` | string pointer (nullable) | optional | |
 | Provider ECDH public key | `provider_ecdh_public_key` | string **unpadded base64url** (32-byte x25519) | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2; base64url per SPEC-008, not standard padded base64 |
 | Provider receipt public key | `provider_receipt_public_key` | string standard padded base64 of 32-byte ed25519 public key | optional, ADDED by SPEC-015 v0.1.3 / SPEC-001 v1.6 | parser-optional; initial-stage only; absent means the provider is not receipt-issuing |
-| Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string, response_chunk_plaintext_envelope: bool}` | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2; shipped 1.8.31 sends `encrypted_leg:true, attestation:true, aead_suites:["A256GCM"], response_chunk_plaintext_envelope:true`. The 4th sub-field's schema is carried in §6.15.1 (SPEC-008 defines only the first three) |
+| Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string, response_chunk_plaintext_envelope: bool, in_band_aead_rekey_v1: bool}` | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2; the v1.8 implementation sends all booleans `true` and `aead_suites:["A256GCM"]`. The additive sub-field transport is carried in §6.15.1; SPEC-008 v0.5 owns in-band rekey semantics |
 | Supported models | `supported_models` | array of strings | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.1 through R-3.1.9 and R-3.6.1 through R-3.6.3 |
 | Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.6 and R-3.6.4 |
 
@@ -2057,13 +2069,14 @@ Wire example with all parser-required fields plus SPEC-010 additions
   "max_context_tokens": 32768,
   "max_concurrency": 1,
   "throughput_tps_estimate": 42.5,
-  "binary_version": "1.8.31",
+  "binary_version": "1.8.32",
   "provider_ecdh_public_key": "<unpadded-base64url-32-byte-x25519-public-key>",
   "tier2_capabilities": {
     "encrypted_leg": true,
     "attestation": true,
     "aead_suites": ["A256GCM"],
-    "response_chunk_plaintext_envelope": true
+    "response_chunk_plaintext_envelope": true,
+    "in_band_aead_rekey_v1": true
   },
   "supported_models": [
     "mlx-community/Qwen2.5-7B-Instruct-4bit",
@@ -2074,17 +2087,18 @@ Wire example with all parser-required fields plus SPEC-010 additions
 }
 ```
 
-**Reconciled v1.7.** The shipped binary (`binary_version` 1.8.31)
-**unconditionally** advertises `tier2_capabilities` with `encrypted_leg: true`,
-`attestation: true`, `aead_suites: ["A256GCM"]`, and the 4th sub-field
-`response_chunk_plaintext_envelope: true` (`CoordinatorClient.swift`) — the
+**Reconciled v1.7, extended v1.8.** Binary 1.8.31 unconditionally advertises
+`tier2_capabilities` with `encrypted_leg: true`,
+`attestation: true`, `aead_suites: ["A256GCM"]`, the 4th sub-field
+`response_chunk_plaintext_envelope: true`; binary 1.8.32 adds the v1.8 5th
+sub-field `in_band_aead_rekey_v1: true` (`CoordinatorClient.swift`) — the
 earlier all-`false`/empty example reflected the never-shipped "v1.3 adds no
 encrypted-leg/attestation behavior" stance and is corrected above.
 `provider_ecdh_public_key` is **unpadded base64url** (not standard padded
 base64) per SPEC-008. Tier-2 fields (`provider_ecdh_public_key`,
 `tier2_capabilities`) are parser-required in the v2 initial-stage frame; their
 semantics and the encrypted-leg / attestation pipeline are owned by **SPEC-008**
-(§6.15). See §6.15.1 for `response_chunk_plaintext_envelope`.
+(§6.15). See §6.15.1 for the additive capability fields.
 
 #### 6.7.2. Proof-stage frame (P->C)
 
@@ -2140,7 +2154,9 @@ requires **all** of:
 - `status: "accepted"` (a non-accepted status is treated as a rejection);
 - `tier2_session.encrypted_leg` with `enabled: true` and matching `alg` (the
   provider-selected AEAD) and `kid` (the session key id), optionally
-  `response_chunk_plaintext_envelope: true` (§6.15.1);
+  `response_chunk_plaintext_envelope: true` and
+  `in_band_aead_rekey_v1: true` (§6.15.1). Absence of the latter keeps the
+  authenticated epoch valid but the binary MUST reject in-band rekey frames;
 - `catalog_compatible: true` **when the provider advertised a signed-catalog
   admission block** (i.e. `catalog_release_id` was sent). A catalog-bearing
   session whose `auth_response` lacks `catalog_compatible: true` is rejected by
@@ -2781,10 +2797,10 @@ at switch time. The catalog target is named here so reviewers of
 future PRs can refer to a stable concept, but the boundary is not
 yet enforced at the package level.
 
-### 6.15. Additive coordinator-wire surface reconciled in v1.7
+### 6.15. Additive coordinator-wire surface reconciled in v1.7 and extended in v1.8
 
-Between SPEC-001 v1.6 (2026-06-22) and the shipped binary (`binary_version`
-1.8.31) the coordinator↔binary wire gained fields and frames that later specs
+Between SPEC-001 v1.6 (2026-06-22) and the current binary (`binary_version`
+1.8.32) the coordinator↔binary wire gained fields and frames that later specs
 own but that transit the SPEC-001 binary. SPEC-001 enumerates them here for
 wire completeness; **the cross-referenced spec owns the semantics** and governs
 on any conflict. All are additive — a coordinator that ignores an unknown field
@@ -2803,6 +2819,11 @@ Initial-stage fields:
   beyond the §6.7.1 `{encrypted_leg, attestation, aead_suites}` schema. SPEC-008
   defines only the first three capability fields, so SPEC-001 carries this one as
   transport owner of last resort (schema below).
+- `tier2_capabilities.in_band_aead_rekey_v1: true` — provider support for the
+  single-WebSocket four-frame fresh-epoch handoff in SPEC-008 v0.5 §6.9. The
+  coordinator confirms selection at
+  `tier2_session.encrypted_leg.in_band_aead_rekey_v1: true`; the binary MUST
+  accept rekey frames only after that confirmation.
 - `credential_bootstrap: true` — provider opt-in to the provisional
   credential-bootstrap / TOFU token-mint path (**SPEC-003** open onboarding,
   FR-C9 / `allow_tokenless_provisional_bootstrap`). SPEC-026 §4.3 does **not**
@@ -2886,6 +2907,13 @@ frame set and otherwise replies `nak unknown_message_type`.
   inbound *server-push control* frame in v1.7. (The `losslessness_probe_v1.*`
   probe family below is also inbound, but is a distinct request/result protocol
   owned by SPEC-030, not a control-frame push.)
+- `aead_rekey_request` → after validating the current assigned ID, old key ID,
+  AEAD, expiry, capability selection, and relay-idle boundary, the binary replies
+  `aead_rekey_response` with a fresh X25519 public key and derived key ID.
+- `aead_rekey_commit` → fresh C→P sequence-0 AEAD proof. The binary validates
+  every outer/proof binding, installs that candidate epoch only after the relay
+  is idle, and replies `aead_rekey_committed`. Both frames and all failure
+  semantics are owned by SPEC-008 v0.5 §6.9.
 
 > **Not wire frames.** `encrypted_leg_invalidated`, `tier_demoted`,
 > `token_revoked`, and `attestation_state_degraded` are **not** inbound
@@ -2914,6 +2942,13 @@ These extend the §6.7 / §6.6 inbound frame set (`hello_ack`, `ownership_event`
   `nonce`, `timestamp`, `public_key`, `signature` (**SPEC-008 Pillar C**). Per
   SPEC-008, the coordinator verifies the signature against the stored
   attestation-time key, **not** the response's `public_key`.
+- `aead_rekey_response` — reply to `aead_rekey_request`; fields `version`,
+  `rekey_id`, `assigned_id`, `old_kid`, `new_kid`, and
+  `provider_ecdh_public_key`.
+- `aead_rekey_committed` — fresh P→C sequence-0 AEAD proof echo after local
+  epoch installation; its clear binding carries `version`, `rekey_id`,
+  `assigned_id`, `old_kid`, and `new_kid`, plus `encrypted:true` and `enc`.
+  SPEC-008 v0.5 §6.9 owns both outbound frames.
 
 **Losslessness-probe frames (SPEC-030).** The binary also handles a
 `losslessness_probe_v1.*` family (`LosslessnessProbeProtocol.swift`). The
@@ -2928,6 +2963,10 @@ verification semantics that consume it; SPEC-001 carries the transit only.
 
 These extend the §6.5 outbound set (`auth_request`, `hello`, `heartbeat`,
 `state_update`, `drain_status`, `nak`, `preflight_ack`).
+
+The rekey exchange is control traffic on the existing WebSocket. It does not
+retransmit an inference request/response and does not alter §6.6's application
+retransmission policy, capacity-1 relay, or request-ID lifecycle.
 
 ---
 

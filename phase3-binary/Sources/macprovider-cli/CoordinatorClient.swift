@@ -144,7 +144,7 @@ actor CoordinatorClient {
     ) async -> Bool?
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
 
-    static let binaryVersion = "1.8.31"
+    static let binaryVersion = "1.8.32"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -193,8 +193,23 @@ actor CoordinatorClient {
     private let configPath: String
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private let pairingController: PairingController
+    private struct PendingAEADRekey {
+        let rekeyID: String
+        let assignedID: String
+        let oldKID: String
+        let coordinatorPublicKey: String
+        let providerPublicKey: String
+        let selectedAEAD: String
+        let expiresAtRaw: String
+        let expiresAt: Date
+        let session: Tier2ProviderSession
+    }
+
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
+    private var pendingAEADRekey: PendingAEADRekey?
+    private var preparingAEADRekeyID: String?
+    private var inBandAEADRekeyEnabled = false
     private var autoupdateTrustState = AutoUpdateTrustState(
         v2Accepted: false,
         tier: nil,
@@ -422,6 +437,9 @@ actor CoordinatorClient {
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
+        pendingAEADRekey = nil
+        preparingAEADRekeyID = nil
+        inBandAEADRekeyEnabled = false
         webSocket?.cancel(with: .goingAway, reason: nil)
         coordinatorSessionAccepted = false
         autoupdateCoordinatorPayload = [:]
@@ -1051,6 +1069,23 @@ actor CoordinatorClient {
     }
 
     private func installTier2Session(_ session: Tier2ProviderSession, socket: ProviderWebSocketTask) {
+        installTier2Session(session, sendFrame: { payload in
+            try await Self.send(payload, to: socket)
+        })
+    }
+
+    private func installTier2SessionForCurrentConnection(_ session: Tier2ProviderSession) {
+        if let webSocket {
+            installTier2Session(session, socket: webSocket)
+            return
+        }
+        installTier2Session(session, sendFrame: { [weak self] payload in
+            guard let self else { throw CancellationError() }
+            try await self.send(payload)
+        })
+    }
+
+    private func installTier2Session(_ session: Tier2ProviderSession, sendFrame: @escaping InferenceRelay.SendFrame) {
         tier2Session = session
         inferenceRelay = InferenceRelay(
             modelRuntime: modelRuntime,
@@ -1067,9 +1102,7 @@ actor CoordinatorClient {
             demoteAutoupdateTrust: { [weak self] reason in
                 await self?.markAutoupdateTrustDemoted(reason: reason)
             },
-            sendFrame: { payload in
-                try await Self.send(payload, to: socket)
-            }
+            sendFrame: sendFrame
         )
     }
 
@@ -1186,6 +1219,9 @@ actor CoordinatorClient {
 
     private func connectAndRunLegacy(socket: ProviderWebSocketTask) async throws {
         tier2Session = nil
+        pendingAEADRekey = nil
+        preparingAEADRekeyID = nil
+        inBandAEADRekeyEnabled = false
         // endpoint_url legacy mode — no relay needed.
         inferenceRelay = nil
         try await send(await helloMessage())
@@ -1274,6 +1310,9 @@ actor CoordinatorClient {
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
+        pendingAEADRekey = nil
+        preparingAEADRekeyID = nil
+        inBandAEADRekeyEnabled = false
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
         coordinatorSessionAccepted = false
@@ -1335,6 +1374,10 @@ actor CoordinatorClient {
             try await handleOwnershipStatus(dict)
         case "preflight":
             try await handlePreflight(dict)
+        case "aead_rekey_request":
+            try await handleAEADRekeyRequest(dict)
+        case "aead_rekey_commit":
+            try await handleAEADRekeyCommit(dict)
         case "inference_request":
             guard wsTunneledMode, let inferenceRelay else {
                 try await sendNAK(
@@ -1376,6 +1419,182 @@ actor CoordinatorClient {
                 message: "Unrecognized message type: '\(type)'"
             )
         }
+    }
+
+    private func handleAEADRekeyRequest(_ message: [String: Any]) async throws {
+        guard Self.intValue(message["version"]) == 1,
+              let rekeyID = message["rekey_id"] as? String, !rekeyID.isEmpty,
+              let assignedID = message["assigned_id"] as? String,
+              assignedID == acceptedAssignedProviderID,
+              let reason = message["reason"] as? String,
+              reason == "request_threshold" || reason == "age_threshold",
+              let oldKID = message["old_kid"] as? String,
+              let coordinatorPublicKey = message["coordinator_ecdh_public_key"] as? String,
+              let selectedAEAD = message["selected_aead"] as? String,
+              selectedAEAD == Tier2ProviderSession.aeadSuite,
+              let expiresAtRaw = message["expires_at"] as? String,
+              let expiresAt = Self.parseAEADRekeyExpiry(expiresAtRaw),
+              expiresAt > Date(),
+              inBandAEADRekeyEnabled,
+              let activeSession = tier2Session,
+              activeSession.assignedID == assignedID,
+              activeSession.keyID == oldKID,
+              preparingAEADRekeyID == nil,
+              pendingAEADRekey == nil
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid aead_rekey_request binding")
+        }
+
+        preparingAEADRekeyID = rekeyID
+        do {
+            guard let remainingSeconds = Self.rekeyWaitSeconds(until: expiresAt) else {
+                throw CoordinatorAuthError.invalidMessage("expired aead_rekey_request")
+            }
+            if let inferenceRelay,
+               await !inferenceRelay.waitUntilIdle(timeoutSeconds: remainingSeconds) {
+                throw CoordinatorAuthError.invalidMessage("aead_rekey_request timed out waiting for idle relay")
+            }
+            guard preparingAEADRekeyID == rekeyID,
+                  pendingAEADRekey == nil,
+                  coordinatorSessionAccepted,
+                  inBandAEADRekeyEnabled,
+                  acceptedAssignedProviderID == assignedID,
+                  expiresAt > Date(),
+                  tier2Session?.keyID == oldKID
+            else {
+                throw CoordinatorAuthError.invalidMessage("stale aead_rekey_request after idle wait")
+            }
+
+            let attempt = Tier2AuthAttempt()
+            let nextSession = try Tier2ProviderSession(
+                attempt: attempt,
+                providerID: providerID,
+                assignedID: assignedID,
+                coordinatorPublicKeyBase64URL: coordinatorPublicKey,
+                selectedAEAD: selectedAEAD,
+                expectedKeyID: nil
+            )
+            if message["response_chunk_plaintext_envelope"] as? Bool == true {
+                nextSession.enableResponseChunkPlaintextEnvelope()
+            }
+            pendingAEADRekey = PendingAEADRekey(
+                rekeyID: rekeyID,
+                assignedID: assignedID,
+                oldKID: oldKID,
+                coordinatorPublicKey: coordinatorPublicKey,
+                providerPublicKey: attempt.publicKeyBase64URL,
+                selectedAEAD: selectedAEAD,
+                expiresAtRaw: expiresAtRaw,
+                expiresAt: expiresAt,
+                session: nextSession
+            )
+            preparingAEADRekeyID = nil
+            try await send([
+                "type": "aead_rekey_response",
+                "version": 1,
+                "rekey_id": rekeyID,
+                "assigned_id": assignedID,
+                "old_kid": oldKID,
+                "new_kid": nextSession.keyID,
+                "provider_ecdh_public_key": attempt.publicKeyBase64URL,
+            ])
+        } catch {
+            if preparingAEADRekeyID == rekeyID {
+                preparingAEADRekeyID = nil
+            }
+            if pendingAEADRekey?.rekeyID == rekeyID {
+                pendingAEADRekey = nil
+            }
+            throw error
+        }
+    }
+
+    private func handleAEADRekeyCommit(_ message: [String: Any]) async throws {
+        guard let pending = pendingAEADRekey,
+              pending.expiresAt > Date(),
+              Self.intValue(message["version"]) == 1,
+              message["rekey_id"] as? String == pending.rekeyID,
+              message["assigned_id"] as? String == pending.assignedID,
+              message["old_kid"] as? String == pending.oldKID,
+              message["new_kid"] as? String == pending.session.keyID,
+              coordinatorSessionAccepted,
+              inBandAEADRekeyEnabled,
+              acceptedAssignedProviderID == pending.assignedID,
+              tier2Session?.keyID == pending.oldKID
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid aead_rekey_commit binding")
+        }
+
+        let proofData = try pending.session.openAEADRekeyCommit(message, rekeyID: pending.rekeyID)
+        guard let proofObject = try JSONSerialization.jsonObject(with: proofData) as? [String: Any],
+              proofObject["type"] as? String == "aead_rekey_proof",
+              Self.intValue(proofObject["version"]) == 1,
+              proofObject["rekey_id"] as? String == pending.rekeyID,
+              proofObject["provider_id"] as? String == providerID,
+              proofObject["assigned_id"] as? String == pending.assignedID,
+              proofObject["old_kid"] as? String == pending.oldKID,
+              proofObject["new_kid"] as? String == pending.session.keyID,
+              proofObject["provider_ecdh_public_key"] as? String == pending.providerPublicKey,
+              proofObject["coordinator_ecdh_public_key"] as? String == pending.coordinatorPublicKey,
+              proofObject["selected_aead"] as? String == pending.selectedAEAD,
+              proofObject["expires_at"] as? String == pending.expiresAtRaw
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid aead_rekey_commit proof")
+        }
+
+        guard let remainingSeconds = Self.rekeyWaitSeconds(until: pending.expiresAt) else {
+            throw CoordinatorAuthError.invalidMessage("expired aead_rekey_commit")
+        }
+        if let inferenceRelay,
+           await !inferenceRelay.waitUntilIdle(timeoutSeconds: remainingSeconds) {
+            throw CoordinatorAuthError.invalidMessage("aead_rekey_commit timed out waiting for idle relay")
+        }
+        guard pendingAEADRekey?.rekeyID == pending.rekeyID,
+              pending.expiresAt > Date(),
+              coordinatorSessionAccepted,
+              inBandAEADRekeyEnabled,
+              acceptedAssignedProviderID == pending.assignedID,
+              tier2Session?.keyID == pending.oldKID
+        else {
+            throw CoordinatorAuthError.invalidMessage("stale aead_rekey_commit after idle wait")
+        }
+        let committedEnvelope = try pending.session.sealAEADRekeyCommitted(rekeyID: pending.rekeyID, proof: proofData)
+        let committed: [String: Any] = [
+            "type": "aead_rekey_committed",
+            "version": 1,
+            "rekey_id": pending.rekeyID,
+            "assigned_id": pending.assignedID,
+            "old_kid": pending.oldKID,
+            "new_kid": pending.session.keyID,
+            "encrypted": true,
+            "enc": committedEnvelope,
+        ]
+
+        // Never roll back to the old epoch after proving possession of the new
+        // keys. If the acknowledgement send fails, normal connection cleanup
+        // forces a fresh full authentication instead of reusing counters.
+        installTier2SessionForCurrentConnection(pending.session)
+        pendingAEADRekey = nil
+        try await send(committed)
+    }
+
+    private static func parseAEADRekeyExpiry(_ raw: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = fractional.date(from: raw) {
+            return parsed
+        }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: raw)
+    }
+
+    private static func rekeyWaitSeconds(until expiry: Date) -> Int? {
+        let remaining = expiry.timeIntervalSinceNow
+        guard remaining.isFinite, remaining > 0 else {
+            return nil
+        }
+        return max(1, Int(min(ceil(remaining), Double(Int32.max))))
     }
 
     private func handleLosslessnessProbeRequest(_ message: [String: Any]) async throws {
@@ -1518,6 +1737,18 @@ actor CoordinatorClient {
     // bumps the heartbeat success timestamp via handle().
     func handleForTest(_ message: URLSessionWebSocketTask.Message) async throws {
         try await handle(message)
+    }
+
+    func tier2KeyIDForTest() -> String? {
+        tier2Session?.keyID
+    }
+
+    func pendingAEADRekeyIDForTest() -> String? {
+        pendingAEADRekey?.rekeyID
+    }
+
+    func tier2CountersForTest() -> (c2p: UInt64, p2c: UInt64)? {
+        tier2Session?.countersForTest
     }
 
     func nanosecondsSinceLastHeartbeatSuccessForTest() -> UInt64 {
@@ -1752,6 +1983,7 @@ actor CoordinatorClient {
         if encryptedLeg["response_chunk_plaintext_envelope"] as? Bool == true {
             session.enableResponseChunkPlaintextEnvelope()
         }
+        inBandAEADRekeyEnabled = encryptedLeg["in_band_aead_rekey_v1"] as? Bool == true
     }
 
     /// SPEC-003 v0.8.2 FR-C9.3 — extract `assigned_provider_token` from
@@ -2922,6 +3154,7 @@ actor CoordinatorClient {
                 "attestation": true,
                 "aead_suites": [Tier2ProviderSession.aeadSuite],
                 "response_chunk_plaintext_envelope": true,
+                "in_band_aead_rekey_v1": true,
             ],
         ]
         let resolvedCatalog: [String]

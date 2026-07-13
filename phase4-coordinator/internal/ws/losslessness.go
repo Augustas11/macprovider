@@ -195,7 +195,10 @@ type LosslessnessExpectedPositionIdentity struct {
 	DraftGeneration      int
 }
 
-var errLosslessnessMalformed = errors.New("inconclusive:malformed_distribution")
+var (
+	errLosslessnessMalformed       = errors.New("inconclusive:malformed_distribution")
+	errLosslessnessRekeyInProgress = errors.New("losslessness probe suspended during tier2 rekey")
+)
 
 type losslessnessPendingProbe struct {
 	ProviderID          string
@@ -983,6 +986,9 @@ func (s *Server) dispatchLosslessnessProbeRound() {
 			continue
 		}
 		if err := s.issueLosslessnessProbeRequest(provider, s.nextLosslessnessProfile(provider)); err != nil {
+			if errors.Is(err, errLosslessnessRekeyInProgress) {
+				continue
+			}
 			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("losslessness probe dispatch failed")
 		}
 	}
@@ -1000,13 +1006,24 @@ func (s *Server) nextLosslessnessProfile(provider pool.Provider) LosslessnessSam
 
 func (s *Server) losslessnessProviderHasPending(providerID, assignedID string) bool {
 	prefix := losslessnessProbeStoreKey(providerID, assignedID, "")
+	now := s.now()
 	found := false
-	s.losslessnessPending.Range(func(key, _ any) bool {
-		if strings.HasPrefix(key.(string), prefix) {
-			found = true
-			return false
+	s.losslessnessPending.Range(func(key, value any) bool {
+		storeKey, ok := key.(string)
+		if !ok || !strings.HasPrefix(storeKey, prefix) {
+			return true
 		}
-		return true
+		pending, ok := value.(losslessnessPendingProbe)
+		if ok && !pending.ExpiresAt.IsZero() && !now.Before(pending.ExpiresAt) {
+			if deleted, loaded := s.losslessnessPending.LoadAndDelete(storeKey); loaded {
+				if expired, typed := deleted.(losslessnessPendingProbe); typed {
+					s.deleteLosslessnessPendingIndexes(expired)
+				}
+			}
+			return true
+		}
+		found = true
+		return false
 	})
 	return found
 }
@@ -1050,6 +1067,14 @@ func (s *Server) issueLosslessnessProbeRequest(provider pool.Provider, profile L
 	if _, err := ValidateLosslessnessEnvelope(cleartext, losslessnessRequestType); err != nil {
 		return err
 	}
+	session.rekeyMu.Lock()
+	defer session.rekeyMu.Unlock()
+	if session.rekey != nil {
+		return errLosslessnessRekeyInProgress
+	}
+	if _, due := session.tier2RekeyReason(s.now(), s.tier2Config()); due {
+		return errLosslessnessRekeyInProgress
+	}
 	pending, err := s.recordLosslessnessPendingProbe(provider.ProviderID, provider.AssignedID, payload, requestDigest, now)
 	if err != nil {
 		return err
@@ -1058,6 +1083,9 @@ func (s *Server) issueLosslessnessProbeRequest(provider pool.Provider, profile L
 	if err != nil {
 		s.losslessnessPending.Delete(losslessnessProbeStoreKey(provider.ProviderID, provider.AssignedID, payload.ProbeID))
 		s.deleteLosslessnessPendingIndexes(pending)
+		if errors.Is(err, errTier2C2PCounterExhausted) {
+			s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, "", "counter_exhausted", ErrRelayAEADFailed)
+		}
 		return err
 	}
 	if err := session.send(frame); err != nil {
@@ -1227,7 +1255,7 @@ func (ps *providerSession) sealLosslessnessProbeRequest(provider pool.Provider, 
 	}
 	defer ps.tier2Mu.Unlock()
 	if session.C2PCounter == ^uint64(0) {
-		return nil, errors.New("tier2 c2p frame counter exhausted")
+		return nil, errTier2C2PCounterExhausted
 	}
 	seq := session.C2PCounter
 	aad := tier2.AEADFrameAAD{
