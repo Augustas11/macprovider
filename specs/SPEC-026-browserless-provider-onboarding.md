@@ -17,8 +17,30 @@ App Attest team/bundle pins, `identity_signature`, and the wallet-change `501` a
 unchanged *as coordinator contracts*; but §4.1/§4.3 now note that the **client** that
 exercises them moved: registration is done by `install.sh`/the CLI (not the app), and
 the app's per-auth `identity_signature` responder has **no wired transport** in the
-monitor-only flow (present but unreachable — a carried gap, §4.3). No code change.
-**See the paired SPEC-025 v0.2** (same PR #418 reconciliation, app-shell side).
+monitor-only flow (present but unreachable — a carried gap, §4.3).
+
+**Deeper reframe (reconciled v0.14, after the codex audit — the App-track client
+apparatus is DORMANT).** The shipped Malibu app does **not** create the App-track
+device `p_*` Ed25519 identity, does **not** call `/v1/providers/register`, and does
+**not** perform App Attest or per-auth identity signing at runtime. Instead,
+`install.sh` onboards a **standard CLI-track provider**: it generates a fresh
+`mp-<32-hex>` principal and runs `macprovider-cli bootstrap-auth`, which acquires a
+`provider_token` via the coordinator's **tokenless WebSocket admission** handshake
+(`install.sh:2484-2505,3112-3125`; `BootstrapAuthCommand.swift`;
+`CoordinatorClient.swift:569-575,1989-2056`). The app then imports that `provider_token`
+into its Keychain and monitors the launchd-managed CLI. The App-track `p_*` identity
+(`ProviderIdentity`), `RegisterClient.postRegister`, App Attest, and the
+`identity_signature` responder all **compile** and the coordinator-side contracts (§4)
+still **conform**, but **no shipped client path exercises them** — they are a
+designed-but-client-dormant surface. v0.14 therefore reframes §3 (identity model),
+§4.1 (register caller), §4.3 (identity-signature), and §5.3 (App Attest) as
+**coordinator-contract / client-dormant**, and documents the real CLI-track credential
+flow in §6.1. It also records shipped **gaps** the audit surfaced: the token-import
+strips the bearer from `config.yaml` (breaking a launchd CLI restart, §6.1); "Quit and
+Uninstall" is compiled but **unreachable** (drag-to-trash leaves the launchd CLI, §6.5);
+the installer env is **not** sanitized (§6.1); the in-app CLI-updater is unwired (only
+Sparkle updates the `.app`). No code change. **See the paired SPEC-025 v0.2** (same PR
+#418 reconciliation, app-shell side).
 
 Earlier honesty note (2026-07-10): flagged the same supersession pending this revision.
 
@@ -819,12 +841,13 @@ and without entering a wallet address unless they want to.
   provider_ids AND new CLI-track provider_ids via the cross-track
   `provider_auth_policy` table.
 - [SPEC-003 §FR-C9 v0.8](./SPEC-003-open-onboarding.md) — coordinator
-  self-mint of `assigned_provider_token` on tokenless admission, with
-  TOFU enforcement per FR-C9.4. SPEC-026 §4.1 defines a NEW HTTP token
-  primitive that shares the `provider_tokens` table +
-  one-active-token invariant but runs in its own transaction with its
-  own TOFU-conflict response semantics (does not literally reuse the
-  WS admission path).
+  self-mint of `assigned_provider_token` on **tokenless WS admission**, with
+  TOFU enforcement per FR-C9.4. **Reconciled v0.14: this WS-admission path is
+  exactly what the shipped app uses** — `install.sh` runs `bootstrap-auth`, which
+  acquires the `provider_token` over the coordinator WebSocket handshake
+  (`BootstrapAuthCommand.swift`; `CoordinatorClient.swift:569-575,1989-2056`). SPEC-026
+  §4.1's separate HTTP `/v1/providers/register` token primitive is a
+  coordinator-contract that the shipped client does **not** call (§4.1).
 - [SPEC-015 §12](./SPEC-015-receipts.md) — provider receipt key
   Ed25519, generated + rotated by SPEC-015 unchanged. SPEC-026's
   identity key is a DIFFERENT Keychain slot and does NOT rotate on
@@ -837,35 +860,47 @@ and without entering a wallet address unless they want to.
 - [SPEC-022](./SPEC-022-verified-model-settlement.md) — verified-model
   settlement, keyed off provider receipt-key identity. Unchanged.
 - [SPEC-023](./SPEC-023-installer-autotune-recommend.md) — local
-  autotune with signed catalog. Runs on-device inside `macprovider-cli
-  autotune --recommend --json`. SPEC-026 §6.1 step 7c invokes it
-  post-identity-mint.
-- [SPEC-025 §3.1](./SPEC-025-native-mac-app.md) — historical first-run
-  browser OAuth flow. SPEC-026 §7.3 retires the `malibu://` /
-  `PendingLinkState` machinery, so fresh flag-off installs do not run
-  this flow after v0.12. Existing configured SPEC-025 installs still run
-  because `MalibuAgent.start()` remains gated by
-  `ProviderConfig.isConfigured`.
+  autotune with signed catalog. **Reconciled v0.14: `install.sh` runs
+  `autotune --recommend` inside the CLI track** as part of onboarding (the app only
+  scrapes `ps` for a progress hint), not an in-app post-identity-mint step (§6.1).
+- [SPEC-025 §3.1](./SPEC-025-native-mac-app.md) — first-run flow. **Reconciled v0.14:
+  SPEC-025 §3.1 is now the CLI-wrapper `install.sh` onboarding** (not browser OAuth);
+  the `malibu://` / `PendingLinkState` machinery is removed (§7.3). There is no
+  onboarding flag; `MalibuAgent.start()` is gated by the three conditions in §7.6
+  (provider_id + launchd evidence + `ProviderConfig.isConfigured`).
 - `phase3-binary/Sources/MacProviderCore/ProviderTokenPersist.swift:42-113`
-  — CLI-track atomic write of `provider_token` to YAML. NOT the
-  App-track persistence path. App-track uses
-  `ProviderConfig.saveProviderIdentity(providerID:token:)` at
-  `phase3-binary/app/Sources/Malibu/System/ProviderConfig.swift:63-99`,
-  which writes provider_id to config and stores token in Keychain
-  (per `CoordinatorClient.swift:1224-1239` `managedBy == "malibu-app"`
-  branch).
-- `phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift:46-50` —
-  launch gate `ProviderConfig.isConfigured`. §7.6 EXTENDS this gate;
-  does not replace it.
-- `phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift:62-66` —
-  CLI child launched with `MACPROVIDER_PROVIDER_TOKEN` env var.
-  Unchanged.
+  — CLI-track atomic write of `provider_token` to YAML. **Reconciled v0.14:** this is
+  the path `install.sh` writes to; the app then **imports** the token via
+  `ProviderConfig.importExistingCLIConfig()` (`ProviderConfig.swift:280-352`), which
+  strips it from YAML into the Keychain (§6.1). `saveProviderIdentity` also exists but
+  is not the shipped onboarding path.
+- `phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift:64-87` —
+  launch gate is now **three** conditions (provider_id + launchd install evidence +
+  `ProviderConfig.isConfigured`) and drives a **monitor**, not a spawn (§7.6).
+- **Reconciled v0.14 — NO CLI child is launched.** The app does not launch a CLI child
+  with `MACPROVIDER_PROVIDER_TOKEN`; the launchd watchdog (installed by `install.sh`)
+  owns the CLI, and the app monitors it over HTTP (SPEC-025 §5).
 - Landing page marketing copy at `/Users/augstar/projects/malibu/host/index.html`
   promises "One line in your terminal. … Your Mac picks up jobs
   whenever it's idle and online." This spec makes the App track
   deliver on that promise without the terminal step.
 
 ## 3. Identity model — device Ed25519, separate from receipt key
+
+> **DORMANT CLIENT-SIDE (reconciled v0.14 — read before this section).** This
+> App-track device-`p_*`-Ed25519 identity model is **not exercised by the shipped
+> Malibu client.** `ProviderIdentity.loadOrGenerate()` / `isReady()` have **zero
+> production callers**; the identity is referenced only by uninstall
+> (`deleteFromKeychain`) and the unreachable `identity_signature` responder (§4.3).
+> The shipped onboarding instead creates a **CLI-track `mp-*` provider** via
+> `install.sh` → `bootstrap-auth` → tokenless WS admission, whose identity is the
+> CLI's **receipt key** (SPEC-015), and the app's finalize gate is
+> `ProviderConfig.isConfigured` (bearer token), **not** `ProviderIdentity.isReady`
+> (`LaunchProviderController.swift:65`; §6.1). Deleting `provider_identity_v1` does
+> **not** force a fresh provider ID. Treat everything in §3 as a **designed but
+> client-dormant** contract (the Keychain slot and the derivation exist in code, but
+> the shipped provider ID is `mp-*`, not `p_*`). §3.2's separation-from-receipt-key
+> is moot in the shipped flow, where the receipt key *is* the operative identity.
 
 ### 3.1 Key generation
 
@@ -954,6 +989,18 @@ trust-score input, but is not the sybil gate and is not required for
 registration to succeed.
 
 ## 4. Coordinator API changes
+
+> **Client-dormant scope banner (reconciled v0.14).** The coordinator-side contracts
+> in §4 (the `/v1/providers/register` HTTP primitive, the `identity_signature`
+> proof-stage verification, App Attest pin verification, the wallet-change `501`) are
+> **implemented and still conform coordinator-side** (their Go tests pass). But the
+> **shipped Malibu client does NOT exercise §4.1, §4.3, or §5.3**: it onboards a
+> CLI-track `mp-*` provider via `bootstrap-auth` + tokenless WS admission (§6.1),
+> never calls `/v1/providers/register` (`RegisterClient.postRegister` is unwired), and
+> never runs App Attest or per-auth identity signing at runtime (§4.3). Read §4 as a
+> **coordinator contract that the shipped app does not drive** — a designed surface
+> awaiting a client that uses it. Where §4/§5.3 say "the App calls X," qualify it as
+> not-shipped-client-side.
 
 ### 4.1 `POST /v1/providers/register`
 
@@ -1539,6 +1586,18 @@ provided qualification lapses.
 
 ### 5.3 App Attest — opportunistic, replay-hardened
 
+> **NOT implemented client-side (reconciled v0.14).** The shipped Malibu app does
+> **not** call `DCAppAttestService` — there is no App Attest implementation in the app
+> tree; `RegisterClient` only carries optional `app_attest_object` / `app_attest_key_id`
+> passthrough params that default to `nil` (`RegisterClient.swift:125`), and that
+> register path is itself unwired (§4.1). So "valid App Attest evidence unlocks trust
+> benefits" is a **coordinator-verifier contract + future client**, not shipped
+> behavior. **Hash-contract note:** this section hashes `ts_utc` as its RFC3339 string,
+> but the coordinator converts `ts_utc` to Unix seconds before hashing
+> (`apptrack.go:518,527`) — a future client implementing §5.3 literally would produce
+> an unverifiable attestation; the client MUST match the coordinator's Unix-seconds
+> hashing.
+
 App-track binary calls `DCAppAttestService.attestKey(_:clientDataHash:)`
 with:
 
@@ -1613,6 +1672,16 @@ slower payout release. Not required for this spec to ship.
 
 ## 6. User flow — click-and-earn
 
+> **Wallet-binding scope banner (reconciled v0.14).** Every "Add a payout wallet" /
+> "Change" / EIP-712 inline-binding affordance described in §6 (success card §6.1
+> step 8, steady state §6.2, §6.3) is a **guarded SPEC-027 stub in the shipped app**:
+> `setPayoutWallet` throws unconditionally, the button is disabled
+> (`LaunchProviderController.swift:94-100`, `OnboardingWindow.swift:137`), and the
+> coordinator returns `501 wallet_change_requires_spec_027` (§4.5 / v0.13 change log).
+> The prose below describes the intended UX; treat all active wallet-binding language
+> as SPEC-027-gated, not shipped. The read-only "unclaimed earnings" / "add a wallet"
+> **prompts** (display only) are fine; the binding **action** is not wired.
+
 ### 6.1 Cold install
 
 1. User double-clicks `Malibu.app` from a downloaded `.dmg`.
@@ -1641,44 +1710,60 @@ slower payout release. Not required for this spec to ship.
 7. Steps happen in the background (reconciled v0.14 to the shipped
    CLI-wrapper flow — `LaunchProviderController.launch()`):
 
-   a. **Short-circuit:** if a local provider is already healthy
-      (`GET /v1/health`), skip the installer and go straight to attach
-      (`LaunchProviderController.swift:79-87,144-163`).
-   b. **Run the bundled `install.sh`** (`.runningCLIInstall`,
-      `:117-125`) via `/bin/bash <temp-copy>` with **no CLI args**;
-      env-driven only (`MACPROVIDER_NO_PROMPT=1`, `HOME`, optional
-      `MACPROVIDER_PORT`, sanitized `PATH` — `CLIInstallRunner.swift:42-51`).
-      **`install.sh` performs, in the CLI track:** the App-track
-      registration (`POST /v1/providers/register`), the SPEC-023
-      `autotune --recommend`, the model-weight download, and the
-      **launchd watchdog install**. The app does NOT do these in-process;
-      it surfaces a progress hint by scraping `ps` for the autotune stage
-      (`:110-149`). SPEC-023's HMAC-derived diversification identity
-      (§3.1) is unchanged and lives in the CLI track.
-   c. **Import the token to Keychain** (`.importingProviderIdentity` →
-      `ProviderConfig.importExistingCLIConfig()`, `:128`,
-      `ProviderConfig.swift:280-352`): move `provider_token` out of the
-      `install.sh`-written `config.yaml` into the app Keychain (token
-      never remains on disk in the App track). A not-yet-written token is
-      a **retriable** deferred error retried during finalize
-      (`:126-137,205-223`).
-   d. **Finalize** (`.startingAgent` → `finalizeInstall`, `:165-199`):
-      wait for the launchd provider's `GET /v1/health`, retry the
-      Keychain import, require the app Ed25519 identity, attach the
-      `MalibuAgent` **monitor** (no child spawn), then register the
-      `SMAppService` login item and mark `.live(model, tier: .provisional)`.
-      The login item is registered **only after** a successful attach.
-   e. **App Ed25519 identity** is generated/loaded from the app Keychain
-      (`ProviderIdentity`, slot `provider_identity_v1`, service
-      `tech.malibu.app`; §3, §7.1) and is used for uninstall + the
-      `identity_signature` responder — but note the responder has no
-      wired transport in monitor mode (§4.3, carried gap).
-   f. **Wallet binding is NOT part of the launch flow** — the "no
-      wallet-signing prompt during onboarding" invariant (§1.1) holds;
-      `setPayoutWallet` is a stub that throws a guarded SPEC-027 error
-      (`LaunchProviderController.swift:94-100`). The success card's "Add
-      wallet" affordance is where post-onboarding binding will happen once
-      SPEC-027 ships.
+   Normal-success stage order is `.idle → .runningCLIInstall → .startingAgent →
+   .live` (`.importingProviderIdentity` is entered only on a **deferred
+   missing-token retry** after `.startingAgent`, not on the happy path —
+   `LaunchProviderController.swift:117-138,165-180`).
+
+   a. **Short-circuit:** if a local provider is already healthy AND has a provider
+      id, a port, and readable launchd evidence (`install_manifest.json` /
+      `live.streamvc.macprovider.plist`), skip the installer and attach
+      (`CLIInstallRunner.swift:89-103`; `LaunchProviderController.swift:79-87`).
+   b. **Run the bundled `install.sh`** (`.runningCLIInstall`, `:117-125`) via
+      `/bin/bash <temp-copy 0700>` with **no CLI args**, one script-path arg.
+      **Env is NOT sanitized (reconciled v0.14 — carried gap):** `CLIInstallRunner`
+      **inherits the full parent environment** and only sets `PATH` when it is
+      missing/empty (`CLIInstallRunner.swift:37-51`); the available
+      `ProcessEnvironmentSanitizer` is not used, so inherited `MACPROVIDER_*`
+      overrides (install location, repo, launchd-disable — `install.sh:12,48`) and a
+      caller-controlled non-empty `PATH` remain effective. **`install.sh` runs the
+      CLI-track onboarding:** it generates a fresh `mp-<32hex>` principal and runs
+      `bootstrap-auth`, which acquires the `provider_token` via the coordinator's
+      **tokenless WS admission** handshake (NOT the App-track `/v1/providers/register`,
+      §4.1); it also runs the SPEC-023 `autotune --recommend`, downloads model
+      weights, and installs the launchd watchdog. The app surfaces a progress hint by
+      scraping `ps` for the autotune stage (`:110-149`). **The initial token import
+      happens here, still in `.runningCLIInstall`.**
+   c. **Import the token** (`ProviderConfig.importExistingCLIConfig()`, `:128`,
+      `ProviderConfig.swift:280-352`): move `provider_token` from the
+      `install.sh`-written `config.yaml` into the app Keychain. **Token-custody gap
+      (reconciled v0.14):** the import **strips** the token from `config.yaml`
+      (`removingTopLevelValue` + `atomicWrite0600`, `:312-335`) and writes a
+      token-bearing `config.yaml.import-backup` (0600). The launchd-managed CLI reads
+      its bearer from `config.yaml` (`Config.swift:406,457,527`) and the plist
+      provides no token env / `--token-file`, so **after import a launchd restart
+      (crash / reboot / logout) starts bearerless and cannot authenticate** until the
+      token is re-supplied. This is a shipped gap, documented not fixed. A
+      not-yet-written token is a retriable deferred error (`.importingProviderIdentity`
+      retry, `:126-137,205-223`).
+   d. **Finalize** (`.startingAgent` → `finalizeInstall`, `:165-199`): wait for the
+      launchd provider's `GET /v1/health`, retry the token import, then check
+      **`appIdentityConfigured`, which is actually `ProviderConfig.isConfigured`**
+      (config + `.installed-by-app` marker + Keychain **bearer** token, `:65`,
+      `ProviderConfig.swift:503-511`) — **NOT** `ProviderIdentity.isReady`. Attach the
+      `MalibuAgent` **monitor** (no child spawn), then register the `SMAppService`
+      login item and mark `.live(model, tier: .provisional)`. The login item is
+      registered **only after** a successful attach.
+   e. **The App `p_*` Ed25519 identity is NOT generated during onboarding
+      (reconciled v0.14).** The shipped provider identity is the CLI-track `mp-*`
+      principal + the CLI **receipt** key. `ProviderIdentity` (slot
+      `provider_identity_v1`) is dormant client-side (§3) — referenced only by
+      uninstall and the unreachable `identity_signature` responder (§4.3).
+   f. **Wallet binding is NOT part of the launch flow** and is a **guarded SPEC-027
+      stub**: `setPayoutWallet` throws unconditionally
+      (`LaunchProviderController.swift:94-100`) and the shipped affordance is disabled
+      (`OnboardingWindow.swift:137`). All active wallet-binding language in this spec
+      is gated on SPEC-027.
 
 8. Success card, in the same window:
 
@@ -1965,20 +2050,24 @@ there is no v1-vs-v2 gate. Consequently the §8.1 State × flag matrix, the §8.
 behavior keyed on the flag, and **AC-026-09** (which asserted flag-gated behavior) **no
 longer apply** and are retained below only as provenance.
 
-**What replaced the flag matrix: `StartupState.detect().route()`** (a pure disk-state
-router, `LaunchProviderController.swift:302-372`, pinned by
-`StartupRouteTests.testStartupRouteInstallStates`). The live routing table:
+**What replaced the flag matrix: `StartupState.detect().route()`**
+(`LaunchProviderController.swift:302-372`, pinned by
+`StartupRouteTests.testStartupRouteInstallStates`). **`detect()` is NOT pure
+disk-state** (reconciled v0.14) — it also checks Keychain configuration and probes the
+provider's HTTP health (`:328-341`). **`route()` checks App-ownership FIRST**, so the
+precedence is (evaluated top-down):
 
-| Disk state | Route |
-|---|---|
-| healthy launchd provider, or launchd install evidence + config | `.startAgent` (monitor) |
-| config + `.installed-by-app` marker but **no** launchd evidence (legacy app-marker) | `.showOnboarding` (re-run `install.sh`) |
-| app-owned but missing app identity | `.showOnboarding` |
-| `config.yaml` present but **no** app marker (CLI-owned) | `.showImportDialog` (§8.4) |
-| nothing configured | `.showOnboarding` |
+| Precedence | State | Route |
+|---|---|---|
+| 1 | `config.yaml` present but **no** `.installed-by-app` marker (CLI-owned) → **wins even when the launchd provider is healthy** | `.showImportDialog` (§8.4) |
+| 2 | app-owned (marker) but not yet `isConfigured` / missing app ownership | `.showOnboarding` (run `install.sh`) |
+| 3 | healthy launchd provider, or launchd install evidence + config, App-owned | `.startAgent` (monitor) |
+| 4 | nothing configured | `.showOnboarding` |
 
-The import/migration dialog (§8.4) and the CLI-owned-config handling are unchanged in
-spirit; they are now reached by `.showImportDialog` rather than a flag column.
+So a healthy launchd CLI-owned config still routes to the import dialog (App-ownership is
+checked before health) — `StartupRouteTests.swift:8-17` pins `cli-owned` /
+`launchd-cli-owned-* → .showImportDialog` and `app-owned-missing-identity →
+.showOnboarding`. The import/migration dialog (§8.4) is reached by `.showImportDialog`.
 
 ---
 
@@ -2367,9 +2456,11 @@ criteria in §5.2 by 25%.
   contains "node", "GitHub", "streamvc.live", "portal", or "sign in".
 - **AC-026-03.** No browser tab, external app, or URL scheme handler
   is invoked during a successful fresh install.
-- **AC-026-04.** Closing the onboarding window during
-  `.downloadingModel` and reopening it via the menu bar continues
-  from the byte offset it had reached, not from 0.
+- **AC-026-04 — SUPERSEDED (reconciled v0.14).** It referenced a
+  `.downloadingModel` stage + in-app resumable model download that no longer exist —
+  the shipped stage machine is `.idle/.runningCLIInstall/.startingAgent/
+  .importingProviderIdentity/.live/.failed` and `install.sh` (CLI track) owns the model
+  download (§6.1, §7.2). No in-app byte-offset-resume criterion applies.
 - **AC-026-05.** A second `POST /v1/providers/register` with the same
   `provider_id` but a different `identity_pubkey` returns `409
   CONFLICT` and does not overwrite the row.
@@ -2386,11 +2477,13 @@ criteria in §5.2 by 25%.
   to `macprovider-verify`. Receipt-key semantics are unchanged from
   SPEC-015; the identity-key separation in §3.2 does not affect
   receipt verification.
-- **AC-026-08.** Deleting the `provider_identity_v1` Keychain item
-  and relaunching the App produces a fresh `provider_id` (not the
-  prior one), landing the user back at the launch screen. The
-  SPEC-015 receipt-key Keychain slot is untouched and its rotation
-  history is preserved.
+- **AC-026-08 — SUPERSEDED (reconciled v0.14).** It asserted that deleting
+  `provider_identity_v1` forces a fresh `provider_id` — **false** in the shipped app.
+  `ProviderIdentity` is dormant (§3): the onboarding gate is `ProviderConfig.isConfigured`
+  (config + marker + Keychain **bearer**), not `ProviderIdentity.isReady`, so deleting
+  the App identity key does not re-onboard. The shipped provider_id is the CLI-track
+  `mp-*` (from `install.sh`). A fresh onboarding is forced by removing the app marker /
+  config / bearer, not the App identity key.
 - **AC-026-09 — SUPERSEDED (reconciled v0.14).** This criterion asserted
   `MALIBU_ONBOARD_V2=0` / `onboardingFlow` flag behavior, which PR #418 **removed**
   (§8): there is no onboarding flag and no setup-paused state. The still-valid *residual*

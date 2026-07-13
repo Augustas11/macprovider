@@ -42,10 +42,10 @@ Ship a **click-and-forget provider experience** for non-developer Mac users. Rep
 
 ### Success criteria
 
-- Non-technical Apple Silicon user goes from `malibu.tech/host` → running node in **≤ 3 minutes**, zero terminal.
-- Same coordinator behavior, same receipts, same portal registration as the CLI track.
-- Auto-update ships silently. Uninstall is drag-to-trash with **zero leftover LaunchAgent**.
-- The CLI track keeps working unchanged; both tracks can coexist on the same Mac without double-registering with the coordinator (see §12 "Conflict" — reuse existing `ProviderConflictDetector`).
+- Non-technical Apple Silicon user goes from `malibu.tech/host` → running provider in **≤ 3 minutes**, zero terminal.
+- Same coordinator behavior, same receipts as the CLI track (the shipped app onboards a **CLI-track** provider via `install.sh` — SPEC-026 §6.1; no separate App-track registration).
+- Auto-update ships silently (Sparkle, the whole `.app`). **Uninstall goal NOT met as shipped (reconciled v0.2):** the "Quit and Uninstall" action is compiled but unreachable, so **drag-to-trash leaves the launchd `macprovider-cli` behind** (§3.4). Zero-leftover is a carried gap.
+- The CLI track keeps working unchanged; both tracks coexist via the shared `config.yaml` + `.installed-by-app` marker (§7), with the CLI-owned config routed to the import dialog (SPEC-026 §8).
 
 ### Non-goals (v1)
 
@@ -139,35 +139,43 @@ time (60–240 s for the first model) in the background.
 
 ### 3.3 Updates — Sparkle 2.x
 
-- Appcast at `https://updates.malibu.tech/appcast.xml`, EdDSA-signed.
+- Appcast at `https://download.malibu.tech/appcast.xml`, EdDSA-signed (reconciled v0.2 to shipped `MalibuUpdateConfiguration.swift:5-10` / `Info.plist:34-39`; v0.1's `updates.malibu.tech` is stale).
 - Delta updates (BSDiff) to keep the ~40 MB payload small. Model weights live outside `.app` and are never re-downloaded on update.
-- Before applying an app update, Sparkle drains the provider via
-  `agent.shutdown(gracefulSeconds: 15)` (`SparkleUpdaterController.swift:36-38,54-70`)
-  — in monitor mode there is no child to kill; the drain is a graceful pause of
-  monitoring. Two independent update authorities (reconciled v0.2): **Sparkle**
-  updates the whole `.app` (appcast `https://download.malibu.tech/appcast.xml`,
-  `Malibu-<tag>.dmg`, `SUPublicEDKey` Ed25519 — `MalibuUpdateConfiguration.swift`),
-  while the **CLI** self-updates by the app invoking `macprovider-cli update`
-  through `CLIUpdateRunner` (`CLIUpdateRunner.swift:30-60`; triggered by
-  `MalibuAgent.updateCLINow()` when the running CLI lags the coordinator's
-  `recommended_binary_version` or the latest GitHub release). Actual CLI
-  install/rollback is the CLI's responsibility; the two authorities do not fight.
+- **Only the Sparkle whole-`.app` update is wired (reconciled v0.2).** Sparkle
+  (`SPUStandardUpdaterController`, auto-checks daily) updates the `.app` from appcast
+  `https://download.malibu.tech/appcast.xml` (`Malibu-<tag>.dmg`, `SUPublicEDKey`
+  Ed25519 — `MalibuUpdateConfiguration.swift:5-22`), draining the provider via
+  `agent.shutdown(gracefulSeconds: 15)` first (`SparkleUpdaterController.swift:36-38`;
+  in monitor mode there is no child to kill — the drain is a graceful monitoring
+  pause). The menu bar and dashboard expose **only** the Sparkle update check
+  (`MenuBarController.swift:93-95`, `DashboardWindow.swift:81-84`).
+- **The in-app CLI-updater is present but UNWIRED (reconciled v0.2 — carried gap).**
+  `CLIUpdateRunner` (invoke `macprovider-cli update`) and `MalibuAgent.updateCLINow()`
+  exist (`CLIUpdateRunner.swift:30-60`, `MalibuAgent.swift:130-155`) but have **no
+  production caller**; even the unused `.updateCLI` handler maps to Sparkle
+  (`MalibuApp.swift:89-90`). So there is no live second update authority — the CLI is
+  updated by the launchd watchdog / its own `update` mechanism, not by the app.
 
 ### 3.4 Uninstall
 
 - Drag `Malibu.app` → Trash. Because `SMAppService` is registered by the app bundle, macOS auto-cleans the launchd registration on next login.
-- App also ships **Quit and Uninstall** menu item that (reconciled v0.2 to the
-  shipped teardown, `MalibuApp.swift:161-193`):
-  - drains monitoring via `agent.shutdown(gracefulSeconds:)`
-  - removes the **launchd CLI install** by delegating to the CLI's own
-    `macprovider-cli uninstall --yes` (`CLIInstallTeardown.swift:33-34`) — not an
-    in-app child kill (there is no child)
-  - `SMAppService.mainApp.unregister()` (the app login item)
-  - `ProviderConfig.wipeAppOwnedState()` removes `config.yaml` **only if the
-    `.installed-by-app` marker is present** (`ProviderConfig.swift:478-501`; do not
-    stomp a CLI-track user's config), plus `~/Library/Application Support/Malibu/`
-    and all `tech.malibu.*` Keychain items
-  - deletes the app Ed25519 identity key (`ProviderIdentity.deleteFromKeychain`)
+- **Quit and Uninstall is compiled but UNREACHABLE in the shipped UI (reconciled
+  v0.2 — carried gap).** The teardown handler exists (`MalibuApp.swift:83-95,188-208`)
+  but **no menu item or dashboard control emits it**: the menu bar exposes only plain
+  **Quit** (`MenuBarController.swift:73-116`) and the dashboard has no uninstall control
+  (`DashboardWindow.swift:22-106`). So **drag-to-trash removes only `Malibu.app` and
+  its `SMAppService` login item — the launchd-managed `macprovider-cli` and its
+  `config.yaml` remain.** The v0.1 "zero leftover LaunchAgent" promise does **not**
+  hold as shipped. Wiring the action is a carried follow-up.
+- If/when the action is wired, the handler's teardown does
+  (`MalibuApp.swift:161-208`): drain monitoring via `agent.shutdown(gracefulSeconds:)`;
+  remove the launchd CLI via `macprovider-cli uninstall --yes`
+  (`CLIInstallTeardown.swift:33-34`); `SMAppService.mainApp.unregister()`;
+  `ProviderConfig.wipeAppOwnedState()` (removes `config.yaml` **only if the
+  `.installed-by-app` marker is present**, `ProviderConfig.swift:478-501`, plus the app
+  support dir; it **preserves receipt keys** — not "all `tech.malibu.*`",
+  `KeychainStore.swift:68-85`); delete the app Ed25519 identity key
+  (`ProviderIdentity.deleteFromKeychain`).
 
 The CLI track's `uninstall.sh` is unaffected and remains the developer-facing path.
 
@@ -199,10 +207,10 @@ and never opens the control socket in the live flow.
 │                    │                          │                       │
 │                    └──────────┬───────────────┘                       │
 │                               ▼                                       │
-│                     MalibuAgent (actor)                               │
-│                    · onboarding: runs Contents/Resources/install.sh   │
-│                    · steady state: MONITORS via HTTP poll             │
-│                    · registers SMAppService (the APP login item)      │
+│   LaunchProviderController (onboarding)   MalibuAgent (steady state)  │
+│    · runs Contents/Resources/install.sh    · MONITORS via HTTP poll   │
+│    · imports token → Keychain              · never spawns a child     │
+│    · registers SMAppService (APP login item)                         │
 │                               │ GET /v1/health + /v1/status           │
 │                               ▼ (127.0.0.1:<port from config.yaml>)   │
 │   ┌──────────────── launchd watchdog (installed by install.sh) ─────┐ │
@@ -326,11 +334,19 @@ Runs on the same macOS runner as the existing job, after the CLI binary is signe
 8. `xcrun notarytool submit Malibu-<version>.dmg --apple-id $APPLE_NOTARY_APPLE_ID --password $APPLE_NOTARY_PASSWORD --team-id $APPLE_NOTARY_TEAM_ID --wait` (this one **is** staplable — unlike the bare CLI).
 9. `xcrun stapler staple Malibu-<version>.dmg` and `stapler validate`.
 10. Upload to `https://download.malibu.tech/Malibu-<version>.dmg` (immutable, versioned), atomic swap of `latest.dmg` symlink.
-11. `sign_update` (Sparkle CLI) → EdDSA signature; render appcast item; publish `https://updates.malibu.tech/appcast.xml`.
+11. `sign_update` (Sparkle CLI) → EdDSA signature; render appcast item; publish `https://download.malibu.tech/appcast.xml` (reconciled v0.2).
 
 Reuse `cleanup_signing_material` trap from the existing job.
 
 ### 6.3 Entitlements (`Malibu.entitlements`)
+
+> **The shipped `Malibu.entitlements` is an EMPTY dictionary (reconciled v0.2).** The
+> build points `CODE_SIGN_ENTITLEMENTS` at `Malibu.entitlements` (`project.yml:46-68`),
+> whose plist has **no keys** (`Malibu.entitlements:1-5`). None of the five entitlements
+> below are in the shipped file. This is consistent with the monitor-only architecture
+> (the app no longer runs MLX inference or spawns/loads the signed CLI in-process — the
+> managed CLI is launchd-owned), so most of the v0.1 rationale is moot. The block below
+> is the v0.1 proposal, retained for provenance; the shipped entitlement set is empty.
 
 ```xml
 <key>com.apple.security.cs.allow-jit</key><true/>
@@ -364,7 +380,7 @@ The single biggest risk in this spec is stomping a config that a developer previ
 |---|---|---|
 | Provider daemon config | `~/.config/macprovider/config.yaml` | **Shared** with CLI track |
 | Wrapper preferences (window sizes, opt-ins) | `~/Library/Application Support/Malibu/prefs.json` | App track only |
-| App-track marker | `~/Library/Application Support/Malibu/.installed-by-app` (file with install date) | App track only |
+| App-track marker | `~/Library/Application Support/Malibu/.installed-by-app` (**empty file**, reconciled v0.2 — not dated; `ProviderConfig.swift:513-518`) | App track only |
 | Logs (rolling, 100 MB cap) | `~/Library/Logs/malibu/` | Shared, app tags its own lines |
 | `provider_token` | Keychain, service `tech.malibu.provider`, account `<provider_id>` | App track; CLI track keeps YAML |
 | Session receipt keys | Keychain, service `tech.malibu.receipt`, account `<key_id>` | Unchanged from CLI track (reuse existing key store) |
@@ -381,7 +397,14 @@ Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`)
   `config.yaml` **only if the marker is present** (`ProviderConfig.swift:478-501`).
 - **`isConfigured`** = `config.yaml` present AND `.installed-by-app` marker present
   AND a Keychain token bound to the config's `provider_id` (`ProviderConfig.swift:503-511`);
-  missing any → onboarding. `provider_token` is **never on disk** in the App track.
+  missing any → onboarding. **Token custody (reconciled v0.2 — nuanced, not "never
+  on disk"):** the import strips `provider_token` from `config.yaml` and adds a
+  `link_state` key (`ProviderConfig.swift:312-335`), so the *live* `config.yaml` holds
+  no token — **but** the import also writes a token-bearing `config.yaml.import-backup`
+  (0600), so the token IS briefly on disk there, and stripping it from `config.yaml`
+  leaves the launchd-managed CLI unable to re-authenticate on restart (it reads the
+  bearer from `config.yaml`; SPEC-026 §6.1 token-custody gap). So the App track is not
+  a clean "token never on disk" win.
 - **CLI track never touches** `~/Library/Application Support/Malibu/` or the app's
   Keychain entries.
 
@@ -425,7 +448,10 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
 
 - Above the fold: big coral **Download for Mac** button → `https://download.malibu.tech/latest.dmg`. Same button also emits the SHA-256 next to it for the paranoid.
 - Below the button: disclosure toggle "**Prefer terminal?**" → reveals current `curl -fsSL https://get.streamvc.live/install.sh | bash` block. Devs keep their flow; the surface area for non-devs is a single button.
-- Step section rewritten: "Download → Open → Earn." GitHub sign-in is now inside the app, not step 2.
+- Step section rewritten: "Download → Open → Earn." **There is no GitHub sign-in
+  (reconciled v0.2):** onboarding is browserless — one **Launch Provider** click runs
+  `install.sh` (SPEC-026 is explicit that no browser/GitHub step exists). v0.1's
+  "GitHub sign-in is now inside the app" is removed.
 - Requirements card unchanged.
 - New troubleshoot page at `malibu.tech/host/troubleshoot` covering: Gatekeeper block (very rare post-notarization), `SMAppService` denied, first-model-download stuck, uninstall.
 
