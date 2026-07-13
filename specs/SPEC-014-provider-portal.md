@@ -67,7 +67,17 @@ state; codex 3-lane audit in progress)
     best-effort; GitHub token disposal + bind write-authority disclosed;
     `/v1/install/pair/refresh` + `pair_ot_mint_log` documented; A.5
     `idle_prewarm.*` paths; change-log/runbook/§11 scope sweep. All R3
-    C/H/M addressed in this revision; re-audit pending.
+    C/H/M addressed.
+    R4 (commit `f9be558`): code 0C/0H/4M/1L, security 0C/0H/2M/4L,
+    architect 0C/0H/2M/2L — **all three lanes HIGH-free.** Tail: pool-404
+    is recorded but not rendered by the shipped header (UI gap);
+    `read-only` scoped to data views (OAuth bind is the one write);
+    SPEC-002 §7.4 stale-attribution made coherent (§10.2); pair-refresh
+    audit-log scoped to 401/200/429; callback origin must equal portal
+    proxied origin; `/v1/install/pair/refresh` unreachable via coordinator
+    ingress; `{"providers":null}` empty case; state-cap non-empty-`code`;
+    bind `{}`≠empty-body; `assigned_id`. All R4 C/H/M addressed in this
+    revision; re-audit pending.
 **Depends on:**
   - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
     ownership frame shapes — `ownership_event` / `needs_claim` — consumed by
@@ -96,9 +106,13 @@ state; codex 3-lane audit in progress)
 buyer-facing surface. The seller side has no web surface today: a
 provider runs `macprovider-cli serve` in a terminal, watches log
 lines, and may hit `GET /v1/health` for a number. SPEC-014 introduces
-**Provider Portal**, a single-pane read-only web surface that lets a
-provider sign in and see THIS machine's coordinator-side status (`provider_id`,
-`tier`, `state`) plus its aggregate earnings. **Sign-in is config-gated
+**Provider Portal**, a single-pane, **read-only for dashboard/data views** web
+surface that lets a provider sign in and see THIS machine's coordinator-side status
+(`provider_id`, `tier`, `state`) plus its aggregate earnings. (Reconciled v0.9: the
+"read-only" property scopes the **data surfaces** — the portal makes no write to
+earnings, pool, or config. The GitHub-OAuth **`pair_ot` bind** (§2.5.6) is the one
+deliberate write: it consumes a `pair_ot` and inserts `provider_ownership`. So the
+portal is read-only for data and write-only for that single binding action.) **Sign-in is config-gated
 dual-mode (reconciled v0.9):** the default and current-prod path is a per-Mac
 `provider_id` + `provider_token` **paste-bearer** sign-in (§2.1); an opt-in
 **GitHub-OAuth cookie-session** mode (§2.5), gated by
@@ -507,24 +521,42 @@ informationally, see §8(b) allowlist note). No other spec owns its HTTP transpo
 (SPEC-003 FR-C10 assigns the rate limit "to the downstream consumer"), so SPEC-014
 records it here: **POST, FR-P12 provider-bearer auth**, `200 {pair_ot, claim_url,
 expires_in: 600}`; a per-provider mint cap (**~5 successful mints/hour**) returns
-**`429` with `Retry-After`**; unauthenticated → `401`; every attempt is written to
-the `pair_ot_mint_log` audit table. The `callback` is reached by the browser via
-GitHub's 302 redirect, not by a portal `fetch`. **All of these paths require the
-operator's reverse proxy to route `/v1/auth/*` to the coordinator (§10.4); the
-reference nginx does not yet do so (§2.3 wiring caveat).**
+**`429` with `Retry-After`**; unauthenticated → `401`. The `pair_ot_mint_log` audit
+table captures the **`401`, `200`, and `429`** outcomes only — a wrong-method
+(`405`) or internal `500` (token-validation or mint/storage failure) returns
+**without** an audit row, so the guarantee is scoped to those three outcomes, not
+"every attempt". **This endpoint is reachable via the coordinator's own ingress,
+not the portal `/v1/auth/*` proxy — and it is currently UNWIRED there (carried
+gap):** the CLI POSTs it to the coordinator origin, but the reference **coordinator**
+nginx (`dist/nginx-coordinator.streamvc.live.conf`) returns 404 for unmatched
+`/v1/*`, so expired-`pair_ot` refresh does not work until an operator adds a
+coordinator-ingress route for it (this is separate from the portal `/v1/auth/*`
+proxy of §10.4).
+
+The `callback` is reached by the browser via GitHub's 302 redirect, not by a portal
+`fetch`. **The browser OAuth paths (`/v1/auth/github/*`, `/v1/auth/me/*`,
+`/v1/auth/logout`) require the operator's reverse proxy to route `/v1/auth/*` to the
+coordinator (§10.4); the reference nginx does not yet do so (§2.3 wiring caveat).**
+(`/v1/install/pair/refresh` is **not** under the `/v1/auth/*` prefix — it has the
+separate coordinator-ingress gap noted just above.)
 
 **Response shapes (owner of last resort, reconciled v0.9 — verified against the
 shipped handlers, not inferred):**
 
-- `GET /v1/auth/me/providers` returns a **`{"providers":[ … ]}` envelope** (object
-  root, key `providers`), **not** a bare array — the portal reads `body.providers`
-  (`auth_github.go`, `index.html`). Each element is `{provider_id, claimed_at,
-  last_seen_at}`; the chooser renders `last_seen_at` as "last seen …" (§2.5.5,
-  §4.5). Those UI/wire fields are enumerated in §5.
+- `GET /v1/auth/me/providers` returns a **`{"providers": <array>}` envelope**
+  (object root, key `providers`), **not** a bare array — the portal reads
+  `body.providers` (`auth_github.go`, `index.html`). Each element is
+  `{provider_id, claimed_at, last_seen_at}`; the chooser renders `last_seen_at` as
+  "last seen …" (§2.5.5, §4.5). **Edge case (reconciled v0.9):** with **zero** owned
+  providers the value serializes as `null`, i.e. `{"providers":null}` (Go returns a
+  nil slice), which the portal defensively normalizes to `[]` — so the wire value is
+  `array | null`, not strictly an array. Those UI/wire fields are enumerated in §5.
 - `POST /v1/auth/me/providers/bind` on success returns
   `{provider_id, github_login, claimed_at}` (`auth_github.go`); the error codes are
-  §2.5.6's `410 pair_ot_invalid` / `409 already_owned` / `401` (and `400` for a
-  malformed/empty pending body).
+  §2.5.6's `410 pair_ot_invalid` / `409 already_owned` / `401`. Body handling
+  (reconciled v0.9): a **raw empty HTTP body** is rejected with `400`, but a JSON
+  **`{}`** body **succeeds** when the session carries a pending `pair_ot`
+  (§2.5.5's logged-out path) — `{}` ≠ empty body.
 
 **Transport-owned persistence.** The OAuth transport introduces coordinator DB
 tables that **no other spec owns** — `github_identities`; `mp_sessions` (columns
@@ -590,11 +622,14 @@ SPEC-003 FR-C10's.
     per-origin limit is an **outstanding-state cap (~20 unexpired, unconsumed
     states per origin hash)**, **not** a rolling "20 creations per 10 minutes" rate
     limit. The callback deletes the state row **before** exchanging the GitHub
-    `code` (`auth_github.go`, `tokens.go`), so **any state-valid callback frees the
-    slot — even one carrying a bogus `code` that then fails the exchange**. Capacity
-    is therefore freed on any state-valid callback attempt, not only on a fully
-    successful login, so far more than 20 starts can occur in a 10-minute window.
-    This is a weaker guarantee than a true rate limit; stated honestly here.
+    `code` (`auth_github.go`, `tokens.go`), so a callback carrying a valid state
+    **and a non-empty `code`** frees the slot **even if that `code` is bogus and the
+    exchange then fails**. (A callback with a valid state but an **empty/missing
+    `code`** returns *before* consumption, so it does **not** free the slot — it
+    stays occupied until TTL expiry.) Capacity is thus freed on any state-valid,
+    non-empty-`code` callback, not only on a fully successful login, so far more
+    than 20 starts can occur in a 10-minute window. This is a weaker guarantee than
+    a true rate limit; stated honestly here.
   - **Scope of `state` (reconciled v0.9 — do NOT overstate it).** `state` protects
     **only the `/github/start` → `/github/callback` handshake** against CSRF /
     fixation on the login step. It is **not** a general CSRF or session-theft
@@ -701,7 +736,8 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
   (§2.5.3). This is a strictly larger auth surface than paste-bearer mode and is why
   it is opt-in/off-by-default.
 - **Logout is not a full revocation boundary (reconciled v0.9 — carried gap).**
-  `POST /v1/auth/logout` deletes **only the current cookie's** session id. But an
+  `POST /v1/auth/logout` **attempts to delete only the current cookie's** session id
+  (best-effort — it ignores a delete error and always 204s, §2.5.2). But an
   OAuth callback always **creates a new session without deleting any prior one**
   (`auth_github.go`), and the earnings-401 relaunch (§2.5.0) drives repeated
   re-auth — so a single browser can accumulate **orphaned** session rows that no
@@ -813,15 +849,20 @@ Single-pane status of THIS machine.
   `"draining"` / `"unavailable"`. The coordinator normalizes `busy` →
   `degraded`; there is **no `"unknown"` state value** — a `provider_id`
   not in the pool snapshot returns **HTTP 404 `provider_not_found`**,
-  not a 200 with `state:"unknown"`. **The portal treats that 404 as a
-  pool-check error** (`poolCheck()` records `state.pool.err`; A.1
-  renders a pool error / offline), **NOT** as an AUTH-2 sign-in
-  rejection — pool-check is unauthenticated, and treating a transient
-  liveness miss as an auth failure would wrongly sign out a provider
-  momentarily absent from the snapshot. **Cross-spec note:** this
-  reconciles to the shipped code as source of truth; SPEC-002 §7.4 is
-  itself **stale** (still documents a 200 `state:"unknown"` miss and no
-  `degraded`), a drift to be fixed in SPEC-002, not owned here.
+  not a 200 with `state:"unknown"`. On that 404 `poolCheck()` records
+  `state.pool.err` but leaves `state.pool.data` untouched, and — **a
+  shipped UI gap (reconciled v0.9)** — the headstrip renderer reads only
+  `state.pool.data`, so A.1 shows "Loading…" (first load) or the last
+  successful status (stale), **not** a rendered pool error. The portal
+  does **NOT** route the 404 through the AUTH-2 sign-in-rejection path —
+  pool-check is unauthenticated, and treating a transient liveness miss
+  as an auth failure would wrongly sign out a provider momentarily absent
+  from the snapshot. Surfacing `state.pool.err` in the header is a
+  carried UI follow-up, not fixed in this spec-only change. **Cross-spec
+  note:** this reconciles to the shipped code as source of truth;
+  SPEC-002 §7.4 is itself **stale** (still documents a 200
+  `state:"unknown"` miss and no `degraded`), a drift to be fixed in
+  SPEC-002 (§10.2), not owned here.
 - "Last refreshed Xs ago" / "stale" stamp on the `/v1/pool/check`
   poll. Cadence per §5 table (a).
 - Manual refresh button (re-issues `/v1/pool/check`).
@@ -895,8 +936,10 @@ signals:
   hard floor" variant.
 - **Self-signed binary** — DEFERRED to v0.2. The only
   browser-callable per-provider STATUS / IDENTITY endpoint today
-  is `/v1/pool/check`, which returns only `{provider_id, tier,
-  state}`. Earnings (`/providers/{id}/earnings`) is a separate
+  is `/v1/pool/check`, whose default response is `{provider_id,
+  assigned_id?, tier, state}` (reconciled v0.9 — `assigned_id` is
+  emitted `omitempty`; the portal reads only `tier`/`state`) and
+  which exposes no signing tier. Earnings (`/providers/{id}/earnings`) is a separate
   browser-callable endpoint but does not expose signing tier.
   Owning amendment: Open Q5 (signing tier is in the Q5 omnibus).
   Q10 (browser-local bridge) is NOT an owning Q for this row.
@@ -1194,6 +1237,13 @@ exactly one of them.
 | E.1 | state | `GET /v1/pool/check?provider_id=<id>` | `state` | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | OAuth chooser (§2.5.5) | owned-provider rows: `provider_id`, `claimed_at`, `last_seen_at` | `GET /v1/auth/me/providers` (cookie) | `body.providers[]` (object-root `{"providers":[…]}` envelope, NOT a bare array): `provider_id`, `claimed_at`, `last_seen_at` | on OAuth home load / popstate | in-memory | §2.5.2 SPEC-014 transport (reconciled v0.9); GitHub-OAuth mode only |
 
+**Note on the `state` source citation (reconciled v0.9).** The `state` rows above
+cite SPEC-002 §7.4 as the *endpoint* owner, but the **enum values and
+missing-provider behavior are per the shipped `/v1/pool/check`** (§4.1:
+`ready`/`degraded`/`draining`/`unavailable`, 404 miss), **not** SPEC-002 §7.4's
+stale `unknown`/200 text — that spec needs its own reconciliation (§10.2). The
+`tier` citation to SPEC-002 §7.4 is accurate as-is.
+
 ### 5.2 Table (b) — Static / spec-backed fields (no runtime API call)
 
 | Surface | Field | Source artifact | Display mode |
@@ -1340,7 +1390,8 @@ Layered, NOT a flat checklist. Six required groups.
       `"degraded"` → offline; `"unavailable"` → offline. A fixture
       iterates all four shipped enum values and asserts the rendered
       pill label. (No `"unknown"` value — a missing provider is a 404
-      that A.1 renders as a pool-check error, NOT the §2.2 auth path.)
+      that sets `state.pool.err` but is NOT surfaced by the shipped
+      headstrip renderer, §4.1, and is NOT the §2.2 auth path.)
 - [ ] A.1 "stale" stamp transition: after the last successful
       `/v1/pool/check` response, advancing a fake clock past
       `2 × poll cadence` (60 s with the v0.1 default 30 s
@@ -1358,8 +1409,9 @@ Layered, NOT a flat checklist. Six required groups.
       "unavailable"`, with the literal text "This machine is
       currently `<state>`." and a copy-to-clipboard
       `macprovider-cli status` CTA. (`degraded` does not trigger this
-      row — see the §4.1 pill note; a missing-provider 404 is rendered
-      as a pool-check error, not this row and not §2.2.)
+      row — see the §4.1 pill note; a missing-provider 404 sets
+      `state.pool.err` but is not surfaced by the header, and is not
+      this row and not §2.2.)
 - [ ] A.3 row never executes a command remotely.
 - [ ] A.4 is not rendered in v0.1 (entirely in §5 table (c)).
 - [ ] A.5 idle-prewarm panel renders the five counters (fired /
@@ -1818,7 +1870,7 @@ owning amendment.
 | Spec | What SPEC-014 uses |
 |---|---|
 | SPEC-001 v1.5 | §6.5 hello / hello_ack field set (referenced for Q5 deferral rationale); §6.4 `/v1/health` shape (referenced for A.4 / A.3 deferral rationale); `ownership_event` / `needs_claim` frame shapes consumed by the GitHub-OAuth bind flow (§2.5.6). No edits required for v0.1. |
-| SPEC-002 v1.3.5 | §7.3 token storage opacity; §7.4 `/v1/pool/check` (the portal's ONLY status/identity endpoint — the `tier` label exposed there originates in §7.5 provisional admission state, but the portal MUST NOT call §7.5's operator-keyed endpoints directly); FR-P12 bearer auth. No edits required for v0.1. |
+| SPEC-002 v1.3.5 | §7.3 token storage opacity; §7.4 `/v1/pool/check` (the portal's ONLY status/identity endpoint — the `tier` label exposed there originates in §7.5 provisional admission state, but the portal MUST NOT call §7.5's operator-keyed endpoints directly); FR-P12 bearer auth. **SPEC-014 reconciles the `state` enum + missing-provider behavior to the SHIPPED `/v1/pool/check` (§4.1: `ready`/`degraded`/`draining`/`unavailable`, 404 miss); SPEC-002 §7.4 is itself STALE on this (documents `unknown`/200) and needs its own reconciliation — see §10.2. That is a SPEC-002 edit, not a SPEC-014 one.** |
 | SPEC-003 v0.10 | §4 / FR-C2 install flow; §5 / FR-D1 + FR-D2 + FR-D2.1 requirements & sizing; §6.2 CLI subcommand table; FR-C7 advisory version nudge; FR-C9 provisional self-mint token path; **FR-C10 GitHub-OAuth coordinator mint/ownership policy** (pair_ot mint, `provider_ownership` anti-check, `ownership_event`, `claim_url`) consumed by §2.5. No edits required for v0.1. |
 | SPEC-005 v0.3 | §1.3 out-of-scope; §2.1 D1 donation-only; §2.11 D11 no-new-**delivery** infra; §11.4 `/providers/{id}/earnings`; §11.5 route-disabled mode + 401/403/404 contract; §13 `endpoints.provider_earnings.rate_limit_per_minute`. **Reconciled v0.9:** the GitHub-OAuth cookie-session **is** a new server-side auth surface — it does not violate D11 (D11 forbids *delivery* infra, not auth); the auth policy is owned by SPEC-003 FR-C10, and the OAuth transport by this spec's §2.5. No edits required for v0.1. |
 | SPEC-009 v0.1 | §2 ASCII layout precedent; §6 visual tokens (inherited verbatim). No edits required for v0.1. |
@@ -1826,6 +1878,13 @@ owning amendment.
 
 ### 10.2 Specs SPEC-014 would force amendments to (if Open Qs resolve a certain way)
 
+- **SPEC-002 §7.4 pool-check contract (reconciled v0.9 — SPEC-002-side
+  drift).** SPEC-002 §7.4 still documents a 200 `state:"unknown"` miss
+  and no `degraded` state, but the shipped `/v1/pool/check` emits
+  `ready`/`degraded`/`draining`/`unavailable` and a **404
+  `provider_not_found`** miss (§4.1). SPEC-002 §7.4 should be reconciled
+  to the shipped behavior; SPEC-014 documents the observed contract as
+  the consumer but does not own the SPEC-002 normative fix.
 - **SPEC-002** for D.1 (uptime), D.2 (routing weight), D.3
   (request tail + privacy-redaction policy), A.1 hardware fields,
   E.1 rotation / removal, B.4 broadcasts panel — all under
@@ -1893,6 +1952,14 @@ The user shared screenshots from a competitor seller portal
     be within the `PORTAL_BASE_URL` host scope; operators SHOULD scope it to the
     exact portal host (a parent domain widens cookie exposure to sibling
     subdomains, §2.5.3), but omitting it is valid (defaults to host-only cookie).
+  - **Origin constraint (reconciled v0.9 — the validator's "any host" is not
+    operational latitude).** Although `validateGitHubOAuth` accepts any HTTPS host
+    for `redirect_uri`, the **`redirect_uri` host, `PORTAL_BASE_URL` host, and the
+    portal's proxied origin MUST all be the same host.** The session cookie is
+    host-only by default and `return_to` is a **relative path**, so a callback that
+    lands on a different (but validator-accepted) host would set the cookie on the
+    wrong origin and the relative post-callback redirect would leave the OAuth
+    origin — breaking authentication. Do not exploit the validator's host latitude.
   - **Ingress query-log redaction:** redact `ot` / `pair_ot` / `code` / `state`
     at the reverse-proxy / CDN layer; coordinator app-log redaction does not cover
     ingress access logs that see `/claim?ot=…` (§2.5.4).
