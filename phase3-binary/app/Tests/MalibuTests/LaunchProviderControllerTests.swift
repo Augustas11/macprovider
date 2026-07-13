@@ -340,6 +340,44 @@ final class LaunchProviderControllerTests: XCTestCase {
         )
     }
 
+    // PROD-M1: when policy discovery failed (.unknown) and no invite is
+    // supplied, an authoritative `required` preflight must re-gate to the
+    // editable invite step BEFORE the expensive installer runs — not after
+    // 10–30 min of downloads/tuning.
+    func testUnknownPolicyRejectsMissingInviteBeforeInstaller() async {
+        let harness = Harness()
+        harness.referralPreflightError = NSError(domain: "tests", code: 0)
+        harness.referralPreflight = ReferralPreflightResult(valid: false, reason: "missing", required: true)
+        harness.expectedReferralCode = ""
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.refreshReferralPolicy()
+        XCTAssertFalse(controller.referralRequired)
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertEqual(
+            controller.stage,
+            .failed(stage: "referral", retryable: true, message: "An invite code is required. Enter a new invite code.")
+        )
+    }
+
+    // PROD-M1: an unknown policy with a valid supplied code validates the code
+    // at preflight and then proceeds to install (no false gate).
+    func testUnknownPolicyValidatesSuppliedCodeThenInstalls() async {
+        let harness = Harness()
+        harness.referralPreflightError = NSError(domain: "tests", code: 0)
+        harness.referralPreflight = ReferralPreflightResult(valid: true, reason: "valid", required: true)
+        let controller = makeController(harness)
+
+        await controller.refreshReferralPolicy()
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
     func testAttachFailureDoesNotRegisterLoginItemOrMarkLive() async {
         let harness = Harness()
         harness.attachHealthy = false
@@ -382,6 +420,10 @@ final class LaunchProviderControllerTests: XCTestCase {
         var configModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
         var installLogLines: [String] = []
         var referralPreflight = ReferralPreflightResult(valid: true, reason: "valid")
+        // PROD-M1: when set, validateReferralCode throws this on its FIRST call
+        // only — used to drive policy discovery into `.unknown` (refresh) while
+        // still returning a definitive result at the pre-install preflight.
+        var referralPreflightError: Error?
         var expectedReferralCode = Harness.validReferralCode
 
         func dependencies() -> LaunchProviderController.Dependencies {
@@ -389,7 +431,13 @@ final class LaunchProviderControllerTests: XCTestCase {
                 localInstallSucceeded: {
                     self.localInstallSucceeded || self.localInstallSucceededAfterInstall
                 },
-                validateReferralCode: { _ in self.referralPreflight },
+                validateReferralCode: { _ in
+                    if let error = self.referralPreflightError {
+                        self.referralPreflightError = nil
+                        throw error
+                    }
+                    return self.referralPreflight
+                },
                 registerLoginItem: {
                     self.loginItemRegistrations += 1
                 },

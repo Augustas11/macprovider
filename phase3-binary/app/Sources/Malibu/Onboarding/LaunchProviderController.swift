@@ -294,10 +294,22 @@ final class LaunchProviderController: ObservableObject {
             return
         }
         var preflightWarning: String?
-        if referralRequired && !existingIdentity {
+        // PROD-M1: validate the invite BEFORE any expensive install work
+        // whenever the policy is not known-optional — i.e. required OR still
+        // unknown (policy discovery failed). This stops a user from spending
+        // 10–30 min downloading and tuning only to discover at the mint that an
+        // invite was mandatory. An authoritative `required` + missing/invalid
+        // code re-gates to the EDITABLE invite step now with reason-specific
+        // copy; an unavailable pre-check degrades to a warning and lets the
+        // install-log rejection re-gate as before (mirrors install.sh's
+        // advisory /v1/referrals/validate treatment).
+        if !existingIdentity && referralPolicy != .optional {
             do {
                 let result = try await dependencies.validateReferralCode(normalizedReferralCode)
-                guard result.valid else {
+                if result.required {
+                    referralPolicy = .required
+                }
+                if result.required && !result.valid {
                     stage = .failed(stage: "referral", retryable: true, message: Self.referralFailureMessage(result.reason))
                     return
                 }
@@ -374,14 +386,19 @@ final class LaunchProviderController: ObservableObject {
 
     private static func referralFailureMessage(_ reason: String) -> String {
         switch reason {
-        case "expired": return "This invite has expired. Enter a new invite code."
-        case "revoked": return "This invite is no longer available. Enter a new invite code."
-        case "exhausted": return "This invite has already been used. Enter a new invite code."
+        // PROD-M1: reason-specific copy that matches the installer's own wording
+        // ("use a different invite") so the same rejection reads identically
+        // whether it surfaces at preflight or from the install log. A code that
+        // exists but cannot be used routes the user to swap it.
+        case "expired": return "This invite has expired. Use a different invite."
+        case "revoked": return "This invite is no longer available. Use a different invite."
+        case "exhausted": return "This invite has already been used. Use a different invite."
         // PROD-M4: `required` is normalized to `missing` upstream, but map it
         // here too so any direct preflight `required` reason renders the same
-        // mandatory-invite copy rather than the generic fallback.
+        // mandatory-invite copy rather than the generic fallback. There is no
+        // code to swap, so the copy asks for one instead.
         case "missing", "required": return "An invite code is required. Enter a new invite code."
-        default: return "This invite is not valid. Enter a new invite code."
+        default: return "This invite is not valid. Use a different invite."
         }
     }
 
