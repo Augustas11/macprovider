@@ -71,7 +71,7 @@ enum CanonicalJSON {
     }
 }
 
-struct RegisterRequest: Equatable {
+struct RegisterRequest: Codable, Equatable {
     let providerID: String
     let identityPubkey: String
     let hardwareSummary: [String: String]
@@ -316,6 +316,108 @@ struct RegisterClient {
 enum RegisterClientError: Error, Equatable {
     case httpStatus(Int)
     case invalidCoordinatorWSURL(reason: String)
+    case noPersistedAttempt
+}
+
+// PROD-H5: a signed register attempt persisted durably so a lost response or an
+// app restart does not force a re-sign. Re-signing shifts the timestamp/nonce,
+// which the coordinator's ±60s skew window and post-recovery cooldown reject;
+// replaying the EXACT persisted bytes is what the coordinator (Go lane) exempts
+// from ordinary skew/cooldown for a committed attempt. The attempt is cleared
+// only after the returned bearer is durably installed, so recovery survives
+// across restarts.
+struct PendingRegisterAttempt: Codable, Equatable {
+    let request: RegisterRequest
+    let bearerProof: String?
+    let coordinatorBaseURL: URL
+    let createdAt: Date
+}
+
+enum PendingRegisterAttemptStore {
+    static func fileURL(paths: ProviderPaths = .current) -> URL {
+        paths.appSupport.appendingPathComponent("pending-register-attempt.json")
+    }
+
+    static func save(_ attempt: PendingRegisterAttempt, paths: ProviderPaths = .current) throws {
+        try FileManager.default.createDirectory(at: paths.appSupport, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(attempt)
+        let url = fileURL(paths: paths)
+        try data.write(to: url, options: [.atomic])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    static func load(paths: ProviderPaths = .current) -> PendingRegisterAttempt? {
+        guard let data = try? Data(contentsOf: fileURL(paths: paths)) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(PendingRegisterAttempt.self, from: data)
+    }
+
+    static func clear(paths: ProviderPaths = .current) {
+        try? FileManager.default.removeItem(at: fileURL(paths: paths))
+    }
+
+    static func hasPending(paths: ProviderPaths = .current) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL(paths: paths).path)
+    }
+}
+
+extension RegisterClient {
+    /// PROD-H5: register durably. Persists the exact signed attempt BEFORE the
+    /// first send so a lost response or crash leaves a recoverable committed
+    /// attempt, sends it, and clears it only after `installBearer` durably
+    /// stores the returned credential. If installing the bearer fails, the
+    /// attempt is deliberately left on disk so the next launch can replay it.
+    @discardableResult
+    func registerDurably(
+        _ request: RegisterRequest,
+        bearerProof: String? = nil,
+        paths: ProviderPaths = .current,
+        installBearer: (RegisterResponse) async throws -> Void
+    ) async throws -> RegisterResponse {
+        let attempt = PendingRegisterAttempt(
+            request: request,
+            bearerProof: bearerProof,
+            coordinatorBaseURL: coordinatorBaseURL,
+            createdAt: Date()
+        )
+        try PendingRegisterAttemptStore.save(attempt, paths: paths)
+        return try await completePersistedRegister(paths: paths, installBearer: installBearer)
+    }
+
+    /// Replays a persisted attempt (if any) against its original coordinator and
+    /// installs the credential, clearing the attempt on success. Returns nil
+    /// when there is nothing to recover. Call on app launch to re-drive a
+    /// register whose response was lost before the bearer was installed —
+    /// replaying the identical signed bytes across the restart.
+    @discardableResult
+    func recoverPersistedRegister(
+        paths: ProviderPaths = .current,
+        installBearer: (RegisterResponse) async throws -> Void
+    ) async throws -> RegisterResponse? {
+        guard PendingRegisterAttemptStore.hasPending(paths: paths) else { return nil }
+        return try await completePersistedRegister(paths: paths, installBearer: installBearer)
+    }
+
+    private func completePersistedRegister(
+        paths: ProviderPaths,
+        installBearer: (RegisterResponse) async throws -> Void
+    ) async throws -> RegisterResponse {
+        guard let attempt = PendingRegisterAttemptStore.load(paths: paths) else {
+            throw RegisterClientError.noPersistedAttempt
+        }
+        // Replay against the coordinator the attempt was signed for; reuse this
+        // client's injected session so tests and redirect-guarding are honored.
+        let client = attempt.coordinatorBaseURL == coordinatorBaseURL
+            ? self
+            : RegisterClient(coordinatorBaseURL: attempt.coordinatorBaseURL, session: session)
+        let response = try await client.postRegister(attempt.request, bearerProof: attempt.bearerProof)
+        try await installBearer(response)
+        PendingRegisterAttemptStore.clear(paths: paths)
+        return response
+    }
 }
 
 enum ProviderBearerURLSession {
