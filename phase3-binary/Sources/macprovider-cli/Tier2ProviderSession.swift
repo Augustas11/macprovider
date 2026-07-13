@@ -117,6 +117,65 @@ final class Tier2ProviderSession: @unchecked Sendable {
         return (c2pCounter, p2cCounter)
     }
 
+    func openAEADRekeyCommit(_ message: [String: Any], rekeyID: String) throws -> Data {
+        guard message["encrypted"] as? Bool == true,
+              let enc = message["enc"] as? [String: Any]
+        else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard c2pCounter == 0 else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_commit",
+            direction: "c2p",
+            requestID: rekeyID,
+            stream: false,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: 0
+        )
+        let plaintext = try Self.openEnvelope(
+            enc,
+            key: c2pKey,
+            nonceBase: c2pNonceBase,
+            keyID: keyID,
+            expectedAAD: aad,
+            expectedSeq: 0
+        )
+        c2pCounter = 1
+        return plaintext
+    }
+
+    func sealAEADRekeyCommitted(rekeyID: String, proof: Data) throws -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard p2cCounter == 0 else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_committed",
+            direction: "p2c",
+            requestID: rekeyID,
+            stream: false,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: 0
+        )
+        let enc = try Self.sealEnvelope(
+            proof,
+            key: p2cKey,
+            nonceBase: p2cNonceBase,
+            keyID: keyID,
+            aad: aad,
+            seq: 0
+        )
+        p2cCounter = 1
+        return enc
+    }
+
     func openRequestBody(message: [String: Any], requestID: String, stream: Bool) throws -> String {
         try openRequestPayload(message: message, requestID: requestID, stream: stream).body
     }
@@ -430,6 +489,68 @@ final class Tier2ProviderSession: @unchecked Sendable {
             throw Tier2ProviderError.invalidPlaintext
         }
         return dict
+    }
+
+    static func coordinatorSessionForRekeyTest(
+        coordinatorPrivateKey: Curve25519.KeyAgreement.PrivateKey,
+        providerID: String,
+        assignedID: String,
+        providerPublicKeyBase64URL: String,
+        selectedAEAD: String
+    ) throws -> Tier2ProviderSession {
+        let providerPublicRaw = try Data(base64URLUnpadded: providerPublicKeyBase64URL)
+        let providerPublic = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: providerPublicRaw)
+        let sharedSecret = try coordinatorPrivateKey.sharedSecretFromKeyAgreement(with: providerPublic)
+        let coordinatorPublicRaw = coordinatorPrivateKey.publicKey.rawRepresentation
+        let transcript = transcript(
+            providerID: providerID,
+            assignedID: assignedID,
+            providerPublicKey: providerPublicRaw,
+            coordinatorPublicKey: coordinatorPublicRaw,
+            selectedAEAD: selectedAEAD
+        )
+        let keyID = Data(SHA256.hash(data: transcript).prefix(16)).base64URLUnpadded()
+        return try Tier2ProviderSession(
+            providerID: providerID,
+            assignedID: assignedID,
+            selectedAEAD: selectedAEAD,
+            keyID: keyID,
+            c2pKey: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/c2p/aead/v1".utf8), count: 32),
+            p2cKey: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/p2c/aead/v1".utf8), count: 32),
+            c2pNonceBase: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/c2p/nonce/v1".utf8), count: 4),
+            p2cNonceBase: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/p2c/nonce/v1".utf8), count: 4)
+        )
+    }
+
+    static func sealAEADRekeyCommitForTest(session: Tier2ProviderSession, rekeyID: String, proof: Data) throws -> [String: Any] {
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_commit",
+            direction: "c2p",
+            requestID: rekeyID,
+            stream: false,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: 0
+        )
+        return try sealEnvelope(proof, key: session.c2pKey, nonceBase: session.c2pNonceBase, keyID: session.keyID, aad: aad, seq: 0)
+    }
+
+    static func openAEADRekeyCommittedForTest(session: Tier2ProviderSession, frame: [String: Any], rekeyID: String) throws -> Data {
+        guard frame["encrypted"] as? Bool == true,
+              let enc = frame["enc"] as? [String: Any]
+        else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_committed",
+            direction: "p2c",
+            requestID: rekeyID,
+            stream: false,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: 0
+        )
+        return try openEnvelope(enc, key: session.p2cKey, nonceBase: session.p2cNonceBase, keyID: session.keyID, expectedAAD: aad, expectedSeq: 0)
     }
 
     private static func sealEnvelope(_ plaintext: Data, key: Data, nonceBase: Data, keyID: String, aad: Tier2FrameAAD, seq: UInt64) throws -> [String: Any] {

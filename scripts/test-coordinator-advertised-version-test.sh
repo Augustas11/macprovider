@@ -7,6 +7,10 @@ source_file="$repo_root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.
 app_project_file="$repo_root/phase3-binary/app/project.yml"
 binary_version="$(sed -nE 's/^[[:space:]]*static let binaryVersion = "([^"]+)".*$/\1/p' "$source_file" | head -n 1)"
 app_build="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION: "?([0-9]+)"?.*$/\1/p' "$app_project_file" | head -n 1)"
+future_version="${binary_version%.*}.$((${binary_version##*.} + 1))"
+future_build="$((app_build + 1))"
+binary_version_pattern="${binary_version//./\\.}"
+future_version_pattern="${future_version//./\\.}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-version-cohesion.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -58,7 +62,9 @@ printf '%s\n' '    CURRENT_PROJECT_VERSION: "999"' >> "$fixture/phase3-binary/ap
 expect_fixture_failure duplicate-build 'exactly one numeric CURRENT_PROJECT_VERSION definition (found 2)'
 
 # A future release must append a new, strictly larger build to the committed
-# ledger. Updating every SemVer source while retaining build 31 must fail.
+# ledger. Updating every SemVer source while retaining the current build must
+# fail. Derive the fixture from the checked-in release so this regression keeps
+# testing the next release after each version bump.
 reset_fixture
 for path in \
   "$fixture/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" \
@@ -66,25 +72,25 @@ for path in \
   "$fixture/phase4-coordinator/dist/coordinator.yaml" \
   "$fixture/phase4-coordinator/coordinator.yaml.example" \
   "$fixture/phase4-coordinator/dist/coordinator.yaml.example"; do
-  sed 's/1\.8\.31/1.8.32/g' "$path" > "$path.next"
+  sed "s/$binary_version_pattern/$future_version/g" "$path" > "$path.next"
   mv "$path.next" "$path"
 done
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.32 >"$work/future-missing-build.out" 2>&1; then
+if bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$future_version" >"$work/future-missing-build.out" 2>&1; then
   echo "version guard accepted a future release without a release-build ledger entry" >&2
   exit 1
 fi
-grep -q 'exactly one entry for 1.8.32' "$work/future-missing-build.out"
-printf '%s\t%s\n' '1.8.32' '31' >> "$fixture/phase3-binary/app/release-builds.tsv"
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.32 >"$work/future-reused-build.out" 2>&1; then
-  echo "version guard accepted a future release that reused build 31" >&2
+grep -q "exactly one entry for $future_version" "$work/future-missing-build.out"
+printf '%s\t%s\n' "$future_version" "$app_build" >> "$fixture/phase3-binary/app/release-builds.tsv"
+if bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$future_version" >"$work/future-reused-build.out" 2>&1; then
+  echo "version guard accepted a future release that reused build $app_build" >&2
   exit 1
 fi
 grep -q 'duplicate build' "$work/future-reused-build.out"
-sed 's/1\.8\.32[[:space:]]*31/1.8.32 32/' "$fixture/phase3-binary/app/release-builds.tsv" > "$fixture/phase3-binary/app/release-builds.tsv.next"
+sed "s/$future_version_pattern[[:space:]]*$app_build/$future_version $future_build/" "$fixture/phase3-binary/app/release-builds.tsv" > "$fixture/phase3-binary/app/release-builds.tsv.next"
 mv "$fixture/phase3-binary/app/release-builds.tsv.next" "$fixture/phase3-binary/app/release-builds.tsv"
-sed 's/CURRENT_PROJECT_VERSION: "31"/CURRENT_PROJECT_VERSION: "32"/' "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
+sed "s/CURRENT_PROJECT_VERSION: \"$app_build\"/CURRENT_PROJECT_VERSION: \"$future_build\"/" "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
 mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
-bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.32
+bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$future_version"
 
 cat >"$work/current-appcast.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>

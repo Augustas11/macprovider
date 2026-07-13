@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -286,6 +288,9 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 	if !response.Tier2Session.EncryptedLeg.ResponseChunkPlaintextEnvelope {
 		t.Fatal("auth_response did not select response_chunk_plaintext_envelope")
 	}
+	if !response.Tier2Session.EncryptedLeg.InBandAEADRekeyV1 {
+		t.Fatal("auth_response did not select in_band_aead_rekey_v1")
+	}
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
 		return ok &&
@@ -294,10 +299,147 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 			provider.ModelLoadTimeMs == 1234 &&
 			provider.Tier2Session != nil &&
 			provider.Tier2Session.ResponseChunkPlaintextEnvelope &&
+			provider.Tier2Session.InBandAEADRekeyV1 &&
 			provider.Tier2Session.KeyID == challenge.KeyID &&
 			len(provider.Tier2Session.C2PKey) == 32 &&
 			provider.InferencePath == pool.InferencePathWSTunneled
 	})
+}
+
+func TestBuyerHTTPMaintainsOneProviderContinuityAcrossRequestThresholdRekey(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+		cfg.Tier2.EncryptedLegRekeyAfterRequests = 1
+		cfg.Tier2.EncryptedLegRekeyAfterSeconds = 0
+	})
+	defer h.HTTP.Close()
+	conn, assignedID, epoch := authenticateBuyerRekeyProvider(t, h)
+	defer conn.Close()
+
+	rekeyStarted := make(chan struct{})
+	allowCommit := make(chan struct{})
+	providerDone := make(chan error, 1)
+	go func() {
+		if err := serveBuyerInferenceOverEpoch(conn, "m4-anon", assignedID, epoch, 0); err != nil {
+			providerDone <- err
+			return
+		}
+		next, err := completeBuyerTestRekey(conn, "m4-anon", assignedID, rekeyStarted, allowCommit)
+		if err != nil {
+			providerDone <- err
+			return
+		}
+		providerDone <- serveBuyerInferenceOverEpoch(conn, "m4-anon", assignedID, next, 1)
+	}()
+
+	relayEntered := make(chan struct{}, 2)
+	buyerServer := buyer.NewServer(
+		h.Registry,
+		zerolog.Nop(),
+		time.Now(),
+		buyer.WithRelay(signalingBuyerRekeyRelay(h.Provider.DispatchInference, relayEntered), 3*time.Second),
+	)
+	first := postBuyerRekeyChat(buyerServer)
+	assertBuyerRekeySuccess(t, first, assignedID)
+	<-relayEntered
+	select {
+	case <-rekeyStarted:
+	case err := <-providerDone:
+		t.Fatalf("provider before request-threshold rekey: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("request-threshold rekey did not start")
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+
+	secondResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() { secondResult <- postBuyerRekeyChat(buyerServer) }()
+	select {
+	case <-relayEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second buyer request did not enter DispatchInference")
+	}
+	select {
+	case early := <-secondResult:
+		t.Fatalf("buyer request returned before rekey commit: status=%d body=%s", early.Code, early.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowCommit)
+	select {
+	case second := <-secondResult:
+		assertBuyerRekeySuccess(t, second, assignedID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("buyer request did not resume after request-threshold rekey")
+	}
+	if err := <-providerDone; err != nil {
+		t.Fatal(err)
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+	assertProviderEpochChanged(t, h.Registry, assignedID, epoch.KeyID)
+}
+
+func TestBuyerHTTPMaintainsOneProviderContinuityAcrossAgeThresholdRekey(t *testing.T) {
+	clock := newLockedTime(time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC))
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithNow(clock.Now)}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+		cfg.Tier2.EncryptedLegRekeyAfterRequests = 0
+		cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	})
+	defer h.HTTP.Close()
+	conn, assignedID, epoch := authenticateBuyerRekeyProvider(t, h)
+	defer conn.Close()
+	clock.Set(clock.Now().Add(2 * time.Second))
+
+	rekeyStarted := make(chan struct{})
+	allowCommit := make(chan struct{})
+	providerDone := make(chan error, 1)
+	go func() {
+		next, err := completeBuyerTestRekey(conn, "m4-anon", assignedID, rekeyStarted, allowCommit)
+		if err != nil {
+			providerDone <- err
+			return
+		}
+		providerDone <- serveBuyerInferenceOverEpoch(conn, "m4-anon", assignedID, next, 1)
+	}()
+
+	relayEntered := make(chan struct{}, 1)
+	buyerServer := buyer.NewServer(
+		h.Registry,
+		zerolog.Nop(),
+		clock.Now(),
+		buyer.WithRelay(signalingBuyerRekeyRelay(h.Provider.DispatchInference, relayEntered), 3*time.Second),
+	)
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() { result <- postBuyerRekeyChat(buyerServer) }()
+	select {
+	case <-rekeyStarted:
+	case err := <-providerDone:
+		t.Fatalf("provider before age-threshold rekey: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("age-threshold rekey did not start")
+	}
+	select {
+	case <-relayEntered:
+	case <-time.After(time.Second):
+		t.Fatal("age-threshold buyer request did not enter DispatchInference")
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+	select {
+	case early := <-result:
+		t.Fatalf("buyer request returned before age rekey commit: status=%d body=%s", early.Code, early.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowCommit)
+	select {
+	case response := <-result:
+		assertBuyerRekeySuccess(t, response, assignedID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("buyer request did not resume after age-threshold rekey")
+	}
+	if err := <-providerDone; err != nil {
+		t.Fatal(err)
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+	assertProviderEpochChanged(t, h.Registry, assignedID, epoch.KeyID)
 }
 
 func TestProviderAuthV2AcceptsMockAttestationToken(t *testing.T) {
@@ -3670,6 +3812,7 @@ func validAuthInitial(providerID, providerPublic string) map[string]any {
 		"attestation":                       true,
 		"aead_suites":                       []string{tier2.PillarBAEADA256GCM},
 		"response_chunk_plaintext_envelope": true,
+		"in_band_aead_rekey_v1":             true,
 	}
 	return h
 }
@@ -3935,6 +4078,258 @@ func authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t *testing.T,
 		writeStateUpdate(t, conn, "ready")
 	}
 	return conn, response
+}
+
+type buyerRekeyEncryptedCarrier struct {
+	Type      string                 `json:"type"`
+	RequestID string                 `json:"request_id"`
+	Stream    bool                   `json:"stream"`
+	Encrypted bool                   `json:"encrypted"`
+	Enc       tier2.AEADEnvelopeBody `json:"enc"`
+}
+
+func authenticateBuyerRekeyProvider(t *testing.T, h providerHarness) (net.Conn, string, tier2.PillarBKeyMaterial) {
+	t.Helper()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial provider: %v", err)
+	}
+	providerPrivate, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		conn.Close()
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		conn.Close()
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	coordinatorPublic, coordinatorPublicRaw, err := tier2.ParseX25519PublicKey(challenge.CoordinatorECDHPublicKey)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("parse coordinator public key: %v", err)
+	}
+	shared, err := providerPrivate.ECDH(coordinatorPublic)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("provider ECDH: %v", err)
+	}
+	epoch, err := tier2.DerivePillarBKeysFromSharedSecret(shared, "m4-anon", challenge.AssignedID, providerPublicRaw, coordinatorPublicRaw, challenge.SelectedAEADSuite)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("derive provider epoch: %v", err)
+	}
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		conn.Close()
+		t.Fatalf("auth response = %+v", response)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(heartbeat())); err != nil {
+		conn.Close()
+		t.Fatalf("write ready heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok && provider.State == pool.StateReady && provider.SlotsFree == 1 && provider.Tier2Session != nil
+	})
+	return conn, challenge.AssignedID, epoch
+}
+
+func serveBuyerInferenceOverEpoch(conn net.Conn, providerID, assignedID string, epoch tier2.PillarBKeyMaterial, expectedC2PSeq uint64) error {
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		return fmt.Errorf("read inference request: %w", err)
+	}
+	if op != gobwas.OpText {
+		return fmt.Errorf("inference request opcode = %v", op)
+	}
+	var request buyerRekeyEncryptedCarrier
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return fmt.Errorf("decode inference request: %w", err)
+	}
+	if request.Type != "inference_request" || request.RequestID == "" || !request.Encrypted || request.Stream {
+		return fmt.Errorf("invalid inference request carrier: %+v", request)
+	}
+	aad, _, err := tier2.DecodeAEADAAD(request.Enc.AAD)
+	if err != nil {
+		return fmt.Errorf("decode inference request aad: %w", err)
+	}
+	if aad.Seq != expectedC2PSeq || aad.RequestID != request.RequestID || aad.AssignedID != assignedID {
+		return fmt.Errorf("inference request aad = %+v, want seq=%d assigned=%s", aad, expectedC2PSeq, assignedID)
+	}
+	if _, err := tier2.OpenPillarBFrame(epoch.C2PKey, epoch.C2PNonceBase, epoch.KeyID, expectedC2PSeq, aad, tier2.AEADEnvelope{Encrypted: true, Enc: request.Enc}); err != nil {
+		return fmt.Errorf("open inference request: %w", err)
+	}
+
+	completion := `{"id":"chatcmpl-rekey","object":"chat.completion","created":1,"model":"mlx-community/Qwen2.5-7B-Instruct-4bit","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	chunkPlaintext, err := json.Marshal(map[string]any{
+		"type": "inference_response_chunk_plaintext",
+		"seq":  0,
+		"data": completion,
+	})
+	if err != nil {
+		return err
+	}
+	chunkAAD := tier2.AEADFrameAAD{
+		Type: "inference_response_chunk", Direction: "p2c", RequestID: request.RequestID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: expectedC2PSeq,
+	}
+	chunkEnvelope, err := tier2.SealPillarBFrame(epoch.P2CKey, epoch.P2CNonceBase, epoch.KeyID, expectedC2PSeq, chunkAAD, chunkPlaintext)
+	if err != nil {
+		return fmt.Errorf("seal inference chunk: %w", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
+		"type": "inference_response_chunk", "request_id": request.RequestID,
+		"encrypted": true, "enc": chunkEnvelope.Enc,
+	})); err != nil {
+		return fmt.Errorf("write inference chunk: %w", err)
+	}
+
+	endSeq := expectedC2PSeq + 1
+	end := providerws.InferenceResponseEnd{
+		Type: "inference_response_end", RequestID: request.RequestID, Status: "complete", ChunksSent: 1,
+		Usage: json.RawMessage(`{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}`),
+	}
+	endAAD := tier2.AEADFrameAAD{
+		Type: "inference_response_end", Direction: "p2c", RequestID: request.RequestID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: endSeq,
+	}
+	endEnvelope, err := tier2.SealPillarBFrame(epoch.P2CKey, epoch.P2CNonceBase, epoch.KeyID, endSeq, endAAD, mustJSON(end))
+	if err != nil {
+		return fmt.Errorf("seal inference end: %w", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
+		"type": "inference_response_end", "request_id": request.RequestID,
+		"encrypted": true, "enc": endEnvelope.Enc,
+	})); err != nil {
+		return fmt.Errorf("write inference end: %w", err)
+	}
+	return nil
+}
+
+func completeBuyerTestRekey(conn net.Conn, providerID, assignedID string, started chan<- struct{}, allow <-chan struct{}) (tier2.PillarBKeyMaterial, error) {
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("read rekey request: %w", err)
+	}
+	if op != gobwas.OpText {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("rekey request opcode = %v", op)
+	}
+	var request providerws.AEADRekeyRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("decode rekey request: %w", err)
+	}
+	if request.Type != "aead_rekey_request" || request.AssignedID != assignedID || request.OldKID == "" {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("invalid rekey request: %+v", request)
+	}
+	close(started)
+	<-allow
+	coordinatorPublic, coordinatorPublicRaw, err := tier2.ParseX25519PublicKey(request.CoordinatorECDHPublicKey)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("parse rekey coordinator key: %w", err)
+	}
+	providerPrivate, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("generate rekey provider key: %w", err)
+	}
+	shared, err := providerPrivate.ECDH(coordinatorPublic)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("derive rekey shared secret: %w", err)
+	}
+	next, err := tier2.DerivePillarBKeysFromSharedSecret(shared, providerID, assignedID, providerPublicRaw, coordinatorPublicRaw, request.SelectedAEAD)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("derive rekey epoch: %w", err)
+	}
+	response := providerws.AEADRekeyResponse{
+		Type: "aead_rekey_response", Version: 1, RekeyID: request.RekeyID,
+		AssignedID: assignedID, OldKID: request.OldKID, NewKID: next.KeyID,
+		ProviderECDHPublicKey: base64.RawURLEncoding.EncodeToString(providerPublicRaw),
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(response)); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("write rekey response: %w", err)
+	}
+	commitPayload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("read rekey commit: %w", err)
+	}
+	var commit providerws.AEADRekeyConfirmation
+	if err := json.Unmarshal(commitPayload, &commit); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("decode rekey commit: %w", err)
+	}
+	commitAAD := tier2.AEADFrameAAD{
+		Type: "aead_rekey_commit", Direction: "c2p", RequestID: request.RekeyID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: 0,
+	}
+	proof, err := tier2.OpenPillarBFrame(next.C2PKey, next.C2PNonceBase, next.KeyID, 0, commitAAD, tier2.AEADEnvelope{Encrypted: true, Enc: commit.Enc})
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("open rekey commit: %w", err)
+	}
+	committedAAD := tier2.AEADFrameAAD{
+		Type: "aead_rekey_committed", Direction: "p2c", RequestID: request.RekeyID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: 0,
+	}
+	committedEnvelope, err := tier2.SealPillarBFrame(next.P2CKey, next.P2CNonceBase, next.KeyID, 0, committedAAD, proof)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("seal rekey committed: %w", err)
+	}
+	committed := providerws.AEADRekeyConfirmation{
+		Type: "aead_rekey_committed", Version: 1, RekeyID: request.RekeyID,
+		AssignedID: assignedID, OldKID: request.OldKID, NewKID: next.KeyID,
+		Encrypted: true, Enc: committedEnvelope.Enc,
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(committed)); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("write rekey committed: %w", err)
+	}
+	return next, nil
+}
+
+func postBuyerRekeyChat(server *buyer.Server) *httptest.ResponseRecorder {
+	body := `{"model":"mlx-community/Qwen2.5-7B-Instruct-4bit","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	return rr
+}
+
+func signalingBuyerRekeyRelay(relay buyer.RelayFunc, entered chan<- struct{}) buyer.RelayFunc {
+	return func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+		entered <- struct{}{}
+		return relay(ctx, provider, requestID, body, stream)
+	}
+}
+
+func assertBuyerRekeySuccess(t *testing.T, response *httptest.ResponseRecorder, assignedID string) {
+	t.Helper()
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"content":"ok"`)) {
+		t.Fatalf("buyer response status=%d body=%s, want successful completion", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("X-MacProvider-Provider"); got != "m4-anon" {
+		t.Fatalf("buyer provider header = %q, want m4-anon", got)
+	}
+	if got := response.Header().Get("X-MacProvider-Route"); got != assignedID {
+		t.Fatalf("buyer route header = %q, want %q", got, assignedID)
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("no_provider_available")) {
+		t.Fatalf("buyer response crossed a no-provider gap: %s", response.Body.String())
+	}
+}
+
+func assertProviderEpochChanged(t *testing.T, registry *pool.Registry, assignedID, oldKID string) {
+	t.Helper()
+	provider, ok := registry.Resolve("m4-anon", assignedID)
+	if !ok || provider.Tier2Session == nil || provider.Tier2Session.KeyID == "" || provider.Tier2Session.KeyID == oldKID {
+		t.Fatalf("provider epoch after rekey = %#v ok=%v, want a new KID", provider.Tier2Session, ok)
+	}
+}
+
+func assertProviderRemainsReadyDuringRekey(t *testing.T, registry *pool.Registry, assignedID string) {
+	t.Helper()
+	provider, ok := registry.Resolve("m4-anon", assignedID)
+	if !ok || provider.AssignedID != assignedID || provider.State != pool.StateReady {
+		t.Fatalf("sole provider during rekey = %#v ok=%v, want same assigned ready provider", provider, ok)
+	}
 }
 
 type lockedTime struct {

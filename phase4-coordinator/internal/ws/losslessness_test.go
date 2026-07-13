@@ -3,6 +3,7 @@ package ws
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"math"
 	"net"
 	"os"
@@ -623,6 +624,27 @@ func TestLosslessnessIssueProbeBlocksWithoutDraftAdmission(t *testing.T) {
 	events := s.losslessnessTelemetrySnapshot()
 	if len(events) != 1 || events[0].EventSubtype != "admission_blocked" || events[0].ReasonCode != "inconclusive:draft_identity_unbound" {
 		t.Fatalf("admission-blocked telemetry = %+v", events)
+	}
+}
+
+func TestLosslessnessIssueProbeSuspendsAtRekeyBoundary(t *testing.T) {
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Pool.LosslessnessProbe.Enabled = true
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, _ := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), now.Add(-2*time.Second))
+	s.now = func() time.Time { return now }
+	seedLosslessnessDraftAdmission(t, s, provider, now.Add(time.Hour))
+	before := provider.Tier2Session.C2PCounter
+	err := s.issueLosslessnessProbeRequest(*provider, LosslessnessSamplingProfile{Temperature: 0.7, TopP: 1})
+	if !errors.Is(err, errLosslessnessRekeyInProgress) {
+		t.Fatalf("probe at rekey boundary = %v, want errLosslessnessRekeyInProgress", err)
+	}
+	if provider.Tier2Session.C2PCounter != before {
+		t.Fatalf("c2p counter = %d, want unchanged %d", provider.Tier2Session.C2PCounter, before)
+	}
+	if s.losslessnessProviderHasPending(provider.ProviderID, provider.AssignedID) {
+		t.Fatal("suspended probe created pending old-epoch state")
 	}
 }
 

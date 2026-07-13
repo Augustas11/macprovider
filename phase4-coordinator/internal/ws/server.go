@@ -1282,6 +1282,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 					RekeyAfterRequests:             tier2Cfg.EncryptedLegRekeyAfterRequests,
 					RekeyAfterSeconds:              tier2Cfg.EncryptedLegRekeyAfterSeconds,
 					ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
+					InBandAEADRekeyV1:              initial.Tier2Capabilities.InBandAEADRekeyV1,
 				},
 				Attestation: AuthAttestationSession{Status: string(attestationStatus), RAMTierAttested: false},
 				ModelHash:   AuthModelHashSession{Status: string(entry.HashStatus)},
@@ -1331,6 +1332,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.Tier2Session = &pool.Tier2Session{
 		AEADSuite:                      selectedAEAD,
 		ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
+		InBandAEADRekeyV1:              initial.Tier2Capabilities.InBandAEADRekeyV1,
 		C2PKey:                         keys.C2PKey,
 		P2CKey:                         keys.P2CKey,
 		C2PNonceBase:                   keys.C2PNonceBase,
@@ -1417,6 +1419,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 				RekeyAfterRequests:             tier2Cfg.EncryptedLegRekeyAfterRequests,
 				RekeyAfterSeconds:              tier2Cfg.EncryptedLegRekeyAfterSeconds,
 				ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
+				InBandAEADRekeyV1:              initial.Tier2Capabilities.InBandAEADRekeyV1,
 			},
 			Attestation: AuthAttestationSession{
 				Status:          string(attestationStatus),
@@ -2256,6 +2259,10 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleStateUpdate(providerID, assignedID, payload)
 	case "preflight_ack":
 		s.handlePreflightAck(providerID, assignedID, payload)
+	case "aead_rekey_response":
+		s.handleAEADRekeyResponse(providerID, assignedID, payload)
+	case "aead_rekey_committed":
+		s.handleAEADRekeyCommitted(providerID, assignedID, payload)
 	case "inference_response_chunk":
 		s.handleInferenceChunk(providerID, assignedID, payload)
 	case "inference_response_end":
@@ -3468,6 +3475,12 @@ func (s *Server) handleDisconnect(providerID, assignedID string) {
 
 func (s *Server) handleProviderWriteFailure(session *providerSession, err error) {
 	if session == nil {
+		return
+	}
+	session.rekeyMu.Lock()
+	exchange := session.rekey
+	session.rekeyMu.Unlock()
+	if exchange != nil && s.failTier2Rekey(session, session.providerID, session.assignedID, exchange, "write_failed", ErrRelayClosed) {
 		return
 	}
 	s.clearWarmupGate(session.providerID, session.assignedID)

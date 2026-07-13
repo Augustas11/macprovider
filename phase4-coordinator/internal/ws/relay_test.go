@@ -3,8 +3,12 @@ package ws
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -1303,6 +1307,7 @@ func TestEncryptedRelayRekeysAfterRequestThreshold(t *testing.T) {
 	cfg := config.Default()
 	cfg.Tier2.EncryptedLegRekeyAfterRequests = 1
 	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now())
+	oldKID := provider.Tier2Session.KeyID
 
 	relay, err := s.DispatchInference(context.Background(), *provider, "req-rekey", []byte(`{"model":"model-a"}`), false)
 	if err != nil {
@@ -1327,22 +1332,459 @@ func TestEncryptedRelayRekeysAfterRequestThreshold(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("end timeout")
 	}
-	if _, ok := s.storedSessionFor("p1", "s1"); ok {
-		t.Fatal("session still stored after request-threshold rekey")
+
+	rekeyedProvider := completeTestTier2Rekey(t, s, providerConn, provider)
+	if rekeyedProvider.AssignedID != provider.AssignedID {
+		t.Fatalf("assigned id changed across in-band rekey: got %q want %q", rekeyedProvider.AssignedID, provider.AssignedID)
 	}
-	got, ok := s.pool.Resolve("p1", "s1")
-	if !ok {
-		t.Fatal("provider not found")
+	if rekeyedProvider.Tier2Session == nil || rekeyedProvider.Tier2Session.KeyID == oldKID {
+		t.Fatalf("rekey did not install independent key material: old=%q new=%#v", oldKID, rekeyedProvider.Tier2Session)
 	}
-	if got.State != pool.StateUnavailable {
-		t.Fatalf("state = %s, want unavailable", got.State)
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("same authenticated provider session was removed during in-band rekey")
 	}
-	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) {
+	if rekeyedProvider.State != pool.StateReady {
+		t.Fatalf("state = %s, want ready", rekeyedProvider.State)
+	}
+
+	relay2, err := s.DispatchInference(context.Background(), *rekeyedProvider, "req-after-rekey", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch after rekey: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read post-rekey inference_request: %v", err)
+	}
+	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, rekeyedProvider, "req-after-rekey", false, 1, []byte(`{"ok":true}`)))
+	select {
+	case <-relay2.Chunks:
+	case <-time.After(time.Second):
+		t.Fatal("post-rekey chunk timeout")
+	}
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, rekeyedProvider, "req-after-rekey", false, 2, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-after-rekey", Status: "complete", ChunksSent: 1}))
+	select {
+	case end := <-relay2.Done:
+		if end.Status != "complete" {
+			t.Fatalf("post-rekey end = %#v", end)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("post-rekey end timeout")
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey_committed"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) ||
+		!bytes.Contains(logs.Bytes(), []byte(`"alg":"A256GCM"`)) || !bytes.Contains(logs.Bytes(), []byte(`"kid":"`)) {
 		t.Fatalf("missing request-threshold rekey log: %s", logs.String())
 	}
 }
 
-func TestEncryptedRelayDefersRekeyCloseUntilActiveCompletes(t *testing.T) {
+func TestEncryptedRelayBoundsWaitersDuringRekey(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), time.Now().Add(-2*time.Second))
+	limit := tier2RekeyWaiterLimit(provider.MaxConcurrency)
+	results := make(chan error, limit)
+	cancels := make([]context.CancelFunc, 0, limit)
+	for i := 0; i < limit; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		go func(i int) {
+			_, err := s.DispatchInference(ctx, *provider, fmt.Sprintf("req-rekey-waiter-%d", i), []byte(`{"model":"model-a"}`), false)
+			results <- err
+		}(i)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read aead_rekey_request: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		session := sessionForTest(s, provider.ProviderID, provider.AssignedID)
+		session.rekeyMu.Lock()
+		waiters := session.rekeyWaiters
+		session.rekeyMu.Unlock()
+		if waiters == limit {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rekey waiters = %d, want %d", waiters, limit)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-rekey-overload", []byte(`{"model":"model-a"}`), false); !errors.Is(err, ErrRelayBackpressure) {
+		t.Fatalf("overflow rekey waiter = %v, want ErrRelayBackpressure", err)
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for i := 0; i < limit; i++ {
+		select {
+		case err := <-results:
+			if !errors.Is(err, ErrRelayClosed) {
+				t.Fatalf("canceled rekey waiter = %v, want ErrRelayClosed", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("canceled rekey waiter did not release")
+		}
+	}
+	got, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || got.State != pool.StateReady {
+		t.Fatalf("provider after waiter overload = %#v ok=%v, want ready", got, ok)
+	}
+}
+
+func TestEncryptedRelayRekeyWaitsForPendingLosslessnessProbe(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), now.Add(-2*time.Second))
+	s.now = func() time.Time { return now }
+	request := losslessnessTestRequestPayload(now.Add(time.Minute))
+	pending, err := s.recordLosslessnessPendingProbe(provider.ProviderID, provider.AssignedID, request, "sha256:rekey-barrier", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.DispatchInference(ctx, *provider, "req-after-losslessness", []byte(`{"model":"model-a"}`), false)
+		result <- err
+	}()
+	if err := providerConn.SetReadDeadline(time.Now().Add(75 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err == nil {
+		t.Fatal("rekey request sent before old-epoch losslessness probe drained")
+	}
+	if err := providerConn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	s.losslessnessPending.Delete(losslessnessProbeStoreKey(provider.ProviderID, provider.AssignedID, pending.ProbeID))
+	s.deleteLosslessnessPendingIndexes(pending)
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read aead_rekey_request after probe drain: %v", err)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrRelayClosed) {
+			t.Fatalf("canceled dispatch = %v, want ErrRelayClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled dispatch did not release")
+	}
+}
+
+func TestEncryptedRelayRejectsExpiredCommittedProof(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	s, provider, _ := newEncryptedRelayHarness(t)
+	s.now = func() time.Time { return now }
+	payload, exchange := seedTestTier2Committed(t, s, provider, now, []byte(`{"proof":"valid"}`))
+	s.handleAEADRekeyCommitted(provider.ProviderID, provider.AssignedID, payload)
+	if !errors.Is(exchange.err, ErrRelayAEADFailed) {
+		t.Fatalf("expired committed proof error = %v, want ErrRelayAEADFailed", exchange.err)
+	}
+	if _, ok := s.storedSessionFor(provider.ProviderID, provider.AssignedID); ok {
+		t.Fatal("expired committed proof left provider session stored")
+	}
+}
+
+func TestEncryptedRelayRejectsTamperedCommittedProof(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	s, provider, _ := newEncryptedRelayHarness(t)
+	s.now = func() time.Time { return now }
+	payload, exchange := seedTestTier2Committed(t, s, provider, now.Add(time.Minute), []byte(`{"proof":"wire"}`))
+	exchange.proof = []byte(`{"proof":"expected"}`)
+	s.handleAEADRekeyCommitted(provider.ProviderID, provider.AssignedID, payload)
+	if !errors.Is(exchange.err, ErrRelayAEADFailed) {
+		t.Fatalf("tampered committed proof error = %v, want ErrRelayAEADFailed", exchange.err)
+	}
+	if _, ok := s.storedSessionFor(provider.ProviderID, provider.AssignedID); ok {
+		t.Fatal("tampered committed proof left provider session stored")
+	}
+}
+
+func TestEncryptedRelayStartsNewEpochAgeAtCommitInstallation(t *testing.T) {
+	requestedAt := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	installedAt := requestedAt.Add(5 * time.Second)
+	s, provider, _ := newEncryptedRelayHarness(t)
+	now := requestedAt
+	s.now = func() time.Time { return now }
+	payload, _ := seedTestTier2Committed(t, s, provider, requestedAt.Add(time.Minute), []byte(`{"proof":"valid"}`))
+	now = installedAt
+	s.handleAEADRekeyCommitted(provider.ProviderID, provider.AssignedID, payload)
+	resolved, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || resolved.Tier2Session == nil {
+		t.Fatalf("provider after commit = %#v ok=%v", resolved, ok)
+	}
+	if !resolved.Tier2Session.StartedAt.Equal(installedAt) {
+		t.Fatalf("new epoch StartedAt = %s, want install time %s", resolved.Tier2Session.StartedAt, installedAt)
+	}
+	cfg := config.Default().Tier2
+	cfg.EncryptedLegRekeyAfterSeconds = 1
+	if _, due := sessionForTest(s, provider.ProviderID, provider.AssignedID).tier2RekeyReason(installedAt.Add(500*time.Millisecond), cfg); due {
+		t.Fatal("new epoch became due before receiving its full configured lifetime")
+	}
+}
+
+func TestEncryptedRelayIgnoresReplayedCommittedProofAfterCutover(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	s, provider, _ := newEncryptedRelayHarness(t)
+	s.now = func() time.Time { return now }
+	payload, exchange := seedTestTier2Committed(t, s, provider, now.Add(time.Minute), []byte(`{"proof":"valid"}`))
+	s.handleAEADRekeyCommitted(provider.ProviderID, provider.AssignedID, payload)
+	committed, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || committed.Tier2Session == nil || committed.Tier2Session.KeyID == exchange.oldKID {
+		t.Fatalf("provider after first commit = %#v ok=%v", committed, ok)
+	}
+
+	s.handleAEADRekeyCommitted(provider.ProviderID, provider.AssignedID, payload)
+	replayed, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || replayed.Tier2Session != committed.Tier2Session || replayed.Tier2Session.P2CCounter != 1 || replayed.State != pool.StateReady {
+		t.Fatalf("provider after replayed commit = %#v ok=%v, want unchanged committed epoch", replayed, ok)
+	}
+	if exchange.err != nil {
+		t.Fatalf("replayed commit mutated completed exchange error: %v", exchange.err)
+	}
+}
+
+func TestEncryptedRelayCounterExhaustionClosesSession(t *testing.T) {
+	s, provider, _ := newEncryptedRelayHarness(t)
+	provider.Tier2Session.C2PCounter = ^uint64(0)
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-counter-exhausted", []byte(`{"model":"model-a"}`), false); !errors.Is(err, ErrRelayAEADFailed) {
+		t.Fatalf("counter-exhausted dispatch = %v, want ErrRelayAEADFailed", err)
+	}
+	if _, ok := s.storedSessionFor(provider.ProviderID, provider.AssignedID); ok {
+		t.Fatal("counter-exhausted session remained stored")
+	}
+	resolved, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || resolved.State != pool.StateUnavailable {
+		t.Fatalf("counter-exhausted provider = %#v ok=%v, want unavailable", resolved, ok)
+	}
+}
+
+func TestEncryptedRelayRekeySocketWriteFailureEmitsFailedAudit(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now().Add(-2*time.Second))
+	if err := providerConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-rekey-write-failure", []byte(`{"model":"model-a"}`), false); !errors.Is(err, ErrRelayClosed) {
+		t.Fatalf("dispatch after rekey write failure = %v, want ErrRelayClosed", err)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey_failed"`)) ||
+		!bytes.Contains(logs.Bytes(), []byte(`"reason":"write_failed"`)) ||
+		!bytes.Contains(logs.Bytes(), []byte(`"alg":"A256GCM"`)) {
+		t.Fatalf("missing write-failure rekey audit: %s", logs.String())
+	}
+	resolved, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || resolved.State != pool.StateUnavailable {
+		t.Fatalf("provider after rekey write failure = %#v ok=%v, want unavailable", resolved, ok)
+	}
+}
+
+func TestEncryptedRelayRekeySessionCloseEmitsFailedAudit(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now().Add(-2*time.Second))
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.DispatchInference(context.Background(), *provider, "req-rekey-session-close", []byte(`{"model":"model-a"}`), false)
+		result <- err
+	}()
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read aead_rekey_request: %v", err)
+	}
+	sessionForTest(s, provider.ProviderID, provider.AssignedID).close()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrRelayClosed) {
+			t.Fatalf("dispatch after rekey session close = %v, want ErrRelayClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session close did not release rekey waiter")
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey_failed"`)) ||
+		!bytes.Contains(logs.Bytes(), []byte(`"reason":"session_closed"`)) {
+		t.Fatalf("missing session-close rekey audit: %s", logs.String())
+	}
+	if _, ok := s.storedSessionFor(provider.ProviderID, provider.AssignedID); ok {
+		t.Fatal("session-close rekey remained stored")
+	}
+	resolved, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || resolved.State != pool.StateUnavailable {
+		t.Fatalf("provider after rekey session close = %#v ok=%v, want unavailable", resolved, ok)
+	}
+}
+
+func seedTestTier2Committed(t *testing.T, s *Server, provider *pool.Provider, expiresAt time.Time, proof []byte) ([]byte, *tier2RekeyExchange) {
+	t.Helper()
+	next := &pool.Tier2Session{
+		AEADSuite:                      tier2.PillarBAEADA256GCM,
+		ResponseChunkPlaintextEnvelope: true,
+		InBandAEADRekeyV1:              true,
+		C2PKey:                         bytes.Repeat([]byte{0x31}, 32),
+		P2CKey:                         bytes.Repeat([]byte{0x32}, 32),
+		C2PNonceBase:                   []byte{0x11, 0x12, 0x13, 0x14},
+		P2CNonceBase:                   []byte{0x21, 0x22, 0x23, 0x24},
+		C2PCounter:                     1,
+		KeyID:                          "test-next-kid",
+	}
+	exchange := &tier2RekeyExchange{
+		id:        "test-rekey-id",
+		reason:    "age_threshold",
+		requestID: "req-rekey-proof",
+		oldKID:    provider.Tier2Session.KeyID,
+		request: AEADRekeyRequest{
+			ExpiresAt: expiresAt.UTC().Format(time.RFC3339Nano),
+		},
+		next:  next,
+		proof: append([]byte(nil), proof...),
+		phase: "commit_sent",
+		done:  make(chan struct{}),
+	}
+	session := sessionForTest(s, provider.ProviderID, provider.AssignedID)
+	session.rekeyMu.Lock()
+	session.rekey = exchange
+	session.rekeyMu.Unlock()
+	aad := tier2.AEADFrameAAD{
+		Type: "aead_rekey_committed", Direction: "p2c", RequestID: exchange.id,
+		ProviderID: provider.ProviderID, AssignedID: provider.AssignedID, Seq: 0,
+	}
+	envelope, err := tier2.SealPillarBFrame(next.P2CKey, next.P2CNonceBase, next.KeyID, 0, aad, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustJSON(AEADRekeyConfirmation{
+		Type: "aead_rekey_committed", Version: 1, RekeyID: exchange.id,
+		AssignedID: provider.AssignedID, OldKID: exchange.oldKID, NewKID: next.KeyID,
+		Encrypted: true, Enc: envelope.Enc,
+	}), exchange
+}
+
+func completeTestTier2Rekey(t *testing.T, s *Server, providerConn net.Conn, provider *pool.Provider) *pool.Provider {
+	t.Helper()
+	payload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read aead_rekey_request: %v", err)
+	}
+	var request struct {
+		Type                           string `json:"type"`
+		Version                        int    `json:"version"`
+		RekeyID                        string `json:"rekey_id"`
+		AssignedID                     string `json:"assigned_id"`
+		Reason                         string `json:"reason"`
+		OldKID                         string `json:"old_kid"`
+		CoordinatorECDHPublicKey       string `json:"coordinator_ecdh_public_key"`
+		SelectedAEAD                   string `json:"selected_aead"`
+		ExpiresAt                      string `json:"expires_at"`
+		ResponseChunkPlaintextEnvelope bool   `json:"response_chunk_plaintext_envelope"`
+	}
+	if err := json.Unmarshal(payload, &request); err != nil {
+		t.Fatalf("decode aead_rekey_request: %v", err)
+	}
+	if request.Type != "aead_rekey_request" || request.Version != 1 || request.RekeyID == "" {
+		t.Fatalf("invalid aead_rekey_request: %#v", request)
+	}
+	if request.AssignedID != provider.AssignedID || request.OldKID != provider.Tier2Session.KeyID {
+		t.Fatalf("rekey binding mismatch: %#v", request)
+	}
+
+	coordinatorPublic, coordinatorPublicRaw, err := tier2.ParseX25519PublicKey(request.CoordinatorECDHPublicKey)
+	if err != nil {
+		t.Fatalf("parse coordinator rekey public key: %v", err)
+	}
+	providerPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate provider rekey key: %v", err)
+	}
+	shared, err := providerPrivate.ECDH(coordinatorPublic)
+	if err != nil {
+		t.Fatalf("derive rekey shared secret: %v", err)
+	}
+	providerPublicRaw := providerPrivate.PublicKey().Bytes()
+	keys, err := tier2.DerivePillarBKeysFromSharedSecret(shared, provider.ProviderID, provider.AssignedID, providerPublicRaw, coordinatorPublicRaw, request.SelectedAEAD)
+	if err != nil {
+		t.Fatalf("derive provider rekey material: %v", err)
+	}
+	nextSession := &pool.Tier2Session{
+		AEADSuite:                      keys.AEADSuite,
+		ResponseChunkPlaintextEnvelope: request.ResponseChunkPlaintextEnvelope,
+		C2PKey:                         keys.C2PKey,
+		P2CKey:                         keys.P2CKey,
+		C2PNonceBase:                   keys.C2PNonceBase,
+		P2CNonceBase:                   keys.P2CNonceBase,
+		KeyID:                          keys.KeyID,
+		StartedAt:                      time.Now(),
+	}
+	s.handleMessage(providerConn, provider.ProviderID, provider.AssignedID, mustJSON(map[string]any{
+		"type": "aead_rekey_response", "version": 1, "rekey_id": request.RekeyID,
+		"assigned_id": provider.AssignedID, "old_kid": request.OldKID, "new_kid": keys.KeyID,
+		"provider_ecdh_public_key": base64.RawURLEncoding.EncodeToString(providerPublicRaw),
+	}))
+
+	commitPayload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read aead_rekey_commit: %v", err)
+	}
+	var commit struct {
+		Type       string                 `json:"type"`
+		Version    int                    `json:"version"`
+		RekeyID    string                 `json:"rekey_id"`
+		AssignedID string                 `json:"assigned_id"`
+		OldKID     string                 `json:"old_kid"`
+		NewKID     string                 `json:"new_kid"`
+		Encrypted  bool                   `json:"encrypted"`
+		Enc        tier2.AEADEnvelopeBody `json:"enc"`
+	}
+	if err := json.Unmarshal(commitPayload, &commit); err != nil {
+		t.Fatalf("decode aead_rekey_commit: %v", err)
+	}
+	if commit.Type != "aead_rekey_commit" || commit.RekeyID != request.RekeyID || commit.NewKID != keys.KeyID {
+		t.Fatalf("invalid aead_rekey_commit: %#v", commit)
+	}
+	commitAAD := tier2.AEADFrameAAD{
+		Type: "aead_rekey_commit", Direction: "c2p", RequestID: request.RekeyID,
+		ProviderID: provider.ProviderID, AssignedID: provider.AssignedID, Seq: 0,
+	}
+	commitPlaintext, err := tier2.OpenPillarBFrame(keys.C2PKey, keys.C2PNonceBase, keys.KeyID, 0, commitAAD, tier2.AEADEnvelope{Encrypted: commit.Encrypted, Enc: commit.Enc})
+	if err != nil {
+		t.Fatalf("open aead_rekey_commit proof: %v", err)
+	}
+	var proof map[string]any
+	if err := json.Unmarshal(commitPlaintext, &proof); err != nil {
+		t.Fatalf("decode aead_rekey_commit proof: %v", err)
+	}
+	if proof["old_kid"] != request.OldKID || proof["new_kid"] != keys.KeyID {
+		t.Fatalf("aead_rekey_commit proof binding mismatch: %#v", proof)
+	}
+	nextSession.C2PCounter = 1
+	committedAAD := tier2.AEADFrameAAD{
+		Type: "aead_rekey_committed", Direction: "p2c", RequestID: request.RekeyID,
+		ProviderID: provider.ProviderID, AssignedID: provider.AssignedID, Seq: 0,
+	}
+	committedEnvelope, err := tier2.SealPillarBFrame(keys.P2CKey, keys.P2CNonceBase, keys.KeyID, 0, committedAAD, commitPlaintext)
+	if err != nil {
+		t.Fatalf("seal aead_rekey_committed proof: %v", err)
+	}
+	nextSession.P2CCounter = 1
+	s.handleMessage(providerConn, provider.ProviderID, provider.AssignedID, mustJSON(map[string]any{
+		"type": "aead_rekey_committed", "version": 1, "rekey_id": request.RekeyID,
+		"assigned_id": provider.AssignedID, "old_kid": request.OldKID, "new_kid": keys.KeyID,
+		"encrypted": true, "enc": committedEnvelope.Enc,
+	}))
+
+	resolved, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after committed rekey")
+	}
+	if resolved.Tier2Session == nil || resolved.Tier2Session.KeyID != nextSession.KeyID {
+		t.Fatalf("pool rekey session = %#v, want kid %q", resolved.Tier2Session, nextSession.KeyID)
+	}
+	return &resolved
+}
+
+func TestEncryptedRelayQueuesDispatchUntilActiveRequestsFinishAndRekeyCommits(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()
 	cfg.Tier2.EncryptedLegRekeyAfterRequests = 2
@@ -1363,9 +1805,17 @@ func TestEncryptedRelayDefersRekeyCloseUntilActiveCompletes(t *testing.T) {
 	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
 		t.Fatalf("read encrypted inference_request b: %v", err)
 	}
-	if _, err := s.DispatchInference(context.Background(), *provider, "req-rekey-third", []byte(`{"model":"model-a"}`), false); err != ErrRelayBackpressure {
-		t.Fatalf("third dispatch = %v, want ErrRelayBackpressure while active requests drain", err)
+	type dispatchResult struct {
+		relay *RelayStream
+		err   error
 	}
+	thirdResult := make(chan dispatchResult, 1)
+	thirdCtx, cancelThird := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelThird()
+	go func() {
+		relay, err := s.DispatchInference(thirdCtx, *provider, "req-rekey-third", []byte(`{"model":"model-a"}`), false)
+		thirdResult <- dispatchResult{relay: relay, err: err}
+	}()
 	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
 		t.Fatal("session closed before active requests completed")
 	}
@@ -1389,6 +1839,11 @@ func TestEncryptedRelayDefersRekeyCloseUntilActiveCompletes(t *testing.T) {
 	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
 		t.Fatal("session closed before second active request completed")
 	}
+	select {
+	case result := <-thirdResult:
+		t.Fatalf("third dispatch returned before old in-flight work drained: %v", result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey-active-b", false, 2, []byte(`{"b":true}`)))
 	select {
@@ -1407,15 +1862,30 @@ func TestEncryptedRelayDefersRekeyCloseUntilActiveCompletes(t *testing.T) {
 		t.Fatal("end b timeout")
 	}
 
-	if _, ok := s.storedSessionFor("p1", "s1"); ok {
-		t.Fatal("session still stored after drained rekey")
+	rekeyedProvider := completeTestTier2Rekey(t, s, providerConn, provider)
+	select {
+	case result := <-thirdResult:
+		if result.err != nil || result.relay == nil {
+			t.Fatalf("queued dispatch after rekey = relay %#v err %v", result.relay, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued dispatch did not resume after rekey commit")
 	}
-	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) {
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read queued post-rekey inference_request: %v", err)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("same session removed after drained rekey")
+	}
+	if rekeyedProvider.State != pool.StateReady {
+		t.Fatalf("state = %s, want ready", rekeyedProvider.State)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey_committed"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) {
 		t.Fatalf("missing request-threshold rekey log: %s", logs.String())
 	}
 }
 
-func TestEncryptedRelayClosesDrainedRekeyAfterActiveCancel(t *testing.T) {
+func TestEncryptedRelayRekeysAfterActiveCancelWithoutUnpublishing(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()
 	cfg.Tier2.EncryptedLegRekeyAfterRequests = 2
@@ -1436,9 +1906,13 @@ func TestEncryptedRelayClosesDrainedRekeyAfterActiveCancel(t *testing.T) {
 	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
 		t.Fatalf("read encrypted inference_request b: %v", err)
 	}
-	if _, err := s.DispatchInference(context.Background(), *provider, "req-rekey-cancel-third", []byte(`{"model":"model-a"}`), false); err != ErrRelayBackpressure {
-		t.Fatalf("third dispatch = %v, want ErrRelayBackpressure while active requests drain", err)
-	}
+	thirdResult := make(chan error, 1)
+	thirdCtx, cancelThird := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelThird()
+	go func() {
+		_, err := s.DispatchInference(thirdCtx, *provider, "req-rekey-cancel-third", []byte(`{"model":"model-a"}`), false)
+		thirdResult <- err
+	}()
 
 	relayA.Cancel("buyer_disconnected")
 	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
@@ -1449,17 +1923,25 @@ func TestEncryptedRelayClosesDrainedRekeyAfterActiveCancel(t *testing.T) {
 	}
 
 	relayB.Cancel("buyer_disconnected")
-	if _, ok := s.storedSessionFor("p1", "s1"); ok {
-		t.Fatal("session still stored after drained rekey cancel")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request b: %v", err)
 	}
-	got, ok := s.pool.Resolve("p1", "s1")
-	if !ok {
-		t.Fatal("provider not found")
+	rekeyedProvider := completeTestTier2Rekey(t, s, providerConn, provider)
+	select {
+	case err := <-thirdResult:
+		if err != nil {
+			t.Fatalf("queued dispatch after canceled drain: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued dispatch did not resume after canceled drain rekey")
 	}
-	if got.State != pool.StateUnavailable {
-		t.Fatalf("state = %s, want unavailable", got.State)
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read queued inference_request after cancel: %v", err)
 	}
-	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) {
+	if rekeyedProvider.State != pool.StateReady {
+		t.Fatalf("state = %s, want ready", rekeyedProvider.State)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey_committed"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) {
 		t.Fatalf("missing request-threshold rekey log: %s", logs.String())
 	}
 }
@@ -1468,26 +1950,209 @@ func TestEncryptedRelayRekeysExpiredSessionBeforeDispatch(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()
 	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
-	s, provider, _ := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now().Add(-2*time.Second))
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now().Add(-2*time.Second))
+	oldSession := provider.Tier2Session
 
-	if _, err := s.DispatchInference(context.Background(), *provider, "req-expired", []byte(`{"model":"model-a"}`), false); err != ErrRelayClosed {
-		t.Fatalf("dispatch = %v, want ErrRelayClosed", err)
+	dispatchResult := make(chan error, 1)
+	dispatchCtx, cancelDispatch := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelDispatch()
+	go func() {
+		_, err := s.DispatchInference(dispatchCtx, *provider, "req-expired", []byte(`{"model":"model-a"}`), false)
+		dispatchResult <- err
+	}()
+	rekeyedProvider := completeTestTier2Rekey(t, s, providerConn, provider)
+	select {
+	case err := <-dispatchResult:
+		if err != nil {
+			t.Fatalf("dispatch after age rekey: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expired-session dispatch did not resume after rekey")
 	}
-	if provider.Tier2Session.C2PCounter != 0 {
-		t.Fatalf("c2p counter = %d, want 0", provider.Tier2Session.C2PCounter)
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read post-age-rekey inference_request: %v", err)
 	}
-	if provider.Tier2Session.RequestsDispatched != 0 {
-		t.Fatalf("requests dispatched = %d, want 0", provider.Tier2Session.RequestsDispatched)
+	if oldSession.C2PCounter != 0 {
+		t.Fatalf("old c2p counter = %d, want 0", oldSession.C2PCounter)
+	}
+	if oldSession.RequestsDispatched != 0 {
+		t.Fatalf("old requests dispatched = %d, want 0", oldSession.RequestsDispatched)
+	}
+	if rekeyedProvider.State != pool.StateReady {
+		t.Fatalf("state = %s, want ready", rekeyedProvider.State)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey_committed"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"age_threshold"`)) {
+		t.Fatalf("missing age-threshold rekey log: %s", logs.String())
+	}
+}
+
+func TestEncryptedRelayRekeyTimeoutFailsClosedAfterIdle(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := config.Default()
+	cfg.WS.HandshakeTimeoutS = 1
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now().Add(-2*time.Second))
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.DispatchInference(context.Background(), *provider, "req-timeout-rekey", []byte(`{"model":"model-a"}`), false)
+		result <- err
+	}()
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read aead_rekey_request: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err != ErrRelayTimeout {
+			t.Fatalf("dispatch after rekey timeout = %v, want ErrRelayTimeout", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("rekey timeout did not release queued dispatch")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("timed-out rekey session remained stored")
 	}
 	got, ok := s.pool.Resolve("p1", "s1")
-	if !ok {
-		t.Fatal("provider not found")
+	if !ok || got.State != pool.StateUnavailable {
+		t.Fatalf("provider after timeout = %#v ok=%v, want unavailable", got, ok)
 	}
-	if got.State != pool.StateUnavailable {
-		t.Fatalf("state = %s, want unavailable", got.State)
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey_failed"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"timeout"`)) {
+		t.Fatalf("missing timeout audit log: %s", logs.String())
 	}
-	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"age_threshold"`)) {
-		t.Fatalf("missing age-threshold rekey log: %s", logs.String())
+}
+
+func TestEncryptedRelayRejectsMismatchedRekeyResponseAndFailsClosed(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), time.Now().Add(-2*time.Second))
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.DispatchInference(context.Background(), *provider, "req-bad-rekey", []byte(`{"model":"model-a"}`), false)
+		result <- err
+	}()
+	payload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read aead_rekey_request: %v", err)
+	}
+	var request AEADRekeyRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		t.Fatalf("decode aead_rekey_request: %v", err)
+	}
+	s.handleMessage(providerConn, "p1", "s1", mustJSON(AEADRekeyResponse{
+		Type: "aead_rekey_response", Version: 1, RekeyID: request.RekeyID,
+		AssignedID: "s1", OldKID: "wrong-old-kid", NewKID: "attacker-kid",
+		ProviderECDHPublicKey: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 32)),
+	}))
+	select {
+	case err := <-result:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("dispatch after invalid rekey response = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("invalid rekey response did not release queued dispatch")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("invalid rekey response left session stored")
+	}
+}
+
+func TestEncryptedRelayRekeyWaitHonorsBuyerContextWithoutUnpublishingProvider(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), time.Now().Add(-2*time.Second))
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.DispatchInference(ctx, *provider, "req-canceled-rekey-wait", []byte(`{"model":"model-a"}`), false)
+		result <- err
+	}()
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read aead_rekey_request: %v", err)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != ErrRelayClosed {
+			t.Fatalf("canceled rekey wait = %v, want ErrRelayClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("buyer cancellation did not release rekey waiter")
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok || got.State != pool.StateReady {
+		t.Fatalf("provider after one canceled waiter = %#v ok=%v, want ready", got, ok)
+	}
+	sessionForTest(s, "p1", "s1").close()
+}
+
+func TestEncryptedRelayLegacyProviderFailsClosedAtRekeyBoundary(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	s, provider, _ := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), time.Now().Add(-2*time.Second))
+	provider.Tier2Session.InBandAEADRekeyV1 = false
+
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-legacy-rekey", []byte(`{"model":"model-a"}`), false); err != ErrRelayClosed {
+		t.Fatalf("legacy provider dispatch = %v, want ErrRelayClosed", err)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("legacy provider remained stored past rekey boundary")
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok || got.State != pool.StateUnavailable {
+		t.Fatalf("legacy provider after rekey boundary = %#v ok=%v, want unavailable", got, ok)
+	}
+}
+
+func TestEncryptedRelayLegacyProviderDrainsInflightBeforeFailClosedRekey(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterRequests = 1
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), time.Now())
+	provider.Tier2Session.InBandAEADRekeyV1 = false
+
+	first, err := s.DispatchInference(context.Background(), *provider, "req-legacy-active", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("first legacy dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read first legacy inference_request: %v", err)
+	}
+
+	secondResult := make(chan error, 1)
+	go func() {
+		_, err := s.DispatchInference(context.Background(), *provider, "req-legacy-waiter", []byte(`{"model":"model-a"}`), false)
+		secondResult <- err
+	}()
+	select {
+	case err := <-secondResult:
+		t.Fatalf("queued legacy dispatch returned before in-flight completion: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("legacy session closed while old-epoch inference was active")
+	}
+
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-legacy-active", false, 0, InferenceResponseEnd{
+		Type: "inference_response_end", RequestID: "req-legacy-active", Status: "complete",
+	}))
+	select {
+	case end := <-first.Done:
+		if end.Status != "complete" {
+			t.Fatalf("first legacy end = %#v", end)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first legacy inference did not complete")
+	}
+	select {
+	case err := <-secondResult:
+		if err != ErrRelayClosed {
+			t.Fatalf("queued legacy dispatch after drain = %v, want ErrRelayClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy fail-closed rekey did not release queued dispatch")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("legacy provider remained stored after old-epoch inference drained")
 	}
 }
 
@@ -1936,6 +2601,7 @@ func newEncryptedRelayHarnessWithConfig(t *testing.T, cfg config.Config, logger 
 	tier2Session := &pool.Tier2Session{
 		AEADSuite:                      tier2.PillarBAEADA256GCM,
 		ResponseChunkPlaintextEnvelope: true,
+		InBandAEADRekeyV1:              true,
 		C2PKey:                         bytes.Repeat([]byte{0x11}, 32),
 		P2CKey:                         bytes.Repeat([]byte{0x22}, 32),
 		C2PNonceBase:                   []byte{0x01, 0x02, 0x03, 0x04},
@@ -1961,6 +2627,7 @@ func newEncryptedRelayHarnessWithConfig(t *testing.T, cfg config.Config, logger 
 	s := NewServer(cfg, registry, logger)
 	session := newProviderSession("p1", "s1", serverConn, 4)
 	session.useTier2Session(tier2Session)
+	session.onWriteFailure = s.handleProviderWriteFailure
 	s.sessions.Store(sessionKey("p1", "s1"), session)
 	go session.runWriter()
 	return s, provider, providerConn
