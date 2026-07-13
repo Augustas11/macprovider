@@ -19,13 +19,14 @@ state; codex 3-lane audit in progress)
   resort, cross-referencing **SPEC-003 FR-C10** for the coordinator mint/ownership
   *policy* and **SPEC-001 v1.5** for frame shapes rather than re-specifying them.
   The GitHub-OAuth mode is documented **honestly as shipped-but-incompletely-wired**
-  (§2.5.0): in cookie mode the aggregate-earnings surfaces (A.2/C.1) cannot load —
-  the earnings route requires an FR-P12 provider bearer that cookie mode
+  (§2.5.0): in cookie mode the aggregate-**earnings** surfaces (A.2/C.1/A.5) cannot
+  load — the earnings route requires an FR-P12 provider bearer that cookie mode
   deliberately does not hold, and the coordinator earnings handler has no
   cookie/ownership path; the reference nginx does not yet proxy `/v1/auth/*`. The
   mode's functional scope today is **GitHub identity + owned-provider listing +
-  `pair_ot` binding only**; the earnings/status data surfaces and the deployment
-  wiring are carried gaps, not working behavior. No code change.
+  `pair_ot` binding + A.1 pool status** (the pool-check route is public, so A.1
+  works in cookie mode); only the earnings data and the OAuth deployment wiring are
+  carried gaps, not working behavior. No code change.
 **Audit history:**
   - v0.1 → codex round 1 → 0 CRITICAL / 3 HIGH / 2 MEDIUM / 2 MINOR /
     0 QUESTION → all HIGH + MEDIUM addressed in v0.2.
@@ -56,8 +57,17 @@ state; codex 3-lane audit in progress)
     in OAuth mode), OAuth-state origin binding degrading behind the
     proxy, logout not a full revocation boundary, `PORTAL_BASE_URL`
     prerequisite, A.5 skip-reason shape, pool-state enum
-    (`degraded`/404, no `unknown`). All R2 C/H/M addressed in this
-    revision; re-audit pending.
+    (`degraded`/404, no `unknown`). All R2 C/H/M addressed.
+    R3 (commit `a76f10f`): code 0C/0H/3M/3L, security 0C/1H/7M/1L,
+    architect 0C/2H/3M/0L — transport-shape precision on my own R2
+    additions: `me/providers` is a `{"providers":[…]}` envelope (not an
+    array root) + bind-success payload; pool-check 404 is a pool error
+    not an AUTH-2 rejection (and SPEC-002 §7.4 is itself stale);
+    session-id entropy made normative (≥256-bit CSPRNG); logout is
+    best-effort; GitHub token disposal + bind write-authority disclosed;
+    `/v1/install/pair/refresh` + `pair_ot_mint_log` documented; A.5
+    `idle_prewarm.*` paths; change-log/runbook/§11 scope sweep. All R3
+    C/H/M addressed in this revision; re-audit pending.
 **Depends on:**
   - SPEC-001 v1.5 (`hello` / `hello_ack` fields; local `/v1/health`;
     ownership frame shapes — `ownership_event` / `needs_claim` — consumed by
@@ -481,33 +491,60 @@ calls exactly this closed set and no others (AUTH-2 allowlist):
 | `GET /v1/auth/github/callback?state=&code=` | OAuth callback; sets session cookie; 302 to `return_to` | validated `state` |
 | `GET /v1/auth/me/providers` | List providers owned by the session's GitHub identity | `mp_session` cookie |
 | `POST /v1/auth/me/providers/bind` | Bind a `pair_ot` to the session identity | `mp_session` cookie |
-| `POST /v1/auth/logout` | Delete session, clear cookie (204) | `mp_session` cookie |
+| `POST /v1/auth/logout` | Best-effort delete session row, clear cookie, 204 | `mp_session` cookie **optional** (see below) |
 
-(The coordinator additionally exposes a bearer-authed
-`POST /v1/install/pair/refresh` to mint a fresh `pair_ot` + `claim_url`; that is a
-provider-CLI/install surface, not called by the portal — though the portal's
-misconfig banner *names* the path informationally, see §8(b) allowlist note.) The
-`callback` is reached by the browser via GitHub's 302 redirect, not by a portal
-`fetch`. **All of these paths require the operator's reverse proxy to route
-`/v1/auth/*` to the coordinator (§10.4); the reference nginx does not yet do so
-(§2.3 wiring caveat).**
+**Logout auth is an optional session selector, not a requirement (reconciled
+v0.9).** `handleAuthLogout` reads the cookie only to pick which session row to
+delete; it **always** clears the browser cookie and returns **204**, even when the
+cookie is absent, stale, or `DeleteMPSession` errors (the error is ignored). So
+logout is best-effort revocation — see the §2.5.7 disclosure.
 
-**Response shape + transport-owned persistence (owner of last resort, reconciled
-v0.9).** `GET /v1/auth/me/providers` returns a list of owned providers, each with
-`provider_id`, `claimed_at`, and `last_seen_at` (`tokens.go`); the chooser renders
-`last_seen_at` as "last seen …" (§2.5.5, §4.5). Those UI/wire fields are enumerated
-in §5. The OAuth transport also introduces coordinator DB tables that **no other
-spec owns** — `github_identities`, `mp_sessions` (incl. `pending_pair_ot`,
-`last_seen`), and `oauth_states` (incl. `origin_hash`, TTL, outstanding-cap) — so
-SPEC-014 records their existence and role here as owner of last resort; their
-column-level schema remains the coordinator's implementation detail (SPEC-014 does
-not freeze it), and the mint/ownership policy over `provider_ownership` stays
+**The bearer-authed install-pair-refresh endpoint (SPEC-014-owned transport,
+reconciled v0.9).** The coordinator exposes `POST /v1/install/pair/refresh` to mint
+a fresh `pair_ot` + `claim_url`; it is a provider-CLI/install surface, **not called
+by the portal** (though the portal's misconfig banner *names* the path
+informationally, see §8(b) allowlist note). No other spec owns its HTTP transport
+(SPEC-003 FR-C10 assigns the rate limit "to the downstream consumer"), so SPEC-014
+records it here: **POST, FR-P12 provider-bearer auth**, `200 {pair_ot, claim_url,
+expires_in: 600}`; a per-provider mint cap (**~5 successful mints/hour**) returns
+**`429` with `Retry-After`**; unauthenticated → `401`; every attempt is written to
+the `pair_ot_mint_log` audit table. The `callback` is reached by the browser via
+GitHub's 302 redirect, not by a portal `fetch`. **All of these paths require the
+operator's reverse proxy to route `/v1/auth/*` to the coordinator (§10.4); the
+reference nginx does not yet do so (§2.3 wiring caveat).**
+
+**Response shapes (owner of last resort, reconciled v0.9 — verified against the
+shipped handlers, not inferred):**
+
+- `GET /v1/auth/me/providers` returns a **`{"providers":[ … ]}` envelope** (object
+  root, key `providers`), **not** a bare array — the portal reads `body.providers`
+  (`auth_github.go`, `index.html`). Each element is `{provider_id, claimed_at,
+  last_seen_at}`; the chooser renders `last_seen_at` as "last seen …" (§2.5.5,
+  §4.5). Those UI/wire fields are enumerated in §5.
+- `POST /v1/auth/me/providers/bind` on success returns
+  `{provider_id, github_login, claimed_at}` (`auth_github.go`); the error codes are
+  §2.5.6's `410 pair_ot_invalid` / `409 already_owned` / `401` (and `400` for a
+  malformed/empty pending body).
+
+**Transport-owned persistence.** The OAuth transport introduces coordinator DB
+tables that **no other spec owns** — `github_identities`; `mp_sessions` (columns
+include `pending_pair_ot`, `last_seen_at`, `last_setcookie_at` — note it is
+`last_seen_at`, not `last_seen`); `oauth_states` (incl. `origin_hash`, TTL,
+outstanding-cap); and `pair_ot_mint_log` (the install-pair-refresh audit table
+above). SPEC-014 records their existence and role here as owner of last resort;
+their column-level schema remains the coordinator's implementation detail (SPEC-014
+does not freeze it), and the mint/ownership policy over `provider_ownership` stays
 SPEC-003 FR-C10's.
 
 #### 2.5.3 Session cookie (`mp_session`)
 
 - Name `mp_session`; value is an **opaque server-side session id** (not a
-  signed/JWT payload) — the session row lives in the coordinator DB.
+  signed/JWT payload) — the session row lives in the coordinator DB. **Normative
+  (reconciled v0.9): the id MUST be ≥256 bits from a CSPRNG.** SPEC-014 owns this
+  transport contract, and "opaque" alone would permit a predictable counter or weak
+  PRNG whose guessed id would grant session (and thus `pair_ot`-bind) takeover. The
+  shipped coordinator generates 32 bytes via `crypto/rand` (`tokens.go`) — the spec
+  now requires that strength rather than merely describing it.
 - Flags: `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000` (30 days),
   optional `Domain=<MP_SESSION_COOKIE_DOMAIN>`. **Reconciled v0.9 — the `Domain`
   MAY be a parent domain**, not necessarily the exact portal host: the coordinator
@@ -517,11 +554,13 @@ SPEC-003 FR-C10's.
   operator SHOULD scope `Domain` to the exact portal host; the spec cannot force it
   because the shipped validator permits the parent. Carried security residual.
 - **30-day sliding *idle* window with no session-id rotation (reconciled v0.9).**
-  The reissue path (`NeedsReissue`, ~24h) updates the session row's `last_seen`
+  The reissue path (`NeedsReissue`, ~24h) updates the session row's `last_seen_at`
   and re-sends the cookie but **keeps the same opaque session id** — it is not
   rotated. So an active thief who keeps using a stolen cookie holds it indefinitely
   (each use slides the 30-day idle expiry forward) and the id never changes.
-  `POST /v1/auth/logout` deletes the session row and clears the cookie; there is no
+  `POST /v1/auth/logout` **best-effort** deletes the session row and clears the
+  cookie (it ignores a `DeleteMPSession` error and always returns 204, §2.5.2), so
+  a stolen copy of the same cookie stays valid if deletion fails; there is no
   server-side "rotate on privilege change." Carried residual.
 - The portal's cookie-mode fetch uses `credentials: "include"`, `cache:
   "no-store"`, and **strips any `Authorization` header** — cookie mode never
@@ -550,10 +589,12 @@ SPEC-003 FR-C10's.
   - **Shipped thresholds (reconciled v0.9):** state **TTL ~10 minutes**; the
     per-origin limit is an **outstanding-state cap (~20 unexpired, unconsumed
     states per origin hash)**, **not** a rolling "20 creations per 10 minutes" rate
-    limit — a successful callback deletes its row and immediately frees capacity
-    (`tokens.go`), so far more than 20 starts can occur in a 10-minute window as
-    long as they are consumed. This is a weaker guarantee than a true rate limit;
-    stated honestly here.
+    limit. The callback deletes the state row **before** exchanging the GitHub
+    `code` (`auth_github.go`, `tokens.go`), so **any state-valid callback frees the
+    slot — even one carrying a bogus `code` that then fails the exchange**. Capacity
+    is therefore freed on any state-valid callback attempt, not only on a fully
+    successful login, so far more than 20 starts can occur in a 10-minute window.
+    This is a weaker guarantee than a true rate limit; stated honestly here.
   - **Scope of `state` (reconciled v0.9 — do NOT overstate it).** `state` protects
     **only the `/github/start` → `/github/callback` handshake** against CSRF /
     fixation on the login step. It is **not** a general CSRF or session-theft
@@ -640,15 +681,25 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
 
 #### 2.5.7 Security disclosures (carried, honest)
 
-- GitHub scope requested is `read:user` only.
-- The session is a bearer-equivalent **cookie** — its theft grants access to the
-  session identity's owned-provider list (and, once wired, their read-only
-  surfaces). The effective mitigations are `HttpOnly` + `Secure` + `SameSite=Lax`;
-  the OAuth `state` is **not** among them — it protects only the login handshake
-  (and degrades behind the proxy, §2.5.4), and `bind`/`logout` have no CSRF token or
-  Origin check. The cookie `Domain` may be a parent domain and the session id is
-  never rotated (§2.5.3). This is a strictly larger auth surface than paste-bearer
-  mode and is why it is opt-in/off-by-default.
+- GitHub scope requested is `read:user` only. **The exchanged GitHub access token
+  is callback-local and MUST NOT be persisted (reconciled v0.9, normative).** The
+  shipped callback uses the token once to fetch `/user`, then stores **only** the
+  GitHub id/login and the local `mp_session` — it never writes the GitHub token to
+  the DB, a log, or the session (`auth_github.go`). The spec now requires that
+  disposal so a spec-literal implementation cannot retain a long-lived third-party
+  credential.
+- The session is a bearer-equivalent **cookie** — its theft grants **read**
+  access to the session identity's owned-provider list (and, once wired, their
+  read-only surfaces) **and write authority**: the same stolen cookie authenticates
+  `POST /v1/auth/me/providers/bind`, so a thief holding a valid `pair_ot` can create
+  **durable `provider_ownership` state**, which — with no unlink path (§2.5.6) — is
+  irreversible. The threat model explicitly includes this bind write. The effective
+  mitigations are `HttpOnly` + `Secure` + `SameSite=Lax`; the OAuth `state` is
+  **not** among them — it protects only the login handshake (and degrades behind
+  the proxy, §2.5.4), and `bind`/`logout` have no CSRF token or Origin check. The
+  cookie `Domain` may be a parent domain and the session id is never rotated
+  (§2.5.3). This is a strictly larger auth surface than paste-bearer mode and is why
+  it is opt-in/off-by-default.
 - **Logout is not a full revocation boundary (reconciled v0.9 — carried gap).**
   `POST /v1/auth/logout` deletes **only the current cookie's** session id. But an
   OAuth callback always **creates a new session without deleting any prior one**
@@ -758,12 +809,19 @@ Single-pane status of THIS machine.
 - `tier` — from `GET /v1/pool/check?provider_id=<id>` (SPEC-002
   §7.4); enum `"pinned"` or `"provisional"`.
 - `state` — from same response; enum (reconciled v0.9 to shipped
-  `handlePoolCheck`) `"ready"` / `"degraded"` / `"draining"` /
-  `"unavailable"`. The coordinator normalizes `busy` → `degraded`;
-  there is **no `"unknown"` state value** — a `provider_id` not in the
-  pool returns **HTTP 404 `provider_not_found`** (routed through the
-  AUTH-2 404 "sign-in rejected" path, §2.2), not a 200 with
-  `state:"unknown"`.
+  `handlePoolCheck`, `buyer/server.go`) `"ready"` / `"degraded"` /
+  `"draining"` / `"unavailable"`. The coordinator normalizes `busy` →
+  `degraded`; there is **no `"unknown"` state value** — a `provider_id`
+  not in the pool snapshot returns **HTTP 404 `provider_not_found`**,
+  not a 200 with `state:"unknown"`. **The portal treats that 404 as a
+  pool-check error** (`poolCheck()` records `state.pool.err`; A.1
+  renders a pool error / offline), **NOT** as an AUTH-2 sign-in
+  rejection — pool-check is unauthenticated, and treating a transient
+  liveness miss as an auth failure would wrongly sign out a provider
+  momentarily absent from the snapshot. **Cross-spec note:** this
+  reconciles to the shipped code as source of truth; SPEC-002 §7.4 is
+  itself **stale** (still documents a 200 `state:"unknown"` miss and no
+  `degraded`), a drift to be fixed in SPEC-002, not owned here.
 - "Last refreshed Xs ago" / "stale" stamp on the `/v1/pool/check`
   poll. Cadence per §5 table (a).
 - Manual refresh button (re-issues `/v1/pool/check`).
@@ -817,10 +875,13 @@ Issue taxonomy (v0.1) is restricted to existing observable
 signals:
 
 - **Unavailable** — `/v1/pool/check.state` returns `"unavailable"`
-  (SPEC-002 §7.4; reconciled v0.9 — the `"unknown"` trigger is retired,
-  a missing provider is a 404 handled via §2.2, and `degraded` does not
-  trigger this row per the pill note above). Row text: "This machine is
-  currently `<state>`." Remediation hint: "Run `macprovider-cli
+  (reconciled v0.9: a missing provider is a **404** shown as a
+  pool-check error, not this row and not the §2.2 auth path; `degraded`
+  does not trigger this row per the pill note above. The shipped portal
+  JS still tests `unavailable || unknown`, but the coordinator no longer
+  emits `unknown`, so the `unknown` branch is **latent-dead**, not
+  removed). Row text: "This machine is currently `<state>`."
+  Remediation hint: "Run `macprovider-cli
   status` to inspect local state; if the binary is healthy,
   re-check in a few seconds." Copy-to-clipboard CTA:
   `macprovider-cli status`. Heartbeat-miss diagnosis ("offline
@@ -866,12 +927,17 @@ table (c).
 
 **A.5 Idle-prewarm panel (reconciled v0.9 — shipped, previously undocumented).**
 The Machine surface renders an idle-prewarm status panel with **five counters**
-(fired / completed / failed / cancelled-by-real-request / skipped) plus a
-**last-hour skips-by-reason count map** (`skips_by_reason_last_1h`), rendered as
-sorted `reason=count` entries — **not** a single "most recent" skip reason and with
-no temporal ordering (reconciled v0.9). Source: the `/providers/{id}/earnings`
-response, which carries these idle-prewarm fields alongside the credit rollups
-(`endpoints.go`; `stats/prewarm/reader.go`). It is
+looked up by name in `idle_prewarm.events_last_1h` (`idle_prewarm_fired` /
+`_completed` / `_skipped` / `_cancelled_by_real_request` / `_failed`) plus a
+**last-hour skips-by-reason count map** `idle_prewarm.skips_by_reason_last_1h`,
+rendered as sorted `reason=count` entries — **not** a single "most recent" skip
+reason and with no temporal ordering (reconciled v0.9). Source: the shipped
+`/providers/{id}/earnings` handler emits an `idle_prewarm` object
+(`{events_last_1h, skips_by_reason_last_1h}`) alongside the credit rollups
+(`endpoints.go`; `stats/prewarm/reader.go`) — this object is an
+**implementation-owned** field of the earnings response, **not** part of the
+SPEC-005 §11.4 normative contract (SPEC-005 defines no `idle_prewarm`); SPEC-014
+records it here as observed shipped behavior. It is
 provider-only telemetry (no buyer data; see §8(d)). Same mode caveat as A.2:
 earnings-sourced, so functional in paste-bearer mode only until cookie mode is
 wired (§2.5.0). Enumerated in §5 table (a).
@@ -1118,7 +1184,7 @@ exactly one of them.
 | A.2 | total credits | `GET /providers/{id}/earnings` | `total_credits` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | A.2 | current window credits | `GET /providers/{id}/earnings` | `current_window_credits` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | A.2 | last payout-ready window | `GET /providers/{id}/earnings` | `last_payout_ready.{window_start_utc, window_end_utc, provider_credits}` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
-| A.5 | idle-prewarm counters (fired / completed / failed / cancelled-by-real-request / skipped) + `skips_by_reason_last_1h` count map | `GET /providers/{id}/earnings` | idle-prewarm counter fields + `skips_by_reason_last_1h` (reason→count) on the earnings response (`endpoints.go`, `stats/prewarm/reader.go`) | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 earnings response (reconciled v0.9); paste-bearer mode only per §2.5.0 |
+| A.5 | idle-prewarm five counters + skips-by-reason map | `GET /providers/{id}/earnings` | `idle_prewarm.events_last_1h.{idle_prewarm_fired,_completed,_skipped,_cancelled_by_real_request,_failed}` + `idle_prewarm.skips_by_reason_last_1h` (reason→count) | 60 s | in-memory; 60 s TTL | shipped earnings-handler `idle_prewarm` object — implementation-owned, NOT SPEC-005 §11.4 (reconciled v0.9); paste-bearer mode only per §2.5.0 |
 | A.3 | "Unavailable" row | `GET /v1/pool/check?provider_id=<id>` | `state` (when `"unavailable"`; reconciled v0.9 — `"unknown"` retired, missing provider = 404) | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | B.3 | release list | `GET https://api.github.com/repos/{owner}/{name}/releases` | array root (`tag_name`, `published_at`, `body`); also reads response header `X-RateLimit-Remaining` (which GitHub does expose to browser code) | on demand + 5 min TTL | in-memory; rate-limit aware | Open Q2 (host) + GitHub Releases API |
 | B.3 | rate-limit fallback notice | derived from the B.3 release-list response header `X-RateLimit-Remaining: 0` | n/a (header-derived); rendered as static notice text "GitHub API rate limit reached — release feed paused; refresh later." | re-evaluated on each B.3 fetch | in-memory; cleared on next non-zero remaining | GitHub Releases API rate-limit posture (Open Q2 records the 60 req/IP/hr cap) |
@@ -1126,7 +1192,7 @@ exactly one of them.
 | C.1 | lifetime / window / last-payout credit cards | `GET /providers/{id}/earnings` | `total_credits`, `current_window_credits`, `last_payout_ready.{window_start_utc, window_end_utc, provider_credits}` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | E.1 | tier badge | `GET /v1/pool/check?provider_id=<id>` | `tier` | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | E.1 | state | `GET /v1/pool/check?provider_id=<id>` | `state` | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
-| OAuth chooser (§2.5.5) | owned-provider rows: `provider_id`, `claimed_at`, `last_seen_at` | `GET /v1/auth/me/providers` (cookie) | array root: `provider_id`, `claimed_at`, `last_seen_at` | on OAuth home load / popstate | in-memory | §2.5.2 SPEC-014 transport (reconciled v0.9); GitHub-OAuth mode only |
+| OAuth chooser (§2.5.5) | owned-provider rows: `provider_id`, `claimed_at`, `last_seen_at` | `GET /v1/auth/me/providers` (cookie) | `body.providers[]` (object-root `{"providers":[…]}` envelope, NOT a bare array): `provider_id`, `claimed_at`, `last_seen_at` | on OAuth home load / popstate | in-memory | §2.5.2 SPEC-014 transport (reconciled v0.9); GitHub-OAuth mode only |
 
 ### 5.2 Table (b) — Static / spec-backed fields (no runtime API call)
 
@@ -1273,8 +1339,8 @@ Layered, NOT a flat checklist. Six required groups.
       §4.1: `"ready"` → online; `"draining"` → online;
       `"degraded"` → offline; `"unavailable"` → offline. A fixture
       iterates all four shipped enum values and asserts the rendered
-      pill label. (No `"unknown"` value — a missing provider is a 404,
-      asserted separately via the §2.2 404 path.)
+      pill label. (No `"unknown"` value — a missing provider is a 404
+      that A.1 renders as a pool-check error, NOT the §2.2 auth path.)
 - [ ] A.1 "stale" stamp transition: after the last successful
       `/v1/pool/check` response, advancing a fake clock past
       `2 × poll cadence` (60 s with the v0.1 default 30 s
@@ -1292,7 +1358,8 @@ Layered, NOT a flat checklist. Six required groups.
       "unavailable"`, with the literal text "This machine is
       currently `<state>`." and a copy-to-clipboard
       `macprovider-cli status` CTA. (`degraded` does not trigger this
-      row — see the §4.1 pill note; a 404 routes to §2.2.)
+      row — see the §4.1 pill note; a missing-provider 404 is rendered
+      as a pool-check error, not this row and not §2.2.)
 - [ ] A.3 row never executes a command remotely.
 - [ ] A.4 is not rendered in v0.1 (entirely in §5 table (c)).
 - [ ] A.5 idle-prewarm panel renders the five counters (fired /
@@ -1450,9 +1517,16 @@ Layered, NOT a flat checklist. Six required groups.
       part of the contract, not merely single-use + origin-match (§2.5.4). The
       origin binding uses `RemoteAddr`, which degrades behind the mandated proxy
       (§2.5.4) — asserted as documented, not as a strong control.
-- [ ] Two-flag misconfig: portal `github_oauth_enabled:true` + coordinator flag
-      off → `/v1/auth/*` 404 → misconfiguration banner; the portal does NOT fall
-      back to paste-bearer mode.
+- [ ] Two-flag misconfig, **proxy present**: portal `github_oauth_enabled:true` +
+      coordinator flag off + operator has added the `/v1/auth/*` proxy routes →
+      `/v1/auth/me/providers` returns a real `404` → misconfiguration banner; the
+      portal does NOT fall back to paste-bearer mode.
+- [ ] Two-flag misconfig, **proxy absent (reference-nginx case)**: with
+      `github_oauth_enabled:true` but no `/v1/auth/*` proxy routes,
+      `/v1/auth/me/providers` hits the SPA fallback and returns **200 HTML**, which
+      the portal parses as an **empty provider list** (silent "waiting" state), NOT
+      a banner. This AC asserts the shipped silent-empty-list behavior and that
+      §10.4 names the proxy routes as a prerequisite (§2.3 wiring caveat).
 - [ ] Coordinator mounts `/v1/auth/*` ONLY when `GITHUB_OAUTH_ENABLED=true`
       (routes absent → 404 when off).
 
@@ -1822,10 +1896,12 @@ The user shared screenshots from a competitor seller portal
   - **Ingress query-log redaction:** redact `ot` / `pair_ot` / `code` / `state`
     at the reverse-proxy / CDN layer; coordinator app-log redaction does not cover
     ingress access logs that see `/claim?ot=…` (§2.5.4).
-  - **Known unwired data path:** even with the above, aggregate earnings (A.2 /
-    C.1) do not load in OAuth cookie mode until the coordinator earnings read is
-    cookie-authorized with an ownership check (§2.5.0). Operators enabling OAuth
-    mode today get identity + provider-list + `pair_ot` binding only.
+  - **Known unwired data path:** even with the above, the earnings-sourced surfaces
+    (A.2 / C.1 **and A.5 idle-prewarm**) do not load in OAuth cookie mode until the
+    coordinator earnings read is cookie-authorized with an ownership check (§2.5.0).
+    The **A.1 pool-status header does work** in OAuth mode (public pool-check).
+    Operators enabling OAuth mode today get identity + provider-list + `pair_ot`
+    binding + A.1 status; earnings (A.2/C.1/A.5) stay dark.
 
 ---
 
@@ -1835,6 +1911,17 @@ v0.1 is intentionally narrow. The phasing below sizes each phase
 to a single PR; each phase ends with its own IMPL audit gate per
 the project's audit-loop rule (memory:
 [`feedback-build-audit-loop`]).
+
+**GitHub-OAuth mode phasing (reconciled v0.9).** The Phase-1A auth
+step below is the **paste-bearer** v0.1 build. The GitHub-OAuth
+cookie-session mode (§2.5) was built and shipped **after** v0.1
+(commit `0935d1e`), not through these phases; v0.9 reconciles it
+retroactively as documentation of shipped code. A future phase — call
+it Phase 2A (OAuth completion) — would wire the earnings gap (§2.5.0:
+cookie-authorize the earnings read + add the ownership/IDOR check),
+add the `/v1/auth/*` reverse-proxy routes (§10.4), and address the
+carried security residuals (§2.5.7). That phase is out of scope for
+this spec-only reconciliation.
 
 ### Phase 1A — Scaffolding + auth + deployment-mode + Machine A.1/A.2/A.3
 
