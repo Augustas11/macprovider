@@ -1,7 +1,7 @@
 # SPEC-031 — Canary Probe, Degrade & Sanction Lifecycle
 
-**Status:** v0.1-draft
-**Date:** 2026-07-11
+**Status:** v0.2
+**Date:** 2026-07-13
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
 **Related infrastructure:** SPEC-030 (losslessness probe) is a *distinct* probe subsystem; SPEC-031 does not govern it. Per SPEC-030 FR-1 the two **MAY** share generic scheduling/jitter/persistence infrastructure but **MUST** keep separate carriers, frames, verdicts, state, and sanction paths (see §17).
 **Companion baseline (separate spec):** proof-of-weights / OPoI semantics + the autotune hello-gate are runbook item 9's normative baseline; this spec defines only the canary *mechanism* those features build on, and explicitly does **not** make weight-integrity claims (see §1, §2, and the CRITICAL reframing in the changelog).
@@ -759,7 +759,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 |----|--------|------|
 | FR-CAN1 scheduling/jitter/shuffle | Implemented | `runCanaryLoop`, `shuffledProviders`, `jitteredCanaryInterval`. |
 | FR-CAN2 body (temp 0, nonce, random challenge) | **Partial** | Temp pinned (#533), nonce validated. Selection is byte-modulo (biased; entries >255 unreachable) not uniform; nonce is 32-bit (probabilistic freshness, no replay cache). Spec recommends ≤256-entry banks + rejection-sampling / ≥128-bit nonce beyond shipped. |
-| FR-CAN3 `max_tokens` sizing + attribution | **Tightens/Gap** | Prod default 16→32 (#531); ≥-expected-length validation and the coordinator-attribution of `incomplete` are new. |
+| FR-CAN3 `max_tokens` sizing + attribution | **Tightens/Partial** | Prod default 16→32 (#531). Coordinator-attribution of a **clean (error-free) `incomplete`** is now **implemented** (v0.2): such a probe — a truncation of the coordinator's own `max_tokens`-bounded echo — is neutral at any fleet size and never increments the counter (`runCanaryProbeAtEpoch` short-circuit + `canaryProbeMetrics.CoordinatorAttributed = end.Error == ""`). A provider-signaled failure (`end.Error != ""`) still counts. The `≥-expected-length` **config validation** remains a gap. |
 | FR-CAN4/5 transport, admitted model | Implemented | WS vs HTTP split; `MaxAdmittedModelKey`. FR-CAN5 explicitly not an identity binding. |
 | FR-CAN6 echo-first, skip-neutral | **Partial** | Order + counter skip-neutral implemented; OPoI skip-neutrality is a gap (see FR-CAN29). |
 | FR-CAN7 observe default; global-latency reject | **Partial** | Default `observe` (#513). Global-bank latency is un-logged in observe but **applied in enforce** (not rejected at validation) — accept-and-partially-honor (gap). |
@@ -776,7 +776,8 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN19 conjunctive eligibility | Implemented | `RoutingEligible()` enforces auth/publication + state + slots. |
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Follows SPEC-010 R-3.3.4 `ModelKnown()` union (#555, authoritative); SPEC-002 R-3.X.6 `MAY` / SPEC-006 §17.2 wording is the carried item-22 cross-spec inconsistency, not claimed as fully aligned. |
-| FR-CAN22/23 sole-provider protection + Sybil-proof correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no last-provider floor, no correlation epoch with staged results (snapshot + shared-fingerprint re-dispatch + bank-generation + discard-on-suspicion), no atomic evaluation. (v0.1 correlation produces only ephemeral discard + alert — no correlated-majority verdict creates persistent containment state; ordinary per-provider FR-CAN11/15 sanctions still apply; all persistent containment is operator-only — see FR-CAN23.) |
+| FR-CAN22 sole-provider floor | **Implemented** (v0.2) | `RecordCanaryResult` spares the **sole routing-eligible provider** for a model on **any** canary-only signal — it returns `CanaryTripFloorHeld` (no state change, keeps accruing the counter) instead of degrading/banning, and the caller emits a `canary_floor_held` / `pool_redundancy_low` operator alert (`hasOtherEligibleForModelLocked`). Applies to both tiers (precedes the tier branch). Removal of a sole provider still requires evidence independent of the canary — the FR-P11a buyer-path breaker, a confirmed transport death, or item-9 weight evidence. |
+| FR-CAN23 correlated-fault epoch (multi-provider) | **Gap** | The correlation epoch with **staged results** (pre-sweep snapshot + shared-fingerprint re-dispatch + bank-generation fencing + discard-on-suspicion) and the `relay_error` **hard/status/soft** sub-class split are **not** implemented — `RecordCanaryResult` still receives only a pass/fail bool with no per-signal class. The FR-CAN22 floor already prevents the single-provider outage (incidents #1/#2); the correlation epoch matters only at **≥2** providers and remains the authorized follow-up. (Its v0.1 design: ephemeral discard + alert only, no correlated-majority verdict creating persistent containment; ordinary per-provider FR-CAN11/15 sanctions still apply — see FR-CAN23.) |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
 | FR-CAN27 failure logging | **Partial** | `canary_fail_reason` (#513); missing `assigned_id`/outcome and global-bank latency (gap). |
@@ -920,11 +921,14 @@ This spec's purpose is to define the contract under which internal canary can be
 (§14 classifies per-FR status but defers the gate to this list) — operators
 **MUST NOT** re-enable canary sanctioning until every item holds:
 
-1. **FR-CAN22/23** — sole-provider protection + Sybil-proof correlated-fault
-   containment (a canary-only signal never empties the pool for the last provider;
-   a shared bad challenge is contained by ephemeral discard + operator alert, with
-   no correlated-majority verdict creating persistent containment state — ordinary
-   per-provider FR-CAN11/15 sanctions still apply).
+1. **FR-CAN22** (sole-provider floor) — **implemented (v0.2):** a canary-only
+   signal never empties the pool for the last provider (`CanaryTripFloorHeld`).
+   **FR-CAN23** (Sybil-proof correlated-fault containment) — **still required**
+   before re-enable at ≥2 providers: a shared bad challenge must be contained by
+   ephemeral discard + operator alert, with no correlated-majority verdict
+   creating persistent containment state — ordinary per-provider FR-CAN11/15
+   sanctions still apply. (At a single provider the FR-CAN22 floor already holds,
+   so this bar item is only outstanding for multi-provider pools.)
 2. **FR-CAN15** — durable sanction load decoupled from `canary_enabled` (disabling
    canary does not launder sanctions).
 3. **FR-CAN18** — crash-consistent, fail-closed persistence for pinned sanctions
@@ -937,8 +941,10 @@ This spec's purpose is to define the contract under which internal canary can be
    percentile-over-N + ≥2-provider preconditions) is conformant — latency
    `enforce` on the current non-streaming single-shot metric is unsafe.
 
-FR-CAN22/23, FR-CAN15, FR-CAN18, and FR-CAN26 are the outage-preventing guards;
-FR-CAN14 is required before the breaker and canary coexist under load.
+FR-CAN22 (implemented v0.2), FR-CAN23, FR-CAN15, FR-CAN18, and FR-CAN26 are the
+outage-preventing guards; the FR-CAN22 floor is the one that directly prevented
+the single-provider incidents #1/#2 and is now in force. FR-CAN14 is required
+before the breaker and canary coexist under load.
 
 ## 17. Cross-references
 
@@ -978,6 +984,26 @@ FR-CAN14 is required before the breaker and canary coexist under load.
 
 ## 18. Changelog
 
+- **v0.2 (2026-07-13):** Runbook item 1(b)/1(c) IMPL landed (docs updated to match
+  code; no spec-behavior change beyond marking Gaps closed).
+  - **FR-CAN22 sole-provider floor → Implemented.** `RecordCanaryResult` now spares
+    the sole routing-eligible provider for a model on any canary-only signal
+    (`CanaryTripFloorHeld` + `hasOtherEligibleForModelLocked`), for both tiers,
+    instead of degrading/banning it — the direct fix for the single-provider
+    incidents #1/#2 self-inflicted outage. The provider keeps accruing its counter
+    and the caller raises a `canary_floor_held` / `pool_redundancy_low` operator
+    alert. §14, §16 item 1, and the outage-guard summary updated.
+  - **FR-CAN3 coordinator-attribution → Partial (attribution done).** A clean,
+    error-free `incomplete` (a truncation of the coordinator's own `max_tokens`
+    echo) is now neutral at any fleet size (`CoordinatorAttributed = end.Error == ""`);
+    a provider-signaled failure still counts. The `≥-expected-length` config
+    validation remains a gap.
+  - **1(c) redundancy visibility (SPEC-032 decision: surface, never auto-admit).**
+    The autotune hello-gate rejection log now carries `routing_eligible_for_model`
+    and flags `pool_redundancy_low` when below two — the gate is **not** weakened.
+  - **Deferred (still Gap):** FR-CAN23 multi-provider correlation epoch + the
+    `relay_error` hard/status/soft sub-class split; FR-CAN15/18/14/26. Sources:
+    `internal/pool/provider.go`, `internal/ws/server.go`, `internal/ws/canary_probe.go`.
 - **v0.1-draft (2026-07-11):** Initial reconstructed baseline (runbook item 8,
   Wave C), then **R1 codex three-lane audit absorbed** (code / security /
   architect; each returned 1 CRITICAL + HIGH/MEDIUM). Key absorptions:

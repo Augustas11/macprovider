@@ -363,6 +363,19 @@ func TestRecordCanaryResultTripsProvisionalUnavailable(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	// A second eligible provider for the same model keeps the FR-CAN22
+	// last-provider floor from sparing the target, so this test still exercises
+	// the normal trip path.
+	registry.Register(&Provider{
+		ProviderID:     "provisional-b",
+		AssignedID:     "session-b",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
 	first := registry.RecordCanaryResult("provisional-a", "session-a", false, at, 3)
@@ -402,6 +415,19 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	// A second eligible provider for the same model keeps the FR-CAN22
+	// last-provider floor from sparing the target, so this test still exercises
+	// the normal pinned-degrade trip path.
+	registry.Register(&Provider{
+		ProviderID:     "pinned-b",
+		AssignedID:     "session-companion",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
 	first := registry.RecordCanaryResult("pinned-a", "session-a", false, at, 2)
@@ -505,6 +531,137 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 	}
 }
 
+// registerFloorPeer registers a second routing-eligible provider serving
+// modelID so the FR-CAN22 last-provider floor does not spare the provider under
+// test — letting sanction/recovery tests still exercise the trip path.
+func registerFloorPeer(registry *Registry, id, modelID string) {
+	registry.Register(&Provider{
+		ProviderID:     id,
+		AssignedID:     id + "-session",
+		ModelID:        modelID,
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+}
+
+// TestRecordCanaryResultFloorSparesSoleProvider verifies the FR-CAN22
+// last-provider floor: a sole routing-eligible provider that fails canaries past
+// the threshold is NOT removed — it stays ready/routable, keeps accruing the
+// fail count, and reports CanaryTripFloorHeld so the caller can alert. Covers
+// both tiers (provisional ban path and pinned degrade path).
+func TestRecordCanaryResultFloorSparesSoleProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tier Tier
+	}{
+		{"provisional", TierProvisional},
+		{"pinned", TierPinned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := NewRegistry(nil)
+			registry.Register(&Provider{
+				ProviderID:     "sole-a",
+				AssignedID:     "session-a",
+				ModelID:        "model-a",
+				Tier:           tc.tier,
+				State:          StateReady,
+				SlotsFree:      1,
+				SlotsTotal:     1,
+				MaxConcurrency: 1,
+			}, nil)
+			at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+			// Fail well past the threshold; the sole provider is never removed.
+			for i := 0; i < 5; i++ {
+				res := registry.RecordCanaryResult("sole-a", "session-a", false, at.Add(time.Duration(i)*time.Minute), 3)
+				if res.Count < 3 {
+					if res.Tripped != CanaryTripNone {
+						t.Fatalf("sub-threshold result %d = %+v, want no trip", i, res)
+					}
+					continue
+				}
+				if res.Tripped != CanaryTripFloorHeld {
+					t.Fatalf("at/over-threshold result %d = %+v, want CanaryTripFloorHeld", i, res)
+				}
+			}
+			got, ok := registry.Resolve("sole-a", "session-a")
+			if !ok {
+				t.Fatal("provider not found")
+			}
+			if got.State != StateReady || !got.RoutingEligible() {
+				t.Fatalf("sole provider = %+v, want spared (ready/routable)", got)
+			}
+			if got.CanaryFailCount != 5 {
+				t.Fatalf("canary fail count = %d, want 5 (still accruing while spared)", got.CanaryFailCount)
+			}
+		})
+	}
+}
+
+// TestRecordCanaryResultFloorLiftsWithSecondProvider verifies the floor is scoped
+// to being the SOLE eligible provider: once a second eligible provider serves the
+// model, the failing provider trips normally. A merely-degraded second provider
+// does NOT satisfy the floor (it is not routing-eligible).
+func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID:     "target",
+		AssignedID:     "session-t",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	// A degraded second provider is not routing-eligible → floor still holds.
+	registry.Register(&Provider{
+		ProviderID:     "degraded-peer",
+		AssignedID:     "session-d",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateDegraded,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+	held := registry.RecordCanaryResult("target", "session-t", false, at, 1)
+	if held.Tripped != CanaryTripFloorHeld {
+		t.Fatalf("with only a degraded peer, result = %+v, want CanaryTripFloorHeld", held)
+	}
+	if n := registry.RoutingEligibleCountForModel("model-a"); n != 1 {
+		t.Fatalf("RoutingEligibleCountForModel = %d, want 1 (target only)", n)
+	}
+
+	// Bring a genuinely eligible second provider online; now the target may trip.
+	registry.Register(&Provider{
+		ProviderID:     "ready-peer",
+		AssignedID:     "session-r",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	if n := registry.RoutingEligibleCountForModel("model-a"); n != 2 {
+		t.Fatalf("RoutingEligibleCountForModel = %d, want 2", n)
+	}
+	tripped := registry.RecordCanaryResult("target", "session-t", false, at.Add(time.Minute), 1)
+	if tripped.Tripped != CanaryTripUnavailable {
+		t.Fatalf("with a second eligible provider, result = %+v, want CanaryTripUnavailable", tripped)
+	}
+	got, _ := registry.Resolve("target", "session-t")
+	if got.State != StateUnavailable {
+		t.Fatalf("state = %q, want unavailable", got.State)
+	}
+}
+
 func TestLoadedCanarySanctionHoldsPinnedProviderAfterRestart(t *testing.T) {
 	beforeRestart := NewRegistry(nil)
 	provider := &Provider{
@@ -518,6 +675,7 @@ func TestLoadedCanarySanctionHoldsPinnedProviderAfterRestart(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	beforeRestart.Register(provider, nil)
+	registerFloorPeer(beforeRestart, "floor-peer", "model-a")
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	beforeRestart.RecordCanaryResult("pinned-restart", "session-a", false, at, 2)
 	beforeRestart.RecordCanaryResult("pinned-restart", "session-a", false, at.Add(time.Minute), 2)
@@ -564,6 +722,7 @@ func TestClearCanarySanctionRecoversOnlyCanaryHeldProvider(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	registerFloorPeer(registry, "floor-peer", "model-a")
 	at := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	registry.RecordCanaryResult("pinned-recovery", "session-a", false, at, 1)
 
@@ -616,6 +775,7 @@ func TestStaleTerminalCanaryPassDoesNotClearSanction(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	registerFloorPeer(registry, "floor-peer", "model-a")
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	registry.RecordCanaryResult("pinned-terminal", "session-a", false, at, 1)
 	if !registry.MarkState("pinned-terminal", "session-a", StateUnavailable) {
@@ -644,6 +804,7 @@ func TestCanaryPassDoesNotUndoDrain(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	registerFloorPeer(registry, "floor-peer", "model-a")
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
 	registry.RecordCanaryResult("pinned-drain", "session-a", false, at, 1)

@@ -105,6 +105,7 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	s := NewServer(cfg, registry, zerolog.Nop())
 	session := newProviderSession("p1", "s1", serverConn, 1)
 	s.sessions.Store(sessionKey("p1", "s1"), session)
+	registerCanaryFloorPeer(registry, "model-a")
 	go session.runWriter()
 
 	passDone := make(chan struct{})
@@ -150,6 +151,84 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	}
 }
 
+// TestRunCanaryProbeIncompleteAttributedToCoordinatorIsNeutral verifies SPEC-031
+// FR-CAN3 / FR-CAN23(f): a clean (error-free) incomplete — a max_tokens
+// truncation of the coordinator's own echo probe — is neutral at any fleet size.
+// A peer is registered so the last-provider floor does NOT apply, proving the
+// neutrality comes from coordinator-attribution. A provider-signaled failure
+// still counts and trips.
+func TestRunCanaryProbeIncompleteAttributedToCoordinatorIsNeutral(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "inc-p1",
+		AssignedID:     "inc-s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	registerCanaryFloorPeer(registry, "model-a") // floor does NOT shelter inc-p1
+	cfg := config.Default()
+	cfg.Pool.CanaryFailureThreshold = 1
+	cfg.Pool.CanaryTimeoutS = 1
+	cfg.Pool.CanaryMaxTokens = 8
+	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("inc-p1", "inc-s1", serverConn, 1)
+	s.sessions.Store(sessionKey("inc-p1", "inc-s1"), session)
+	go session.runWriter()
+
+	// Truncated (incomplete) generation, no provider error → coordinator-attributed,
+	// neutral: no counter increment, provider stays ready — even at threshold 1 with
+	// a peer present (so the floor is not what spares it).
+	done := make(chan struct{})
+	go func() { s.runCanaryProbe(*provider); close(done) }()
+	req := readCanaryInferenceRequest(t, providerConn)
+	s.handleInferenceEnd("inc-p1", "inc-s1", mustJSON(InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  req.RequestID,
+		Status:     "incomplete",
+		ChunksSent: 0,
+	}))
+	waitForCanary(t, done)
+	got, ok := registry.Resolve("inc-p1", "inc-s1")
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.CanaryFailCount != 0 || got.State != pool.StateReady {
+		t.Fatalf("after coordinator-attributed incomplete = %+v, want neutral (fail count 0, ready)", got)
+	}
+
+	// A provider-signaled failure is NOT attributed to the coordinator → it counts
+	// and (threshold 1, peer present) trips the provisional ban.
+	done2 := make(chan struct{})
+	go func() { s.runCanaryProbe(*provider); close(done2) }()
+	req2 := readCanaryInferenceRequest(t, providerConn)
+	s.handleInferenceEnd("inc-p1", "inc-s1", mustJSON(InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  req2.RequestID,
+		Status:     "error",
+		Error:      "provider boom",
+		ChunksSent: 0,
+	}))
+	waitForCanary(t, done2)
+	got2, ok := registry.Resolve("inc-p1", "inc-s1")
+	if !ok {
+		t.Fatal("provider not found after provider-error probe")
+	}
+	if got2.CanaryFailCount != 1 || got2.State != pool.StateUnavailable {
+		t.Fatalf("after provider-signaled failure = %+v, want counted + tripped (unavailable)", got2)
+	}
+}
+
 func TestRunCanaryProbePersistsPinnedSanctionAndClearsOnPass(t *testing.T) {
 	serverConn, providerConn := net.Pipe()
 	defer providerConn.Close()
@@ -177,6 +256,7 @@ func TestRunCanaryProbePersistsPinnedSanctionAndClearsOnPass(t *testing.T) {
 	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
 	session := newProviderSession("pinned-p1", "pinned-s1", serverConn, 1)
 	s.sessions.Store(sessionKey("pinned-p1", "pinned-s1"), session)
+	registerCanaryFloorPeer(registry, "model-a")
 	go session.runWriter()
 
 	runFailedCanaryProbe(t, s, providerConn, provider)
@@ -251,6 +331,7 @@ func TestRunCanaryProbeDoesNotDeletePersistedSanctionOnStaleTerminalPass(t *test
 	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
 	session := newProviderSession("pinned-stale", "pinned-stale-s1", serverConn, 1)
 	s.sessions.Store(sessionKey("pinned-stale", "pinned-stale-s1"), session)
+	registerCanaryFloorPeer(registry, "model-a")
 	go session.runWriter()
 
 	runFailedCanaryProbe(t, s, providerConn, provider)
@@ -749,6 +830,25 @@ func testCanaryChallenge() config.CanaryChallengeConfig {
 		Prompt:   "Which US state uses postal abbreviation VT? Append -{nonce}.",
 		Expected: "Vermont-{nonce}",
 	}
+}
+
+// registerCanaryFloorPeer registers a second routing-eligible provider for
+// modelID so the FR-CAN22 last-provider floor does not spare the provider under
+// test — letting canary tests still exercise the normal trip path. The peer has
+// no session/conn; it exists only as an eligible registry entry and is never
+// probed.
+func registerCanaryFloorPeer(registry *pool.Registry, modelID string) {
+	registry.Register(&pool.Provider{
+		ProviderID:     "canary-floor-peer",
+		AssignedID:     "canary-floor-peer-session",
+		ModelID:        modelID,
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
 }
 
 func runFailedCanaryProbe(t *testing.T, s *Server, providerConn net.Conn, provider *pool.Provider) {

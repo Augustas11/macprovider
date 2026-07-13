@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	errCanaryChallengeBankEmpty   = errors.New("canary challenge bank is empty")
-	errCanaryRandomSeedTooShort   = errors.New("canary random seed too short")
-	errCanaryChallengePromptEmpty = errors.New("canary challenge prompt and expected must not be empty")
+	errCanaryChallengeBankEmpty    = errors.New("canary challenge bank is empty")
+	errCanaryRandomSeedTooShort    = errors.New("canary random seed too short")
+	errCanaryChallengePromptEmpty  = errors.New("canary challenge prompt and expected must not be empty")
 	errCanaryChallengeMissingNonce = errors.New("canary challenge prompt and expected must contain {nonce}")
 )
 
@@ -38,6 +38,12 @@ type canaryProbeMetrics struct {
 	// tps_breach, incomplete, relay_error) so prod canary-failure logs are
 	// diagnosable. Empty on a pass.
 	FailReason canaryFailReason
+	// CoordinatorAttributed marks a failure caused by the coordinator's own probe
+	// configuration — specifically a max_tokens truncation of the fixed echo prompt
+	// (a clean, error-free `incomplete`) — rather than provider misbehavior. Such a
+	// failure is NEUTRAL at any fleet size (SPEC-031 FR-CAN3 / FR-CAN23(f)): it
+	// never increments the sanction counter and never sanctions.
+	CoordinatorAttributed bool
 }
 
 // canaryFailReason identifies why a canary probe failed. Empty on pass.

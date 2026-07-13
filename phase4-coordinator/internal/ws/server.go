@@ -1673,11 +1673,22 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 		return "", "", false
 	}
 	if !ok {
-		s.log.Info().
+		// SPEC-032 redundancy decision (runbook item 1c): rejecting a would-be
+		// second provider for lack of verified hardware evidence is correct — the
+		// gate is NOT weakened here. But surface the redundancy cost so an operator
+		// sees a rejection that leaves the model non-redundant (the 2026-07-10 air5
+		// gated-out condition). Attach the current routing-eligible count for the
+		// model; flag pool_redundancy_low when it is below two.
+		eligible := s.pool.RoutingEligibleCountForModel(hello.ModelID)
+		event := s.log.Info().
 			Str("provider_id", hello.ProviderID).
 			Str("event", "autotune_evidence_required").
 			Str("model_id", hello.ModelID).
-			Msg("autotune hello gate rejected connect without verified hardware evidence")
+			Int("routing_eligible_for_model", eligible)
+		if eligible < 2 {
+			event = event.Bool("pool_redundancy_low", true)
+		}
+		event.Msg("autotune hello gate rejected connect without verified hardware evidence")
 		s.close(conn, CloseInvalidHello, "autotune_evidence_required")
 		return "", "", false
 	}
@@ -2723,6 +2734,20 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		s.enforceNextCanary.Store(provider.ProviderID, struct{}{})
 		return true
 	}
+	if outcome == canaryProbeFail && attempt.metrics.CoordinatorAttributed {
+		// SPEC-031 FR-CAN3 / FR-CAN23(f): a coordinator-attributable incomplete
+		// (our own max_tokens truncated the fixed echo probe) is neutral at any
+		// fleet size — it never counts toward a sanction. Do NOT call
+		// RecordCanaryResult: leave the counter untouched and keep the provider
+		// routable. This is the direct fix for the 2026-07-10 `canary_max_tokens`
+		// truncation that transiently degraded the sole prod provider (incident #3).
+		s.log.Info().
+			Str("provider_id", provider.ProviderID).
+			Str("canary_fail_reason", string(attempt.metrics.FailReason)).
+			Int("canary_max_tokens", s.canaryMaxTokens()).
+			Msg("canary probe incomplete attributed to coordinator max_tokens budget; neutral (no sanction)")
+		return true
+	}
 	passed := outcome == canaryProbePass
 	checkedAt := s.now()
 	result := s.pool.RecordCanaryResult(provider.ProviderID, provider.AssignedID, passed, checkedAt, s.canaryFailureThreshold())
@@ -2778,6 +2803,21 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 			LastFailedAt:  &checkedAt,
 		})
 		s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider held degraded after canary threshold")
+	case pool.CanaryTripFloorHeld:
+		// SPEC-031 FR-CAN22 last-provider floor: the sole routing-eligible provider
+		// for this model reached the canary failure threshold but was spared to
+		// avoid emptying the pool (the incidents #1/#2 outage). It stays routable.
+		// This IS the below-two redundancy signal (SPEC-032 redundancy decision:
+		// surface, never auto-remove) — an operator must investigate the failing
+		// canary and/or add a second provider.
+		s.log.Warn().
+			Str("provider_id", provider.ProviderID).
+			Str("model_id", provider.ModelID).
+			Str("event", "canary_floor_held").
+			Int("canary_fail_count", result.Count).
+			Int("canary_failure_threshold", result.Threshold).
+			Bool("pool_redundancy_low", true).
+			Msg("sole routing-eligible provider for model failed canary threshold; spared to preserve availability (SPEC-031 FR-CAN22) — operator investigation required")
 	}
 	return true
 }
@@ -2879,6 +2919,13 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 			}
 			if end.Status != "complete" {
 				metrics.FailReason = canaryFailIncomplete
+				// A clean, error-free non-complete end on a coordinator-authored,
+				// max_tokens-bounded echo probe is a coordinator-attributable
+				// truncation (SPEC-031 FR-CAN3, §5): the coordinator chose the token
+				// budget, so this is not evidence of provider misbehavior. A
+				// provider-signaled error (end.Error) is NOT attributed — it stays a
+				// countable failure.
+				metrics.CoordinatorAttributed = end.Error == ""
 				return canaryProbeFail, metrics
 			}
 			enforceLatency := s.cfg.Pool.CanaryLatencyEnforced()

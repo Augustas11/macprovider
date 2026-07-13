@@ -1136,6 +1136,11 @@ const (
 	CanaryTripNone        CanaryTripState = ""
 	CanaryTripDegraded    CanaryTripState = "degraded"
 	CanaryTripUnavailable CanaryTripState = "unavailable"
+	// CanaryTripFloorHeld means the provider reached the failure threshold but was
+	// spared because it is the sole routing-eligible provider for its model
+	// (SPEC-031 FR-CAN22 last-provider floor). It stays routable and keeps
+	// accruing CanaryFailCount; the caller MUST emit an operator alert.
+	CanaryTripFloorHeld CanaryTripState = "floor_held"
 )
 
 type CanaryResult struct {
@@ -1196,6 +1201,21 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	if result.Count < threshold {
 		return result
 	}
+	// FR-CAN22 (SPEC-031 §10) last-provider floor: a canary-only signal MUST NOT
+	// remove the sole routing-eligible provider for a model. A canary probe is a
+	// fingerprintable synthetic request, so a failed echo does not prove ordinary
+	// buyer traffic is failing; removing the last provider on it is the
+	// self-inflicted total outage of incidents #1/#2 (2026-07-09/10). The provider
+	// keeps accruing CanaryFailCount and stays routable; the caller emits an
+	// operator alert (CanaryTripFloorHeld). Removing a sole provider requires
+	// evidence independent of the canary — the FR-P11a buyer-path breaker, a
+	// confirmed transport death, or item-9 weight evidence — none of which flow
+	// through this canary path. Applies to both tiers (provisional ban and pinned
+	// degrade), since it precedes the tier branch.
+	if !r.hasOtherEligibleForModelLocked(providerID, p.ModelID) {
+		result.Tripped = CanaryTripFloorHeld
+		return result
+	}
 	if p.Tier == TierProvisional {
 		r.setStateLocked(p, StateUnavailable)
 		result.Tripped = CanaryTripUnavailable
@@ -1210,6 +1230,55 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	}
 	result.Tripped = CanaryTripDegraded
 	return result
+}
+
+// providerServesModel reports whether p currently serves modelID, either as its
+// active model or via a declared supported model. Pure; performs no locking.
+func providerServesModel(p *Provider, modelID string) bool {
+	if p == nil {
+		return false
+	}
+	if p.ModelID == modelID {
+		return true
+	}
+	for _, m := range p.SupportedModels {
+		if m == modelID {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOtherEligibleForModelLocked reports whether some provider other than
+// excludeID is routing-eligible and serves modelID. Caller MUST hold r.mu.
+// Backs the FR-CAN22 last-provider floor in RecordCanaryResult: when this
+// returns false, the excluded provider is the sole server for the model and a
+// canary-only signal must not remove it.
+func (r *Registry) hasOtherEligibleForModelLocked(excludeID, modelID string) bool {
+	for id, p := range r.providers {
+		if id == excludeID {
+			continue
+		}
+		if p.RoutingEligible() && providerServesModel(p, modelID) {
+			return true
+		}
+	}
+	return false
+}
+
+// RoutingEligibleCountForModel returns the number of routing-eligible providers
+// serving modelID. Backs the SPEC-031 §10 / SPEC-032 redundancy alert
+// (below-two operator visibility); it never affects admission or routing.
+func (r *Registry) RoutingEligibleCountForModel(modelID string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, p := range r.providers {
+		if p.RoutingEligible() && providerServesModel(p, modelID) {
+			n++
+		}
+	}
+	return n
 }
 
 // SELivenessResult is returned by RecordSELivenessResult.
