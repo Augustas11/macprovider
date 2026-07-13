@@ -10,6 +10,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
 )
 
 type Hello struct {
@@ -112,6 +113,7 @@ type Tier2Caps struct {
 	Attestation                    bool     `json:"attestation"`
 	AEADSuites                     []string `json:"aead_suites"`
 	ResponseChunkPlaintextEnvelope bool     `json:"response_chunk_plaintext_envelope,omitempty"`
+	InBandAEADRekeyV1              bool     `json:"in_band_aead_rekey_v1,omitempty"`
 }
 
 type AuthChallenge struct {
@@ -179,6 +181,61 @@ type AuthEncryptedLegSession struct {
 	RekeyAfterRequests             int    `json:"rekey_after_requests"`
 	RekeyAfterSeconds              int    `json:"rekey_after_seconds"`
 	ResponseChunkPlaintextEnvelope bool   `json:"response_chunk_plaintext_envelope,omitempty"`
+	InBandAEADRekeyV1              bool   `json:"in_band_aead_rekey_v1,omitempty"`
+}
+
+// AEADRekeyRequest starts an in-band Tier-2 key rotation on an already
+// authenticated provider WebSocket. The stable provider and assigned session
+// identities do not change; only the encrypted-leg epoch is replaced.
+type AEADRekeyRequest struct {
+	Type                           string `json:"type"`
+	Version                        int    `json:"version"`
+	RekeyID                        string `json:"rekey_id"`
+	AssignedID                     string `json:"assigned_id"`
+	Reason                         string `json:"reason"`
+	OldKID                         string `json:"old_kid"`
+	CoordinatorECDHPublicKey       string `json:"coordinator_ecdh_public_key"`
+	SelectedAEAD                   string `json:"selected_aead"`
+	ExpiresAt                      string `json:"expires_at"`
+	ResponseChunkPlaintextEnvelope bool   `json:"response_chunk_plaintext_envelope"`
+}
+
+type AEADRekeyResponse struct {
+	Type                  string `json:"type"`
+	Version               int    `json:"version"`
+	RekeyID               string `json:"rekey_id"`
+	AssignedID            string `json:"assigned_id"`
+	OldKID                string `json:"old_kid"`
+	NewKID                string `json:"new_kid"`
+	ProviderECDHPublicKey string `json:"provider_ecdh_public_key"`
+}
+
+// AEADRekeyConfirmation is used for both commit directions. The outer binding
+// is intentionally duplicated inside the encrypted proof so neither side can
+// acknowledge a pending epoch without possessing its freshly derived key.
+type AEADRekeyConfirmation struct {
+	Type       string                 `json:"type"`
+	Version    int                    `json:"version"`
+	RekeyID    string                 `json:"rekey_id"`
+	AssignedID string                 `json:"assigned_id"`
+	OldKID     string                 `json:"old_kid"`
+	NewKID     string                 `json:"new_kid"`
+	Encrypted  bool                   `json:"encrypted"`
+	Enc        tier2.AEADEnvelopeBody `json:"enc"`
+}
+
+type AEADRekeyProof struct {
+	Type                     string `json:"type"`
+	Version                  int    `json:"version"`
+	RekeyID                  string `json:"rekey_id"`
+	ProviderID               string `json:"provider_id"`
+	AssignedID               string `json:"assigned_id"`
+	OldKID                   string `json:"old_kid"`
+	NewKID                   string `json:"new_kid"`
+	ProviderECDHPublicKey    string `json:"provider_ecdh_public_key"`
+	CoordinatorECDHPublicKey string `json:"coordinator_ecdh_public_key"`
+	SelectedAEAD             string `json:"selected_aead"`
+	ExpiresAt                string `json:"expires_at"`
 }
 
 type AuthAttestationSession struct {

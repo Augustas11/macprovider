@@ -3,6 +3,9 @@ package ws
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -16,15 +19,17 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/google/uuid"
 )
 
 var (
-	ErrRelayBackpressure   = errors.New("provider websocket write buffer full")
-	ErrRelayNAKFallback    = errors.New("provider rejected ws-tunneled inference")
-	ErrRelayClosed         = errors.New("provider websocket closed")
-	ErrRelayTimeout        = errors.New("provider websocket inference timed out")
-	ErrRelayAEADFailed     = errors.New("tier2 aead decrypt failed")
-	ErrRelayBufferExceeded = errors.New("relay_buffer_exceeded")
+	ErrRelayBackpressure        = errors.New("provider websocket write buffer full")
+	ErrRelayNAKFallback         = errors.New("provider rejected ws-tunneled inference")
+	ErrRelayClosed              = errors.New("provider websocket closed")
+	ErrRelayTimeout             = errors.New("provider websocket inference timed out")
+	ErrRelayAEADFailed          = errors.New("tier2 aead decrypt failed")
+	ErrRelayBufferExceeded      = errors.New("relay_buffer_exceeded")
+	errTier2C2PCounterExhausted = errors.New("tier2 c2p frame counter exhausted")
 )
 
 const retiredRelayRequestTTL = 5 * time.Minute
@@ -142,6 +147,22 @@ type retiredRelayRequest struct {
 	retiredAt time.Time
 }
 
+type tier2RekeyExchange struct {
+	id                 string
+	reason             string
+	requestID          string
+	oldKID             string
+	coordinatorPrivate *ecdh.PrivateKey
+	request            AEADRekeyRequest
+	next               *pool.Tier2Session
+	proof              []byte
+	phase              string
+	done               chan struct{}
+	err                error
+	setupErr           error
+	failureReason      string
+}
+
 type providerSession struct {
 	providerID     string
 	assignedID     string
@@ -156,9 +177,14 @@ type providerSession struct {
 	activeMu       sync.Mutex
 	active         map[string]*relayActive
 	retired        map[string]retiredRelayRequest
+	activeChanged  chan struct{}
+	closedCh       chan struct{}
 	httpOnly       bool
 	tier2Mu        sync.Mutex
 	tier2          *pool.Tier2Session
+	rekeyMu        sync.Mutex
+	rekey          *tier2RekeyExchange
+	rekeyWaiters   int
 }
 
 // providerFrame is the unit of work consumed by runWriter. Two kinds exist:
@@ -231,13 +257,15 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 		writeLimit = writeLimits[0]
 	}
 	return &providerSession{
-		providerID: providerID,
-		assignedID: assignedID,
-		conn:       conn,
-		writeCh:    make(chan providerFrame, bufferSize),
-		writeLimit: writeLimit,
-		active:     map[string]*relayActive{},
-		retired:    map[string]retiredRelayRequest{},
+		providerID:    providerID,
+		assignedID:    assignedID,
+		conn:          conn,
+		writeCh:       make(chan providerFrame, bufferSize),
+		writeLimit:    writeLimit,
+		active:        map[string]*relayActive{},
+		retired:       map[string]retiredRelayRequest{},
+		activeChanged: make(chan struct{}, 1),
+		closedCh:      make(chan struct{}),
 	}
 }
 
@@ -261,9 +289,10 @@ func (ps *providerSession) runWriter() {
 		if err != nil {
 			ps.failAll(ErrRelayClosed)
 			_ = ps.conn.Close()
-			ps.close()
 			if ps.onWriteFailure != nil {
 				ps.onWriteFailure(ps, err)
+			} else {
+				ps.close()
 			}
 			return
 		}
@@ -286,6 +315,7 @@ func (ps *providerSession) close() {
 		ps.closed = true
 		close(ps.writeCh)
 		ps.writeMu.Unlock()
+		close(ps.closedCh)
 		ps.failAll(ErrRelayClosed)
 	})
 }
@@ -384,11 +414,14 @@ func (ps *providerSession) addActive(requestID string, maxConcurrency int, strea
 
 func (ps *providerSession) removeActive(requestID string) (*relayActive, bool) {
 	ps.activeMu.Lock()
-	defer ps.activeMu.Unlock()
 	active, ok := ps.active[requestID]
 	if ok {
 		delete(ps.active, requestID)
 		ps.markRetiredLocked(active, time.Now())
+	}
+	ps.activeMu.Unlock()
+	if ok {
+		ps.signalActiveChanged()
 	}
 	return active, ok
 }
@@ -485,12 +518,22 @@ func (ps *providerSession) failAll(err error) {
 		delete(ps.active, requestID)
 	}
 	ps.activeMu.Unlock()
+	if len(active) > 0 {
+		ps.signalActiveChanged()
+	}
 	for _, a := range active {
 		select {
 		case a.errs <- err:
 		default:
 		}
 		close(a.chunks)
+	}
+}
+
+func (ps *providerSession) signalActiveChanged() {
+	select {
+	case ps.activeChanged <- struct{}{}:
+	default:
 	}
 }
 
@@ -528,7 +571,7 @@ func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestI
 	}
 	defer ps.tier2Mu.Unlock()
 	if session.C2PCounter == ^uint64(0) {
-		return nil, errors.New("tier2 c2p frame counter exhausted")
+		return nil, errTier2C2PCounterExhausted
 	}
 	seq := session.C2PCounter
 	aad := tier2.AEADFrameAAD{
@@ -812,27 +855,398 @@ func (ps *providerSession) tier2RekeyReason(now time.Time, cfg config.Tier2Confi
 	return "", false
 }
 
-func (s *Server) closeProviderForTier2Rekey(session *providerSession, providerID, assignedID, requestID, reason string) {
-	tier2.LogAEADRekey(s.log, providerID, assignedID, requestID, reason)
+func (s *Server) closeProviderForTier2RekeyIfDrained(session *providerSession, providerID, assignedID, requestID string) {
+	s.beginTier2RekeyIfDue(session, providerID, assignedID, requestID)
+}
+
+func (s *Server) newTier2RekeyExchange(session *providerSession, assignedID, requestID, reason string) *tier2RekeyExchange {
+	rekeyID := uuid.NewString()
+	exchange := &tier2RekeyExchange{
+		id:        rekeyID,
+		reason:    reason,
+		requestID: requestID,
+		phase:     "draining",
+		done:      make(chan struct{}),
+	}
+	session.tier2Mu.Lock()
+	current := session.tier2
+	if current == nil {
+		session.tier2Mu.Unlock()
+		exchange.setupErr = ErrRelayClosed
+		exchange.failureReason = "session_missing"
+		return exchange
+	}
+	exchange.oldKID = current.KeyID
+	if !current.InBandAEADRekeyV1 {
+		session.tier2Mu.Unlock()
+		exchange.setupErr = ErrRelayClosed
+		exchange.failureReason = "unsupported"
+		return exchange
+	}
+	selectedAEAD := current.AEADSuite
+	responseChunkPlaintextEnvelope := current.ResponseChunkPlaintextEnvelope
+	session.tier2Mu.Unlock()
+
+	coordinatorPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		exchange.setupErr = err
+		exchange.failureReason = "key_generation_failed"
+		return exchange
+	}
+	request := AEADRekeyRequest{
+		Type:                           "aead_rekey_request",
+		Version:                        1,
+		RekeyID:                        rekeyID,
+		AssignedID:                     assignedID,
+		Reason:                         reason,
+		OldKID:                         exchange.oldKID,
+		CoordinatorECDHPublicKey:       base64.RawURLEncoding.EncodeToString(coordinatorPrivate.PublicKey().Bytes()),
+		SelectedAEAD:                   selectedAEAD,
+		ResponseChunkPlaintextEnvelope: responseChunkPlaintextEnvelope,
+	}
+	exchange.coordinatorPrivate = coordinatorPrivate
+	exchange.request = request
+	return exchange
+}
+
+func (s *Server) beginTier2RekeyIfDue(session *providerSession, providerID, assignedID, requestID string) *tier2RekeyExchange {
+	session.rekeyMu.Lock()
+	if session.rekey != nil {
+		exchange := session.rekey
+		session.rekeyMu.Unlock()
+		return exchange
+	}
+	reason, due := session.tier2RekeyReason(s.now(), s.tier2Config())
+	if !due {
+		session.rekeyMu.Unlock()
+		return nil
+	}
+	exchange := s.newTier2RekeyExchange(session, assignedID, requestID, reason)
+	session.rekey = exchange
+	session.rekeyMu.Unlock()
+	tier2.LogAEADRekey(s.log, providerID, assignedID, requestID, exchange.oldKID, reason)
+	go s.runTier2Rekey(session, providerID, assignedID, exchange)
+	return exchange
+}
+
+func (s *Server) runTier2Rekey(session *providerSession, providerID, assignedID string, exchange *tier2RekeyExchange) {
+	barrierPoll := time.NewTicker(25 * time.Millisecond)
+	defer barrierPoll.Stop()
+	for session.hasActive() || s.losslessnessProviderHasPending(providerID, assignedID) {
+		select {
+		case <-session.activeChanged:
+		case <-barrierPoll.C:
+		case <-session.closedCh:
+			s.failTier2Rekey(session, providerID, assignedID, exchange, "session_closed", ErrRelayClosed)
+			return
+		}
+	}
+	if exchange.setupErr != nil {
+		s.failTier2Rekey(session, providerID, assignedID, exchange, exchange.failureReason, exchange.setupErr)
+		return
+	}
+
+	session.rekeyMu.Lock()
+	if session.rekey != exchange {
+		session.rekeyMu.Unlock()
+		return
+	}
+	exchange.request.ExpiresAt = s.now().Add(s.cfg.ProviderWSHandshakeTimeout()).UTC().Format(time.RFC3339Nano)
+	exchange.phase = "requested"
+	payload, err := json.Marshal(exchange.request)
+	if err == nil {
+		err = session.send(payload)
+	}
+	session.rekeyMu.Unlock()
+	if err != nil {
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "request_send_failed", err)
+		return
+	}
+
+	timer := time.NewTimer(s.cfg.ProviderWSHandshakeTimeout())
+	defer timer.Stop()
+	select {
+	case <-exchange.done:
+		return
+	case <-session.closedCh:
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "session_closed", ErrRelayClosed)
+	case <-timer.C:
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "timeout", ErrRelayTimeout)
+	}
+}
+
+func (s *Server) failTier2Rekey(session *providerSession, providerID, assignedID string, exchange *tier2RekeyExchange, reason string, err error) bool {
+	session.rekeyMu.Lock()
+	if session.rekey != exchange {
+		session.rekeyMu.Unlock()
+		return false
+	}
 	s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
 	s.sessions.Delete(sessionKey(providerID, assignedID))
 	_ = session.conn.Close()
+	exchange.err = err
+	session.rekey = nil
+	tier2.LogAEADRekeyFailed(s.log, providerID, assignedID, exchange.requestID, exchange.id, exchange.oldKID, reason)
+	close(exchange.done)
+	session.rekeyMu.Unlock()
 	session.close()
+	return true
 }
 
-func (s *Server) closeProviderForTier2RekeyIfDrained(session *providerSession, providerID, assignedID, requestID string) {
-	if session.hasActive() {
+func (s *Server) handleAEADRekeyResponse(providerID, assignedID string, payload []byte) {
+	var response AEADRekeyResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Msg("invalid aead_rekey_response")
 		return
 	}
-	if reason, ok := session.tier2RekeyReason(s.now(), s.tier2Config()); ok {
-		s.closeProviderForTier2Rekey(session, providerID, assignedID, requestID, reason)
+	session, ok := s.storedSessionFor(providerID, assignedID)
+	if !ok {
+		return
+	}
+
+	session.rekeyMu.Lock()
+	exchange := session.rekey
+	if exchange == nil || exchange.phase != "requested" {
+		session.rekeyMu.Unlock()
+		s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Msg("stale aead_rekey_response ignored")
+		return
+	}
+	invalid := response.Type != "aead_rekey_response" || response.Version != 1 ||
+		response.RekeyID != exchange.id || response.AssignedID != assignedID ||
+		response.OldKID != exchange.oldKID || response.NewKID == "" || response.NewKID == exchange.oldKID
+	expiresAt := mustParseRekeyExpiry(exchange.request.ExpiresAt)
+	if invalid || expiresAt.IsZero() || !s.now().Before(expiresAt) {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "invalid_response_binding", ErrRelayAEADFailed)
+		return
+	}
+	providerPublic, _, err := tier2.ParseX25519PublicKey(response.ProviderECDHPublicKey)
+	if err != nil {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "invalid_provider_public_key", ErrRelayAEADFailed)
+		return
+	}
+	keys, err := tier2.DerivePillarBKeys(exchange.coordinatorPrivate, providerPublic, providerID, assignedID, exchange.request.SelectedAEAD)
+	if err != nil || keys.KeyID != response.NewKID {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "key_confirmation_mismatch", ErrRelayAEADFailed)
+		return
+	}
+	proof := AEADRekeyProof{
+		Type:                     "aead_rekey_proof",
+		Version:                  1,
+		RekeyID:                  exchange.id,
+		ProviderID:               providerID,
+		AssignedID:               assignedID,
+		OldKID:                   exchange.oldKID,
+		NewKID:                   keys.KeyID,
+		ProviderECDHPublicKey:    response.ProviderECDHPublicKey,
+		CoordinatorECDHPublicKey: exchange.request.CoordinatorECDHPublicKey,
+		SelectedAEAD:             exchange.request.SelectedAEAD,
+		ExpiresAt:                exchange.request.ExpiresAt,
+	}
+	proofBytes, err := json.Marshal(proof)
+	if err != nil {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "proof_encode_failed", ErrRelayAEADFailed)
+		return
+	}
+	commitAAD := tier2.AEADFrameAAD{
+		Type:       "aead_rekey_commit",
+		Direction:  "c2p",
+		RequestID:  exchange.id,
+		ProviderID: providerID,
+		AssignedID: assignedID,
+		Seq:        0,
+	}
+	commitEnvelope, err := tier2.SealPillarBFrame(keys.C2PKey, keys.C2PNonceBase, keys.KeyID, 0, commitAAD, proofBytes)
+	if err != nil {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "commit_seal_failed", ErrRelayAEADFailed)
+		return
+	}
+	next := &pool.Tier2Session{
+		AEADSuite:                      keys.AEADSuite,
+		ResponseChunkPlaintextEnvelope: exchange.request.ResponseChunkPlaintextEnvelope,
+		InBandAEADRekeyV1:              true,
+		C2PKey:                         keys.C2PKey,
+		P2CKey:                         keys.P2CKey,
+		C2PNonceBase:                   keys.C2PNonceBase,
+		P2CNonceBase:                   keys.P2CNonceBase,
+		C2PCounter:                     1,
+		KeyID:                          keys.KeyID,
+	}
+	exchange.next = next
+	exchange.proof = proofBytes
+	exchange.phase = "commit_sent"
+	commit := AEADRekeyConfirmation{
+		Type:       "aead_rekey_commit",
+		Version:    1,
+		RekeyID:    exchange.id,
+		AssignedID: assignedID,
+		OldKID:     exchange.oldKID,
+		NewKID:     keys.KeyID,
+		Encrypted:  true,
+		Enc:        commitEnvelope.Enc,
+	}
+	commitPayload, err := json.Marshal(commit)
+	if err == nil {
+		err = session.send(commitPayload)
+	}
+	session.rekeyMu.Unlock()
+	if err != nil {
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "commit_send_failed", ErrRelayClosed)
+	}
+}
+
+func (s *Server) handleAEADRekeyCommitted(providerID, assignedID string, payload []byte) {
+	var committed AEADRekeyConfirmation
+	if err := json.Unmarshal(payload, &committed); err != nil {
+		s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Msg("invalid aead_rekey_committed")
+		return
+	}
+	session, ok := s.storedSessionFor(providerID, assignedID)
+	if !ok {
+		return
+	}
+	session.rekeyMu.Lock()
+	exchange := session.rekey
+	if exchange == nil || exchange.phase != "commit_sent" {
+		session.rekeyMu.Unlock()
+		s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Msg("stale aead_rekey_committed ignored")
+		return
+	}
+	expiresAt := mustParseRekeyExpiry(exchange.request.ExpiresAt)
+	if expiresAt.IsZero() || !s.now().Before(expiresAt) {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "commit_expired", ErrRelayAEADFailed)
+		return
+	}
+	invalid := committed.Type != "aead_rekey_committed" || committed.Version != 1 || !committed.Encrypted ||
+		committed.RekeyID != exchange.id || committed.AssignedID != assignedID ||
+		committed.OldKID != exchange.oldKID || exchange.next == nil || committed.NewKID != exchange.next.KeyID
+	if invalid {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "invalid_commit_binding", ErrRelayAEADFailed)
+		return
+	}
+	committedAAD := tier2.AEADFrameAAD{
+		Type:       "aead_rekey_committed",
+		Direction:  "p2c",
+		RequestID:  exchange.id,
+		ProviderID: providerID,
+		AssignedID: assignedID,
+		Seq:        0,
+	}
+	plaintext, err := tier2.OpenPillarBFrame(exchange.next.P2CKey, exchange.next.P2CNonceBase, exchange.next.KeyID, 0, committedAAD, tier2.AEADEnvelope{Encrypted: true, Enc: committed.Enc})
+	if err != nil || !bytes.Equal(plaintext, exchange.proof) {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "commit_proof_mismatch", ErrRelayAEADFailed)
+		return
+	}
+	exchange.next.P2CCounter = 1
+	session.tier2Mu.Lock()
+	currentMatches := session.tier2 != nil && session.tier2.KeyID == exchange.oldKID
+	session.tier2Mu.Unlock()
+	exchange.next.StartedAt = s.now()
+	if !currentMatches || !s.pool.ReplaceTier2Session(providerID, assignedID, exchange.oldKID, exchange.next) {
+		session.rekeyMu.Unlock()
+		s.failTier2Rekey(session, providerID, assignedID, exchange, "stale_session", ErrRelayClosed)
+		return
+	}
+	session.tier2Mu.Lock()
+	session.tier2 = exchange.next
+	session.tier2Mu.Unlock()
+	exchange.err = nil
+	session.rekey = nil
+	tier2.LogAEADRekeyCommitted(s.log, providerID, assignedID, exchange.requestID, exchange.id, exchange.oldKID, exchange.next.KeyID, exchange.reason)
+	close(exchange.done)
+	session.rekeyMu.Unlock()
+}
+
+func mustParseRekeyExpiry(raw string) time.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
+func rekeyWaitError(ctx context.Context, exchange *tier2RekeyExchange) error {
+	select {
+	case <-exchange.done:
+		return exchange.err
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ErrRelayTimeout
+		}
+		return ErrRelayClosed
+	}
+}
+
+func tier2RekeyWaiterLimit(maxConcurrency int) int {
+	limit := maxConcurrency * 2
+	if limit < 8 {
+		return 8
+	}
+	if limit > 64 {
+		return 64
+	}
+	return limit
+}
+
+// waitForTier2Rekey registers a bounded per-provider waiter while rekeyMu is
+// held, then releases the gate for the duration of the context-aware wait.
+func waitForTier2Rekey(ctx context.Context, session *providerSession, exchange *tier2RekeyExchange, maxConcurrency int) error {
+	if session.rekeyWaiters >= tier2RekeyWaiterLimit(maxConcurrency) {
+		session.rekeyMu.Unlock()
+		return ErrRelayBackpressure
+	}
+	session.rekeyWaiters++
+	session.rekeyMu.Unlock()
+	err := rekeyWaitError(ctx, exchange)
+	session.rekeyMu.Lock()
+	session.rekeyWaiters--
+	session.rekeyMu.Unlock()
+	return err
+}
+
+func (s *Server) addTier2Active(ctx context.Context, session *providerSession, provider pool.Provider, requestID string, stream bool) (*relayActive, error) {
+	for {
+		session.rekeyMu.Lock()
+		if exchange := session.rekey; exchange != nil {
+			if err := waitForTier2Rekey(ctx, session, exchange, provider.MaxConcurrency); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if reason, due := session.tier2RekeyReason(s.now(), s.tier2Config()); due {
+			exchange := s.newTier2RekeyExchange(session, provider.AssignedID, requestID, reason)
+			session.rekey = exchange
+			tier2.LogAEADRekey(s.log, provider.ProviderID, provider.AssignedID, requestID, exchange.oldKID, reason)
+			go s.runTier2Rekey(session, provider.ProviderID, provider.AssignedID, exchange)
+			if err := waitForTier2Rekey(ctx, session, exchange, provider.MaxConcurrency); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		active, err := session.addActive(requestID, provider.MaxConcurrency, stream)
+		if err == nil {
+			session.markTier2RequestDispatched()
+		}
+		session.rekeyMu.Unlock()
+		return active, err
 	}
 }
 
 func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, providerID, assignedID, requestID, reason string) {
 	tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, requestID, reason)
-	tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, "aead_decrypt_failed")
-	session.failActiveOrAll(requestID, ErrRelayAEADFailed)
+	s.closeProviderForTier2SessionFailure(session, providerID, assignedID, requestID, "aead_decrypt_failed", ErrRelayAEADFailed)
+}
+
+func (s *Server) closeProviderForTier2SessionFailure(session *providerSession, providerID, assignedID, requestID, reason string, relayErr error) {
+	tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, reason)
+	session.failActiveOrAll(requestID, relayErr)
 	s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
 	s.sessions.Delete(sessionKey(providerID, assignedID))
 	_ = session.conn.Close()
@@ -857,20 +1271,23 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	}
 	if provider.EncryptedLeg {
 		session.useTier2Session(provider.Tier2Session)
-		if reason, ok := session.tier2RekeyReason(s.now(), s.tier2Config()); ok {
-			if session.hasActive() {
-				return nil, ErrRelayBackpressure
-			}
-			s.closeProviderForTier2Rekey(session, provider.ProviderID, provider.AssignedID, requestID, reason)
-			return nil, ErrRelayClosed
-		}
 	}
-	active, err := session.addActive(requestID, provider.MaxConcurrency, stream)
+	var active *relayActive
+	var err error
+	if provider.EncryptedLeg {
+		active, err = s.addTier2Active(ctx, session, provider, requestID, stream)
+	} else {
+		active, err = session.addActive(requestID, provider.MaxConcurrency, stream)
+	}
 	if err != nil {
 		return nil, err
 	}
 	payload, err := session.sealInferenceRequest(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx))
 	if err != nil {
+		if errors.Is(err, errTier2C2PCounterExhausted) {
+			s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "counter_exhausted", ErrRelayAEADFailed)
+			return nil, ErrRelayAEADFailed
+		}
 		session.removeActive(requestID)
 		return nil, err
 	}
@@ -880,9 +1297,6 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 			s.handleProviderWriteFailure(session, err)
 		}
 		return nil, err
-	}
-	if provider.EncryptedLeg {
-		session.markTier2RequestDispatched()
 	}
 	cancel := func(reason string) {
 		if reason == "" {

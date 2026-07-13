@@ -1,8 +1,25 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.4.1 (2026-07-12, §2.2 invariant (b) narrowed for the SPEC-024 prefix-cache provider-visibility carve-out)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
+**Version:** 0.5 (2026-07-13, zero-gap in-band Pillar-B AEAD rekey)
+**Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
+
+**Change log v0.5 (2026-07-13, issue #540 — zero-gap mandatory AEAD rekey):**
+- **§6.9 replaces reconnect rotation with a negotiated in-band epoch handoff.**
+  A provider that advertises `in_band_aead_rekey_v1` keeps the same WebSocket,
+  provider identity, assigned session identity, readiness, and warm-up state while
+  request/age rotation gates new dispatch, drains old-epoch work, proves both fresh
+  key directions, and atomically replaces the encrypted-leg epoch. This removes the
+  one-provider `no_provider_available` gap caused by close/reconnect/warm-up.
+- **Failure is fenced and fail-closed.** No rekey-induced close may terminate
+  old-epoch inference. Timeout, invalid binding, failed fresh-key proof, stale epoch,
+  unsupported capability, or write failure closes the connection only after old work
+  has drained; queued callers retain their own cancellation/deadline semantics. Counter
+  exhaustion and AEAD compromise remain immediate hard-failure paths, not soft rekey.
+- **§6.11 adds AC-B-7.** Conformance now requires request- and age-triggered
+  zero-gap traffic, in-flight drain, failure/timeout, stale/duplicate epoch, and
+  fresh-key proof coverage. SPEC-002/SPEC-003 duplicate-identity rules are unchanged
+  because v0.5 never overlaps two provider WebSockets.
 
 **Change log v0.4.1 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out):**
 - **§2.2 invariant (b) narrowed.** Previously the provider could not see/derive `conv:` at all.
@@ -1532,16 +1549,148 @@ All buyer-visible errors from this policy MUST follow §4.6 and §4.7.
 
 ### 6.9 Rekeying
 
-The coordinator SHOULD rekey a Pillar B session after the earliest of:
+The coordinator MUST rotate a Pillar B session at the configured soft boundary
+after the earliest of:
 
 - `tier2.encrypted_leg_rekey_after_requests` requests,
-- `tier2.encrypted_leg_rekey_after_seconds` seconds,
-- provider reconnect,
-- AEAD frame counter exhaustion risk,
-- operator-triggered key rotation.
+- `tier2.encrypted_leg_rekey_after_seconds` seconds.
 
-Rekeying MUST NOT change sticky TTL, sticky key derivation, provider identity,
-or model-hash state.
+Provider reconnect always performs the full §6.2 handshake and therefore starts
+a fresh epoch, but it is not the normal request/age rekey mechanism. AEAD frame
+counter exhaustion risk, authentication failure, nonce/counter corruption, and
+other suspected key compromise are hard failures: the coordinator MUST close the
+encrypted leg immediately per §6.7 and MUST NOT attempt this soft handoff.
+
+#### 6.9.1 Capability and stable identity
+
+The provider advertises `tier2_capabilities.in_band_aead_rekey_v1: true` in
+the initial v2 `auth_request`. The coordinator confirms selection at
+`tier2_session.encrypted_leg.in_band_aead_rekey_v1: true` in the accepted auth
+response. The in-band protocol below is permitted only when both sides selected
+that value.
+
+Rotation uses the existing authenticated provider WebSocket and the existing
+`provider_id` plus `assigned_id`. It MUST NOT create a second provider connection,
+re-register the provider, run warm-up again, change pool readiness, or trigger
+duplicate-provider eviction. SPEC-002 and SPEC-003 duplicate-identity rules remain
+unchanged because there is never an overlapping connection. Rekeying also MUST NOT
+change sticky TTL, sticky key derivation, model-hash state, attestation state, or
+catalog admission state.
+
+#### 6.9.2 Dispatch gate and old-epoch drain
+
+Threshold evaluation and encrypted C→P frame admission MUST share one atomic
+per-session gate. Once a threshold is due or a rekey is pending:
+
+1. no new inference or encrypted control probe may reserve or consume an
+   old-epoch counter;
+2. already-admitted old-epoch inference and losslessness probes continue
+   normally through their terminal response, expiry, or cancellation and MUST
+   NOT be terminated by rekey;
+3. later buyer dispatches wait behind a bounded per-provider gate using their
+   own request context; requests beyond that explicit bound receive ordinary
+   relay backpressure rather than consuming unbounded coordinator resources; and
+4. a healthy rekey MUST NOT unpublish the provider or produce
+   `503 no_provider_available` or `503 tier2_encrypted_leg_required`. Within the
+   bounded waiter budget it MUST NOT produce relay backpressure solely because
+   rotation is active.
+
+The coordinator waits for the old active inference set to reach zero and for
+every admitted old-epoch encrypted control probe to complete or expire before
+sending any rekey frame. This drain has no independent rekey timeout: ordinary
+request deadline/cancellation and control-probe expiry own old work. The rekey
+handshake timeout begins only after the barrier is empty and
+`aead_rekey_request` is sent. A caller that expires while waiting receives its
+ordinary cancellation/timeout result without canceling the shared rekey or
+unpublishing the provider.
+
+#### 6.9.3 Four-frame fresh-epoch handshake
+
+All public keys are 32-byte X25519 values encoded as unpadded base64url. The key
+schedule, transcript, `key_id`, nonce derivation, and AEAD envelope are exactly
+§6.2/§6.3, using the stable `provider_id` and `assigned_id` plus the two newly
+generated public keys. `expires_at` is RFC 3339 with optional fractional seconds.
+
+After the drain, the coordinator generates a fresh X25519 keypair and sends:
+
+```json
+{
+  "type": "aead_rekey_request",
+  "version": 1,
+  "rekey_id": "<uuid>",
+  "assigned_id": "<existing-assigned-id>",
+  "reason": "request_threshold",
+  "old_kid": "<current-kid>",
+  "coordinator_ecdh_public_key": "<new-unpadded-base64url-x25519-key>",
+  "selected_aead": "A256GCM",
+  "expires_at": "2026-07-13T12:00:00.000000000Z",
+  "response_chunk_plaintext_envelope": true
+}
+```
+
+`reason` is `request_threshold` or `age_threshold`. The provider MUST reject an
+expired request, a second pending rekey, or any mismatch with its current
+`assigned_id`, `old_kid`, or negotiated AEAD. After independently confirming its
+inference relay is idle, it generates a fresh X25519 keypair, derives a candidate
+epoch without installing it, and replies:
+
+```json
+{
+  "type": "aead_rekey_response",
+  "version": 1,
+  "rekey_id": "<same-uuid>",
+  "assigned_id": "<existing-assigned-id>",
+  "old_kid": "<current-kid>",
+  "new_kid": "<derived-fresh-kid>",
+  "provider_ecdh_public_key": "<new-unpadded-base64url-x25519-key>"
+}
+```
+
+The coordinator MUST derive the same candidate epoch and compare `new_kid`.
+It then serializes an `aead_rekey_proof` object containing exactly: `type`,
+`version`, `rekey_id`, `provider_id`, `assigned_id`, `old_kid`, `new_kid`,
+`provider_ecdh_public_key`, `coordinator_ecdh_public_key`, `selected_aead`, and
+`expires_at`. It sends those proof bytes in an encrypted
+`aead_rekey_commit` outer frame whose clear binding repeats `version`,
+`rekey_id`, `assigned_id`, `old_kid`, and `new_kid`.
+
+The commit MUST use the candidate epoch's C→P key and nonce base at sequence 0.
+Its §6.3 AAD is `type=aead_rekey_commit`, `direction=c2p`,
+`request_id=rekey_id`, `stream=false`, the stable provider/assigned IDs, and
+`seq=0`. The provider MUST validate every clear binding, decrypt and validate
+every proof field, and re-confirm that its relay is idle. It then installs the
+candidate epoch and returns the identical proof bytes in encrypted
+`aead_rekey_committed`, using the candidate P→C key/nonce base at sequence 0 and
+the analogous AAD (`type=aead_rekey_committed`, `direction=p2c`).
+
+The provider MUST NOT roll back to the old epoch after emitting fresh-key proof.
+If that write fails, normal connection cleanup forces a full authentication.
+The coordinator installs the candidate epoch only after authenticating the
+provider's committed proof and only if `(provider_id, assigned_id, old_kid)`
+still identifies the current pool session. Replacement of the pool pointer and
+the relay pointer MUST be generation-fenced and atomic with respect to dispatch.
+The first encrypted frame in either direction under the new epoch uses sequence
+1; sequence 0 is permanently consumed by the corresponding commit proof. If
+encrypted control traffic consumes sequence 1, the first inference frame uses
+the next sequence in that direction.
+
+#### 6.9.4 Failure and compatibility behavior
+
+Invalid/mismatched/expired response, key-derivation mismatch, commit proof
+failure, handshake timeout, stale pool generation, or rekey write failure MUST
+mark the provider unavailable, delete the stored relay session, and close the
+WebSocket. Because §6.9.2 drains before the handshake, this failure path cannot
+terminate an old-epoch inference. Waiting dispatches fail through the normal
+relay error mapping; the provider must complete a new full v2 authentication
+before becoming eligible again. Neither side may reuse the failed candidate
+keys or counters.
+
+A provider without the negotiated capability is allowed to finish already
+admitted old-epoch work. At the next request/age boundary the coordinator then
+fails closed and requires a normal reconnect; it MUST NOT continue admitting
+requests under an over-age/over-count epoch. This compatibility path may incur
+the historical reconnect gap for old binaries, but MUST NOT reintroduce an
+in-flight termination.
 
 ### 6.10 Coordinator restart behavior
 
@@ -1591,6 +1740,18 @@ Pillar B fields remains routable and Tier-1 behavior is preserved.
 With `tier2.require_encrypted_leg: true`, an otherwise-routable old provider is
 excluded and buyer receives `503 tier2_encrypted_leg_required` if no encrypted
 provider remains.
+
+**AC-B-7. Zero-gap in-band rekey.**
+Hermetic coordinator/provider tests MUST prove request-count and age rotation on
+a one-provider pool with no healthy-rekey 503 and no backpressure within the
+bounded waiter budget, no termination of
+old in-flight work, context-aware queued dispatch, fresh bidirectional key proof,
+sequence-0 commit reservation and sequence-1 first post-commit encrypted frame,
+exact assigned-ID/old-KID
+generation fencing, rejection of overlap/mismatch/replay, timeout/failure
+fail-closed behavior after drain, and legacy-capability drain-before-close. A
+pre-production Pearl canary MUST additionally force both thresholds under
+continuous traffic and record zero rekey-correlated 503s before rollout.
 
 ---
 
@@ -3157,6 +3318,8 @@ Pillar B MUST log:
 - `key_exchange_failed`
 - `aead_decrypt_failed`
 - `aead_rekey`
+- `aead_rekey_committed`
+- `aead_rekey_failed`
 - `encrypted_leg_session_closed`
 - `coordinator_restart_session_invalidated`
 
@@ -3725,9 +3888,10 @@ Condition:
 
 Severity:
 
-- INFO for negotiation, session closure, coordinator restart invalidation, and
-  rekey.
+- INFO for negotiation, session closure, coordinator restart invalidation,
+  `aead_rekey`, and `aead_rekey_committed`.
 - WARN for fallback when encrypted providers exist for the model.
+- WARN for `aead_rekey_failed`.
 - MAJOR for `aead_decrypt_failed` or required encrypted-leg exclusion.
 
 Required fields:

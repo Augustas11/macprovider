@@ -2167,6 +2167,300 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["attestation"] as? Bool, true)
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
         XCTAssertEqual(caps["response_chunk_plaintext_envelope"] as? Bool, true)
+        XCTAssertEqual(caps["in_band_aead_rekey_v1"] as? Bool, true)
+    }
+
+    func testInBandAEADRekeyProvesFreshKeysBeforeSameSessionCutover() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let oldSession = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "old-kid",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response",
+            "version": 2,
+            "status": "accepted",
+            "assigned_id": "assigned-v2",
+            "heartbeat_interval_s": 30,
+            "tier2_session": [
+                "encrypted_leg": [
+                    "enabled": true,
+                    "alg": Tier2ProviderSession.aeadSuite,
+                    "kid": "old-kid",
+                    "in_band_aead_rekey_v1": true,
+                ],
+            ],
+        ], session: oldSession)
+
+        let coordinatorPrivate = Curve25519.KeyAgreement.PrivateKey()
+        let coordinatorPublic = coordinatorPrivate.publicKey.rawRepresentation.base64URLUnpadded()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expiresAt = formatter.string(from: Date().addingTimeInterval(30))
+        let request: [String: Any] = [
+            "type": "aead_rekey_request",
+            "version": 1,
+            "rekey_id": "rekey-1",
+            "assigned_id": "assigned-v2",
+            "reason": "request_threshold",
+            "old_kid": "old-kid",
+            "coordinator_ecdh_public_key": coordinatorPublic,
+            "selected_aead": Tier2ProviderSession.aeadSuite,
+            "expires_at": expiresAt,
+            "response_chunk_plaintext_envelope": true,
+        ]
+        try await client.handleCoordinatorPayloadForTest(request)
+
+        let keyIDBeforeCommit = await client.tier2KeyIDForTest()
+        let pendingIDBeforeCommit = await client.pendingAEADRekeyIDForTest()
+        let framesBeforeCommit = await recorder.frames
+        XCTAssertEqual(keyIDBeforeCommit, "old-kid", "request phase must not cut over early")
+        XCTAssertEqual(pendingIDBeforeCommit, "rekey-1")
+        let response = try XCTUnwrap(framesBeforeCommit.last { $0["type"] as? String == "aead_rekey_response" })
+        let providerPublic = try XCTUnwrap(response["provider_ecdh_public_key"] as? String)
+        let newKID = try XCTUnwrap(response["new_kid"] as? String)
+        XCTAssertNotEqual(newKID, "old-kid")
+        let coordinatorSession = try Tier2ProviderSession.coordinatorSessionForRekeyTest(
+            coordinatorPrivateKey: coordinatorPrivate,
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            providerPublicKeyBase64URL: providerPublic,
+            selectedAEAD: Tier2ProviderSession.aeadSuite
+        )
+        XCTAssertEqual(coordinatorSession.keyID, newKID)
+        let proof: [String: Any] = [
+            "type": "aead_rekey_proof",
+            "version": 1,
+            "rekey_id": "rekey-1",
+            "provider_id": "provider-test",
+            "assigned_id": "assigned-v2",
+            "old_kid": "old-kid",
+            "new_kid": newKID,
+            "provider_ecdh_public_key": providerPublic,
+            "coordinator_ecdh_public_key": coordinatorPublic,
+            "selected_aead": Tier2ProviderSession.aeadSuite,
+            "expires_at": expiresAt,
+        ]
+        let proofData = try JSONSerialization.data(withJSONObject: proof, options: [.sortedKeys])
+        let commitEnvelope = try Tier2ProviderSession.sealAEADRekeyCommitForTest(
+            session: coordinatorSession,
+            rekeyID: "rekey-1",
+            proof: proofData
+        )
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "aead_rekey_commit",
+            "version": 1,
+            "rekey_id": "rekey-1",
+            "assigned_id": "assigned-v2",
+            "old_kid": "old-kid",
+            "new_kid": newKID,
+            "encrypted": true,
+            "enc": commitEnvelope,
+        ])
+
+        let keyIDAfterCommit = await client.tier2KeyIDForTest()
+        let pendingIDAfterCommit = await client.pendingAEADRekeyIDForTest()
+        let countersAfterCommit = await client.tier2CountersForTest()
+        let framesAfterCommit = await recorder.frames
+        XCTAssertEqual(keyIDAfterCommit, newKID)
+        XCTAssertNil(pendingIDAfterCommit)
+        let counters = try XCTUnwrap(countersAfterCommit)
+        XCTAssertEqual(counters.c2p, 1)
+        XCTAssertEqual(counters.p2c, 1)
+        let committed = try XCTUnwrap(framesAfterCommit.last { $0["type"] as? String == "aead_rekey_committed" })
+        XCTAssertEqual(committed["assigned_id"] as? String, "assigned-v2")
+        let committedProof = try Tier2ProviderSession.openAEADRekeyCommittedForTest(
+            session: coordinatorSession,
+            frame: committed,
+            rekeyID: "rekey-1"
+        )
+        XCTAssertEqual(committedProof, proofData)
+        await client.stop()
+    }
+
+    func testInBandAEADRekeyRejectsOverlappingAttemptWithoutChangingActiveEpoch() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let oldSession = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "old-kid",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response", "version": 2, "status": "accepted",
+            "assigned_id": "assigned-v2", "heartbeat_interval_s": 30,
+            "tier2_session": ["encrypted_leg": [
+                "enabled": true,
+                "alg": Tier2ProviderSession.aeadSuite,
+                "kid": "old-kid",
+                "in_band_aead_rekey_v1": true,
+            ]],
+        ], session: oldSession)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let baseRequest: [String: Any] = [
+            "type": "aead_rekey_request", "version": 1, "rekey_id": "rekey-original",
+            "assigned_id": "assigned-v2", "reason": "age_threshold", "old_kid": "old-kid",
+            "coordinator_ecdh_public_key": Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64URLUnpadded(),
+            "selected_aead": Tier2ProviderSession.aeadSuite,
+            "expires_at": formatter.string(from: Date().addingTimeInterval(30)),
+        ]
+        try await client.handleCoordinatorPayloadForTest(baseRequest)
+        var overlapping = baseRequest
+        overlapping["rekey_id"] = "rekey-overlap"
+        do {
+            try await client.handleCoordinatorPayloadForTest(overlapping)
+            XCTFail("overlapping in-band rekey must be rejected")
+        } catch {
+            let activeKeyID = await client.tier2KeyIDForTest()
+            let pendingRekeyID = await client.pendingAEADRekeyIDForTest()
+            XCTAssertEqual(activeKeyID, "old-kid")
+            XCTAssertEqual(pendingRekeyID, "rekey-original")
+        }
+        await client.stop()
+    }
+
+    func testInBandAEADRekeyRequiresNegotiatedCapability() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let oldSession = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "old-kid",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response", "version": 2, "status": "accepted",
+            "assigned_id": "assigned-v2", "heartbeat_interval_s": 30,
+            "tier2_session": ["encrypted_leg": [
+                "enabled": true,
+                "alg": Tier2ProviderSession.aeadSuite,
+                "kid": "old-kid",
+            ]],
+        ], session: oldSession)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let request: [String: Any] = [
+            "type": "aead_rekey_request", "version": 1, "rekey_id": "rekey-unnegotiated",
+            "assigned_id": "assigned-v2", "reason": "age_threshold", "old_kid": "old-kid",
+            "coordinator_ecdh_public_key": Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64URLUnpadded(),
+            "selected_aead": Tier2ProviderSession.aeadSuite,
+            "expires_at": formatter.string(from: Date().addingTimeInterval(30)),
+        ]
+
+        do {
+            try await client.handleCoordinatorPayloadForTest(request)
+            XCTFail("unnegotiated in-band rekey must be rejected")
+        } catch {
+            let activeKeyID = await client.tier2KeyIDForTest()
+            let pendingRekeyID = await client.pendingAEADRekeyIDForTest()
+            XCTAssertEqual(activeKeyID, "old-kid")
+            XCTAssertNil(pendingRekeyID)
+            let frames = await recorder.frames
+            XCTAssertFalse(frames.contains { $0["type"] as? String == "aead_rekey_response" })
+        }
+        await client.stop()
+    }
+
+    func testInBandAEADRekeyRejectsTamperedProofFieldWithoutCutover() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let prepared = try await prepareInBandAEADRekey(recorder: recorder)
+        var proof = prepared.proof
+        proof["assigned_id"] = "attacker-assigned-id"
+        let proofData = try JSONSerialization.data(withJSONObject: proof, options: [.sortedKeys])
+        let commitEnvelope = try Tier2ProviderSession.sealAEADRekeyCommitForTest(
+            session: prepared.coordinatorSession,
+            rekeyID: prepared.rekeyID,
+            proof: proofData
+        )
+
+        do {
+            try await prepared.client.handleCoordinatorPayloadForTest([
+                "type": "aead_rekey_commit",
+                "version": 1,
+                "rekey_id": prepared.rekeyID,
+                "assigned_id": "assigned-v2",
+                "old_kid": "old-kid",
+                "new_kid": prepared.newKID,
+                "encrypted": true,
+                "enc": commitEnvelope,
+            ])
+            XCTFail("tampered rekey proof field must be rejected")
+        } catch {
+            let activeKeyID = await prepared.client.tier2KeyIDForTest()
+            let pendingRekeyID = await prepared.client.pendingAEADRekeyIDForTest()
+            XCTAssertEqual(activeKeyID, "old-kid")
+            XCTAssertEqual(pendingRekeyID, prepared.rekeyID)
+        }
+        await prepared.client.stop()
+    }
+
+    func testInBandAEADRekeyCommittedSendFailureNeverRollsBackOldEpoch() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let sendOverride: CoordinatorClient.SendOverride = { frame in
+            await recorder.append(frame)
+            if frame["type"] as? String == "aead_rekey_committed" {
+                throw CoordinatorClientTestError.sendStateUpdateFailed
+            }
+        }
+        let prepared = try await prepareInBandAEADRekey(recorder: recorder, sendOverride: sendOverride)
+        let proofData = try JSONSerialization.data(withJSONObject: prepared.proof, options: [.sortedKeys])
+        let commitEnvelope = try Tier2ProviderSession.sealAEADRekeyCommitForTest(
+            session: prepared.coordinatorSession,
+            rekeyID: prepared.rekeyID,
+            proof: proofData
+        )
+
+        do {
+            try await prepared.client.handleCoordinatorPayloadForTest([
+                "type": "aead_rekey_commit",
+                "version": 1,
+                "rekey_id": prepared.rekeyID,
+                "assigned_id": "assigned-v2",
+                "old_kid": "old-kid",
+                "new_kid": prepared.newKID,
+                "encrypted": true,
+                "enc": commitEnvelope,
+            ])
+            XCTFail("committed acknowledgement send failure must surface")
+        } catch {
+            let activeKeyID = await prepared.client.tier2KeyIDForTest()
+            let pendingRekeyID = await prepared.client.pendingAEADRekeyIDForTest()
+            XCTAssertEqual(activeKeyID, prepared.newKID)
+            XCTAssertNil(pendingRekeyID)
+        }
+        await prepared.client.stop()
     }
 
     func testAuthInitialIncludesReceiptPublicKeyWhenConfigured() async throws {
@@ -2369,10 +2663,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.31")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.31")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.31")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.31")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.32")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.32")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.32")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.32")
     }
 
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
@@ -3054,6 +3348,90 @@ final class CoordinatorClientTests: XCTestCase {
         \(Data([0x30, 0x03, 0x02, 0x01, 0x05]).base64EncodedString())
         -----END \(block)-----
         """
+    }
+
+    private struct PreparedInBandAEADRekey {
+        let client: CoordinatorClient
+        let coordinatorSession: Tier2ProviderSession
+        let rekeyID: String
+        let newKID: String
+        let proof: [String: Any]
+    }
+
+    private func prepareInBandAEADRekey(
+        recorder: CoordinatorFrameRecorder,
+        sendOverride: CoordinatorClient.SendOverride? = nil
+    ) async throws -> PreparedInBandAEADRekey {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, sendOverride: sendOverride)
+        let oldSession = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "old-kid",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response", "version": 2, "status": "accepted",
+            "assigned_id": "assigned-v2", "heartbeat_interval_s": 30,
+            "tier2_session": ["encrypted_leg": [
+                "enabled": true,
+                "alg": Tier2ProviderSession.aeadSuite,
+                "kid": "old-kid",
+                "in_band_aead_rekey_v1": true,
+            ]],
+        ], session: oldSession)
+
+        let rekeyID = "rekey-adversarial"
+        let coordinatorPrivate = Curve25519.KeyAgreement.PrivateKey()
+        let coordinatorPublic = coordinatorPrivate.publicKey.rawRepresentation.base64URLUnpadded()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expiresAt = formatter.string(from: Date().addingTimeInterval(30))
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "aead_rekey_request", "version": 1, "rekey_id": rekeyID,
+            "assigned_id": "assigned-v2", "reason": "age_threshold", "old_kid": "old-kid",
+            "coordinator_ecdh_public_key": coordinatorPublic,
+            "selected_aead": Tier2ProviderSession.aeadSuite,
+            "expires_at": expiresAt,
+        ])
+        let frames = await recorder.frames
+        let response = try XCTUnwrap(frames.last { $0["type"] as? String == "aead_rekey_response" })
+        let providerPublic = try XCTUnwrap(response["provider_ecdh_public_key"] as? String)
+        let newKID = try XCTUnwrap(response["new_kid"] as? String)
+        let coordinatorSession = try Tier2ProviderSession.coordinatorSessionForRekeyTest(
+            coordinatorPrivateKey: coordinatorPrivate,
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            providerPublicKeyBase64URL: providerPublic,
+            selectedAEAD: Tier2ProviderSession.aeadSuite
+        )
+        return PreparedInBandAEADRekey(
+            client: client,
+            coordinatorSession: coordinatorSession,
+            rekeyID: rekeyID,
+            newKID: newKID,
+            proof: [
+                "type": "aead_rekey_proof",
+                "version": 1,
+                "rekey_id": rekeyID,
+                "provider_id": "provider-test",
+                "assigned_id": "assigned-v2",
+                "old_kid": "old-kid",
+                "new_kid": newKID,
+                "provider_ecdh_public_key": providerPublic,
+                "coordinator_ecdh_public_key": coordinatorPublic,
+                "selected_aead": Tier2ProviderSession.aeadSuite,
+                "expires_at": expiresAt,
+            ]
+        )
     }
 
     private func makeClient(
