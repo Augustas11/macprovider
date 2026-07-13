@@ -2998,6 +2998,15 @@ actor CoordinatorClient {
                !referralCode.isEmpty {
                 message["referral_code"] = referralCode
             }
+            // FIX-570 R4 ADV-H1: the coordinator binds the reservation id into the
+            // verified proof transcript and requires the initial and proof frames
+            // to match exactly. Send it in BOTH frames (proof adds it at
+            // authProofMessage); omitting it here rejected every reservation-bearing
+            // CLI bootstrap before minting.
+            if let reservationID = appConfig.referralReservationID?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !reservationID.isEmpty {
+                message["referral_reservation_id"] = reservationID
+            }
         }
         return message
     }

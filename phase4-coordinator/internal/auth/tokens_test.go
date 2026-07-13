@@ -75,6 +75,19 @@ func TestBootstrapMintConsumesInstallerReservation(t *testing.T) {
 	if err != nil || mint.ProviderToken == "" {
 		t.Fatalf("reserved bootstrap mint failed: mint=%+v err=%v", mint, err)
 	}
+
+	// FIX-570 R4 C1b/ADV-H2: the first mint's response is lost. The same-key
+	// retry still carries the (now-consumed, deleted) reservation id. Recovery
+	// of the unused bootstrap token must NOT fail exhausted just because the
+	// reservation is gone — the redemption already exists and is idempotent.
+	recovery := bootstrapRequest("ws-h2-winner", "192.0.2.30", key, now.Add(2*time.Second))
+	recovery.ReferralCode = code
+	recovery.ReferralPolicy = policy
+	recovery.ReferralReservationID = reservationID
+	recovered, err := store.MintBootstrapToken(ctx, recovery)
+	if err != nil || recovered.ProviderToken == "" {
+		t.Fatalf("lost-response recovery with stale reservation failed: mint=%+v err=%v", recovered, err)
+	}
 }
 
 func TestBootstrapTokenRecoveryRequiresExactUnusedRetainedIdentity(t *testing.T) {

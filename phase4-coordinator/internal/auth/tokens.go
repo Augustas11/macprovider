@@ -982,11 +982,25 @@ SELECT COUNT(1)
 		// this (campaign, provider_id, code). Consume it atomically here BEFORE
 		// redemption so the installer's own live reservation is not counted as
 		// remaining capacity — otherwise a cap-one invite reports exhausted for
-		// the very user who reserved it. Consume only when gating is on and a
-		// reservation id was supplied; a stale/missing reservation fails closed.
+		// the very user who reserved it.
+		//
+		// FIX-570 R4 C1b/ADV-H2: consume the reservation ONLY when creating a NEW
+		// redemption. On a lost-response retry (same-key recovery of an unused
+		// bootstrap token), the first committed mint already redeemed and DELETED
+		// the reservation; re-consuming a now-missing reservation would wrongly
+		// return ErrReferralExhausted and break recovery. redeemReferralTx below is
+		// idempotent for the existing immutable binding, so recovery still proceeds.
 		if referralPolicy.RequireForRegistration && strings.TrimSpace(req.ReferralReservationID) != "" {
-			if err := consumeReferralReservationTx(ctx, conn, referralPolicy, req.ReferralReservationID, req.ReferralCode, req.ProviderID, req.Now); err != nil {
+			var existingRedemption int
+			if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM referral_redemptions WHERE campaign = ? AND provider_id = ?`,
+				referralPolicy.Campaign, req.ProviderID).Scan(&existingRedemption); err != nil {
 				return err
+			}
+			if existingRedemption == 0 {
+				if err := consumeReferralReservationTx(ctx, conn, referralPolicy, req.ReferralReservationID, req.ReferralCode, req.ProviderID, req.Now); err != nil {
+					return err
+				}
 			}
 		}
 		if err := redeemReferralTx(ctx, conn, referralPolicy, req.ReferralCode, req.ProviderID, req.Now); err != nil {
