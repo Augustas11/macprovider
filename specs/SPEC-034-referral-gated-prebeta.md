@@ -1,10 +1,22 @@
 # SPEC-034 — Referral-gated pre-beta and advocacy invite bonus
 
-Version: v0.2.0
+Version: v0.3.0
 Status: implementation
 Product parent: https://github.com/MalibuAI/malibu/issues/46
 
 Changelog:
+- v0.3.0 (FIX-570 review round 5): committed-attempt recovery proves the durable
+  commitment BEFORE any destructive mutation and keys the match on replay-stable
+  SIGNED fields only — `(provider_id, nonce, ts_utc)`, never `source_ip` (C1a);
+  reservation absolute lifetime is anchored to a reservation LINEAGE that
+  survives natural expiry (60-minute cap), with a distinct `reservation_expired`
+  reason and the STORED expiry reported (H3); the branded exhausted/expired/
+  revoked pages take an explicit validated `request_access_url` and hide the CTA
+  when unset (PROD-H1); `replace-referral-issuer` verifies against the deployed
+  policy, is dry-run-capable, and carries earned/pending X bonus into the
+  successor (PROD-H4, M2); `/j/` operational failures render a retryable 503 not
+  a 404 (M1); ambiguous X 403s are transient not terminal (M2); audited revoke
+  discloses the blast radius and requires a confirmed snapshot to apply (M5).
 - v0.2.0 (FIX-570 review round 1): preflight capacity reservation endpoint (H1);
   deferred, dwell-gated, author-bound X social bonus (H3); insert-only seed
   creation with audited capacity adjustment (H5); audited replacement path for a
@@ -24,9 +36,15 @@ eligibility, or operational state.
 
 The feature owns two orthogonal state axes:
 
-- access: `valid`, `bound`, `expired`, `exhausted`, or `revoked`;
-- advocacy: `locked_until_first_serving`, `eligible`,
-  `verification_pending`, `verified`, `failed`, or `skipped`.
+- access: `valid`, `bound`, `expired`, `exhausted`, `reservation_expired`, or
+  `revoked` (`reservation_expired` — FIX-570 H3 — is distinct from `exhausted`:
+  the caller's own preflight hold lapsed at its absolute lifetime while the
+  invite may still have capacity);
+- advocacy: `locked_until_first_serving`, `eligible`, `pending_social_review`
+  (a submitted X verification awaiting the dwell/promotion re-check), `verified`,
+  `social_review_failed` (a terminal re-check failure), or `skipped`. These are
+  the CANONICAL wire enums the `/v1/provider/referrals` `advocacy_status` field
+  and dashboard use (FIX-570).
 
 It does not introduce a generic provider `active` state. Existing
 `pinned`/`provisional` admission and `provisional`/`trusted` reward state remain
@@ -136,10 +154,21 @@ binding.
   10–30 minute install. The reservation is authoritative, idempotent by
   `(campaign, provider_id)` — re-reserving the same code extends the same
   reservation and returns the same `reservation_id`; a different code for the
-  same provider returns reason `conflict`. It uses a 30-minute TTL (longer than
-  the inline register-time reservation), returns `required:false` when
-  enforcement is disabled, and reason-codes failures like validate (missing,
-  invalid, expired, revoked, exhausted, conflict) with HTTP 200 except 429 for
+  same provider returns reason `conflict`. Each refresh grants a fresh per-request
+  TTL, but the reservation's ABSOLUTE lifetime is bounded (FIX-570 H3): it is
+  anchored to a reservation LINEAGE (`first_created_at`) that SURVIVES natural
+  expiry of the reservation row, so re-reserving the same code after it expires
+  can no longer reset the clock. The absolute cap is 60 minutes — chosen to cover
+  the realistic worst-case install (benchmarking alone is 10–30 minutes on top of
+  the download and autotune). Past the absolute lifetime the identity is refused
+  with reason `reservation_expired` (distinct from `exhausted`) and a short
+  cooldown blocks it from immediately re-holding the SAME code, while the freed
+  slot is available to other installers; combined with the per-IP limiter this
+  removes the indefinite-hold vector. The endpoint returns the STORED
+  absolute-capped `expires_at`, not `now+ttl`, so an aged reservation is never
+  presented as a fresh hold. It returns `required:false` when enforcement is
+  disabled, and reason-codes failures like validate (missing, invalid, expired,
+  revoked, exhausted, reservation_expired, conflict) with HTTP 200 except 429 for
   rate limit and 400 for bad request. Same public, unauthenticated, rate- and
   slot-bounded treatment as validate. The App-track register body carries an
   optional advisory `referral_reservation_id`; the register transaction still
@@ -164,7 +193,19 @@ and redeems inside the mint transaction. Nginx explicitly forwards the
 validation, reservation, provider advocacy, X, and `/j/` landing routes to the
 buyer-port handler. The `/j/<code>` route is mounted PERMANENTLY (FIX-570 M5):
 when gating is disabled it serves an open-beta landing (download CTA) rather than
-404ing invite links already in circulation.
+404ing invite links already in circulation. A raw 404 is reserved for genuinely
+malformed/forged codes: exhausted, expired, and revoked invites each render their
+own BRANDED page, and an operational validation failure (DB lock, I/O, context
+cancel, corrupt stored time) renders a branded retryable 503 with `Retry-After`
+and logs the underlying error rather than mislabeling a valid code as malformed
+(FIX-570 M1). The branded exhausted/expired/revoked pages take an EXPLICIT,
+validated `request_access_url` deployment setting (absolute https) for their
+primary CTA; when it is unset the request-access CTA is NOT rendered (never a
+dead default path) and the pages still offer the known-good "Learn more" link
+(FIX-570 PROD-H1). X 403 responses are classified from the bounded structured
+error body: only a proven post-deletion/protection/suspension is terminal, while
+a credential/project/access-level 403 (and any ambiguous body) is transient and
+retried, so a bonus is never permanently denied on an unproven signal (FIX-570 M2).
 
 ## 8. Serving and social eligibility
 
@@ -205,11 +246,23 @@ live code). Capacity changes go through `adjust-seed-referral`, which previews b
 default (current capacity, redeemed count, live reserved count, resulting
 remaining), requires `--apply`, `--actor`, and `--reason` to mutate, and refuses
 to set capacity below the redeemed-plus-reserved floor. A revoked provider issuer
-has a supported successor path via `replace-referral-issuer`, which mints a fresh
-usable issuer bound to the same provider (the old issuer stays revoked and is
-linked to its replacement) and requires `--actor` and `--reason`. Every applied
-seed adjustment and issuer replacement writes an append-only
-`referral_admin_audit` row (actor, reason, action, target, detail, timestamp).
+has a supported successor path via `replace-referral-issuer`. FIX-570 PROD-H4:
+the successor's signing key, campaign, and capacity are taken from the
+coordinator's AUTHORITATIVE resolved config (`--config`, the same policy the
+running coordinator loads), not from operator flags; the command rejects any
+mismatch of campaign, signing-key identity, signing secret, or base capacity
+BEFORE mutating, validates the generated code under the DEPLOYED policy, and is
+rollback-safe (dry-run by default showing old→proposed capacity/key; `--apply`
+commits). FIX-570 M2(prod): the successor CARRIES the old issuer's earned
+`bonus_capacity` and any pending social verification/challenge is rebound to the
+successor, so a granted or pending X bonus is never dropped onto the detached
+issuer. Revocation (`revoke-referral`) previews the full BLAST RADIUS — redemption
+count, live reservation count, and remaining capacity (FIX-570 M5) — and `--apply`
+requires a confirmed expected-snapshot (`--expect-redeemed`, `--expect-reservations`)
+that must still match the live counts, refusing to revoke against a drifted
+preview. Every applied seed adjustment, issuer replacement, and revocation writes
+an append-only `referral_admin_audit` row (actor, reason, action, target, detail
+including the blast-radius counts, timestamp).
 
 ### 8.3 Durable attempt-marker retention (FIX-570 L1)
 
@@ -287,9 +340,17 @@ decisions survive later cutoff changes.
 9. X outage never blocks registration or serving.
 10. Tests and logs prove secrets, codes, challenges, post bodies, and bearer
     credentials are not disclosed.
-11. App-track crash recovery preserves a token only when the exact PostgreSQL
-    nonce/identity attempt committed; otherwise it restores capacity without
-    deleting a historical same-campaign redemption.
+11. App-track crash and lost-response recovery PROVES the exact durable attempt
+    committed BEFORE any destructive mutation (revoke/rotate/replace-saga), and
+    keys that commitment match on REPLAY-STABLE SIGNED fields only —
+    `(provider_id, nonce, ts_utc)`, never the unsigned connection-dependent
+    `source_ip` — so an identical signed replay from a different NAT/proxy
+    recovers a usable rotated token instead of destroying the committed
+    credential (FIX-570 C1a). An uncommitted attempt never mutates existing state
+    (it falls through to a fresh registration); saga/token rotation is an
+    attempt-bound compare-and-swap that never touches another signed attempt's
+    saga; and recovery restores capacity without deleting a historical
+    same-campaign redemption.
 12. Preflight reservation claims one use idempotently by `(campaign, provider_id)`,
     surfaces `exhausted`/`conflict` under contention, and returns `required:false`
     when disabled (FIX-570 H1).
