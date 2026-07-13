@@ -44,6 +44,7 @@ const (
 	maxHandshakeBinaryVersionBytes = 32
 	maxHandshakeMetadataBytes      = 1024
 	maxReferralCodeBytes           = 256
+	maxReferralReservationIDBytes  = 128
 )
 
 type HelloAck struct {
@@ -103,6 +104,7 @@ type AuthRequest struct {
 	CandidateRowIdentity     string          `json:"catalog_row_identity,omitempty"`
 	CredentialBootstrap      bool            `json:"credential_bootstrap,omitempty"`
 	ReferralCode             string          `json:"referral_code,omitempty"`
+	ReferralReservationID    string          `json:"referral_reservation_id,omitempty"`
 }
 
 type Spec010Presence struct {
@@ -600,6 +602,11 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 			return AuthRequest{}, Spec010Presence{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
 		}
 	}
+	if v, ok := raw["referral_reservation_id"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ReferralReservationID); err != nil || len([]byte(req.ReferralReservationID)) > maxReferralReservationIDBytes || containsControlChar(req.ReferralReservationID) {
+			return AuthRequest{}, Spec010Presence{}, "referral_reservation_id", fmt.Errorf("referral_reservation_id must be a string of at most %d bytes", maxReferralReservationIDBytes)
+		}
+	}
 	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
@@ -718,6 +725,11 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 	if v, ok := raw["referral_code"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &req.ReferralCode); err != nil || len([]byte(req.ReferralCode)) > maxReferralCodeBytes || containsControlChar(req.ReferralCode) {
 			return AuthRequest{}, Spec010Presence{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
+		}
+	}
+	if v, ok := raw["referral_reservation_id"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ReferralReservationID); err != nil || len([]byte(req.ReferralReservationID)) > maxReferralReservationIDBytes || containsControlChar(req.ReferralReservationID) {
+			return AuthRequest{}, Spec010Presence{}, "referral_reservation_id", fmt.Errorf("referral_reservation_id must be a string of at most %d bytes", maxReferralReservationIDBytes)
 		}
 	}
 	// Proof-stage MUST keep the bare "supported_models" badField (NOT

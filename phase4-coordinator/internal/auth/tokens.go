@@ -92,20 +92,21 @@ type AdmissionPairMint struct {
 }
 
 type BootstrapMintRequest struct {
-	ProviderID          string
-	ProviderName        string
-	SourceIP            string
-	ReceiptPubkey       []byte
-	Now                 time.Time
-	TTL                 time.Duration
-	PerIPLimitPerHour   int
-	PerProviderPerHour  int
-	GlobalLimitPerHour  int
-	UnconfirmedIDMax    int
-	OutstandingTokenMax int
-	IdentityRetention   time.Duration
-	ReferralCode        string
-	ReferralPolicy      ReferralPolicy
+	ProviderID            string
+	ProviderName          string
+	SourceIP              string
+	ReceiptPubkey         []byte
+	Now                   time.Time
+	TTL                   time.Duration
+	PerIPLimitPerHour     int
+	PerProviderPerHour    int
+	GlobalLimitPerHour    int
+	UnconfirmedIDMax      int
+	OutstandingTokenMax   int
+	IdentityRetention     time.Duration
+	ReferralCode          string
+	ReferralReservationID string
+	ReferralPolicy        ReferralPolicy
 }
 
 type BootstrapMint struct {
@@ -977,6 +978,17 @@ SELECT COUNT(1)
 		// bootstrap path may use it only after the exact retained receipt key
 		// above proved custody of an existing bootstrap identity.
 		referralPolicy.GrandfatherProof = identityExists
+		// FIX-570 H2: the installer may have claimed a preflight reservation for
+		// this (campaign, provider_id, code). Consume it atomically here BEFORE
+		// redemption so the installer's own live reservation is not counted as
+		// remaining capacity — otherwise a cap-one invite reports exhausted for
+		// the very user who reserved it. Consume only when gating is on and a
+		// reservation id was supplied; a stale/missing reservation fails closed.
+		if referralPolicy.RequireForRegistration && strings.TrimSpace(req.ReferralReservationID) != "" {
+			if err := consumeReferralReservationTx(ctx, conn, referralPolicy, req.ReferralReservationID, req.ReferralCode, req.ProviderID, req.Now); err != nil {
+				return err
+			}
+		}
 		if err := redeemReferralTx(ctx, conn, referralPolicy, req.ReferralCode, req.ProviderID, req.Now); err != nil {
 			return err
 		}

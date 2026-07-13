@@ -1218,7 +1218,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	if proof.AuthAttemptID != authAttemptID || proof.ProviderID != initial.ProviderID ||
-		proof.CredentialBootstrap != initial.CredentialBootstrap || proof.ReferralCode != initial.ReferralCode || s.now().After(challengeExpiresAt) {
+		proof.CredentialBootstrap != initial.CredentialBootstrap || proof.ReferralCode != initial.ReferralCode ||
+		proof.ReferralReservationID != initial.ReferralReservationID || s.now().After(challengeExpiresAt) {
 		s.sendAuthRejection(conn, "attestation_failed", "attestation failed")
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
@@ -1280,20 +1281,21 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			return "", ""
 		}
 		mint, err := s.bootstrapTokens.MintBootstrapToken(context.Background(), auth.BootstrapMintRequest{
-			ProviderID:          entry.ProviderID,
-			ProviderName:        initial.Hostname,
-			SourceIP:            connectionAuth.sourceIP,
-			ReceiptPubkey:       append([]byte(nil), initial.ProviderReceiptPubkey...),
-			Now:                 s.now(),
-			TTL:                 time.Duration(s.cfg.Auth.CredentialBootstrapTokenTTLS) * time.Second,
-			PerIPLimitPerHour:   s.cfg.Auth.CredentialBootstrapMintsPerIPHour,
-			PerProviderPerHour:  s.cfg.Auth.CredentialBootstrapMintsPerIDHour,
-			GlobalLimitPerHour:  s.cfg.Auth.CredentialBootstrapMintsGlobalHour,
-			UnconfirmedIDMax:    s.cfg.Auth.CredentialBootstrapUnconfirmedMax,
-			OutstandingTokenMax: s.cfg.Auth.CredentialBootstrapOutstandingMax,
-			IdentityRetention:   time.Duration(s.cfg.Auth.CredentialBootstrapIdentityRetentionS) * time.Second,
-			ReferralCode:        initial.ReferralCode,
-			ReferralPolicy:      s.referralPolicy,
+			ProviderID:            entry.ProviderID,
+			ProviderName:          initial.Hostname,
+			SourceIP:              connectionAuth.sourceIP,
+			ReceiptPubkey:         append([]byte(nil), initial.ProviderReceiptPubkey...),
+			Now:                   s.now(),
+			TTL:                   time.Duration(s.cfg.Auth.CredentialBootstrapTokenTTLS) * time.Second,
+			PerIPLimitPerHour:     s.cfg.Auth.CredentialBootstrapMintsPerIPHour,
+			PerProviderPerHour:    s.cfg.Auth.CredentialBootstrapMintsPerIDHour,
+			GlobalLimitPerHour:    s.cfg.Auth.CredentialBootstrapMintsGlobalHour,
+			UnconfirmedIDMax:      s.cfg.Auth.CredentialBootstrapUnconfirmedMax,
+			OutstandingTokenMax:   s.cfg.Auth.CredentialBootstrapOutstandingMax,
+			IdentityRetention:     time.Duration(s.cfg.Auth.CredentialBootstrapIdentityRetentionS) * time.Second,
+			ReferralCode:          initial.ReferralCode,
+			ReferralReservationID: initial.ReferralReservationID,
+			ReferralPolicy:        s.referralPolicy,
 		})
 		if err != nil {
 			s.rejectCredentialBootstrap(conn, err)

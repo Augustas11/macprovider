@@ -32,6 +32,51 @@ func bootstrapPrincipal(label string) string {
 	return "mp-" + hex.EncodeToString(sum[:16])
 }
 
+// FIX-570 H2: a CLI-track installer that claims a preflight reservation must have
+// that exact reservation consumed by the WS credential bootstrap mint, otherwise
+// its own live reservation counts against a cap-one invite and the installer that
+// reserved the spot is rejected as exhausted.
+func TestBootstrapMintConsumesInstallerReservation(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	policy := referralPolicy()
+	code, err := store.CreateSeedReferral(ctx, policy, "wsh2seed", 1, nil) // cap-one
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x33}, 32)
+	providerID := bootstrapPrincipal("ws-h2-winner")
+
+	reservationID, err := store.ReserveReferralCapacity(ctx, policy, code, providerID, now, 30*time.Minute)
+	if err != nil || reservationID == "" {
+		t.Fatalf("reserve: id=%q err=%v", reservationID, err)
+	}
+
+	// Without consuming the reservation, ordinary bootstrap redemption sees the
+	// live reservation as spent capacity and rejects the very installer that reserved it.
+	blocked := bootstrapRequest("ws-h2-winner", "192.0.2.30", key, now)
+	blocked.ReferralCode = code
+	blocked.ReferralPolicy = policy
+	if _, err := store.MintBootstrapToken(ctx, blocked); !errors.Is(err, auth.ErrReferralExhausted) {
+		t.Fatalf("expected exhausted without reservation consumption, got %v", err)
+	}
+
+	// Passing the reservation id consumes it atomically, so the same installer mints.
+	winning := bootstrapRequest("ws-h2-winner", "192.0.2.30", key, now.Add(time.Second))
+	winning.ReferralCode = code
+	winning.ReferralPolicy = policy
+	winning.ReferralReservationID = reservationID
+	mint, err := store.MintBootstrapToken(ctx, winning)
+	if err != nil || mint.ProviderToken == "" {
+		t.Fatalf("reserved bootstrap mint failed: mint=%+v err=%v", mint, err)
+	}
+}
+
 func TestBootstrapTokenRecoveryRequiresExactUnusedRetainedIdentity(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
