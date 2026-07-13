@@ -92,6 +92,7 @@ type Server struct {
 	// interface-segregation regression of mixing both on TokenValidator.
 	issuer          TokenIssuer
 	bootstrapTokens BootstrapTokenStore
+	referralPolicy  auth.ReferralPolicy
 	authStore       *auth.Store
 	githubOAuth     githubOAuthClient
 	admission       *AdmissionManager
@@ -312,6 +313,12 @@ func WithTokenIssuer(issuer TokenIssuer) Option {
 func WithBootstrapTokenStore(store BootstrapTokenStore) Option {
 	return func(s *Server) {
 		s.bootstrapTokens = store
+	}
+}
+
+func WithReferralPolicy(policy auth.ReferralPolicy) Option {
+	return func(s *Server) {
+		s.referralPolicy = policy
 	}
 }
 
@@ -861,7 +868,7 @@ const (
 // bearer; race-losers are quarantined as AuthBearerlessDuplicate.
 //
 // authParam is renamed to disambiguate from the auth package import.
-func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, providerName string) (provisionalTokenOutcome, string, string, string, pool.AuthState) {
+func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, providerName, referralCode string) (provisionalTokenOutcome, string, string, string, pool.AuthState) {
 	if s.issuer == nil {
 		return provisionalTokenSkip, "", "", "", ""
 	}
@@ -879,7 +886,7 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 		return provisionalTokenRejectTOFU, "", "", "", ""
 	}
 	if s.cfg.Auth.GitHubOAuth.Enabled && s.authStore != nil {
-		mint, err := s.authStore.MintAdmissionTokenAndPairOT(ctx, providerID, providerName, s.now())
+		mint, err := s.authStore.MintAdmissionTokenAndPairOTWithReferral(ctx, providerID, providerName, s.now(), referralCode, s.referralPolicy)
 		if err == nil {
 			claimURL := ""
 			if mint.Paired {
@@ -894,7 +901,19 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 		}
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C10 pair_ot compound mint failed; falling back to plain FR-C9 provider token mint")
 	}
-	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
+	var token string
+	if s.referralPolicy.RequireForRegistration {
+		referralIssuer, ok := s.issuer.(interface {
+			IssueTokenWithReferral(context.Context, string, string, string, auth.ReferralPolicy) (auth.TokenRecord, string, error)
+		})
+		if !ok {
+			err = errors.New("referral-aware token issuer unavailable")
+		} else {
+			_, token, err = referralIssuer.IssueTokenWithReferral(ctx, providerID, providerName, referralCode, s.referralPolicy)
+		}
+	} else {
+		_, token, err = s.issuer.IssueToken(ctx, providerID, providerName)
+	}
 	if err != nil {
 		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
 			// SPEC-003 v0.8.4 race-loss path: a concurrent tokenless
@@ -956,9 +975,14 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			return "", ""
 		}
 	}
-	entry, ok := s.prepareProviderAdmission(conn, connectionAuth, hello, true)
+	entry, ok := s.prepareProviderAdmission(conn, connectionAuth, hello)
 	if !ok {
 		return "", ""
+	}
+	if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
+		return "", ""
+	} else {
+		entry.Tier = tier
 	}
 	registered := false
 	defer func() {
@@ -974,7 +998,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// the provided AuthState (BearerValidated / BearerlessDuplicate /
 	// empty) and let the registry eviction defense + RoutingEligible
 	// gates take over.
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, hello.Hostname)
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, hello.Hostname, hello.ReferralCode)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
@@ -982,6 +1006,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
+	entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
 	entry.AuthState = authState
 	session, _ := s.registerProviderSession(conn, entry)
 	if session == nil {
@@ -1068,7 +1093,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if initial.CredentialBootstrap {
 		entry, ok = s.prepareCredentialBootstrap(conn, connectionAuth, initial)
 	} else {
-		entry, ok = s.prepareProviderAdmission(conn, connectionAuth, initial.Hello(), false)
+		entry, ok = s.prepareProviderAdmission(conn, connectionAuth, initial.Hello())
 	}
 	if !ok {
 		return "", ""
@@ -1193,7 +1218,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	if proof.AuthAttemptID != authAttemptID || proof.ProviderID != initial.ProviderID ||
-		proof.CredentialBootstrap != initial.CredentialBootstrap || s.now().After(challengeExpiresAt) {
+		proof.CredentialBootstrap != initial.CredentialBootstrap || proof.ReferralCode != initial.ReferralCode ||
+		s.now().After(challengeExpiresAt) {
 		s.sendAuthRejection(conn, "attestation_failed", "attestation failed")
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
@@ -1267,6 +1293,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			UnconfirmedIDMax:    s.cfg.Auth.CredentialBootstrapUnconfirmedMax,
 			OutstandingTokenMax: s.cfg.Auth.CredentialBootstrapOutstandingMax,
 			IdentityRetention:   time.Duration(s.cfg.Auth.CredentialBootstrapIdentityRetentionS) * time.Second,
+			ReferralCode:        initial.ReferralCode,
+			ReferralPolicy:      s.referralPolicy,
 		})
 		if err != nil {
 			s.rejectCredentialBootstrap(conn, err)
@@ -1361,11 +1389,9 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	entry.MaxAdmittedModelKey = maxAdmittedModelKey
 	entry.MaxAdmittedModelID = maxAdmittedModelID
-	// This is the first durable admission mutation in the v2 path. Keep it
-	// after the post-challenge evidence recheck so a provider whose evidence
-	// disappears during authentication cannot consume an hourly admission or
-	// leave a provisional record behind.
-	if tier, ok := s.recordProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+	// Reserve after the post-challenge evidence recheck, but defer the durable
+	// admission record until credential minting succeeds.
+	if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
 		return "", ""
 	} else {
 		entry.Tier = tier
@@ -1376,7 +1402,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			s.admission.ReleasePendingProvisional()
 		}
 	}()
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname)
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname, initial.ReferralCode)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
@@ -1384,6 +1410,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
+	entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
 	entry.AuthState = authState
 	session, refusal := s.registerProviderSession(conn, entry)
 	if session == nil {
@@ -1518,10 +1545,31 @@ func (s *Server) rejectCredentialBootstrap(conn net.Conn, err error) {
 	case errors.Is(err, auth.ErrBootstrapOutstandingLimit):
 		s.observeCredentialBootstrap("rejected_outstanding")
 		s.close(conn, CloseProvisionalPoolFull, "credential_bootstrap_outstanding_full")
+	case errors.Is(err, auth.ErrReferralRequired):
+		s.observeCredentialBootstrap("rejected_referral_required")
+		s.close(conn, CloseInvalidToken, "referral_required")
+	case errors.Is(err, auth.ErrReferralInvalid), errors.Is(err, auth.ErrReferralExpired),
+		errors.Is(err, auth.ErrReferralRevoked), errors.Is(err, auth.ErrReferralExhausted),
+		errors.Is(err, auth.ErrReferralConflict):
+		s.observeCredentialBootstrap("rejected_referral")
+		s.close(conn, CloseInvalidToken, referralCloseReason(err))
 	default:
 		s.observeCredentialBootstrap("store_error")
 		s.log.Warn().Err(err).Msg("credential bootstrap token transaction failed")
 		s.close(conn, CloseInvalidToken, "invalid_token")
+	}
+}
+
+func referralCloseReason(err error) string {
+	switch {
+	case errors.Is(err, auth.ErrReferralExpired):
+		return "referral_expired"
+	case errors.Is(err, auth.ErrReferralRevoked):
+		return "referral_revoked"
+	case errors.Is(err, auth.ErrReferralExhausted):
+		return "referral_exhausted"
+	default:
+		return "referral_invalid"
 	}
 }
 
@@ -1531,7 +1579,7 @@ func (s *Server) observeCredentialBootstrap(outcome string) {
 	}
 }
 
-func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello, recordAdmission bool) (*pool.Provider, bool) {
+func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
 	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
 		cmp, ok := compareSemver(hello.BinaryVersion, required)
 		if !ok || cmp < 0 {
@@ -1609,13 +1657,6 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, hello)
 	if !gateOK {
 		return nil, false
-	}
-	if recordAdmission {
-		tier, closeCode, closeReason = s.checkOrRecordAdmission(hello, pinned, true)
-		if closeCode != 0 {
-			s.close(conn, closeCode, closeReason)
-			return nil, false
-		}
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -1790,13 +1831,17 @@ func (s *Server) populateCatalogAuthResponse(response *AuthResponse) {
 	response.CatalogSignerKeyID = s.autotuneCatalog.SignerKeyID
 }
 
-func (s *Server) recordProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {
-	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, true)
+func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {
+	tier, closeCode, closeReason := s.admission.ReserveAdmission(hello, pinned, s.connectedProvisional())
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
 		return "", false
 	}
 	return tier, true
+}
+
+func (s *Server) commitProviderAdmission(hello Hello, pinned bool) pool.Tier {
+	return s.admission.CommitReservedAdmission(hello, pinned)
 }
 
 func (s *Server) checkOrRecordAdmission(hello Hello, pinned bool, record bool) (pool.Tier, gobwas.StatusCode, string) {
