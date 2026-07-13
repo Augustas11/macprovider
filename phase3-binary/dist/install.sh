@@ -3147,7 +3147,10 @@ write_config() {
   printf "%s\n" "$provider_id" > "$provider_id_temp"
   chmod 600 "$provider_id_temp" 2>/dev/null || true
   mv "$provider_id_temp" "$PROVIDER_ID_PATH"
-  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "$REFERRAL_CODE"
+  # Some hermetic deploy checks source this function without running the
+  # installer's argument-initialization prelude. Treat an unset referral as the
+  # open-beta/default empty value while preserving set -u for real mistakes.
+  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "${REFERRAL_CODE:-}"
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
 }
 
