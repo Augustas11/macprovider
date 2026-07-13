@@ -1986,7 +1986,9 @@ reconnects.
 
 #### 6.7.1. Initial-stage frame (P->C)
 
-R-6.7.1 The binary MUST send the v2 initial-stage frame with
+R-6.7.1 **When the v2 handshake applies** (WS-tunneled or credential-bootstrap
+mode — R-6.7.8; a legacy HTTP-forwarding connection sends `hello` at §6.5
+instead), the binary MUST send the v2 initial-stage frame with
 `type == "auth_request"`, `version == 2`, and `stage == "initial"` per
 SPEC-010 v1.5 R-3.1.1 through R-3.1.10 and the parser-required field
 table in SPEC-010 v1.5 §3.1.A.
@@ -2193,6 +2195,11 @@ coordinator as empty optionals with no behavior change.
 R-6.7.7 The binary MUST treat SPEC-010 catalog publication and
 SPEC-011 warm swap as orthogonal opt-ins per SPEC-010 v1.5 R-3.6.1 /
 R-3.6.4 and SPEC-011 v0.5 R-3.1.0 / R-3.3.0.
+
+The cells below describe the `auth_request` **field content** in the mode where
+the v2 handshake applies (WS-tunneled / credential-bootstrap — R-6.7.8). These
+opt-ins do **not** select v2 vs legacy `hello`; the transport mode does. In
+legacy HTTP-forwarding mode the equivalent catalog fields ride the `hello` frame.
 
 | `--supported-models` | `--enable-warm-swap` | Behavior cell |
 |---|---|---|
@@ -3183,7 +3190,9 @@ harness code requires zero modifications.
 
 **AC-5. Coordinator mock integration.**
 The binary connects to a mock coordinator (a simple WebSocket echo
-server that validates JSON message shapes) and successfully:
+server that validates JSON message shapes) **in legacy HTTP-forwarding mode**
+(the `hello`-handshake mode; a WS-tunneled / credential-bootstrap connection
+would instead run the v2 `auth_request` handshake — R-6.7.8) and successfully:
 1. Sends a `hello` message with all required fields.
 2. Receives a `hello_ack` and honors the `heartbeat_interval_s`.
 3. Sends at least 3 capacity heartbeats with all FR-17 fields.
@@ -3318,8 +3327,10 @@ against a local coordinator.
 **AC-18.0. L-1 baseline default — no NEW SPEC-010/SPEC-011 surface.**
 A v1.3 binary built per this spec, invoked with neither
 `--supported-models` nor `--enable-warm-swap`, MUST satisfy ALL of:
-(a) v2 `auth_request` initial-stage frame emits
-`supported_models: [model_id]` (single-entry) per SPEC-010 v1.5
+(a) **when the connection is WS-tunneled or credential-bootstrap** (the modes
+that use the v2 handshake; in legacy HTTP-forwarding mode the equivalent fields
+ride the legacy `hello` — R-6.7.8) the v2 `auth_request` initial-stage frame
+emits `supported_models: [model_id]` (single-entry) per SPEC-010 v1.5
 R-3.6.2 / AC-19 and OMITS `publishes_supported_models` per SPEC-010
 v1.5 R-3.6.4 / AC-21;
 (b) heartbeat frame OMITS `model_hash` and `loading` fields entirely
@@ -3345,10 +3356,12 @@ SPEC-010 v1.5 AC-2 + AC-19 + AC-21.
 
 **AC-18.1. SPEC-010 opt-in.**
 A v1.3 binary invoked with `--supported-models A,B,C
---publish-supported-models=true --model A` MUST send v2
-`auth_request` initial-stage with `supported_models: [A, B, C]`,
-`publishes_supported_models: true`, and `model_id: A`. Traces to
-SPEC-010 v1.5 AC-1 and AC-21.
+--publish-supported-models=true --model A` **and connecting in WS-tunneled or
+credential-bootstrap mode** (the mode, not the catalog opt-in, is what selects
+v2 — R-6.7.8) MUST send v2 `auth_request` initial-stage with
+`supported_models: [A, B, C]`, `publishes_supported_models: true`, and
+`model_id: A`. (In legacy HTTP-forwarding mode the same catalog fields ride the
+legacy `hello`.) Traces to SPEC-010 v1.5 AC-1 and AC-21.
 
 **AC-18.2. SPEC-010 pre-flight.**
 A v1.3 binary invoked with `--supported-models A,B --model C` MUST
@@ -3400,8 +3413,12 @@ uppercase characters. Traces to SPEC-011 v0.5 AC-10 and AC-20.
 
 **AC-18.9. Four matrix cells.**
 Test matrix exercises all four cells of the SPEC-010 × SPEC-011 opt-in
-matrix per §6.7.3. Each cell's expected wire behavior is verified by
-capturing the v2 `auth_request` frame and first heartbeat:
+matrix per §6.7.3, **with the connection in WS-tunneled or credential-bootstrap
+mode** so the v2 `auth_request` frame is the one emitted (transport mode, not the
+opt-ins, selects v2 vs legacy `hello` — R-6.7.8; the four-cell matrix varies only
+the catalog/warm-swap field *content*, not the handshake choice). Each cell's
+expected wire behavior is verified by capturing the v2 `auth_request` frame and
+first heartbeat:
 - Cell 1 (unset/unset): frame carries `supported_models: [model_id]`
   per SPEC-010 v1.5 R-3.6.2 / AC-19; OMITS `publishes_supported_models`
   per SPEC-010 v1.5 R-3.6.4 / AC-21; heartbeat OMITS `model_hash` /
@@ -3619,9 +3636,10 @@ never shipped and is retired in v1.7.)
 **Step 9. Coordinator WebSocket client.**
 Implement FR-13 (outbound WebSocket), FR-14 (hello + tier), FR-15
 (health states + state_update), FR-16 (warm-up), FR-17 (capacity
-heartbeat with all fields). Test against a mock WebSocket server.
-Deliverable: binary connects, sends hello, heartbeats, responds to
-preflight and drain.
+heartbeat with all fields), and the §6.7 v2 `auth_request` handshake. Test
+against a mock WebSocket server. Deliverable: binary connects (legacy `hello`
+in HTTP-forwarding mode, v2 `auth_request` in WS-tunneled / credential-bootstrap
+mode — R-6.7.8), heartbeats, responds to preflight and drain.
 
 **Step 10. Graceful shutdown and self-test.**
 Implement FR-12 (SIGTERM drain with drain_status messages) and FR-20
