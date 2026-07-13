@@ -286,12 +286,16 @@ chain (see Section 3 for the hook-point diagram).
 - Coordinator implementation (Phase 4 separate SPEC)
 - Smart router logic (Phase 4/5)
 - Buyer authentication or authorization (Tier 2)
-- Privacy attestation implementation (Tier 2)
 - Web UI, dashboard, or contributor portal
 - Contributor onboarding flow beyond "run this binary"
 - Antseed seller plugin integration (coordinator's responsibility)
 - Automatic model downloading (contributor pre-downloads via `huggingface-cli`)
-- Provider authentication to coordinator (deferred to SPEC-002)
+- **Coordinator-side** validation/policy of provider authentication and
+  attestation (owned by SPEC-002 / SPEC-008 / SPEC-026). **Reconciled v1.7:** the
+  binary-side of these — bearer-token transport, the v2 challenge/proof
+  handshake, and SE/MDA **attestation-token generation** — *is* in scope and
+  shipped (`CoordinatorClient.swift`, FR-13/FR-14/§6.7/§6.15); only the
+  coordinator's acceptance decision is out of scope here.
 
 ---
 
@@ -628,12 +632,6 @@ run in detached tasks (`HTTPServer.swift`) and the non-streaming path passes
 does **not** release its waiter or its later compute. FR-11's earlier assurance
 that awaiting clients are freed by structured-concurrency cancellation on
 disconnect is therefore **not** shipped; a flood of (including disconnected)
-cancellation is **not** wired to client disconnect: requests run in detached
-tasks (`HTTPServer.swift`) and the non-streaming path passes
-`shouldCancel: { false }`, so a client that disconnects while awaiting a permit
-does **not** release its waiter or its later compute. FR-11's earlier assurance
-that awaiting clients are freed by structured-concurrency cancellation on
-disconnect is therefore **not** shipped; a flood of (including disconnected)
 requests can retain parsed request state and later consume compute. Hardening
 this (channel-close → `Task.cancel`, waiter cap) is a carried follow-up, not a
 v1.7 spec claim.
@@ -671,8 +669,14 @@ coordinator URL is configured, the binary runs in standalone mode
 drops, the binary reconnects with exponential backoff (1s, 2s, 4s, ...
 capped at 60s). The coordinator is a Phase 4 dependency; the binary
 ships with the client protocol fully implemented, tested against a mock.
-Provider authentication to the coordinator is out of scope for this
-binary (deferred to SPEC-002).
+**Reconciled v1.7:** provider authentication is **not** wholly out of scope. The
+binary-side credential transport and proof generation are shipped and in scope —
+it attaches `Authorization: Bearer <provider_token>` on the coordinator WS
+connect (when the token is non-empty; see the header §, and
+`CoordinatorClient.swift`) and runs the v2 challenge/proof handshake with
+attestation/identity proof (§6.7, §6.15). Only the **coordinator-side**
+validation and issuance *policy* is deferred to SPEC-002 (and SPEC-008 /
+SPEC-026 for attestation/identity).
 
 **FR-14. Tier capability announcement (reconciled v1.7).**
 On the legacy `hello` message the shipped binary sends `tier: 1` with
@@ -840,7 +844,7 @@ Inference errors map to `status` values in `inference_response_end`:
 | Client cancelled | `"cancelled"` |
 | Model not loaded | `"error_model_not_loaded"` |
 | Context length exceeded | `"error_context_exceeded"` |
-| Queue full | `"error_queue_full"` |
+| WS capacity-1 rejection (concurrent 2nd request; no queue exists — FR-25) | `"error_queue_full"` |
 | Internal inference error | `"error_internal"` |
 
 **FR-28. Provider-side write buffer backpressure.**
@@ -2101,15 +2105,54 @@ R-6.7.6 If the binary re-sends `supported_models[]` or
 be byte-identical to the initial-stage values per SPEC-010 v1.5
 R-3.1.10.
 
+#### 6.7.1.5. Coordinator-sent handshake frames — inbound schema carried here (reconciled v1.7)
+
+The coordinator's two handshake responses carry fields that the shipped binary
+**requires** but that no downstream spec fully names; SPEC-001 carries them as
+transport owner of last resort (`CoordinatorClient.swift`):
+
+**`auth_challenge` (C->P), after the initial-stage `auth_request`:**
+
+| Field | JSON name | Type | Requiredness | Notes |
+|---|---|---|---|---|
+| Type | `type` | string `"auth_challenge"` | REQUIRED | else the binary aborts the handshake |
+| Version | `version` | int `2` | REQUIRED | |
+| Assigned ID | `assigned_id` | string | REQUIRED | coordinator-assigned session/provider id |
+| Coordinator ECDH key | `coordinator_ecdh_public_key` | string | REQUIRED | SPEC-008 Tier-2 key agreement |
+| Selected AEAD suite | `selected_aead_suite` | string | REQUIRED | e.g. `A256GCM` |
+| Auth attempt ID | `auth_attempt_id` | string | REQUIRED | echoed on the proof frame |
+| Bootstrap identity key | `bootstrap_identity_public_key` | string standard base64 | **conditional** | when present, the binary selects and persists the matching durable receipt-identity signing key for this bootstrap (SPEC-003 credential bootstrap pairing); absent otherwise |
+
+**Accepted `auth_response` (C->P), after the proof-stage frame** — the binary
+requires **all** of:
+
+- `type: "auth_response"`, `version: 2` (rejected otherwise);
+- `status: "accepted"` (a non-accepted status is treated as a rejection);
+- `tier2_session.encrypted_leg` with `enabled: true` and matching `alg` (the
+  provider-selected AEAD) and `kid` (the session key id), optionally
+  `response_chunk_plaintext_envelope: true` (§6.15.1);
+- `catalog_compatible: true` **when the provider advertised a signed-catalog
+  admission block** (i.e. `catalog_release_id` was sent). A catalog-bearing
+  session whose `auth_response` lacks `catalog_compatible: true` is rejected by
+  the binary. This boolean is not named by SPEC-010 (which leaves catalog
+  signing out of scope) or SPEC-022; SPEC-001 carries it here.
+
+A spec-only coordinator MUST emit these fields or the shipped binary fails
+admission.
+
 #### 6.7.2.1. `pair_ot` and `claim_url` on accepted `auth_response` (NEW in v1.5)
 
 The v2 proof-stage-accepted `auth_response` MAY include the same optional
-pairing fields defined for `hello_ack` in §6.5.1:
+pairing fields defined for `hello_ack` in §6.5.1. The example below is
+**abbreviated** to the pairing fields only — a real accepted `auth_response`
+also carries the required `version: 2`, `status: "accepted"`, `tier2_session`,
+and (for catalog-bearing sessions) `catalog_compatible: true` per §6.7.1.5:
 
 ```json
 {
   "type": "auth_response",
-  "accepted": true,
+  "version": 2,
+  "status": "accepted",
   "assigned_provider_token": "<64-hex-token>",
   "pair_ot": "<opaque-token>",
   "claim_url": "https://portal.example/claim?ot=<opaque-token>"
@@ -2375,13 +2418,18 @@ abbreviated signatures for the App-track control frames; the shipped
 here as owner of last resort:
 
 - `metrics_request` — `{type}` (no payload).
-- `metrics_response` — `{type, earnings_usdc, malibu_accrued, uptime_sec}` REQUIRED,
-  plus optional `gpu_c`, `latency_p50_ms`, `requests_served_today`,
-  `requests_served_all_time`, `requests_per_minute`, `input_tokens_today`,
-  `output_tokens_today`, `input_tokens_all_time`, `output_tokens_all_time`,
-  `queue_depth` (each omitted when nil).
+- `metrics_response` — `{type}` plus these members (types from
+  `ControlMetricsSnapshot.swift`, enforced by the decoder): REQUIRED
+  `earnings_usdc` (number/Double), `malibu_accrued` (number/Double),
+  `uptime_sec` (int); OPTIONAL (omitted when nil) `gpu_c` (number/Double),
+  `latency_p50_ms` (int), `requests_served_today` (int),
+  `requests_served_all_time` (int), `requests_per_minute` (number/Double),
+  `input_tokens_today` (int64), `output_tokens_today` (int64),
+  `input_tokens_all_time` (int64), `output_tokens_all_time` (int64),
+  `queue_depth` (int).
 - `pause_request` / `resume_request` — `{type}` (no payload).
-- `pause_ack` / `resume_ack` — `{type, accepted: bool}` plus optional `reason`.
+- `pause_ack` / `resume_ack` — `{type, accepted: bool}` plus optional
+  `reason` (string).
 - `shutdown_request` — `{type, grace_seconds: int}`; `shutdown_ack` — `{type}`.
 
 **`identity_signature_request.binary_version` is a JSON string.** The shipped
@@ -2739,7 +2787,9 @@ initial-stage `tier2_capabilities`. The coordinator confirms it in the
 true` (`CoordinatorClient.swift`). When confirmed, each encrypted
 `inference_response_chunk` wraps its plaintext in an inner JSON envelope
 **before** AEAD sealing: `{ "type": "inference_response_chunk_plaintext", "seq":
-<int>, "data": <string> }` (JCS/sorted-keys, `Tier2ProviderSession.swift`); when
+<int>, "data": <string> }` (serialized with Foundation `JSONSerialization`
+`.sortedKeys` — lexicographic key ordering, **not** full RFC 8785 JCS —
+`Tier2ProviderSession.swift`); when
 not confirmed, the sealed plaintext is the raw UTF-8 string with no envelope.
 
 **Signed-catalog admission block — schema carried here.** Five **independent
@@ -2863,8 +2913,11 @@ These extend the §6.5 outbound set (`auth_request`, `hello`, `heartbeat`,
 Version pins are starting points. The build session may bump versions
 after testing, with a documented reason in `implementation-notes.html`.
 
-Provider authentication to coordinator is specified in SPEC-002 and is
-out of scope for this binary's wire protocol.
+Provider-authentication **policy and coordinator-side validation** are specified
+in SPEC-002 (and SPEC-008 / SPEC-026 for attestation/identity). The binary-side
+credential transport and proof generation (bearer token, v2 challenge/proof
+handshake, attestation-token generation) are in scope and shipped — see FR-13,
+§6.7, and §6.15 (reconciled v1.7).
 
 ### 7.2 Reference hygiene — strict clean-room for d-inference
 
@@ -3341,11 +3394,17 @@ Each cell's expected shape is byte-asserted against the captured frame,
 not "additional fields tolerated." Traces to SPEC-010 v1.5 AC-1, AC-2,
 AC-19, AC-21 and SPEC-011 v0.5 AC-10, AC-18, AC-20, AC-23.
 
-**AC-18.10. NEW §6.7 v2 handshake documented.**
-The SPEC-001 v1.3 §6.7 v2 `auth_request` handshake section is
-consistent with the SPEC-010 v1.5 §3.1.A field table by byte-for-byte
-field comparison. No field appears in one and not the other. Traces to
-SPEC-010 v1.5 AC-16 and AC-18.
+**AC-18.10. NEW §6.7 v2 handshake documented (scope reconciled v1.7).**
+The SPEC-001 §6.7 v2 `auth_request` handshake **initial/proof-stage** field set
+is consistent with the SPEC-010 v1.5 §3.1.A field table. The byte-for-byte
+"no field appears in one and not the other" equality holds **only for the
+SPEC-010 §3.1.A baseline**; v1.7 intentionally documents additional
+shipped fields that SPEC-010 does not define — the 4th `tier2_capabilities`
+sub-field, `credential_bootstrap`, the signed-catalog admission block (§6.15.1),
+and the coordinator-sent `auth_challenge` / accepted-`auth_response` fields
+(§6.7.1.5). This AC is therefore scoped to *SPEC-010 baseline parity plus the
+documented v1.7 extensions*, not literal set-equality. Traces to SPEC-010 v1.5
+AC-16 and AC-18.
 
 **AC-18.11. No drift in §6.5.**
 SPEC-001 v1.3 §6.5 (Coordinator WebSocket envelope — legacy `hello`
@@ -3427,7 +3486,10 @@ clients will consume this and test.
 FR-14 sends `tier: 1` as an integer. Should this be a version string
 (`"tier-1"`) or a structured object (`{"level": 1, "capabilities": [...]}`)
 to allow for tier 1.5 or partial upgrades? The spec picks integer for
-simplicity. Tier 2 SPEC can revisit if needed.
+simplicity. This is **settled**: SPEC-008 v0.3 locked the tier scheme and the
+shipped Tier-2 uses the v2 `auth_request` `tier2_capabilities` object (§6.15),
+not a `hello.tier` string/upgrade — so the legacy integer `tier: 1` stays as-is
+and there is no open revisit.
 
 **OQ-3. Binary distribution method.** RESOLVED in SPEC-003 v0.3
 FR-C1, FR-C2. Distribution channel is GitHub Releases via
