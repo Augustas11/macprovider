@@ -72,11 +72,6 @@ func (h *JoinHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !h.allow(r) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "too many invite checks", http.StatusTooManyRequests)
-		return
-	}
 	code, ok := joinCode(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
@@ -98,6 +93,11 @@ func (h *JoinHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.renderOperationalFailure(w, r, errors.New("referral authority busy"))
 			return
 		}
+	}
+	if !h.allow(r) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "too many invite checks", http.StatusTooManyRequests)
+		return
 	}
 
 	_, err := h.Store.ValidateReferral(r.Context(), h.Policy, code, h.now())
