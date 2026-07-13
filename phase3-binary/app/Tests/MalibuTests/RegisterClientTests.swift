@@ -24,6 +24,7 @@ final class RegisterClientTests: XCTestCase {
                 "macos_version": "14.5",
                 "app_version": "1.0.3"
             ],
+            referralCode: "MAL1-S-k1-seed-TEST",
             nonce: String(repeating: "a", count: 64),
             timestamp: Date(timeIntervalSince1970: 1_783_082_460)
         )
@@ -34,6 +35,7 @@ final class RegisterClientTests: XCTestCase {
             "hardware_summary",
             "app_attest_object",
             "app_attest_key_id",
+            "referral_code",
             "nonce",
             "ts_utc",
             "signature"
@@ -41,6 +43,7 @@ final class RegisterClientTests: XCTestCase {
         XCTAssertFalse(request.fieldNames.contains("binary_version"))
         XCTAssertFalse(request.fieldNames.contains("provider_name"))
         XCTAssertFalse(request.fieldNames.contains("signature_alg"))
+        XCTAssertEqual(request.referralCode, "MAL1-S-k1-seed-TEST")
 
         let canonical = try RegisterClient.canonicalRegisterPayloadWithoutSignature(request)
         let signature = Data(base64Encoded: request.signature)

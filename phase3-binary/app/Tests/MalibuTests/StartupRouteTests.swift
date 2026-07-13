@@ -60,8 +60,19 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertNotNil(result.backupPath)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupPath!))
-        let attrs = try FileManager.default.attributesOfItem(atPath: result.backupPath!)
-        XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        // PROD-H3/M6: startFresh archives the whole identity bundle into a
+        // timestamped directory. The directory is 0o700; each archived artifact
+        // inside stays 0o600.
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupPath!, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+        let dirAttrs = try FileManager.default.attributesOfItem(atPath: result.backupPath!)
+        XCTAssertEqual((dirAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+        let archivedConfig = URL(fileURLWithPath: result.backupPath!)
+            .appendingPathComponent(paths.configFile.lastPathComponent)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archivedConfig.path))
+        let fileAttrs = try FileManager.default.attributesOfItem(atPath: archivedConfig.path)
+        XCTAssertEqual((fileAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
     func testMigrationCancelTouchesNoFiles() async throws {

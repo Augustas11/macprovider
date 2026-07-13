@@ -1,7 +1,28 @@
 import Foundation
 
-// Malibu is a CLI wrapper: onboarding runs install.sh, then Malibu monitors
-// the launchd-managed macprovider-cli. No in-app register/autotune/spawn path.
+struct ReferralPreflightResult: Decodable, Equatable {
+    let valid: Bool
+    let reason: String
+    let required: Bool
+
+    init(valid: Bool, reason: String, required: Bool = true) {
+        self.valid = valid
+        self.reason = reason
+        self.required = required
+    }
+}
+
+private enum ReferralPreflightError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? {
+        "Malibu could not check this invite. Check your connection and try again."
+    }
+}
+
+// Malibu is a CLI wrapper: onboarding runs install.sh. Fresh installs use the
+// launchd bootstrap long enough to import the issued identity; app-owned
+// identities then run as a Malibu child so their bearer remains in Keychain.
 
 @MainActor
 final class LaunchProviderController: ObservableObject {
@@ -18,20 +39,56 @@ final class LaunchProviderController: ObservableObject {
         case importingProviderIdentity
         case live(model: String, tier: TrustTier)
         case failed(stage: String, retryable: Bool, message: String)
+        // PROD-H6: an app-owned identity exists but its Keychain bearer is
+        // gone. Offer recovery or an explicit destructive "start fresh"
+        // instead of silently asking for a new invite.
+        case existingIdentityMissingBearer(providerID: String)
+    }
+
+    // PROD-M3: three-valued referral policy. `.unknown` (policy discovery
+    // failed) must NOT masquerade as `.required`: it lets the authoritative
+    // registration decide and only re-gates if the server rejects with
+    // `referral_required`. `.required` is the pre-discovery default so a fresh
+    // launch before discovery still fails closed.
+    enum ReferralPolicy: Equatable {
+        case required
+        case optional
+        case unknown
+    }
+
+    // PROD-M6: details of an identity just retired via "Start New", surfaced so
+    // the UI can name what was archived, where, and offer a session-scoped undo.
+    struct RetiredIdentity: Equatable {
+        let providerID: String
+        let archiveURL: URL
+        let retiredAt: Date
+        var archivePath: String { archiveURL.path }
     }
 
     @Published private(set) var stage: Stage = .idle
     @Published private(set) var installLogLines: [String] = []
     @Published private(set) var installProgressHint: String?
     @Published private(set) var installStartedAt: Date?
+    @Published var referralCode = ""
+    @Published private(set) var referralPolicy: ReferralPolicy = .required
+    @Published private(set) var retiredIdentity: RetiredIdentity?
+
+    /// True only when an invite is known to be mandatory. `.unknown` and
+    /// `.optional` are both non-blocking at the UI — the server enforces.
+    var referralRequired: Bool { referralPolicy == .required }
+
+    /// Show the invite field whenever an invite may still be needed, i.e. when
+    /// required or when policy discovery hasn't confirmed it is optional.
+    var showsReferralField: Bool { referralPolicy != .optional }
 
     private var installProgressTask: Task<Void, Never>?
     private let dependencies: Dependencies
 
     struct Dependencies {
         var localInstallSucceeded: @MainActor () async -> Bool
+        var validateReferralCode: @MainActor (String) async throws -> ReferralPreflightResult
         var registerLoginItem: @MainActor () async throws -> Void
-        var runCLIInstall: @MainActor (@escaping @MainActor (String) -> Void) async throws -> Void
+        var runCLIInstall: @MainActor (String, @escaping @MainActor (String) -> Void) async throws -> Void
         var importCLIConfigAfterInstall: @MainActor () async throws -> Void
         var waitForInstalledProviderHealth: @MainActor () async -> Bool
         var attachInstalledProviderAfterInstall: @MainActor () async -> Bool
@@ -39,13 +96,49 @@ final class LaunchProviderController: ObservableObject {
         var providerStartFailure: @MainActor () -> String?
         var appIdentityConfigured: @MainActor () async -> Bool
         var waitBeforeImportRetry: @MainActor () async throws -> Void
+        // PROD-H6: detect an app-owned identity whose Keychain bearer is gone,
+        // read its provider_id, and move the app-owned config aside for an
+        // explicit "start fresh". Defaulted so existing callers/tests compile.
+        var existingIdentityMissingBearer: @MainActor () async -> Bool = {
+            await ProviderConfig.existingIdentityMissingBearer()
+        }
+        var readProviderID: @MainActor () -> String? = { ProviderConfig.readProviderID() }
+        // PROD-M6: returns the archive directory so the UI can show where the
+        // retired identity went and offer an undo.
+        var moveAppOwnedConfigAside: @MainActor () async throws -> URL? = {
+            try ProviderConfig.startFreshMovingCLIConfigAside()
+        }
+        var restoreArchivedIdentity: @MainActor (URL) async throws -> Void = { archive in
+            try ProviderConfig.restoreArchivedIdentity(from: archive)
+        }
 
         static func live(agent: MalibuAgent?) -> Dependencies {
             Dependencies(
                 localInstallSucceeded: { await CLIInstallRunner.localInstallSucceeded() },
+                validateReferralCode: { code in
+                    guard let baseURL = ProviderConfig.readCoordinatorBaseURL()
+                        ?? URL(string: "https://coordinator.streamvc.live") else {
+                        throw ReferralPreflightError.unavailable
+                    }
+                    var request = URLRequest(url: baseURL.appendingPathComponent("v1/referrals/validate"))
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("application/json", forHTTPHeaderField: "Accept")
+                    request.httpBody = try JSONEncoder().encode(["code": code])
+                    let configuration = URLSessionConfiguration.ephemeral
+                    configuration.timeoutIntervalForRequest = 6
+                    configuration.timeoutIntervalForResource = 8
+                    let session = URLSession(configuration: configuration)
+                    defer { session.finishTasksAndInvalidate() }
+                    let (data, response) = try await session.data(for: request)
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                        throw ReferralPreflightError.unavailable
+                    }
+                    return try JSONDecoder().decode(ReferralPreflightResult.self, from: data)
+                },
                 registerLoginItem: { try AppLoginItem.register() },
-                runCLIInstall: { onLogLine in
-                    try await CLIInstallRunner.run(onLogLine: onLogLine)
+                runCLIInstall: { referralCode, onLogLine in
+                    try await CLIInstallRunner.run(referralCode: referralCode, onLogLine: onLogLine)
                 },
                 importCLIConfigAfterInstall: {
                     try await ProviderConfig.importExistingCLIConfig()
@@ -56,7 +149,7 @@ final class LaunchProviderController: ObservableObject {
                     )
                 },
                 attachInstalledProviderAfterInstall: {
-                    await agent?.monitorInstalledProviderIfPresent(
+                    await agent?.startManagedProvider(
                         timeout: MalibuOnboardingTimeouts.firstServingFrameSec
                     ) ?? false
                 },
@@ -76,19 +169,139 @@ final class LaunchProviderController: ObservableObject {
         self.dependencies = dependencies ?? .live(agent: agent)
     }
 
+    var normalizedReferralCode: String {
+        Self.extractReferralCode(referralCode)
+    }
+
+    var referralCodeIsValid: Bool {
+        Self.isValidReferralCode(normalizedReferralCode)
+    }
+
+    // PROD-M1: the dashboard "Copy private invite" puts a canonical
+    // https://…/j/<code> URL on the clipboard, so a recipient will often paste
+    // the whole URL here. Accept either a canonical invite URL (take the path
+    // segment after "/j/") or a bare code.
+    static func extractReferralCode(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let marker = trimmed.range(of: "/j/") else {
+            return trimmed
+        }
+        let tail = trimmed[marker.upperBound...]
+        let code = tail.prefix { $0 != "/" && $0 != "?" && $0 != "#" }
+        return String(code)
+    }
+
+    // PROD-M6: a lightweight, non-authorizing way for a user without a working
+    // inviter to ask for access. This does NOT grant registration — it is a
+    // waitlist/support entry point. The Go branded join pages (A6) link to the
+    // same destination; keep them in sync.
+    static let requestAccessURL = URL(string: "https://malibu.tech/request-access")!
+
+    static func isValidReferralCode(_ raw: String) -> Bool {
+        raw.range(
+            of: #"^MAL1-[SP]-[A-Za-z0-9_]{1,32}-[A-Za-z0-9_]{1,32}-[A-Z2-7]{26}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
     func launch() async {
+        if await dependencies.existingIdentityMissingBearer() {
+            stage = .existingIdentityMissingBearer(providerID: dependencies.readProviderID() ?? "")
+            return
+        }
         if await dependencies.localInstallSucceeded() {
             await finalizeExistingInstall(
                 logLine: "Background provider is already running locally. Connecting Malibu to it."
             )
             return
         }
-        await launchViaCLIInstall()
+        let existingIdentity = await dependencies.appIdentityConfigured()
+        await launchViaCLIInstall(existingIdentity: existingIdentity)
+    }
+
+    func refreshReferralPolicy() async {
+        if await dependencies.appIdentityConfigured() {
+            referralPolicy = .optional
+            return
+        }
+        do {
+            let result = try await dependencies.validateReferralCode("")
+            referralPolicy = result.required ? .required : .optional
+        } catch {
+            // PROD-M3: policy discovery failed → UNKNOWN, not required. Let the
+            // authoritative registration decide; B8 re-gates only if the server
+            // rejects with referral_required. Mirrors the installer's advisory
+            // treatment of /v1/referrals/validate.
+            referralPolicy = .unknown
+        }
     }
 
     func retry() async {
         guard case .failed(_, let retryable, _) = stage, retryable else { return }
         await launch()
+    }
+
+    // PROD-H6: if an app-owned identity exists without its Keychain bearer,
+    // claim the dedicated recovery/start-fresh stage instead of falling through
+    // to the invite flow. Returns true when it took over the stage.
+    @discardableResult
+    func evaluateExistingIdentityState() async -> Bool {
+        guard case .idle = stage else { return false }
+        guard await dependencies.existingIdentityMissingBearer() else { return false }
+        stage = .existingIdentityMissingBearer(providerID: dependencies.readProviderID() ?? "")
+        return true
+    }
+
+    // PROD-H6 (b): explicit destructive escape hatch. Move the app-owned
+    // config aside so a genuinely fresh provider can be created, then return to
+    // the normal invite flow. PROD-M6: capture the archive location and provider
+    // id so the UI can name what was retired and offer an undo — the caller is
+    // expected to have confirmed the destructive action first.
+    func startAsNewProvider() async {
+        let providerID = dependencies.readProviderID() ?? ""
+        do {
+            let archive = try await dependencies.moveAppOwnedConfigAside()
+            if let archive {
+                retiredIdentity = RetiredIdentity(
+                    providerID: providerID,
+                    archiveURL: archive,
+                    retiredAt: Date()
+                )
+            }
+        } catch {
+            stage = .failed(
+                stage: "startFresh",
+                retryable: true,
+                message: "Could not move the existing provider aside: \(error.localizedDescription)"
+            )
+            return
+        }
+        referralCode = ""
+        stage = .idle
+        await refreshReferralPolicy()
+    }
+
+    // PROD-M6: undo a just-performed "Start New" while the archive still exists,
+    // restoring the retired identity bundle in place. Refuses (surfaces the
+    // error) if a replacement identity was already created over it.
+    func undoStartAsNewProvider() async {
+        guard let retired = retiredIdentity else { return }
+        do {
+            try await dependencies.restoreArchivedIdentity(retired.archiveURL)
+        } catch {
+            stage = .failed(
+                stage: "startFresh",
+                retryable: true,
+                message: "Could not restore the retired provider: \(error.localizedDescription)"
+            )
+            return
+        }
+        retiredIdentity = nil
+        stage = .idle
+        // Re-detect the restored (missing-bearer) identity so the user lands
+        // back on the recover/start-new choice rather than a blank invite.
+        if await evaluateExistingIdentityState() { return }
+        await refreshReferralPolicy()
     }
 
     func setPayoutWallet(_ address: String) async throws {
@@ -110,13 +323,45 @@ final class LaunchProviderController: ObservableObject {
         await finalizeExistingInstall(logLine: "Background provider is already running locally.")
     }
 
-    private func launchViaCLIInstall() async {
+    private func launchViaCLIInstall(existingIdentity: Bool = false) async {
+        guard existingIdentity || !referralRequired || referralCodeIsValid else {
+            stage = .failed(
+                stage: "referral",
+                retryable: true,
+                message: "Enter a valid Malibu pre-beta invite code."
+            )
+            return
+        }
+        var preflightWarning: String?
+        // PROD-M1: validate the invite BEFORE any expensive install work
+        // whenever the policy is not known-optional — i.e. required OR still
+        // unknown (policy discovery failed). This stops a user from spending
+        // 10–30 min downloading and tuning only to discover at the mint that an
+        // invite was mandatory. An authoritative `required` + missing/invalid
+        // code re-gates to the EDITABLE invite step now with reason-specific
+        // copy; an unavailable pre-check degrades to a warning and lets the
+        // install-log rejection re-gate as before (mirrors install.sh's
+        // advisory /v1/referrals/validate treatment).
+        if !existingIdentity && referralPolicy != .optional {
+            do {
+                let result = try await dependencies.validateReferralCode(normalizedReferralCode)
+                if result.required {
+                    referralPolicy = .required
+                }
+                if result.required && !result.valid {
+                    stage = .failed(stage: "referral", retryable: true, message: Self.referralFailureMessage(result.reason))
+                    return
+                }
+            } catch {
+                preflightWarning = "Invite pre-check unavailable; final validation will happen securely during registration."
+            }
+        }
         beginInstallProgressWatch()
         defer { endInstallProgressWatch() }
         do {
             stage = .runningCLIInstall
-            installLogLines = []
-            try await dependencies.runCLIInstall { [weak self] line in
+            installLogLines = preflightWarning.map { [$0] } ?? []
+            try await dependencies.runCLIInstall(existingIdentity ? "" : normalizedReferralCode) { [weak self] line in
                 guard let self else { return }
                 self.installLogLines.append(line)
                 if self.installLogLines.count > 200 {
@@ -124,20 +369,70 @@ final class LaunchProviderController: ObservableObject {
                 }
             }
             var importError: Error?
-            do {
-                try await dependencies.importCLIConfigAfterInstall()
-            } catch {
-                if isRetriableImportError(error) {
-                    importError = error
-                    installLogLines.append(deferredImportMessage(for: error))
-                } else {
-                    stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
-                    return
+            if !existingIdentity {
+                do {
+                    try await dependencies.importCLIConfigAfterInstall()
+                } catch {
+                    if isRetriableImportError(error) {
+                        importError = error
+                        installLogLines.append(deferredImportMessage(for: error))
+                    } else {
+                        stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
+                        return
+                    }
                 }
             }
-            await finalizeInstall(pendingImportError: importError)
+            await finalizeInstall(
+                pendingImportError: importError,
+                startWithAppCredential: existingIdentity
+            )
         } catch {
+            // PROD-M2: if the authoritative registration rejected the invite,
+            // route back to the referral step (required) with the specific
+            // reason rather than a generic install failure.
+            if let reason = referralRejectionFromInstallLog() {
+                referralPolicy = .required
+                stage = .failed(stage: "referral", retryable: true, message: Self.referralFailureMessage(reason))
+                return
+            }
             stage = .failed(stage: "cliInstall", retryable: true, message: error.localizedDescription)
+        }
+    }
+
+    // PROD-M2: install.sh surfaces a referral rejection from the authoritative
+    // mint as `referral_<token>` (token ∈ missing|invalid|expired|revoked|
+    // exhausted|required), both as a MACPROVIDER_REFERRAL_REJECTED marker and in
+    // the fatal message. Scan the captured install log for it.
+    private func referralRejectionFromInstallLog() -> String? {
+        let pattern = #"referral_(missing|invalid|expired|revoked|exhausted|required)"#
+        for line in installLogLines.reversed() {
+            if let range = line.range(of: pattern, options: .regularExpression) {
+                let token = String(line[range].dropFirst("referral_".count))
+                // PROD-M4: the server's authoritative `referral_required`
+                // rejection means an invite is mandatory. Normalize it to the
+                // `missing` case so the failure copy and mandatory-invite routing
+                // match the other required-invite rejections.
+                return token == "required" ? "missing" : token
+            }
+        }
+        return nil
+    }
+
+    private static func referralFailureMessage(_ reason: String) -> String {
+        switch reason {
+        // PROD-M1: reason-specific copy that matches the installer's own wording
+        // ("use a different invite") so the same rejection reads identically
+        // whether it surfaces at preflight or from the install log. A code that
+        // exists but cannot be used routes the user to swap it.
+        case "expired": return "This invite has expired. Use a different invite."
+        case "revoked": return "This invite is no longer available. Use a different invite."
+        case "exhausted": return "This invite has already been used. Use a different invite."
+        // PROD-M4: `required` is normalized to `missing` upstream, but map it
+        // here too so any direct preflight `required` reason renders the same
+        // mandatory-invite copy rather than the generic fallback. There is no
+        // code to swap, so the copy asks for one instead.
+        case "missing", "required": return "An invite code is required. Enter a new invite code."
+        default: return "This invite is not valid. Use a different invite."
         }
     }
 
@@ -145,7 +440,7 @@ final class LaunchProviderController: ObservableObject {
         installLogLines = [logLine]
         guard !Task.isCancelled else { return }
         if await dependencies.appIdentityConfigured() {
-            await finalizeInstall()
+            await finalizeInstall(startWithAppCredential: true)
             return
         }
         var importError: Error?
@@ -162,21 +457,26 @@ final class LaunchProviderController: ObservableObject {
         await finalizeInstall(pendingImportError: importError)
     }
 
-    private func finalizeInstall(pendingImportError: Error? = nil) async {
+    private func finalizeInstall(
+        pendingImportError: Error? = nil,
+        startWithAppCredential: Bool = false
+    ) async {
         do {
             stage = .startingAgent
-            guard await dependencies.waitForInstalledProviderHealth() else {
-                let message = dependencies.providerStartFailure()
-                    ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
-                throw launchdMonitorUnavailableError(message: message)
-            }
-            if let pendingImportError {
-                stage = .importingProviderIdentity
-                do {
-                    try await retryPendingImportAfterProviderStart(initialError: pendingImportError)
-                } catch {
-                    stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
-                    return
+            if !startWithAppCredential {
+                guard await dependencies.waitForInstalledProviderHealth() else {
+                    let message = dependencies.providerStartFailure()
+                        ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
+                    throw launchdMonitorUnavailableError(message: message)
+                }
+                if let pendingImportError {
+                    stage = .importingProviderIdentity
+                    do {
+                        try await retryPendingImportAfterProviderStart(initialError: pendingImportError)
+                    } catch {
+                        stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
+                        return
+                    }
                 }
             }
             guard await dependencies.appIdentityConfigured() else {

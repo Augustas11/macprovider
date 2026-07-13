@@ -42,6 +42,7 @@ final class MalibuAgent: ObservableObject {
     private var isShuttingDown: Bool = false
     private var healthPollTask: Task<Void, Never>?
     private var monitorsLaunchdProvider = false
+    private var managedStartFailureIsPermanent = false
     private var lastRequestsRateSample: (total: Int, date: Date)?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
@@ -77,16 +78,15 @@ final class MalibuAgent: ObservableObject {
             return
         }
 
-        // Release any Malibu-spawned CLI from older builds before attaching to launchd.
-        await releaseSpawnedChildForLaunchdMonitor()
-
-        snapshot.state = .starting
-        startProviderLogTail()
-        if await monitorInstalledProviderIfPresent() {
+        // App-owned identities keep their bearer in Keychain, never in config.yaml
+        // or a launchd plist. Run the provider as Malibu's child so the bearer is
+        // supplied over an anonymous stdin pipe (--token-fd 0) — never argv or the
+        // initial environment — so KERN_PROCARGS2 inspection cannot recover it.
+        if await startManagedProvider() {
             return
         }
 
-        if let failure = providerStartFailure {
+        if let failure = providerStartFailure, managedStartFailureIsPermanent {
             snapshot.state = .error
             snapshot.lastError = failure
             return
@@ -105,6 +105,106 @@ final class MalibuAgent: ObservableObject {
             logHint: ProviderLogDiagnostics.logHint()
         )
         await scheduleReconnect()
+    }
+
+    /// Start an app-owned provider with the Keychain bearer. This is also the
+    /// repair path after install.sh refreshes an existing app-managed install:
+    /// unlike launchd, this child receives the bearer without persisting it.
+    @discardableResult
+    func startManagedProvider(
+        timeout: TimeInterval = MalibuOnboardingTimeouts.firstServingFrameSec
+    ) async -> Bool {
+        managedStartFailureIsPermanent = false
+        guard !isShuttingDown,
+              let providerID = ProviderConfig.readProviderID(),
+              let port = ProviderConfig.readHTTPPort(),
+              await ProviderConfig.isConfigured,
+              let bearer = await KeychainStore.readProviderToken(providerID: providerID),
+              !bearer.isEmpty else {
+            managedStartFailureIsPermanent = true
+            providerStartFailure = "The app-managed provider credential is unavailable. Re-import the provider identity and try again."
+            snapshot.state = .error
+            snapshot.lastError = providerStartFailure
+            return false
+        }
+
+        providerStartFailure = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        healthPollTask?.cancel()
+        healthPollTask = nil
+        monitorsLaunchdProvider = false
+        await stopManagedChildForRestart()
+        guard await Self.bootoutLaunchdProvider(port: port) else {
+            providerStartFailure = "Could not release the background provider before app-managed startup. Malibu will retry."
+            snapshot.state = .reconnecting
+            snapshot.lastError = providerStartFailure
+            return false
+        }
+        guard !isShuttingDown else { return false }
+
+        let paths = ProviderPaths.current
+        do {
+            try paths.ensureDirectories()
+            try? FileManager.default.removeItem(at: paths.controlSocket)
+            let managed = CLIChildProcess(
+                launch: .init(
+                    executable: try CLIUpdateRunner.resolveExecutableURL(),
+                    configPath: paths.configFile,
+                    controlSocketPath: paths.controlSocket,
+                    httpPort: port,
+                    logFileURL: paths.cliLogFile,
+                    // ADV-C1: the bearer travels over an anonymous stdin pipe
+                    // (--token-fd 0), never the child's initial environment,
+                    // so it cannot be read from KERN_PROCARGS2 or captured by
+                    // an installer recovery snapshot.
+                    providerToken: bearer
+                )
+            )
+            managed.onUnexpectedExit = { [weak self] code in
+                Task { @MainActor in
+                    await self?.handleUnexpectedChildExit(code: code)
+                }
+            }
+            child = managed
+            snapshot.state = .starting
+            snapshot.lastError = nil
+            startProviderLogTail()
+            try managed.start()
+        } catch {
+            child = nil
+            providerStartFailure = "Could not start the app-managed provider: \(error.localizedDescription)"
+            snapshot.state = .error
+            snapshot.lastError = providerStartFailure
+            return false
+        }
+
+        let deadline = Date().addingTimeInterval(max(1, timeout))
+        while Date() < deadline, !isShuttingDown, child != nil {
+            if await InstalledProviderMonitor.isHealthy(port: port) {
+                await connectControl(socketPath: paths.controlSocket.path)
+                guard child != nil, !isShuttingDown else { return false }
+                await applyProviderSnapshot(port: port)
+                startHealthPolling(port: port)
+                await refreshEarnings()
+                providerStartFailure = nil
+                return snapshot.state == .serving
+            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            try? await Task.sleep(
+                nanoseconds: UInt64(min(1, remaining) * 1_000_000_000)
+            )
+        }
+
+        guard !isShuttingDown else { return false }
+        let failure = diagnosedProviderFailure()
+            ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
+        providerStartFailure = failure
+        snapshot.state = .error
+        snapshot.lastError = failure
+        await stopManagedChildForRestart()
+        return false
     }
 
     // AUDIT R1 ARCHITECT A1: don't flip state until the CLI acks. If the CLI
@@ -242,6 +342,83 @@ final class MalibuAgent: ObservableObject {
         await control?.close()
         child = nil
         control = nil
+    }
+
+    private func stopManagedChildForRestart() async {
+        guard child != nil || control != nil else { return }
+        child?.markStopping()
+        try? await control?.send(.shutdownRequest(graceSeconds: 5))
+        await child?.stop(gracePeriod: 5)
+        metricsPoller?.cancel()
+        metricsPoller = nil
+        eventStreamTask?.cancel()
+        eventStreamTask = nil
+        await control?.close()
+        child = nil
+        control = nil
+    }
+
+    private func handleUnexpectedChildExit(code: Int32) async {
+        guard !isShuttingDown else { return }
+        child = nil
+        metricsPoller?.cancel()
+        metricsPoller = nil
+        eventStreamTask?.cancel()
+        eventStreamTask = nil
+        await control?.close()
+        control = nil
+        snapshot.state = .reconnecting
+        snapshot.lastError = "Provider exited unexpectedly (status \(code)). Reconnecting…"
+        await scheduleReconnect()
+    }
+
+    private static func bootoutLaunchdProvider(port: Int) async -> Bool {
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+        let uid = getuid()
+        _ = await processStatus(
+            executable: "/bin/launchctl",
+            arguments: ["bootout", "gui/\(uid)/live.streamvc.macprovider"]
+        )
+        if FileManager.default.fileExists(atPath: plist.path) {
+            _ = await processStatus(
+                executable: "/bin/launchctl",
+                arguments: ["bootout", "gui/\(uid)", plist.path]
+            )
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            let jobLoaded = await processStatus(
+                executable: "/bin/launchctl",
+                arguments: ["print", "gui/\(uid)/live.streamvc.macprovider"]
+            ) == 0
+            let portOwned = await processStatus(
+                executable: "/usr/sbin/lsof",
+                arguments: ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"]
+            ) == 0
+            if !jobLoaded && !portOwned { return true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return false
+    }
+
+    private static func processStatus(executable: String, arguments: [String]) async -> Int32 {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    continuation.resume(returning: process.terminationStatus)
+                } catch {
+                    continuation.resume(returning: -1)
+                }
+            }
+        }
     }
 
     private func applyProviderSnapshot(port: Int) async {
@@ -401,6 +578,15 @@ final class MalibuAgent: ObservableObject {
                             )
                         }
                     }
+                } else if self.child != nil {
+                    await MainActor.run {
+                        self.snapshot.state = .reconnecting
+                        self.snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
+                            logHint: ProviderLogDiagnostics.logHint()
+                        )
+                    }
+                    await self.stopManagedChildForRestart()
+                    await self.scheduleReconnect()
                 }
             }
         }

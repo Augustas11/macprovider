@@ -524,6 +524,48 @@ final class ProviderConfigParserTests: XCTestCase {
         )
     }
 
+    // PROD-M6: "Start New" archives the identity bundle; the undo restores it
+    // in place, and a restore over a live identity is refused.
+    func testRestoreArchivedIdentityRoundTrip() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent().deletingLastPathComponent()) }
+        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try Data().write(to: paths.appMarkerFile)
+        try "p_old".write(to: ProviderConfig.providerIDFile(paths: paths), atomically: true, encoding: .utf8)
+
+        let archive = try XCTUnwrap(ProviderConfig.startFreshMovingCLIConfigAside(paths: paths))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+
+        try ProviderConfig.restoreArchivedIdentity(from: archive, paths: paths)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertEqual(ProviderConfig.readProviderID(paths: paths), "p_old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path))
+    }
+
+    func testRestoreArchivedIdentityRefusesWhenDestinationOccupied() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent().deletingLastPathComponent()) }
+        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try Data().write(to: paths.appMarkerFile)
+
+        let archive = try XCTUnwrap(ProviderConfig.startFreshMovingCLIConfigAside(paths: paths))
+        // A replacement identity is created before the user tries to undo.
+        try "provider_id: p_new\nprovider_token: new-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try ProviderConfig.restoreArchivedIdentity(from: archive, paths: paths)) { error in
+            guard case ProviderConfig.SaveError.restoreDestinationOccupied = error else {
+                return XCTFail("expected restoreDestinationOccupied, got \(error)")
+            }
+        }
+        // The replacement identity is untouched and the archive is preserved.
+        XCTAssertEqual(ProviderConfig.readProviderID(paths: paths), "p_new")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archive.path))
+    }
+
     private func makeTempPaths() throws -> ProviderPaths {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-provider-config-tests-\(UUID().uuidString)", isDirectory: true)
@@ -584,5 +626,41 @@ final class ProviderConfigParserTests: XCTestCase {
         var st = stat()
         XCTAssertEqual(lstat(url.path, &st), 0)
         return st.st_mode
+    }
+
+    // PROD-H3: "Start as a new provider" must retire the COMPLETE identity
+    // bundle. Leaving the durable provider_id file (or the app marker) behind
+    // makes the installer's choose_provider_id reuse the old bound provider_id.
+    func testStartFreshArchivesCompleteIdentityBundle() throws {
+        let paths = try makeTempPaths()
+        let fm = FileManager.default
+        try paths.ensureDirectories()
+        let providerIDFile = ProviderConfig.providerIDFile(paths: paths)
+        try "provider_id: mp-old-bound-identity\nmodel: test\n"
+            .write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try "mp-old-bound-identity\n"
+            .write(to: providerIDFile, atomically: true, encoding: .utf8)
+        XCTAssertTrue(fm.createFile(atPath: paths.appMarkerFile.path, contents: Data()))
+
+        let archive = try ProviderConfig.startFreshMovingCLIConfigAside(paths: paths)
+
+        // The whole bundle is moved out of the live locations, so the next
+        // install generates a brand-new provider_id.
+        XCTAssertFalse(fm.fileExists(atPath: paths.configFile.path))
+        XCTAssertFalse(fm.fileExists(atPath: providerIDFile.path))
+        XCTAssertFalse(fm.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertNil(ProviderConfig.readProviderID(paths: paths))
+
+        // Every artifact is preserved in the returned archive directory.
+        let archiveDir = try XCTUnwrap(archive)
+        XCTAssertTrue(fm.fileExists(atPath: archiveDir.appendingPathComponent("config.yaml").path))
+        XCTAssertTrue(fm.fileExists(atPath: archiveDir.appendingPathComponent("provider_id").path))
+        XCTAssertTrue(fm.fileExists(atPath: archiveDir.appendingPathComponent(".installed-by-app").path))
+    }
+
+    func testStartFreshReturnsNilWhenNoIdentityPresent() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        XCTAssertNil(try ProviderConfig.startFreshMovingCLIConfigAside(paths: paths))
     }
 }

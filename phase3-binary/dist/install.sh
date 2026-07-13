@@ -31,6 +31,7 @@ LIVE_CONFIG_PATH="$CONFIG_PATH"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
 MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
+APP_MARKER_PATH="$HOME/Library/Application Support/Malibu/.installed-by-app"
 EXISTING_INSTALL_WAS_PRESENT=0
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
@@ -47,9 +48,11 @@ WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchd
 WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
 NO_WATCHDOG="${MACPROVIDER_NO_WATCHDOG:-0}"
 DRY_RUN=0
+REFERRAL_CODE="${MACPROVIDER_REFERRAL_CODE:-}"
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
 EMERGENCY_ROLLBACK="${MACPROVIDER_EMERGENCY_ROLLBACK:-0}"
+APP_MANAGED_REPAIR="${MACPROVIDER_APP_MANAGED_REPAIR:-0}"
 EMERGENCY_CONFIG_BACKUP="${MACPROVIDER_EMERGENCY_CONFIG_BACKUP:-}"
 EMERGENCY_CONFIG_SHA256="${MACPROVIDER_EMERGENCY_CONFIG_SHA256:-}"
 EMERGENCY_STAGED_CONFIG_SHA256=""
@@ -265,13 +268,17 @@ fi
 
 usage() {
   cat <<'USAGE'
-Usage: bash install.sh [--dry-run]
+Usage: bash install.sh [--dry-run] [--ref CODE]
+
+Referral invite:
+  curl -fsSL https://get.streamvc.live/install.sh | bash -s -- --ref CODE
 
 Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
   MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
                                  (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
+  MACPROVIDER_REFERRAL_CODE      pre-beta referral code (same as --ref)
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
@@ -280,6 +287,9 @@ Environment overrides:
                                  launchd service and its companion watchdog
   MACPROVIDER_NO_WATCHDOG=1      expert/debug only: install the provider
                                  launchd service but skip the watchdog
+  MACPROVIDER_APP_MANAGED_REPAIR=1
+                                 Malibu.app only: update an existing app-owned
+                                 install without starting credential-less launchd
   MACPROVIDER_EMERGENCY_ROLLBACK=1
                                  operator-only signed rollback to an explicit
                                  MACPROVIDER_VERSION; commits only through an
@@ -288,13 +298,24 @@ Environment overrides:
 USAGE
 }
 
-for arg in "$@"; do
-  case "$arg" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --dry-run) DRY_RUN=1 ;;
+    --ref|--referral-code)
+      [ "$#" -ge 2 ] || die 7 "$1 requires a referral code"
+      REFERRAL_CODE="$2"
+      shift
+      ;;
+    --ref=*|--referral-code=*) REFERRAL_CODE="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
-    *) die 7 "unknown argument: $arg" ;;
+    *) die 7 "unknown argument: $1" ;;
   esac
+  shift
 done
+
+if [ -n "$REFERRAL_CODE" ] && [[ ! "$REFERRAL_CODE" =~ ^MAL1-[SP]-[A-Za-z0-9_]{1,32}-[A-Za-z0-9_]{1,32}-[A-Z2-7]{26}$ ]]; then
+  die 7 "referral code has an invalid format"
+fi
 
 release_install_lock() {
   [ "$INSTALL_LOCK_HELD" -eq 1 ] || return 0
@@ -1297,6 +1318,19 @@ for encoded in encoded_arguments:
     arguments.append(argument)
 if sum(map(len, arguments)) > 65536:
     raise SystemExit("manual provider argument bounds exceeded")
+# ADV-H1: defense in depth for any pre-fix recovery snapshot. A `--token-fd`
+# provider cannot be relaunched with `stdin=DEVNULL` (the empty bearer would be
+# rejected). Do not replay it — write a `handoff` sentinel and exit cleanly so
+# the caller logs the app-managed handoff instead of relaunching or failing.
+def _references_token_fd(args):
+    for argument in args:
+        if argument == b"--token-fd" or argument.startswith(b"--token-fd="):
+            return True
+    return False
+if _references_token_fd(arguments):
+    with open(pid_path, "w", encoding="ascii") as handle:
+        handle.write("handoff\n")
+    raise SystemExit(0)
 try:
     working_directory = base64.b64decode(record["working_directory_b64"], validate=True)
 except Exception as error:
@@ -1419,10 +1453,17 @@ except BaseException as original_error:
     raise
 PY
   RESTORED_MANUAL_PID="$(cat "$RECOVERY_DIR/manual-restored.pid")"
-  case "$RESTORED_MANUAL_PID" in
-    ''|*[!0-9]*) recovery_failed "restored manual provider pid is invalid" ;;
-  esac
-  recovery_log "Restored prior manual provider pid=$RESTORED_MANUAL_PID with exact prior argv and port ownership."
+  if [ "$RESTORED_MANUAL_PID" = "handoff" ]; then
+    # ADV-H1: the prior manual provider received its bearer on an inherited
+    # token fd (app-managed). It is intentionally not relaunched here; Malibu
+    # restarts it with the Keychain bearer after the failed install rolls back.
+    recovery_log "Previous manual provider used an inherited token fd (app-managed); skipped installer replay and handed its restart to Malibu."
+  else
+    case "$RESTORED_MANUAL_PID" in
+      ''|*[!0-9]*) recovery_failed "restored manual provider pid is invalid" ;;
+    esac
+    recovery_log "Restored prior manual provider pid=$RESTORED_MANUAL_PID with exact prior argv and port ownership."
+  fi
 fi
 
 recovery_log "Previous provider, recommendation, watchdog, manifest, service, and manual-process states were restored and verified."
@@ -1630,6 +1671,24 @@ if len(arguments) > 128 or any(b"\x00" in argument or len(argument) > 4096 for a
     raise SystemExit("manual provider argument bounds exceeded")
 if sum(map(len, arguments)) > 65536:
     raise SystemExit("manual provider argument bounds exceeded")
+# ADV-H1: an app-managed provider receives its bearer on an inherited file
+# descriptor (`--token-fd N`), which is closed when we stop it and cannot be
+# reproduced by a rollback that relaunches with `stdin=DEVNULL`. Do NOT capture
+# a recovery snapshot for such a provider — a replay would feed `--token-fd` an
+# empty bearer and the provider would reject it. Skip capture cleanly (exit 0,
+# no snapshot file) so rollback leaves its restart to Malibu's app-managed start,
+# which owns the Keychain bearer.
+def _references_token_fd(args):
+    for argument in args:
+        if argument == b"--token-fd" or argument.startswith(b"--token-fd="):
+            return True
+    return False
+if _references_token_fd(arguments):
+    sys.stderr.write(
+        "manual provider uses an inherited token fd (app-managed); skipping recovery "
+        "capture so rollback will not relaunch it with an empty bearer\n"
+    )
+    raise SystemExit(0)
 environment = []
 while offset < len(data):
     entry_end = data.find(b"\x00", offset)
@@ -1647,6 +1706,34 @@ if len(environment) > 512 or any(len(entry) > 8192 for entry in environment) or 
 environment_keys = [entry.split(b"=", 1)[0] for entry in environment]
 if any(not key or b"=" in key for key in environment_keys) or len(set(environment_keys)) != len(environment_keys):
     raise SystemExit("manual provider environment is invalid")
+# ADV-C1: never serialize a secret to disk. Drop the provider bearer and any
+# token/secret/key/password/bearer-shaped env entry from the recovery snapshot.
+# The restored serving child obtains its bearer from Keychain (app-managed) or
+# its 0600 config/token-file (CLI track), not from this recovered environment.
+def _is_secret_env_key(key):
+    upper = key.upper()
+    if upper == b"MACPROVIDER_PROVIDER_TOKEN":
+        return True
+    for needle in (b"TOKEN", b"SECRET", b"PASSWORD", b"PASSWD", b"BEARER", b"APIKEY"):
+        if needle in upper:
+            return True
+    return upper.endswith(b"_KEY") or upper == b"KEY"
+# M1(adv): the secret-substring filter uses ASCII .upper()/substring checks, so
+# fullwidth/Cyrillic confusables (APIＴOKEN, secrе t, ＢEARER) would survive it.
+# Conservatively DROP every non-ASCII-keyed env entry from the recovery snapshot
+# in addition to the ASCII secret filter; a restored serving child never needs a
+# non-ASCII environment key and we must never risk serializing a disguised secret.
+def _is_ascii_key(key):
+    try:
+        key.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    return True
+environment = [
+    entry
+    for entry in environment
+    if _is_ascii_key(entry.split(b"=", 1)[0]) and not _is_secret_env_key(entry.split(b"=", 1)[0])
+]
 working_directory = os.path.realpath(observed_cwd)
 if not os.path.isabs(working_directory) or not os.path.isdir(working_directory):
     raise SystemExit("manual provider working directory is invalid")
@@ -2051,6 +2138,31 @@ coordinator_http_base() {
     wss://coordinator.streamvc.live/ws/provider) printf "%s" "$COORDINATOR_BASE_DEFAULT" ;;
     wss://*) printf "https://%s" "${coordinator_url#wss://}" | sed -E 's#/ws/provider/?$##' ;;
     *) die 7 "coordinator URL must start with wss://" ;;
+  esac
+}
+
+advisory_validate_referral() {
+  local coordinator_base="$1"
+  local payload response result
+  payload="$(MACPROVIDER_CONFIG_REFERRAL_CODE="$REFERRAL_CODE" python3 -c 'import json,os; print(json.dumps({"code": os.environ.pop("MACPROVIDER_CONFIG_REFERRAL_CODE", "")}))')" \
+    || return 0
+  if ! response="$(printf "%s" "$payload" | curl -fsS --max-time 8 \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      --data-binary @- "$coordinator_base/v1/referrals/validate" 2>/dev/null)"; then
+    log "Invite pre-check unavailable; authoritative validation will run during credential registration."
+    return 0
+  fi
+  result="$(printf "%s" "$response" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin); print(("valid" if d.get("valid") else "invalid") + ":" + str(d.get("reason", "invalid")))
+except Exception: print("unavailable:invalid")')"
+  case "$result" in
+    valid:*) return 0 ;;
+    invalid:expired) die 7 "referral code has expired; use a different invite" ;;
+    invalid:revoked) die 7 "referral code is no longer available; use a different invite" ;;
+    invalid:exhausted) die 7 "referral code has already been used; use a different invite" ;;
+    invalid:*) die 7 "referral code is not valid; check it or use a different invite" ;;
+    *) log "Invite pre-check response was unavailable; authoritative validation will run during credential registration." ;;
   esac
 }
 
@@ -2958,7 +3070,9 @@ semantic_merge_config() {
   provider_id_value="$3"
   coordinator_url_value="$4"
   port_value="$5"
-  python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" <<'PY'
+  referral_code_value="${6:-}"
+  MACPROVIDER_CONFIG_REFERRAL_CODE="$referral_code_value" \
+    python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" <<'PY'
 import json
 import os
 import re
@@ -2966,6 +3080,7 @@ import sys
 import tempfile
 
 path, model, provider_id, coordinator_url, port = sys.argv[1:]
+referral_code = os.environ.pop("MACPROVIDER_CONFIG_REFERRAL_CODE", "")
 owned = {
     "coordinator_url": json.dumps(coordinator_url),
     "provider_id": json.dumps(provider_id),
@@ -2973,6 +3088,8 @@ owned = {
 }
 if model:
     owned["model"] = json.dumps(model)
+if referral_code:
+    owned["referral_code"] = json.dumps(referral_code)
 try:
     with open(path, "r", encoding="utf-8") as handle:
         lines = handle.read().splitlines()
@@ -2993,7 +3110,7 @@ for line in lines:
     merged.append(f"{key}: {owned[key]}")
     seen.add(key)
 
-for key in ("model", "coordinator_url", "provider_id", "port"):
+for key in ("model", "coordinator_url", "provider_id", "port", "referral_code"):
     if key not in owned:
         continue
     if key not in seen:
@@ -3030,7 +3147,7 @@ write_config() {
   printf "%s\n" "$provider_id" > "$provider_id_temp"
   chmod 600 "$provider_id_temp" 2>/dev/null || true
   mv "$provider_id_temp" "$PROVIDER_ID_PATH"
-  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT"
+  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "$REFERRAL_CODE"
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
 }
 
@@ -3047,14 +3164,42 @@ read_config_model() {
   ' "$CONFIG_PATH"
 }
 
-read_config_provider_token_line() {
+read_config_provider_token() {
   [ -f "$CONFIG_PATH" ] || return 1
-  awk '
+  awk -F: '
     /^provider_token[[:space:]]*:/ {
-      print
+	  value=$0
+	  sub(/^provider_token[[:space:]]*:[[:space:]]*/, "", value)
+	  gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+	  gsub(/^"|"$/, "", value)
+	  print value
       exit
     }
   ' "$CONFIG_PATH"
+}
+
+clear_config_referral_code() {
+  [ -f "$CONFIG_PATH" ] || return 0
+  grep -Eq '^referral_code[[:space:]]*:' "$CONFIG_PATH" || return 0
+  referral_temp="$(mktemp "${CONFIG_PATH}.referral.XXXXXX")" \
+    || die 5 "could not prepare referral-code cleanup"
+  if ! awk '!/^referral_code[[:space:]]*:/' "$CONFIG_PATH" > "$referral_temp"; then
+    rm -f "$referral_temp"
+    die 5 "could not remove redeemed referral code from config"
+  fi
+  chmod 600 "$referral_temp" 2>/dev/null || true
+  mv "$referral_temp" "$CONFIG_PATH" \
+    || die 5 "could not finalize referral-code cleanup"
+}
+
+existing_provider_credential_configured() {
+  [ -n "$(read_config_provider_token || true)" ] && return 0
+  if [ "${APP_MANAGED_REPAIR:-0}" -eq 1 ] \
+    && [ -r "$APP_MARKER_PATH" ] \
+    && [ -n "$(read_config_provider_id || true)" ]; then
+    return 0
+  fi
+  return 1
 }
 
 read_config_provider_id() {
@@ -3110,7 +3255,8 @@ read_config_donor_mode() {
 }
 
 ensure_provider_credentials() {
-  if [ -n "$(read_config_provider_token_line || true)" ]; then
+  if existing_provider_credential_configured; then
+    clear_config_referral_code
     return 0
   fi
   provider_id="$(read_config_provider_id || true)"
@@ -3119,10 +3265,29 @@ ensure_provider_credentials() {
     *) die 6 "tokenless credential bootstrap requires a fresh high-entropy mp-* provider ID; this existing predictable ID needs an operator-issued ownership credential" ;;
   esac
   log "Acquiring first-install provider credential before evidence admission."
+  # PROD-M2: capture bootstrap-auth stderr so we can distinguish a referral
+  # rejection (machine-readable MACPROVIDER_REFERRAL_REJECTED marker) from a
+  # generic failure, and surface the specific reason so the app can route the
+  # user back to the invite step.
+  bootstrap_err="$(mktemp -t macprovider-bootstrap-err 2>/dev/null || mktemp)"
+  bootstrap_rc=0
   run_macprovider_cli_with_amfi_retry bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH" \
-    || die 6 "provider credential bootstrap failed before evidence admission"
-  [ -n "$(read_config_provider_token_line || true)" ] \
+    2>"$bootstrap_err" || bootstrap_rc=$?
+  cat "$bootstrap_err" >&2
+  if [ "$bootstrap_rc" -ne 0 ]; then
+    referral_reason="$(sed -n 's/.*MACPROVIDER_REFERRAL_REJECTED reason=referral_\([a-z]*\).*/\1/p' "$bootstrap_err" | head -n1)"
+    rm -f "$bootstrap_err"
+    if [ -n "$referral_reason" ]; then
+      die 7 "provider registration rejected the invite (referral_$referral_reason); enter a new invite and try again"
+    fi
+    die 6 "provider credential bootstrap failed before evidence admission"
+  fi
+  rm -f "$bootstrap_err"
+  [ -n "$(read_config_provider_token || true)" ] \
     || die 6 "provider credential bootstrap completed without persisting provider_token"
+  # The invite is bootstrap-only. Remove it immediately after a credential is
+  # present so a redeemed multi-use code is not retained in long-lived config.
+  clear_config_referral_code
   if [ -n "${STAGED_CONFIG_PATH:-}" ] && [ "$CONFIG_PATH" = "$STAGED_CONFIG_PATH" ]; then
     # Coordinator bootstrap creates a durable principal. Publish its exact key
     # material into the protected live transaction immediately so #547's
@@ -4406,6 +4571,41 @@ start_manual_service() {
   fi
 }
 
+unload_app_managed_launchd_jobs() {
+  [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && assert_install_lock_ownership
+  # Address the launchd domain by label even when a crashing KeepAlive job has
+  # no listener. Port-based cutover detection cannot see that state.
+  launchctl bootout "gui/$UID/live.streamvc.macprovider" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1 || true
+  # Older launchctl versions are more reliable with the plist form.
+  [ ! -f "$PLIST_PATH" ] \
+    || launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 \
+    || true
+  [ ! -f "$WATCHDOG_PLIST_PATH" ] \
+    || launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+    || true
+  attempts=0
+  while [ "$attempts" -lt 40 ]; do
+    provider_loaded=0
+    watchdog_loaded=0
+    launchctl print "gui/$UID/live.streamvc.macprovider" >/dev/null 2>&1 \
+      && provider_loaded=1
+    launchctl print "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1 \
+      && watchdog_loaded=1
+    listener_present=0
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 \
+      && listener_present=1
+    if [ "$provider_loaded" -eq 0 ] \
+      && [ "$watchdog_loaded" -eq 0 ] \
+      && [ "$listener_present" -eq 0 ]; then
+      return 0
+    fi
+    sleep 0.25
+    attempts=$((attempts + 1))
+  done
+  die 70 "could not confirm launchd ownership release for app-managed repair"
+}
+
 cache_size_kb() {
   path="$1"
   if [ -d "$path" ]; then
@@ -4917,6 +5117,10 @@ main() {
     require_tool "$tool"
   done
   validate_install_dir
+  case "$APP_MANAGED_REPAIR" in
+    0|1) ;;
+    *) die 7 "MACPROVIDER_APP_MANAGED_REPAIR must be 0 or 1" ;;
+  esac
   acquire_install_lock
   recover_orphaned_install_transactions
 
@@ -4926,6 +5130,19 @@ main() {
   coordinator_url="$(choose_coordinator_url)"
   coordinator_base="$(coordinator_http_base "$coordinator_url")"
   validate_inputs "$model" "$provider_id" "$coordinator_url"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    if existing_provider_credential_configured; then
+      log "Existing provider credential found; referral pre-check is not required for repair or upgrade."
+    else
+      advisory_validate_referral "$coordinator_base"
+    fi
+  fi
+  if [ "$APP_MANAGED_REPAIR" -eq 1 ]; then
+    existing_provider_credential_configured \
+      || die 7 "app-managed repair requires an existing provider credential"
+    [ "$EMERGENCY_ROLLBACK" -eq 0 ] \
+      || die 7 "app-managed repair cannot perform an emergency rollback"
+  fi
   log "Model selection: signed catalog recommendation after release verification"
   log "Provider ID: $provider_id"
   log "Coordinator: $coordinator_url"
@@ -5037,6 +5254,18 @@ main() {
   install_binary
   activate_staged_config
   check_path_hint
+  if [ "$APP_MANAGED_REPAIR" -eq 1 ]; then
+    # The app-owned config intentionally contains no bearer. Do not start or
+    # health-gate a launchd job that cannot authenticate. The caller starts the
+    # verified binary as a Malibu child with its Keychain bearer immediately
+    # after this transaction commits.
+    unload_app_managed_launchd_jobs
+    rm -f "$PLIST_PATH" "$WATCHDOG_PLIST_PATH"
+    write_install_manifest "$tag"
+    commit_install_transaction
+    log "App-managed repair artifacts are ready; Malibu will start and verify the provider."
+    exit 0
+  fi
   install_plist "$model" "$provider_id" "$coordinator_url"
   install_watchdog "$coordinator_url"
   write_install_manifest "$tag"

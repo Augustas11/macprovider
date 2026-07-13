@@ -3,11 +3,14 @@ import Foundation
 enum ProcessEnvironmentSanitizer {
     enum Error: Swift.Error, CustomStringConvertible, Equatable {
         case unsafeValue(String)
+        case forbiddenSecretKey(String)
 
         var description: String {
             switch self {
             case let .unsafeValue(key):
                 return "unsafe environment value for \(key)"
+            case let .forbiddenSecretKey(key):
+                return "secret environment key is forbidden for managed child: \(key)"
             }
         }
     }
@@ -23,6 +26,9 @@ enum ProcessEnvironmentSanitizer {
             result[key] = value
         }
         for (key, value) in extraEnvironment {
+            guard key != "MACPROVIDER_PROVIDER_TOKEN" else {
+                throw Error.forbiddenSecretKey(key)
+            }
             guard isSafeValue(value) else { throw Error.unsafeValue(key) }
             result[key] = value
         }

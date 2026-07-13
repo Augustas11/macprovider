@@ -228,6 +228,11 @@ actor CoordinatorClient {
     private let sendOverride: SendOverride?
     private let streamInterval: Int
     private let credentialBootstrap: Bool
+    // PROD-M2: set when a credential-bootstrap attempt is terminally rejected
+    // for a referral reason (`referral_<token>`). BootstrapAuthCommand polls
+    // this so the installer can surface the specific reason instead of a
+    // generic timeout.
+    private var terminalReferralReason: String?
     private let bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey?
     private let receiptIdentitySigningKeys: [Curve25519.Signing.PrivateKey]
     private let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
@@ -402,6 +407,13 @@ actor CoordinatorClient {
         self.persistReceiptIdentitySigningKey = persistReceiptIdentitySigningKey
     }
 
+    /// PROD-M2: the terminal referral rejection reason (`referral_<token>`)
+    /// observed on a credential-bootstrap attempt, if any. `nil` until a
+    /// referral-coded close terminates the reconnect loop.
+    func terminalReferralRejection() -> String? {
+        terminalReferralReason
+    }
+
     func start() async {
         await runStartupAutoupdateRecovery()
         startReconnectTask()
@@ -560,6 +572,16 @@ actor CoordinatorClient {
                 consecutiveAuthProtocolFailures = 0
             } catch {
                 await cleanupConnection()
+                // PROD-M2: a referral rejection during credential bootstrap is
+                // terminal. Record the specific reason and stop looping so the
+                // bootstrap command surfaces it immediately (no 30s timeout).
+                if credentialBootstrap,
+                   let authError = error as? CoordinatorAuthError,
+                   case .rejected(let code, _) = authError,
+                   code.hasPrefix("referral_") {
+                    terminalReferralReason = code
+                    return
+                }
                 failedAttempts += 1
                 if Self.isFatalAuthProtocolFailure(error) {
                     consecutiveAuthProtocolFailures += 1
@@ -611,7 +633,9 @@ actor CoordinatorClient {
         }
         switch authError {
         case .rejected(let code, _):
-            return code == "invalid_auth_request"
+            // A referral rejection is deterministic — retrying will not help,
+            // so it counts as a fatal auth-protocol failure (PROD-M2).
+            return code == "invalid_auth_request" || code.hasPrefix("referral_")
         case .invalidMessage(let message):
             let lowered = message.lowercased()
             return lowered.contains("auth_request") ||
@@ -1180,6 +1204,16 @@ actor CoordinatorClient {
         case 4000 where reason == "unrecognized auth message":
             return .invalidMessage(reason)
         default:
+            // PROD-M2 / C-1: the coordinator preserves the specific referral
+            // failure token in the WS close reason as `referral_<token>`
+            // (token ∈ missing|invalid|expired|revoked|exhausted). Surface it
+            // verbatim as a rejection so the installer/app can route the user
+            // back to the invite step with the right message instead of
+            // treating it as a generic auth/timeout failure. Accept it on any
+            // close code the coordinator chooses.
+            if reason.hasPrefix("referral_") {
+                return .rejected(code: reason, message: reason)
+            }
             return nil
         }
     }
@@ -1595,6 +1629,10 @@ actor CoordinatorClient {
                 throw CoordinatorAuthError.invalidMessage("credential bootstrap receipt identity unavailable")
             }
             proof["credential_bootstrap"] = true
+            if let referralCode = appConfig.referralCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !referralCode.isEmpty {
+                proof["referral_code"] = referralCode
+            }
             let transcriptSHA256 = try Self.initialAuthTranscriptHashBase64(initialMessage)
             let payload = try Self.credentialBootstrapIdentityPayload(
                 challenge: challenge,
@@ -2950,6 +2988,10 @@ actor CoordinatorClient {
         }
         if credentialBootstrap {
             message["credential_bootstrap"] = true
+            if let referralCode = appConfig.referralCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !referralCode.isEmpty {
+                message["referral_code"] = referralCode
+            }
         }
         return message
     }
@@ -3004,6 +3046,11 @@ actor CoordinatorClient {
             message["model_hash"] = hashForHello
         }
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
+        if providerToken == nil,
+           let referralCode = appConfig.referralCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !referralCode.isEmpty {
+            message["referral_code"] = referralCode
+        }
         return message
     }
 

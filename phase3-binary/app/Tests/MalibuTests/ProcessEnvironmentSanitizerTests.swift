@@ -2,7 +2,7 @@ import XCTest
 @testable import Malibu
 
 final class ProcessEnvironmentSanitizerTests: XCTestCase {
-    func testChildEnvironmentKeepsOnlyAllowlistedInheritedValuesAndExplicitToken() throws {
+    func testChildEnvironmentKeepsOnlyAllowlistedInheritedValues() throws {
         let sanitized = try ProcessEnvironmentSanitizer.sanitized(
             from: [
                 "PATH": "/usr/bin:/bin",
@@ -11,16 +11,26 @@ final class ProcessEnvironmentSanitizerTests: XCTestCase {
                 "MACPROVIDER_EVIL": "1",
                 "MALIBU_CLI_PATH": "/tmp/fake"
             ],
-            extraEnvironment: [
-                "MACPROVIDER_PROVIDER_TOKEN": "provider-token"
-            ]
+            extraEnvironment: ["MACPROVIDER_SAFE_OVERRIDE": "enabled"]
         )
 
         XCTAssertEqual(sanitized["PATH"], "/usr/bin:/bin")
         XCTAssertEqual(sanitized["LC_CTYPE"], "UTF-8")
-        XCTAssertEqual(sanitized["MACPROVIDER_PROVIDER_TOKEN"], "provider-token")
+        XCTAssertEqual(sanitized["MACPROVIDER_SAFE_OVERRIDE"], "enabled")
         XCTAssertNil(sanitized["MACPROVIDER_EVIL"])
         XCTAssertNil(sanitized["MALIBU_CLI_PATH"])
+    }
+
+    func testChildEnvironmentRejectsProviderBearerEvenWhenExplicit() {
+        XCTAssertThrowsError(try ProcessEnvironmentSanitizer.sanitized(
+            from: [:],
+            extraEnvironment: ["MACPROVIDER_PROVIDER_TOKEN": "provider-token"]
+        )) { error in
+            XCTAssertEqual(
+                error as? ProcessEnvironmentSanitizer.Error,
+                .forbiddenSecretKey("MACPROVIDER_PROVIDER_TOKEN")
+            )
+        }
     }
 
     func testChildEnvironmentRejectsUnsafeInheritedValue() {

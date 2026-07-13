@@ -23,6 +23,8 @@ private struct OnboardingRootView: View {
     @ObservedObject var agent: MalibuAgent
     let onDone: () -> Void
     @StateObject private var controller: LaunchProviderController
+    // PROD-M6: gate the destructive "Start New" behind an explicit confirmation.
+    @State private var showStartFreshConfirm = false
 
     init(agent: MalibuAgent, onDone: @escaping () -> Void) {
         self.agent = agent
@@ -56,6 +58,10 @@ private struct OnboardingRootView: View {
         .padding(28)
         .frame(minWidth: 460, minHeight: 560)
         .task {
+            // PROD-H6: an app-owned identity with a missing bearer takes over
+            // the stage; skip the invite flow when it does.
+            if await controller.evaluateExistingIdentityState() { return }
+            await controller.refreshReferralPolicy()
             await controller.refreshFromExistingInstall()
         }
     }
@@ -64,9 +70,43 @@ private struct OnboardingRootView: View {
     private var content: some View {
         switch controller.stage {
         case .idle:
-            stageRow(title: "Ready", detail: "Installs the provider CLI, picks a model, and registers a background service.") {
-                VStack(alignment: .leading, spacing: 8) {
+            stageRow(
+                title: controller.referralRequired ? "Invite-only pre-beta" : "Set up Malibu",
+                detail: controller.referralRequired
+                    ? "Enter an invite to install the provider CLI and register this Mac."
+                    : "Install the provider CLI and register this Mac."
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let retired = controller.retiredIdentity {
+                        retiredIdentityBanner(retired)
+                    }
+                    if controller.showsReferralField {
+                        HStack(spacing: 8) {
+                            TextField("MAL1-… or invite link", text: $controller.referralCode)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                                .accessibilityLabel("Malibu invite code")
+                            Button("Paste code") {
+                                if let value = NSPasteboard.general.string(forType: .string) {
+                                    controller.referralCode = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                                }
+                            }
+                        }
+                        if !controller.referralRequired {
+                            // PROD-M3: policy is unknown/optional — the invite is
+                            // not blocking; registration decides.
+                            Text("Have an invite? Paste it here. Registration will confirm whether one is required.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if !controller.normalizedReferralCode.isEmpty && !controller.referralCodeIsValid {
+                            Text("That invite code does not match Malibu's expected format.")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
                     launchButton(title: "Launch Provider")
+                        .disabled(controller.referralRequired && !controller.referralCodeIsValid)
                     Text("No wallet needed to start — add one anytime after.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -126,6 +166,42 @@ private struct OnboardingRootView: View {
             ) {
                 ProgressView().controlSize(.small)
             }
+        case let .existingIdentityMissingBearer(providerID):
+            stageRow(
+                title: "Provider credential missing",
+                detail: "This Mac already has a Malibu provider identity"
+                    + (providerID.isEmpty ? "" : " (\(providerID))")
+                    + ", but its saved credential is gone. Malibu will not retry registration with that identity or ask for another invite in a loop."
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Contact Malibu support if you believe the credential can be restored from another trusted backup. Otherwise, start as a new provider below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Link("Contact Malibu support", destination: LaunchProviderController.requestAccessURL)
+                        .font(.caption)
+                    Divider()
+                    Button("Start as a new provider") {
+                        showStartFreshConfirm = true
+                    }
+                    .prominentButton(true)
+                    .tint(MalibuBrand.coral)
+                    Text("Moves the existing provider aside and sets up a fresh one. This does not delete your earnings history, but the old provider identity is retired on this Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .confirmationDialog(
+                    "Retire this provider and start new?",
+                    isPresented: $showStartFreshConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("Retire and start new", role: .destructive) {
+                        Task { await controller.startAsNewProvider() }
+                    }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text(startFreshConfirmationMessage(providerID: providerID))
+                }
+            }
         case let .live(model, tier):
             VStack(alignment: .leading, spacing: 16) {
                 stageRow(title: "Provider live", detail: "Serving \(model). Trust tier: \(tier.rawValue).") {
@@ -142,13 +218,61 @@ private struct OnboardingRootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(MalibuBrand.coral)
             }
-        case let .failed(_, retryable, message):
+        case let .failed(stage, retryable, message):
             stageRow(title: retryable ? "Needs retry" : "Setup failed", detail: message) {
                 if retryable {
+                    if stage == "referral" || (stage == "cliInstall" && controller.referralRequired) {
+                        // PROD-M2: when the server demanded an invite, entering a
+                        // new invite code is required — not optional.
+                        Text(stage == "referral" ? "Enter a new invite code" : "Change invite code")
+                            .font(.caption.weight(.semibold))
+                        TextField("MAL1-… or invite link", text: $controller.referralCode)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                        // PROD-M6: no working inviter? Offer a non-authorizing
+                        // request-access affordance.
+                        Link("No working invite? Request access", destination: LaunchProviderController.requestAccessURL)
+                            .font(.caption)
+                    }
                     launchButton(title: "Retry")
+                        .disabled(controller.referralRequired && (stage == "referral" || stage == "cliInstall") && !controller.referralCodeIsValid)
                 }
             }
         }
+    }
+
+    // PROD-M6: name the affected provider, the identity/earnings consequence,
+    // and where the bundle is archived so a destructive click is informed.
+    private func startFreshConfirmationMessage(providerID: String) -> String {
+        let subject = providerID.isEmpty ? "This Mac's provider identity" : "Provider \(providerID)"
+        return "\(subject) will be archived under ~/.config/macprovider and retired on this Mac. "
+            + "Your earnings history is not deleted, but this Mac stops serving under that identity until you restore it. "
+            + "You can undo this immediately afterward while the archive is still on disk."
+    }
+
+    // PROD-M6: session-scoped undo affordance after a "Start New". The archive
+    // stays on disk, so even after this session it can be restored manually from
+    // the shown path.
+    @ViewBuilder
+    private func retiredIdentityBanner(_ retired: LaunchProviderController.RetiredIdentity) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(retired.providerID.isEmpty
+                ? "Previous provider retired and archived."
+                : "Retired provider \(retired.providerID) and archived it.")
+                .font(.caption.weight(.semibold))
+            Text("Archive: \(retired.archivePath)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            Button("Undo — restore the retired provider") {
+                Task { await controller.undoStartAsNewProvider() }
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(MalibuBrand.sunnyYellow.opacity(0.15)))
     }
 
     @ViewBuilder
@@ -201,5 +325,18 @@ private struct OnboardingRootView: View {
             return String(format: "%d:%02d:%02d", hours, mins, remainder)
         }
         return String(format: "%d:%02d", minutes, remainder)
+    }
+}
+
+private extension View {
+    // A ternary over `.borderedProminent`/`.bordered` doesn't type-check
+    // (distinct ButtonStyle types), so branch on the concrete style instead.
+    @ViewBuilder
+    func prominentButton(_ prominent: Bool) -> some View {
+        if prominent {
+            buttonStyle(.borderedProminent)
+        } else {
+            buttonStyle(.bordered)
+        }
     }
 }

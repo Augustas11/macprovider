@@ -45,6 +45,26 @@ enum ProviderConfig {
         return port
     }
 
+    static func readCoordinatorBaseURL(paths: ProviderPaths = .current) -> URL? {
+        guard let contents = try? String(contentsOf: paths.configFile),
+              let raw = parseTopLevelValue(named: "coordinator_url", from: contents),
+              var components = URLComponents(string: raw) else {
+            return nil
+        }
+        let isLoopback = ["localhost", "127.0.0.1", "::1"].contains(components.host?.lowercased() ?? "")
+        switch components.scheme?.lowercased() {
+        case "wss": components.scheme = "https"
+        case "ws" where isLoopback: components.scheme = "http"
+        case "https": break
+        case "http" where isLoopback: break
+        default: return nil
+        }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
     static func readLinkState(paths: ProviderPaths = .current) -> LinkState? {
         guard let contents = try? String(contentsOf: paths.configFile),
               let value = parseTopLevelValue(named: "link_state", from: contents)
@@ -156,6 +176,7 @@ enum ProviderConfig {
         case importRollbackFailed(importError: Error, rollbackError: Error)
         case appMarkerCreateFailed
         case savedIdentityNotConfigured
+        case restoreDestinationOccupied
         var errorDescription: String? {
             switch self {
             case .existingConfigNotOwnedByApp:
@@ -174,6 +195,8 @@ enum ProviderConfig {
                 return "The app ownership marker could not be written."
             case .savedIdentityNotConfigured:
                 return "The provider identity was not fully persisted."
+            case .restoreDestinationOccupied:
+                return "A provider identity already exists on this Mac, so the archived one cannot be restored over it."
             }
         }
     }
@@ -237,11 +260,9 @@ enum ProviderConfig {
         lines.append("provider_id: \(providerID)")
         lines.append("coordinator_url: \(coordinatorWSURL.absoluteString)")
         lines.append("link_state: \(LinkState.pendingLink.rawValue)")
-        // We deliberately do NOT write the token to disk. The CLI must be
-        // launched with the token in the environment (MACPROVIDER_PROVIDER_TOKEN),
-        // which MalibuAgent will set from Keychain before spawning the process.
-        // Followup: teach the CLI to read the token from Keychain directly so
-        // the environment-variable path can be removed.
+        // We deliberately do NOT write the token to disk. MalibuAgent hands the
+        // Keychain bearer to its managed CLI child over an anonymous pipe
+        // (`--token-fd 0`), keeping it out of argv and the process environment.
         let joined = lines.joined(separator: "\n") + "\n"
         do {
             try await saveToken(providerID, token)
@@ -440,9 +461,25 @@ enum ProviderConfig {
         try startFreshMovingCLIConfigAside(now: now, paths: .current)
     }
 
+    /// The durable provider_id file the installer's `choose_provider_id` reads
+    /// first (`~/.config/macprovider/provider_id`). It lives next to config.yaml
+    /// and is part of the app-owned identity bundle.
+    static func providerIDFile(paths: ProviderPaths = .current) -> URL {
+        paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
+    }
+
+    // PROD-H3: "Start as a new provider" must be truly destructive+clean. Moving
+    // only config.yaml aside left the durable provider_id file (and the app
+    // ownership marker) in place, so the installer's choose_provider_id reused
+    // the old bound provider_id and the fresh registration landed back in the
+    // bound-identity conflict. Archive the COMPLETE identity bundle — config.yaml,
+    // the provider_id file, and the app marker — into one timestamped directory
+    // so the next install generates a brand-new provider_id. Partial moves roll
+    // back so a failure never leaves the identity half-retired.
     static func startFreshMovingCLIConfigAside(now: Date = Date(), paths: ProviderPaths) throws -> URL? {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: paths.configFile.path) else { return nil }
+        let bundle = [paths.configFile, providerIDFile(paths: paths), paths.appMarkerFile]
+        guard bundle.contains(where: { fm.fileExists(atPath: $0.path) }) else { return nil }
         try paths.ensureDirectories()
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -450,11 +487,66 @@ enum ProviderConfig {
         let suffix = formatter.string(from: now)
             .replacingOccurrences(of: ":", with: "")
             .replacingOccurrences(of: "-", with: "")
-        let backup = paths.configFile.deletingLastPathComponent()
-            .appendingPathComponent("config.yaml.cli-backup-\(suffix)")
-        try fm.moveItem(at: paths.configFile, to: backup)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
-        return backup
+        let archive = paths.configFile.deletingLastPathComponent()
+            .appendingPathComponent("identity-archive-\(suffix)-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try fm.createDirectory(at: archive, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: archive.path)
+
+        var moved: [(from: URL, to: URL)] = []
+        do {
+            for artifact in bundle where fm.fileExists(atPath: artifact.path) {
+                let destination = archive.appendingPathComponent(artifact.lastPathComponent)
+                try fm.moveItem(at: artifact, to: destination)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+                moved.append((artifact, destination))
+            }
+        } catch {
+            // Restore any already-archived artifacts so the identity stays whole.
+            for entry in moved.reversed() {
+                try? fm.moveItem(at: entry.to, to: entry.from)
+            }
+            try? fm.removeItem(at: archive)
+            throw error
+        }
+        return archive
+    }
+
+    // PROD-M6: reverse of startFreshMovingCLIConfigAside so an accidental
+    // "Start New" can be undone while the archive still exists. Each archived
+    // artifact is restored to its original location by filename (config.yaml
+    // and provider_id under the config dir; the app marker under Application
+    // Support). Refuses if any destination is already occupied so a
+    // freshly-created replacement identity is never clobbered. Partial moves
+    // roll back so a failure never leaves the identity half-restored.
+    static func restoreArchivedIdentity(from archive: URL, paths: ProviderPaths = .current) throws {
+        let fm = FileManager.default
+        let destinations: [String: URL] = [
+            paths.configFile.lastPathComponent: paths.configFile,
+            providerIDFile(paths: paths).lastPathComponent: providerIDFile(paths: paths),
+            paths.appMarkerFile.lastPathComponent: paths.appMarkerFile,
+        ]
+        let entries = (try? fm.contentsOfDirectory(at: archive, includingPropertiesForKeys: nil)) ?? []
+        for entry in entries {
+            if let destination = destinations[entry.lastPathComponent],
+               fm.fileExists(atPath: destination.path) {
+                throw SaveError.restoreDestinationOccupied
+            }
+        }
+        try paths.ensureDirectories()
+        var moved: [(from: URL, to: URL)] = []
+        do {
+            for entry in entries {
+                guard let destination = destinations[entry.lastPathComponent] else { continue }
+                try fm.moveItem(at: entry, to: destination)
+                moved.append((entry, destination))
+            }
+        } catch {
+            for entry in moved.reversed() {
+                try? fm.moveItem(at: entry.to, to: entry.from)
+            }
+            throw error
+        }
+        try? fm.removeItem(at: archive)
     }
 
     // AUDIT R1 CODE M2 / SECURITY S3 / ARCHITECT A6 fix: uninstall must complete
@@ -508,6 +600,22 @@ enum ProviderConfig {
             return false
         }
         return await KeychainStore.readProviderToken(providerID: providerID) != nil
+    }
+
+    // PROD-H6: an app-owned config (config + app marker + provider_id) whose
+    // Keychain bearer is gone. This is distinct from "unconfigured": reusing
+    // the existing provider_id for a fresh referral loops because the
+    // coordinator rejects the already-confirmed bootstrap identity. Callers
+    // must offer proven recovery or an explicit "start fresh", never silently
+    // ask for a new invite.
+    static func existingIdentityMissingBearer(paths: ProviderPaths = .current) async -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path),
+              fm.fileExists(atPath: paths.appMarkerFile.path),
+              let providerID = readProviderID(paths: paths) else {
+            return false
+        }
+        return await KeychainStore.readProviderToken(providerID: providerID) == nil
     }
 
     private static func writeAppMarker(paths: ProviderPaths, fileManager fm: FileManager) throws {

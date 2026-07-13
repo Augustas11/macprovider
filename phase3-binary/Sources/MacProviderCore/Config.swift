@@ -32,6 +32,8 @@ public struct AppConfig: Equatable, Sendable {
     public var modelCatalogVersion: String?
     public var modelCatalogHash: String?
     public var coordinatorURL: String?
+    /// Pre-beta referral code used only while obtaining first credentials.
+    public var referralCode: String?
     public var providerID: String?
     public var endpointURL: String?
     public var wsTunneledMode: Bool?
@@ -129,6 +131,7 @@ public struct AppConfig: Equatable, Sendable {
             modelCatalogVersion: nil,
             modelCatalogHash: nil,
             coordinatorURL: nil,
+            referralCode: nil,
             providerID: nil,
             endpointURL: nil,
             wsTunneledMode: nil,
@@ -177,6 +180,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var numDraftTokens: Int?
     public var publishesSpecDecodeTelemetry: Bool?
     public var coordinatorURL: String?
+    public var referralCode: String?
     public var providerID: String?
     public var endpointURL: String?
     public var configPath: String?
@@ -214,6 +218,7 @@ public struct CLIOverrides: Equatable, Sendable {
         numDraftTokens: Int? = nil,
         publishesSpecDecodeTelemetry: Bool? = nil,
         coordinatorURL: String? = nil,
+        referralCode: String? = nil,
         providerID: String? = nil,
         endpointURL: String? = nil,
         configPath: String? = nil,
@@ -247,6 +252,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.numDraftTokens = numDraftTokens
         self.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
         self.coordinatorURL = coordinatorURL
+        self.referralCode = referralCode
         self.providerID = providerID
         self.endpointURL = endpointURL
         self.configPath = configPath
@@ -368,6 +374,7 @@ public enum ConfigLoader {
         try assign(&config.modelCatalogVersion, from: dict, key: "model_catalog_version", expected: "string")
         try assign(&config.modelCatalogHash, from: dict, key: "model_catalog_hash", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
+        try assign(&config.referralCode, from: dict, key: "referral_code", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
         try assign(&config.wsTunneledMode, from: dict, key: "ws_tunneled_mode", expected: "boolean")
@@ -423,6 +430,7 @@ public enum ConfigLoader {
         try assign(&config.numDraftTokens, from: environment, env: "MACPROVIDER_NUM_DRAFT_TOKENS", expected: "integer")
         try assign(&config.publishesSpecDecodeTelemetry, from: environment, env: "MACPROVIDER_PUBLISHES_SPEC_DECODE_TELEMETRY", expected: "boolean")
         try assign(&config.coordinatorURL, from: environment, env: "MACPROVIDER_COORDINATOR_URL", expected: "string")
+        try assign(&config.referralCode, from: environment, env: "MACPROVIDER_REFERRAL_CODE", expected: "string")
         try assign(&config.providerID, from: environment, env: "MACPROVIDER_PROVIDER_ID", expected: "string")
         try assign(&config.endpointURL, from: environment, env: "MACPROVIDER_ENDPOINT_URL", expected: "string")
         try assign(&config.wsTunneledMode, from: environment, env: "MACPROVIDER_WS_TUNNELED_MODE", expected: "boolean")
@@ -483,6 +491,9 @@ public enum ConfigLoader {
         }
         if let coordinatorURL = cli.coordinatorURL {
             config.coordinatorURL = coordinatorURL
+        }
+        if let referralCode = cli.referralCode {
+            config.referralCode = referralCode
         }
         if let providerID = cli.providerID {
             config.providerID = providerID
