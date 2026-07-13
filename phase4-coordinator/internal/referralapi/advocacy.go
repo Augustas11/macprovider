@@ -1,0 +1,284 @@
+package referralapi
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/auth"
+)
+
+type AdvocacyStore interface {
+	ProviderReferralStatus(context.Context, auth.ReferralPolicy, string) (auth.ProviderReferral, error)
+	EnsureProviderReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ProviderReferral, error)
+	CreateSocialChallenge(context.Context, auth.ReferralPolicy, string, time.Time) (auth.SocialChallenge, error)
+	ValidateSocialChallenge(context.Context, auth.ReferralPolicy, string, string, time.Time) error
+	CompleteSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, string, string, time.Time) (auth.ProviderReferral, error)
+}
+
+type ProviderTokenValidator interface {
+	ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error)
+}
+
+type ServingEvidence interface {
+	FirstVerifiedServing(context.Context, string) (time.Time, bool, error)
+}
+
+type PostVerifier interface {
+	VerifyPost(context.Context, string, string) (string, error)
+}
+
+// AdvocacyHandler owns the provider-authenticated referral endpoints. It never
+// consumes invite capacity; only provider registration creates redemptions.
+type AdvocacyHandler struct {
+	Store           AdvocacyStore
+	Tokens          ProviderTokenValidator
+	ServingEvidence ServingEvidence
+	PostVerifier    PostVerifier
+	Policy          auth.ReferralPolicy
+	ProviderLimiter *BoundedLimiter
+	VerifySlots     chan struct{}
+	Now             func() time.Time
+	JoinBaseURL     string
+	Metrics         ReferralMetrics
+}
+
+func (h *AdvocacyHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET required")
+		return
+	}
+	providerID, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	status, err := h.Store.ProviderReferralStatus(r.Context(), h.Policy, providerID)
+	if errors.Is(err, auth.ErrReferralLocked) {
+		if h.ServingEvidence == nil {
+			h.observe("status", "locked")
+			h.writeStatus(w, status)
+			return
+		}
+		firstServingAt, eligible, evidenceErr := h.ServingEvidence.FirstVerifiedServing(r.Context(), providerID)
+		if evidenceErr != nil {
+			h.observe("status", "error")
+			writeError(w, http.StatusServiceUnavailable, "serving_evidence_unavailable", "serving evidence unavailable")
+			return
+		}
+		if !eligible {
+			h.observe("status", "locked")
+			h.writeStatus(w, status)
+			return
+		}
+		status, err = h.Store.EnsureProviderReferral(r.Context(), h.Policy, providerID, firstServingAt)
+		if err == nil {
+			h.observe("status", "issued")
+		}
+	}
+	if err != nil {
+		h.observe("status", "error")
+		writeError(w, http.StatusInternalServerError, "referral_state_unavailable", "provider referral state unavailable")
+		return
+	}
+	if status.SocialState != "" {
+		h.observe("status", status.SocialState)
+	}
+	h.writeStatus(w, status)
+}
+
+func (h *AdvocacyHandler) HandleChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
+		return
+	}
+	providerID, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if !h.Policy.EnableSocialBonus {
+		h.observe("challenge", "disabled")
+		writeError(w, http.StatusNotFound, "social_bonus_disabled", "social invite bonus is disabled")
+		return
+	}
+	if h.ProviderLimiter == nil || !h.ProviderLimiter.Allow("challenge:"+providerID) {
+		w.Header().Set("Retry-After", "60")
+		h.observe("challenge", "rate_limited")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many social challenge requests")
+		return
+	}
+	if h.ServingEvidence == nil {
+		h.observe("challenge", "error")
+		writeError(w, http.StatusServiceUnavailable, "serving_evidence_unavailable", "serving evidence unavailable")
+		return
+	}
+	firstServingAt, eligible, err := h.ServingEvidence.FirstVerifiedServing(r.Context(), providerID)
+	if err != nil {
+		h.observe("challenge", "error")
+		writeError(w, http.StatusServiceUnavailable, "serving_evidence_unavailable", "serving evidence unavailable")
+		return
+	}
+	if !eligible {
+		h.observe("challenge", "locked")
+		writeError(w, http.StatusConflict, "first_serving_required", "complete one verified serving before sharing")
+		return
+	}
+	if _, err := h.Store.EnsureProviderReferral(r.Context(), h.Policy, providerID, firstServingAt); err != nil {
+		h.observe("challenge", "error")
+		writeError(w, http.StatusInternalServerError, "referral_state_unavailable", "provider referral state unavailable")
+		return
+	}
+	challenge, err := h.Store.CreateSocialChallenge(r.Context(), h.Policy, providerID, h.now())
+	if err != nil {
+		h.observe("challenge", "conflict")
+		writeError(w, http.StatusConflict, "challenge_unavailable", "social challenge unavailable")
+		return
+	}
+	shareURL := strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" +
+		url.PathEscape(challenge.Code) + "?c=" + url.QueryEscape(challenge.Cleartext)
+	copy := "My Mac just joined Malibu's pre-beta compute network. If you have a Mac and want early access: " + shareURL
+	h.observe("challenge", "created")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"intent_url": "https://twitter.com/intent/tweet?text=" + url.QueryEscape(copy),
+		"share_url":  shareURL,
+		"expires_at": challenge.ExpiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+func (h *AdvocacyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
+		return
+	}
+	providerID, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if !h.Policy.EnableSocialBonus || h.PostVerifier == nil {
+		h.observe("x_verify", "disabled")
+		writeError(w, http.StatusNotFound, "social_bonus_disabled", "social invite bonus is disabled")
+		return
+	}
+	if h.ProviderLimiter == nil || !h.ProviderLimiter.Allow("verify:"+providerID) {
+		w.Header().Set("Retry-After", "60")
+		h.observe("x_verify", "rate_limited")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many social verification requests")
+		return
+	}
+	var request struct {
+		PostURL   string `json:"post_url"`
+		Challenge string `json:"challenge"`
+	}
+	if err := decodeBoundedJSON(r, &request, 2048); err != nil || len(request.Challenge) != 64 {
+		h.observe("x_verify", "bad_request")
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid verification request")
+		return
+	}
+	postID, err := ParseXPostID(request.PostURL)
+	if err != nil {
+		h.observe("x_verify", "bad_request")
+		writeError(w, http.StatusBadRequest, "invalid_post_url", "use a public x.com post URL")
+		return
+	}
+	status, err := h.Store.ProviderReferralStatus(r.Context(), h.Policy, providerID)
+	if err != nil || status.Code == "" {
+		h.observe("x_verify", "conflict")
+		writeError(w, http.StatusConflict, "referral_locked", "provider invite is not available")
+		return
+	}
+	if err := h.Store.ValidateSocialChallenge(r.Context(), h.Policy, providerID, request.Challenge, h.now()); err != nil {
+		h.observe("x_verify", "conflict")
+		writeError(w, http.StatusConflict, "challenge_invalid", "social challenge is invalid or expired")
+		return
+	}
+	expectedURL := strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" +
+		url.PathEscape(status.Code) + "?c=" + url.QueryEscape(request.Challenge)
+	if h.VerifySlots != nil {
+		select {
+		case h.VerifySlots <- struct{}{}:
+			defer func() { <-h.VerifySlots }()
+		default:
+			h.observe("x_verify", "busy")
+			writeError(w, http.StatusServiceUnavailable, "verification_busy", "social verification is temporarily busy")
+			return
+		}
+	}
+	authorID, err := h.PostVerifier.VerifyPost(r.Context(), postID, expectedURL)
+	if errors.Is(err, ErrXPostTransient) {
+		w.Header().Set("Retry-After", "30")
+		h.observe("x_verify", "unavailable")
+		writeError(w, http.StatusServiceUnavailable, "verification_unavailable", "social verification is temporarily unavailable")
+		return
+	}
+	if err != nil || strings.TrimSpace(authorID) == "" {
+		h.observe("x_verify", "failed")
+		writeError(w, http.StatusUnprocessableEntity, "post_not_verified", "post is unavailable or does not contain the invite link")
+		return
+	}
+	status, err = h.Store.CompleteSocialVerification(
+		r.Context(), h.Policy, providerID, request.Challenge, postID, authorID, "x_api", h.now(),
+	)
+	if err != nil {
+		h.observe("x_verify", "conflict")
+		writeError(w, http.StatusConflict, "challenge_invalid", "challenge expired, reused, or belongs to another provider")
+		return
+	}
+	h.observe("x_verify", "pending")
+	h.writeStatus(w, status)
+}
+
+func (h *AdvocacyHandler) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw := strings.TrimSpace(r.Header.Get("Authorization"))
+	token, ok := strings.CutPrefix(raw, "Bearer ")
+	if !ok || strings.TrimSpace(token) == "" || h.Tokens == nil || h.Store == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
+		return "", false
+	}
+	providerID, valid, err := h.Tokens.ValidateAndMarkTokenUsed(r.Context(), strings.TrimSpace(token))
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "auth_unavailable", "provider authentication unavailable")
+		return "", false
+	}
+	if !valid {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token invalid")
+		return "", false
+	}
+	return providerID, true
+}
+
+func (h *AdvocacyHandler) writeStatus(w http.ResponseWriter, status auth.ProviderReferral) {
+	body := map[string]any{
+		"campaign":                  status.Campaign,
+		"social_state":              status.SocialState,
+		"base_capacity":             status.BaseCapacity,
+		"configured_bonus_capacity": h.Policy.SocialBonusUses,
+		"bonus_capacity":            status.BonusCapacity,
+		"redemptions":               status.Redemptions,
+		"remaining":                 status.Remaining,
+		"first_serving_seen":        status.FirstServingSeen,
+		"social_bonus_enabled":      h.Policy.EnableSocialBonus,
+	}
+	if status.Code != "" {
+		body["invite_code"] = status.Code
+		body["invite_url"] = strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" + url.PathEscape(status.Code)
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (h *AdvocacyHandler) now() time.Time {
+	if h.Now != nil {
+		return h.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (h *AdvocacyHandler) observe(event, outcome string) {
+	if h.Metrics != nil {
+		h.Metrics.IncReferralEvent(event, outcome)
+	}
+}

@@ -75,6 +75,28 @@ func TestWithReferralValidationMountsPermanentJoinRoute(t *testing.T) {
 	}
 }
 
+func TestWithReferralAdvocacyMountsOnlyProviderReferralRoutes(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withReferralAdvocacy(
+		base,
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) },
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) },
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) },
+	)
+	for path, want := range map[string]int{
+		"/v1/provider/referrals":             http.StatusOK,
+		"/v1/provider/referrals/x/challenge": http.StatusCreated,
+		"/v1/provider/referrals/x/verify":    http.StatusAccepted,
+		"/v1/referrals/reserve":              http.StatusNoContent,
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != want {
+			t.Fatalf("path=%s status=%d want=%d", path, response.Code, want)
+		}
+	}
+}
+
 func TestListenAddressParsesIPv4AndIPv6(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1", "::"} {
 		t.Run(host, func(t *testing.T) {

@@ -444,6 +444,7 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		)`,
 	}
 	stmts = append(stmts, referralAdminSchemaStatements()...)
+	stmts = append(stmts, referralSocialSchemaStatements()...)
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -453,6 +454,9 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_issued", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_issued INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_issuers", "replaced_by", `ALTER TABLE referral_issuers ADD COLUMN replaced_by TEXT`); err != nil {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {

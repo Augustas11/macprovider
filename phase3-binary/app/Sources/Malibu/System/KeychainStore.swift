@@ -3,6 +3,7 @@ import Security
 
 enum KeychainStore {
     private static let providerService = "tech.malibu.provider"
+    private static let referralChallengeService = "tech.malibu.referral-challenge"
 
     static func saveProviderToken(providerID: String, token: String) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -62,6 +63,68 @@ enum KeychainStore {
         }
     }
 
+    static func saveReferralChallenge(providerID: String, data: Data) async throws {
+        try await save(data: data, service: referralChallengeService, account: providerID)
+    }
+
+    static func readReferralChallenge(providerID: String) async -> Data? {
+        await readData(service: referralChallengeService, account: providerID)
+    }
+
+    static func deleteReferralChallenge(providerID: String) async throws {
+        try await delete(service: referralChallengeService, account: providerID)
+    }
+
+    private static func save(data: Data, service: String, account: String) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global().async {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account
+                ]
+                SecItemDelete(query as CFDictionary)
+                var attrs = query
+                attrs[kSecValueData as String] = data
+                attrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                let status = SecItemAdd(attrs as CFDictionary, nil)
+                if status == errSecSuccess { cont.resume() }
+                else { cont.resume(throwing: NSError(domain: NSOSStatusErrorDomain, code: Int(status))) }
+            }
+        }
+    }
+
+    private static func readData(service: String, account: String) async -> Data? {
+        await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            DispatchQueue.global().async {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account,
+                    kSecReturnData as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne
+                ]
+                var out: CFTypeRef?
+                let status = SecItemCopyMatching(query as CFDictionary, &out)
+                cont.resume(returning: status == errSecSuccess ? out as? Data : nil)
+            }
+        }
+    }
+
+    private static func delete(service: String, account: String) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global().async {
+                let status = SecItemDelete([
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecAttrAccount as String: account
+                ] as CFDictionary)
+                if status == errSecSuccess || status == errSecItemNotFound { cont.resume() }
+                else { cont.resume(throwing: NSError(domain: NSOSStatusErrorDomain, code: Int(status))) }
+            }
+        }
+    }
+
     // AUDIT R1 CODE M2 / SECURITY S3 fix: delete synchronously (awaited by caller)
     // so uninstall can report residue instead of racing against NSApp.terminate.
     // Any non-noop non-notFound OSStatus is surfaced so the caller can decide.
@@ -69,7 +132,7 @@ enum KeychainStore {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.global().async {
                 var firstError: NSError?
-                for service in ["tech.malibu.provider", "tech.malibu.auth"] {
+                for service in ["tech.malibu.provider", "tech.malibu.auth", referralChallengeService] {
                     let query: [String: Any] = [
                         kSecClass as String: kSecClassGenericPassword,
                         kSecAttrService as String: service

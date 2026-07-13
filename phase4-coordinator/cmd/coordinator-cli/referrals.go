@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/config"
 )
 
 func createSeedReferral(args []string, getenv func(string) string, stdout io.Writer) error {
@@ -101,6 +102,91 @@ func adjustSeedReferral(args []string, getenv func(string) string, stdout io.Wri
 	}
 	_, err = fmt.Fprintf(stdout, "mode=%s\ncampaign=%s\nseed_id=%s\ncurrent_capacity=%d\nnew_capacity=%d\nredeemed=%d\nresulting_remaining=%d\n",
 		mode, policy.Campaign, result.SeedID, result.CurrentCapacity, result.NewCapacity, result.Redeemed, result.ResultingRemaining)
+	return err
+}
+
+func replaceReferralIssuer(args []string, stdout io.Writer) error {
+	fs := newReferralFlagSet("replace-referral-issuer")
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	configPath := fs.String("config", "", "path to authoritative coordinator YAML config")
+	campaign := fs.String("campaign", "", "expected deployed referral campaign")
+	keyID := fs.String("key-id", "", "expected deployed current HMAC key identifier")
+	issuerID := fs.String("issuer-id", "", "revoked provider issuer identifier")
+	baseUses := fs.Int("base-uses", 0, "expected deployed provider base capacity")
+	apply := fs.Bool("apply", false, "apply the replacement (default is dry-run preview)")
+	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
+	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
+	setReferralUsage(fs, "replace-referral-issuer", "coordinator-cli replace-referral-issuer --db coordinator.db --config coordinator.yaml --campaign prebeta --key-id k1 --issuer-id <revoked-issuer> --base-uses 1 --apply --actor ops@malibu --reason 'rotate compromised link'")
+	if err := fs.Parse(args); err != nil {
+		return referralParseError(err)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments")
+	}
+	if strings.TrimSpace(*configPath) == "" {
+		return fmt.Errorf("--config is required; replacement policy is loaded from coordinator config")
+	}
+	if *baseUses <= 0 {
+		return fmt.Errorf("--base-uses is required and must be > 0")
+	}
+	if *apply && (strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "") {
+		return fmt.Errorf("--actor and --reason are required with --apply")
+	}
+	cfg, err := config.Load(strings.TrimSpace(*configPath))
+	if err != nil {
+		return fmt.Errorf("load coordinator config: %w", err)
+	}
+	if !cfg.Referrals.RequireForRegistration && !cfg.Referrals.EnableSocialInviteBonus {
+		return fmt.Errorf("deployed config has no active referral policy")
+	}
+	policy := auth.ReferralPolicy{
+		RequireForRegistration: cfg.Referrals.RequireForRegistration,
+		EnableSocialBonus:      cfg.Referrals.EnableSocialInviteBonus,
+		Campaign:               cfg.Referrals.Campaign,
+		PolicyVersion:          cfg.Referrals.PolicyVersion,
+		CurrentKeyID:           cfg.Referrals.CurrentKeyID,
+		HMACKeys:               cfg.Referrals.HMACKeys,
+		ProviderBaseUses:       cfg.Referrals.ProviderBaseUses,
+		SocialBonusUses:        cfg.Referrals.SocialBonusUses,
+		ChallengeTTL:           time.Duration(cfg.Referrals.ChallengeTTLS) * time.Second,
+	}
+	if err := policy.Validate(); err != nil {
+		return fmt.Errorf("deployed referral policy is invalid: %w", err)
+	}
+	if strings.TrimSpace(*campaign) != policy.Campaign {
+		return fmt.Errorf("campaign mismatch: expected %q, deployed %q", strings.TrimSpace(*campaign), policy.Campaign)
+	}
+	if strings.TrimSpace(*keyID) != policy.CurrentKeyID {
+		return fmt.Errorf("key mismatch: expected %q, deployed %q", strings.TrimSpace(*keyID), policy.CurrentKeyID)
+	}
+	if *baseUses != policy.ProviderBaseUses {
+		return fmt.Errorf("capacity mismatch: expected %d, deployed %d", *baseUses, policy.ProviderBaseUses)
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	replacement, err := store.ReplaceReferralIssuer(
+		context.Background(), policy, strings.TrimSpace(*issuerID), strings.TrimSpace(*actor),
+		strings.TrimSpace(*reason), *apply, time.Now().UTC(),
+	)
+	if err != nil {
+		return err
+	}
+	if !replacement.Applied {
+		_, err = fmt.Fprintf(stdout, "mode=dry-run\ncampaign=%s\nprovider_id=%s\nold_issuer_id=%s\nkey_id=%s\nold_base_capacity=%d\nproposed_base_capacity=%d\nold_bonus_capacity=%d\nproposed_bonus_capacity=%d\npending_social=%t\n",
+			policy.Campaign, replacement.ProviderID, replacement.OldIssuerID, replacement.KeyID,
+			replacement.OldBaseCapacity, replacement.BaseCapacity, replacement.OldBonusCapacity,
+			replacement.BonusCapacity, replacement.PendingSocialReview)
+		return err
+	}
+	if _, err := store.ValidateReferral(context.Background(), policy, replacement.NewCode, time.Now().UTC()); err != nil {
+		return fmt.Errorf("successor code failed validation under deployed policy: %w", err)
+	}
+	_, err = fmt.Fprintf(stdout, "mode=applied\ncampaign=%s\nprovider_id=%s\nold_issuer_id=%s\nnew_issuer_id=%s\nnew_referral_code=%s\nbase_capacity=%d\nbonus_capacity=%d\npending_social=%t\nverified=true\n",
+		policy.Campaign, replacement.ProviderID, replacement.OldIssuerID, replacement.NewIssuerID,
+		replacement.NewCode, replacement.BaseCapacity, replacement.BonusCapacity, replacement.PendingSocialReview)
 	return err
 }
 

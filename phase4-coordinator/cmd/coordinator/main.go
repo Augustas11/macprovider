@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -908,10 +909,12 @@ func main() {
 	)
 	trustedReferralProxies := mustParseTrustedProxies(cfg, logger)
 	referralValidation := &referralapi.ValidationHandler{
-		Store:         tokenStore,
-		Policy:        referralPolicy,
-		PublicLimiter: referralapi.NewBoundedLimiter(30, time.Minute, 4096),
-		ValidateSlots: make(chan struct{}, 4),
+		Store:            tokenStore,
+		Policy:           referralPolicy,
+		PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+		ValidateSlots:    make(chan struct{}, 4),
+		RequestAccessURL: cfg.Referrals.RequestAccessURL,
+		Metrics:          metricsHandle,
 		SourceIP: func(r *http.Request) string {
 			return onboarding.ClientIP(r, trustedReferralProxies)
 		},
@@ -930,6 +933,33 @@ func main() {
 		},
 	}
 	buyerHandler = withReferralValidation(buyerHandler, referralValidation.ServeHTTP, referralJoin.ServeHTTP)
+	var referralStatus, referralChallenge, referralVerify http.HandlerFunc
+	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnableSocialInviteBonus {
+		advocacy := &referralapi.AdvocacyHandler{
+			Store:           tokenStore,
+			Tokens:          tokenStore,
+			ServingEvidence: referralapi.SQLiteServingEvidence{Path: cfg.Storage.DBPath},
+			Policy:          referralPolicy,
+			ProviderLimiter: referralapi.NewBoundedLimiter(10, time.Minute, 4096),
+			VerifySlots:     make(chan struct{}, 16),
+			JoinBaseURL:     cfg.Referrals.JoinBaseURL,
+			Metrics:         metricsHandle,
+		}
+		if cfg.Referrals.EnableSocialInviteBonus {
+			xClient := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
+			advocacy.PostVerifier = xClient
+			startSocialVerificationPromotionReconciler(shutdownCtx, tokenStore, referralPolicy, xClient, metricsHandle, logger)
+		}
+		referralStatus = advocacy.HandleStatus
+		referralChallenge = advocacy.HandleChallenge
+		referralVerify = advocacy.HandleVerify
+		logger.Info().
+			Bool("require_for_registration", cfg.Referrals.RequireForRegistration).
+			Bool("social_invite_bonus", cfg.Referrals.EnableSocialInviteBonus).
+			Str("campaign", cfg.Referrals.Campaign).
+			Msg("provider referral advocacy endpoints mounted")
+	}
+	buyerHandler = withReferralAdvocacy(buyerHandler, referralStatus, referralChallenge, referralVerify)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
@@ -1233,6 +1263,69 @@ func startAppTrackReferralMintReconciler(ctx context.Context, handler *onboardin
 	}()
 }
 
+type socialAuthorLookup interface {
+	LookupPostAuthor(context.Context, string) (string, error)
+}
+
+func startSocialVerificationPromotionReconciler(
+	ctx context.Context,
+	store *auth.Store,
+	policy auth.ReferralPolicy,
+	verifier socialAuthorLookup,
+	metrics referralapi.ReferralMetrics,
+	logger zerolog.Logger,
+) {
+	if store == nil || verifier == nil || !policy.EnableSocialBonus {
+		return
+	}
+	recheck := func(ctx context.Context, postID, boundAuthorID string) error {
+		authorID, err := verifier.LookupPostAuthor(ctx, postID)
+		if err != nil {
+			if errors.Is(err, referralapi.ErrXPostTransient) {
+				return fmt.Errorf("%w: %v", auth.ErrSocialRecheckTransient, err)
+			}
+			return err
+		}
+		if boundAuthorID == "" || authorID != boundAuthorID {
+			return fmt.Errorf("x post author no longer matches")
+		}
+		return nil
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			granted, err := store.PromoteMaturedSocialVerifications(reconcileCtx, policy, time.Now().UTC(), recheck)
+			if err != nil && ctx.Err() == nil {
+				if metrics != nil {
+					metrics.IncReferralEvent("promotion", "error")
+				}
+				logger.Error().Err(err).Msg("social verification promotion failed")
+				return
+			}
+			for range granted {
+				if metrics != nil {
+					metrics.IncReferralEvent("promotion", "granted")
+				}
+			}
+			if granted > 0 {
+				logger.Info().Int("granted", granted).Msg("promoted matured social verifications")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
 func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
@@ -1318,6 +1411,24 @@ func withReferralValidation(base http.Handler, validate http.HandlerFunc, join .
 	}
 	if hasJoin {
 		mux.HandleFunc("/j/", join[0])
+	}
+	mux.Handle("/", base)
+	return mux
+}
+
+func withReferralAdvocacy(base http.Handler, status, challenge, verify http.HandlerFunc) http.Handler {
+	if status == nil && challenge == nil && verify == nil {
+		return base
+	}
+	mux := http.NewServeMux()
+	if status != nil {
+		mux.HandleFunc("/v1/provider/referrals", status)
+	}
+	if challenge != nil {
+		mux.HandleFunc("/v1/provider/referrals/x/challenge", challenge)
+	}
+	if verify != nil {
+		mux.HandleFunc("/v1/provider/referrals/x/verify", verify)
 	}
 	mux.Handle("/", base)
 	return mux

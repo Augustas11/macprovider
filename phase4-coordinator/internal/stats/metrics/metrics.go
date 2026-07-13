@@ -52,8 +52,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// Metrics holds the five SPEC-017 v0.1.8 metrics. New() takes a
-// prometheus.Registerer so tests can use a fresh registry per
+// Metrics holds coordinator metrics. New() takes a prometheus.Registerer so
+// tests can use a fresh registry per
 // case; production code passes prometheus.DefaultRegisterer (or
 // a coordinator-owned named registry).
 type Metrics struct {
@@ -69,10 +69,33 @@ type Metrics struct {
 	IdlePrewarmEventTotal    *prometheus.CounterVec
 	ModelHashMismatchTotal   prometheus.Counter
 	CredentialBootstrapTotal *prometheus.CounterVec
+	ReferralEventTotal       *prometheus.CounterVec
 }
 
-// New registers all five metrics against reg and returns the
-// Metrics handle. promauto.With(reg) panics on double-register;
+var allowedReferralMetricOutcomes = map[string]map[string]bool{
+	"validate": {
+		"valid": true, "invalid": true, "missing": true, "expired": true,
+		"revoked": true, "exhausted": true, "conflict": true,
+		"rate_limited": true, "bad_request": true, "disabled": true,
+		"busy": true, "unavailable": true,
+	},
+	"status": {
+		"locked": true, "issued": true, "eligible": true, "pending": true,
+		"matured": true, "failed": true, "revoked": true, "error": true,
+	},
+	"challenge": {
+		"created": true, "locked": true, "disabled": true, "conflict": true,
+		"rate_limited": true, "error": true,
+	},
+	"x_verify": {
+		"pending": true, "failed": true, "conflict": true, "disabled": true,
+		"bad_request": true, "rate_limited": true, "busy": true, "unavailable": true,
+	},
+	"promotion": {"granted": true, "error": true},
+}
+
+// New registers the metrics against reg and returns the Metrics handle.
+// promauto.With(reg) panics on double-register;
 // production callers MUST construct this once at coordinator
 // boot (BUILD §C.3 fail-closed contract — duplicate registration
 // of the same metric name is a deploy-time bug, not a runtime
@@ -162,6 +185,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"outcome"},
 		),
+		ReferralEventTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "referral_event_total",
+				Help: "Count of referral admission and provider advocacy outcomes using closed-set, privacy-safe labels.",
+			},
+			[]string{"event", "outcome"},
+		),
 	}
 }
 
@@ -234,9 +264,17 @@ func (m *Metrics) IncCredentialBootstrap(outcome string) {
 	}
 	switch outcome {
 	case "minted", "recovered", "rejected_v1", "rejected_identity", "rejected_used",
-		"rejected_expired", "rejected_rate", "rejected_outstanding", "store_error":
+		"rejected_expired", "rejected_rate", "rejected_outstanding",
+		"rejected_referral_required", "rejected_referral", "store_error":
 	default:
 		return
 	}
 	m.CredentialBootstrapTotal.WithLabelValues(outcome).Inc()
+}
+
+func (m *Metrics) IncReferralEvent(event, outcome string) {
+	if m == nil || m.ReferralEventTotal == nil || !allowedReferralMetricOutcomes[event][outcome] {
+		return
+	}
+	m.ReferralEventTotal.WithLabelValues(event, outcome).Inc()
 }

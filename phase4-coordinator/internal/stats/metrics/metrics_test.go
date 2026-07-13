@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 var (
@@ -45,7 +46,8 @@ var (
 	allowCredentialBootstrapOutcome = map[string]bool{
 		"minted": true, "recovered": true, "rejected_v1": true,
 		"rejected_identity": true, "rejected_used": true, "rejected_expired": true,
-		"rejected_rate": true, "rejected_outstanding": true, "store_error": true,
+		"rejected_rate": true, "rejected_outstanding": true,
+		"rejected_referral_required": true, "rejected_referral": true, "store_error": true,
 	}
 	// Round-1 ARCH M1 / CODE M1 fix: also scan for an
 	// Origin-fragment to prove no attacker-controlled string
@@ -87,6 +89,12 @@ func TestLabelHygiene(t *testing.T) {
 		m.IncCredentialBootstrap(outcome)
 	}
 	m.IncCredentialBootstrap("raw-attacker-value")
+	for event, outcomes := range allowedReferralMetricOutcomes {
+		for outcome := range outcomes {
+			m.IncReferralEvent(event, outcome)
+		}
+	}
+	m.IncReferralEvent("raw-attacker-value", "raw-attacker-value")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -143,7 +151,11 @@ func TestLabelHygiene(t *testing.T) {
 						t.Errorf("metric %s track=%q not in allowed set", mf.GetName(), val)
 					}
 				case "event":
-					if !allowIdlePrewarmEvent[val] {
+					if mf.GetName() == "referral_event_total" {
+						if _, ok := allowedReferralMetricOutcomes[val]; !ok {
+							t.Errorf("metric %s event=%q not in allowed set", mf.GetName(), val)
+						}
+					} else if !allowIdlePrewarmEvent[val] {
 						t.Errorf("metric %s event=%q not in allowed set", mf.GetName(), val)
 					}
 				case "reason":
@@ -151,13 +163,80 @@ func TestLabelHygiene(t *testing.T) {
 						t.Errorf("metric %s reason=%q not in allowed set", mf.GetName(), val)
 					}
 				case "outcome":
-					if !allowCredentialBootstrapOutcome[val] {
+					if mf.GetName() == "referral_event_total" {
+						event := labelValue(mt, "event")
+						if !allowedReferralMetricOutcomes[event][val] {
+							t.Errorf("metric %s event=%q outcome=%q not in allowed set", mf.GetName(), event, val)
+						}
+					} else if !allowCredentialBootstrapOutcome[val] {
 						t.Errorf("metric %s outcome=%q not in allowed set", mf.GetName(), val)
 					}
 				}
 			}
 		}
 	}
+}
+
+func TestReferralAndBootstrapRejectionCountersIncrement(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := New(registry)
+
+	metrics.IncCredentialBootstrap("rejected_referral_required")
+	metrics.IncCredentialBootstrap("rejected_referral")
+	metrics.IncReferralEvent("validate", "valid")
+	metrics.IncReferralEvent("status", "issued")
+
+	if got := gatheredCounterValue(t, registry, "credential_bootstrap_total", map[string]string{"outcome": "rejected_referral_required"}); got != 1 {
+		t.Fatalf("rejected_referral_required=%v want 1", got)
+	}
+	if got := gatheredCounterValue(t, registry, "credential_bootstrap_total", map[string]string{"outcome": "rejected_referral"}); got != 1 {
+		t.Fatalf("rejected_referral=%v want 1", got)
+	}
+	if got := gatheredCounterValue(t, registry, "referral_event_total", map[string]string{"event": "validate", "outcome": "valid"}); got != 1 {
+		t.Fatalf("validate/valid=%v want 1", got)
+	}
+	if got := gatheredCounterValue(t, registry, "referral_event_total", map[string]string{"event": "status", "outcome": "issued"}); got != 1 {
+		t.Fatalf("status/issued=%v want 1", got)
+	}
+	metrics.IncReferralEvent("validate", "raw-code-value")
+	if got := gatheredCounterValue(t, registry, "referral_event_total", map[string]string{"event": "validate", "outcome": "raw-code-value"}); got != 0 {
+		t.Fatalf("unallowlisted referral outcome=%v want 0", got)
+	}
+}
+
+func gatheredCounterValue(t *testing.T, registry *prometheus.Registry, family string, labels map[string]string) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, metricFamily := range families {
+		if metricFamily.GetName() != family {
+			continue
+		}
+		for _, metric := range metricFamily.GetMetric() {
+			matched := true
+			for name, want := range labels {
+				if labelValue(metric, name) != want {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+func labelValue(metric interface{ GetLabel() []*dto.LabelPair }, name string) string {
+	for _, label := range metric.GetLabel() {
+		if label.GetName() == name {
+			return label.GetValue()
+		}
+	}
+	return ""
 }
 
 func containsCaseFold(haystack, needle string) bool {
