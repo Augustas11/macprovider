@@ -1264,7 +1264,7 @@ func providerServesActiveModel(p *Provider, modelID string) bool {
 	return p != nil && strings.EqualFold(p.ModelID, modelID)
 }
 
-// SetBuyerServingPredicate injects the routable-now buyer-serving predicate
+// SetBuyerServingPredicate injects the request-independent buyer-serving predicate
 // (RoutingEligible + positive context window + not Tier-2-excluded; quota omitted)
 // used by the FR-CAN22 floor and the redundancy count. The ws layer wires this at
 // construction; nil restores the RoutingEligible+context fallback. It never mutates
@@ -1279,7 +1279,7 @@ func (r *Registry) SetBuyerServingPredicate(fn func(Provider) bool) {
 // isBuyerServingLocked applies the injected buyer-serving predicate, or a
 // routability-based fallback, to p. Caller MUST hold r.mu (read or write). The
 // fallback (used only when no ws predicate is injected — i.e. registry unit tests)
-// mirrors the routable-now core of `canaryBuyerServing`: RoutingEligible (ready +
+// mirrors the request-independent core of `canaryBuyerServing`: RoutingEligible (ready +
 // free slots) AND a positive context window, so a busy, degraded, negative-slot,
 // zero-free-slot, or zero-context peer never lifts the floor. It omits the transport + Tier-2
 // gate, which requires ws config the pool package cannot see.
@@ -1294,7 +1294,7 @@ func (r *Registry) isBuyerServingLocked(p *Provider) bool {
 // excludeID is buyer-serving and actively serves modelID. Caller MUST hold r.mu.
 // Backs the FR-CAN22 last-provider floor in RecordCanaryResult: when this returns
 // false, the excluded provider is the sole buyer-serving provider for the model
-// and a canary-only signal must not remove it. Uses the injected routable-now
+// and a canary-only signal must not remove it. Uses the injected request-independent
 // predicate (RoutingEligible + positive context + not Tier-2-excluded) so a
 // busy, degraded, negative-slot, transport-unreachable, or Tier-2-excluded peer
 // does not falsely lift the floor (transport + Tier-2 are ws-only gates).

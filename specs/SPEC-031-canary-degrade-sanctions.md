@@ -628,8 +628,9 @@ floor. Requirements below assume that stronger predicate:
   generation-fenced control whose **deterministic challenge-semantic** failure
   (never a transport/timeout/status failure) is the sole authorization — deferred,
   not specified here.
-- Coordinator-attributable failures (an `incomplete` from undersized
-  `max_tokens`, FR-CAN3) are **neutral** regardless of fleet size.
+- Coordinator-attributable failures (a **truncation** from undersized `max_tokens`
+  — on the shipped WS path a `nonce_mismatch`, §5/AC-3; FR-CAN3) are **neutral**
+  regardless of fleet size (the runtime attribution itself is deferred, §14).
 - A **provisional** sole provider MUST additionally never be
   hard-banned/session-closed on a latency or soft-deadline failure.
 

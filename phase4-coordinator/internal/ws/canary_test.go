@@ -152,10 +152,13 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 }
 
 // TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates verifies the injected
-// predicate counts a peer only when buyers can route to it RIGHT NOW: it must be
-// RoutingEligible (ready + free slots), have a positive context window, and not be
+// predicate counts a peer only when it passes the coordinator's request-independent
+// routability gates: RoutingEligible (ready + free slots), transport-reachable (a
+// live open WS session or a non-empty endpoint), a positive context window, and not
 // Tier-2-excluded. Provider-asserted-but-unroutable states (busy, negative/zero
-// slots, zero context, Tier-2 exclusion) must NOT lift the floor.
+// slots, zero/negative context, unreachable transport, closed/absent WS session,
+// Tier-2 exclusion) must NOT lift the floor. (Request-dependent context/quota are
+// deferred to FR-CAN23 and not asserted here.)
 func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	s := NewServer(config.Default(), registry, zerolog.Nop())
@@ -192,6 +195,17 @@ func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 		if s.canaryBuyerServing(p) {
 			t.Fatalf("%s provider must not be buyer-serving (would falsely lift the floor)", name)
 		}
+	}
+	// A WS peer whose stored session is CLOSED (the disconnect window: closed before
+	// the map entry is deleted / the provider marked unavailable) is unreachable —
+	// dispatch would return ErrRelayClosed — and must not lift the floor.
+	closedConn, _ := net.Pipe()
+	closedSess := newProviderSession("closed-peer", "cs", closedConn, 1)
+	closedSess.close()
+	s.sessions.Store(sessionKey("closed-peer", "cs"), closedSess)
+	closedPeer := mutate(func(p *pool.Provider) { p.ProviderID = "closed-peer"; p.AssignedID = "cs" })
+	if s.canaryBuyerServing(closedPeer) {
+		t.Fatal("WS peer with a closed stored session must not be buyer-serving")
 	}
 	// Tier-2 exclusion (requires an encrypted leg the provider lacks).
 	s.SetTier2Config(config.Tier2Config{RequireEncryptedLeg: true})

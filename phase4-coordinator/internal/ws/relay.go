@@ -320,6 +320,20 @@ func (ps *providerSession) close() {
 	})
 }
 
+// isOpen reports whether the session has not yet been closed. Lock-free — a
+// non-blocking receive on closedCh (which close() closes) — so it is safe to call
+// from under the registry lock (canaryBuyerServing / the FR-CAN22 floor). Dispatch
+// to a closed-but-not-yet-deleted session returns ErrRelayClosed, so such a session
+// must not count as buyer-serving.
+func (ps *providerSession) isOpen() bool {
+	select {
+	case <-ps.closedCh:
+		return false
+	default:
+		return true
+	}
+}
+
 func (ps *providerSession) send(payload []byte) error {
 	return ps.enqueueFrame(providerFrame{payload: payload})
 }

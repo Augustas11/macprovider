@@ -520,7 +520,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 //   - RoutingEligible() — state ready AND SlotsFree>0 AND auth/catalog/receipt gates
 //     (excludes busy [SlotsFree==0] and negative-slot peers, stored verbatim from
 //     heartbeats); AND
-//   - transport-reachable — a WS-tunneled peer needs a live STORED session
+//   - transport-reachable — a WS-tunneled peer needs a live, open STORED session
 //     (storedSessionFor; excludes the registration/disconnect windows where
 //     IsWSTunneled holds but no session is stored), else a non-empty EndpointURL;
 //     excludes an HTTPForwardingOnly peer with no endpoint; AND
@@ -551,7 +551,7 @@ func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 		return false
 	}
 	// Transport reachability, matching dispatch. A WS-tunneled peer is dispatchable
-	// only via a live STORED session — dispatch returns ErrRelayClosed otherwise,
+	// only via a live, open STORED session — dispatch returns ErrRelayClosed otherwise,
 	// e.g. during the registration/disconnect windows where IsWSTunneled holds but
 	// the session is not yet stored / already deleted (checked via storedSessionFor,
 	// which touches only the sessions map — no pool.mu, so it is safe under the
@@ -559,7 +559,8 @@ func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 	// provider-controlled `unknown_message_type` NAK can drop IsWSTunneled without
 	// establishing one. Either way an unreachable peer must not lift the floor.
 	if p.IsWSTunneled() {
-		if _, ok := s.storedSessionFor(p.ProviderID, p.AssignedID); !ok {
+		session, ok := s.storedSessionFor(p.ProviderID, p.AssignedID)
+		if !ok || !session.isOpen() {
 			return false
 		}
 	} else if strings.TrimSpace(p.EndpointURL) == "" {
