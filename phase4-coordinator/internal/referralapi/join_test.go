@@ -22,7 +22,7 @@ func joinHandlerFor(result error) *JoinHandler {
 		Policy:           validationPolicy(),
 		PublicLimiter:    NewBoundedLimiter(20, time.Minute, 20),
 		ValidateSlots:    make(chan struct{}, 1),
-		RequestAccessURL: "https://malibu.tech/request-access",
+		RequestAccessURL: "https://access.example.test/waitlist",
 	}
 }
 
@@ -50,13 +50,26 @@ func TestJoinHandlerRendersLifecycleStates(t *testing.T) {
 			if got := response.Header().Get("Cache-Control"); got != "no-store" {
 				t.Fatalf("Cache-Control=%q", got)
 			}
-			if tc.err == auth.ErrReferralExpired && !strings.Contains(response.Body.String(), "https://malibu.tech/request-access") {
+			if tc.err == auth.ErrReferralExpired && !strings.Contains(response.Body.String(), "https://access.example.test/waitlist") {
 				t.Fatal("request-access CTA missing")
 			}
 			if tc.name == "operational" && response.Header().Get("Retry-After") != "5" {
 				t.Fatal("operational failure missing Retry-After")
 			}
 		})
+	}
+}
+
+func TestJoinHandlerOmitsAccessCTAWhenNotConfigured(t *testing.T) {
+	h := joinHandlerFor(auth.ErrReferralExpired)
+	h.RequestAccessURL = ""
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Ask your inviter for another invite.") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "Request access") || strings.Contains(response.Body.String(), "access.example.test") {
+		t.Fatalf("unconfigured request-access CTA rendered: %s", response.Body.String())
 	}
 }
 
