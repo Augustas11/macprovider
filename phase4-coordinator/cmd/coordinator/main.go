@@ -938,8 +938,9 @@ func main() {
 			SourceIP: func(r *http.Request) string {
 				return onboarding.ClientIP(r, trusted)
 			},
-			JoinBaseURL: cfg.Referrals.JoinBaseURL,
-			Metrics:     metricsHandle,
+			JoinBaseURL:      cfg.Referrals.JoinBaseURL,
+			RequestAccessURL: cfg.Referrals.RequestAccessURL,
+			Metrics:          metricsHandle,
 		}
 		if cfg.Referrals.EnableSocialInviteBonus {
 			xClient := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)

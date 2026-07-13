@@ -108,6 +108,11 @@ referrals:
   join_base_url: "https://coordinator.streamvc.live/j"
   # Set before enabling social bonus: env:X_API_BEARER_TOKEN
   x_api_bearer_token: ""
+  # FIX-570 PROD-H1: primary "Request access" CTA on the branded exhausted/expired/
+  # revoked invite pages. MUST be an absolute https URL to a live waitlist/support
+  # page. Leave empty to HIDE the CTA (the pages still show the "Learn more" link);
+  # never point it at a path that 404s in production.
+  request_access_url: ""
 
 # SPEC-007 v0.2 — internal read-only operator explorer.
 # Reuses auth.operator_key (D15). Disable by setting enabled: false.

@@ -323,6 +323,39 @@ func TestJoinBrandedUnavailablePagesCarryRequestAccessURL(t *testing.T) {
 	}
 }
 
+// TestJoinBrandedPagesHideRequestAccessWhenUnset is the FIX-570 PROD-H1
+// regression: with no configured request-access URL the branded pages must NOT
+// render a request-access CTA (and never the dead /request-access default), but
+// must still offer the known-good "Learn more" link.
+func TestJoinBrandedPagesHideRequestAccessWhenUnset(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// RequestAccessURL deliberately unset.
+	h := &Handler{Store: store, Policy: apiPolicy(), Now: time.Now, PublicLimiter: NewBoundedLimiter(100, time.Minute, 100)}
+	exhausted, err := store.CreateSeedReferral(context.Background(), apiPolicy(), "prodh1", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueTokenWithReferral(context.Background(), "prodh1-provider", "prodh1", exhausted, apiPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.HandleJoin(w, httptest.NewRequest(http.MethodGet, "/j/"+exhausted, nil))
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "This invite filled up") {
+		t.Fatalf("status=%d body=%s", w.Code, body)
+	}
+	if strings.Contains(body, "request-access") || strings.Contains(body, "Request access") {
+		t.Fatalf("unset request-access URL must not render a request-access CTA: %s", body)
+	}
+	if !strings.Contains(body, `href="https://malibu.tech"`) {
+		t.Fatalf("branded page must still offer the known-good Learn more link: %s", body)
+	}
+}
+
 func TestJoinServesOpenBetaLandingWhenGateDisabled(t *testing.T) {
 	policy := apiPolicy()
 	policy.RequireForRegistration = false

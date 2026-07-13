@@ -672,6 +672,12 @@ type ReferralConfig struct {
 	ChallengeTTLS           int               `yaml:"challenge_ttl_s"`
 	JoinBaseURL             string            `yaml:"join_base_url"`
 	XAPIBearerToken         string            `yaml:"x_api_bearer_token"`
+	// RequestAccessURL is the waitlist / support destination shown as the primary
+	// CTA on the branded exhausted/expired/revoked invite pages (FIX-570 PROD-H1).
+	// It MUST be an explicit, validated absolute https URL when set; when unset the
+	// request-access CTA is NOT rendered (the pages still offer the known-good
+	// "Learn more" link) so a dead /request-access path can never 404 in prod.
+	RequestAccessURL string `yaml:"request_access_url"`
 }
 
 type GitHubOAuthConfig struct {
@@ -1806,6 +1812,15 @@ func (c Config) validateReferrals() error {
 	joinURL, err := url.Parse(strings.TrimSpace(r.JoinBaseURL))
 	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.RawQuery != "" || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
 		return fmt.Errorf("referrals.join_base_url must be an absolute https URL ending in /j")
+	}
+	// FIX-570 PROD-H1: when a request-access URL is configured it must be an
+	// absolute https URL, so the branded invite CTA never points at a dead link.
+	// An empty value is allowed and simply hides the CTA.
+	if raw := strings.TrimSpace(r.RequestAccessURL); raw != "" {
+		reqURL, err := url.Parse(raw)
+		if err != nil || reqURL.Scheme != "https" || reqURL.Host == "" {
+			return fmt.Errorf("referrals.request_access_url must be an absolute https URL when set")
+		}
 	}
 	return nil
 }

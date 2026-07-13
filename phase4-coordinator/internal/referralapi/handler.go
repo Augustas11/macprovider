@@ -70,17 +70,18 @@ type Handler struct {
 	Metrics         Metrics
 	// RequestAccessURL is a lightweight, non-authorizing waitlist / support link
 	// shown on the branded expired/revoked/exhausted invite pages (FIX-570 A6/B7).
-	// It MUST NOT itself grant registration. Empty falls back to a default.
+	// It MUST NOT itself grant registration. FIX-570 PROD-H1: it is an explicit,
+	// validated deployment setting; when empty the request-access CTA is NOT
+	// rendered (no dead default link) — the pages still offer the "Learn more" CTA.
 	RequestAccessURL string
 }
 
-const defaultRequestAccessURL = "https://malibu.tech/request-access"
-
+// requestAccessURL returns the configured, validated request-access destination,
+// or "" when unset. FIX-570 PROD-H1: there is deliberately NO default here — the
+// prior default (https://malibu.tech/request-access) 404s in production, so an
+// unset value hides the request-access CTA rather than rendering a dead link.
 func (h *Handler) requestAccessURL() string {
-	if u := strings.TrimSpace(h.RequestAccessURL); u != "" {
-		return u
-	}
-	return defaultRequestAccessURL
+	return strings.TrimSpace(h.RequestAccessURL)
 }
 
 func (h *Handler) HandleValidate(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +212,7 @@ var joinFullPage = template.Must(template.New("join-full").Parse(`<!doctype html
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title>
 <style>` + brandedUnavailableStyle + `</style></head>
-<body><main><p>Malibu pre-beta</p><h1>This invite filled up.</h1><div class="card"><p>All early-access spots on this invite have been claimed. Ask your inviter for another invite, or request access below.</p><div class="actions"><a href="{{.RequestAccessURL}}">Request access</a><a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
+<body><main><p>Malibu pre-beta</p><h1>This invite filled up.</h1><div class="card"><p>All early-access spots on this invite have been claimed. Ask your inviter for another invite, or learn more below.</p><div class="actions">{{if .RequestAccessURL}}<a href="{{.RequestAccessURL}}">Request access</a>{{end}}<a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
 
 // FIX-570 A6: expired and revoked invites render a branded state instead of a raw
 // 404. Raw 404 is reserved for malformed/forged codes.
@@ -219,13 +220,13 @@ var joinExpiredPage = template.Must(template.New("join-expired").Parse(`<!doctyp
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title>
 <style>` + brandedUnavailableStyle + `</style></head>
-<body><main><p>Malibu pre-beta</p><h1>This invite is no longer available.</h1><div class="card"><p>This invite has expired. Ask your inviter for another invite, or request access below.</p><div class="actions"><a href="{{.RequestAccessURL}}">Request access</a><a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
+<body><main><p>Malibu pre-beta</p><h1>This invite is no longer available.</h1><div class="card"><p>This invite has expired. Ask your inviter for another invite, or learn more below.</p><div class="actions">{{if .RequestAccessURL}}<a href="{{.RequestAccessURL}}">Request access</a>{{end}}<a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
 
 var joinRevokedPage = template.Must(template.New("join-revoked").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Malibu pre-beta invite</title>
 <style>` + brandedUnavailableStyle + `</style></head>
-<body><main><p>Malibu pre-beta</p><h1>This invite is no longer available.</h1><div class="card"><p>This invite is no longer active. Ask your inviter for another invite, or request access below.</p><div class="actions"><a href="{{.RequestAccessURL}}">Request access</a><a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
+<body><main><p>Malibu pre-beta</p><h1>This invite is no longer available.</h1><div class="card"><p>This invite is no longer active. Ask your inviter for another invite, or learn more below.</p><div class="actions">{{if .RequestAccessURL}}<a href="{{.RequestAccessURL}}">Request access</a>{{end}}<a class="secondary" href="https://malibu.tech">Learn more about Malibu</a></div></div></main></body></html>`))
 
 // FIX-570 A9: when the referral gate is disabled the /j route stays mounted and
 // serves an open-beta landing rather than 404ing links already in circulation.

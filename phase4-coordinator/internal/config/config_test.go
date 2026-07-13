@@ -57,6 +57,22 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "x_api_bearer_token") {
 		t.Fatalf("social bonus without X credential error=%v", err)
 	}
+	cfg.Referrals.EnableSocialInviteBonus = false
+
+	// FIX-570 PROD-H1: a configured request-access URL must be absolute https;
+	// empty is allowed (the CTA is hidden), a bad value is rejected.
+	cfg.Referrals.RequestAccessURL = "malibu.tech/request-access"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_access_url") {
+		t.Fatalf("invalid request_access_url error=%v", err)
+	}
+	cfg.Referrals.RequestAccessURL = "https://malibu.tech/waitlist"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid request_access_url should validate: %v", err)
+	}
+	cfg.Referrals.RequestAccessURL = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty request_access_url should validate (CTA hidden): %v", err)
+	}
 }
 
 func TestAutotuneFeedsRejectInvalidPublicKeys(t *testing.T) {
