@@ -211,6 +211,20 @@ linked to its replacement) and requires `--actor` and `--reason`. Every applied
 seed adjustment and issuer replacement writes an append-only
 `referral_admin_audit` row (actor, reason, action, target, detail, timestamp).
 
+### 8.3 Durable attempt-marker retention (FIX-570 L1)
+
+The durable `provider_register_attempts` table (which anchors lost-response
+recovery and crash reconciliation, §5) grows one row per successful App-track
+registration. Its `prune_provider_register_attempts(retain_for)` maintenance
+function is deliberately `REVOKE`d from the runtime `provider_onboarding` role
+and rejects a `retain_for` under 7 days, so retention is an OPERATOR/DBA task,
+not a runtime path — mirroring `prune_provider_register_nonces`. Operators
+schedule it (e.g. a daily cron with an elevated maintenance role and
+`retain_for => INTERVAL '30 days'`) alongside the existing nonce-pruner job.
+Because the row count is bounded by real successful registrations (a gated,
+low-volume pre-beta surface), unbounded growth is not a runtime risk between
+maintenance runs.
+
 ## 9. Client transport
 
 The installer accepts referral environment/flag input, performs advisory
