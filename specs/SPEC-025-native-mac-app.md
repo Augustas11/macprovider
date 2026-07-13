@@ -1,6 +1,15 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.9 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.10 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.10 (2026-07-13, R9 audit-loop convergence — code source of truth).** R9
+code/architect caught that the v0.9 watchdog routine/rollback boundary was fixed in §8 +
+grounding table but NOT swept through the live §5 prose. v0.10 sweeps the last three
+sites: the §5.2 architecture diagram, the §5.3 lifecycle sentence, and the §5.2 recovery
+line now all state the boundary — the companion watchdog is a no-op on **routine** health
+failures (provider-service `KeepAlive` restarts those) but **force-restarts** the provider
+service during **auto-update rollback recovery** (`install.sh:4086,4113`).
+
 
 **Change log v0.9 (2026-07-13, R8 audit-loop convergence — code source of truth).** R8
 code caught that the R7 "watchdog never restarts" was too absolute: the companion
@@ -315,7 +324,8 @@ and never opens the control socket in the live flow.
 │                               ▼ (127.0.0.1:<port from config.yaml>)   │
 │   ┌── launchd provider service live.streamvc.macprovider (KeepAlive) ─┐ │
 │   │   macprovider-cli   ← owned/restarted by launchd KeepAlive, NOT the │ │
-│   │   app (+ separate health watchdog, no-op restart — §8)             │ │
+│   │   app (+ health watchdog: routine no-op, force-kickstart on         │ │
+│   │   auto-update rollback — §8)                                        │ │
 │   └──────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────┘
   MalibuAgent.start() gate (in order, MalibuAgent.swift:64-87):
@@ -382,8 +392,9 @@ is still reserved under the app support dir, `ProviderPaths.swift`, but not conn
 
 **Reconciled v0.2/v0.7 — the wrapper does NOT spawn, restart, or SIGTERM a CLI child.**
 The launchd **provider service** `live.streamvc.macprovider` (`KeepAlive`) that
-`install.sh` installs owns the CLI's lifecycle and restarts (the companion watchdog only
-health-observes; its restart request is a no-op — §8).
+`install.sh` installs owns the CLI's lifecycle and routine restarts (the companion
+watchdog is a no-op on routine health failures, but DOES force-restart the provider
+service during auto-update rollback recovery — §8).
 `MalibuAgent` holds a `var child: CLIChildProcess?` but **never instantiates it** in
 shipped code — `CLIChildProcess(` has no call site in `Sources` or `Tests`; the field
 is only read to defensively release a child left by an *older* build
@@ -396,9 +407,10 @@ What the app actually does around lifecycle:
   a locally-ready but non-`buyer_serving` provider (or an undiagnosed connection loss)
   is surfaced as "Reconnecting" (`MalibuAgent.swift:307`); **diagnosed**
   startup/health failures and the first-attach timeout transition to **`.error`**, not
-  "Reconnecting" (`MalibuAgent.swift:89,391`). Recovery of the daemon is the launchd
-  provider service's `KeepAlive` job (the watchdog only health-observes, §8), not an
-  in-app restart loop.
+  "Reconnecting" (`MalibuAgent.swift:89,391`). Routine recovery of the daemon is the
+  launchd provider service's `KeepAlive` job (the watchdog is a no-op on routine health
+  but force-restarts the provider service during auto-update rollback, §8), not an in-app
+  restart loop.
 - **Drain (app quit / Sparkle update):** `agent.shutdown(gracefulSeconds:)` pauses
   monitoring (`MalibuApp.swift:57-74`, `SparkleUpdaterController.swift:36-38`) — there
   is no child process to signal.
