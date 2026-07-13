@@ -50,6 +50,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Coordinator WebSocket URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
     var coordinator: String?
 
+    @Option(name: [.customLong("ref"), .customLong("referral-code")], help: "Pre-beta referral code used only to obtain the first provider credential. Overrides MACPROVIDER_REFERRAL_CODE and config key referral_code.")
+    var referralCode: String?
+
     @Option(help: "Stable provider identifier sent in the coordinator hello message. Must match the coordinator's config.providers[] entry. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id. If unset, a per-instance UUID is generated (suitable for dev/test only).")
     var providerID: String?
 
@@ -89,6 +92,9 @@ struct ServeCommand: AsyncParsableCommand {
 
     @Option(help: "Read provider authentication token from a 0600 file. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token without exposing the token in process arguments.")
     var tokenFile: String?
+
+    @Option(help: "Read the provider authentication token from an already-open, inherited file descriptor (e.g. --token-fd 0 for stdin). Used by Malibu.app to hand the bearer to the managed CLI without exposing it in argv or the process environment, so it is invisible to KERN_PROCARGS2 inspection. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token.")
+    var tokenFd: Int?
 
     @Option(help: "Marks this binary as spawned by an outer manager (SPEC-025). Setting this to 'malibu-app' disables the CLI's own AutoUpdater so Sparkle in Malibu.app owns whole-bundle updates. Overrides MACPROVIDER_MANAGED_BY and config key managed_by. Unset for the standalone CLI track.")
     var managedBy: String?
@@ -488,6 +494,32 @@ struct ServeCommand: AsyncParsableCommand {
         return factory()
     }
 
+    /// Read a provider bearer from an inherited file descriptor. The writer
+    /// (Malibu.app) sends the token bytes and closes its end; we read to EOF
+    /// and trim surrounding whitespace/newlines, mirroring --token-file. The
+    /// fd is never captured by KERN_PROCARGS2, so the bearer stays off both
+    /// argv and the process environment.
+    static func readProviderToken(fromFileDescriptor fd: Int32) throws -> String {
+        guard fd >= 0 else {
+            throw ValidationError("--token-fd must be a non-negative file descriptor")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        let data: Data
+        do {
+            data = try handle.readToEnd() ?? Data()
+        } catch {
+            throw ValidationError("could not read provider token from --token-fd \(fd): \(error)")
+        }
+        guard let raw = String(data: data, encoding: .utf8) else {
+            throw ValidationError("provider token on --token-fd \(fd) is not valid UTF-8")
+        }
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            throw ValidationError("provider token on --token-fd \(fd) was empty")
+        }
+        return token
+    }
+
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -498,6 +530,7 @@ struct ServeCommand: AsyncParsableCommand {
                 numDraftTokens: numDraftTokens,
                 publishesSpecDecodeTelemetry: publishSpecDecodeTelemetry,
                 coordinatorURL: coordinator,
+                referralCode: referralCode,
                 providerID: providerID,
                 endpointURL: endpointURL,
                 configPath: config,
@@ -526,10 +559,21 @@ struct ServeCommand: AsyncParsableCommand {
             )
         )
 
+        // ADV-C1 fix: when Malibu.app manages this CLI it hands the bearer
+        // through an inherited file descriptor (--token-fd) rather than the
+        // initial environment. Unlike the environment, an fd is never captured
+        // by KERN_PROCARGS2, so a same-user process (or an installer recovery
+        // snapshot) can no longer read the token. Reading here — after config
+        // load — lets the fd win over any env/config value, matching the
+        // precedence of --token-file.
+        if let tokenFd {
+            resolved.providerToken = try Self.readProviderToken(fromFileDescriptor: Int32(tokenFd))
+        }
+
         // AUDIT R1 SECURITY S2 fix (PR #334): drop MACPROVIDER_PROVIDER_TOKEN
-        // from the process env immediately after we've resolved it. Under
-        // Malibu.app the token arrives via env (see SPEC-025 §7 followup:
-        // eventually via Keychain read here). Same-user malware inspecting
+        // from the process env immediately after we've resolved it. Legacy
+        // callers may still pass the token via env; the fd path above is the
+        // supported app-managed transport. Same-user malware inspecting
         // `ps -E <cli-pid>` would otherwise see a payout-bearing bearer token
         // for the lifetime of the process. Config resolution has already
         // captured it into `resolved.providerToken`; the env slot is unused

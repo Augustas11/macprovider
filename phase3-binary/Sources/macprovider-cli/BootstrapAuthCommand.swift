@@ -78,6 +78,15 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
                     await client.stop()
                     return
                 }
+                // PROD-M2: a referral-coded terminal rejection means retrying is
+                // pointless. Surface the specific reason on stderr as a
+                // machine-readable marker so install.sh can route the user back
+                // to the invite step instead of reporting a generic timeout.
+                if let reason = await client.terminalReferralRejection() {
+                    await client.stop()
+                    FileHandle.standardError.write(Data("MACPROVIDER_REFERRAL_REJECTED reason=\(reason)\n".utf8))
+                    throw ValidationError("provider credential bootstrap rejected the invite: \(reason)")
+                }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
         } catch {

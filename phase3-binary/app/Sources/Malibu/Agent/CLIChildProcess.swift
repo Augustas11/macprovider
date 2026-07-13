@@ -11,9 +11,32 @@ final class CLIChildProcess {
         let controlSocketPath: URL
         let httpPort: Int?
         let logFileURL: URL
-        // Merged over an allowlisted parent env. MACPROVIDER_PROVIDER_TOKEN
-        // belongs here so the token never touches config.yaml or argv.
+        // Merged over an allowlisted parent env. The provider bearer is NOT
+        // carried here (see `providerToken`): the environment is captured by
+        // KERN_PROCARGS2 and could be serialized to disk by installer recovery.
         let extraEnvironment: [String: String]
+        // ADV-C1: the provider bearer, handed to the child over an anonymous
+        // stdin pipe (--token-fd 0) so it never appears in argv or the initial
+        // environment and is invisible to same-user KERN_PROCARGS2 inspection.
+        let providerToken: String?
+
+        init(
+            executable: URL,
+            configPath: URL,
+            controlSocketPath: URL,
+            httpPort: Int?,
+            logFileURL: URL,
+            extraEnvironment: [String: String] = [:],
+            providerToken: String? = nil
+        ) {
+            self.executable = executable
+            self.configPath = configPath
+            self.controlSocketPath = controlSocketPath
+            self.httpPort = httpPort
+            self.logFileURL = logFileURL
+            self.extraEnvironment = extraEnvironment
+            self.providerToken = providerToken
+        }
     }
 
     private let launch: Launch
@@ -49,23 +72,21 @@ final class CLIChildProcess {
 
         let proc = Process()
         proc.executableURL = launch.executable
-        // Flag names must match phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
-        // (ArgumentParser derives kebab-case from the camelCase @Option name).
-        //
-        // --enable-warm-swap is required: the CLI only opens the control socket when
-        // warm-swap is enabled (see ServeCommand comment on `enableWarmSwap`).
-        var args = [
-            "--config", launch.configPath.path,
-            "--ctl-socket-path", launch.controlSocketPath.path,
-            "--enable-warm-swap",
-            "--managed-by", "malibu-app"
-        ]
-        if let port = launch.httpPort {
-            args.append(contentsOf: ["--port", "\(port)"])
-        }
-        proc.arguments = args
+        proc.arguments = Self.buildArguments(launch: launch)
 
         proc.environment = try ProcessEnvironmentSanitizer.sanitized(extraEnvironment: launch.extraEnvironment)
+
+        // ADV-C1: deliver the bearer over an anonymous stdin pipe. The read end
+        // becomes the child's fd 0 (--token-fd 0); we write the token to the
+        // write end after launch and close it so the CLI reads it to EOF. The
+        // pipe is not part of argv or the environment, so KERN_PROCARGS2 (and
+        // therefore installer recovery snapshots) never see the token.
+        var tokenPipe: Pipe?
+        if let token = launch.providerToken, !token.isEmpty {
+            let pipe = Pipe()
+            proc.standardInput = pipe.fileHandleForReading
+            tokenPipe = pipe
+        }
 
         proc.standardOutput = handle
         proc.standardError = handle
@@ -85,6 +106,40 @@ final class CLIChildProcess {
 
         try proc.run()
         process = proc
+
+        // Write the bearer to the child's stdin and close our end so the CLI
+        // sees EOF. Done after run() so the read end is already dup'd into the
+        // child; closing the read end here (it lives on in the child) avoids
+        // leaking the fd into our own process.
+        if let tokenPipe, let token = launch.providerToken {
+            let writer = tokenPipe.fileHandleForWriting
+            try? writer.write(contentsOf: Data(token.utf8))
+            try? writer.close()
+            try? tokenPipe.fileHandleForReading.close()
+        }
+    }
+
+    /// Build the CLI argument vector. Flag names must match
+    /// phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift (ArgumentParser
+    /// derives kebab-case from the camelCase @Option name).
+    ///
+    /// --enable-warm-swap is required: the CLI only opens the control socket when
+    /// warm-swap is enabled (see ServeCommand comment on `enableWarmSwap`).
+    /// --token-fd 0 is appended when a bearer is supplied over the stdin pipe.
+    static func buildArguments(launch: Launch) -> [String] {
+        var args = [
+            "--config", launch.configPath.path,
+            "--ctl-socket-path", launch.controlSocketPath.path,
+            "--enable-warm-swap",
+            "--managed-by", "malibu-app"
+        ]
+        if let port = launch.httpPort {
+            args.append(contentsOf: ["--port", "\(port)"])
+        }
+        if let token = launch.providerToken, !token.isEmpty {
+            args.append(contentsOf: ["--token-fd", "0"])
+        }
+        return args
     }
 
     func stop(gracePeriod: TimeInterval) async {

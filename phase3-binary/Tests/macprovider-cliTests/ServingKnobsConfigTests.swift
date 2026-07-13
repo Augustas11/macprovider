@@ -55,6 +55,24 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(config.enableReceipts)
     }
 
+    func testReferralCodeResolutionUsesCLIThenEnvironmentThenYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(referralCode: "cli-code"),
+            environment: ["MACPROVIDER_REFERRAL_CODE": "env-code"],
+            fileExists: { _ in true },
+            readFile: { _ in "referral_code: yaml-code\n" }
+        )
+        XCTAssertEqual(config.referralCode, "cli-code")
+
+        let environmentOnly = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_REFERRAL_CODE": "env-code"],
+            fileExists: { _ in true },
+            readFile: { _ in "referral_code: yaml-code\n" }
+        )
+        XCTAssertEqual(environmentOnly.referralCode, "env-code")
+    }
+
     // MARK: - --kv-bits
 
     func testKvBitsCLIOverridesEnvironmentOverridesYAML() throws {

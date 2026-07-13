@@ -2518,6 +2518,7 @@ final class CoordinatorClientTests: XCTestCase {
             status: status,
             recorder: recorder,
             providerReceiptPublicKey: receiptPublicKey,
+            referralCode: "MAL1-S-k1-seed-AAAAAAAAAAAAAAAAAAAAAAAAAA",
             credentialBootstrap: true,
             bootstrapReceiptSigningKey: receiptKey
         )
@@ -2540,8 +2541,10 @@ final class CoordinatorClientTests: XCTestCase {
 
         XCTAssertNil(hello["credential_bootstrap"])
         XCTAssertEqual(initial["credential_bootstrap"] as? Bool, true)
+        XCTAssertEqual(initial["referral_code"] as? String, "MAL1-S-k1-seed-AAAAAAAAAAAAAAAAAAAAAAAAAA")
         XCTAssertEqual(initial["provider_receipt_public_key"] as? String, receiptPublicKey)
         XCTAssertEqual(proof["credential_bootstrap"] as? Bool, true)
+        XCTAssertEqual(proof["referral_code"] as? String, initial["referral_code"] as? String)
         XCTAssertNotNil(proof["identity_signature"] as? String)
         XCTAssertNotNil(proof["identity_signature_transcript_sha256"] as? String)
     }
@@ -3447,6 +3450,7 @@ final class CoordinatorClientTests: XCTestCase {
         pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
         providerReceiptPublicKey: String? = nil,
+        referralCode: String? = nil,
         sendOverride: CoordinatorClient.SendOverride? = nil,
         watchdogExitHook: (@Sendable (String) -> Void)? = nil,
         publishesSpecDecodeTelemetry: Bool = false,
@@ -3470,6 +3474,7 @@ final class CoordinatorClientTests: XCTestCase {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
+        config.referralCode = referralCode
         config.model = "model-a"
         config.modelCatalogModelID = modelCatalogModelID
         config.drainTimeoutSeconds = drainTimeoutSeconds
