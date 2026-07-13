@@ -60,6 +60,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Option(help: "YAML config path for --apply. Defaults to ~/.config/macprovider/config.yaml.")
     var config: String?
 
+    @Option(help: "Read the provider authentication token from an inherited file descriptor (for example, --token-fd 0 for stdin). Used by Malibu.app repair so required hardware evidence can authenticate without putting the bearer in argv, the environment, or a file.")
+    var tokenFd: Int?
+
     @Option(help: "Number of recent autotune runs to retain.")
     var retainRuns = 50
 
@@ -690,6 +693,12 @@ struct AutotuneCommand: AsyncParsableCommand {
         if requireHardwareEvidence && !submitHardwareEvidence {
             throw ValidationError("--require-hardware-evidence cannot be combined with --no-submit-hardware-evidence")
         }
+        if tokenFd != nil && !recommend {
+            throw ValidationError("--token-fd requires --recommend")
+        }
+        if let tokenFd, tokenFd < 0 {
+            throw ValidationError("--token-fd must be a non-negative file descriptor")
+        }
         guard maxDuration > 0 else {
             throw ValidationError("--max-duration must be > 0")
         }
@@ -725,7 +734,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         let rateCard = await staticInputs.loadRateCard()
 
         let fingerprint = MachineFingerprinter().sample()
-        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let resolvedConfig = try resolvedProviderConfig()
         let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
         let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
@@ -897,7 +906,7 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     private func runRecommendationFreshnessCheck() async throws {
-        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let resolvedConfig = try resolvedProviderConfig()
         let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
         switch status {
         case .fresh:
@@ -951,6 +960,14 @@ struct AutotuneCommand: AsyncParsableCommand {
         case .failed(let reason):
             return .blocked(reason)
         }
+    }
+
+    private func resolvedProviderConfig() throws -> AppConfig? {
+        guard var resolved = try? ConfigLoader.load(cli: CLIOverrides(configPath: config)) else {
+            return nil
+        }
+        try ProviderTokenInput.apply(fileDescriptor: tokenFd, to: &resolved)
+        return resolved
     }
 
     static func requiredHardwareEvidenceBlockReason(

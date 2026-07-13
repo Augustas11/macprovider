@@ -18,9 +18,7 @@ final class ServeCommandTests: XCTestCase {
         try pipe.fileHandleForWriting.write(contentsOf: Data("fd-token\n".utf8))
         try pipe.fileHandleForWriting.close()
 
-        let token = try ServeCommand.readProviderToken(
-            fromFileDescriptor: pipe.fileHandleForReading.fileDescriptor
-        )
+        let token = try ProviderTokenInput.read(fromFileDescriptor: pipe.fileHandleForReading.fileDescriptor)
 
         XCTAssertEqual(token, "fd-token")
         try pipe.fileHandleForReading.close()

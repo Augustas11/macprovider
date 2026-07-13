@@ -4,11 +4,42 @@ struct ReferralPreflightResult: Decodable, Equatable {
     let valid: Bool
     let reason: String
     let required: Bool
+    let requestAccessURL: URL?
 
-    init(valid: Bool, reason: String, required: Bool = true) {
+    private enum CodingKeys: String, CodingKey {
+        case valid
+        case reason
+        case required
+        case requestAccessURL = "request_access_url"
+    }
+
+    init(valid: Bool, reason: String, required: Bool = true, requestAccessURL: URL? = nil) {
         self.valid = valid
         self.reason = reason
         self.required = required
+        self.requestAccessURL = Self.validRequestAccessURL(requestAccessURL?.absoluteString)
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        valid = try values.decode(Bool.self, forKey: .valid)
+        reason = try values.decode(String.self, forKey: .reason)
+        required = try values.decode(Bool.self, forKey: .required)
+        requestAccessURL = Self.validRequestAccessURL(
+            try values.decodeIfPresent(String.self, forKey: .requestAccessURL)
+        )
+    }
+
+    private static func validRequestAccessURL(_ raw: String?) -> URL? {
+        guard let raw,
+              let components = URLComponents(string: raw),
+              components.scheme?.lowercased() == "https",
+              components.host?.isEmpty == false,
+              components.user == nil,
+              components.password == nil else {
+            return nil
+        }
+        return components.url
     }
 }
 
@@ -45,11 +76,10 @@ final class LaunchProviderController: ObservableObject {
         case existingIdentityMissingBearer(providerID: String)
     }
 
-    // PROD-M3: three-valued referral policy. `.unknown` (policy discovery
-    // failed) must NOT masquerade as `.required`: it lets the authoritative
-    // registration decide and only re-gates if the server rejects with
-    // `referral_required`. `.required` is the pre-discovery default so a fresh
-    // launch before discovery still fails closed.
+    // PROD-M3: three-valued referral policy. `.unknown` (policy discovery in
+    // flight or unavailable) must NOT masquerade as `.required`: it lets the
+    // authoritative registration decide and only re-gates if the server
+    // rejects with `referral_required`.
     enum ReferralPolicy: Equatable {
         case required
         case optional
@@ -57,7 +87,8 @@ final class LaunchProviderController: ObservableObject {
     }
 
     // PROD-M6: details of an identity just retired via "Start New", surfaced so
-    // the UI can name what was archived, where, and offer a session-scoped undo.
+    // the UI can name what was archived, where, and offer a session-scoped
+    // local-file restore without promising credential or serving recovery.
     struct RetiredIdentity: Equatable {
         let providerID: String
         let archiveURL: URL
@@ -70,7 +101,9 @@ final class LaunchProviderController: ObservableObject {
     @Published private(set) var installProgressHint: String?
     @Published private(set) var installStartedAt: Date?
     @Published var referralCode = ""
-    @Published private(set) var referralPolicy: ReferralPolicy = .required
+    @Published private(set) var referralPolicy: ReferralPolicy = .unknown
+    @Published private(set) var isDiscoveringReferralPolicy = false
+    @Published private(set) var requestAccessURL: URL?
     @Published private(set) var retiredIdentity: RetiredIdentity?
 
     /// True only when an invite is known to be mandatory. `.unknown` and
@@ -104,11 +137,11 @@ final class LaunchProviderController: ObservableObject {
         }
         var readProviderID: @MainActor () -> String? = { ProviderConfig.readProviderID() }
         // PROD-M6: returns the archive directory so the UI can show where the
-        // retired identity went and offer an undo.
+        // retired identity went and offer a local-file restore.
         var moveAppOwnedConfigAside: @MainActor () async throws -> URL? = {
             try ProviderConfig.startFreshMovingCLIConfigAside()
         }
-        var restoreArchivedIdentity: @MainActor (URL) async throws -> Void = { archive in
+        var restoreArchivedFiles: @MainActor (URL) async throws -> Void = { archive in
             try ProviderConfig.restoreArchivedIdentity(from: archive)
         }
 
@@ -126,8 +159,11 @@ final class LaunchProviderController: ObservableObject {
                     request.setValue("application/json", forHTTPHeaderField: "Accept")
                     request.httpBody = try JSONEncoder().encode(["code": code])
                     let configuration = URLSessionConfiguration.ephemeral
-                    configuration.timeoutIntervalForRequest = 6
-                    configuration.timeoutIntervalForResource = 8
+                    // Policy discovery is advisory and must never hold the
+                    // onboarding screen indefinitely. These URLSession bounds
+                    // cover connection establishment and the complete request.
+                    configuration.timeoutIntervalForRequest = LaunchProviderController.referralPolicyRequestTimeout
+                    configuration.timeoutIntervalForResource = LaunchProviderController.referralPolicyResourceTimeout
                     let session = URLSession(configuration: configuration)
                     defer { session.finishTasksAndInvalidate() }
                     let (data, response) = try await session.data(for: request)
@@ -183,19 +219,25 @@ final class LaunchProviderController: ObservableObject {
     // segment after "/j/") or a bare code.
     static func extractReferralCode(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let marker = trimmed.range(of: "/j/") else {
+        guard let components = URLComponents(string: trimmed), components.scheme != nil else {
             return trimmed
         }
-        let tail = trimmed[marker.upperBound...]
-        let code = tail.prefix { $0 != "/" && $0 != "?" && $0 != "#" }
-        return String(code)
+        guard components.scheme?.lowercased() == "https",
+              components.host?.isEmpty == false,
+              components.user == nil,
+              components.password == nil,
+              !components.path.hasSuffix("//") else {
+            return trimmed
+        }
+        let path = components.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard path.count >= 2, path[path.count - 2] == "j" else {
+            return trimmed
+        }
+        return String(path[path.count - 1])
     }
 
-    // PROD-M6: a lightweight, non-authorizing way for a user without a working
-    // inviter to ask for access. This does NOT grant registration — it is a
-    // waitlist/support entry point. The Go branded join pages (A6) link to the
-    // same destination; keep them in sync.
-    static let requestAccessURL = URL(string: "https://malibu.tech/request-access")!
+    static let referralPolicyRequestTimeout: TimeInterval = 6
+    static let referralPolicyResourceTimeout: TimeInterval = 8
 
     static func isValidReferralCode(_ raw: String) -> Bool {
         raw.range(
@@ -222,17 +264,22 @@ final class LaunchProviderController: ObservableObject {
     func refreshReferralPolicy() async {
         if await dependencies.appIdentityConfigured() {
             referralPolicy = .optional
+            requestAccessURL = nil
             return
         }
+        isDiscoveringReferralPolicy = true
+        defer { isDiscoveringReferralPolicy = false }
         do {
             let result = try await dependencies.validateReferralCode("")
             referralPolicy = result.required ? .required : .optional
+            requestAccessURL = result.requestAccessURL
         } catch {
             // PROD-M3: policy discovery failed → UNKNOWN, not required. Let the
             // authoritative registration decide; B8 re-gates only if the server
             // rejects with referral_required. Mirrors the installer's advisory
             // treatment of /v1/referrals/validate.
             referralPolicy = .unknown
+            requestAccessURL = nil
         }
     }
 
@@ -255,8 +302,8 @@ final class LaunchProviderController: ObservableObject {
     // PROD-H6 (b): explicit destructive escape hatch. Move the app-owned
     // config aside so a genuinely fresh provider can be created, then return to
     // the normal invite flow. PROD-M6: capture the archive location and provider
-    // id so the UI can name what was retired and offer an undo — the caller is
-    // expected to have confirmed the destructive action first.
+    // id so the UI can name what was retired and offer a local-file restore —
+    // the caller is expected to have confirmed the destructive action first.
     func startAsNewProvider() async {
         let providerID = dependencies.readProviderID() ?? ""
         do {
@@ -281,18 +328,19 @@ final class LaunchProviderController: ObservableObject {
         await refreshReferralPolicy()
     }
 
-    // PROD-M6: undo a just-performed "Start New" while the archive still exists,
-    // restoring the retired identity bundle in place. Refuses (surfaces the
-    // error) if a replacement identity was already created over it.
-    func undoStartAsNewProvider() async {
+    // PROD-M6: restore local files from a just-performed "Start New" while the
+    // archive still exists. This cannot recreate a missing Keychain bearer,
+    // restore coordinator authority, or resume serving. Refuses (surfaces the
+    // error) if a replacement identity was already created over the files.
+    func restoreRetiredProviderFiles() async {
         guard let retired = retiredIdentity else { return }
         do {
-            try await dependencies.restoreArchivedIdentity(retired.archiveURL)
+            try await dependencies.restoreArchivedFiles(retired.archiveURL)
         } catch {
             stage = .failed(
                 stage: "startFresh",
                 retryable: true,
-                message: "Could not restore the retired provider: \(error.localizedDescription)"
+                message: "Could not restore the archived provider files: \(error.localizedDescription)"
             )
             return
         }
@@ -345,6 +393,7 @@ final class LaunchProviderController: ObservableObject {
         if !existingIdentity && referralPolicy != .optional {
             do {
                 let result = try await dependencies.validateReferralCode(normalizedReferralCode)
+                requestAccessURL = result.requestAccessURL
                 if result.required {
                     referralPolicy = .required
                 }
@@ -426,12 +475,12 @@ final class LaunchProviderController: ObservableObject {
         // exists but cannot be used routes the user to swap it.
         case "expired": return "This invite has expired. Use a different invite."
         case "revoked": return "This invite is no longer available. Use a different invite."
-        case "exhausted": return "This invite has already been used. Use a different invite."
+        case "exhausted": return "All spots on this invite are taken. Use a different invite."
         // PROD-M4: `required` is normalized to `missing` upstream, but map it
         // here too so any direct preflight `required` reason renders the same
         // mandatory-invite copy rather than the generic fallback. There is no
         // code to swap, so the copy asks for one instead.
-        case "missing", "required": return "An invite code is required. Enter a new invite code."
+        case "missing", "required": return "An invite is required. Enter an invite code or link."
         default: return "This invite is not valid. Use a different invite."
         }
     }

@@ -25,6 +25,7 @@ final class RegisterClientTests: XCTestCase {
                 "app_version": "1.0.3"
             ],
             referralCode: "MAL1-S-k1-seed-TEST",
+            providerTokenCandidate: String(repeating: "c", count: 64),
             nonce: String(repeating: "a", count: 64),
             timestamp: Date(timeIntervalSince1970: 1_783_082_460)
         )
@@ -36,6 +37,7 @@ final class RegisterClientTests: XCTestCase {
             "app_attest_object",
             "app_attest_key_id",
             "referral_code",
+            "provider_token_candidate",
             "nonce",
             "ts_utc",
             "signature"
@@ -44,6 +46,7 @@ final class RegisterClientTests: XCTestCase {
         XCTAssertFalse(request.fieldNames.contains("provider_name"))
         XCTAssertFalse(request.fieldNames.contains("signature_alg"))
         XCTAssertEqual(request.referralCode, "MAL1-S-k1-seed-TEST")
+        XCTAssertEqual(request.providerTokenCandidate, String(repeating: "c", count: 64))
 
         let canonical = try RegisterClient.canonicalRegisterPayloadWithoutSignature(request)
         let signature = Data(base64Encoded: request.signature)

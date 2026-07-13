@@ -154,6 +154,7 @@ final class AutotuneCommandTests: XCTestCase {
             "--freshness-check",
             "--submit-hardware-evidence",
             "--require-hardware-evidence",
+            "--token-fd", "0",
             "--donor-mode",
         ])
 
@@ -161,6 +162,7 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertTrue(command.freshnessCheck)
         XCTAssertTrue(command.submitHardwareEvidence)
         XCTAssertTrue(command.requireHardwareEvidence)
+        XCTAssertEqual(command.tokenFd, 0)
         XCTAssertTrue(command.donorMode)
     }
 
@@ -186,6 +188,13 @@ final class AutotuneCommandTests: XCTestCase {
             "--recommend",
             "--require-hardware-evidence",
             "--no-submit-hardware-evidence",
+        ]))
+    }
+
+    func testTokenFDRequiresRecommendation() {
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--token-fd", "0",
+            "--dry-run",
         ]))
     }
 
