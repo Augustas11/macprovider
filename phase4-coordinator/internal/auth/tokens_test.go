@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -962,7 +963,7 @@ func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
 	ctx := context.Background()
 	const providerID = "p_apptrackprovider"
 
-	first, err := store.MintProviderTokenAppTrack(ctx, providerID, nil)
+	first, err := store.MintProviderTokenAppTrack(ctx, providerID, nil, nil)
 	if err != nil {
 		t.Fatalf("first app-track mint: %v", err)
 	}
@@ -970,18 +971,18 @@ func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
 		t.Fatalf("first token len=%d want 64", len(first))
 	}
 
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
 		t.Fatalf("unused active without proof err=%v want ErrAppTrackExistingTokenNoProof", err)
 	}
 	if provider, ok, err := store.ValidateToken(ctx, first); err != nil || !ok || provider != providerID {
 		t.Fatalf("first token should remain active provider=%q ok=%v err=%v", provider, ok, err)
 	}
 	wrong := "wrong-token"
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
 		t.Fatalf("active token with wrong proof err=%v want ErrAppTrackExistingTokenNoProof", err)
 	}
 
-	second, err := store.MintProviderTokenAppTrack(ctx, providerID, &first)
+	second, err := store.MintProviderTokenAppTrack(ctx, providerID, &first, nil)
 	if err != nil {
 		t.Fatalf("active token with current proof should reissue: %v", err)
 	}
@@ -991,8 +992,24 @@ func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
 	if err := store.MarkTokenUsed(ctx, second); err != nil {
 		t.Fatalf("mark second used: %v", err)
 	}
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &second); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &second, nil); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
 		t.Fatalf("cooldown reissue err=%v want ErrAppTrackReissueCooldown", err)
+	}
+}
+
+func TestMintProviderTokenAppTrackUsesFreshClientCandidate(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	candidate := strings.Repeat("c", 64)
+	got, err := store.MintProviderTokenAppTrack(context.Background(), "p_apptrackcandidate", nil, &candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != candidate {
+		t.Fatalf("token=%q want client candidate", got)
 	}
 }
 

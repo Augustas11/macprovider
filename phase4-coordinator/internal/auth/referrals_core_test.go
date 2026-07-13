@@ -80,7 +80,8 @@ func TestAppTrackReferralSagaPreservesCommittedAndCompensatesAbsent(t *testing.T
 		AttemptTS: time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC),
 	}
 
-	token, err := store.MintProviderTokenAppTrackWithReferralAttempt(context.Background(), "provider-a", code, policy, attempt)
+	tokenCandidate := strings.Repeat("c", 64)
+	token, err := store.MintProviderTokenAppTrackWithReferralAttempt(context.Background(), "provider-a", code, tokenCandidate, policy, attempt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestAppTrackReferralSagaPreservesCommittedAndCompensatesAbsent(t *testing.T
 		t.Fatalf("rolled-back token ok=%v err=%v", ok, err)
 	}
 
-	committedToken, err := store.MintProviderTokenAppTrackWithReferralAttempt(context.Background(), "provider-b", code, policy, AppTrackRegistrationAttempt{
+	committedToken, err := store.MintProviderTokenAppTrackWithReferralAttempt(context.Background(), "provider-b", code, strings.Repeat("d", 64), policy, AppTrackRegistrationAttempt{
 		SourceIP: "203.0.113.11", Nonce: strings.Repeat("b", 64), AttemptTS: attempt.AttemptTS.Add(time.Second),
 	})
 	if err != nil {

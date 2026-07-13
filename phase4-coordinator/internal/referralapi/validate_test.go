@@ -86,3 +86,19 @@ func TestReferralReasonDoesNotCollapseLifecycleFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestBoundedLimiterNeverEvictsAnActiveBucketForANewKey(t *testing.T) {
+	limiter := NewBoundedLimiter(2, time.Minute, 1)
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	limiter.now = func() time.Time { return now }
+	if !limiter.Allow("active") || limiter.Allow("unseen") {
+		t.Fatal("full limiter admitted an unseen key")
+	}
+	if !limiter.Allow("active") || limiter.Allow("active") {
+		t.Fatal("active bucket was reset or its budget was not preserved")
+	}
+	now = now.Add(time.Minute)
+	if !limiter.Allow("unseen") {
+		t.Fatal("expired bucket was not reclaimed")
+	}
+}

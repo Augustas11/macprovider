@@ -2,6 +2,7 @@ package referralapi
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,11 +46,6 @@ func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.SourceIP != nil {
 		key = h.SourceIP(r)
 	}
-	if h.PublicLimiter == nil || !h.PublicLimiter.Allow(key) {
-		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many referral checks")
-		return
-	}
 	if h.ValidateSlots != nil {
 		select {
 		case h.ValidateSlots <- struct{}{}:
@@ -59,6 +55,11 @@ func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "busy", "invite validation is temporarily busy")
 			return
 		}
+	}
+	if h.PublicLimiter == nil || !h.PublicLimiter.Allow(key) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many referral checks")
+		return
 	}
 	if h.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
@@ -138,6 +139,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 type limiterEntry struct {
 	windowStart time.Time
 	count       int
+	element     *list.Element
 }
 
 type BoundedLimiter struct {
@@ -147,12 +149,13 @@ type BoundedLimiter struct {
 	maxEntries int
 	now        func() time.Time
 	entries    map[string]limiterEntry
+	oldest     *list.List
 }
 
 func NewBoundedLimiter(limit int, window time.Duration, maxEntries int) *BoundedLimiter {
 	return &BoundedLimiter{
 		limit: limit, window: window, maxEntries: maxEntries,
-		now: time.Now, entries: map[string]limiterEntry{},
+		now: time.Now, entries: map[string]limiterEntry{}, oldest: list.New(),
 	}
 }
 
@@ -163,24 +166,41 @@ func (l *BoundedLimiter) Allow(key string) bool {
 	now := l.now().UTC()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for k, entry := range l.entries {
-		if now.Sub(entry.windowStart) >= l.window {
-			delete(l.entries, k)
+	// Expiration is ordered by window start and bounded per call. This keeps a
+	// distributed-key flood from turning every request into a full-map scan.
+	for removed := 0; removed < 16; removed++ {
+		front := l.oldest.Front()
+		if front == nil {
+			break
 		}
+		key := front.Value.(string)
+		entry, ok := l.entries[key]
+		if !ok || entry.element != front {
+			l.oldest.Remove(front)
+			continue
+		}
+		if now.Sub(entry.windowStart) < l.window {
+			break
+		}
+		delete(l.entries, key)
+		l.oldest.Remove(front)
 	}
 	entry, ok := l.entries[key]
 	if !ok {
 		if len(l.entries) >= l.maxEntries {
-			var oldestKey string
-			var oldest time.Time
-			for k, candidate := range l.entries {
-				if oldestKey == "" || candidate.windowStart.Before(oldest) {
-					oldestKey, oldest = k, candidate.windowStart
-				}
-			}
-			delete(l.entries, oldestKey)
+			// Never reset an active caller's budget merely to admit a new key.
+			return false
 		}
-		l.entries[key] = limiterEntry{windowStart: now, count: 1}
+		element := l.oldest.PushBack(key)
+		l.entries[key] = limiterEntry{windowStart: now, count: 1, element: element}
+		return true
+	}
+	if now.Sub(entry.windowStart) >= l.window {
+		l.oldest.Remove(entry.element)
+		entry.windowStart = now
+		entry.count = 1
+		entry.element = l.oldest.PushBack(key)
+		l.entries[key] = entry
 		return true
 	}
 	if entry.count >= l.limit {

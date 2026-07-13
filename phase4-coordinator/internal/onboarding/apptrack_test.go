@@ -137,9 +137,13 @@ func TestHandleAppTrackRegisterFreshGateUsesSagaThenDiscloses(t *testing.T) {
 }
 
 func TestHandleAppTrackRegisterCommittedRetryNeverRotatesCredential(t *testing.T) {
-	body, _ := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	body, providerID := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
 	stats := &fakeStatsDB{prepared: true}
-	authStore := &fakeAuthStore{referralToken: "must-not-mint"}
+	authStore := &fakeAuthStore{
+		referralToken:      "must-not-mint",
+		validateOK:         true,
+		validateProviderID: providerID,
+	}
 	handler := testRegisterHandler(stats, authStore, nil)
 	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
 	handler.ReferralStore = authStore
@@ -148,11 +152,49 @@ func TestHandleAppTrackRegisterCommittedRetryNeverRotatesCredential(t *testing.T
 
 	handler.HandleAppTrackRegister(response, req)
 
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "existing_active_token_no_proof") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), strings.Repeat("c", 64)) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	if authStore.referralMintCalls != 0 || stats.prepareCalls != 0 {
 		t.Fatalf("committed retry mutated state: mint=%d prepare=%d", authStore.referralMintCalls, stats.prepareCalls)
+	}
+}
+
+func TestHandleAppTrackRegisterCommittedRetryRejectsDifferentCandidate(t *testing.T) {
+	body, _ := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepared: true}
+	authStore := &fakeAuthStore{}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body)))
+
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "committed_credential_mismatch") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authStore.referralMintCalls != 0 || stats.prepareCalls != 0 {
+		t.Fatalf("committed retry mutated state: mint=%d prepare=%d", authStore.referralMintCalls, stats.prepareCalls)
+	}
+}
+
+func TestHandleAppTrackRegisterGateRequiresClientHeldCandidate(t *testing.T) {
+	body, _ := signedRegisterBody(t, func(body map[string]any) {
+		body["referral_code"] = "invite"
+		delete(body, "provider_token_candidate")
+	})
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body)))
+
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "provider_token_candidate_required") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -686,10 +728,12 @@ func TestHandleAppTrackRegisterMapsRateLimitAndCooldown(t *testing.T) {
 func TestHandleAppTrackRegisterRateLimitDoesNotWriteReplayNonce(t *testing.T) {
 	body, _ := signedRegisterBody(t, nil)
 	stats := &fakeStatsDB{}
-	handler := testRegisterHandler(stats, &fakeAuthStore{token: "provider-token"}, &fakeMetrics{}, denyLimiter{})
+	authStore := &fakeAuthStore{token: "provider-token", validateOK: true}
+	handler := testRegisterHandler(stats, authStore, &fakeMetrics{}, denyLimiter{})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
 	req.RemoteAddr = "198.51.100.10:4444"
+	req.Header.Set("Authorization", "Bearer existing-token")
 	rr := httptest.NewRecorder()
 	handler.HandleAppTrackRegister(rr, req)
 
@@ -698,6 +742,12 @@ func TestHandleAppTrackRegisterRateLimitDoesNotWriteReplayNonce(t *testing.T) {
 	}
 	if stats.nonceCalls != 0 {
 		t.Fatalf("nonce calls=%d, want 0 before rate-limit rejection", stats.nonceCalls)
+	}
+	if stats.preparedChecks != 0 {
+		t.Fatalf("prepared checks=%d, want 0 before rate-limit rejection", stats.preparedChecks)
+	}
+	if authStore.validateCalls != 0 {
+		t.Fatalf("credential validations=%d, want 0 before rate-limit rejection", authStore.validateCalls)
 	}
 	if calls := stats.hardwareCallsCount(); calls != 0 {
 		t.Fatalf("hardware calls=%d, want 0 before rate-limit rejection", calls)
@@ -1083,8 +1133,9 @@ func signedRegisterBody(t *testing.T, mutate func(map[string]any)) ([]byte, stri
 			"macos_version":     "15.5",
 			"app_version":       "1.0.0",
 		},
-		"nonce":  strings.Repeat("a", 64),
-		"ts_utc": "2026-07-03T12:00:00Z",
+		"nonce":                    strings.Repeat("a", 64),
+		"ts_utc":                   "2026-07-03T12:00:00Z",
+		"provider_token_candidate": strings.Repeat("c", 64),
 	}
 	normalized, err := json.Marshal(body)
 	if err != nil {
@@ -1285,6 +1336,7 @@ type fakeAuthStore struct {
 	validateProviderID string
 	validateOK         bool
 	validateErr        error
+	validateCalls      int
 	referralToken      string
 	referralMintErr    error
 	referralMintCalls  int
@@ -1297,16 +1349,20 @@ type fakeAuthStore struct {
 	resolvedPrepared   []bool
 }
 
-func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
+func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer, freshTokenCandidate *string) (string, error) {
 	f.providerID = providerID
 	f.bearer = currentBearer
 	if f.err != nil {
 		return "", f.err
 	}
+	if currentBearer == nil && freshTokenCandidate != nil && f.token == "" {
+		return *freshTokenCandidate, nil
+	}
 	return f.token, nil
 }
 
 func (f *fakeAuthStore) ValidateToken(ctx context.Context, token string) (string, bool, error) {
+	f.validateCalls++
 	if f.validateErr != nil {
 		return "", false, f.validateErr
 	}
@@ -1319,13 +1375,16 @@ func (f *fakeAuthStore) ValidateToken(ctx context.Context, token string) (string
 	return f.providerID, true, nil
 }
 
-func (f *fakeAuthStore) MintProviderTokenAppTrackWithReferralAttempt(_ context.Context, providerID, referralCode string, policy auth.ReferralPolicy, attempt auth.AppTrackRegistrationAttempt) (string, error) {
+func (f *fakeAuthStore) MintProviderTokenAppTrackWithReferralAttempt(_ context.Context, providerID, referralCode, tokenCandidate string, policy auth.ReferralPolicy, attempt auth.AppTrackRegistrationAttempt) (string, error) {
 	f.referralMintCalls++
 	f.providerID = providerID
 	if f.referralMintErr != nil {
 		return "", f.referralMintErr
 	}
-	return f.referralToken, nil
+	if f.referralToken != "" {
+		return f.referralToken, nil
+	}
+	return tokenCandidate, nil
 }
 
 func (f *fakeAuthStore) AcknowledgeAppTrackReferralMint(context.Context, string, string) error {
