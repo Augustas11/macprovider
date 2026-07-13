@@ -408,7 +408,102 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater._restore_catalog(tx)
         self.assertEqual(os.readlink(install / "autotune" / "current"), "releases/old-catalog")
         self.assertEqual(previous.read_text().strip(), "releases/older-catalog")
+        self.assertEqual(previous.stat().st_gid, self.updater.catalog_gid)
+        self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o640)
         self.assertFalse((releases / release.catalog.release_id).exists())
+
+    def test_catalog_install_uses_service_group_and_repairs_restrictive_umask(self):
+        release = self.stage(self.verify())
+        install = self.updater.install_root
+        install.mkdir(mode=0o750)
+        install.chmod(0o750)
+        service_gid = os.getegid()
+        self.updater.catalog_gid = service_gid
+        self.updater.candidate_gid = service_gid + 10_000
+
+        with (
+            mock.patch.object(updater_module.os, "chown", wraps=os.chown) as chown,
+            mock.patch.object(updater_module.os, "fchown", wraps=os.fchown) as fchown,
+        ):
+            previous_umask = os.umask(0o077)
+            try:
+                self.updater.install_catalog(release)
+            finally:
+                os.umask(previous_umask)
+
+        self.assertGreaterEqual(chown.call_count, 3)
+        for call in chown.call_args_list:
+            self.assertEqual(call.args[2], service_gid)
+            self.assertEqual(call.kwargs, {"follow_symlinks": False})
+        releases = install / "autotune" / "releases"
+        destination = releases / release.catalog.release_id
+        self.assertIn(install / "autotune", [call.args[0] for call in chown.call_args_list])
+        self.assertIn(releases, [call.args[0] for call in chown.call_args_list])
+        for directory in (install / "autotune", releases, destination):
+            self.assertEqual(directory.stat().st_gid, service_gid)
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o750)
+        self.assertGreaterEqual(fchown.call_count, len(updater_module.CATALOG_ASSETS) + 1)
+        for call in fchown.call_args_list:
+            self.assertEqual(call.args[2], service_gid)
+        for name in updater_module.CATALOG_ASSETS:
+            installed = destination / name
+            self.assertEqual(installed.stat().st_gid, service_gid)
+            self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o640)
+
+    def test_catalog_install_repairs_existing_release_permissions_for_service(self):
+        release = self.stage(self.verify())
+        install = self.updater.install_root
+        releases = install / "autotune" / "releases"
+        destination = releases / release.catalog.release_id
+        destination.mkdir(parents=True, mode=0o700)
+        (install / "autotune").chmod(0o700)
+        releases.chmod(0o700)
+        destination.chmod(0o700)
+        for name in updater_module.CATALOG_ASSETS:
+            installed = destination / name
+            shutil.copyfile(release.directory / name, installed)
+            installed.chmod(0o600)
+
+        service_gid = os.getegid()
+        self.updater.catalog_gid = service_gid
+        self.updater.candidate_gid = service_gid + 10_000
+        self.updater.install_catalog(release)
+
+        for directory in (install / "autotune", releases, destination):
+            self.assertEqual(directory.stat().st_gid, service_gid)
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o750)
+        for name in updater_module.CATALOG_ASSETS:
+            installed = destination / name
+            self.assertEqual(installed.stat().st_gid, service_gid)
+            self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o640)
+
+    def test_catalog_existing_hash_mismatch_does_not_partially_repair_release(self):
+        release = self.stage(self.verify())
+        destination = (
+            self.updater.install_root
+            / "autotune"
+            / "releases"
+            / release.catalog.release_id
+        )
+        destination.mkdir(parents=True, mode=0o700)
+        (self.updater.install_root / "autotune").chmod(0o700)
+        destination.parent.chmod(0o700)
+        destination.chmod(0o700)
+        for name in updater_module.CATALOG_ASSETS:
+            installed = destination / name
+            shutil.copyfile(release.directory / name, installed)
+            installed.chmod(0o600)
+        (destination / updater_module.CATALOG_ASSETS[-1]).write_text("tampered\n")
+        before = {
+            path: stat.S_IMODE(path.stat().st_mode)
+            for path in (destination, *(destination / name for name in updater_module.CATALOG_ASSETS))
+        }
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "already exists with different bytes"):
+            self.updater.install_catalog(release)
+
+        after = {path: stat.S_IMODE(path.stat().st_mode) for path in before}
+        self.assertEqual(after, before)
 
     def test_partial_download_rejected_and_removed(self):
         class PartialResponse(io.BytesIO):
@@ -1530,6 +1625,20 @@ class PearlUpdaterTests(unittest.TestCase):
         self.install_coherent_pair(release)
         current, decision = self.updater.eligibility(release)
         self.assertEqual((str(current), decision), ("1.8.27", "already_current"))
+
+        installed_catalog = (
+            self.updater.install_root
+            / "autotune"
+            / "releases"
+            / release.catalog.release_id
+        )
+        installed_catalog.chmod(0o700)
+        (installed_catalog / updater_module.CATALOG_ASSETS[0]).chmod(0o600)
+        _, decision = self.updater.eligibility(release)
+        self.assertEqual(decision, "repair_pair")
+        self.updater.install_catalog(release)
+        _, decision = self.updater.eligibility(release)
+        self.assertEqual(decision, "already_current")
 
         with (self.updater.install_root / "gateway").open("ab") as handle:
             handle.write(b"tampered")

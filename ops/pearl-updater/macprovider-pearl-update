@@ -51,6 +51,8 @@ BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
 INDEPENDENT_ALERT_ENV_PATH = Path("/etc/macprovider/monitor.env")
 VALIDATOR_ACCOUNT = "macprovider-updater-validate"
+CATALOG_SERVICE_ACCOUNT = "macprovider"
+CATALOG_SERVICE_GROUP = "macprovider"
 INDEPENDENT_ALERT_ACCOUNT = "macprovider"
 INDEPENDENT_ALERT_GROUP = "macprovider"
 GATED_SERVICE_UNITS = (
@@ -677,6 +679,7 @@ class Updater:
         trusted_uid: int = 0,
         candidate_uid: int | None = None,
         candidate_gid: int | None = None,
+        catalog_gid: int | None = None,
         independent_alert_gid: int | None = None,
         isolate_candidate_network: bool = False,
         catalog_verifier: Path = CATALOG_RELEASE_VERIFIER,
@@ -696,6 +699,7 @@ class Updater:
         self.trusted_uid = trusted_uid
         self.candidate_uid = trusted_uid if candidate_uid is None else candidate_uid
         self.candidate_gid = trusted_uid if candidate_gid is None else candidate_gid
+        self.catalog_gid = self.candidate_gid if catalog_gid is None else catalog_gid
         self.independent_alert_gid = (
             self.candidate_gid if independent_alert_gid is None else independent_alert_gid
         )
@@ -1546,17 +1550,20 @@ class Updater:
 
     def installed_catalog_is_coherent(self, release: Release) -> bool:
         catalog_root = self.install_root / "autotune"
+        releases = catalog_root / "releases"
         current = catalog_root / "current"
         try:
+            self._assert_catalog_directory(catalog_root, "installed catalog root")
+            self._assert_catalog_directory(releases, "installed catalog releases directory")
             if not stat.S_ISLNK(current.lstat().st_mode):
                 return False
             expected_target = f"releases/{release.catalog.release_id}"
             if os.readlink(current) != expected_target:
                 return False
             installed = catalog_root / expected_target
-            _trusted_directory(installed, "installed catalog release", trusted_uid=self.trusted_uid, mode=0o750)
+            self._assert_catalog_directory(installed, "installed catalog release")
             for name in CATALOG_ASSETS:
-                self._trusted_regular_file(installed / name, f"installed catalog asset {name}")
+                self._assert_catalog_asset(installed / name, f"installed catalog asset {name}")
                 if sha256_file(installed / name) != release.catalog.files[name]:
                     return False
             return True
@@ -1573,6 +1580,29 @@ class Updater:
 
     def _trusted_config_file(self, path: Path) -> None:
         self._trusted_regular_file(path, "coordinator config")
+
+    def _assert_catalog_directory(self, path: Path, description: str) -> None:
+        _trusted_directory(path, description, trusted_uid=self.trusted_uid, mode=0o750)
+        if path.lstat().st_gid != self.catalog_gid:
+            raise UpdateError(
+                f"{description} group gid must be {self.catalog_gid}: {path}"
+            )
+
+    def _assert_catalog_asset(self, path: Path, description: str) -> None:
+        entry = self._trusted_regular_file(path, description)
+        if entry.st_gid != self.catalog_gid or stat.S_IMODE(entry.st_mode) != 0o640:
+            raise UpdateError(
+                f"{description} ownership/mode must be "
+                f"{self.trusted_uid}:{self.catalog_gid} 0640: {path}"
+            )
+
+    def _repair_catalog_directory(self, path: Path, description: str) -> None:
+        if not _path_entry_exists(path):
+            path.mkdir(mode=0o700)
+        _trusted_directory(path, description, trusted_uid=self.trusted_uid, mode=None)
+        os.chown(path, self.trusted_uid, self.catalog_gid, follow_symlinks=False)
+        os.chmod(path, 0o750, follow_symlinks=False)
+        self._assert_catalog_directory(path, description)
 
     def validate_recovery_inputs(self, config_path: Path) -> None:
         if not config_path.is_absolute():
@@ -2954,32 +2984,52 @@ class Updater:
         catalog_root = self.install_root / "autotune"
         releases = catalog_root / "releases"
         for directory in (catalog_root, releases):
-            if not _path_entry_exists(directory):
-                directory.mkdir(mode=0o750)
-            _trusted_directory(directory, "catalog release directory", trusted_uid=self.trusted_uid, mode=0o750)
+            self._repair_catalog_directory(directory, "catalog release directory")
         destination = releases / release.catalog.release_id
         if _path_entry_exists(destination):
-            _trusted_directory(destination, "immutable catalog release", trusted_uid=self.trusted_uid, mode=0o750)
+            _trusted_directory(
+                destination,
+                "immutable catalog release",
+                trusted_uid=self.trusted_uid,
+                mode=None,
+            )
+            installed_assets: list[Path] = []
             for name in CATALOG_ASSETS:
                 existing = destination / name
                 self._trusted_regular_file(existing, f"installed catalog asset {name}")
                 if sha256_file(existing) != release.catalog.files[name]:
                     raise UpdateError(f"catalog release ID {release.catalog.release_id} already exists with different bytes")
+                installed_assets.append(existing)
+            self._repair_catalog_directory(destination, "immutable catalog release")
+            for existing in installed_assets:
+                os.chown(
+                    existing,
+                    self.trusted_uid,
+                    self.catalog_gid,
+                    follow_symlinks=False,
+                )
+                os.chmod(existing, 0o640, follow_symlinks=False)
+                self._assert_catalog_asset(existing, f"installed catalog asset {existing.name}")
         else:
             stage = releases / f".stage-{release.catalog.release_id}-{os.getpid()}-{time.time_ns()}"
-            stage.mkdir(mode=0o750)
+            stage.mkdir(mode=0o700)
+            self._repair_catalog_directory(stage, "catalog release staging directory")
             try:
                 for name in CATALOG_ASSETS:
                     self.atomic_replace(
                         release.directory / name,
                         stage / name,
                         uid=self.trusted_uid,
-                        gid=self.install_root.stat().st_gid,
+                        gid=self.catalog_gid,
                         mode=0o640,
                     )
+                    self._assert_catalog_asset(stage / name, f"staged catalog asset {name}")
                 _fsync_directory(stage)
                 os.replace(stage, destination)
                 _fsync_directory(releases)
+                self._assert_catalog_directory(destination, "immutable catalog release")
+                for name in CATALOG_ASSETS:
+                    self._assert_catalog_asset(destination / name, f"installed catalog asset {name}")
             finally:
                 if _path_entry_exists(stage):
                     shutil.rmtree(stage)
@@ -2997,7 +3047,7 @@ class Updater:
             previous_payload,
             mode=0o640,
             uid=self.trusted_uid,
-            gid=self.install_root.stat().st_gid,
+            gid=self.catalog_gid,
         )
         self._replace_catalog_pointer("current", f"releases/{release.catalog.release_id}")
         self.audit(
@@ -3681,7 +3731,7 @@ class Updater:
                 (previous_target + "\n").encode("utf-8"),
                 mode=0o640,
                 uid=self.trusted_uid,
-                gid=self.install_root.stat().st_gid,
+                gid=self.catalog_gid,
             )
         if not manifest["candidate_existed"]:
             candidate = catalog_root / "releases" / manifest["candidate_release_id"]
@@ -4263,6 +4313,7 @@ def main(argv: list[str]) -> int:
     if testing:
         candidate_uid = os.geteuid()
         candidate_gid = os.getegid()
+        catalog_gid = candidate_gid
         independent_alert_gid = candidate_gid
     else:
         try:
@@ -4273,6 +4324,10 @@ def main(argv: list[str]) -> int:
             raise UpdateError(f"{VALIDATOR_ACCOUNT} service account must not use the root uid or gid")
         candidate_uid = account.pw_uid
         candidate_gid = account.pw_gid
+        catalog_gid = resolve_service_group_gid(
+            CATALOG_SERVICE_ACCOUNT,
+            CATALOG_SERVICE_GROUP,
+        )
         independent_alert_gid = resolve_service_group_gid(
             INDEPENDENT_ALERT_ACCOUNT,
             INDEPENDENT_ALERT_GROUP,
@@ -4292,6 +4347,7 @@ def main(argv: list[str]) -> int:
         trusted_uid=trusted_uid,
         candidate_uid=candidate_uid,
         candidate_gid=candidate_gid,
+        catalog_gid=catalog_gid,
         independent_alert_gid=independent_alert_gid,
         isolate_candidate_network=not testing,
     )
