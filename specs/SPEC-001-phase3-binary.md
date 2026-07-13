@@ -293,7 +293,8 @@ chain (see Section 3 for the hook-point diagram).
 - **Coordinator-side** validation/policy of provider authentication and
   attestation (owned by SPEC-002 / SPEC-008 / SPEC-026). **Reconciled v1.7:** the
   binary-side of these — bearer-token transport, the v2 challenge/proof
-  handshake, and SE/MDA **attestation-token generation** — *is* in scope and
+  handshake (in WS-tunneled / credential-bootstrap mode; R-6.7.8), and SE/MDA
+  **attestation-token generation** — *is* in scope and
   shipped (`CoordinatorClient.swift`, FR-13/FR-14/§6.7/§6.15); only the
   coordinator's acceptance decision is out of scope here.
 
@@ -673,10 +674,12 @@ ships with the client protocol fully implemented, tested against a mock.
 binary-side credential transport and proof generation are shipped and in scope —
 it attaches `Authorization: Bearer <provider_token>` on the coordinator WS
 connect (when the token is non-empty; see the header §, and
-`CoordinatorClient.swift`) and runs the v2 challenge/proof handshake with
-attestation/identity proof (§6.7, §6.15). Only the **coordinator-side**
-validation and issuance *policy* is deferred to SPEC-002 (and SPEC-008 /
-SPEC-026 for attestation/identity).
+`CoordinatorClient.swift`). The handshake it then runs is **mode-selected**
+(R-6.7.8): a **WS-tunneled or credential-bootstrap** connection runs the v2
+`auth_request` challenge/proof with attestation/identity proof (§6.7, §6.15),
+while a **legacy HTTP-forwarding** connection uses the §6.5 `hello`. Only the
+**coordinator-side** validation and issuance *policy* is deferred to SPEC-002
+(and SPEC-008 / SPEC-026 for attestation/identity).
 
 **FR-14. Tier capability announcement (reconciled v1.7).**
 On the legacy `hello` message the shipped binary sends `tier: 1` with
@@ -2947,8 +2950,9 @@ after testing, with a documented reason in `implementation-notes.html`.
 
 Provider-authentication **policy and coordinator-side validation** are specified
 in SPEC-002 (and SPEC-008 / SPEC-026 for attestation/identity). The binary-side
-credential transport and proof generation (bearer token, v2 challenge/proof
-handshake, attestation-token generation) are in scope and shipped — see FR-13,
+credential transport and proof generation (bearer token, the mode-selected v2
+challenge/proof handshake used in WS-tunneled / credential-bootstrap mode per
+R-6.7.8, attestation-token generation) are in scope and shipped — see FR-13,
 §6.7, and §6.15 (reconciled v1.7).
 
 ### 7.2 Reference hygiene — strict clean-room for d-inference
