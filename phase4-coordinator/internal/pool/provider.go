@@ -429,14 +429,16 @@ type Registry struct {
 	providers map[string]*Provider
 	sessions  map[string]*Provider
 	endpoints map[string]config.ProviderConfig
-	// buyerServing, when set, decides whether a provider is currently
-	// buyer-serving (ServingCapable + Tier-2 admission gates + quota) for the
-	// FR-CAN22 last-provider floor and the redundancy count. Injected by the ws
-	// layer via SetBuyerServingPredicate because those gates (Tier-2 config,
-	// admission quota) live outside the pool package. Nil falls back to
-	// ServingCapable — sufficient for registry unit tests, but production MUST
-	// inject the full predicate so a Tier-2/quota-excluded or slotless peer cannot
-	// falsely lift the floor and empty the real buyer-serving pool.
+	// buyerServing, when set, decides whether a provider is a peer buyers can
+	// actually route to RIGHT NOW (RoutingEligible + positive context window + not
+	// Tier-2-excluded) for the FR-CAN22 last-provider floor and the redundancy
+	// count. Injected by the ws layer via SetBuyerServingPredicate because the
+	// Tier-2 gate needs config outside the pool package. Provisional quota is
+	// deliberately NOT part of it (admission-DB convoy — see canaryBuyerServing).
+	// Nil falls back to RoutingEligible + positive context (the routable-now core,
+	// minus Tier-2) — used only in registry unit tests; production injects the full
+	// predicate so a busy/negative-slot/zero-capacity/Tier-2-excluded peer cannot
+	// falsely lift the floor and empty the real routable pool.
 	buyerServing func(Provider) bool
 	// seenModelsByProvider tracks the model IDs ever reported by each
 	// currently-connected provider. M2-5 / PERF-5: previously a single
@@ -1222,8 +1224,9 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	// through this canary path. Applies to both tiers (provisional ban and pinned
 	// degrade), since it precedes the tier branch. "Sole" is keyed on the ACTIVE
 	// buyer-routing model (providerServesActiveModel, not declared SupportedModels)
-	// AND the full buyer-serving predicate (Tier-2/quota-aware), so a peer buyers
-	// cannot actually route to does not lift the floor.
+	// AND the routable-now buyer-serving predicate (RoutingEligible + context +
+	// not Tier-2-excluded), so a peer buyers cannot actually route to right now
+	// does not lift the floor.
 	if !r.hasOtherBuyerServingForModelLocked(providerID, p.ModelID) {
 		result.Tripped = CanaryTripFloorHeld
 		return result
@@ -1258,10 +1261,11 @@ func providerServesActiveModel(p *Provider, modelID string) bool {
 	return p != nil && strings.EqualFold(p.ModelID, modelID)
 }
 
-// SetBuyerServingPredicate injects the authoritative buyer-serving predicate
-// (ServingCapable + Tier-2 admission gates + quota) used by the FR-CAN22 floor and
-// the redundancy count. The ws layer wires this at construction; nil restores the
-// ServingCapable-only fallback. It never mutates routing/admission — the predicate
+// SetBuyerServingPredicate injects the routable-now buyer-serving predicate
+// (RoutingEligible + positive context window + not Tier-2-excluded; quota omitted)
+// used by the FR-CAN22 floor and the redundancy count. The ws layer wires this at
+// construction; nil restores the RoutingEligible+context fallback. It never mutates
+// routing/admission — the predicate
 // is read-only w.r.t. the sanction decision.
 func (r *Registry) SetBuyerServingPredicate(fn func(Provider) bool) {
 	r.mu.Lock()
@@ -1270,23 +1274,27 @@ func (r *Registry) SetBuyerServingPredicate(fn func(Provider) bool) {
 }
 
 // isBuyerServingLocked applies the injected buyer-serving predicate, or a
-// capacity-aware ServingCapable fallback, to p. Caller MUST hold r.mu (read or
-// write). The fallback also requires SlotsTotal>0 so a zero-total-capacity peer
-// never lifts the floor even in the (unit-test-only) uninjected path.
+// routability-based fallback, to p. Caller MUST hold r.mu (read or write). The
+// fallback (used only when no ws predicate is injected — i.e. registry unit tests)
+// mirrors the routable-now core of `canaryBuyerServing`: RoutingEligible (ready +
+// free slots) AND a positive context window, so a busy, degraded, negative-slot,
+// zero-capacity, or zero-context peer never lifts the floor. It omits the Tier-2
+// gate, which requires ws config the pool package cannot see.
 func (r *Registry) isBuyerServingLocked(p *Provider) bool {
 	if r.buyerServing != nil {
 		return r.buyerServing(*p)
 	}
-	return p.ServingCapable() && p.SlotsTotal > 0
+	return p.RoutingEligible() && p.MaxContextTokens > 0
 }
 
 // hasOtherBuyerServingForModelLocked reports whether some provider other than
 // excludeID is buyer-serving and actively serves modelID. Caller MUST hold r.mu.
 // Backs the FR-CAN22 last-provider floor in RecordCanaryResult: when this returns
 // false, the excluded provider is the sole buyer-serving provider for the model
-// and a canary-only signal must not remove it. Uses the full buyer-serving
-// predicate (Tier-2/quota-aware) so a Tier-2-excluded, quota-exhausted, or
-// slotless-only peer does not falsely lift the floor.
+// and a canary-only signal must not remove it. Uses the injected routable-now
+// predicate (RoutingEligible + positive context + not Tier-2-excluded) so a
+// busy, degraded, negative-slot, zero-capacity, zero-context, or Tier-2-excluded
+// peer does not falsely lift the floor.
 func (r *Registry) hasOtherBuyerServingForModelLocked(excludeID, modelID string) bool {
 	for id, p := range r.providers {
 		if id == excludeID {

@@ -504,42 +504,52 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		go s.runLosslessnessProbeLoop()
 	}
 	if registry != nil {
-		// Inject the authoritative buyer-serving predicate so the FR-CAN22 floor and
-		// the redundancy count reason about real buyer-routable capacity (Tier-2 +
-		// quota), not just ServingCapable. Mirrors buyer.Server.providerBuyerServing;
-		// the admission manager is shared with the buyer server (main.go
-		// buyer.WithAdmission(wsServer.Admission())).
+		// Inject the routable-now buyer-serving predicate so the FR-CAN22 floor and
+		// the redundancy count reason about peers buyers can actually route to now
+		// (RoutingEligible + positive context + not Tier-2-excluded), not just
+		// ServingCapable — a busy/negative-slot/zero-capacity peer receives no buyer
+		// traffic and must not lift the floor. Quota is intentionally omitted (see
+		// canaryBuyerServing).
 		registry.SetBuyerServingPredicate(s.canaryBuyerServing)
 	}
 	return s
 }
 
-// canaryBuyerServing reports whether p provides real, permanent buyer-serving
-// capacity for the FR-CAN22 last-provider floor. It requires:
-//   - ServingCapable (state ready or busy, auth/catalog/receipt gates), AND
-//   - positive TOTAL serving capacity (SlotsTotal > 0). ServingCapable ignores
-//     slot counts, but a peer with zero total slots can NEVER be routed to (buyer
-//     selection needs SlotsFree>0 and the buyer queue needs SlotsTotal>0), so a
-//     provider-authored `max_concurrency=0` heartbeat must not lift the floor. A
-//     merely BUSY peer (SlotsFree==0, SlotsTotal>0) still counts — its capacity
-//     frees up, and buyers queue behind it. AND
-//   - not Tier-2-excluded (hash/encryption/attestation) — the PERMANENT
-//     buyer-routability exclusions, evaluated from in-memory config + catalog.
+// canaryBuyerServing reports whether p is a peer buyers can actually route to
+// RIGHT NOW, for the FR-CAN22 last-provider floor. It requires:
+//   - RoutingEligible() — state ready AND SlotsFree>0 AND auth/catalog/receipt
+//     gates. This is the coordinator's OWN routability predicate, so any peer that
+//     lifts the floor genuinely receives buyer traffic; if such a peer is lying
+//     about being able to serve, the FR-P11a buyer-path breaker catches it on a
+//     real request. Provider-asserted-but-unroutable states are thereby excluded:
+//     a BUSY peer (SlotsFree==0), a NEGATIVE-slot peer (SlotsFree<=0, stored
+//     verbatim from heartbeats), and a zero-total-capacity peer all receive NO
+//     buyer traffic, so FR-P11a would be blind to them and a fake peer could lift
+//     the floor and empty the pool. Excluding a genuinely-busy real peer is
+//     over-protective (the floor may hold when it need not) — the SAFE direction;
+//     the peer re-counts the moment a slot frees. AND
+//   - MaxContextTokens > 0 — a peer advertising a zero/negative context window is
+//     rejected for every buyer request (ProviderContextSufficient requires
+//     MaxContextTokens >= the >=1-token estimate), so it is unroutable in practice
+//     even while RoutingEligible. AND
+//   - not Tier-2-excluded (hash/encryption/attestation) — evaluated from in-memory
+//     config + catalog (no DB).
 //
-// Provisional quota is deliberately NOT checked here. Quota exhaustion is
-// transient (an hourly window that self-heals), so a quota-throttled peer counting
-// toward the floor causes at most a bounded transient availability gap, never a
-// permanent empty pool. More importantly, calling admission.CheckQuota under the
-// registry lock (RecordCanaryResult holds pool.mu; BuyerServingCountForModel holds
-// pool.mu.RLock) would couple pool.mu to the admission mutex, which is held across
-// synchronous single-connection DB writes in TryReserveRequest — an availability
-// convoy that could freeze registry snapshots, heartbeats, and routing. See
-// DECISION_CRITERIA Entry 139.
+// Provisional quota is deliberately NOT checked here: admission.CheckQuota shares
+// the admission mutex with the synchronous single-connection DB write in
+// TryReserveRequest, so calling it under the registry lock (RecordCanaryResult
+// holds pool.mu; BuyerServingCountForModel holds pool.mu.RLock) would couple
+// pool.mu to that DB write — an availability convoy that could freeze registry
+// snapshots/heartbeats/routing. A quota-exhausted-but-RoutingEligible peer can
+// still lift the floor; that adversarial multi-provider case (an attacker
+// renewably exhausting its own peer's quota) is deferred to FR-CAN23, which must
+// simulate full buyer eligibility, and has NO current-prod impact (single provider,
+// canary disabled). See DECISION_CRITERIA Entry 139 / SPEC-031 §14.
 func (s *Server) canaryBuyerServing(p pool.Provider) bool {
-	if !p.ServingCapable() {
+	if !p.RoutingEligible() {
 		return false
 	}
-	if p.SlotsTotal <= 0 {
+	if p.MaxContextTokens <= 0 {
 		return false
 	}
 	if s.tier2WarmupExcluded(p) {

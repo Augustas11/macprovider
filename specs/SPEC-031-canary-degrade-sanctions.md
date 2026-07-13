@@ -115,7 +115,7 @@ currently disabled on Pearl; see §16).
 | **Latency failure** | A probe that echoed correctly but breached a wall-time SLO — `ttft_breach`, `tps_breach`. |
 | **Sanction** | A coordinator-owned state change removing a provider from routing: **degrade** (pinned) or **admission-reject/ban** (provisional). |
 | **Recovery hold** | A coordinator-owned lock preventing a degraded provider from self-reporting its way back to `ready`. Reasons are enumerated (breaker, canary, provider-failure, warm-up, operator-clear); see §7 for composition. |
-| **Sole provider** | The only **buyer-serving** provider (`ServingCapable` + positive total capacity `SlotsTotal>0` + Tier-2 gates) for a given model at a given instant. |
+| **Sole provider** | The only **buyer-serving** provider — one buyers can route to right now: `RoutingEligible` (ready + free slots) + positive context window (`MaxContextTokens>0`) + not Tier-2-excluded — for a given model at a given instant. |
 
 Provider **tiers** — `provisional` (self-onboarded, bearer-validated or tokenless)
 vs `pinned` (operator-configured) — are defined by SPEC-002's F-2 amendment and
@@ -520,9 +520,9 @@ cross-spec inconsistency — runbook item 22 — not re-litigated here.)
 
 **FR-CAN22 — The sole provider is never removed by a canary-only signal.** When a
 provider is the **only** buyer-serving provider for a model — the implementation
-uses the injected buyer-serving predicate (`ServingCapable` [ready or busy] +
-positive total capacity `SlotsTotal>0` + not Tier-2-excluded; provisional quota is
-deliberately excluded, see §14), keyed on the active model — **no
+uses the injected buyer-serving predicate (`RoutingEligible` [ready + free slots] +
+positive context window `MaxContextTokens>0` + not Tier-2-excluded; provisional
+quota is deliberately excluded, see §14), keyed on the active model — **no
 canary signal alone may remove it** — not `nonce_mismatch`, not `incomplete`, not a
 latency or soft-deadline `relay_error`, and not a canary-specific HTTP non-200
 (`status` sub-class). The reason is the corrected threat model (§1): a canary
@@ -619,9 +619,9 @@ containment:
 > **Conformance status (§14).** **Implemented in v0.2:** the last-provider floor —
 > a canary-only signal never removes the sole **buyer-serving** provider.
 > `RecordCanaryResult` consults `hasOtherBuyerServingForModelLocked` (the injected
-> buyer-serving predicate: `ServingCapable` + positive total capacity `SlotsTotal>0`
-> + not Tier-2-excluded, keyed on the active model) before the tier branch and
-> returns `CanaryTripFloorHeld`. A
+> buyer-serving predicate: `RoutingEligible` [ready + free slots] + positive context
+> window `MaxContextTokens>0` + not Tier-2-excluded, keyed on the active model)
+> before the tier branch and returns `CanaryTripFloorHeld`. A
 > sole provider can therefore no longer be removed by a coordinator-config fault
 > (incidents #1/#2 are closed) — including a max_tokens truncation, which the floor
 > protects against regardless of how it is classified. **Still Gap:** runtime
@@ -796,7 +796,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN19 conjunctive eligibility | Implemented | `RoutingEligible()` enforces auth/publication + state + slots. |
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Follows SPEC-010 R-3.3.4 `ModelKnown()` union (#555, authoritative); SPEC-002 R-3.X.6 `MAY` / SPEC-006 §17.2 wording is the carried item-22 cross-spec inconsistency, not claimed as fully aligned. |
-| FR-CAN22 sole-provider floor | **Implemented** (v0.2) | `RecordCanaryResult` spares the **sole buyer-serving provider** on **any** canary-only signal: it returns `CanaryTripFloorHeld` (no state change, keeps accruing the counter) instead of degrading/banning, and the caller emits `canary_floor_held` / `pool_redundancy_low` redundancy telemetry (`hasOtherBuyerServingForModelLocked`). The **injected predicate** (`canaryBuyerServing`) counts a peer only when it is `ServingCapable` (ready **or** busy) AND has **positive total capacity** (`SlotsTotal>0`) AND is **not Tier-2-excluded** (hash/encryption/attestation), keyed on the **active** model (case-folded `ModelID`, not declared-but-cold `SupportedModels`). So a peer that only *declares* the model, is degraded, is Tier-2-excluded, or reports zero total capacity (provider-authored `max_concurrency=0`, never routable) cannot falsely lift the floor and empty the real pool — while a merely **busy** peer (`SlotsFree==0`, `SlotsTotal>0`) DOES count (its capacity frees up and buyers queue behind it). **Provisional quota is deliberately NOT part of the predicate**: quota exhaustion is transient (self-heals in ≤1 h), so a quota-throttled peer counting toward the floor is at most a bounded transient gap — whereas checking `admission.CheckQuota` under the registry lock would couple `pool.mu` to the admission mutex (held across synchronous DB writes in `TryReserveRequest`), an availability convoy that could freeze registry snapshots/heartbeats/routing. This diverges from `buyer.Server.providerBuyerServing` only by (a) requiring positive total capacity — stricter — and (b) omitting the transient quota gate. Applies to both tiers (precedes the tier branch). Removing a sole provider still requires evidence independent of the canary — the FR-P11a buyer-path breaker, a confirmed transport death, or item-9 weight evidence. |
+| FR-CAN22 sole-provider floor | **Implemented** (v0.2) | `RecordCanaryResult` spares the **sole buyer-serving provider** on **any** canary-only signal: it returns `CanaryTripFloorHeld` (no state change, keeps accruing the counter) instead of degrading/banning, and the caller emits `canary_floor_held` / `pool_redundancy_low` redundancy telemetry (`hasOtherBuyerServingForModelLocked`). The **injected predicate** (`canaryBuyerServing`) counts a peer only when buyers can route to it **right now**: `RoutingEligible` (state ready AND `SlotsFree>0` AND auth/catalog/receipt gates) AND a positive context window (`MaxContextTokens>0`) AND not Tier-2-excluded (hash/encryption/attestation), keyed on the **active** model (case-folded `ModelID`, not declared-but-cold `SupportedModels`). This is deliberately the coordinator's own routability predicate: any peer that lifts the floor therefore actually receives buyer traffic, so a peer lying about serving is caught by the FR-P11a buyer-path breaker on a real request. Provider-asserted-but-unroutable peers are all excluded — a peer that only *declares* the model, is degraded, is Tier-2-excluded, is **busy** (`SlotsFree==0`), reports **negative** free slots (heartbeat-authored, stored verbatim), reports zero total capacity (`max_concurrency=0`), or advertises a zero/negative context window — because such a peer receives no buyer traffic (FR-P11a would be blind) and could otherwise lift the floor and empty the pool. Excluding a genuinely-busy real peer is **over-protective** (the floor may hold when it need not) — the safe direction; it re-counts the moment a slot frees. **Provisional quota is deliberately NOT part of the predicate** because `admission.CheckQuota` shares the admission mutex with the synchronous DB write in `TryReserveRequest`, so checking it under `pool.mu` would couple the registry lock to that DB write — an availability convoy that could freeze registry snapshots/heartbeats/routing. A quota-exhausted-but-`RoutingEligible` peer can therefore still lift the floor; that adversarial multi-provider case (an attacker renewably exhausting its own peer's quota so it lifts the floor without serving) is **deferred to FR-CAN23** (which must simulate full buyer eligibility) and has no current-prod impact (single provider, canary disabled). Applies to both tiers (precedes the tier branch). Removing a sole provider still requires evidence independent of the canary — the FR-P11a buyer-path breaker, a confirmed transport death, or item-9 weight evidence. |
 | FR-CAN23 correlated-fault epoch (multi-provider) | **Gap** | The correlation epoch with **staged results** (pre-sweep snapshot + shared-fingerprint re-dispatch + bank-generation fencing + discard-on-suspicion) and the `relay_error` **hard/status/soft** sub-class split are **not** implemented — `RecordCanaryResult` still receives only a pass/fail bool with no per-signal class. The FR-CAN22 floor already prevents the single-provider outage (incidents #1/#2); the correlation epoch matters only at **≥2** providers and remains the authorized follow-up. (Its v0.1 design: ephemeral discard + alert only, no correlated-majority verdict creating persistent containment; ordinary per-provider FR-CAN11/15 sanctions still apply — see FR-CAN23.) |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
@@ -859,13 +859,14 @@ Testable against the current build (happy paths against the shipped code):
   soft-deadline `relay_error`, or a canary-specific HTTP non-200 — absent an
   independent buyer-path failure, confirmed transport death, or item-9 weight
   evidence. At the failure threshold it reports `CanaryTripFloorHeld`, stays
-  routable, and keeps accruing the counter. A second **buyer-serving** provider for
-  the **active** model — ready **or** busy, with positive total capacity — restores
-  the normal trip path; a peer that only **declares** the model via
-  `SupportedModels`, is degraded, is Tier-2-excluded, or reports zero total capacity
-  (`max_concurrency=0`) does **not** lift the floor. (Provisional quota is not part
-  of the predicate — see §14 — so a quota-throttled peer *can* lift it; that is an
-  accepted transient, not a floor bug.)
+  routable, and keeps accruing the counter. A second **routable** provider for the
+  **active** model — `RoutingEligible` (ready + free slots) with a positive context
+  window — restores the normal trip path; a peer that only **declares** the model
+  via `SupportedModels`, is degraded, is Tier-2-excluded, is busy (`SlotsFree==0`),
+  reports negative free slots, reports zero total capacity (`max_concurrency=0`), or
+  advertises a zero/negative context window does **not** lift the floor. (Provisional
+  quota is not part of the predicate — see §14 — so a quota-throttled peer *can*
+  lift it; that residual is deferred to FR-CAN23, not a shipped floor bug.)
 
 Forward criteria (expected to FAIL against the current build; each corresponds to
 a §14 Partial/Gap row and defines part of the follow-up IMPL's done bar):
@@ -1033,16 +1034,21 @@ before the breaker and canary coexist under load.
     signal (`CanaryTripFloorHeld` + `hasOtherBuyerServingForModelLocked`), for both
     tiers, instead of degrading/banning it — the direct fix for the single-provider
     incidents #1/#2 outage. "Buyer-serving" is an **injected predicate**
-    (`canaryBuyerServing`): `ServingCapable` (ready or busy) + **positive total
-    capacity** (`SlotsTotal>0`) + **not Tier-2-excluded**, keyed on the case-folded
-    ACTIVE `ModelID` (matching buyer routing), **not** declared-but-cold
-    `SupportedModels` — so a declared-only, degraded, Tier-2-excluded, or
-    zero-total-capacity (`max_concurrency=0`, never routable) peer does not falsely
-    lift the floor and empty the real pool, while a merely busy peer still counts.
-    Provisional **quota is deliberately excluded** from the predicate (transient/
-    self-healing, and checking it under the registry lock would couple `pool.mu` to
-    the admission-DB mutex — an availability convoy). The provider keeps accruing its
-    counter; the caller raises `canary_floor_held` / `pool_redundancy_low` telemetry.
+    (`canaryBuyerServing`) counting only peers buyers can route to right now:
+    `RoutingEligible` (ready + `SlotsFree>0` + auth/catalog/receipt) + positive
+    context window (`MaxContextTokens>0`) + **not Tier-2-excluded**, keyed on the
+    case-folded ACTIVE `ModelID`, **not** declared-but-cold `SupportedModels`. Using
+    the coordinator's own routability predicate means any lifting peer receives buyer
+    traffic, so FR-P11a catches a liar. Provider-asserted-but-unroutable peers do not
+    lift the floor — declared-only, degraded, Tier-2-excluded, **busy**
+    (`SlotsFree==0`), **negative-slot**, zero-total-capacity (`max_concurrency=0`), or
+    zero/negative context window; excluding a genuinely-busy real peer is
+    over-protective (safe). Provisional **quota is deliberately excluded** (checking
+    `admission.CheckQuota` under the registry lock would couple `pool.mu` to the
+    admission-DB mutex — an availability convoy); a quota-exhausted-but-routable peer
+    can still lift the floor, an adversarial multi-provider case **deferred to
+    FR-CAN23** with no current-prod impact. The provider keeps accruing its counter;
+    the caller raises `canary_floor_held` / `pool_redundancy_low` telemetry.
   - **FR-CAN3 coordinator-attribution → NOT shipped (stays Gap).** Runtime
     attribution of a max_tokens truncation was prototyped but **deliberately dropped**
     after audit: the shipped provider represents a truncation as `finish_reason:"length"`

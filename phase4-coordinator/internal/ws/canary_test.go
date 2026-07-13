@@ -151,50 +151,44 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	}
 }
 
-// TestCanaryBuyerServingAppliesTier2Gate verifies the floor's injected
-// buyer-serving predicate excludes a Tier-2-excluded provider that raw
-// ServingCapable would accept — the H1 residual (a non-buyer-routable peer must
-// not lift the last-provider floor).
-func TestCanaryBuyerServingAppliesTier2Gate(t *testing.T) {
+// TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates verifies the injected
+// predicate counts a peer only when buyers can route to it RIGHT NOW: it must be
+// RoutingEligible (ready + free slots), have a positive context window, and not be
+// Tier-2-excluded. Provider-asserted-but-unroutable states (busy, negative/zero
+// slots, zero context, Tier-2 exclusion) must NOT lift the floor.
+func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	s := NewServer(config.Default(), registry, zerolog.Nop())
-	p := pool.Provider{
-		ProviderID:     "p",
-		AssignedID:     "s",
-		ModelID:        "model-a",
-		Tier:           pool.TierProvisional,
-		State:          pool.StateReady,
-		SlotsFree:      1,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
-		EncryptedLeg:   false,
+	base := pool.Provider{
+		ProviderID: "p", AssignedID: "s", ModelID: "model-a", Tier: pool.TierProvisional,
+		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		MaxContextTokens: 4096, EncryptedLeg: false,
 	}
-	if !s.canaryBuyerServing(p) {
-		t.Fatal("baseline ready provider should be buyer-serving")
+	if !s.canaryBuyerServing(base) {
+		t.Fatal("baseline ready+free-slot+context provider should be buyer-serving")
 	}
-	// Tier-2 now requires an encrypted leg the provider lacks → excluded.
+	mutate := func(f func(p *pool.Provider)) pool.Provider {
+		p := base
+		f(&p)
+		return p
+	}
+	// Not routable now / not routable ever — none may be buyer-serving.
+	for name, p := range map[string]pool.Provider{
+		"busy/zero-free":   mutate(func(p *pool.Provider) { p.State = pool.StateBusy; p.SlotsFree = 0 }),
+		"negative-free":    mutate(func(p *pool.Provider) { p.SlotsFree = -1 }),
+		"zero-total":       mutate(func(p *pool.Provider) { p.SlotsTotal = 0; p.SlotsFree = 0; p.MaxConcurrency = 0 }),
+		"zero-context":     mutate(func(p *pool.Provider) { p.MaxContextTokens = 0 }),
+		"negative-context": mutate(func(p *pool.Provider) { p.MaxContextTokens = -1 }),
+		"degraded":         mutate(func(p *pool.Provider) { p.State = pool.StateDegraded }),
+	} {
+		if s.canaryBuyerServing(p) {
+			t.Fatalf("%s provider must not be buyer-serving (would falsely lift the floor)", name)
+		}
+	}
+	// Tier-2 exclusion (requires an encrypted leg the provider lacks).
 	s.SetTier2Config(config.Tier2Config{RequireEncryptedLeg: true})
-	if s.canaryBuyerServing(p) {
-		t.Fatal("Tier-2-excluded provider must not be buyer-serving (would falsely lift the floor)")
-	}
-	s.SetTier2Config(config.Tier2Config{})
-	// A busy provider (no free slots but positive total capacity) is still
-	// buyer-serving capacity — it frees up and buyers queue behind it.
-	busy := p
-	busy.State = pool.StateBusy
-	busy.SlotsFree = 0
-	if !s.canaryBuyerServing(busy) {
-		t.Fatal("busy provider (SlotsTotal>0) should still be buyer-serving")
-	}
-	// A zero-TOTAL-capacity peer (provider-authored max_concurrency=0) can never be
-	// routed to and MUST NOT be buyer-serving — otherwise it would lift the floor
-	// and let the real provider be sanctioned into an empty pool.
-	zero := p
-	zero.SlotsTotal = 0
-	zero.SlotsFree = 0
-	zero.MaxConcurrency = 0
-	if s.canaryBuyerServing(zero) {
-		t.Fatal("zero-total-capacity provider must not be buyer-serving")
+	if s.canaryBuyerServing(base) {
+		t.Fatal("Tier-2-excluded provider must not be buyer-serving")
 	}
 }
 
@@ -217,14 +211,14 @@ func TestFloorUsesInstalledPredicateExcludesTier2Peer(t *testing.T) {
 	registry.Register(&pool.Provider{
 		ProviderID: "target", AssignedID: "st", ModelID: "model-a",
 		Tier: pool.TierProvisional, State: pool.StateReady,
-		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 		EncryptedLeg: true, HashStatus: pool.HashStatusVerified,
 	}, nil)
-	// Peer: ready + same model + capacity, but Tier-2-excluded (no encrypted leg).
+	// Peer: routable + same model, but Tier-2-excluded (no encrypted leg).
 	registry.Register(&pool.Provider{
 		ProviderID: "tier2-excluded-peer", AssignedID: "sp", ModelID: "model-a",
 		Tier: pool.TierProvisional, State: pool.StateReady,
-		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 		EncryptedLeg: false, HashStatus: pool.HashStatusVerified,
 	}, nil)
 
@@ -848,15 +842,16 @@ func testCanaryChallenge() config.CanaryChallengeConfig {
 // probed.
 func registerCanaryFloorPeer(registry *pool.Registry, modelID string) {
 	registry.Register(&pool.Provider{
-		ProviderID:     "canary-floor-peer",
-		AssignedID:     "canary-floor-peer-session",
-		ModelID:        modelID,
-		Tier:           pool.TierProvisional,
-		InferencePath:  pool.InferencePathWSTunneled,
-		State:          pool.StateReady,
-		SlotsFree:      1,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
+		ProviderID:       "canary-floor-peer",
+		AssignedID:       "canary-floor-peer-session",
+		ModelID:          modelID,
+		Tier:             pool.TierProvisional,
+		InferencePath:    pool.InferencePathWSTunneled,
+		State:            pool.StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
 	}, nil)
 }
 

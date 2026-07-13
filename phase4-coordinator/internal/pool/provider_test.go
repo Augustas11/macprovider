@@ -367,14 +367,15 @@ func TestRecordCanaryResultTripsProvisionalUnavailable(t *testing.T) {
 	// last-provider floor from sparing the target, so this test still exercises
 	// the normal trip path.
 	registry.Register(&Provider{
-		ProviderID:     "provisional-b",
-		AssignedID:     "session-b",
-		ModelID:        "model-a",
-		Tier:           TierProvisional,
-		State:          StateReady,
-		SlotsFree:      1,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
+		ProviderID:       "provisional-b",
+		AssignedID:       "session-b",
+		ModelID:          "model-a",
+		Tier:             TierProvisional,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
 	}, nil)
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
@@ -419,14 +420,15 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 	// last-provider floor from sparing the target, so this test still exercises
 	// the normal pinned-degrade trip path.
 	registry.Register(&Provider{
-		ProviderID:     "pinned-b",
-		AssignedID:     "session-companion",
-		ModelID:        "model-a",
-		Tier:           TierPinned,
-		State:          StateReady,
-		SlotsFree:      1,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
+		ProviderID:       "pinned-b",
+		AssignedID:       "session-companion",
+		ModelID:          "model-a",
+		Tier:             TierPinned,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
 	}, nil)
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
@@ -536,14 +538,15 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 // test — letting sanction/recovery tests still exercise the trip path.
 func registerFloorPeer(registry *Registry, id, modelID string) {
 	registry.Register(&Provider{
-		ProviderID:     id,
-		AssignedID:     id + "-session",
-		ModelID:        modelID,
-		Tier:           TierProvisional,
-		State:          StateReady,
-		SlotsFree:      1,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
+		ProviderID:       id,
+		AssignedID:       id + "-session",
+		ModelID:          modelID,
+		Tier:             TierProvisional,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
 	}, nil)
 }
 
@@ -602,77 +605,63 @@ func TestRecordCanaryResultFloorSparesSoleProvider(t *testing.T) {
 }
 
 // TestRecordCanaryResultFloorLiftsWithSecondProvider verifies the floor is scoped
-// to being the SOLE serving-capable provider for the ACTIVE model. Peers that do
-// not add real capacity for the model do NOT lift the floor:
-//   - a degraded peer (not ServingCapable),
-//   - a ready peer serving a DIFFERENT active model but merely DECLARING model-a
-//     via SupportedModels (declared-but-cold; H1 regression).
-//
-// A ready OR busy peer actively serving model-a DOES lift it.
+// to being the sole provider buyers can ROUTE TO RIGHT NOW for the ACTIVE model.
+// Only a RoutingEligible (ready + free slots) peer with a positive context window
+// lifts the floor; provider-asserted-but-unroutable peers do NOT (a peer that
+// lifts must actually receive buyer traffic so FR-P11a can catch it if it lies):
+//   - degraded (not RoutingEligible),
+//   - busy / zero free slots (not routable now — over-protective, safe),
+//   - negative free slots (heartbeat-authored, stored verbatim),
+//   - zero context window (rejected for every buyer request),
+//   - a peer serving model-b that only DECLARES model-a via SupportedModels.
 func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 	registry := NewRegistry(nil)
 	registry.Register(&Provider{
-		ProviderID:     "target",
-		AssignedID:     "session-t",
-		ModelID:        "model-a",
-		Tier:           TierProvisional,
-		State:          StateReady,
-		SlotsFree:      1,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
+		ProviderID: "target", AssignedID: "session-t", ModelID: "model-a",
+		Tier: TierProvisional, State: StateReady,
+		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 	}, nil)
-	// A degraded peer is not serving-capable → floor still holds.
-	registry.Register(&Provider{
-		ProviderID:     "degraded-peer",
-		AssignedID:     "session-d",
-		ModelID:        "model-a",
-		Tier:           TierProvisional,
-		State:          StateDegraded,
-		SlotsFree:      1,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
-	}, nil)
-	// H1 regression: a ready peer serving model-b that only DECLARES model-a in
-	// SupportedModels is buyer-unroutable for model-a → must NOT lift model-a's
-	// floor (declared-but-cold is 503, not live capacity).
-	registry.Register(&Provider{
-		ProviderID:      "cold-declarer",
-		AssignedID:      "session-c",
-		ModelID:         "model-b",
-		SupportedModels: []string{"model-a"},
-		Tier:            TierProvisional,
-		State:           StateReady,
-		SlotsFree:       1,
-		SlotsTotal:      1,
-		MaxConcurrency:  1,
-	}, nil)
+	// None of these unroutable peers may lift model-a's floor.
+	for _, p := range []*Provider{
+		// degraded → not RoutingEligible.
+		{ProviderID: "degraded-peer", AssignedID: "sd", ModelID: "model-a", Tier: TierProvisional,
+			State: StateDegraded, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+		// busy / zero free slots → not routable now.
+		{ProviderID: "busy-peer", AssignedID: "sb", ModelID: "model-a", Tier: TierProvisional,
+			State: StateBusy, SlotsFree: 0, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+		// negative free slots → not routable.
+		{ProviderID: "neg-peer", AssignedID: "sn", ModelID: "model-a", Tier: TierProvisional,
+			State: StateReady, SlotsFree: -1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+		// zero context window → rejected for every request.
+		{ProviderID: "noctx-peer", AssignedID: "sx", ModelID: "model-a", Tier: TierProvisional,
+			State: StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 0},
+		// declared-but-cold (serves model-b, only declares model-a).
+		{ProviderID: "cold-declarer", AssignedID: "sc", ModelID: "model-b", SupportedModels: []string{"model-a"},
+			Tier: TierProvisional, State: StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+	} {
+		registry.Register(p, nil)
+	}
 	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 
 	held := registry.RecordCanaryResult("target", "session-t", false, at, 1)
 	if held.Tripped != CanaryTripFloorHeld {
-		t.Fatalf("with no live model-a peer, result = %+v, want CanaryTripFloorHeld", held)
+		t.Fatalf("with no routable model-a peer, result = %+v, want CanaryTripFloorHeld", held)
 	}
 	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
 		t.Fatalf("BuyerServingCountForModel(model-a) = %d, want 1 (target only)", n)
 	}
 
-	// A BUSY peer actively serving model-a is still serving-capable → lifts the floor.
+	// A genuinely routable peer (ready + free slot + context) lifts the floor.
 	registry.Register(&Provider{
-		ProviderID:     "busy-peer",
-		AssignedID:     "session-b",
-		ModelID:        "model-a",
-		Tier:           TierProvisional,
-		State:          StateBusy,
-		SlotsFree:      0,
-		SlotsTotal:     1,
-		MaxConcurrency: 1,
+		ProviderID: "ready-peer", AssignedID: "sr", ModelID: "model-a", Tier: TierProvisional,
+		State: StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 	}, nil)
 	if n := registry.BuyerServingCountForModel("model-a"); n != 2 {
 		t.Fatalf("BuyerServingCountForModel(model-a) = %d, want 2", n)
 	}
 	tripped := registry.RecordCanaryResult("target", "session-t", false, at.Add(time.Minute), 1)
 	if tripped.Tripped != CanaryTripUnavailable {
-		t.Fatalf("with a busy serving peer, result = %+v, want CanaryTripUnavailable", tripped)
+		t.Fatalf("with a routable peer, result = %+v, want CanaryTripUnavailable", tripped)
 	}
 	got, _ := registry.Resolve("target", "session-t")
 	if got.State != StateUnavailable {
@@ -681,8 +670,8 @@ func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 }
 
 // TestRecordCanaryResultFloorRespectsBuyerServingPredicate verifies the floor uses
-// the injected buyer-serving predicate (Tier-2/quota-aware), not just
-// ServingCapable: a ready same-model peer that the predicate rejects (e.g.
+// the injected buyer-serving predicate (a custom closure here), not
+// its default: a ready same-model peer that the predicate rejects (e.g.
 // Tier-2-excluded or quota-exhausted) must NOT lift the floor.
 func TestRecordCanaryResultFloorRespectsBuyerServingPredicate(t *testing.T) {
 	registry := NewRegistry(nil)
