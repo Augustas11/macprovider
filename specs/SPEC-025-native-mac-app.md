@@ -1,6 +1,17 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.5 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.6 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.6 (2026-07-13, R5 audit-loop convergence — code source of truth).** R5
+architect/code caught remaining app-side twins: §3.3 BSDiff **delta updates marked
+design-intent only** (shipped generator stages one full DMG, `generate-malibu-appcast.sh:67`,
+consistent with §9); §7 receipt/admission Keychain services spelled out in full with
+lifetimes — `com.streamvc.macprovider.receipt-key` (rotatable), `.receipt-key.prev`
+(grace), `.bootstrap-identity-key` (stable admission identity, never rotates), account
+`<provider_id>` (`ReceiptKeyStore.swift:22-25,58-92`); §4 distribution facts corrected —
+`hdiutil` DMG (not `create-dmg`) and the optional signed App `.pkg` (`tech.malibu.app.installer`)
+is already emitted, not a backlog item (`release.yml:599,616`); §13 backlog narrowed to
+broader MDM/enterprise packaging.
 
 **Change log v0.5 (2026-07-13, R4 audit-loop convergence — code source of truth).** R4
 architect/code caught app-side build/distribution twins: §2 token-backup documented as
@@ -109,7 +120,7 @@ From reading `phase3-binary/`:
 | Portal | `portal.streamvc.live` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
 | Release manifest / checksum | `scripts/sign-catalog.go`, tier2 release scripts | Feeds the same manifest that Sparkle appcast references |
 | Signing + notarization pipeline | `.github/workflows/release.yml` "Sign + notarize binary" step + `phase3-binary/dist/release-signing-runbook.md` | Reuse the existing keychain-import / codesign / `notarytool submit --wait` / `stapler` pattern verbatim; extend to sign the `.app` and `.dmg` |
-| Signed `.pkg` delivery container | Same workflow, `pkgbuild` + `productsign` with **Developer ID Installer** cert, identifier `live.streamvc.macprovider.cli`, preinstall blocks direct GUI install | Do **not** confuse with the App-track `.pkg` (backlog item, distinct identifier `tech.malibu.app`) — the existing one is a delivery container for `install.sh`, not a user-facing installer |
+| Signed `.pkg` delivery container | Same workflow, `pkgbuild` + `productsign` with **Developer ID Installer** cert, identifier `live.streamvc.macprovider.cli`, preinstall blocks direct GUI install | Do **not** confuse with the App-track `.pkg`, which the pipeline **already emits** as an OPTIONAL scriptless flat package, identifier `tech.malibu.app.installer` (reconciled v0.5, `release.yml:616,635,641`) — this CLI one is a delivery container for `install.sh`, not a user-facing installer |
 
 **README is stale.** `README.md` says signing is "planned for a future release." The actual state (as of `release.yml`): full pipeline exists, activates conditionally on secret presence — driven by the macOS 26.3.1+ launchd/AMFI change that rejects adhoc-signed binaries (see memory `macprovider-launchd-amfi-blocker-macos-26`). This spec **extends** that pipeline; it does not build it from scratch. README needs a follow-up correction.
 
@@ -192,7 +203,7 @@ time (60–240 s for the first model) in the background.
 ### 3.3 Updates — Sparkle 2.x
 
 - Appcast at `https://download.malibu.tech/appcast.xml`, EdDSA-signed (reconciled v0.2 to shipped `MalibuUpdateConfiguration.swift:5-10` / `Info.plist:34-39`; v0.1's `updates.malibu.tech` is stale).
-- Delta updates (BSDiff) to keep the ~40 MB payload small. Model weights live outside `.app` and are never re-downloaded on update.
+- Model weights live outside `.app` and are never re-downloaded on update. **BSDiff delta updates are design-intent only (reconciled v0.5):** the shipped appcast generator stages a single full `.dmg` with no delta configuration (`generate-malibu-appcast.sh:67`; see §9).
 - **Only the Sparkle whole-`.app` update is wired (reconciled v0.2).** Sparkle
   (`SPUStandardUpdaterController`, auto-checks daily) updates the `.app` from appcast
   `https://download.malibu.tech/appcast.xml` (`Malibu-<tag>.dmg`, `SUPublicEDKey`
@@ -245,7 +256,7 @@ Recommendation: **`.dmg`**.
 | Requires elevation | No | Yes (or user-scope pkgs, clunky) |
 | Post-install steps | App runs the bundled `install.sh` on first Launch (installs the launchd CLI); `SMAppService` only registers the app's own login item after attach (reconciled v0.4, §8) | Installer scripts (extra attack surface) |
 | Update path | Sparkle replaces `.app` in place | Works but clunkier |
-| CI complexity | `create-dmg` one-liner | `pkgbuild` + `productbuild` + component plist |
+| CI complexity | `hdiutil` DMG build (reconciled v0.5, `release.yml:599`; the earlier `create-dmg` framing is superseded) | `pkgbuild` + `productbuild` + component plist |
 | MDM/enterprise | Weaker | Stronger |
 
 Ship `.dmg` for v1. **Reconciled v0.4:** the pipeline already emits an **optional signed App `.pkg`** alongside the `.dmg` (`release.yml:599,616`); the earlier "later, enterprise/MDM only" framing is superseded — content is the same `.app`.
@@ -456,7 +467,7 @@ The single biggest risk in this spec is stomping a config that a developer previ
 | App-track marker | `~/Library/Application Support/Malibu/.installed-by-app` (**empty file**, reconciled v0.2 — not dated; `ProviderConfig.swift:513-518`) | App track only |
 | Logs (rolling, 100 MB cap) | `~/Library/Logs/malibu/` | Shared, app tags its own lines |
 | `provider_token` | Keychain, service `tech.malibu.provider`, account `<provider_id>` | App track; CLI track keeps YAML |
-| Session receipt keys | Keychain, services `com.streamvc.macprovider.receipt-key` / `.prev` / `.bootstrap-identity-key`, account `<provider_id>` (reconciled v0.4 to shipped `ReceiptKeyStore.swift:22-25,232-249`) | Unchanged from CLI track (reuses the existing CLI key store) |
+| Session receipt / admission keys | Keychain (CLI store), services `com.streamvc.macprovider.receipt-key` (current, rotatable — signs receipts), `com.streamvc.macprovider.receipt-key.prev` (rotation grace), `com.streamvc.macprovider.bootstrap-identity-key` (stable admission identity — **never rotates**; verifies `mp-*` `identity_signature`), all account `<provider_id>` (reconciled v0.5 to `ReceiptKeyStore.swift:22-25,58-92,232-249`) | Unchanged from CLI track (reuses the existing CLI key store) |
 
 Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`):
 
@@ -595,7 +606,7 @@ These are the things I'd flag as **must-decide before P0**, in priority order:
 
 ## 13. Out of scope (backlog)
 
-- `.pkg` for MDM/enterprise.
+- Broader MDM/enterprise packaging. **Reconciled v0.5:** a basic optional signed App `.pkg` (`tech.malibu.app.installer`) is **already emitted** by the pipeline (`release.yml:616`); only fuller MDM/enterprise packaging (config profiles, managed deployment) remains backlog.
 - Windows/Linux/Intel Mac builds.
 - Multi-node fleet management.
 - Fully in-app wallet (send/receive).
