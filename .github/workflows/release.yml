@@ -154,6 +154,17 @@ jobs:
           set -euo pipefail
           bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
 
+      - name: Select OpenSSL 3 for catalog verification
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew install openssl@3
+          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
+          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
+          echo "OPENSSL_BIN=$openssl_bin" >> "$GITHUB_ENV"
+
       - name: Build package
         shell: bash
         run: |
