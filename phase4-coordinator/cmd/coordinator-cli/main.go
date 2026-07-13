@@ -635,8 +635,11 @@ func createSeedReferral(args []string, getenv func(string) string, stdout io.Wri
 	seedID := fs.String("seed-id", "", "opaque seed issuer identifier")
 	maxUses := fs.Int("max-uses", 1, "maximum successful registrations")
 	expiresAt := fs.String("expires-at", "", "optional RFC3339 expiry")
+	fs.Usage = referralUsage(fs, "create-seed-referral",
+		"coordinator-cli create-seed-referral --db coordinator.db --campaign prebeta \\\n"+
+			"    --key-id k1 --secret-env MAL_REFERRAL_SECRET --seed-id launch --max-uses 100")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return referralParseError(err)
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*secretEnv) == "" {
 		return fmt.Errorf("--secret-env is required; referral HMAC secrets are not accepted on argv")
@@ -694,8 +697,12 @@ func adjustSeedReferral(args []string, getenv func(string) string, stdout io.Wri
 	apply := fs.Bool("apply", false, "apply the change (default is dry-run preview)")
 	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
 	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
+	fs.Usage = referralUsage(fs, "adjust-seed-referral",
+		"coordinator-cli adjust-seed-referral --db coordinator.db --campaign prebeta \\\n"+
+			"    --key-id k1 --secret-env MAL_REFERRAL_SECRET --seed-id launch --max-uses 250 \\\n"+
+			"    --apply --actor ops@malibu --reason 'expand launch cohort'")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return referralParseError(err)
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*secretEnv) == "" {
 		return fmt.Errorf("--secret-env is required; referral HMAC secrets are not accepted on argv")
@@ -748,16 +755,28 @@ func replaceReferralIssuer(args []string, getenv func(string) string, stdout io.
 	keyID := fs.String("key-id", "", "HMAC key identifier")
 	secretEnv := fs.String("secret-env", "", "environment variable containing the HMAC secret")
 	issuerID := fs.String("issuer-id", "", "revoked provider issuer identifier to replace")
+	// FIX-570 M4: the successor issuer's base capacity must match the campaign's
+	// effective provider base capacity. It is no longer hardcoded to 1; the
+	// operator supplies the reviewed value so a campaign that grants 3 is not
+	// silently downgraded to 1.
+	baseUses := fs.Int("base-uses", 0, "successor issuer base capacity (campaign ProviderBaseUses; required, must be > 0)")
 	actor := fs.String("actor", "", "operator identity recorded in the audit log")
 	reason := fs.String("reason", "", "reason recorded in the audit log")
+	fs.Usage = referralUsage(fs, "replace-referral-issuer",
+		"coordinator-cli replace-referral-issuer --db coordinator.db --campaign prebeta \\\n"+
+			"    --key-id k1 --secret-env MAL_REFERRAL_SECRET --issuer-id <revoked-issuer> \\\n"+
+			"    --base-uses 3 --actor ops@malibu --reason 'issuer key rotation'")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return referralParseError(err)
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*secretEnv) == "" {
 		return fmt.Errorf("--secret-env is required; referral HMAC secrets are not accepted on argv")
 	}
 	if strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "" {
 		return fmt.Errorf("--actor and --reason are required")
+	}
+	if *baseUses <= 0 {
+		return fmt.Errorf("--base-uses is required and must be > 0 (set it to the campaign's ProviderBaseUses)")
 	}
 	secret := getenv(strings.TrimSpace(*secretEnv))
 	if len(secret) < 32 {
@@ -768,7 +787,7 @@ func replaceReferralIssuer(args []string, getenv func(string) string, stdout io.
 		PolicyVersion:    "v1",
 		CurrentKeyID:     strings.TrimSpace(*keyID),
 		HMACKeys:         map[string]string{strings.TrimSpace(*keyID): secret},
-		ProviderBaseUses: 1,
+		ProviderBaseUses: *baseUses,
 		SocialBonusUses:  1,
 		ChallengeTTL:     15 * time.Minute,
 	}
@@ -784,7 +803,13 @@ func replaceReferralIssuer(args []string, getenv func(string) string, stdout io.
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "replaced campaign=%s provider_id=%s old_issuer_id=%s new_issuer_id=%s new_referral_code=%s base_capacity=%d\n",
+	// FIX-570 M4: verify the generated code validates under the effective policy
+	// before reporting success, so a wrong key/secret cannot silently mint an
+	// unusable successor code.
+	if _, verifyErr := store.ValidateReferral(context.Background(), policy, replacement.NewCode, time.Now().UTC()); verifyErr != nil {
+		return fmt.Errorf("successor code failed verification under the supplied policy (wrong key/secret?): %w", verifyErr)
+	}
+	_, err = fmt.Fprintf(stdout, "replaced campaign=%s provider_id=%s old_issuer_id=%s new_issuer_id=%s new_referral_code=%s base_capacity=%d verified=true\n",
 		policy.Campaign, replacement.ProviderID, replacement.OldIssuerID, replacement.NewIssuerID, replacement.NewCode, replacement.BaseCapacity)
 	return err
 }
@@ -795,20 +820,59 @@ func revokeReferral(args []string, stdout io.Writer) error {
 	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
 	campaign := fs.String("campaign", "", "referral campaign identifier")
 	issuerID := fs.String("issuer-id", "", "seed or provider invite issuer identifier")
+	// FIX-570 M6: revoke is now audited. --apply gates the mutation; without it the
+	// command previews the target so an operator can confirm before revoking.
+	apply := fs.Bool("apply", false, "apply the revocation (default is a dry-run preview)")
+	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
+	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
+	fs.Usage = referralUsage(fs, "revoke-referral",
+		"coordinator-cli revoke-referral --db coordinator.db --campaign prebeta \\\n"+
+			"    --issuer-id <issuer> --apply --actor ops@malibu --reason 'abuse report #42'")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return referralParseError(err)
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
+	}
+	if *apply && (strings.TrimSpace(*actor) == "" || strings.TrimSpace(*reason) == "") {
+		return fmt.Errorf("--actor and --reason are required with --apply")
 	}
 	store, err := auth.OpenStore(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	if err := store.RevokeReferralIssuer(context.Background(), *campaign, *issuerID, time.Now().UTC()); err != nil {
+	result, err := store.RevokeReferralIssuerAudited(context.Background(), *campaign, *issuerID, *apply, strings.TrimSpace(*actor), strings.TrimSpace(*reason), time.Now().UTC())
+	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "revoked referral campaign=%s issuer_id=%s\n", strings.TrimSpace(*campaign), strings.TrimSpace(*issuerID))
+	mode := "dry-run"
+	if result.Applied {
+		mode = "applied"
+	}
+	_, err = fmt.Fprintf(stdout, "mode=%s\ncampaign=%s\nissuer_id=%s\ncode_type=%s\nprovider_id=%s\n",
+		mode, result.Campaign, result.IssuerID, result.CodeType, result.ProviderID)
+	return err
+}
+
+// referralUsage returns a flag.Usage that restores per-subcommand help (the
+// referral subcommands discard flag output to control error formatting, which
+// otherwise suppresses -h). FIX-570 L1-product.
+func referralUsage(fs *flag.FlagSet, name, example string) func() {
+	return func() {
+		fmt.Fprintf(os.Stderr, "usage: coordinator-cli %s [flags]\n\nflags:\n", name)
+		fs.SetOutput(os.Stderr)
+		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
+		fmt.Fprintf(os.Stderr, "\nexample:\n  %s\n", example)
+	}
+}
+
+// referralParseError prints usage on -h (flag.ErrHelp) and exits cleanly, while
+// surfacing genuine parse errors. FIX-570 L1-product.
+func referralParseError(err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 	return err
 }

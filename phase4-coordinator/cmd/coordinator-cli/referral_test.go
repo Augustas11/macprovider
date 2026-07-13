@@ -177,9 +177,15 @@ func TestReplaceReferralIssuerMintsFreshUsableIssuer(t *testing.T) {
 	if err := replaceReferralIssuer([]string{
 		"--db", dbPath, "--campaign", "prebeta_2026", "--key-id", "k1",
 		"--secret-env", "REF_SECRET", "--issuer-id", prov.IssuerID,
+		"--base-uses", "3",
 		"--actor", "ops@malibu", "--reason", "reissue after compromise",
 	}, getenv, &out); err != nil {
 		t.Fatalf("replace err=%v", err)
+	}
+	// FIX-570 M4: the successor inherits the campaign's base capacity (3), not a
+	// hardcoded 1.
+	if !strings.Contains(out.String(), "base_capacity=3") {
+		t.Fatalf("successor should keep base_capacity=3, got: %s", out.String())
 	}
 	newCode := ""
 	for _, field := range strings.Fields(out.String()) {
@@ -227,11 +233,23 @@ func TestRevokeReferralInvalidatesSeedCode(t *testing.T) {
 	}, func(string) string { return secret }, &created); err != nil {
 		t.Fatal(err)
 	}
-	var revoked bytes.Buffer
-	if err := revokeReferral([]string{"--db", dbPath, "--campaign", "prebeta_2026", "--issuer-id", "launch"}, &revoked); err != nil {
+	// FIX-570 M6: revoke without --apply is a dry-run preview that must NOT mutate.
+	var preview bytes.Buffer
+	if err := revokeReferral([]string{"--db", dbPath, "--campaign", "prebeta_2026", "--issuer-id", "launch"}, &preview); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(revoked.String(), "issuer_id=launch") {
+	if !strings.Contains(preview.String(), "mode=dry-run") || !strings.Contains(preview.String(), "issuer_id=launch") {
+		t.Fatalf("unexpected preview output: %s", preview.String())
+	}
+	// Applying requires actor + reason and writes an audit row.
+	var revoked bytes.Buffer
+	if err := revokeReferral([]string{
+		"--db", dbPath, "--campaign", "prebeta_2026", "--issuer-id", "launch",
+		"--apply", "--actor", "ops@malibu", "--reason", "abuse report",
+	}, &revoked); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(revoked.String(), "mode=applied") || !strings.Contains(revoked.String(), "issuer_id=launch") {
 		t.Fatalf("unexpected output: %s", revoked.String())
 	}
 	code := strings.TrimPrefix(strings.Split(created.String(), "\n")[0], "referral_code=")

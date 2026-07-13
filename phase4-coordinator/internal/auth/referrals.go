@@ -229,6 +229,72 @@ UPDATE referral_issuers
 	return nil
 }
 
+// ReferralRevocation is the preview/result of RevokeReferralIssuerAudited.
+type ReferralRevocation struct {
+	Campaign   string
+	IssuerID   string
+	CodeType   string
+	ProviderID string
+	Applied    bool
+}
+
+// RevokeReferralIssuerAudited previews (apply=false) or applies (apply=true) a
+// revocation of a seed or provider issuer within a campaign. Applying requires a
+// non-empty actor and reason and writes an append-only referral_admin_audit row
+// in the SAME transaction as the revoke. FIX-570 M6: the operator revoke path
+// must be attributable. The preview reports the target issuer's type and bound
+// provider so an operator can confirm before mutating.
+func (s *Store) RevokeReferralIssuerAudited(ctx context.Context, campaign, issuerID string, apply bool, actor, reason string, now time.Time) (ReferralRevocation, error) {
+	campaign = strings.TrimSpace(campaign)
+	issuerID = strings.TrimSpace(issuerID)
+	if !referralPartPattern.MatchString(campaign) || !referralPartPattern.MatchString(issuerID) {
+		return ReferralRevocation{}, ErrReferralInvalid
+	}
+	if apply && (strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "") {
+		return ReferralRevocation{}, fmt.Errorf("actor and reason are required to apply a revocation")
+	}
+	out := ReferralRevocation{Campaign: campaign, IssuerID: issuerID}
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var providerID sql.NullString
+		var revokedAt sql.NullString
+		if err := conn.QueryRowContext(ctx, `
+SELECT code_type, provider_id, revoked_at
+  FROM referral_issuers
+ WHERE campaign = ? AND issuer_id = ?`, campaign, issuerID).Scan(&out.CodeType, &providerID, &revokedAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrReferralInvalid
+			}
+			return err
+		}
+		out.ProviderID = strings.TrimSpace(providerID.String)
+		if revokedAt.Valid {
+			return fmt.Errorf("issuer %s is already revoked", issuerID)
+		}
+		if !apply {
+			return nil
+		}
+		result, err := conn.ExecContext(ctx, `
+UPDATE referral_issuers SET revoked_at = ? WHERE campaign = ? AND issuer_id = ? AND revoked_at IS NULL`,
+			timeText(now.UTC()), campaign, issuerID)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return ErrReferralInvalid
+		}
+		detail := fmt.Sprintf("code_type=%s provider=%s", out.CodeType, out.ProviderID)
+		if err := recordReferralAdminAuditTx(ctx, conn, actor, reason, "revoke_issuer", campaign+"/"+issuerID, detail, now); err != nil {
+			return err
+		}
+		out.Applied = true
+		return nil
+	})
+	if err != nil {
+		return ReferralRevocation{}, err
+	}
+	return out, nil
+}
+
 // SeedReferralAdjustment is the preview/result of an AdjustSeedReferral call.
 // It is returned for both dry-run and applied adjustments so operators can see
 // the exact effect before and after mutation.
