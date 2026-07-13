@@ -507,48 +507,62 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		// Inject the routable-now buyer-serving predicate so the FR-CAN22 floor and
 		// the redundancy count reason about peers buyers can actually route to now
 		// (RoutingEligible + positive context + not Tier-2-excluded), not just
-		// ServingCapable — a busy/negative-slot/zero-capacity peer receives no buyer
-		// traffic and must not lift the floor. Quota is intentionally omitted (see
-		// canaryBuyerServing).
+		// ServingCapable — a busy, negative-slot, or transport-unreachable peer must not
+		// lift the floor. Request-dependent context/quota are omitted (see canaryBuyerServing).
 		registry.SetBuyerServingPredicate(s.canaryBuyerServing)
 	}
 	return s
 }
 
-// canaryBuyerServing reports whether p is a peer buyers can actually route to
-// RIGHT NOW, for the FR-CAN22 last-provider floor. It requires:
-//   - RoutingEligible() — state ready AND SlotsFree>0 AND auth/catalog/receipt
-//     gates. This is the coordinator's OWN routability predicate, so any peer that
-//     lifts the floor genuinely receives buyer traffic; if such a peer is lying
-//     about being able to serve, the FR-P11a buyer-path breaker catches it on a
-//     real request. Provider-asserted-but-unroutable states are thereby excluded:
-//     a BUSY peer (SlotsFree==0), a NEGATIVE-slot peer (SlotsFree<=0, stored
-//     verbatim from heartbeats), and a zero-total-capacity peer all receive NO
-//     buyer traffic, so FR-P11a would be blind to them and a fake peer could lift
-//     the floor and empty the pool. Excluding a genuinely-busy real peer is
-//     over-protective (the floor may hold when it need not) — the SAFE direction;
-//     the peer re-counts the moment a slot frees. AND
-//   - MaxContextTokens > 0 — a peer advertising a zero/negative context window is
-//     rejected for every buyer request (ProviderContextSufficient requires
-//     MaxContextTokens >= the >=1-token estimate), so it is unroutable in practice
-//     even while RoutingEligible. AND
-//   - not Tier-2-excluded (hash/encryption/attestation) — evaluated from in-memory
-//     config + catalog (no DB).
+// canaryBuyerServing reports whether p passes the coordinator's REQUEST-INDEPENDENT
+// buyer-routability gates, for the FR-CAN22 last-provider floor. It requires:
+//   - RoutingEligible() — state ready AND SlotsFree>0 AND auth/catalog/receipt gates
+//     (excludes busy [SlotsFree==0] and negative-slot peers, stored verbatim from
+//     heartbeats); AND
+//   - transport-reachable (IsWSTunneled OR non-empty EndpointURL) — excludes an
+//     HTTPForwardingOnly peer with no endpoint; AND
+//   - MaxContextTokens > 0 — a sanity gate excluding the degenerate zero window; AND
+//   - not Tier-2-excluded (hash/encryption/attestation) — in-memory config + catalog.
 //
-// Provisional quota is deliberately NOT checked here: admission.CheckQuota shares
-// the admission mutex with the synchronous single-connection DB write in
-// TryReserveRequest, so calling it under the registry lock (RecordCanaryResult
-// holds pool.mu; BuyerServingCountForModel holds pool.mu.RLock) would couple
-// pool.mu to that DB write — an availability convoy that could freeze registry
-// snapshots/heartbeats/routing. A quota-exhausted-but-RoutingEligible peer can
-// still lift the floor; that adversarial multi-provider case (an attacker
-// renewably exhausting its own peer's quota) is deferred to FR-CAN23, which must
-// simulate full buyer eligibility, and has NO current-prod impact (single provider,
-// canary disabled). See DECISION_CRITERIA Entry 139 / SPEC-031 §14.
+// It deliberately does NOT evaluate REQUEST-DEPENDENT eligibility, because the floor
+// runs without a request in hand:
+//   - per-request context sufficiency (ProviderContextSufficient needs
+//     MaxContextTokens >= the request's token estimate, so a peer advertising a tiny
+//     positive window — e.g. 1 — passes here yet is filtered per request); and
+//   - provisional quota (admission.CheckQuota shares the admission mutex with the
+//     synchronous DB write in TryReserveRequest, so calling it under the registry
+//     lock would couple pool.mu to that DB write — an availability convoy).
+//
+// A same-model peer that passes these gates but is filtered per-request (tiny
+// context, exhausted quota) can therefore still lift the floor, and buyer routing
+// SKIPS it without recording an FR-P11a breaker fault — so the breaker is not a
+// universal backstop for that case. This is NOT a regression: the floor only ever
+// SPARES a provider the prior canary would have removed (it never removes one the
+// old code kept), so the adversarial-peer empty-pool outcome equals the pre-floor
+// baseline. Adversarial-safe multi-provider peer-genuineness (full request-aware /
+// coordinator-observed-serving eligibility) is deferred to FR-CAN23, with NO
+// current-prod impact (single provider, canary disabled). See DECISION_CRITERIA
+// Entry 139 / SPEC-031 §14.
 func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 	if !p.RoutingEligible() {
 		return false
 	}
+	// Transport reachability: a WS-tunneled peer is reachable over its session; an
+	// HTTP-forwarding peer needs a non-empty endpoint. A provider-controlled
+	// `unknown_message_type` NAK can set HTTPForwardingOnly (dropping IsWSTunneled)
+	// WITHOUT establishing an endpoint — such a peer can receive no inference and
+	// must not lift the floor.
+	if !p.IsWSTunneled() && strings.TrimSpace(p.EndpointURL) == "" {
+		return false
+	}
+	// Sanity gate: a zero/negative context window can serve no request. NOTE this
+	// does NOT make the peer routable — per-request context sufficiency
+	// (MaxContextTokens >= the request's token estimate) is request-dependent and is
+	// NOT evaluated here; a peer advertising a tiny positive window (e.g. 1) still
+	// passes yet is filtered per-request. That request-dependent adversarial case,
+	// like provisional quota, is deferred to FR-CAN23 (see SPEC-031 §14). The floor
+	// remains a monotonic improvement — it only ever SPARES a provider the prior
+	// canary would have removed — so this is not a regression.
 	if p.MaxContextTokens <= 0 {
 		return false
 	}

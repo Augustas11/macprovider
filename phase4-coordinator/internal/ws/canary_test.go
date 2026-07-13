@@ -161,11 +161,12 @@ func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 	s := NewServer(config.Default(), registry, zerolog.Nop())
 	base := pool.Provider{
 		ProviderID: "p", AssignedID: "s", ModelID: "model-a", Tier: pool.TierProvisional,
-		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		InferencePath: pool.InferencePathWSTunneled,
+		State:         pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
 		MaxContextTokens: 4096, EncryptedLeg: false,
 	}
 	if !s.canaryBuyerServing(base) {
-		t.Fatal("baseline ready+free-slot+context provider should be buyer-serving")
+		t.Fatal("baseline ready+free-slot+context+WS-tunneled provider should be buyer-serving")
 	}
 	mutate := func(f func(p *pool.Provider)) pool.Provider {
 		p := base
@@ -180,6 +181,8 @@ func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 		"zero-context":     mutate(func(p *pool.Provider) { p.MaxContextTokens = 0 }),
 		"negative-context": mutate(func(p *pool.Provider) { p.MaxContextTokens = -1 }),
 		"degraded":         mutate(func(p *pool.Provider) { p.State = pool.StateDegraded }),
+		// HTTPForwardingOnly (drops IsWSTunneled) with no endpoint → unreachable.
+		"http-no-endpoint": mutate(func(p *pool.Provider) { p.HTTPForwardingOnly = true; p.EndpointURL = "" }),
 	} {
 		if s.canaryBuyerServing(p) {
 			t.Fatalf("%s provider must not be buyer-serving (would falsely lift the floor)", name)
@@ -210,15 +213,15 @@ func TestFloorUsesInstalledPredicateExcludesTier2Peer(t *testing.T) {
 	// encrypted-leg requirement is the sole Tier-2 discriminator in this test.
 	registry.Register(&pool.Provider{
 		ProviderID: "target", AssignedID: "st", ModelID: "model-a",
-		Tier: pool.TierProvisional, State: pool.StateReady,
-		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
+		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled,
+		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 		EncryptedLeg: true, HashStatus: pool.HashStatusVerified,
 	}, nil)
 	// Peer: routable + same model, but Tier-2-excluded (no encrypted leg).
 	registry.Register(&pool.Provider{
 		ProviderID: "tier2-excluded-peer", AssignedID: "sp", ModelID: "model-a",
-		Tier: pool.TierProvisional, State: pool.StateReady,
-		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
+		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled,
+		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
 		EncryptedLeg: false, HashStatus: pool.HashStatusVerified,
 	}, nil)
 

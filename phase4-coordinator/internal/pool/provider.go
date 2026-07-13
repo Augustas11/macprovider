@@ -437,8 +437,8 @@ type Registry struct {
 	// deliberately NOT part of it (admission-DB convoy — see canaryBuyerServing).
 	// Nil falls back to RoutingEligible + positive context (the routable-now core,
 	// minus Tier-2) — used only in registry unit tests; production injects the full
-	// predicate so a busy/negative-slot/zero-capacity/Tier-2-excluded peer cannot
-	// falsely lift the floor and empty the real routable pool.
+	// predicate so a busy, negative-slot, transport-unreachable, or Tier-2-excluded
+	// peer cannot falsely lift the floor and empty the real routable pool.
 	buyerServing func(Provider) bool
 	// seenModelsByProvider tracks the model IDs ever reported by each
 	// currently-connected provider. M2-5 / PERF-5: previously a single
@@ -1278,7 +1278,7 @@ func (r *Registry) SetBuyerServingPredicate(fn func(Provider) bool) {
 // fallback (used only when no ws predicate is injected — i.e. registry unit tests)
 // mirrors the routable-now core of `canaryBuyerServing`: RoutingEligible (ready +
 // free slots) AND a positive context window, so a busy, degraded, negative-slot,
-// zero-capacity, or zero-context peer never lifts the floor. It omits the Tier-2
+// zero-free-slot, or zero-context peer never lifts the floor. It omits the transport + Tier-2
 // gate, which requires ws config the pool package cannot see.
 func (r *Registry) isBuyerServingLocked(p *Provider) bool {
 	if r.buyerServing != nil {
@@ -1293,8 +1293,8 @@ func (r *Registry) isBuyerServingLocked(p *Provider) bool {
 // false, the excluded provider is the sole buyer-serving provider for the model
 // and a canary-only signal must not remove it. Uses the injected routable-now
 // predicate (RoutingEligible + positive context + not Tier-2-excluded) so a
-// busy, degraded, negative-slot, zero-capacity, zero-context, or Tier-2-excluded
-// peer does not falsely lift the floor.
+// busy, degraded, negative-slot, transport-unreachable, or Tier-2-excluded peer
+// does not falsely lift the floor (transport + Tier-2 are ws-only gates).
 func (r *Registry) hasOtherBuyerServingForModelLocked(excludeID, modelID string) bool {
 	for id, p := range r.providers {
 		if id == excludeID {
