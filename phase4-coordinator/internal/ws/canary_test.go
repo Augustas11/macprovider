@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -152,95 +151,39 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	}
 }
 
-// TestRunCanaryProbeMaxTokensTruncationAttributedToCoordinatorIsNeutral verifies
-// SPEC-031 FR-CAN3 / FR-CAN23(f) against the REAL provider wire shape: a
-// max_tokens truncation surfaces as finish_reason:"length" with
-// completion_tokens >= max_tokens inside a terminal status:"complete" frame (a
-// truncated-echo nonce_mismatch), and is coordinator-attributed → neutral. It
-// requires BOTH signals: a provider that fakes finish_reason:"length" with a
-// short body (< max_tokens) is NOT attributed and counts, and a normal
-// finish_reason:"stop" nonce_mismatch counts. A floor peer is registered so the
-// last-provider floor is NOT what spares the neutral case.
-func TestRunCanaryProbeMaxTokensTruncationAttributedToCoordinatorIsNeutral(t *testing.T) {
-	serverConn, providerConn := net.Pipe()
-	defer providerConn.Close()
-	defer serverConn.Close()
-
+// TestCanaryBuyerServingAppliesTier2Gate verifies the floor's injected
+// buyer-serving predicate excludes a Tier-2-excluded provider that raw
+// ServingCapable would accept — the H1 residual (a non-buyer-routable peer must
+// not lift the last-provider floor).
+func TestCanaryBuyerServingAppliesTier2Gate(t *testing.T) {
 	registry := pool.NewRegistry(nil)
-	provider := &pool.Provider{
-		ProviderID:     "inc-p1",
-		AssignedID:     "inc-s1",
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	p := pool.Provider{
+		ProviderID:     "p",
+		AssignedID:     "s",
 		ModelID:        "model-a",
 		Tier:           pool.TierProvisional,
-		InferencePath:  pool.InferencePathWSTunneled,
 		State:          pool.StateReady,
 		SlotsFree:      1,
 		SlotsTotal:     1,
 		MaxConcurrency: 1,
+		EncryptedLeg:   false,
 	}
-	registry.Register(provider, serverConn)
-	registerCanaryFloorPeer(registry, "model-a") // floor does NOT shelter inc-p1
-	cfg := config.Default()
-	cfg.Pool.CanaryFailureThreshold = 2
-	cfg.Pool.CanaryTimeoutS = 1
-	cfg.Pool.CanaryMaxTokens = 8
-	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
-	s := NewServer(cfg, registry, zerolog.Nop())
-	session := newProviderSession("inc-p1", "inc-s1", serverConn, 1)
-	s.sessions.Store(sessionKey("inc-p1", "inc-s1"), session)
-	go session.runWriter()
-
-	// Drive one probe whose response body carries the given finish_reason +
-	// completion_tokens and a deliberately wrong (truncated) nonce echo.
-	runProbe := func(finishReason string, completionTokens int) {
-		done := make(chan struct{})
-		go func() { s.runCanaryProbe(*provider); close(done) }()
-		req := readCanaryInferenceRequest(t, providerConn)
-		body := fmt.Sprintf(
-			`{"choices":[{"message":{"content":"WRONG-NONCE"},"finish_reason":%q}],"usage":{"completion_tokens":%d}}`,
-			finishReason, completionTokens)
-		s.handleInferenceChunk("inc-p1", "inc-s1", mustJSON(InferenceResponseChunk{
-			Type:      "inference_response_chunk",
-			RequestID: req.RequestID,
-			Seq:       0,
-			Data:      body,
-		}))
-		s.handleInferenceEnd("inc-p1", "inc-s1", mustJSON(InferenceResponseEnd{
-			Type:       "inference_response_end",
-			RequestID:  req.RequestID,
-			Status:     "complete",
-			ChunksSent: 1,
-		}))
-		waitForCanary(t, done)
+	if !s.canaryBuyerServing(p) {
+		t.Fatal("baseline ready provider should be buyer-serving")
 	}
-
-	// (1) Real truncation: finish_reason:"length" + full budget → attributed, neutral.
-	runProbe("length", 8)
-	got, ok := registry.Resolve("inc-p1", "inc-s1")
-	if !ok {
-		t.Fatal("provider not found")
+	// Tier-2 now requires an encrypted leg the provider lacks → excluded.
+	s.SetTier2Config(config.Tier2Config{RequireEncryptedLeg: true})
+	if s.canaryBuyerServing(p) {
+		t.Fatal("Tier-2-excluded provider must not be buyer-serving (would falsely lift the floor)")
 	}
-	if got.CanaryFailCount != 0 || got.State != pool.StateReady {
-		t.Fatalf("after coordinator-attributed truncation = %+v, want neutral (fail count 0, ready)", got)
-	}
-
-	// (2) Faked attribution: finish_reason:"length" but a SHORT body (< max_tokens)
-	// is NOT coordinator-attributed → counts.
-	runProbe("length", 3)
-	got, _ = registry.Resolve("inc-p1", "inc-s1")
-	if got.CanaryFailCount != 1 || got.State != pool.StateReady {
-		t.Fatalf("after short-body faked length = %+v, want counted (fail count 1, ready)", got)
-	}
-
-	// (3) Ordinary nonce_mismatch (finish_reason:"stop") → counts; at threshold 2
-	// with a peer present it trips the provisional ban.
-	runProbe("stop", 3)
-	got2, ok := registry.Resolve("inc-p1", "inc-s1")
-	if !ok {
-		t.Fatal("provider not found after non-truncation probe")
-	}
-	if got2.CanaryFailCount != 2 || got2.State != pool.StateUnavailable {
-		t.Fatalf("after genuine nonce_mismatch = %+v, want counted + tripped (unavailable)", got2)
+	// A busy provider (no free slots) is still buyer-serving capacity.
+	busy := p
+	busy.State = pool.StateBusy
+	busy.SlotsFree = 0
+	s.SetTier2Config(config.Tier2Config{})
+	if !s.canaryBuyerServing(busy) {
+		t.Fatal("busy provider should still be buyer-serving")
 	}
 }
 

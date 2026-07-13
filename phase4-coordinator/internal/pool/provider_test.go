@@ -652,8 +652,8 @@ func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 	if held.Tripped != CanaryTripFloorHeld {
 		t.Fatalf("with no live model-a peer, result = %+v, want CanaryTripFloorHeld", held)
 	}
-	if n := registry.ServingCapableCountForModel("model-a"); n != 1 {
-		t.Fatalf("ServingCapableCountForModel(model-a) = %d, want 1 (target only)", n)
+	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
+		t.Fatalf("BuyerServingCountForModel(model-a) = %d, want 1 (target only)", n)
 	}
 
 	// A BUSY peer actively serving model-a is still serving-capable → lifts the floor.
@@ -667,8 +667,8 @@ func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 		SlotsTotal:     1,
 		MaxConcurrency: 1,
 	}, nil)
-	if n := registry.ServingCapableCountForModel("model-a"); n != 2 {
-		t.Fatalf("ServingCapableCountForModel(model-a) = %d, want 2", n)
+	if n := registry.BuyerServingCountForModel("model-a"); n != 2 {
+		t.Fatalf("BuyerServingCountForModel(model-a) = %d, want 2", n)
 	}
 	tripped := registry.RecordCanaryResult("target", "session-t", false, at.Add(time.Minute), 1)
 	if tripped.Tripped != CanaryTripUnavailable {
@@ -677,6 +677,58 @@ func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
 	got, _ := registry.Resolve("target", "session-t")
 	if got.State != StateUnavailable {
 		t.Fatalf("state = %q, want unavailable", got.State)
+	}
+}
+
+// TestRecordCanaryResultFloorRespectsBuyerServingPredicate verifies the floor uses
+// the injected buyer-serving predicate (Tier-2/quota-aware), not just
+// ServingCapable: a ready same-model peer that the predicate rejects (e.g.
+// Tier-2-excluded or quota-exhausted) must NOT lift the floor.
+func TestRecordCanaryResultFloorRespectsBuyerServingPredicate(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID:     "target",
+		AssignedID:     "session-t",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	registry.Register(&Provider{
+		ProviderID:     "excluded-peer",
+		AssignedID:     "session-e",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+	// Predicate rejects the peer (simulating a Tier-2/quota exclusion the raw
+	// ServingCapable check would miss) → the peer does not count → floor holds.
+	registry.SetBuyerServingPredicate(func(p Provider) bool {
+		return p.ProviderID != "excluded-peer" && p.ServingCapable()
+	})
+	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 1 (peer excluded by predicate)", n)
+	}
+	held := registry.RecordCanaryResult("target", "session-t", false, at, 1)
+	if held.Tripped != CanaryTripFloorHeld {
+		t.Fatalf("with a predicate-excluded peer, result = %+v, want CanaryTripFloorHeld", held)
+	}
+
+	// Predicate now accepts the peer → it lifts the floor → target trips.
+	registry.SetBuyerServingPredicate(func(p Provider) bool { return p.ServingCapable() })
+	if n := registry.BuyerServingCountForModel("model-a"); n != 2 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 2", n)
+	}
+	tripped := registry.RecordCanaryResult("target", "session-t", false, at.Add(time.Minute), 1)
+	if tripped.Tripped != CanaryTripUnavailable {
+		t.Fatalf("with the peer buyer-serving, result = %+v, want CanaryTripUnavailable", tripped)
 	}
 }
 

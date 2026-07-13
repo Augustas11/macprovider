@@ -503,7 +503,34 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	if cfg.Pool.LosslessnessProbe.Enabled && registry != nil {
 		go s.runLosslessnessProbeLoop()
 	}
+	if registry != nil {
+		// Inject the authoritative buyer-serving predicate so the FR-CAN22 floor and
+		// the redundancy count reason about real buyer-routable capacity (Tier-2 +
+		// quota), not just ServingCapable. Mirrors buyer.Server.providerBuyerServing;
+		// the admission manager is shared with the buyer server (main.go
+		// buyer.WithAdmission(wsServer.Admission())).
+		registry.SetBuyerServingPredicate(s.canaryBuyerServing)
+	}
 	return s
+}
+
+// canaryBuyerServing reports whether p is currently buyer-serving: ServingCapable
+// (ready or busy) AND not Tier-2-excluded (hash/encryption/attestation gates) AND
+// within its provisional quota. Mirrors buyer.Server.providerBuyerServing using the
+// shared admission manager and this server's Tier-2 config. Read-only:
+// admission.CheckQuota only prunes expired request-window entries, it does not
+// consume quota.
+func (s *Server) canaryBuyerServing(p pool.Provider) bool {
+	if !p.ServingCapable() {
+		return false
+	}
+	if s.tier2WarmupExcluded(p) {
+		return false
+	}
+	if s.admission != nil && !s.admission.CheckQuota(p) {
+		return false
+	}
+	return true
 }
 
 func (s *Server) autotuneCatalogBridgeActive() bool {
@@ -1680,13 +1707,13 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 		// gated-out condition). NOTE: this is *partial rejection telemetry*, NOT the
 		// full SPEC-032 FR-HG5 below-two operator alert (which additionally requires
 		// a catalogued-demand-filtered structural count across ALL gate actions +
-		// episode dedup/cooldown — still a Gap). Count ServingCapable providers.
-		serving := s.pool.ServingCapableCountForModel(hello.ModelID)
+		// episode dedup/cooldown — still a Gap). Count buyer-serving providers.
+		serving := s.pool.BuyerServingCountForModel(hello.ModelID)
 		event := s.log.Info().
 			Str("provider_id", hello.ProviderID).
 			Str("event", "autotune_evidence_required").
 			Str("model_id", hello.ModelID).
-			Int("serving_capable_for_model", serving)
+			Int("buyer_serving_for_model", serving)
 		if serving < 2 {
 			event = event.Bool("pool_redundancy_low", true)
 		}
@@ -2687,23 +2714,6 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		return false
 	}
 	outcome := attempt.outcome
-	if outcome == canaryProbeFail && attempt.metrics.CoordinatorAttributed {
-		// SPEC-031 FR-CAN3 / FR-CAN23(f): a max_tokens truncation of the
-		// coordinator's OWN echo probe is neutral at any fleet size — it never
-		// counts toward a sanction. Handled BEFORE the model-class OPoI/drift
-		// recording so a coordinator-caused truncation is also skip-neutral for the
-		// OPoI pass flag (FR-CAN29) and telemetry-drift, rather than logging a false
-		// OPoI failure. Do NOT call RecordCanaryResult; the counter is untouched and
-		// the provider stays routable. Direct fix for the 2026-07-10
-		// `canary_max_tokens` truncation that transiently degraded the sole prod
-		// provider (incident #3).
-		s.log.Info().
-			Str("provider_id", provider.ProviderID).
-			Str("canary_fail_reason", string(attempt.metrics.FailReason)).
-			Int("canary_max_tokens", s.canaryMaxTokens()).
-			Msg("canary probe truncated by coordinator max_tokens budget; neutral (no sanction)")
-		return true
-	}
 	if attempt.modelClassBank {
 		pass := outcome == canaryProbePass
 		s.pool.SetModelClassOPoIPass(provider.ProviderID, provider.AssignedID, &pass)
@@ -2809,7 +2819,7 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		})
 		s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider held degraded after canary threshold")
 	case pool.CanaryTripFloorHeld:
-		// SPEC-031 FR-CAN22 last-provider floor: the sole serving-capable provider
+		// SPEC-031 FR-CAN22 last-provider floor: the sole buyer-serving provider
 		// for this model reached the canary failure threshold but was spared to
 		// avoid emptying the pool (the incidents #1/#2 outage). It stays routable.
 		// This is canary-path redundancy telemetry (surface, never auto-remove) —
@@ -2822,7 +2832,7 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 			Int("canary_fail_count", result.Count).
 			Int("canary_failure_threshold", result.Threshold).
 			Bool("pool_redundancy_low", true).
-			Msg("sole serving-capable provider for model failed canary threshold; spared to preserve availability (SPEC-031 FR-CAN22) — operator investigation required")
+			Msg("sole buyer-serving provider for model failed canary threshold; spared to preserve availability (SPEC-031 FR-CAN22) — operator investigation required")
 	}
 	return true
 }
@@ -2922,18 +2932,6 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 				}
 				metrics = canaryMetricsFromTiming(start, firstTokenAt, completedAt, tokens)
 			}
-			// FR-CAN3 coordinator attribution: a max_tokens truncation of the
-			// coordinator's own echo probe is neutral (not provider misbehavior).
-			// The shipped provider signals exhaustion as finish_reason:"length"
-			// (ModelRuntime.swift) inside a terminal status:"complete" frame, so a
-			// real truncation surfaces as a truncated-echo nonce_mismatch, NOT a
-			// non-complete status. Require BOTH the provider-declared
-			// finish_reason:"length" AND completion_tokens >= the configured
-			// max_tokens (independent evidence the budget was the binding
-			// constraint) so a provider cannot fake attribution with a short body
-			// to evade all canary sanctioning.
-			metrics.CoordinatorAttributed = canaryFinishReason([]byte(rawResponse.String())) == "length" &&
-				canaryCompletionTokens([]byte(rawResponse.String())) >= s.canaryMaxTokens()
 			if end.Status != "complete" {
 				metrics.FailReason = canaryFailIncomplete
 				return canaryProbeFail, metrics
