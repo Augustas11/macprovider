@@ -900,6 +900,85 @@ func TestMigrationsIdempotent(t *testing.T) {
 	}
 }
 
+func TestApptrackRegisterAttemptsUpgradeDowngradeAndReapply(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	assertTableExists := func(want bool) {
+		t.Helper()
+		var exists bool
+		if err := adminDB.QueryRowContext(ctx, `
+SELECT to_regclass('public.provider_register_attempts') IS NOT NULL
+`).Scan(&exists); err != nil {
+			t.Fatalf("lookup provider_register_attempts: %v", err)
+		}
+		if exists != want {
+			t.Fatalf("provider_register_attempts exists=%v, want %v", exists, want)
+		}
+	}
+
+	assertTableExists(true)
+
+	onboardingDB, err := sql.Open("postgres", fx.roleDSN(roleProviderOnboard))
+	if err != nil {
+		t.Fatalf("open provider_onboarding: %v", err)
+	}
+	defer onboardingDB.Close()
+
+	providerID := "p_migration_roundtrip"
+	nonce := "nonce-roundtrip"
+	if _, err := onboardingDB.ExecContext(ctx, `
+INSERT INTO provider_register_attempts (provider_id, nonce, ts_utc, source_ip)
+VALUES ($1, $2, '2026-07-16T00:00:00Z', '127.0.0.1')
+`, providerID, nonce); err != nil {
+		t.Fatalf("provider_onboarding insert: %v", err)
+	}
+	var count int
+	if err := onboardingDB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM provider_register_attempts
+WHERE provider_id = $1 AND nonce = $2
+`, providerID, nonce).Scan(&count); err != nil {
+		t.Fatalf("provider_onboarding select: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("provider_onboarding selected %d attempt rows, want 1", count)
+	}
+	for operation, query := range map[string]string{
+		"update": `UPDATE provider_register_attempts SET source_ip = '127.0.0.2' WHERE provider_id = 'p_migration_roundtrip'`,
+		"delete": `DELETE FROM provider_register_attempts WHERE provider_id = 'p_migration_roundtrip'`,
+		"prune":  `SELECT prune_provider_register_attempts(INTERVAL '30 days')`,
+	} {
+		if _, err := onboardingDB.ExecContext(ctx, query); err == nil || !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+			t.Fatalf("provider_onboarding %s error=%v, want permission denied", operation, err)
+		}
+	}
+
+	if err := statsmigrations.Apply(ctx, adminDB); err != nil {
+		t.Fatalf("idempotent re-apply with migration 018 present: %v", err)
+	}
+	assertTableExists(true)
+
+	downSQL, err := os.ReadFile("migrations/018_apptrack_register_attempts.down.sql")
+	if err != nil {
+		t.Fatalf("read migration 018 rollback artifact: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, string(downSQL)); err != nil {
+		t.Fatalf("apply migration 018 rollback: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `DELETE FROM schema_migrations_spec017 WHERE version = 18`); err != nil {
+		t.Fatalf("remove rolled-back migration 018 ledger row: %v", err)
+	}
+	assertTableExists(false)
+
+	if err := statsmigrations.Apply(ctx, adminDB); err != nil {
+		t.Fatalf("re-apply migration 018 after rollback: %v", err)
+	}
+	assertTableExists(true)
+}
+
 // TestMigrationsConcurrent — round-1 CODE r1 CRITICAL C1 fix.
 // Two parallel Apply calls must both succeed without leaving
 // duplicate rows in schema_migrations_spec017 or double-applying
