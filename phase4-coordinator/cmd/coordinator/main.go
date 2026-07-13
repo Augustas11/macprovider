@@ -916,7 +916,20 @@ func main() {
 			return onboarding.ClientIP(r, trustedReferralProxies)
 		},
 	}
-	buyerHandler = withReferralValidation(buyerHandler, referralValidation.ServeHTTP)
+	referralJoin := &referralapi.JoinHandler{
+		Store:            tokenStore,
+		Policy:           referralPolicy,
+		PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+		ValidateSlots:    make(chan struct{}, 4),
+		RequestAccessURL: cfg.Referrals.RequestAccessURL,
+		SourceIP: func(r *http.Request) string {
+			return onboarding.ClientIP(r, trustedReferralProxies)
+		},
+		ErrorLogger: func(op string, err error) {
+			logger.Error().Err(err).Str("op", op).Msg("referral join failed")
+		},
+	}
+	buyerHandler = withReferralValidation(buyerHandler, referralValidation.ServeHTTP, referralJoin.ServeHTTP)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
@@ -1294,12 +1307,18 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	return mux
 }
 
-func withReferralValidation(base http.Handler, validate http.HandlerFunc) http.Handler {
-	if validate == nil {
+func withReferralValidation(base http.Handler, validate http.HandlerFunc, join ...http.HandlerFunc) http.Handler {
+	hasJoin := len(join) > 0 && join[0] != nil
+	if validate == nil && !hasJoin {
 		return base
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/referrals/validate", validate)
+	if validate != nil {
+		mux.HandleFunc("/v1/referrals/validate", validate)
+	}
+	if hasJoin {
+		mux.HandleFunc("/j/", join[0])
+	}
 	mux.Handle("/", base)
 	return mux
 }
