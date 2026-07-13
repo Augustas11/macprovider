@@ -441,6 +441,24 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			UNIQUE(campaign, provider_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_referral_reservations_issuer_expiry ON referral_reservations(issuer_id, expires_at)`,
+		// FIX-570 H3: reservation LINEAGE. This row records the first_created_at of an
+		// identity's current reservation lineage for (campaign, provider_id,
+		// code_digest) and OUTLIVES the reservation row itself (which is deleted at
+		// natural expiry). The absolute lifetime is measured from this
+		// lineage_started_at, so re-reserving the SAME code after the reservation row
+		// expires can no longer reset the clock with a fresh created_at. After the
+		// absolute lifetime a short cooldown must elapse before a new lineage may
+		// start, which — combined with the per-IP limiter — removes the indefinite-
+		// hold vector. It does NOT block acquiring a DIFFERENT still-valid invite. The
+		// row is pruned once the lineage plus its cooldown have fully elapsed.
+		`CREATE TABLE IF NOT EXISTS referral_reservation_cooldowns (
+			campaign TEXT NOT NULL,
+			provider_id TEXT NOT NULL,
+			code_digest TEXT NOT NULL,
+			lineage_started_at TEXT NOT NULL,
+			PRIMARY KEY(campaign, provider_id, code_digest)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_referral_reservation_cooldowns_started ON referral_reservation_cooldowns(lineage_started_at)`,
 		`CREATE TABLE IF NOT EXISTS apptrack_pending_referral_mints (
 			provider_id TEXT PRIMARY KEY,
 			token_hash TEXT NOT NULL UNIQUE,

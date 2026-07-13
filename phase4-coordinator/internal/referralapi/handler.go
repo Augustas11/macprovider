@@ -26,7 +26,9 @@ const appTrackReferralReserveTTL = 30 * time.Minute
 
 type Store interface {
 	ValidateReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ReferralValidation, error)
-	ReserveReferralCapacity(context.Context, auth.ReferralPolicy, string, string, time.Time, time.Duration) (string, error)
+	// ReserveReferralCapacityWithExpiry returns the STORED absolute-capped
+	// expires_at so the endpoint reports the true remaining hold (FIX-570 H3).
+	ReserveReferralCapacityWithExpiry(context.Context, auth.ReferralPolicy, string, string, time.Time, time.Duration) (string, time.Time, error)
 	ProviderReferralStatus(context.Context, auth.ReferralPolicy, string) (auth.ProviderReferral, error)
 	EnsureProviderReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ProviderReferral, error)
 	CreateSocialChallenge(context.Context, auth.ReferralPolicy, string, time.Time) (auth.SocialChallenge, error)
@@ -175,7 +177,7 @@ func (h *Handler) HandleReserve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid provider_id")
 		return
 	}
-	reservationID, err := h.Store.ReserveReferralCapacity(r.Context(), h.Policy, req.Code, req.ProviderID, h.now(), appTrackReferralReserveTTL)
+	reservationID, expiresAt, err := h.Store.ReserveReferralCapacityWithExpiry(r.Context(), h.Policy, req.Code, req.ProviderID, h.now(), appTrackReferralReserveTTL)
 	if err != nil {
 		reason := referralReason(err)
 		h.observe("reserve", reason)
@@ -186,8 +188,11 @@ func (h *Handler) HandleReserve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"reserved":       true,
 		"reservation_id": reservationID,
-		"expires_at":     h.now().Add(appTrackReferralReserveTTL).UTC().Format(time.RFC3339),
-		"required":       true,
+		// FIX-570 H3: report the STORED absolute-capped deadline, not now+ttl, so a
+		// refresh of an already-aged reservation is not misrepresented as a fresh
+		// 30-minute hold.
+		"expires_at": expiresAt.UTC().Format(time.RFC3339),
+		"required":   true,
 	})
 }
 
@@ -600,6 +605,10 @@ func referralReason(err error) string {
 		return "expired"
 	case errors.Is(err, auth.ErrReferralRevoked):
 		return "revoked"
+	case errors.Is(err, auth.ErrReferralReservationExpired):
+		// FIX-570 H3: distinct from "exhausted" — the caller's own hold lapsed, the
+		// invite may still have capacity, so the app shows re-acquire copy.
+		return "reservation_expired"
 	case errors.Is(err, auth.ErrReferralExhausted):
 		return "exhausted"
 	case errors.Is(err, auth.ErrReferralConflict):

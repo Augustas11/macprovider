@@ -431,6 +431,60 @@ func TestReserveClaimsCapacityIdempotentlyAndReportsExhaustion(t *testing.T) {
 	}
 }
 
+// TestReserveReportsStoredExpiryAndExpiredReason is the FIX-570 H3 boundary
+// regression: /v1/referrals/reserve must report the STORED absolute-capped
+// expires_at (not now+ttl) so an aged reservation is not misrepresented as a
+// fresh 30-minute hold, and must surface a distinct "reservation_expired" reason
+// once the caller's own hold reaches its absolute lifetime.
+func TestReserveReportsStoredExpiryAndExpiredReason(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := apiPolicy()
+	code, err := store.CreateSeedReferral(context.Background(), policy, "reserveexpiry", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	clock := t0
+	h := Handler{Store: store, Policy: policy, PublicLimiter: NewBoundedLimiter(50, time.Minute, 64), Now: func() time.Time { return clock }}
+	reserve := func() (int, map[string]any) {
+		body := `{"code":"` + code + `","provider_id":"prov-a"}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/referrals/reserve", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.HandleReserve(w, req)
+		var m map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &m)
+		return w.Code, m
+	}
+
+	// Fresh reservation: expires_at is now+ttl (30m).
+	_, first := reserve()
+	if first["reserved"] != true || first["expires_at"] != t0.Add(appTrackReferralReserveTTL).UTC().Format(time.RFC3339) {
+		t.Fatalf("fresh reserve body=%v", first)
+	}
+
+	// Refresh 45m later: the absolute cap (60m) clamps expires_at to t0+60m, NOT
+	// clock+30m (t0+75m). The endpoint must report the STORED deadline.
+	clock = t0.Add(45 * time.Minute)
+	_, refreshed := reserve()
+	if refreshed["reserved"] != true {
+		t.Fatalf("refresh should still be reserved: %v", refreshed)
+	}
+	if refreshed["expires_at"] != t0.Add(60*time.Minute).UTC().Format(time.RFC3339) {
+		t.Fatalf("refresh expires_at=%v want stored clamp t0+60m (not clock+ttl)", refreshed["expires_at"])
+	}
+
+	// Past the absolute lifetime: distinct reservation_expired reason, not exhausted.
+	clock = t0.Add(61 * time.Minute)
+	_, expired := reserve()
+	if expired["reserved"] != false || expired["reason"] != "reservation_expired" {
+		t.Fatalf("expired reserve body=%v want reason reservation_expired", expired)
+	}
+}
+
 func TestReserveDisabledReturnsNotRequired(t *testing.T) {
 	policy := apiPolicy()
 	policy.RequireForRegistration = false

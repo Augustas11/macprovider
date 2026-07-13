@@ -836,6 +836,11 @@ func writeReferralError(w http.ResponseWriter, err error) {
 		writeReferralJSONError(w, http.StatusGone, "referral_expired", "expired", "referral code expired")
 	case errors.Is(err, auth.ErrReferralRevoked):
 		writeReferralJSONError(w, http.StatusGone, "referral_revoked", "revoked", "referral code revoked")
+	case errors.Is(err, auth.ErrReferralReservationExpired):
+		// FIX-570 H3: the preflight hold lapsed at its absolute lifetime; the invite
+		// may still have capacity, so route the client to re-acquire rather than
+		// showing the terminal "all spots taken" copy.
+		writeReferralJSONError(w, http.StatusConflict, "reservation_expired", "reservation_expired", "your reservation expired; re-acquire from a valid invite")
 	case errors.Is(err, auth.ErrReferralExhausted):
 		writeReferralJSONError(w, http.StatusConflict, "referral_exhausted", "exhausted", "all spots on this referral are taken")
 	case errors.Is(err, auth.ErrReferralConflict):

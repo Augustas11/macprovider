@@ -18,17 +18,25 @@ import (
 )
 
 var (
-	ErrReferralRequired          = errors.New("referral code required")
-	ErrReferralInvalid           = errors.New("referral code invalid")
-	ErrReferralExpired           = errors.New("referral code expired")
-	ErrReferralRevoked           = errors.New("referral code revoked")
-	ErrReferralExhausted         = errors.New("referral code exhausted")
-	ErrReferralConflict          = errors.New("provider already attributed to another referral")
-	ErrReferralSeedExists        = errors.New("seed referral already exists")
-	ErrReferralCapacityBelowUsed = errors.New("referral capacity cannot be set below redeemed plus reserved uses")
-	ErrReferralLocked            = errors.New("provider referral locked until first verified serving")
-	ErrSocialDisabled            = errors.New("social invite bonus disabled")
-	ErrSocialChallenge           = errors.New("social challenge invalid")
+	ErrReferralRequired  = errors.New("referral code required")
+	ErrReferralInvalid   = errors.New("referral code invalid")
+	ErrReferralExpired   = errors.New("referral code expired")
+	ErrReferralRevoked   = errors.New("referral code revoked")
+	ErrReferralExhausted = errors.New("referral code exhausted")
+	// ErrReferralReservationExpired is distinct from ErrReferralExhausted: the
+	// caller's own preflight reservation reached its ABSOLUTE lifetime and was
+	// released (FIX-570 H3). The invite itself may still have capacity, so the
+	// installer/app should show actionable "your hold expired, re-acquire" copy
+	// rather than the terminal "all spots taken" (exhausted) copy. A short
+	// post-expiry cooldown keyed on (campaign, provider_id, code) prevents the
+	// same identity from immediately re-holding the same slot forever.
+	ErrReferralReservationExpired = errors.New("referral reservation expired")
+	ErrReferralConflict           = errors.New("provider already attributed to another referral")
+	ErrReferralSeedExists         = errors.New("seed referral already exists")
+	ErrReferralCapacityBelowUsed  = errors.New("referral capacity cannot be set below redeemed plus reserved uses")
+	ErrReferralLocked             = errors.New("provider referral locked until first verified serving")
+	ErrSocialDisabled             = errors.New("social invite bonus disabled")
+	ErrSocialChallenge            = errors.New("social challenge invalid")
 	// ErrSocialRecheckTransient signals that a promotion-time social re-check
 	// failed for a transient reason (timeout / 429 / 5xx / transport error)
 	// rather than a confirmed terminal one (post deleted, protected, or author
@@ -564,89 +572,158 @@ SELECT (SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?)
 // which the reservation expires and the slot frees. Without this bound a single
 // unauthenticated /v1/referrals/reserve request could pin a cap-one invite
 // indefinitely by periodically refreshing under the per-IP limit. FIX-570 H3.
-const maxReservationLifetime = 30 * time.Minute
+//
+// The value is deliberately >= the longest realistic App-track install:
+// onboarding states benchmarking ALONE can take 10-30 minutes, on top of the
+// DMG download, model download, and autotune. 60 minutes covers that worst case
+// with headroom while still bounding an abusive hold; the reservation may be
+// refreshed within this window but never past created_at + this cap.
+const maxReservationLifetime = 60 * time.Minute
+
+// reservationExpiryCooldown is the short window after a reservation reaches its
+// ABSOLUTE lifetime during which the SAME identity may not re-hold the SAME
+// code. During the cooldown the released slot is available to OTHER installers,
+// so — combined with the per-IP limiter — an unauthenticated caller can no
+// longer pin a cap-one invite forever. It does not block acquiring a different
+// still-valid invite. FIX-570 H3.
+const reservationExpiryCooldown = 2 * time.Minute
 
 // ReserveReferralCapacity creates a short-lived authoritative claim on one
 // invite use. It lets App-track commit its PostgreSQL identity transaction
 // without holding SQLite's writer lock and without losing a capacity race
-// before the referral/token transaction runs.
+// before the referral/token transaction runs. The returned expires_at is the
+// STORED absolute-capped deadline, not now+ttl (FIX-570 H3).
 func (s *Store) ReserveReferralCapacity(ctx context.Context, policy ReferralPolicy, code, providerID string, now time.Time, ttl time.Duration) (string, error) {
+	id, _, err := s.reserveReferralCapacity(ctx, policy, code, providerID, now, ttl)
+	return id, err
+}
+
+// ReserveReferralCapacityWithExpiry is ReserveReferralCapacity that additionally
+// returns the STORED (absolute-capped) expires_at so the caller can present the
+// true remaining hold instead of a fresh now+ttl window (FIX-570 H3).
+func (s *Store) ReserveReferralCapacityWithExpiry(ctx context.Context, policy ReferralPolicy, code, providerID string, now time.Time, ttl time.Duration) (string, time.Time, error) {
+	return s.reserveReferralCapacity(ctx, policy, code, providerID, now, ttl)
+}
+
+func (s *Store) reserveReferralCapacity(ctx context.Context, policy ReferralPolicy, code, providerID string, now time.Time, ttl time.Duration) (string, time.Time, error) {
 	if err := policy.Validate(); err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	if !policy.RequireForRegistration || ttl <= 0 {
-		return "", ErrReferralRequired
+		return "", time.Time{}, ErrReferralRequired
 	}
 	code = strings.TrimSpace(code)
 	if code == "" {
-		return "", ErrReferralRequired
+		return "", time.Time{}, ErrReferralRequired
 	}
 	if err := config.ValidateProviderID(providerID); err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	reservationID := fmt.Sprintf("%x", raw[:])
 	digest := sha256.Sum256([]byte(code))
 	digestText := fmt.Sprintf("%x", digest[:])
 	now = now.UTC()
-	expiresAt := now.Add(ttl)
+	var storedExpiry time.Time
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		if _, err := conn.ExecContext(ctx, `DELETE FROM referral_reservations WHERE expires_at <= ?`, timeText(now)); err != nil {
 			return err
 		}
-		var existingID, existingDigest, existingCreatedAt string
+		// FIX-570 H3: prune lineage rows whose absolute lifetime AND cooldown have
+		// both fully elapsed, so a genuinely new install much later starts clean.
+		if _, err := conn.ExecContext(ctx, `DELETE FROM referral_reservation_cooldowns WHERE lineage_started_at <= ?`,
+			timeText(now.Add(-(maxReservationLifetime + reservationExpiryCooldown)))); err != nil {
+			return err
+		}
+
+		// FIX-570 H3: the absolute lifetime is anchored to the LINEAGE start, which
+		// survives natural expiry of the reservation row. This is what stops an
+		// identity from resetting the clock by re-reserving the same code after each
+		// deadline. Resolve (or start) the lineage first.
+		var lineageStartedText string
+		lineageErr := conn.QueryRowContext(ctx, `
+SELECT lineage_started_at FROM referral_reservation_cooldowns
+ WHERE campaign = ? AND provider_id = ? AND code_digest = ?`,
+			policy.Campaign, providerID, digestText).Scan(&lineageStartedText)
+		if lineageErr != nil && !errors.Is(lineageErr, sql.ErrNoRows) {
+			return lineageErr
+		}
+		var absoluteDeadline time.Time
+		haveLineage := false
+		if lineageErr == nil {
+			started, parseErr := time.Parse(time.RFC3339, lineageStartedText)
+			if parseErr != nil {
+				return parseErr
+			}
+			absoluteDeadline = started.Add(maxReservationLifetime)
+			switch {
+			case now.Before(absoluteDeadline):
+				haveLineage = true // within the current lineage's absolute lifetime
+			case now.Before(absoluteDeadline.Add(reservationExpiryCooldown)):
+				// Past the absolute lifetime, still inside the post-expiry cooldown:
+				// the same identity may not immediately re-hold the same code.
+				return ErrReferralReservationExpired
+			default:
+				// Fully elapsed (defensive; the prune above normally removed it).
+				if _, err := conn.ExecContext(ctx, `
+DELETE FROM referral_reservation_cooldowns
+ WHERE campaign = ? AND provider_id = ? AND code_digest = ?`,
+					policy.Campaign, providerID, digestText); err != nil {
+					return err
+				}
+			}
+		}
+
+		var existingID, existingDigest string
 		err := conn.QueryRowContext(ctx, `
-SELECT reservation_id, code_digest, created_at
+SELECT reservation_id, code_digest
   FROM referral_reservations
- WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&existingID, &existingDigest, &existingCreatedAt)
+ WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&existingID, &existingDigest)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		if err == nil {
+			// A live reservation row implies an in-lifetime lineage.
 			if !hmac.Equal([]byte(existingDigest), []byte(digestText)) {
 				return ErrReferralConflict
 			}
-			// FIX-570 H3: cap the refresh at the ORIGINAL created_at + absolute
-			// lifetime. A reservation that has already reached its absolute deadline
-			// is treated as expired: it is deleted and re-created fresh below (a new
-			// created_at, subject to current capacity), so a single request can no
-			// longer pin a slot forever by refreshing.
-			createdAt, parseErr := time.Parse(time.RFC3339, existingCreatedAt)
-			if parseErr != nil {
-				return parseErr
+			if _, validationErr := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false); validationErr != nil {
+				return validationErr
 			}
-			absoluteDeadline := createdAt.Add(maxReservationLifetime)
-			if absoluteDeadline.After(now) {
-				if _, validationErr := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false); validationErr != nil {
-					return validationErr
-				}
-				cappedExpiry := expiresAt
-				if cappedExpiry.After(absoluteDeadline) {
-					cappedExpiry = absoluteDeadline
-				}
-				result, updateErr := conn.ExecContext(ctx, `
+			cappedExpiry := now.Add(ttl)
+			if haveLineage && cappedExpiry.After(absoluteDeadline) {
+				cappedExpiry = absoluteDeadline
+			}
+			result, updateErr := conn.ExecContext(ctx, `
 UPDATE referral_reservations
    SET expires_at = ?
  WHERE reservation_id = ? AND campaign = ? AND provider_id = ?`,
-					timeText(cappedExpiry), existingID, policy.Campaign, providerID)
-				if updateErr != nil {
-					return updateErr
-				}
-				if changed, updateErr := result.RowsAffected(); updateErr != nil || changed != 1 {
-					return ErrReferralExhausted
-				}
-				reservationID = existingID
-				return nil
+				timeText(cappedExpiry), existingID, policy.Campaign, providerID)
+			if updateErr != nil {
+				return updateErr
 			}
-			// Past the absolute lifetime: free the slot and fall through to a fresh
-			// reservation with a new created_at.
-			if _, delErr := conn.ExecContext(ctx, `
-DELETE FROM referral_reservations WHERE reservation_id = ? AND campaign = ? AND provider_id = ?`,
-				existingID, policy.Campaign, providerID); delErr != nil {
-				return delErr
+			if changed, updateErr := result.RowsAffected(); updateErr != nil || changed != 1 {
+				return ErrReferralExhausted
+			}
+			reservationID = existingID
+			storedExpiry = cappedExpiry
+			return nil
+		}
+
+		// Fresh reservation. Start a new lineage if none is active; otherwise reuse
+		// the current lineage's absolute deadline (re-holding after the row expired
+		// must NOT reset the clock).
+		if !haveLineage {
+			absoluteDeadline = now.Add(maxReservationLifetime)
+			if _, err := conn.ExecContext(ctx, `
+INSERT INTO referral_reservation_cooldowns (campaign, provider_id, code_digest, lineage_started_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(campaign, provider_id, code_digest) DO UPDATE SET lineage_started_at = excluded.lineage_started_at`,
+				policy.Campaign, providerID, digestText, timeText(now)); err != nil {
+				return err
 			}
 		}
 		validated, err := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false)
@@ -668,17 +745,24 @@ SELECT issuer_id, code_digest
 		} else if _, err := validateReferralTx(ctx, conn, policy, code, now); err != nil {
 			return err
 		}
-		_, err = conn.ExecContext(ctx, `
+		expiresAt := now.Add(ttl)
+		if expiresAt.After(absoluteDeadline) {
+			expiresAt = absoluteDeadline
+		}
+		if _, err = conn.ExecContext(ctx, `
 INSERT INTO referral_reservations (
     reservation_id, campaign, provider_id, issuer_id, code_digest, created_at, expires_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			reservationID, policy.Campaign, providerID, validated.IssuerID, digestText, timeText(now), timeText(expiresAt))
-		return err
+			reservationID, policy.Campaign, providerID, validated.IssuerID, digestText, timeText(now), timeText(expiresAt)); err != nil {
+			return err
+		}
+		storedExpiry = expiresAt
+		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
-	return reservationID, nil
+	return reservationID, storedExpiry, nil
 }
 
 func consumeReferralReservationTx(ctx context.Context, conn *sql.Conn, policy ReferralPolicy, reservationID, code, providerID string, now time.Time) error {
