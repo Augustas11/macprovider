@@ -56,12 +56,26 @@ final class LaunchProviderController: ObservableObject {
         case unknown
     }
 
+    // PROD-M6: details of an identity just retired via "Start New", surfaced so
+    // the UI can name what was archived, where, and offer a session-scoped undo.
+    struct RetiredIdentity: Equatable {
+        let providerID: String
+        let archiveURL: URL
+        let retiredAt: Date
+        var archivePath: String { archiveURL.path }
+    }
+
     @Published private(set) var stage: Stage = .idle
     @Published private(set) var installLogLines: [String] = []
     @Published private(set) var installProgressHint: String?
     @Published private(set) var installStartedAt: Date?
     @Published var referralCode = ""
     @Published private(set) var referralPolicy: ReferralPolicy = .required
+    @Published private(set) var retiredIdentity: RetiredIdentity?
+    // PROD-H2: set when an attempted missing-bearer recovery could not restore
+    // the credential, so the missing-bearer view can explain why and steer the
+    // user to the honest "Start New" path instead of a silent retry loop.
+    @Published private(set) var recoveryNotice: String?
 
     /// True only when an invite is known to be mandatory. `.unknown` and
     /// `.optional` are both non-blocking at the UI — the server enforces.
@@ -93,8 +107,13 @@ final class LaunchProviderController: ObservableObject {
             await ProviderConfig.existingIdentityMissingBearer()
         }
         var readProviderID: @MainActor () -> String? = { ProviderConfig.readProviderID() }
-        var moveAppOwnedConfigAside: @MainActor () async throws -> Void = {
-            _ = try ProviderConfig.startFreshMovingCLIConfigAside()
+        // PROD-M6: returns the archive directory so the UI can show where the
+        // retired identity went and offer an undo.
+        var moveAppOwnedConfigAside: @MainActor () async throws -> URL? = {
+            try ProviderConfig.startFreshMovingCLIConfigAside()
+        }
+        var restoreArchivedIdentity: @MainActor (URL) async throws -> Void = { archive in
+            try ProviderConfig.restoreArchivedIdentity(from: archive)
         }
 
         static func live(agent: MalibuAgent?) -> Dependencies {
@@ -229,8 +248,20 @@ final class LaunchProviderController: ObservableObject {
     func evaluateExistingIdentityState() async -> Bool {
         guard case .idle = stage else { return false }
         guard await dependencies.existingIdentityMissingBearer() else { return false }
+        recoveryNotice = nil
         stage = .existingIdentityMissingBearer(providerID: dependencies.readProviderID() ?? "")
         return true
+    }
+
+    // PROD-H2: a missing-bearer recovery that could not restore the credential
+    // must NOT drop the user into a generic retryable identity-import failure
+    // (whose "Retry" re-enters the fresh-invite flow and loops). Route back to
+    // the missing-bearer choice with an explanation so the only honest next step
+    // — starting as a new provider — is legible and one click away.
+    private func routeToMissingBearerRecoveryFailure(_ reason: String) {
+        recoveryNotice = "Automatic recovery couldn't restore this provider's saved credential (\(reason)). "
+            + "The coordinator can't re-issue it without the original credential, so the reliable path is to start as a new provider below."
+        stage = .existingIdentityMissingBearer(providerID: dependencies.readProviderID() ?? "")
     }
 
     // PROD-H6 (a): proven recovery. Re-run the installer in repair mode with no
@@ -238,6 +269,7 @@ final class LaunchProviderController: ObservableObject {
     // identity. If recovery is not yet available server-side, the install
     // failure surfaces normally rather than a fresh-referral dead-end.
     func recoverExistingIdentity() async {
+        recoveryNotice = nil
         stage = .idle
         // PROD-H3: the Keychain bearer is gone, so — unlike an ordinary
         // existing-identity launch — the re-disclosed credential must be
@@ -248,10 +280,21 @@ final class LaunchProviderController: ObservableObject {
 
     // PROD-H6 (b): explicit destructive escape hatch. Move the app-owned
     // config aside so a genuinely fresh provider can be created, then return to
-    // the normal invite flow.
+    // the normal invite flow. PROD-M6: capture the archive location and provider
+    // id so the UI can name what was retired and offer an undo — the caller is
+    // expected to have confirmed the destructive action first.
     func startAsNewProvider() async {
+        recoveryNotice = nil
+        let providerID = dependencies.readProviderID() ?? ""
         do {
-            try await dependencies.moveAppOwnedConfigAside()
+            let archive = try await dependencies.moveAppOwnedConfigAside()
+            if let archive {
+                retiredIdentity = RetiredIdentity(
+                    providerID: providerID,
+                    archiveURL: archive,
+                    retiredAt: Date()
+                )
+            }
         } catch {
             stage = .failed(
                 stage: "startFresh",
@@ -262,6 +305,29 @@ final class LaunchProviderController: ObservableObject {
         }
         referralCode = ""
         stage = .idle
+        await refreshReferralPolicy()
+    }
+
+    // PROD-M6: undo a just-performed "Start New" while the archive still exists,
+    // restoring the retired identity bundle in place. Refuses (surfaces the
+    // error) if a replacement identity was already created over it.
+    func undoStartAsNewProvider() async {
+        guard let retired = retiredIdentity else { return }
+        do {
+            try await dependencies.restoreArchivedIdentity(retired.archiveURL)
+        } catch {
+            stage = .failed(
+                stage: "startFresh",
+                retryable: true,
+                message: "Could not restore the retired provider: \(error.localizedDescription)"
+            )
+            return
+        }
+        retiredIdentity = nil
+        stage = .idle
+        // Re-detect the restored (missing-bearer) identity so the user lands
+        // back on the recover/start-new choice rather than a blank invite.
+        if await evaluateExistingIdentityState() { return }
         await refreshReferralPolicy()
     }
 
@@ -339,7 +405,16 @@ final class LaunchProviderController: ObservableObject {
                 do {
                     try await dependencies.importCLIConfigAfterInstall()
                 } catch {
-                    if !recoveringMissingBearer, isRetriableImportError(error) {
+                    if recoveringMissingBearer {
+                        // PROD-H2: recovery could not restore the credential.
+                        // Don't drop into a retryable identity-import failure
+                        // whose Retry re-enters the fresh-invite flow and loops;
+                        // route to the missing-bearer choice steering to Start
+                        // New instead.
+                        routeToMissingBearerRecoveryFailure(error.localizedDescription)
+                        return
+                    }
+                    if isRetriableImportError(error) {
                         importError = error
                         installLogLines.append(deferredImportMessage(for: error))
                     } else {

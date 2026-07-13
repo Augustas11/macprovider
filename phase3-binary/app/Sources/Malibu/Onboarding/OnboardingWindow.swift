@@ -23,6 +23,8 @@ private struct OnboardingRootView: View {
     @ObservedObject var agent: MalibuAgent
     let onDone: () -> Void
     @StateObject private var controller: LaunchProviderController
+    // PROD-M6: gate the destructive "Start New" behind an explicit confirmation.
+    @State private var showStartFreshConfirm = false
 
     init(agent: MalibuAgent, onDone: @escaping () -> Void) {
         self.agent = agent
@@ -75,6 +77,9 @@ private struct OnboardingRootView: View {
                     : "Install the provider CLI and register this Mac."
             ) {
                 VStack(alignment: .leading, spacing: 10) {
+                    if let retired = controller.retiredIdentity {
+                        retiredIdentityBanner(retired)
+                    }
                     if controller.showsReferralField {
                         HStack(spacing: 8) {
                             TextField("MAL1-… or invite link", text: $controller.referralCode)
@@ -169,22 +174,44 @@ private struct OnboardingRootView: View {
                     + ", but its saved credential is gone. Recover it, or start over as a new provider."
             ) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Button("Recover this provider") {
+                    if let notice = controller.recoveryNotice {
+                        // PROD-H2: a prior recovery attempt could not restore the
+                        // credential — say so and steer to Start New instead of
+                        // looping on the recover button.
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundStyle(MalibuBrand.coral)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button(controller.recoveryNotice == nil ? "Recover this provider" : "Try recovery again") {
                         Task { await controller.recoverExistingIdentity() }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .prominentButton(controller.recoveryNotice == nil)
                     .tint(MalibuBrand.coral)
                     Text("Tries to restore the existing provider's credential. No new invite needed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Divider()
                     Button("Start as a new provider") {
-                        Task { await controller.startAsNewProvider() }
+                        showStartFreshConfirm = true
                     }
-                    .buttonStyle(.bordered)
+                    .prominentButton(controller.recoveryNotice != nil)
+                    .tint(MalibuBrand.coral)
                     Text("Moves the existing provider aside and sets up a fresh one. This does not delete your earnings history, but the old provider identity is retired on this Mac.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+                .confirmationDialog(
+                    "Retire this provider and start new?",
+                    isPresented: $showStartFreshConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("Retire and start new", role: .destructive) {
+                        Task { await controller.startAsNewProvider() }
+                    }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text(startFreshConfirmationMessage(providerID: providerID))
                 }
             }
         case let .live(model, tier):
@@ -224,6 +251,40 @@ private struct OnboardingRootView: View {
                 }
             }
         }
+    }
+
+    // PROD-M6: name the affected provider, the identity/earnings consequence,
+    // and where the bundle is archived so a destructive click is informed.
+    private func startFreshConfirmationMessage(providerID: String) -> String {
+        let subject = providerID.isEmpty ? "This Mac's provider identity" : "Provider \(providerID)"
+        return "\(subject) will be archived under ~/.config/macprovider and retired on this Mac. "
+            + "Your earnings history is not deleted, but this Mac stops serving under that identity until you restore it. "
+            + "You can undo this immediately afterward while the archive is still on disk."
+    }
+
+    // PROD-M6: session-scoped undo affordance after a "Start New". The archive
+    // stays on disk, so even after this session it can be restored manually from
+    // the shown path.
+    @ViewBuilder
+    private func retiredIdentityBanner(_ retired: LaunchProviderController.RetiredIdentity) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(retired.providerID.isEmpty
+                ? "Previous provider retired and archived."
+                : "Retired provider \(retired.providerID) and archived it.")
+                .font(.caption.weight(.semibold))
+            Text("Archive: \(retired.archivePath)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            Button("Undo — restore the retired provider") {
+                Task { await controller.undoStartAsNewProvider() }
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(MalibuBrand.sunnyYellow.opacity(0.15)))
     }
 
     @ViewBuilder
@@ -276,5 +337,18 @@ private struct OnboardingRootView: View {
             return String(format: "%d:%02d:%02d", hours, mins, remainder)
         }
         return String(format: "%d:%02d", minutes, remainder)
+    }
+}
+
+private extension View {
+    // A ternary over `.borderedProminent`/`.bordered` doesn't type-check
+    // (distinct ButtonStyle types), so branch on the concrete style instead.
+    @ViewBuilder
+    func prominentButton(_ prominent: Bool) -> some View {
+        if prominent {
+            buttonStyle(.borderedProminent)
+        } else {
+            buttonStyle(.bordered)
+        }
     }
 }

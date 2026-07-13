@@ -400,6 +400,72 @@ final class LaunchProviderControllerTests: XCTestCase {
         }
     }
 
+    // PROD-H2: a missing-bearer recovery that can't restore the credential must
+    // NOT loop on a retryable identity-import failure. It routes back to the
+    // missing-bearer choice with a notice steering to Start New, and retry() is
+    // a no-op there (no fresh-invite loop).
+    func testRecoveryFailureRoutesToMissingBearerNotLoopingRetry() async {
+        let harness = Harness()
+        harness.providerID = "p_missing_bearer"
+        harness.expectedReferralCode = ""
+        harness.cliImportErrors = [ProviderConfig.SaveError.missingProviderToken]
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.recoverExistingIdentity()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(controller.stage, .existingIdentityMissingBearer(providerID: "p_missing_bearer"))
+        XCTAssertNotNil(controller.recoveryNotice)
+
+        // Retry must not re-enter the install/invite flow from this state.
+        await controller.retry()
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(controller.stage, .existingIdentityMissingBearer(providerID: "p_missing_bearer"))
+    }
+
+    // PROD-M6: "Start New" records the retired identity (id + archive path) so
+    // the UI can name it and offer an undo; the undo restores it and clears the
+    // banner.
+    func testStartAsNewProviderRecordsRetiredIdentityAndUndoRestores() async {
+        let harness = Harness()
+        harness.providerID = "p_retire_me"
+        let archive = URL(fileURLWithPath: "/tmp/malibu-archive-xyz")
+        harness.startFreshArchive = archive
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.startAsNewProvider()
+
+        XCTAssertEqual(controller.retiredIdentity?.providerID, "p_retire_me")
+        XCTAssertEqual(controller.retiredIdentity?.archivePath, archive.path)
+        XCTAssertEqual(controller.stage, .idle)
+
+        await controller.undoStartAsNewProvider()
+
+        XCTAssertEqual(harness.restoreRuns, 1)
+        XCTAssertNil(controller.retiredIdentity)
+        XCTAssertEqual(controller.stage, .idle)
+    }
+
+    func testUndoStartAsNewProviderSurfacesRestoreFailure() async {
+        let harness = Harness()
+        harness.startFreshArchive = URL(fileURLWithPath: "/tmp/malibu-archive-xyz")
+        harness.restoreError = NSError(domain: "tests", code: 9, userInfo: [NSLocalizedDescriptionKey: "occupied"])
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.startAsNewProvider()
+        await controller.undoStartAsNewProvider()
+
+        // The retired banner remains so the user can retry / restore manually.
+        XCTAssertNotNil(controller.retiredIdentity)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "startFresh")
+            XCTAssertTrue(retryable)
+            XCTAssertTrue(message.contains("occupied"))
+        } else {
+            XCTFail("expected failed startFresh stage after restore failure")
+        }
+    }
+
     private final class Harness {
         static let validReferralCode = "MAL1-S-key-seed-AAAAAAAAAAAAAAAAAAAAAAAAAA"
         var localInstallSucceeded = false
@@ -425,6 +491,12 @@ final class LaunchProviderControllerTests: XCTestCase {
         // still returning a definitive result at the pre-install preflight.
         var referralPreflightError: Error?
         var expectedReferralCode = Harness.validReferralCode
+        // PROD-M6: start-fresh archive + undo injection.
+        var providerID = "p_existing"
+        var startFreshArchive: URL? = URL(fileURLWithPath: "/tmp/malibu-test-archive")
+        var startFreshError: Error?
+        var restoreError: Error?
+        var restoreRuns = 0
 
         func dependencies() -> LaunchProviderController.Dependencies {
             LaunchProviderController.Dependencies(
@@ -469,6 +541,16 @@ final class LaunchProviderControllerTests: XCTestCase {
                 appIdentityConfigured: { self.appIdentityConfigured },
                 waitBeforeImportRetry: {
                     self.importRetryWaits += 1
+                },
+                existingIdentityMissingBearer: { false },
+                readProviderID: { self.providerID },
+                moveAppOwnedConfigAside: {
+                    if let error = self.startFreshError { throw error }
+                    return self.startFreshArchive
+                },
+                restoreArchivedIdentity: { _ in
+                    self.restoreRuns += 1
+                    if let error = self.restoreError { throw error }
                 }
             )
         }

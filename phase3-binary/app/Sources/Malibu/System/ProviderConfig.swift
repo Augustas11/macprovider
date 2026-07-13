@@ -176,6 +176,7 @@ enum ProviderConfig {
         case importRollbackFailed(importError: Error, rollbackError: Error)
         case appMarkerCreateFailed
         case savedIdentityNotConfigured
+        case restoreDestinationOccupied
         var errorDescription: String? {
             switch self {
             case .existingConfigNotOwnedByApp:
@@ -194,6 +195,8 @@ enum ProviderConfig {
                 return "The app ownership marker could not be written."
             case .savedIdentityNotConfigured:
                 return "The provider identity was not fully persisted."
+            case .restoreDestinationOccupied:
+                return "A provider identity already exists on this Mac, so the archived one cannot be restored over it."
             }
         }
     }
@@ -508,6 +511,44 @@ enum ProviderConfig {
             throw error
         }
         return archive
+    }
+
+    // PROD-M6: reverse of startFreshMovingCLIConfigAside so an accidental
+    // "Start New" can be undone while the archive still exists. Each archived
+    // artifact is restored to its original location by filename (config.yaml
+    // and provider_id under the config dir; the app marker under Application
+    // Support). Refuses if any destination is already occupied so a
+    // freshly-created replacement identity is never clobbered. Partial moves
+    // roll back so a failure never leaves the identity half-restored.
+    static func restoreArchivedIdentity(from archive: URL, paths: ProviderPaths = .current) throws {
+        let fm = FileManager.default
+        let destinations: [String: URL] = [
+            paths.configFile.lastPathComponent: paths.configFile,
+            providerIDFile(paths: paths).lastPathComponent: providerIDFile(paths: paths),
+            paths.appMarkerFile.lastPathComponent: paths.appMarkerFile,
+        ]
+        let entries = (try? fm.contentsOfDirectory(at: archive, includingPropertiesForKeys: nil)) ?? []
+        for entry in entries {
+            if let destination = destinations[entry.lastPathComponent],
+               fm.fileExists(atPath: destination.path) {
+                throw SaveError.restoreDestinationOccupied
+            }
+        }
+        try paths.ensureDirectories()
+        var moved: [(from: URL, to: URL)] = []
+        do {
+            for entry in entries {
+                guard let destination = destinations[entry.lastPathComponent] else { continue }
+                try fm.moveItem(at: entry, to: destination)
+                moved.append((entry, destination))
+            }
+        } catch {
+            for entry in moved.reversed() {
+                try? fm.moveItem(at: entry.to, to: entry.from)
+            }
+            throw error
+        }
+        try? fm.removeItem(at: archive)
     }
 
     // AUDIT R1 CODE M2 / SECURITY S3 / ARCHITECT A6 fix: uninstall must complete

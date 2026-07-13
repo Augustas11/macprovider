@@ -524,6 +524,48 @@ final class ProviderConfigParserTests: XCTestCase {
         )
     }
 
+    // PROD-M6: "Start New" archives the identity bundle; the undo restores it
+    // in place, and a restore over a live identity is refused.
+    func testRestoreArchivedIdentityRoundTrip() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent().deletingLastPathComponent()) }
+        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try Data().write(to: paths.appMarkerFile)
+        try "p_old".write(to: ProviderConfig.providerIDFile(paths: paths), atomically: true, encoding: .utf8)
+
+        let archive = try XCTUnwrap(ProviderConfig.startFreshMovingCLIConfigAside(paths: paths))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+
+        try ProviderConfig.restoreArchivedIdentity(from: archive, paths: paths)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertEqual(ProviderConfig.readProviderID(paths: paths), "p_old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: archive.path))
+    }
+
+    func testRestoreArchivedIdentityRefusesWhenDestinationOccupied() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent().deletingLastPathComponent()) }
+        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try Data().write(to: paths.appMarkerFile)
+
+        let archive = try XCTUnwrap(ProviderConfig.startFreshMovingCLIConfigAside(paths: paths))
+        // A replacement identity is created before the user tries to undo.
+        try "provider_id: p_new\nprovider_token: new-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try ProviderConfig.restoreArchivedIdentity(from: archive, paths: paths)) { error in
+            guard case ProviderConfig.SaveError.restoreDestinationOccupied = error else {
+                return XCTFail("expected restoreDestinationOccupied, got \(error)")
+            }
+        }
+        // The replacement identity is untouched and the archive is preserved.
+        XCTAssertEqual(ProviderConfig.readProviderID(paths: paths), "p_new")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archive.path))
+    }
+
     private func makeTempPaths() throws -> ProviderPaths {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-provider-config-tests-\(UUID().uuidString)", isDirectory: true)
