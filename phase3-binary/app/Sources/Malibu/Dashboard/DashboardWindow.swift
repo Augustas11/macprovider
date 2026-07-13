@@ -110,9 +110,14 @@ private struct DashboardView: View {
         .padding(20)
         .task {
             await referralInvites.refresh()
+            // PROD-M3: keep polling while the state can still advance on its own
+            // — the pre-serving lock and a pending X review (which the
+            // coordinator's reconciler promotes or retries on its own interval)
+            // both resolve without user action, so the pending-review panel
+            // never shows a stale past time.
             while !Task.isCancelled,
                   !referralInvites.dismissed,
-                  referralInvites.status?.advocacyStatus == "locked_until_first_serving" {
+                  referralInvites.autoRefreshes {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 await referralInvites.refresh()
             }
@@ -154,32 +159,56 @@ private struct DashboardView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 case ProviderReferralStatus.pendingSocialReview:
-                    // PROD-M3: a valid X post is submitted and under review. Show
-                    // the keep-post-public guidance and, when known, the time the
-                    // review is due so refreshes no longer erase this state.
+                    // PROD-M3: a valid X post is submitted and under review.
+                    // `review_due_at` is the earliest ELIGIBILITY instant, not a
+                    // completion time — after it passes the reconciler keeps
+                    // checking. Label it accordingly and distinguish
+                    // still-queued from now-eligible/retrying, always repeating
+                    // the keep-public requirement. The dashboard auto-refreshes
+                    // this state (see the .task poll loop) so it can't go stale.
                     Text("Your X post was received and is being verified.")
                         .font(.callout)
-                    if let due = status.reviewDueAt {
-                        Text("Verification finishes around \(due.formatted(date: .omitted, time: .shortened)). Keep your X post public until then — deleting or hiding it before review cancels the bonus.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Keep your X post public for about 30–35 minutes so it can be verified. Deleting or hiding it before review cancels the bonus.")
-                            .font(.caption)
+                    Text(pendingReviewDetail(status))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let next = status.reviewNextAttemptAt, next > Date() {
+                        Text("Next check around \(next.formatted(date: .omitted, time: .shortened)).")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     Button("Refresh status") { Task { await referralInvites.refresh() } }
                         .buttonStyle(.bordered)
-                case "social_review_failed":
-                    // PROD-M3: terminal failure — the post could not be verified.
-                    // Explain what happened; the provider stays live and the
-                    // private invite still works.
-                    Text("Your X post could not be verified for the bonus. This can happen if the post was edited, made private, or removed before review finished. Your provider remains live and your private invite still works.")
+                case ProviderReferralStatus.socialReviewFailed:
+                    // PROD-M4: terminal failure. Show the reason-specific
+                    // corrective action (decoded from the coordinator's failure
+                    // reason code, generic fallback when absent), keep the
+                    // provider-still-live reassurance, and offer an actionable
+                    // route: a re-challenge CTA when the coordinator permits one
+                    // after a fixable failure, otherwise an appeal/support CTA.
+                    Text("Your X post could not be verified for the bonus.")
                         .font(.callout)
+                    Text(status.reviewFailureCorrectiveAction)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button(status.remaining > 0 ? "Copy private invite" : "Invite used") { referralInvites.copyPrivateInvite() }
-                        .buttonStyle(.bordered)
-                        .disabled(status.remaining == 0)
+                    Text("Your provider remains live and your private invite still works.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button(status.remaining > 0 ? "Copy private invite" : "Invite used") { referralInvites.copyPrivateInvite() }
+                            .buttonStyle(.bordered)
+                            .disabled(status.remaining == 0)
+                        if status.socialBonusEnabled, status.reviewRetryAllowed == true {
+                            Button("Try posting again") {
+                                Task { await referralInvites.shareOnX() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(MalibuBrand.coral)
+                            .disabled(referralInvites.isSharing)
+                        } else {
+                            Link("Appeal or contact support", destination: Self.reviewAppealURL)
+                                .font(.callout)
+                        }
+                    }
                 default:
                     Text(status.remaining == 0
                         ? (status.socialBonusEnabled
@@ -292,6 +321,31 @@ private struct DashboardView: View {
         case .error: return .red
         case .idle: return .secondary
         }
+    }
+
+    // PROD-M4: appeal/support destination for a terminal X-review failure the
+    // user believes was wrong. A mailto avoids the dead-web-CTA hazard flagged
+    // in R4-H1 (a branded web page that 404s). If a hosted appeal page ships,
+    // point this at it and keep the Go branded-page CTA in sync.
+    static let reviewAppealURL = URL(string:
+        "mailto:support@malibu.tech?subject=Malibu%20X%20verification%20appeal")!
+
+    // PROD-M3: `review_due_at` is the earliest ELIGIBILITY instant, not a
+    // completion time. Before it passes the review is simply queued; after it
+    // passes the reconciler is actively (re)checking. Either way the post must
+    // stay public. Degrades to a generic "checking periodically" line when the
+    // coordinator advertises no eligibility time.
+    private func pendingReviewDetail(_ status: ProviderReferralStatus) -> String {
+        let keepPublic =
+            " Keep your X post public until it's verified — deleting or hiding it before review cancels the bonus."
+        guard let due = status.reviewDueAt else {
+            return "In review — Malibu is checking periodically (usually within about 30–35 minutes)." + keepPublic
+        }
+        let time = due.formatted(date: .omitted, time: .shortened)
+        if due > Date() {
+            return "Eligible for review around \(time)." + keepPublic
+        }
+        return "Now eligible for review — Malibu is checking periodically (eligible since \(time))." + keepPublic
     }
 }
 

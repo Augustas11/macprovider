@@ -110,9 +110,11 @@ final class ProviderReferralStatusDecodingTests: XCTestCase {
         XCTAssertEqual(status.shareIncentivePhrase, "one more invite use")
     }
 
-    // Back-compat: an older coordinator advertising neither field falls back to
-    // the historical default of 2.
-    func testShareIncentiveFallsBackToTwoWhenFieldsAbsent() throws {
+    // L2(prod): an older/zero-bonus coordinator advertising neither field must
+    // NOT be rendered as the historical "two uses" — the incentive size is
+    // unavailable and the copy is non-numeric so a zero award is never promised
+    // as a specific count.
+    func testShareIncentiveUsesNonNumericCopyWhenFieldsAbsent() throws {
         let status = try decode("""
         {"advocacy_status":"eligible","invite_code":"abc","remaining":1,
          "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
@@ -120,7 +122,19 @@ final class ProviderReferralStatusDecodingTests: XCTestCase {
         """)
         XCTAssertNil(status.configuredBonusUses)
         XCTAssertNil(status.bonusUses)
-        XCTAssertEqual(status.shareIncentiveBonusUses, 2)
+        XCTAssertNil(status.shareIncentiveBonusUses)
+        XCTAssertEqual(status.shareIncentivePhrase, "bonus invite uses")
+    }
+
+    // L2(prod): an explicit zero configured bonus is also unavailable, not two.
+    func testShareIncentiveIsUnavailableWhenConfiguredBonusIsZero() throws {
+        let status = try decode("""
+        {"advocacy_status":"eligible","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null,"bonus_uses":0,"configured_bonus_uses":0}
+        """)
+        XCTAssertNil(status.shareIncentiveBonusUses)
+        XCTAssertEqual(status.shareIncentivePhrase, "bonus invite uses")
     }
 
     // PROD-M3: pending review decodes advocacy_status + review_due_at.
@@ -144,7 +158,56 @@ final class ProviderReferralStatusDecodingTests: XCTestCase {
          "invite_url":null}
         """)
         XCTAssertFalse(status.isPendingSocialReview)
+        XCTAssertTrue(status.isSocialReviewFailed)
         XCTAssertNil(status.reviewDueAt)
-        XCTAssertEqual(status.advocacyStatus, "social_review_failed")
+        XCTAssertEqual(status.advocacyStatus, ProviderReferralStatus.socialReviewFailed)
+    }
+
+    // PROD-M3: optional last/next attempt observability decodes when present
+    // and stays absent (nil, not a crash) when the coordinator omits it.
+    func testPendingReviewDecodesOptionalAttemptTimestamps() throws {
+        let status = try decode("""
+        {"advocacy_status":"pending_social_review","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null,"review_due_at":"2026-07-12T18:30:00Z",
+         "review_last_attempt_at":"2026-07-12T18:35:00Z",
+         "review_next_attempt_at":"2026-07-12T18:40:00Z"}
+        """)
+        XCTAssertEqual(status.reviewLastAttemptAt, ISO8601DateFormatter().date(from: "2026-07-12T18:35:00Z"))
+        XCTAssertEqual(status.reviewNextAttemptAt, ISO8601DateFormatter().date(from: "2026-07-12T18:40:00Z"))
+    }
+
+    func testPendingReviewToleratesAbsentAttemptTimestamps() throws {
+        let status = try decode("""
+        {"advocacy_status":"pending_social_review","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null,"review_due_at":"2026-07-12T18:30:00Z"}
+        """)
+        XCTAssertNil(status.reviewLastAttemptAt)
+        XCTAssertNil(status.reviewNextAttemptAt)
+    }
+
+    // PROD-M4: a known failure reason yields a specific corrective action; an
+    // unknown/absent reason degrades to generic guidance rather than misleading.
+    func testFailedReviewReasonMapsToCorrectiveAction() throws {
+        let deleted = try decode("""
+        {"advocacy_status":"social_review_failed","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null,"review_failure_reason":"deleted","review_retry_allowed":true}
+        """)
+        XCTAssertEqual(deleted.reviewFailureReason, "deleted")
+        XCTAssertEqual(deleted.reviewRetryAllowed, true)
+        XCTAssertTrue(deleted.reviewFailureCorrectiveAction.contains("deleted"))
+
+        let unknown = try decode("""
+        {"advocacy_status":"social_review_failed","invite_code":"abc","remaining":1,
+         "social_verified":false,"first_serving_seen":true,"social_bonus_enabled":true,
+         "invite_url":null,"review_failure_reason":"some_new_code"}
+        """)
+        XCTAssertNil(unknown.reviewRetryAllowed)
+        XCTAssertEqual(
+            unknown.reviewFailureCorrectiveAction,
+            "This can happen if the post was edited, made private, or removed before review finished."
+        )
     }
 }

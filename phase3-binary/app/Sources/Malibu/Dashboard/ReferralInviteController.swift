@@ -5,6 +5,8 @@ struct ProviderReferralStatus: Decodable, Equatable {
     // PROD-M3: durable advocacy status set by the coordinator once a valid X
     // post has been submitted and is awaiting review.
     static let pendingSocialReview = "pending_social_review"
+    // PROD-M4: terminal advocacy status when the X post could not be verified.
+    static let socialReviewFailed = "social_review_failed"
 
     let advocacyStatus: String
     let inviteCode: String
@@ -22,8 +24,25 @@ struct ProviderReferralStatus: Decodable, Equatable {
     // unlocks BY sharing, so the "share to unlock N" copy must use it.
     let configuredBonusUses: Int?
     // PROD-M3: when a valid X post is under review the coordinator returns the
-    // time by which the review is due. The post must stay public until then.
+    // time it becomes ELIGIBLE for review (pending_since + dwell), not a
+    // completion time. The reconciler runs on its own interval and may retry
+    // past this instant on transient X failures. The post must stay public
+    // until it is verified.
     let reviewDueAt: Date?
+    // PROD-M3: optional cross-lane observability the coordinator MAY expose so
+    // the dashboard can distinguish normal queueing from a stuck/retrying
+    // review. Decoded defensively — absent on coordinators that don't emit
+    // them, in which case the UI degrades to a generic "checking periodically".
+    // The Go lane owns these field names; keep them in sync if it renames.
+    let reviewLastAttemptAt: Date?
+    let reviewNextAttemptAt: Date?
+    // PROD-M4: optional coordinator-provided terminal-failure reason code so the
+    // dashboard can show a specific corrective action instead of generic
+    // speculation. Decoded defensively; unknown/absent codes fall back to
+    // generic guidance. `reviewRetryAllowed` gates a re-challenge CTA only when
+    // the coordinator says a fresh attempt is permitted after this failure.
+    let reviewFailureReason: String?
+    let reviewRetryAllowed: Bool?
 
     enum CodingKeys: String, CodingKey {
         case advocacyStatus = "advocacy_status"
@@ -36,6 +55,10 @@ struct ProviderReferralStatus: Decodable, Equatable {
         case bonusUses = "bonus_uses"
         case configuredBonusUses = "configured_bonus_uses"
         case reviewDueAt = "review_due_at"
+        case reviewLastAttemptAt = "review_last_attempt_at"
+        case reviewNextAttemptAt = "review_next_attempt_at"
+        case reviewFailureReason = "review_failure_reason"
+        case reviewRetryAllowed = "review_retry_allowed"
     }
 
     /// True once a valid X post has been submitted and is awaiting review.
@@ -43,21 +66,53 @@ struct ProviderReferralStatus: Decodable, Equatable {
         advocacyStatus == Self.pendingSocialReview
     }
 
-    /// Configured X-share bonus size for the pre-verification incentive copy.
-    /// PROD-M2: reflects `configured_bonus_uses` (what sharing unlocks), never
-    /// the awarded `bonus_uses` which is 0 until promotion. Falls back to the
-    /// awarded value, then to the historical default of 2, only when the
-    /// coordinator advertises neither field (older coordinators).
-    var shareIncentiveBonusUses: Int {
-        if let configuredBonusUses, configuredBonusUses > 0 { return configuredBonusUses }
-        if let bonusUses, bonusUses > 0 { return bonusUses }
-        return 2
+    /// True when a submitted X post terminally failed verification.
+    var isSocialReviewFailed: Bool {
+        advocacyStatus == Self.socialReviewFailed
     }
 
-    /// "two more invite uses" / "one more invite use" — the pre-verification
-    /// copy describing what sharing on X unlocks.
+    /// PROD-M4: reason-specific corrective action for a terminal review
+    /// failure. The coordinator (Go lane) owns the reason-code vocabulary; this
+    /// maps the codes we know and degrades to generic guidance for anything
+    /// unrecognized or absent so a renamed/added code never crashes or misleads.
+    var reviewFailureCorrectiveAction: String {
+        switch reviewFailureReason?.lowercased() {
+        case "deleted", "not_found", "missing_post":
+            return "The post appears to have been deleted before it could be verified. Post again and keep it public until verification finishes."
+        case "private", "not_public", "protected", "visibility":
+            return "The post was not publicly visible during review. Make sure your X account and the post are public, then post again."
+        case "author_mismatch", "wrong_author":
+            return "The post was published by a different X account than the one linked to this provider. Post from your own account and try again."
+        case "wrong_post", "content_mismatch", "missing_link", "no_challenge":
+            return "The post didn't include the required Malibu verification link. Use the Share on X composer so the link is included, then try again."
+        case "expired", "timed_out":
+            return "The verification window elapsed before the post could be checked. Start a new share and verify it promptly."
+        default:
+            return "This can happen if the post was edited, made private, or removed before review finished."
+        }
+    }
+
+    /// Configured X-share bonus size for the pre-verification incentive copy,
+    /// or nil when the coordinator advertises no positive configured/awarded
+    /// capacity. PROD-M2: reflects `configured_bonus_uses` (what sharing
+    /// unlocks), never the awarded `bonus_uses` which is 0 until promotion.
+    /// L2(prod): when the configured capacity is absent it returns nil rather
+    /// than the historical default of 2 — a zero-bonus or mixed-version
+    /// coordinator must never be advertised as a two-use promise inferred from
+    /// a zero award.
+    var shareIncentiveBonusUses: Int? {
+        if let configuredBonusUses, configuredBonusUses > 0 { return configuredBonusUses }
+        if let bonusUses, bonusUses > 0 { return bonusUses }
+        return nil
+    }
+
+    /// "two more invite uses" / "one more invite use" when the bonus size is
+    /// known. L2(prod): a non-numeric "bonus invite uses" fallback when the
+    /// coordinator advertises no positive capacity, so a zero award is never
+    /// rendered as a specific count.
     var shareIncentivePhrase: String {
-        Self.bonusPhrase(for: shareIncentiveBonusUses)
+        guard let count = shareIncentiveBonusUses else { return "bonus invite uses" }
+        return Self.bonusPhrase(for: count)
     }
 
     static func bonusPhrase(for count: Int) -> String {
@@ -214,6 +269,19 @@ final class ReferralInviteController: ObservableObject {
 
     var isVisible: Bool {
         !dismissed && (isLoading || status != nil || errorMessage != nil)
+    }
+
+    /// PROD-M3: true while the status can still advance without user action, so
+    /// the dashboard keeps polling — the pre-serving lock and a pending X
+    /// review (which the coordinator's reconciler promotes or retries on its
+    /// own interval) both resolve on their own.
+    var autoRefreshes: Bool {
+        switch status?.advocacyStatus {
+        case "locked_until_first_serving", ProviderReferralStatus.pendingSocialReview:
+            return true
+        default:
+            return false
+        }
     }
 
     var canVerify: Bool {
