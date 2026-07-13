@@ -1089,6 +1089,22 @@ class PearlUpdaterTests(unittest.TestCase):
         response["policy_version"] = "wrong-policy"
         self.assertFalse(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
 
+    def test_exact_catalog_admission_uses_the_local_buyer_listener(self):
+        release = self.verify()
+        self.updater.catalog_admission_ready = mock.Mock(return_value=True)
+        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+        self.updater.audit = mock.Mock()
+
+        self.updater.verify_exact_catalog_admission(release)
+
+        self.assertEqual(
+            self.updater.catalog_admission_ready.call_args_list,
+            [
+                mock.call(release, "http://127.0.0.1:8443/v1/autotune-release"),
+                mock.call(release, "https://coordinator.streamvc.live/v1/autotune-release"),
+            ],
+        )
+
     def test_exact_provider_canary_matches_pool_envelope_to_independent_mac_row(self):
         release = self.verify()
         digest, signer = self.updater.catalog_candidate_identity(release)

@@ -3187,7 +3187,7 @@ class Updater:
         self.wait_for(
             "local exact catalog admission",
             self.config.service_health_timeout_s,
-            lambda: self.catalog_admission_ready(release, "http://127.0.0.1:8444/v1/autotune-release"),
+            lambda: self.catalog_admission_ready(release, "http://127.0.0.1:8443/v1/autotune-release"),
         )
         self.wait_for(
             "public exact catalog admission",
