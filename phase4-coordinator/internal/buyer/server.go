@@ -205,6 +205,7 @@ type Server struct {
 	// warn-log per conversation_key to defend against hostile-gateway
 	// log flooding. Issue #266 T1 operational-hygiene item.
 	stickyMismatchLimiter *stickyMismatchLimiter
+	operatorKey           string
 	gatewayServiceToken   string
 	requireGatewayContext bool
 	tier2Mu               sync.RWMutex
@@ -447,12 +448,20 @@ func (s *Server) tier2Config() config.Tier2Config {
 	return s.tier2
 }
 
+// WithOperatorKey sets the human-operator credential used by buyer-plane
+// endpoints that expose privileged deployment evidence. It is deliberately
+// separate from gatewayServiceToken and is never accepted by /internal/*.
+func WithOperatorKey(key string) Option {
+	return func(s *Server) {
+		s.operatorKey = strings.TrimSpace(key)
+	}
+}
+
 // WithGatewayServiceToken sets the credential required on `/internal/*`
-// paths (M3-2 / SECU-4 / codex PR #73 HIGH-1). Post PR #87 item 3 this
-// is the SOLE accepted credential on `/internal/routing` and
-// `/internal/sticky` — the legacy operator_key fallback was removed
-// once the 30-day clean-cutover gate fired (2026-07-12, audit-log
-// proof of zero gateway-origin operator_key admits on /internal/*).
+// paths (M3-2 / SECU-4 / codex PR #73 HIGH-1). After PR #172 merges,
+// this is the SOLE accepted credential on `/internal/routing` and
+// `/internal/sticky`; the merge gate remains tracked in
+// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md.
 // The audit-log line continues to emit `key=service_token` for
 // continuity with the operator's existing journald grep watchers.
 //
@@ -1045,7 +1054,7 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Missing assigned_id for readiness evidence")
 		return
 	}
-	if includeDeploymentEvidence && !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+	if includeDeploymentEvidence && !auth.OperatorOnlyBearerMatches(r.Header, s.operatorKey) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Deployment pool evidence requires coordinator authorization")
 		return
 	}
@@ -6085,9 +6094,8 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 // internalBearerAuthorized guards the `/internal/routing` and
 // `/internal/sticky` paths the gateway calls upstream. It accepts ONLY
 // the gateway_service_token (M3-2 / SECU-4 / codex PR #73 HIGH-1). The
-// legacy operator_key fallback was removed by PR #87 item 3 once the
-// 30-day clean-cutover gate fired (2026-07-12, audit-log proof of zero
-// gateway-origin operator_key admits on /internal/*). The audit-log
+// legacy operator_key fallback is removed by PR #87 item 3 after the
+// 30-day clean-cutover gate documented in the M3-2 tracker. The audit-log
 // line continues to emit `event=internal_bearer_accepted key=service_token`
 // for continuity with the operator's existing journald watchers.
 func (s *Server) internalBearerAuthorized(headers http.Header) bool {

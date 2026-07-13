@@ -14,7 +14,8 @@
 # Prerequisites:
 #   - gateway-linux-amd64 cross-compiled into dist/ (see build-linux.sh)
 #   - /etc/macprovider/gateway.env on Pearl already contains:
-#       COORDINATOR_OPERATOR_KEY, MACPROVIDER_KEY_HASH_SECRET,
+#       COORDINATOR_OPERATOR_KEY, COORDINATOR_SERVICE_TOKEN,
+#       MACPROVIDER_KEY_HASH_SECRET,
 #       MACPROVIDER_DEMO_SIGNING_SECRET,
 #       GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET
 #     This deploy script does NOT touch that file — secrets stay on the VPS.
@@ -37,9 +38,17 @@
 #                    the gateway config installed on Pearl.
 #   GATEWAY_REMOTE_CONFIG  installed gateway config path on Pearl.
 #                    Default: /opt/macprovider/gateway.yaml.
-#   COORD_CONFIG     path to the coordinator.yaml that's expected to be live
-#                    on Pearl. Defaults to ../../phase4-coordinator/dist/coordinator.yaml
-#                    if present. Used for the C2 timer cross-check.
+#   COORD_CONFIG     used only with --dry-run-local. Defaults to the checked-in
+#                    coordinator deploy config.
+#   COORD_REMOTE_CONFIG  installed coordinator config path on Pearl.
+#                    Default: /opt/macprovider/coordinator.yaml.
+#   C2C_COORD_SERVICE_TOKEN_SHA256, C2C_GATEWAY_SERVICE_TOKEN_SHA256,
+#   C2C_GATEWAY_OPERATOR_KEY_SHA256
+#                    required by --dry-run-local when either config uses
+#                    env:NAME credentials. Compute each SHA-256 independently
+#                    from its respective runtime EnvironmentFile; never pass
+#                    raw credential values. Production computes these proofs
+#                    on Pearl and returns only the digests.
 #   FORCE_RESTART=1  bypass the connected-buyer guard (similar to the
 #                    coordinator's connected-provider guard).
 #   STRICT_PROVENANCE=1  abort if /healthz returns no "version" field.
@@ -128,15 +137,21 @@ NGINX_SITE="$DIST_DIR/nginx-api.streamvc.live.conf"
 GATEWAY_CONFIG_DEFAULT="$DIST_DIR/gateway.yaml"
 GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
 GATEWAY_REMOTE_CONFIG="${GATEWAY_REMOTE_CONFIG:-/opt/macprovider/gateway.yaml}"
+COORD_REMOTE_CONFIG="${COORD_REMOTE_CONFIG:-/opt/macprovider/coordinator.yaml}"
 
 COORD_CONFIG_DEFAULT="$DIST_DIR/../../phase4-coordinator/dist/coordinator.yaml"
 COORD_CONFIG="${COORD_CONFIG:-$COORD_CONFIG_DEFAULT}"
 
 CHECK_SCRIPT="$DIST_DIR/../../phase4-coordinator/dist/check-deploy-config.sh"
+C2C_PROOF_SCRIPT="$DIST_DIR/../../phase4-coordinator/dist/lib/c2c_runtime_proof.py"
 
 for f in "$BINARY" "$SERVICE" "$NGINX_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
+if [ ! -r "$C2C_PROOF_SCRIPT" ]; then
+  echo "aborting deploy: runtime credential proof helper missing or unreadable: $C2C_PROOF_SCRIPT" >&2
+  exit 5
+fi
 
 # #290 R2 SEC MED — assert the shipped nginx template still contains
 # the expected `server_name` + Let's Encrypt paths before we upload +
@@ -160,6 +175,16 @@ case "$GATEWAY_REMOTE_CONFIG" in
   /*) ;;
   *) echo "aborting deploy: GATEWAY_REMOTE_CONFIG must be an absolute path" >&2; exit 5 ;;
 esac
+case "$COORD_REMOTE_CONFIG" in
+  /*) ;;
+  *) echo "aborting deploy: COORD_REMOTE_CONFIG must be an absolute path" >&2; exit 5 ;;
+esac
+case "$COORD_REMOTE_CONFIG" in
+  *[!A-Za-z0-9._/-]*)
+    echo "aborting deploy: COORD_REMOTE_CONFIG contains unsupported characters: $COORD_REMOTE_CONFIG" >&2
+    exit 5
+    ;;
+esac
 case "$GATEWAY_REMOTE_CONFIG" in
   *[!A-Za-z0-9._/-]*)
     echo "aborting deploy: GATEWAY_REMOTE_CONFIG contains unsupported characters: $GATEWAY_REMOTE_CONFIG" >&2
@@ -174,6 +199,7 @@ esac
 # guarded with `:-` so the trap is a no-op when it is unset.
 trap '
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
+  rm -f "${COORD_REMOTE_CONFIG_TMP:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
   fi
@@ -199,6 +225,29 @@ read_gateway_db_path_from_file() {
   ' "$1"
 }
 
+yaml_file_block_value() {
+  local file="$1" block="$2" key="$3"
+  awk -v block="$block" -v key="$key" '
+    BEGIN { in_block=0 }
+    {
+      line=$0
+      sub(/[[:space:]]+#.*$/, "", line)
+    }
+    line ~ "^[[:space:]]*" block ":[[:space:]]*$" { in_block=1; next }
+    in_block && line ~ /^[^[:space:]#][^:]*:/ { exit }
+    in_block {
+      if (line ~ "^[[:space:]]*" key ":[[:space:]]*") {
+        sub("^[[:space:]]*" key ":[[:space:]]*", "", line)
+        gsub(/^"|"$/, "", line)
+        gsub(/^'\''|'\''$/, "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$file"
+}
+
 # #615 production exception gate runs independently of C2. SKIP_C2_CHECK must
 # never suppress registered-row exception enforcement.
 REPO_ROOT="$(CDPATH= cd -- "$DIST_DIR/../.." && pwd -P)"
@@ -222,7 +271,10 @@ log "step 0/8: pre-deploy C2 cross-component config check"
 if [ "$DRY_RUN_LOCAL" = "1" ]; then
   echo "  --dry-run-local set — validating local GATEWAY_CONFIG and exiting before deploy" >&2
   if [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
-    bash "$CHECK_SCRIPT" "$COORD_CONFIG" "$GATEWAY_CONFIG" || {
+    C2C_COORD_SERVICE_TOKEN_SHA256="${C2C_COORD_SERVICE_TOKEN_SHA256:-}" \
+    C2C_GATEWAY_SERVICE_TOKEN_SHA256="${C2C_GATEWAY_SERVICE_TOKEN_SHA256:-}" \
+    C2C_GATEWAY_OPERATOR_KEY_SHA256="${C2C_GATEWAY_OPERATOR_KEY_SHA256:-}" \
+      bash "$CHECK_SCRIPT" "$COORD_CONFIG" "$GATEWAY_CONFIG" || {
       echo "aborting gateway deploy dry-run: local config-drift check failed" >&2; exit 5;
     }
     echo "  local dry-run C2 check passed"
@@ -235,7 +287,14 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
   exit 5
 elif [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
   echo "  SKIP_C2_CHECK=1 set — C2 cross-check skipped by operator opt-out (exception gate already ran)" >&2
-elif [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ]; then
+elif [ -x "$CHECK_SCRIPT" ]; then
+  COORD_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-installed-config.XXXXXXXX)" || {
+    echo "aborting gateway deploy: mktemp failed for installed coordinator config copy" >&2; exit 5;
+  }
+  $SSH "test -f '$COORD_REMOTE_CONFIG' || { echo 'missing installed coordinator config: $COORD_REMOTE_CONFIG' >&2; exit 1; }; cat '$COORD_REMOTE_CONFIG'" > "$COORD_REMOTE_CONFIG_TMP" || {
+    echo "aborting gateway deploy: could not read installed coordinator config from Pearl: $COORD_REMOTE_CONFIG" >&2
+    exit 5
+  }
   GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
     echo "aborting gateway deploy: mktemp failed for installed config copy" >&2; exit 5;
   }
@@ -244,14 +303,51 @@ elif [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ]; then
     exit 5
   }
   GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
-  echo "  validating installed Pearl config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
-  bash "$CHECK_SCRIPT" "$COORD_CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
+  COORD_REMOTE_CONFIG_SHA=$(shasum -a 256 "$COORD_REMOTE_CONFIG_TMP" | awk '{print $1}')
+  echo "  validating installed Pearl coordinator config: $COORD_REMOTE_CONFIG sha256=$COORD_REMOTE_CONFIG_SHA"
+  echo "  validating installed Pearl gateway config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
+
+  # PR #172 C2c: the gateway will restart and consume gateway.env, while the
+  # coordinator keeps its current process environment. Prove that exact
+  # next-state pairing on Pearl. The helper also requires the peer's env file
+  # and process to match, so a later peer restart cannot change the proven
+  # state. Current-peer credentials must use env:NAME because inline YAML
+  # cannot be read authoritatively from an already-running process. Only
+  # SHA-256 digests cross SSH; bearer material remains on Pearl.
+  _c2c_env_name() {
+    local raw="$1"
+    case "$raw" in
+      env:*)
+        raw="${raw#env:}"
+        if ! printf '%s' "$raw" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+          echo "aborting gateway deploy: malformed env:NAME in credential pairing field" >&2
+          return 1
+        fi
+        printf '%s' "$raw"
+        ;;
+      *) printf '%s' - ;;
+    esac
+  }
+  _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$COORD_REMOTE_CONFIG_TMP" auth gateway_service_token)")" || exit 5
+  _gateway_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator service_token)")" || exit 5
+  _gateway_op_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator operator_key)")" || exit 5
+  _c2c_proofs="$($SSH python3 - gateway-deploy "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
+    echo "aborting gateway deploy: could not prove coordinator/gateway credential pairing on Pearl" >&2
+    exit 5
+  }
+  read -r C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256 <<EOF
+$_c2c_proofs
+EOF
+  C2C_COORD_SERVICE_TOKEN_SHA256="$C2C_COORD_SERVICE_TOKEN_SHA256" \
+  C2C_GATEWAY_SERVICE_TOKEN_SHA256="$C2C_GATEWAY_SERVICE_TOKEN_SHA256" \
+  C2C_GATEWAY_OPERATOR_KEY_SHA256="$C2C_GATEWAY_OPERATOR_KEY_SHA256" \
+    bash "$CHECK_SCRIPT" "$COORD_REMOTE_CONFIG_TMP" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting gateway deploy: config-drift check failed" >&2; exit 5;
   }
 else
   echo "aborting gateway deploy: cannot run C2 cross-check." >&2
   echo "  check-deploy-config.sh: $CHECK_SCRIPT $( [ -x "$CHECK_SCRIPT" ] || echo '(missing or not executable)')" >&2
-  echo "  coordinator config:    $COORD_CONFIG $( [ -f "$COORD_CONFIG" ] || echo '(missing)')" >&2
+  echo "  installed coordinator config on Pearl: $COORD_REMOTE_CONFIG" >&2
   echo "  installed gateway config on Pearl: $GATEWAY_REMOTE_CONFIG" >&2
   echo "  To deploy without the cross-check, set SKIP_C2_CHECK=1 explicitly." >&2
   echo "  Local gateway.yaml files are intentionally NOT accepted in production deploy mode." >&2

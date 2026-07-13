@@ -857,13 +857,15 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, gatewayBin, "-config", s.gatewayYAML)
-	cmd.Stderr = io.Discard
+	var seedLogs bytes.Buffer
+	cmd.Stderr = &seedLogs
 	cmd.Stdout = io.Discard
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("seed gateway start: %v", err)
 	}
 	// Poll until the schema is present, then kill.
 	deadline := time.Now().Add(4 * time.Second)
+	schemaReady := false
 	for time.Now().Before(deadline) {
 		db, err := sql.Open("sqlite", s.gatewayDB)
 		if err == nil {
@@ -871,6 +873,7 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 			err = db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'`).Scan(&ok)
 			db.Close()
 			if err == nil {
+				schemaReady = true
 				break
 			}
 		}
@@ -878,6 +881,9 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 	}
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
+	if !schemaReady {
+		s.t.Fatalf("seed gateway did not create accounts schema: %s", seedLogs.String())
+	}
 
 	db, err := sql.Open("sqlite", s.gatewayDB)
 	if err != nil {

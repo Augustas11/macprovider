@@ -718,10 +718,11 @@ type AuthConfig struct {
 	OperatorKeys map[string]string `yaml:"operator_keys"`
 	// GatewayServiceToken is the REQUIRED service-to-service credential
 	// the gateway uses when calling /internal/* coordinator endpoints
-	// (M3-2 / SECU-4; post-2026-07-12 cutover gate). The coordinator
+	// (M3-2 / SECU-4). After PR #172 merges, the coordinator
 	// accepts ONLY GatewayServiceToken on the internal-bearer auth path
-	// — the legacy operator_key fallback was removed in PR #172 (issue
-	// #87 item 3). Must be non-empty AND distinct from OperatorKey:
+	// — the legacy operator_key fallback is removed by PR #172 (issue
+	// #87 item 3). Must be non-empty AND distinct from every operator
+	// credential:
 	// equal values defeat the operator-vs-service credential split
 	// because the operator credential would still authenticate
 	// /internal/* by value.
@@ -1589,11 +1590,12 @@ func (c Config) Validate() error {
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
 	}
-	// Post-PR #172 (issue #87 item 3, 2026-07-12 cutover): the legacy
+	// After PR #172 (issue #87 item 3), the legacy
 	// operator_key fallback on /internal/* is gone, so the coordinator
 	// MUST have a distinct gateway_service_token or every /internal/*
 	// gateway call fails 401.
-	if c.Auth.GatewayServiceToken == "" {
+	serviceToken := strings.TrimSpace(c.Auth.GatewayServiceToken)
+	if serviceToken == "" {
 		return fmt.Errorf("auth.gateway_service_token must be set (post-M3-2 cutover: required for /internal/* gateway auth)")
 	}
 	// Compare after TrimSpace: auth.BearerTokenMatchesHeader trims both
@@ -1601,8 +1603,13 @@ func (c Config) Validate() error {
 	// same value at runtime. A strict == on the raw fields would let an
 	// operator pass distinctness while still effectively reusing the
 	// operator credential on /internal/*.
-	if strings.TrimSpace(c.Auth.GatewayServiceToken) == strings.TrimSpace(c.Auth.OperatorKey) {
+	if serviceToken == strings.TrimSpace(c.Auth.OperatorKey) {
 		return fmt.Errorf("auth.gateway_service_token must differ from auth.operator_key (rotation discipline: equal values — including whitespace-equivalent — defeat the operator-vs-service credential split)")
+	}
+	for name, operatorKey := range c.Auth.OperatorKeys {
+		if serviceToken == strings.TrimSpace(operatorKey) {
+			return fmt.Errorf("auth.gateway_service_token must differ from auth.operator_keys.%s (service credentials must not grant a named operator identity)", name)
+		}
 	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err

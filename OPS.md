@@ -423,9 +423,10 @@ play:
   human-admin power.
 - `auth.gateway_service_token` in `coordinator.yaml` — service-to-service
   credential the coordinator accepts on `/internal/routing` and
-  `/internal/sticky`. The operator key is ALSO accepted on those paths
-  as a backward-compat fallback until the cutover gate is met (see
-  `audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md`).
+  `/internal/sticky`. After PR #172 merges, the operator key is no longer
+  accepted on `/internal/*`; the required 30-day gate and earliest merge
+  date (2026-07-26) are tracked in
+  `audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md`.
 - `coordinator.service_token` in `gateway.yaml` — outbound credential
   the gateway sends on upstream `/internal/*` calls.
 
@@ -488,7 +489,7 @@ gateway side fails closed on the same pattern as of the same fix.
 
 ### 6.1 `coordinator.env` permissions
 
-`/etc/macprovider/coordinator.env` holds `OPERATOR_KEY` and (optionally)
+`/etc/macprovider/coordinator.env` holds `OPERATOR_KEY` and the required
 `GATEWAY_SERVICE_TOKEN`. It is read by the coordinator unit (running
 as root → drops to macprovider via `User=`) and by the de-rooted
 monitor unit (running as macprovider). The required mode is **0640

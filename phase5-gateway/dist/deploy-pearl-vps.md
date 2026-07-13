@@ -26,6 +26,8 @@ the change-log / rollback runbook the script's comments cross-reference.
   coordinator's first deploy (`phase4-coordinator/dist/deploy-pearl-vps.sh`).
 - `/etc/macprovider/gateway.env` with:
   - `COORDINATOR_OPERATOR_KEY`
+  - `COORDINATOR_SERVICE_TOKEN` (must match coordinator
+    `GATEWAY_SERVICE_TOKEN` and differ from operator credentials)
   - `MACPROVIDER_KEY_HASH_SECRET`
   - `MACPROVIDER_DEMO_SIGNING_SECRET`
   - `GITHUB_OAUTH_CLIENT_ID`

@@ -195,7 +195,7 @@ func BearerTokenMatchesHeader(headers http.Header, expected string) bool {
 
 // InternalBearerKind identifies WHICH credential class matched in
 // GatewayInternalBearerMatches. After the M3-2 legacy-fallback removal
-// (PR #87 item 3, post-2026-07-12 cutover gate) the only non-None value
+// (PR #87 item 3, after its tracked cutover gate) the only non-None value
 // is BearerKindServiceToken; the previous BearerKindOperatorKey existed
 // solely to label the M3-2 fallback path on the audit-log line so the
 // operator could watch the cutover, and the path is now gone. The enum
@@ -239,9 +239,8 @@ func OperatorOnlyBearerMatches(headers http.Header, operatorKey string) bool {
 // History: PR #73 (M3-2 / SECU-4) introduced a dual-credential bridge
 // here that also accepted the legacy operator_key as a backward-compat
 // fallback so the cutover could roll out without an atomic flip. The
-// fallback was removed by PR #87 item 3 once the 30-day clean-cutover
-// gate fired (2026-07-12, zero gateway-origin operator_key admits on
-// /internal/* throughout the window). Empty serviceToken still means
+// fallback is removed by PR #87 item 3 after the 30-day clean-cutover
+// gate in the M3-2 tracker. Empty serviceToken still means
 // DENY (M1-5 / SECU-5 preserved).
 func GatewayInternalBearerMatches(headers http.Header, serviceToken string) InternalBearerKind {
 	if serviceToken != "" && BearerTokenMatchesHeader(headers, serviceToken) {

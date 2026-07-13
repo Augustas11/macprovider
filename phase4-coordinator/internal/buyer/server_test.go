@@ -101,7 +101,6 @@ func TestGatewayContextRequiredRejectsChatBeforeIdempotency(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-secret"),
 		buyer.WithGatewayServiceToken("gateway-secret"),
 		buyer.WithRequireGatewayContext(true),
 		buyer.WithRequestLog(store),
@@ -131,7 +130,6 @@ func TestGatewayContextRequiredAllowsAuthenticatedGatewayContext(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-secret"),
 		buyer.WithGatewayServiceToken("gateway-secret"),
 		buyer.WithRequireGatewayContext(true),
 	)
@@ -354,7 +352,7 @@ func TestRateCardProjectionVersionChangesOnlyForProjectionFields(t *testing.T) {
 			time.Unix(1716768000, 0),
 			buyer.WithBilling(nil, base),
 			buyer.WithBillingSnapshotID(999),
-			buyer.WithInternalAuthKey("operator-key-does-not-affect-rate-card"),
+			buyer.WithGatewayServiceToken("operator-key-does-not-affect-rate-card"),
 			buyer.WithRateCardUSDPerMillionCredits(1.0),
 		),
 	)
@@ -1290,7 +1288,7 @@ func TestPoolCheckReportsExactCatalogAdmissionAndServingEligibility(t *testing.T
 				registry,
 				zerolog.Nop(),
 				time.Unix(1716768000, 0),
-				buyer.WithInternalAuthKey("operator-secret"),
+				buyer.WithOperatorKey("operator-secret"),
 				buyer.WithTier2Config(tc.tier2Config),
 			)
 			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=catalog-canary&details=deployment", nil)
@@ -1347,7 +1345,7 @@ func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing
 				provider.CandidateRowIdentity = strings.Repeat("b", 64)
 			}
 			registry.Register(provider, nil)
-			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-secret"))
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithOperatorKey("operator-secret"))
 			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=readiness-provider&assigned_id=session-1&details=readiness", nil)
 			req.RemoteAddr = "198.51.100.1:12345"
 			rr := httptest.NewRecorder()
@@ -1407,13 +1405,35 @@ func TestPoolCheckReadinessRequiresExactAssignedSession(t *testing.T) {
 func TestPoolCheckDeploymentEvidenceRequiresAuthorization(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
-	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-secret"))
-	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&details=deployment", nil)
-	req.RemoteAddr = "198.51.100.1:12345"
-	rr := httptest.NewRecorder()
-	server.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithOperatorKey("operator-secret"),
+		buyer.WithGatewayServiceToken("service-secret"),
+	)
+	for _, tc := range []struct {
+		name   string
+		bearer string
+		remote string
+		want   int
+	}{
+		{name: "missing bearer", remote: "198.51.100.11:12345", want: http.StatusUnauthorized},
+		{name: "service token is not operator auth", bearer: "service-secret", remote: "198.51.100.12:12345", want: http.StatusUnauthorized},
+		{name: "operator bearer", bearer: "operator-secret", remote: "198.51.100.13:12345", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&details=deployment", nil)
+			req.RemoteAddr = tc.remote
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d body=%s", rr.Code, tc.want, rr.Body.String())
+			}
+		})
 	}
 }
 
@@ -2400,7 +2420,7 @@ func TestNonStreamingBillingDiscountsCachedPromptTokensOnlyOnStickyHit(t *testin
 	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
 	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(billingStore, rewards),
 		buyer.WithRoutingConfig(config.RoutingConfig{
@@ -2478,7 +2498,7 @@ func TestNonStreamingBillingDiscountsCachedPromptTokensOnSingleProviderStickyHit
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
 	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(billingStore, rewards),
 		buyer.WithRoutingConfig(config.RoutingConfig{
@@ -2533,7 +2553,7 @@ func TestWSTunneledStickyEligibleForwardsConversationKeyOnBothMissAndHit(t *test
 
 	var forwardedKeys []string
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:    true,
 			StickyTTLS:       1800,
@@ -2616,7 +2636,7 @@ func TestStickyEligibleWithoutInternalConvHeaderForwardsEmpty(t *testing.T) {
 
 	var forwardedKeys []string
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:    true,
 			StickyTTLS:       1800,
@@ -2662,7 +2682,7 @@ func TestStickyEligibleRejectsInternalConvWithoutConvPrefix(t *testing.T) {
 
 	var forwardedKeys []string
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:    true,
 			StickyTTLS:       1800,
@@ -2735,7 +2755,7 @@ func TestNonStreamingBillingQuarantinesCachedPromptTokensWhenStickyProviderPrefl
 	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, p2Upstream.URL, 20)
 	p1PreflightCalls := 0
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(billingStore, rewards),
 		buyer.WithPreflightConfig(1, time.Second),
@@ -6870,7 +6890,7 @@ func TestStickyAccountMismatchEmitsWarnLog(t *testing.T) {
 		registry,
 		zerolog.New(&logBuf),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:    true,
 			StickyTTLS:       1800,

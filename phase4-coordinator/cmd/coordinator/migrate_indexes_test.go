@@ -45,7 +45,7 @@ func TestMigrateIndexesCheckIsReadOnly(t *testing.T) {
 	}
 	_ = db.Close()
 
-	if err := os.WriteFile(configPath, []byte("auth:\n  operator_key: 0123456789abcdefABCDEFghijklmnop\nstorage:\n  db_path: "+dbPath+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte("auth:\n  operator_key: 0123456789abcdefABCDEFghijklmnop\n  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA\nstorage:\n  db_path: "+dbPath+"\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 

@@ -4906,8 +4906,8 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 // Empty operator_key still means DENY (M1-5 / SECU-5 preserved). The
 // service-to-service `/internal/*` paths under buyer.Server use the
 // auth.GatewayInternalBearerMatches helper instead, which accepts the
-// gateway_service_token ONLY (post PR #87 item 3, 2026-07-12 cutover
-// gate). Operator-only endpoints here keep the legacy operator_key.
+// gateway_service_token ONLY after PR #87 item 3. Operator-only endpoints
+// here keep the operator_key.
 func (s *Server) authorizedOperator(r *http.Request) bool {
 	if !auth.OperatorOnlyBearerMatches(r.Header, s.cfg.Auth.OperatorKey) {
 		return false

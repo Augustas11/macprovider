@@ -414,7 +414,7 @@ func TestInternalBearerServiceTokenAccepted(t *testing.T) {
 }
 
 // TestInternalBearerOperatorKeyRejectedPostCutover pins the M3-2 / SECU-4
-// post-cutover contract (PR #87 item 3, 2026-07-12 gate): the coordinator
+// post-cutover contract (PR #87 item 3, after its tracked gate): the coordinator
 // MUST reject the legacy operator_key on /internal/* — the dual-credential
 // bridge is gone, gateway_service_token is the only accepted credential.
 //
@@ -598,7 +598,7 @@ func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 	}
 }
 
-// (Removed by PR #87 item 3, 2026-07-12 cutover gate)
+// (Removed by PR #87 item 3 after its tracked cutover gate.)
 // TestGatewayOperatorKeyFallbackEndToEnd previously pinned the gateway
 // upstream falling back to operator_key when coordinator.service_token
 // was empty. With the legacy fallback removed:

@@ -16,10 +16,9 @@ import (
 // TestInternalRoutingAcceptsServiceTokenOnly locks the M3-2 / SECU-4
 // post-cutover contract for `/internal/routing` and `/internal/sticky`
 // (the paths the gateway actually calls upstream): the gateway_service_token
-// is the SOLE accepted credential. PR #87 item 3 removed the legacy
-// operator_key fallback once the 30-day clean-cutover gate fired
-// (2026-07-12, audit-log proof of zero gateway-origin operator_key
-// admits on /internal/* throughout the window). An operator-key-shaped
+// is the SOLE accepted credential. PR #87 item 3 removes the legacy
+// operator_key fallback after the tracked 30-day clean-cutover gate.
+// An operator-key-shaped
 // bearer hitting this path post-cutover MUST 401 — that's the
 // security gain the removal locked in.
 func TestInternalRoutingAcceptsServiceTokenOnly(t *testing.T) {

@@ -47,7 +47,7 @@ case "$GW" in
 esac
 
 python3 - "$COORD" "$GW" <<'PY'
-import datetime, os, re, sys
+import datetime, hashlib, os, re, sys
 
 coord = open(sys.argv[1]).read()
 gw = open(sys.argv[2]).read() if len(sys.argv) > 2 and sys.argv[2] else ""
@@ -102,6 +102,47 @@ def g_section(src, section, key):
         if m:
             return parse_scalar(m.group(1))
     return None
+
+def g_mapping(src, section, key):
+    """Return scalar children of a one-level nested mapping.
+
+    This intentionally mirrors the gate's bounded YAML reader rather than
+    becoming a second general YAML implementation. It is used for
+    auth.operator_keys so every named operator secret participates in the
+    service-vs-operator collision gate.
+    """
+    body = section_body(src, section)
+    if body is None:
+        return {}
+    parent_indent = None
+    start = None
+    for i, line in enumerate(body):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = re.match(r"^[ \t]*", line).group(0)
+        if parent_indent is None:
+            parent_indent = indent
+        if re.match(rf"^{re.escape(parent_indent)}{re.escape(key)}:\s*(?:#.*)?$", line):
+            start = i + 1
+            break
+    if start is None:
+        return {}
+    values = {}
+    child_indent = None
+    for line in body[start:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = re.match(r"^[ \t]*", line).group(0)
+        if len(indent) <= len(parent_indent):
+            break
+        if child_indent is None:
+            child_indent = indent
+        if indent != child_indent:
+            continue
+        m = re.match(r"^[ \t]*([A-Za-z0-9_.-]+):\s*(.*)$", line)
+        if m:
+            values[m.group(1)] = parse_scalar(m.group(2))
+    return values
 
 fail = 0
 warns = 0
@@ -207,7 +248,7 @@ def check_hex_secret(label, raw):
 # --- operator_key (inline literal or env:NAME deferred to runtime) ---
 check_hex_secret("coordinator operator_key", g_section(coord, "auth", "operator_key"))
 
-# --- gateway_service_token (coordinator side) — REQUIRED post-2026-07-12 cutover ---
+# --- gateway_service_token (coordinator side) — REQUIRED after PR #172 ---
 # PR #172 (issue #87 item 3) removed the legacy operator_key fallback on
 # /internal/*; the coordinator now accepts ONLY gateway_service_token there.
 # A coordinator deployed without auth.gateway_service_token boots but rejects
@@ -220,7 +261,7 @@ check_hex_secret("coordinator gateway_service_token",
 # Only checkable when the gateway config is present (not coordinator-only
 # SKIP_C2_CHECK mode). Both operator_key (for /poolz proxying) and
 # service_token (for /internal/* upstream calls) are REQUIRED by gateway
-# config.go Validate() post-2026-07-12 cutover. The gateway runtime fails
+# config.go Validate() after PR #172. The gateway runtime fails
 # closed on an unset/empty env:NAME or an empty token; the residual gap
 # this gate catches is an INLINE placeholder, which is non-empty and so
 # boots with a junk credential that silently fails gateway->coordinator
@@ -274,6 +315,30 @@ def _resolved_value(raw):
         v = os.environ.get(m.group(1))
         return v.strip() if v else None
     return raw.strip()
+
+def _cross_file_digest(label, raw, proof_env):
+    """Return a digest tied to one service's actual runtime credential.
+
+    Cross-file env:NAME references resolve from different systemd env files,
+    so this process's os.environ cannot prove either equality or distinctness.
+    The production wrapper supplies SHA-256 attestations computed on Pearl;
+    inline values can be hashed locally without exposing them.
+    """
+    if not raw:
+        hard(f"C2c {label}: missing credential")
+        return None
+    if _env_name(raw) is None:
+        value = _resolved_value(raw)
+        if value is None:
+            hard(f"C2c {label}: malformed credential")
+            return None
+        return hashlib.sha256(value.encode()).hexdigest()
+    digest = os.environ.get(proof_env, "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        hard(f"C2c {label}: UNVERIFIED cross-file env credential; "
+             f"{proof_env} must contain the wrapper-provided SHA-256 proof")
+        return None
+    return digest
 
 def _check_distinct(label_a, raw_a, label_b, raw_b, same_file=True):
     """C2c distinctness: assert two secret-bearing fields are NOT equal.
@@ -343,6 +408,17 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
         ok(f"C2c pairing {label_a} == {label_b}: both reference env:{_safe_env_name(na)} "
            f"(same file -> same value at runtime)")
         return
+    if not same_file:
+        a = _cross_file_digest(label_a, raw_a, "C2C_GATEWAY_SERVICE_TOKEN_SHA256")
+        b = _cross_file_digest(label_b, raw_b, "C2C_COORD_SERVICE_TOKEN_SHA256")
+        if a is None or b is None:
+            return
+        if a != b:
+            hard(f"C2c: {label_a} != {label_b} — gateway sends a credential the "
+                 f"coordinator rejects; every /internal/* call would 401")
+        else:
+            ok(f"C2c pairing {label_a} == {label_b}: match (cross-file proof)")
+        return
     a = _resolved_value(raw_a)
     b = _resolved_value(raw_b)
     if a is None or b is None:
@@ -380,6 +456,17 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
     else:
         ok(f"C2c pairing {label_a} == {label_b}: match")
 
+def _check_cross_file_distinct(label_a, raw_a, proof_a, label_b, raw_b, proof_b):
+    a = _cross_file_digest(label_a, raw_a, proof_a)
+    b = _cross_file_digest(label_b, raw_b, proof_b)
+    if a is None or b is None:
+        return
+    if a == b:
+        hard(f"C2c: {label_a} == {label_b} — rotation discipline violated; "
+             f"operator credential would authenticate /internal/* by value")
+    else:
+        ok(f"C2c {label_a} vs {label_b}: distinct (cross-file proof)")
+
 coord_op = g_section(coord, "auth", "operator_key")
 coord_svc = g_section(coord, "auth", "gateway_service_token")
 # Same-file: both fields are in coordinator.yaml and resolve from
@@ -387,6 +474,10 @@ coord_svc = g_section(coord, "auth", "gateway_service_token")
 _check_distinct("coordinator auth.operator_key", coord_op,
                 "coordinator auth.gateway_service_token", coord_svc,
                 same_file=True)
+for operator_name, operator_secret in g_mapping(coord, "auth", "operator_keys").items():
+    _check_distinct(f"coordinator auth.operator_keys.{operator_name}", operator_secret,
+                    "coordinator auth.gateway_service_token", coord_svc,
+                    same_file=True)
 
 if gw:
     gw_op = g_section(gw, "coordinator", "operator_key")
@@ -399,17 +490,20 @@ if gw:
     # Cross-file: gateway operator_key (proxied to coordinator for /poolz)
     # vs coordinator gateway_service_token. Same env:NAME does NOT prove
     # same value because coord and gw units source separate env files.
-    # Skip unresolved with an explicit message; runtime backstop on each
-    # side prevents an unsafe boot for the equal-values-in-one-file case.
-    _check_distinct("gateway coordinator.operator_key", gw_op,
-                    "coordinator auth.gateway_service_token", coord_svc,
-                    same_file=False)
+    # Runtime validation cannot compare values sourced from two independent
+    # env files. Require wrapper-provided hashes instead of trusting this
+    # process's ambiguous os.environ or allowing an unverified warning.
+    _check_cross_file_distinct(
+        "gateway coordinator.operator_key", gw_op,
+        "C2C_GATEWAY_OPERATOR_KEY_SHA256",
+        "coordinator auth.gateway_service_token", coord_svc,
+        "C2C_COORD_SERVICE_TOKEN_SHA256")
     # C2c pairing: gateway sends coordinator.service_token on /internal/*;
     # coordinator accepts ONLY its own auth.gateway_service_token. Cross-file
     # by definition. Same env:NAME on both sides DOES NOT prove pairing
     # (separate env files). Mismatches are detectable only when both
-    # values are resolvable at gate time; otherwise WARN, do not pass
-    # silently — pairing is the load-bearing /internal/* invariant.
+    # values are proven by service-specific digests; unresolved proof is a
+    # hard failure because pairing is the load-bearing /internal/* invariant.
     _check_pair_equal("gateway coordinator.service_token", gw_svc,
                       "coordinator auth.gateway_service_token", coord_svc,
                       same_file=False)
@@ -572,8 +666,8 @@ else:
 # cross-file C2c (audit-r5 MINOR): operators scanning wrapper output
 # would otherwise miss the manual-verification prompt.
 if warns:
-    print(f"\nconfig-drift summary: {warns} WARN(s) — review above; some C2c "
-          f"invariants may require manual verification (see UNVERIFIED lines)")
+    print(f"\nconfig-drift summary: {warns} WARN(s) — review the non-blocking "
+          f"configuration warnings above")
 else:
     print("\nconfig-drift summary: 0 WARN(s)")
 

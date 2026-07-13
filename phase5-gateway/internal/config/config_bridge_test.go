@@ -137,3 +137,11 @@ auth:
 		t.Fatalf("error should reference field: %v", err)
 	}
 }
+
+func TestValidateRejectsWhitespaceOnlyCoordinatorServiceToken(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Coordinator.ServiceToken = " \t\n "
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "coordinator.service_token must be set") {
+		t.Fatalf("Validate err=%v want whitespace-only token rejection", err)
+	}
+}

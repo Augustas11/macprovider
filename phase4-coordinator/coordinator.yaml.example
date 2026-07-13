@@ -200,14 +200,10 @@ auth:
   # Indirected form (production):
   #   operator_key: env:OPERATOR_KEY
   operator_key: "change-me"
-  # gateway_service_token is the optional service-to-service credential
-  # the gateway uses when calling internal/admin coordinator endpoints
-  # (M3-2 / SECU-4). When set, the coordinator accepts EITHER
-  # operator_key OR gateway_service_token on the internal-bearer auth
-  # path, letting the operator key be rotated independently of the live
-  # upstream credential. Leave unset to preserve pre-bridge behavior
-  # (operator_key is the sole accepted credential).
-  #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Required service-to-service credential for gateway calls to
+  # /internal/*. It must differ from operator_key and every operator_keys
+  # entry. Production should use env indirection.
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   require_provider_tokens: true # Disable only for isolated local development.
   # Public onboarding escape hatch. Keep false for local/invite-only configs;
   # set true only when clean tokenless provisional installs should self-mint.

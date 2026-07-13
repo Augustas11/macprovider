@@ -179,6 +179,7 @@ func TestOAuthHandoffPersistenceFailureRedirectsToAccount(t *testing.T) {
 	cfg.Auth.OAuth.GitHub.ClientID = "client-id"
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	cfg.Coordinator.OperatorKey = "operator-key"
+	cfg.Coordinator.ServiceToken = "service-token"
 	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.streamvc.live/auth/github/callback"}
 	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
 	withMalibuReturnTo(&cfg)
@@ -282,7 +283,7 @@ func baselineValidConfig(t *testing.T) config.Config {
 	cfg.Auth.OAuth.GitHub.ClientID = "client-id"
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	cfg.Coordinator.OperatorKey = "operator-key"
+	cfg.Coordinator.ServiceToken = "service-token"
 	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.streamvc.live/auth/github/callback"}
 	return cfg
 }
-

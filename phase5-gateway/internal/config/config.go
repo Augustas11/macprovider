@@ -50,10 +50,10 @@ type CoordinatorConfig struct {
 	OperatorKey string `yaml:"operator_key"`
 	// ServiceToken is the REQUIRED service-to-service credential the
 	// gateway sends on UPSTREAM /internal/* calls to the coordinator
-	// (M3-2 / SECU-4). Post PR #87 item 3 this is the ONLY accepted
+	// (M3-2 / SECU-4). After PR #87 item 3 this is the ONLY accepted
 	// credential on the coordinator's /internal/routing and
 	// /internal/sticky endpoints — the legacy OperatorKey fallback was
-	// removed once the 30-day clean-cutover gate fired (2026-07-12).
+	// removed after the 30-day clean-cutover gate in the M3-2 tracker.
 	// OperatorKey remains for /poolz proxying (operator-only path).
 	// Validate() now requires ServiceToken non-empty.
 	ServiceToken      string `yaml:"service_token"`
@@ -340,18 +340,19 @@ func (c Config) Validate() error {
 	if c.Coordinator.OperatorKey == "" {
 		return fmt.Errorf("coordinator.operator_key must be set")
 	}
-	// Post-PR #87 item 3 (2026-07-12 cutover gate): service_token is now
+	// After PR #87 item 3, service_token is
 	// REQUIRED — the coordinator no longer accepts the legacy operator_key
 	// fallback on /internal/*, so a gateway without service_token can't
 	// route any buyer traffic.
-	if c.Coordinator.ServiceToken == "" {
+	serviceToken := strings.TrimSpace(c.Coordinator.ServiceToken)
+	if serviceToken == "" {
 		return fmt.Errorf("coordinator.service_token must be set (post-M3-2 cutover: required for /internal/* upstream calls)")
 	}
 	// Compare after TrimSpace: the coordinator strips both sides before
 	// matching the bearer, so "X" and "X " collapse to the same value
 	// on the wire. A strict == on the raw fields would let an operator
 	// pass distinctness while effectively reusing the operator credential.
-	if strings.TrimSpace(c.Coordinator.ServiceToken) == strings.TrimSpace(c.Coordinator.OperatorKey) {
+	if serviceToken == strings.TrimSpace(c.Coordinator.OperatorKey) {
 		return fmt.Errorf("coordinator.service_token must differ from coordinator.operator_key (rotation discipline: equal values — including whitespace-equivalent — would let the operator credential authenticate /internal/* by value)")
 	}
 	if c.Coordinator.PoolzPollInterval <= 0 {
@@ -551,8 +552,8 @@ func (c Config) Address() string {
 }
 
 // UpstreamCoordinatorBearer returns the credential the gateway sends on
-// UPSTREAM /internal/* calls to the coordinator (M3-2 / SECU-4). Post
-// PR #87 item 3 (2026-07-12 cutover gate), this is the
+// UPSTREAM /internal/* calls to the coordinator (M3-2 / SECU-4). After
+// PR #87 item 3, this is the
 // gateway_service_token ONLY — the legacy OperatorKey fallback was
 // removed once 30 days of clean audit-log evidence showed zero
 // gateway-origin operator_key admits on /internal/*. Empty return means

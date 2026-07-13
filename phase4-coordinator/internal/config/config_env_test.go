@@ -63,6 +63,20 @@ auth:
 	}
 }
 
+func TestLoadRejectsWhitespaceOnlyEnvGatewayServiceToken(t *testing.T) {
+	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("M3_2_TEST_BLANK_GATEWAY_TOKEN", "  \t ")
+
+	_, err := loadConfigFromYAML(t, `
+auth:
+  operator_key: env:M3_2_TEST_OPERATOR_KEY
+  gateway_service_token: env:M3_2_TEST_BLANK_GATEWAY_TOKEN
+`)
+	if err == nil || !strings.Contains(err.Error(), "gateway_service_token must be set") {
+		t.Fatalf("Load err=%v want whitespace-only token rejection", err)
+	}
+}
+
 // TestLoadResolvesEnvStatsDSNs locks the SPEC-017 deployment path:
 // stats runtime DSNs may be env-indirected and resolve before
 // stats.enabled validation runs.
@@ -76,6 +90,7 @@ listen:
   bind_address: "127.0.0.1"
 auth:
   operator_key: env:M3_2_TEST_OPERATOR_KEY
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
 stats:
   enabled: true
   reader_dsn: env:TEST_STATS_READER_DSN
@@ -180,11 +195,12 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 func TestLoadRejectsWeakEnvNamedOperatorKey(t *testing.T) {
 	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
 	t.Setenv("M3_2_TEST_WEAK_OPERATOR_A", "changeme")
-	t.Setenv("M3_2_TEST_STRONG_OPERATOR_B", "fedcba9876543210PONMLKJIHGFEDCBA")
+	t.Setenv("M3_2_TEST_STRONG_OPERATOR_B", "ZXCVbnm1234567890qwertyASDFGHJKL")
 
 	_, err := loadConfigFromYAML(t, `
 auth:
   operator_key: env:M3_2_TEST_OPERATOR_KEY
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
   operator_keys:
     alice: env:M3_2_TEST_WEAK_OPERATOR_A
     bob: env:M3_2_TEST_STRONG_OPERATOR_B

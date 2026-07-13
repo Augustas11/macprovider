@@ -45,16 +45,14 @@
 #   T31 — C2c coord operator_key == gateway_service_token (inline same)         -> FAIL
 #   T32 — C2c gateway operator_key == service_token (inline same)               -> FAIL
 #   T33 — C2c cross-file gw operator_key == coord gateway_service_token         -> FAIL
-#   T34 — C2c all tokens env-deferred                                           -> skipped (pass)
+#   T34 — C2c all tokens env-deferred without runtime proof                     -> FAIL
 #   T35 — C2c same env:NAME within same yaml file (static catch)                -> FAIL
 #   T36 — C2c pairing gw service_token != coord service_token (inline)          -> FAIL
-#   T37 — C2c pairing mismatch via different env vars resolving differently     -> FAIL
-#   T38 — C2c pairing match via different env vars resolving to same value      -> pass
-#   T39 — C2c pairing cross-file same env:NAME unresolved (separate env files)  -> pass with explicit WARN
-#   T40 — C2c cross-file distinctness unresolved (no runtime backstop)          -> pass with WARN
-#   T41 — C2c pairing inline+env-unresolved (no runtime backstop)               -> pass with WARN
-#   T42 — C2c pairing both env-unresolved different names                       -> pass with WARN
-#   T43 — WARN-bearing run surfaces "config-drift summary: N WARN(s)"           -> pass
+#   T37 — C2c pairing mismatch via service-specific runtime hashes              -> FAIL
+#   T38 — C2c pairing match via service-specific runtime hashes                 -> pass
+#   T39-T42 — unresolved cross-file env credentials without proof               -> FAIL
+#   T43 — matching runtime hashes prove env-indirected pairing                  -> pass
+#   T44 — named operator key colliding with service token                       -> FAIL
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -74,6 +72,10 @@ FUTURE_RFC3339="$(python3 -c 'import datetime; print((datetime.datetime.now(date
 # Second 64-hex constant, distinct from HEX64, for tests that exercise the
 # C2c operator-vs-service-token distinctness invariant added in PR #172.
 HEX64B=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+HEX64C=11112222333344445555666677778888999900001111222233334444aaaabbbb
+HEX64_SHA256="$(printf '%s' "$HEX64" | shasum -a 256 | awk '{print $1}')"
+HEX64B_SHA256="$(printf '%s' "$HEX64B" | shasum -a 256 | awk '{print $1}')"
+HEX64C_SHA256="$(printf '%s' "$HEX64C" | shasum -a 256 | awk '{print $1}')"
 
 PASS=0
 FAIL=0
@@ -89,7 +91,7 @@ mk_workdir() { mktemp -d -t check-deploy-config-test.XXXXXX; }
 # Write a coordinator.yaml whose operator_key is $1 (verbatim, already
 # quoted/unquoted by the caller) plus the fields the gate needs to otherwise
 # pass: an explicit require_provider_tokens, a C2-clean request_timeout_s,
-# and a distinct gateway_service_token (REQUIRED post-2026-07-12 cutover).
+# and a distinct gateway_service_token (required after PR #172).
 # $4 overrides the gateway_service_token line (defaults to inline HEX64B,
 # distinct from HEX64 so C2c passes). Pass "" to omit it entirely (for
 # tests that exercise the missing-token failure path).
@@ -128,7 +130,7 @@ EOF
 # inline HEX64B service_token line so existing tests pass the post-cutover
 # REQUIRED check. Pass "" to omit it (exercises missing-token failure).
 write_gw() {
-  local wd="$1" gwt="${2:-300}" opkey="${3:-env:COORDINATOR_OPERATOR_KEY}"
+  local wd="$1" gwt="${2:-300}" opkey="${3:-\"$HEX64\"}"
   local svc="service_token: \"$HEX64B\""
   if [ "$#" -ge 4 ]; then svc="$4"; fi
   {
@@ -346,7 +348,7 @@ test_gateway_operator_key_env_unset_deferred() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\""
   write_gw "$wd" 300 "env:COORDINATOR_OPERATOR_KEY"
-  run_check "$wd" COORDINATOR_OPERATOR_KEY=
+  run_check "$wd" COORDINATOR_OPERATOR_KEY= C2C_GATEWAY_OPERATOR_KEY_SHA256="$HEX64_SHA256"
   assert_exit 0 "T11 gateway operator_key env:NAME (unset) does not false-fail"
   assert_contains "gateway operator_key deferred to runtime" "T11 deferred message"
   rm -rf "$wd"
@@ -381,7 +383,7 @@ test_gateway_service_token_placeholder_fails() {
 }
 
 test_gateway_service_token_absent_fails_post_cutover() {
-  # Post-PR #172 (issue #87 item 3, 2026-07-12 cutover): service_token is
+  # After PR #172 (issue #87 item 3), service_token is
   # REQUIRED on the gateway side. Absence must hard-fail; without it the
   # gateway can't reach any /internal/* coordinator endpoint.
   local wd; wd="$(mk_workdir)"
@@ -678,14 +680,14 @@ test_c2c_cross_file_gw_operator_equals_coord_service_fails() {
   rm -rf "$wd"
 }
 
-test_c2c_deferred_env_skipped() {
+test_c2c_deferred_env_without_proof_fails() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "env:OPERATOR_KEY" 280 "gateway_service_token: env:COORD_SVC_TOKEN"
   write_gw "$wd" 300 "env:COORDINATOR_OPERATOR_KEY" "service_token: env:GW_SVC_TOKEN"
-  # All env vars unset -> all tokens deferred -> C2c skipped (cannot judge).
+  # Cross-file values cannot be inferred from one process environment.
   run_check "$wd" OPERATOR_KEY= COORD_SVC_TOKEN= COORDINATOR_OPERATOR_KEY= GW_SVC_TOKEN=
-  assert_exit 0 "T34 all env tokens deferred -> C2c skipped + pass overall"
-  assert_contains "skipped, deferred to runtime" "T34 deferred skip message"
+  assert_exit 1 "T34 all env tokens deferred without runtime hashes -> FAIL"
+  assert_contains "must contain the wrapper-provided SHA-256 proof" "T34 missing-proof message"
   rm -rf "$wd"
 }
 
@@ -718,7 +720,6 @@ test_c2c_pairing_inline_mismatch_fails() {
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: \"$HEX64B\""
   # gateway service_token = a third distinct value (HEX64C) — passes
   # individual hex checks and distinctness, but mismatches coordinator.
-  local HEX64C=11112222333344445555666677778888999900001111222233334444aaaabbbb
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64C\""
   run_check "$wd"
   assert_exit 1 "T36 gateway/coord service_token mismatch (inline) -> FAIL"
@@ -730,9 +731,10 @@ test_c2c_pairing_env_resolved_mismatch_fails() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:GW_SVC"
-  # Both env vars set but to different values.
-  run_check "$wd" COORD_SVC="$HEX64B" GW_SVC=11112222333344445555666677778888999900001111222233334444aaaabbbb
-  assert_exit 1 "T37 gateway/coord service_token mismatch (env-resolved) -> FAIL"
+  run_check "$wd" \
+    C2C_COORD_SERVICE_TOKEN_SHA256="$HEX64B_SHA256" \
+    C2C_GATEWAY_SERVICE_TOKEN_SHA256="$HEX64C_SHA256"
+  assert_exit 1 "T37 gateway/coord service-token runtime hashes mismatch -> FAIL"
   assert_contains "gateway coordinator.service_token != coordinator auth.gateway_service_token" "T37 env-mismatch message"
   rm -rf "$wd"
 }
@@ -741,91 +743,81 @@ test_c2c_pairing_env_resolved_match_passes() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:GW_SVC"
-  # Both env vars set to the SAME value via different names — pairing ok.
-  run_check "$wd" COORD_SVC="$HEX64B" GW_SVC="$HEX64B"
-  assert_exit 0 "T38 gateway/coord service_token match (env-resolved, diff names) -> pass"
-  assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: match" "T38 pairing-match message"
+  run_check "$wd" \
+    C2C_COORD_SERVICE_TOKEN_SHA256="$HEX64B_SHA256" \
+    C2C_GATEWAY_SERVICE_TOKEN_SHA256="$HEX64B_SHA256"
+  assert_exit 0 "T38 matching service-specific runtime hashes -> pass"
+  assert_contains "match (cross-file proof)" "T38 pairing-match message"
   rm -rf "$wd"
 }
 
-test_c2c_pairing_cross_file_same_env_name_unverified_warn() {
-  # Audit-r3 finding (3/3 lanes): coord and gw systemd units source
-  # SEPARATE env files (/etc/macprovider/coordinator.env vs gateway.env).
-  # Same env:NAME on both sides does NOT prove same value — the env files
-  # can disagree. r2 wrongly treated this as a proven pass; r3 fix: WARN
-  # (loud, not silent) so the operator knows the gate cannot verify and
-  # must check both env files manually.
+test_c2c_pairing_cross_file_same_env_name_without_proof_fails() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:SHARED_SVC"
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:SHARED_SVC"
-  run_check "$wd" SHARED_SVC=
-  # Exit 0 — WARN is not a hard fail, but the message is loud.
-  assert_exit 0 "T39 pairing cross-file same env:NAME unresolved -> pass with explicit WARN"
-  assert_contains "UNVERIFIED" "T39 unverified-warn message"
-  assert_contains "SEPARATE env files" "T39 separate-env-files explanation"
+  run_check "$wd"
+  assert_exit 1 "T39 same env:NAME across separate env files without proof -> FAIL"
+  assert_contains "UNVERIFIED cross-file env credential" "T39 unverified-proof message"
   rm -rf "$wd"
 }
 
-test_c2c_cross_file_distinctness_unresolved_warns() {
-  # Audit-r4 finding (3-of-3 lanes): cross-file _check_distinct unresolved
-  # has NO runtime backstop (each module's Validate only sees its own
-  # file). r3 emitted ok-skip; r4 fix: WARN loudly, name the gap.
+test_c2c_cross_file_distinctness_without_proof_fails() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:SHARED_NAME"
   write_gw "$wd" 300 "env:SHARED_NAME" "service_token: \"$HEX64B\""
-  run_check "$wd" SHARED_NAME=
-  assert_exit 0 "T40 cross-file distinctness unresolved -> pass with WARN"
-  assert_contains "WARN: C2c gateway coordinator.operator_key vs coordinator auth.gateway_service_token: UNVERIFIED" "T40 cross-file warn message"
-  assert_contains "NO runtime backstop" "T40 backstop-gap explanation"
+  run_check "$wd"
+  assert_exit 1 "T40 cross-file distinctness without runtime hashes -> FAIL"
+  assert_contains "C2C_GATEWAY_OPERATOR_KEY_SHA256" "T40 gateway-operator proof message"
   rm -rf "$wd"
 }
 
-test_c2c_pairing_inline_plus_env_unresolved_warns() {
-  # Audit-r4 (3-of-3): inline on one side + unresolved env on the other
-  # — pairing cannot be verified. r3 silently skipped; r4 must WARN.
-  # Audit-r5 (3-of-3): the WARN must NOT print the inline raw value —
-  # earlier `raw_a={raw!r}` leaked a live bearer into deploy output.
+test_c2c_pairing_inline_plus_env_without_proof_fails() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
-  run_check "$wd" COORD_SVC=
-  assert_exit 0 "T41 pairing inline+env-unresolved -> pass with WARN"
-  assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: UNVERIFIED" "T41 pairing-warn message"
-  assert_contains "NO runtime backstop" "T41 backstop-gap explanation"
-  # Regression guards (audit-r5): the WARN must redact the inline value
-  # and classify safely. HEX64B must NEVER appear in WARN/OK output.
+  run_check "$wd"
+  assert_exit 1 "T41 inline plus env without runtime proof -> FAIL"
+  assert_contains "C2C_COORD_SERVICE_TOKEN_SHA256" "T41 coordinator-service proof message"
   assert_absent "$HEX64B" "T41 redacted: HEX64B inline value not leaked"
-  assert_contains "inline-redacted" "T41 inline side classified as inline-redacted"
-  assert_contains "env:COORD_SVC (unresolved)" "T41 env side classified safely"
   rm -rf "$wd"
 }
 
-test_c2c_pairing_different_env_unresolved_warns() {
-  # Audit-r4 (3-of-3): both sides env-deferred via DIFFERENT names —
-  # cannot prove pairing without resolving. WARN.
+test_c2c_pairing_different_env_without_proof_fails() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:GW_SVC"
-  run_check "$wd" COORD_SVC= GW_SVC=
-  assert_exit 0 "T42 pairing both-env-unresolved (diff names) -> pass with WARN"
-  assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: UNVERIFIED" "T42 pairing-warn message"
+  run_check "$wd"
+  assert_exit 1 "T42 different env names without runtime proof -> FAIL"
+  assert_contains "must contain the wrapper-provided SHA-256 proof" "T42 missing-proof message"
   rm -rf "$wd"
 }
 
-test_warn_count_surfaced_in_summary() {
-  # Audit-r5 MINOR (3-of-3): final pass line was bare "config-drift
-  # check passed" even when WARNs had fired — easy to miss in a wall
-  # of OKs. Summary line now reports the WARN count (exact number
-  # depends on which optional fields are unset; here we assert the
-  # line shape and the manual-verification prompt).
+test_cross_file_runtime_hashes_prove_pairing() {
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
-  run_check "$wd" COORD_SVC=
-  assert_exit 0 "T43 WARN-bearing run still passes overall"
-  assert_contains "config-drift summary:" "T43 summary line present"
-  assert_contains "WARN(s)" "T43 WARN count surfaced in summary"
-  assert_contains "manual verification" "T43 summary prompts manual verification (UNVERIFIED prompt active)"
+  run_check "$wd" C2C_COORD_SERVICE_TOKEN_SHA256="$HEX64B_SHA256"
+  assert_exit 0 "T43 runtime hash proves env-side value matches inline gateway token"
+  assert_contains "match (cross-file proof)" "T43 proof-backed pairing message"
+  rm -rf "$wd"
+}
+
+test_c2c_named_operator_collision_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: \"$HEX64B\""
+  # Add a named operator credential equal to the service token.
+  awk -v secret="$HEX64B" '
+    { print }
+    /gateway_service_token:/ {
+      print "  operator_keys:"
+      print "    alice: \"" secret "\""
+    }
+  ' "$wd/coordinator.yaml" > "$wd/coordinator.yaml.tmp"
+  mv "$wd/coordinator.yaml.tmp" "$wd/coordinator.yaml"
+  write_gw "$wd"
+  run_check "$wd"
+  assert_exit 1 "T44 named operator key matching service token -> FAIL"
+  assert_contains "auth.operator_keys.alice == coordinator auth.gateway_service_token" "T44 named-operator collision message"
   rm -rf "$wd"
 }
 
@@ -869,16 +861,17 @@ test_c2c_coord_service_token_absent_fails
 test_c2c_coord_operator_equals_service_fails
 test_c2c_gateway_operator_equals_service_fails
 test_c2c_cross_file_gw_operator_equals_coord_service_fails
-test_c2c_deferred_env_skipped
+test_c2c_deferred_env_without_proof_fails
 test_c2c_same_env_name_same_file_static_fail
 test_c2c_pairing_inline_mismatch_fails
 test_c2c_pairing_env_resolved_mismatch_fails
 test_c2c_pairing_env_resolved_match_passes
-test_c2c_pairing_cross_file_same_env_name_unverified_warn
-test_c2c_cross_file_distinctness_unresolved_warns
-test_c2c_pairing_inline_plus_env_unresolved_warns
-test_c2c_pairing_different_env_unresolved_warns
-test_warn_count_surfaced_in_summary
+test_c2c_pairing_cross_file_same_env_name_without_proof_fails
+test_c2c_cross_file_distinctness_without_proof_fails
+test_c2c_pairing_inline_plus_env_without_proof_fails
+test_c2c_pairing_different_env_without_proof_fails
+test_cross_file_runtime_hashes_prove_pairing
+test_c2c_named_operator_collision_fails
 
 echo
 echo "== summary =="

@@ -920,6 +920,7 @@ coordinator:
   buyer_url: https://buyer.example
   operator_url: https://op.example
   operator_key: operator-secret
+  service_token: service-secret
   poolz_poll_interval_s: 5
 storage:
   driver: sqlite
