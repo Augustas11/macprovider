@@ -179,7 +179,7 @@ func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
 		f(&p)
 		return p
 	}
-	// Not routable now / not routable ever / unreachable — none may be buyer-serving.
+	// Unroutable / unreachable on a request-independent gate — none may be buyer-serving.
 	for name, p := range map[string]pool.Provider{
 		"busy/zero-free":   mutate(func(p *pool.Provider) { p.State = pool.StateBusy; p.SlotsFree = 0 }),
 		"negative-free":    mutate(func(p *pool.Provider) { p.SlotsFree = -1 }),

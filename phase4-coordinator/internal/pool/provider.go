@@ -1265,9 +1265,11 @@ func providerServesActiveModel(p *Provider, modelID string) bool {
 }
 
 // SetBuyerServingPredicate injects the request-independent buyer-serving predicate
-// (RoutingEligible + positive context window + not Tier-2-excluded; quota omitted)
-// used by the FR-CAN22 floor and the redundancy count. The ws layer wires this at
-// construction; nil restores the RoutingEligible+context fallback. It never mutates
+// (RoutingEligible + transport-reachable [live open WS session, else endpoint] +
+// positive context window + not Tier-2-excluded; request-dependent context/quota
+// omitted) used by the FR-CAN22 floor and the redundancy count. The ws layer wires
+// this at construction; nil restores the RoutingEligible+context fallback (which
+// omits the ws-only transport/Tier-2 gates). It never mutates
 // routing/admission — the predicate
 // is read-only w.r.t. the sanction decision.
 func (r *Registry) SetBuyerServingPredicate(fn func(Provider) bool) {

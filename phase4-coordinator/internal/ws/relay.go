@@ -312,10 +312,16 @@ func (ps *providerSession) completeFrame(f providerFrame, err error) {
 func (ps *providerSession) close() {
 	ps.closeOnce.Do(func() {
 		ps.writeMu.Lock()
+		// Publish the closed-state to isOpen() (which reads closedCh lock-free)
+		// BEFORE flipping ps.closed, both under writeMu. This makes isOpen() a
+		// conservative signal: it can only observe closedCh-closed at-or-before
+		// dispatch begins rejecting on ps.closed, so there is never a window where
+		// isOpen() returns true while enqueueFrame would return ErrRelayClosed (the
+		// canary floor must not count a session dispatch has already given up on).
+		close(ps.closedCh)
 		ps.closed = true
 		close(ps.writeCh)
 		ps.writeMu.Unlock()
-		close(ps.closedCh)
 		ps.failAll(ErrRelayClosed)
 	})
 }
