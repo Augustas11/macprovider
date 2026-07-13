@@ -37,9 +37,13 @@ type RegisterRequest struct {
 	AppAttestObject *string         `json:"app_attest_object,omitempty"` // base64 CBOR
 	AppAttestKeyID  *string         `json:"app_attest_key_id,omitempty"` // base64 32-byte
 	ReferralCode    string          `json:"referral_code,omitempty"`
-	Nonce           string          `json:"nonce"`     // 64-hex = 32 random bytes
-	TSUTC           string          `json:"ts_utc"`    // RFC3339
-	Signature       string          `json:"signature"` // base64 64-byte Ed25519 over JCS(body\signature)
+	// ProviderTokenCandidate is generated and durably held by the client
+	// before transport. Binding it into the signed request makes a committed
+	// registration idempotently recoverable after a lost HTTP response.
+	ProviderTokenCandidate string `json:"provider_token_candidate,omitempty"`
+	Nonce                  string `json:"nonce"`     // 64-hex = 32 random bytes
+	TSUTC                  string `json:"ts_utc"`    // RFC3339
+	Signature              string `json:"signature"` // base64 64-byte Ed25519 over JCS(body\signature)
 }
 
 type HardwareSummary struct {
@@ -180,9 +184,10 @@ type RegistrationPrepareStore interface {
 type AuthTokenStore interface {
 	// MintProviderTokenAppTrack mints per SPEC-026 §4.1 step 7 semantics.
 	// Duplicate registration with any active token requires bearer proof from
-	// the Authorization header; request bodies must never carry bearer material.
-	// provider_name is the tenant literal "malibu-app" for App-track.
-	MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (cleartext string, err error)
+	// the Authorization header; request bodies must never carry the current
+	// bearer. A fresh client-held candidate is not authoritative until this
+	// transaction commits. provider_name is the tenant literal "malibu-app".
+	MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer, freshTokenCandidate *string) (cleartext string, err error)
 
 	// ValidateToken validates an existing provider bearer token and returns the
 	// bound provider_id. Evidence submission is read-only with respect to the
@@ -191,7 +196,7 @@ type AuthTokenStore interface {
 }
 
 type ReferralStore interface {
-	MintProviderTokenAppTrackWithReferralAttempt(ctx context.Context, providerID, referralCode string, policy auth.ReferralPolicy, attempt auth.AppTrackRegistrationAttempt) (cleartext string, err error)
+	MintProviderTokenAppTrackWithReferralAttempt(ctx context.Context, providerID, referralCode, tokenCandidate string, policy auth.ReferralPolicy, attempt auth.AppTrackRegistrationAttempt) (cleartext string, err error)
 	AcknowledgeAppTrackReferralMint(ctx context.Context, providerID, cleartextToken string) error
 	RollbackAppTrackReferralMint(ctx context.Context, providerID, cleartextToken string) error
 	ListPendingAppTrackReferralMints(ctx context.Context, createdBefore time.Time) ([]auth.PendingAppTrackReferralMint, error)
@@ -286,6 +291,10 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "referral_code is invalid")
 		return
 	}
+	if req.ProviderTokenCandidate != "" && (len(req.ProviderTokenCandidate) != 64 || !isLowerHex(req.ProviderTokenCandidate)) {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "provider_token_candidate must be 64 lowercase hex chars")
+		return
+	}
 
 	pubkey, err := DecodeIdentityPubkey(req.IdentityPubkey)
 	if err != nil {
@@ -326,36 +335,6 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 	}
 
 	sourceIP := clientIP(r, h.TrustedProxies)
-	currentBearer := bearerFromRequest(r)
-	bearerExempt := false
-	if h.ReferralPolicy.RequireForRegistration && currentBearer != nil {
-		boundProviderID, ok, validateErr := h.AuthTokenStore.ValidateToken(r.Context(), *currentBearer)
-		if validateErr != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "credential authority unavailable")
-			return
-		}
-		bearerExempt = ok && boundProviderID == req.ProviderID
-	}
-	prepareStore, prepareStoreOK := h.StatsDB.(RegistrationPrepareStore)
-	if h.ReferralPolicy.RequireForRegistration && !bearerExempt {
-		if h.ReferralStore == nil || !prepareStoreOK {
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
-			return
-		}
-		// A retry of an already committed signed attempt never rotates or
-		// re-discloses credentials. Return a stable support state instead.
-		checkCtx, cancelCheck := context.WithTimeout(r.Context(), 2*time.Second)
-		prepared, checkErr := prepareStore.ProviderRegistrationPrepared(checkCtx, req.ProviderID, req.Nonce, tsUTC)
-		cancelCheck()
-		if checkErr != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "provider registration outcome unavailable")
-			return
-		}
-		if prepared {
-			writeJSONError(w, http.StatusConflict, "existing_active_token_no_proof", "registration already committed; existing credential proof or support is required")
-			return
-		}
-	}
 	if delta := now.Sub(tsUTC); delta > time.Minute || delta < -time.Minute {
 		writeJSONError(w, http.StatusBadRequest, "timestamp_skew", "ts_utc outside allowed skew")
 		return
@@ -384,6 +363,49 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			}
 			w.Header().Set("Retry-After", "60")
 			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "asn rate limit exceeded")
+			return
+		}
+	}
+	currentBearer := bearerFromRequest(r)
+	bearerExempt := false
+	if h.ReferralPolicy.RequireForRegistration && currentBearer != nil {
+		boundProviderID, ok, validateErr := h.AuthTokenStore.ValidateToken(r.Context(), *currentBearer)
+		if validateErr != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "credential authority unavailable")
+			return
+		}
+		bearerExempt = ok && boundProviderID == req.ProviderID
+	}
+	prepareStore, prepareStoreOK := h.StatsDB.(RegistrationPrepareStore)
+	if h.ReferralPolicy.RequireForRegistration && !bearerExempt {
+		if h.ReferralStore == nil || !prepareStoreOK {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
+			return
+		}
+		if req.ProviderTokenCandidate == "" {
+			writeJSONError(w, http.StatusBadRequest, "provider_token_candidate_required", "a client-held provider token candidate is required for gated registration")
+			return
+		}
+		// A retry of an already committed signed attempt never rotates or
+		// re-discloses credentials. Return a stable support state instead.
+		checkCtx, cancelCheck := context.WithTimeout(r.Context(), 2*time.Second)
+		prepared, checkErr := prepareStore.ProviderRegistrationPrepared(checkCtx, req.ProviderID, req.Nonce, tsUTC)
+		cancelCheck()
+		if checkErr != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "provider registration outcome unavailable")
+			return
+		}
+		if prepared {
+			boundProviderID, ok, validateErr := h.AuthTokenStore.ValidateToken(r.Context(), req.ProviderTokenCandidate)
+			if validateErr != nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "credential authority unavailable")
+				return
+			}
+			if !ok || boundProviderID != req.ProviderID {
+				writeJSONError(w, http.StatusConflict, "committed_credential_mismatch", "registration committed with a different credential candidate")
+				return
+			}
+			writeAppTrackRegisterSuccess(w, req.ProviderID, req.ProviderTokenCandidate, false, h.CoordinatorWSURL)
 			return
 		}
 	}
@@ -449,7 +471,7 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		attempt := auth.AppTrackRegistrationAttempt{SourceIP: sourceIP, Nonce: req.Nonce, AttemptTS: tsUTC}
 		mintCtx, cancelMint := context.WithTimeout(r.Context(), 2*time.Second)
 		token, err = h.ReferralStore.MintProviderTokenAppTrackWithReferralAttempt(
-			mintCtx, req.ProviderID, req.ReferralCode, h.ReferralPolicy, attempt,
+			mintCtx, req.ProviderID, req.ReferralCode, req.ProviderTokenCandidate, h.ReferralPolicy, attempt,
 		)
 		cancelMint()
 		if err != nil {
@@ -513,7 +535,11 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			writeAppTrackPrepareError(w, err)
 			return
 		}
-		token, err = h.AuthTokenStore.MintProviderTokenAppTrack(r.Context(), req.ProviderID, currentBearer)
+		var freshTokenCandidate *string
+		if currentBearer == nil && req.ProviderTokenCandidate != "" {
+			freshTokenCandidate = &req.ProviderTokenCandidate
+		}
+		token, err = h.AuthTokenStore.MintProviderTokenAppTrack(r.Context(), req.ProviderID, currentBearer, freshTokenCandidate)
 		if err != nil {
 			writeAppTrackMintError(w, err)
 			return
@@ -523,12 +549,16 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 	if h.Metrics != nil {
 		h.Metrics.IncRegisterSource("app")
 	}
+	writeAppTrackRegisterSuccess(w, req.ProviderID, token, attested, h.CoordinatorWSURL)
+}
+
+func writeAppTrackRegisterSuccess(w http.ResponseWriter, providerID, token string, attested bool, coordinatorWSURL string) {
 	writeJSON(w, http.StatusOK, RegisterResponse{
-		ProviderID:       req.ProviderID,
+		ProviderID:       providerID,
 		ProviderToken:    token,
 		TrustTier:        "provisional",
 		Trust:            TrustState{Attested: attested, RateLimitBucket: "new_ip"},
-		CoordinatorWSURL: h.CoordinatorWSURL,
+		CoordinatorWSURL: coordinatorWSURL,
 	})
 }
 

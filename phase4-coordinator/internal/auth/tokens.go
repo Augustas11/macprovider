@@ -1081,7 +1081,7 @@ func deleteRows(ctx context.Context, conn *sql.Conn, query string, args ...any) 
 	return res.RowsAffected()
 }
 
-func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
+func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer, freshTokenCandidate *string) (string, error) {
 	if err := config.ValidateProviderID(providerID); err != nil {
 		return "", err
 	}
@@ -1129,9 +1129,18 @@ UPDATE provider_tokens
 			}
 		}
 
-		newToken, err := randomHex(32)
-		if err != nil {
-			return err
+		var newToken string
+		if !requiresProof && freshTokenCandidate != nil {
+			newToken = strings.TrimSpace(*freshTokenCandidate)
+			if len(newToken) != 64 || !isLowerHexToken(newToken) {
+				return ErrReferralConflict
+			}
+		} else {
+			var err error
+			newToken, err = randomHex(32)
+			if err != nil {
+				return err
+			}
 		}
 		prefix := newToken[:tokenDisplayPrefixLength]
 		if _, err := conn.ExecContext(ctx, `
