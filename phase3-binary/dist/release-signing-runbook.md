@@ -287,11 +287,13 @@ chmod -R go-w "$ACCEPTANCE_ASSET_DIR"
 
 release_assets=()
 while IFS= read -r release_asset; do
+  test -z "$release_asset" || [[ "$release_asset" =~ ^[A-Za-z0-9._-]+$ ]] || exit 1
   test -n "$release_asset" && release_assets+=("$ACCEPTANCE_ASSET_DIR/$release_asset")
 done < "$ACCEPTANCE_ASSET_DIR/release-assets.txt"
 bash scripts/verify-release-checksums.sh \
   --acceptance-candidate \
   "$ACCEPTANCE_ASSET_DIR/acceptance-candidate.json" \
+  "$ACCEPTANCE_REF" \
   "$ACCEPTANCE_RUN_ID" "$ACCEPTANCE_RUN_ATTEMPT" "$ACCEPTANCE_CONTROL_COMMIT" \
   "$ACCEPTANCE_ASSET_DIR/checksums.txt" \
   "$ACCEPTANCE_ASSET_DIR/acceptance-candidate.json.sig" \

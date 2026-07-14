@@ -5,13 +5,19 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 workflow="$root/.github/workflows/acceptance-candidate.yml"
 metadata="$root/scripts/acceptance-candidate-metadata.py"
 signer="$root/scripts/sign-acceptance-candidate.sh"
+keychain_helper="$root/scripts/acceptance-signing-keychain.sh"
 source_guard="$root/scripts/verify-acceptance-candidate-source.sh"
 remote_guard="$root/scripts/verify-acceptance-remote-state.sh"
 provisioner="$root/scripts/provision-acceptance-signing-key.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-security.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-python3 - "$workflow" "$metadata" "$signer" "$provisioner" "$root/schemas/acceptance-candidate-v1.schema.json" <<'PY'
+fail() {
+  printf '[test-acceptance-candidate-security] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+python3 - "$workflow" "$metadata" "$signer" "$keychain_helper" "$provisioner" "$root/schemas/acceptance-candidate-v1.schema.json" <<'PY'
 import ast
 import pathlib
 import re
@@ -20,8 +26,9 @@ import sys
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 metadata = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 signer = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
-provisioner = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
-schema = __import__("json").loads(pathlib.Path(sys.argv[5]).read_text(encoding="utf-8"))
+keychain_helper = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+provisioner = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
+schema = __import__("json").loads(pathlib.Path(sys.argv[6]).read_text(encoding="utf-8"))
 
 if "\n  workflow_dispatch:\n" not in workflow or "\n  push:" in workflow:
     raise SystemExit("acceptance workflow must be manual dispatch only")
@@ -87,8 +94,37 @@ if "--private-key \"$release_private_key\"" not in signer or "--public-key \"$re
     raise SystemExit("inner compatibility manifest is not main-owned and production-key verified")
 if "pearl-release.json.sig" not in signer or "-sign \"$private_key\"" not in signer:
     raise SystemExit("acceptance-only Pearl metadata is not separately signed")
+if '"$output_dir/release-assets.txt"' not in signer:
+    raise SystemExit("acceptance signer does not export the verifier asset selector")
+if signer.find('release_assets+=("$output_dir/release-provenance.json")') > signer.find('"$output_dir/release-assets.txt"'):
+    raise SystemExit("acceptance asset selector is emitted before the provenance asset is included")
+if signer.find('"$output_dir/release-assets.txt"') > signer.find('build-checksums'):
+    raise SystemExit("acceptance asset selector is emitted after signed checksum construction")
 if re.search(r'\$cli_work/macprovider-cli["}]?\s+--', signer):
     raise SystemExit("protected signer executes the candidate CLI")
+for value in (
+    'keychain="acceptance-signing-${run_id}-${run_attempt}-${keychain_nonce}.keychain"',
+    'acceptance_keychain_capture_default || die',
+    'acceptance_keychain_create_and_select "$keychain" "$keychain_password"',
+    'acceptance_keychain_cleanup "$keychain"',
+):
+    if value not in signer:
+        raise SystemExit(f"acceptance signer keychain contract is incomplete: {value}")
+if "$signing_tmp/acceptance-signing.keychain-db" in signer:
+    raise SystemExit("acceptance signer places its codesigning keychain outside the user keychain directory")
+for value in (
+    'acceptance_keychain_restore_required=1',
+    'security default-keychain -d user -s "$keychain"',
+    'security default-keychain -d user -s "$acceptance_previous_default_keychain"',
+    'if [[ "$acceptance_keychain_created" == 1 ]]',
+    'security delete-keychain "$keychain"',
+):
+    if value not in keychain_helper:
+        raise SystemExit(f"acceptance keychain helper contract is incomplete: {value}")
+if keychain_helper.find('acceptance_keychain_restore_required=1') > keychain_helper.find('security default-keychain -d user -s "$keychain"'):
+    raise SystemExit("acceptance keychain restore flag is set after default-keychain mutation")
+if keychain_helper.find('security default-keychain -d user -s "$acceptance_previous_default_keychain"') > keychain_helper.find('security delete-keychain "$keychain"'):
+    raise SystemExit("acceptance signer deletes the active keychain before restoring the prior default")
 for value in (
     'SIGNING_DOMAIN = b"macprovider.acceptance-candidate.v1\\n"',
     '"candidate_ref"',
@@ -130,6 +166,68 @@ for index, line in enumerate(lines):
     if any("${{" in row for row in block):
         raise SystemExit("GitHub expression is interpolated directly into a shell block")
 PY
+
+mkdir -p "$work/bin"
+cat > "$work/bin/security" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$SECURITY_LOG"
+case "$1" in
+  default-keychain)
+    if [[ "$*" == "default-keychain -d user" ]]; then
+      [[ "$SECURITY_SCENARIO" != query_failure ]] || exit 71
+      printf '    "/Users/fixture/Library/Keychains/login.keychain-db"\n'
+    fi
+    ;;
+  create-keychain)
+    [[ "$SECURITY_SCENARIO" != create_failure ]] || exit 72
+    ;;
+esac
+SH
+chmod 0755 "$work/bin/security"
+
+query_failure_log="$work/query-failure.log"
+if PATH="$work/bin:$PATH" SECURITY_LOG="$query_failure_log" SECURITY_SCENARIO=query_failure \
+  bash -c 'source "$1"; acceptance_keychain_capture_default' _ "$keychain_helper"; then
+  fail "keychain lifecycle accepted an unreadable prior default"
+fi
+printf '%s\n' 'default-keychain -d user' > "$work/query-failure.expected"
+cmp "$work/query-failure.expected" "$query_failure_log"
+
+create_failure_log="$work/create-failure.log"
+PATH="$work/bin:$PATH" SECURITY_LOG="$create_failure_log" SECURITY_SCENARIO=create_failure \
+  bash -c '
+    source "$1"
+    acceptance_keychain_capture_default
+    if acceptance_keychain_create_and_select collision.keychain fixture; then
+      exit 73
+    fi
+    acceptance_keychain_cleanup collision.keychain
+  ' _ "$keychain_helper"
+printf '%s\n' \
+  'default-keychain -d user' \
+  'create-keychain -p fixture collision.keychain' \
+  > "$work/create-failure.expected"
+cmp "$work/create-failure.expected" "$create_failure_log"
+
+downstream_failure_log="$work/downstream-failure.log"
+PATH="$work/bin:$PATH" SECURITY_LOG="$downstream_failure_log" SECURITY_SCENARIO=downstream_failure \
+  bash -c '
+    source "$1"
+    acceptance_keychain_capture_default
+    acceptance_keychain_create_and_select owned.keychain fixture
+    acceptance_keychain_cleanup owned.keychain
+  ' _ "$keychain_helper"
+printf '%s\n' \
+  'default-keychain -d user' \
+  'create-keychain -p fixture owned.keychain' \
+  'default-keychain -d user -s owned.keychain' \
+  'unlock-keychain -p fixture owned.keychain' \
+  'set-keychain-settings -lut 3600 owned.keychain' \
+  'default-keychain -d user -s /Users/fixture/Library/Keychains/login.keychain-db' \
+  'delete-keychain owned.keychain' \
+  > "$work/downstream-failure.expected"
+cmp "$work/downstream-failure.expected" "$downstream_failure_log"
 
 # macOS runners still invoke Bash 3.2, where expanding an initialized empty
 # array under `set -u` fails as an unbound variable. Keep the workflow's array
@@ -214,6 +312,61 @@ if python3 "$metadata" validate-provider-payload --directory "$work/provider" >"
   exit 1
 fi
 grep -q 'unexpected top-level members' "$work/extra-provider.out"
+
+# Catalog release manifests have their own deterministic pretty-JSON contract.
+# The acceptance signer must preserve and parse those exact bytes rather than
+# imposing the compact acceptance-envelope format on them.
+mkdir "$work/pearl-catalog"
+python3 "$root/scripts/catalog-release.py" verify
+cp "$root/phase3-binary/catalog/autotune/release.json" \
+  "$root/phase3-binary/catalog/autotune/trusted-keys.json" \
+  "$root/phase3-binary/dist/static/autotune-candidates.json" \
+  "$root/phase3-binary/dist/static/autotune-candidates.json.sig" \
+  "$root/phase3-binary/dist/static/demand-rank.json" \
+  "$root/phase3-binary/dist/static/demand-rank.json.sig" \
+  "$work/pearl-catalog/"
+python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy strict_post_migration \
+  --catalog-directory "$work/pearl-catalog" \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-release.json"
+python3 - "$work/pearl-catalog/release.json" "$work/pearl-release.json" <<'PY'
+import json
+import pathlib
+import sys
+
+catalog = json.loads(pathlib.Path(sys.argv[1]).read_text())
+pearl = json.loads(pathlib.Path(sys.argv[2]).read_text())
+if pearl["catalog"]["release_id"] != catalog["release_id"]:
+    raise SystemExit("Pearl metadata did not preserve the verified catalog release ID")
+PY
+python3 - "$work/pearl-catalog/release.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.write_text(json.dumps(json.loads(path.read_text()), sort_keys=True, separators=(",", ":")) + "\n")
+PY
+if python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy strict_post_migration \
+  --catalog-directory "$work/pearl-catalog" \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/noncanonical-pearl-release.json" >"$work/noncanonical-catalog.out" 2>&1; then
+  echo "Pearl metadata builder accepted a noncanonical catalog release" >&2
+  exit 1
+fi
+grep -q 'catalog release: must be canonical' "$work/noncanonical-catalog.out"
 
 cat > "$work/compatibility.json.tmp" <<EOF
 {"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}

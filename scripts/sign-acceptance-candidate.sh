@@ -22,6 +22,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 metadata="$root/scripts/acceptance-candidate-metadata.py"
 compatibility="$root/scripts/compatibility-set-manifest.py"
 artifact_index="$root/scripts/compatibility-artifact-index.py"
+keychain_helper="$root/scripts/acceptance-signing-keychain.sh"
 acceptance_public_key="$root/security/acceptance-candidate-signing-public.pem"
 openssl_bin="${OPENSSL_BIN:-openssl}"
 
@@ -42,7 +43,7 @@ esac
 for command in python3 security codesign xcrun ditto hdiutil tar shasum spctl base64 "$openssl_bin"; do
   command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"
 done
-for path in "$metadata" "$compatibility" "$artifact_index" "$acceptance_public_key"; do
+for path in "$metadata" "$compatibility" "$artifact_index" "$keychain_helper" "$acceptance_public_key"; do
   [[ -f "$path" && ! -L "$path" ]] || die "trusted signer input is absent or unsafe: $path"
 done
 [[ -d "$unsigned_dir" && ! -L "$unsigned_dir" ]] || die "unsigned input directory is absent or unsafe"
@@ -85,12 +86,27 @@ python3 "$metadata" verify-unsigned \
   "${unsigned_assets[@]}"
 
 signing_tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/acceptance-signer.XXXXXX")"
-keychain="$signing_tmp/acceptance-signing.keychain-db"
+# The trusted path is validated above before sourcing.
+# shellcheck disable=SC1090,SC1091
+source "$keychain_helper"
+keychain_nonce="$("$openssl_bin" rand -hex 8)"
+[[ "$keychain_nonce" =~ ^[0-9a-f]{16}$ ]] || die "could not generate a safe keychain nonce"
+keychain="acceptance-signing-${run_id}-${run_attempt}-${keychain_nonce}.keychain"
 cleanup() {
-  security delete-keychain "$keychain" >/dev/null 2>&1 || true
+  local status=$?
+  local cleanup_failed=0
+  if ! acceptance_keychain_cleanup "$keychain"; then
+    printf '[sign-acceptance-candidate] ERROR: could not restore and remove the signing keychain\n' >&2
+    cleanup_failed=1
+  fi
   rm -rf "$signing_tmp"
+  if [[ "$status" == 0 && "$cleanup_failed" == 1 ]]; then
+    status=1
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
+acceptance_keychain_capture_default || die "could not capture the existing user default keychain"
 
 private_key="$signing_tmp/acceptance-private.pem"
 derived_public_key="$signing_tmp/acceptance-public.pem"
@@ -148,9 +164,8 @@ python3 "$compatibility" validate \
   --openssl "$openssl_bin"
 
 keychain_password="$("$openssl_bin" rand -hex 24)"
-security create-keychain -p "$keychain_password" "$keychain"
-security unlock-keychain -p "$keychain_password" "$keychain"
-security set-keychain-settings -lut 3600 "$keychain"
+acceptance_keychain_create_and_select "$keychain" "$keychain_password" ||
+  die "could not create and select the transient signing keychain"
 printf '%s' "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" | base64 -d > "$signing_tmp/developer-id.p12"
 security import "$signing_tmp/developer-id.p12" \
   -k "$keychain" \
@@ -304,6 +319,34 @@ python3 "$root/scripts/build-release-provenance.py" \
   "$output_dir/release-provenance.json" \
   "${release_assets[@]}"
 release_assets+=("$output_dir/release-provenance.json")
+python3 - "$output_dir" "$output_dir/release-assets.txt" "${release_assets[@]}" <<'PY'
+import os
+import pathlib
+import re
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+output = pathlib.Path(sys.argv[2])
+paths = [pathlib.Path(value) for value in sys.argv[3:]]
+names = []
+for path in paths:
+    info = path.lstat()
+    if path.parent.resolve() != root or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise SystemExit(f"unsafe acceptance release asset: {path}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", path.name) or path.name in names:
+        raise SystemExit(f"invalid or duplicate acceptance release asset name: {path.name}")
+    names.append(path.name)
+descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+try:
+    with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+        handle.write("".join(f"{name}\n" for name in sorted(names)))
+        handle.flush()
+        os.fsync(handle.fileno())
+except Exception:
+    output.unlink(missing_ok=True)
+    raise
+PY
 
 checksum_arguments=()
 for release_asset in "${release_assets[@]}"; do
