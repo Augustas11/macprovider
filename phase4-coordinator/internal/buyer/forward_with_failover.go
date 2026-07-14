@@ -68,6 +68,12 @@ func (s *Server) forwardWithFailover(
 ) (shouldFallThroughToHTTP bool) {
 	failoverAttempted := false
 	for {
+		// Reset the per-attempt dispatched flag before every attempt so the
+		// item-18 no-charge marker reflects only THIS attempt's dispatch
+		// (providerCredited separately carries billed credit from prior
+		// attempts). Must precede tx.dispatch, which may write a terminal
+		// response (route_snapshot_failed, provider_failed) synchronously.
+		rec.beginDispatchAttempt()
 		// Dispatch — per-transport. The callback runs one attempt and
 		// returns the classified result. HTTP's callback also owns its
 		// per-attempt context.WithTimeout setup and the cancelAttempt

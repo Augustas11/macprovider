@@ -969,9 +969,16 @@ as documented follow-ups rather than blocking it.
   coordinator sets the POSITIVE `X-MacProvider-Settlement-No-Prior-Dispatch`
   marker and the gateway saw no prior provider-billed retry. The coordinator
   stamps that marker centrally (`noPriorDispatchResponseWriter`) on any terminal
-  response written while no provider is credited (`attemptN == 0`, ledger-exact:
-  an admission failure or same-attempt re-route that records no row correctly
-  stays marked). The positive-marker design makes a gateway-first deploy /
+  response written while no provider has been **billably credited** for the
+  request. "Credited" is ledger-exact, from two recorder signals: `providerCredited`
+  (set inside `recordRow` when a provider-bound billable row persists —
+  `providerAssignedID != "" AND status != 503`) and `dispatchedThisAttempt &&
+  terminalStatus != 503` (the current terminal attempt, whose billing row lands
+  after its write on the WS paths). This supersedes the earlier `attemptN == 0`
+  source, which over-counted non-billed 503 rows (over-charge) and incremented
+  after the terminal WS write (under-charge); an admission failure, a same-attempt
+  re-route, or a queue-full 503 records no billable credit and correctly stays
+  marked. The positive-marker design makes a gateway-first deploy /
   coordinator rollback safe — an unmarked response settles on the estimate.
   Two unmarked/settled cases preserve provider work credited in `observe` mode:
   (1) coordinator-internal failover (marker withheld once a provider is
