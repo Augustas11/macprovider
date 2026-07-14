@@ -51,6 +51,16 @@ if protected.find("verify-acceptance-remote-state.sh") > protected.find("RELEASE
     raise SystemExit("a protected token is imported before the post-approval candidate drift gate")
 if 'MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY"' not in build:
     raise SystemExit("candidate package does not receive the exact admission policy input")
+if re.search(r'^\s*strings\s+.*\|\s*grep\s+.*-q', build, re.MULTILINE):
+    raise SystemExit("candidate binary version checks can fail under pipefail when grep exits early")
+for value in (
+    'strings "$RUNNER_TEMP/coordinator-linux-amd64" > "$RUNNER_TEMP/coordinator-strings.txt"',
+    'strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-strings.txt"',
+    'grep -Fq "$TAG" "$RUNNER_TEMP/coordinator-strings.txt"',
+    'grep -Fq "$TAG" "$RUNNER_TEMP/gateway-strings.txt"',
+):
+    if value not in build:
+        raise SystemExit(f"candidate binary version check is incomplete: {value}")
 if "retention-days: 1" not in protected or "actions/upload-artifact@ea165f8d" not in protected:
     raise SystemExit("private acceptance artifact is not short-lived and action-pinned")
 for secret in (
