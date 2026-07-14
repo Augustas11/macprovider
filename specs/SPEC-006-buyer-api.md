@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.8 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out: survivability invariant (b) narrowed)
+**Version:** 0.9.9 (2026-07-14, SPEC-018 AC-45 streaming-mode diagnostic added to the response-pass-through allowlist)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.3, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.9 (2026-07-14, SPEC-018 AC-45 gateway-strip reconciliation):**
+- Added `X-MacProvider-Streaming-Mode` to the § 5.4 response-pass-through allowlist (and its outbound-strip-summary duplicate). The coordinator has always set this SPEC-018 AC-45 buyer-visible streaming-mode diagnostic on streaming `200` responses, but the gateway's blanket `X-MacProvider-*` strip removed it before the buyer on `api.streamvc.live`, making AC-45's "header absent" fail condition live in production. The gateway now forwards it, validated against AC-45's closed enum (`incremental` / `buffered_kill_switch` / `buffered_provider_downgrade`) and dropped otherwise (defense-in-depth against header-content injection past the strip). Resolves runbook item 15 / the SPEC-018 v0.2.4 "Known open gap" note. No wire-contract change beyond un-stripping an already-specified header; the header remains observation-only.
 
 **Change log v0.9.8 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out):**
 - Narrowed § 1.3 Tier-2 survivability invariant (b): the raw buyer tag / `account_id` remain unrecoverable by the provider (one-way HMAC, non-side-channel-derivable), but the *derived opaque* `conv:` value MAY be provided to the provider in the inference request for provider-local prefix caching (SPEC-004 v0.3.2 FR-SR-2 / SPEC-008 v0.4.1 §2.2). No wire-contract change.
@@ -1300,6 +1303,16 @@ The documented response-pass-through allowlist is:
 
 - `X-MacProvider-Receipt`, emitted by SPEC-015 v0.1.3 non-streaming
   receipt-capable providers and forwarded unchanged by the gateway.
+- `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
+  streaming-mode diagnostic set by the coordinator on streaming `200`
+  responses. The gateway MUST forward it only when its value is one of
+  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  or `buffered_provider_downgrade` — and MUST drop any other value rather
+  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  but the allowlist prevents a compromised or misconfigured upstream from
+  smuggling arbitrary header content past the `X-MacProvider-*` strip). The
+  header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
+  negotiation.
 
 The gateway MUST return 503 when no provider slot is available after
 any allowed bounded pre-dispatch slot queue expires.
@@ -2049,6 +2062,16 @@ The documented response-pass-through allowlist is:
 
 - `X-MacProvider-Receipt`, emitted by SPEC-015 v0.1.3 non-streaming
   receipt-capable providers and forwarded unchanged by the gateway.
+- `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
+  streaming-mode diagnostic set by the coordinator on streaming `200`
+  responses. The gateway MUST forward it only when its value is one of
+  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  or `buffered_provider_downgrade` — and MUST drop any other value rather
+  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  but the allowlist prevents a compromised or misconfigured upstream from
+  smuggling arbitrary header content past the `X-MacProvider-*` strip). The
+  header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
+  negotiation.
 
 The gateway MAY expose a public request ID.
 
