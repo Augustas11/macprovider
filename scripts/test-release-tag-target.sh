@@ -66,11 +66,13 @@ grep -q 'release tag v1.0.0 is absent' "$work/source-absent.out"
 # an absent tag, but the production mode must never inherit that relaxation.
 (
   cd "$work/source"
+  git update-ref -d refs/remotes/origin/main
   GITHUB_EVENT_NAME=workflow_dispatch \
     GITHUB_REF=refs/heads/fix/acceptance \
     GITHUB_SHA="$second" \
     bash "$source_guard" v1.0.4 "$second" "$work/remote.git" \
       --allow-absent --acceptance-candidate refs/heads/fix/acceptance
+  test "$(git rev-parse refs/remotes/origin/main)" = "$second"
 ) | grep -q 'ok: v1.0.4 at reviewed refs/heads/fix/acceptance'
 if (
   cd "$work/source"

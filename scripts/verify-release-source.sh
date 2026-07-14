@@ -54,6 +54,12 @@ case "$source_mode" in
     fetched_ref="refs/remotes/release-source/acceptance-candidate"
     git fetch --quiet --no-tags "$remote" \
       "+$source_ref:$fetched_ref" || die "could not refresh selected acceptance-candidate branch"
+    # package.sh validates the immutable release ledger against origin/main.
+    # Branch-mode acceptance still needs that read-only base ref even though
+    # the reviewed candidate identity is the exact selected branch head.
+    git fetch --quiet --no-tags "$remote" \
+      +refs/heads/main:refs/remotes/origin/main ||
+      die "could not refresh origin/main release-ledger base"
     selected_commit="$(git rev-parse "$fetched_ref")"
     [[ "$selected_commit" == "$expected_commit" ]] ||
       die "acceptance-candidate commit is not the fresh selected branch tip"
