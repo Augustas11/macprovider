@@ -1887,6 +1887,69 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 	}
 }
 
+// TestStreamingModeHeaderForwarded pins the item-15 fix: SPEC-018 AC-45's
+// buyer-visible X-MacProvider-Streaming-Mode diagnostic — set by the
+// coordinator on streaming 200 responses — must survive the gateway's
+// blanket X-MacProvider-* strip and reach the buyer, while sibling
+// X-MacProvider-* headers stay stripped. Covers all three canonical values.
+func TestStreamingModeHeaderForwarded(t *testing.T) {
+	for _, mode := range []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade"} {
+		t.Run(mode, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
+				return responseWithBody(http.StatusOK, http.Header{
+					"Content-Type":                 []string{"text/event-stream; charset=utf-8"},
+					"X-MacProvider-Streaming-Mode": []string{mode},
+					"X-MacProvider-Foo":            []string{"strip-me"},
+				}, payload+"\n\ndata: [DONE]\n\n"), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_stream_mode_"+mode)
+
+			resp := postChat(t, h, fullKey, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if got := resp.Header().Get("X-MacProvider-Streaming-Mode"); got != mode {
+				t.Fatalf("streaming-mode header = %q, want %q", got, mode)
+			}
+			if got := resp.Header().Get("X-MacProvider-Foo"); got != "" {
+				t.Fatalf("sibling X-MacProvider-Foo leaked = %q", got)
+			}
+		})
+	}
+}
+
+// TestStreamingModeHeaderInvalidValueDropped pins the AC-45 defense-in-depth
+// enum guard: an upstream value outside the closed set is dropped, not
+// forwarded verbatim — a compromised/misconfigured upstream cannot smuggle
+// arbitrary header content past the X-MacProvider-* strip.
+func TestStreamingModeHeaderInvalidValueDropped(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{
+			"Content-Type":                 []string{"text/event-stream; charset=utf-8"},
+			"X-MacProvider-Streaming-Mode": []string{"evil\r\ninjected: 1"},
+		}, payload+"\n\ndata: [DONE]\n\n"), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_stream_mode_invalid")
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("X-MacProvider-Streaming-Mode"); got != "" {
+		t.Fatalf("non-canonical streaming-mode value forwarded = %q (must be dropped)", got)
+	}
+}
+
 func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
 	payload := strings.Join([]string{

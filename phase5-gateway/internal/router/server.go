@@ -1087,6 +1087,24 @@ func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 			}
 			continue
 		}
+		// SPEC-018 AC-45 / SPEC-006 §5.4 response-pass-through allowlist:
+		// the coordinator's buyer-visible X-MacProvider-Streaming-Mode
+		// diagnostic must survive the blanket X-MacProvider-* strip below.
+		// The value is validated against AC-45's closed enum so a
+		// compromised or misconfigured upstream cannot smuggle arbitrary
+		// header content past the strip (defense-in-depth — the value is
+		// coordinator-set). Unconditional (both receipt-eligible and
+		// non-receipt paths) because the coordinator emits it on the
+		// streaming 200 path that flows through copyCleanHeaders.
+		if isStreamingModeResponseHeader(key) {
+			for _, value := range values {
+				if mode := buyerVisibleStreamingModeHeader(value); mode != "" {
+					dst.Set(streamingModeResponseHeader, mode)
+					break
+				}
+			}
+			continue
+		}
 		if isMacProviderHeader(key) {
 			continue
 		}
@@ -1132,6 +1150,29 @@ func isGatewayOwnedCorrelationHeader(key string) bool {
 
 func isReceiptResponseHeader(key string) bool {
 	return strings.EqualFold(key, "X-MacProvider-Receipt")
+}
+
+// streamingModeResponseHeader is the SPEC-018 AC-45 buyer-visible
+// diagnostic. The coordinator sets it on streaming 200 responses; the
+// gateway allowlists it through the X-MacProvider-* strip per the
+// SPEC-006 §5.4 response-pass-through allowlist.
+const streamingModeResponseHeader = "X-MacProvider-Streaming-Mode"
+
+func isStreamingModeResponseHeader(key string) bool {
+	return strings.EqualFold(key, streamingModeResponseHeader)
+}
+
+// buyerVisibleStreamingModeHeader returns the value only if it is one of
+// AC-45's three canonical streaming-mode values, else "" (drop). The header
+// is observation-only (SPEC-018 §10d.4) — buyers MUST NOT negotiate on it —
+// so validating against the closed enum is safe and prevents header
+// injection should the upstream ever be compromised.
+func buyerVisibleStreamingModeHeader(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade":
+		return strings.TrimSpace(raw)
+	}
+	return ""
 }
 
 func buyerVisibleReceiptHeader(raw string) string {
