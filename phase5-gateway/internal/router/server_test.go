@@ -6946,6 +6946,85 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 	}
 }
 
+// TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge pins item 18: a
+// coordinator 500 route_snapshot_failed is emitted BEFORE any provider is
+// dispatched (SPEC-022 durable route-snapshot write failure) with no
+// settlement finality headers, so no inference ran. The gateway must refund
+// the reservation and pass the body through verbatim — NOT settle on the
+// prompt estimate (the old bug charged the buyer for a request no provider
+// ever saw). Covers both streaming modes.
+func TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			coordBody := `{"error":{"message":"Could not durably record route snapshot","type":"api_error","param":null,"code":"route_snapshot_failed","retryable":false,"request_id":null,"inference_ran":false,"settlement_ran":false}}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_route_snap_"+name)
+
+			body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+			if stream {
+				body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+
+			// (a) Status passes through as 500 with the coordinator body verbatim
+			// — NOT mapped to a 502 upstream_provider_error (the settle-on-error path).
+			if resp.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s — route_snapshot_failed must pass through as 500, not map to 502", resp.Code, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), `"code":"route_snapshot_failed"`) {
+				t.Fatalf("body=%s — expected route_snapshot_failed body to pass through verbatim", resp.Body.String())
+			}
+			if strings.Contains(resp.Body.String(), "upstream_provider_error") {
+				t.Fatalf("body=%s — must NOT use upstream_provider_error wording (that path settles on estimate)", resp.Body.String())
+			}
+
+			// (b) No charge: no provider was reached, so quota is unchanged and
+			// the reservation is refunded.
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			if used := quota["daily_tokens_used"].(float64); used != 0 {
+				t.Fatalf("daily_tokens_used=%v, want 0 — route_snapshot_failed must not charge (no provider reached)", used)
+			}
+			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+				t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on route_snapshot_failed", reserved)
+			}
+		})
+	}
+}
+
+// TestCoordinatorGeneric500StillSettlesUpstreamError is the narrowness guard
+// for item 18: a 500 whose code is NOT route_snapshot_failed must keep the
+// pre-existing settle-on-estimate → 502 upstream_provider_error behavior, so
+// the no-charge classifier is scoped to the pre-dispatch code alone.
+func TestCoordinatorGeneric500StillSettlesUpstreamError(t *testing.T) {
+	coordBody := `{"error":{"message":"boom","type":"api_error","param":null,"code":"internal_error"}}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_generic_500")
+
+	resp := postChat(t, h, fullKey, `{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`, nil)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s — a non-route_snapshot 500 must keep mapping to 502", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "upstream_provider_error") {
+		t.Fatalf("body=%s — generic 500 must still surface upstream_provider_error", resp.Body.String())
+	}
+}
+
 // TestCoordinatorProvisionalQuotaExceededPreservesRetryAfter3600 is M-R2-2
 // (round-2 3-lane re-audit of PR #548): the coordinator sets its own fixed
 // Retry-After: 3600 on provisional_quota_exceeded, but copyCleanHeaders

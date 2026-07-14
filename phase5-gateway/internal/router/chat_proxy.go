@@ -48,13 +48,13 @@ type usageSubject struct {
 }
 
 const (
-	settlementOutcomeHeader           = "X-MacProvider-Settlement-Outcome"
-	settlementReceiptResultHeader     = "X-MacProvider-Settlement-Receipt-Result"
-	settlementReasonHeader            = "X-MacProvider-Settlement-Reason"
-	settlementClosedHeader            = "X-MacProvider-Settlement-Closed"
-	settlementModeHeader              = "X-MacProvider-Settlement-Mode"
-	settlementPolicyVersionHeader     = "X-MacProvider-Settlement-Policy-Version"
-	settlementPendingUntilHeader      = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	settlementOutcomeHeader       = "X-MacProvider-Settlement-Outcome"
+	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
+	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
+	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
+	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
+	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
+	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 	// settlementPolicyVersion is the current coordinator route-snapshot
 	// policy version (see billing.RouteSnapshotPolicyVersion). It was
 	// bumped v0 -> v1 when the settlement pending-deadline default moved
@@ -615,6 +615,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 		return
 	}
+	if coordinatorPreDispatchNoChargeError(resp.StatusCode, body, resp.Header) {
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		if coordinatorValidationError(resp.StatusCode, body) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
@@ -718,6 +722,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			return
+		}
+		if coordinatorPreDispatchNoChargeError(resp.StatusCode, body, resp.Header) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
@@ -1347,6 +1355,33 @@ func coordinatorIdempotencyError(status int, body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// coordinatorPreDispatchNoChargeError detects a coordinator 5xx emitted
+// BEFORE any provider was dispatched, where no inference ran and the buyer
+// must not be charged. The one case today is route_snapshot_failed — the
+// SPEC-022 durable route-snapshot write failing: the coordinator
+// (internal/buyer/route_snapshot.go) writes it via plain writeError with a
+// 500 and NO settlement finality headers, i.e. no provider was invoked.
+//
+// Without this the gateway's generic upstream-error path settles the
+// reservation on the prompt estimate — shouldRefundLegacyPreStreamProvider502
+// only refunds 502s — debiting the buyer for a request that never reached a
+// provider (the exact charge the coordinator comment at route_snapshot.go:65
+// flags as a carried follow-up). Routing it through
+// passThroughNoProviderCoordinatorError refunds the reservation, writes a
+// 0-token refunded audit row, and passes the coordinator body through
+// verbatim — identical to the 404 / idempotency / tier-2-policy no-provider
+// cases. Applies to both streaming and non-streaming buyer requests.
+//
+// Gated on the absence of settlement finality headers so that if a future
+// coordinator ever attaches finality to this code, the finality-policy path
+// handles it instead.
+func coordinatorPreDispatchNoChargeError(status int, body []byte, h http.Header) bool {
+	if status != http.StatusInternalServerError || hasAnySettlementFinalityHeader(h) {
+		return false
+	}
+	return openAIErrorCode(body) == "route_snapshot_failed"
 }
 
 func coordinatorValidationError(status int, body []byte) bool {
