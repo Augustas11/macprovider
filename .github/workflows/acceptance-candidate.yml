@@ -161,9 +161,13 @@ jobs:
           set -euo pipefail
           cd candidate/phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
-          resolved_dir="Malibu.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
-          mkdir -p "$resolved_dir"
-          cp Package.resolved "$resolved_dir/Package.resolved"
+          package_resolution_args=()
+          if [ -f Package.resolved ]; then
+            resolved_dir="Malibu.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
+            mkdir -p "$resolved_dir"
+            cp Package.resolved "$resolved_dir/Package.resolved"
+            package_resolution_args=(-onlyUsePackageVersionsFromResolvedFile)
+          fi
           xcodebuild \
             -project Malibu.xcodeproj \
             -scheme Malibu \
@@ -171,7 +175,7 @@ jobs:
             -destination "generic/platform=macOS" \
             -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
             archive \
-            -onlyUsePackageVersionsFromResolvedFile \
+            "${package_resolution_args[@]}" \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
