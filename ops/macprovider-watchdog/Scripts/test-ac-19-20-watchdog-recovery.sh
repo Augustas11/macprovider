@@ -51,6 +51,23 @@ exit "${TEST_CURL_EXIT:-0}"
 SH
 chmod 700 "$FAKE_BIN/curl"
 
+cat > "$FAKE_BIN/ditto" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -ne 4 ] || [ "$1" != "-x" ] || [ "$2" != "-k" ]; then
+  exit 64
+fi
+python3 - "$3" "$4" <<'PY'
+import sys
+import zipfile
+
+archive, destination = sys.argv[1:3]
+with zipfile.ZipFile(archive, "r") as handle:
+    handle.extractall(destination)
+PY
+SH
+chmod 700 "$FAKE_BIN/ditto"
+
 write_fixture() {
   local backup_body="$1"
   local target_body="$2"
@@ -230,9 +247,9 @@ import os
 import plistlib
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
+import zipfile
 
 root, home = sys.argv[1:3]
 pending = os.path.join(root, "pending.json")
@@ -257,10 +274,14 @@ try:
         handle.write("old-app\n")
     os.chmod(os.path.join(old_app, "Contents", "MacOS", "Malibu"), 0o700)
     archive = os.path.join(release_backup, "Malibu.app.zip")
-    subprocess.run(
-        ["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", old_app, archive],
-        check=True,
-    )
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        for current, directory_names, file_names in os.walk(old_app):
+            directory_names.sort()
+            file_names.sort()
+            for name in file_names:
+                path = os.path.join(current, name)
+                relative = os.path.relpath(path, old_root)
+                handle.write(path, relative)
     os.chmod(archive, 0o600)
 finally:
     shutil.rmtree(old_root)
@@ -337,6 +358,7 @@ run_watchdog_tick() {
   MACPROVIDER_BINARY_PATH="$BIN_DIR/macprovider-cli" \
   MACPROVIDER_BINARY_DIR="$BIN_DIR" \
   MACPROVIDER_CONFIG_PATH="$TMP_ROOT/missing-config.yaml" \
+  MACPROVIDER_DITTO="$FAKE_BIN/ditto" \
   MACPROVIDER_LOG_DIR="$LOG_DIR" \
   MACPROVIDER_WATCHDOG_STATE_DIR="$WATCHDOG_STATE" \
   TEST_LIFECYCLE_LEASE_KIND="${TEST_LIFECYCLE_LEASE_KIND:-}" \
@@ -352,6 +374,7 @@ run_watchdog_tick_with_health() {
   MACPROVIDER_BINARY_DIR="$BIN_DIR" \
   MACPROVIDER_CONFIG_PATH="$TMP_ROOT/missing-config.yaml" \
   MACPROVIDER_CURL="$FAKE_BIN/curl" \
+  MACPROVIDER_DITTO="$FAKE_BIN/ditto" \
   MACPROVIDER_HEALTHCHECK_URL="http://127.0.0.1:9/healthz" \
   MACPROVIDER_LOG_DIR="$LOG_DIR" \
   MACPROVIDER_WATCHDOG_STATE_DIR="$WATCHDOG_STATE" \
