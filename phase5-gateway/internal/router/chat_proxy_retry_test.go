@@ -717,6 +717,79 @@ func TestGatewayRetriedProvider502ThenRouteSnapshotFailedDoesNotRefund(t *testin
 	}
 }
 
+// TestGatewayRetriedUnmarked503ThenRouteSnapshotFailedDoesNotRefund pins the
+// round-4 security HIGH: a provider is billed, then failover exhaustion returns
+// a retryable no_provider 503 (NOT a 502). Because a provider was already
+// credited, the coordinator withholds the no-prior-dispatch marker on that 503;
+// the gateway must read that absence and refuse to refund the subsequent
+// route_snapshot_failed.
+func TestGatewayRetriedUnmarked503ThenRouteSnapshotFailedDoesNotRefund(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			// Unmarked 503: failover exhaustion AFTER a billed provider attempt.
+			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		}
+		hdr := http.Header{}
+		hdr.Set("Content-Type", "application/json")
+		hdr.Set("X-MacProvider-Settlement-No-Prior-Dispatch", "1")
+		return responseWithBody(http.StatusInternalServerError, hdr, routeSnapshotFailedCoordBody), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, nil)
+	fullKey := createAccountAndKey(t, store, cfg, "acct_unmarked503_then_snap")
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if calls != 2 {
+		t.Fatalf("coordinator calls=%d, want 2", calls)
+	}
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s — after an UNMARKED retried 503 (prior billed dispatch), route_snapshot_failed must settle, not refund", resp.Code, resp.Body.String())
+	}
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	if used := readQuota(t, usageResp)["daily_tokens_used"].(float64); used == 0 {
+		t.Fatalf("daily_tokens_used=0 — an unmarked-503-then-route_snapshot_failed must charge the estimate")
+	}
+}
+
+// TestGatewayRetriedMarkedCold503ThenRouteSnapshotFailedRefunds is the
+// companion: a genuine cold-start 503 (no provider ever dispatched) carries the
+// marker, so retrying it must NOT poison a later refundable route_snapshot_failed.
+func TestGatewayRetriedMarkedCold503ThenRouteSnapshotFailedRefunds(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		hdr := http.Header{}
+		hdr.Set("Content-Type", "application/json")
+		hdr.Set("X-MacProvider-Settlement-No-Prior-Dispatch", "1")
+		if calls == 1 {
+			// Marked cold 503: no provider dispatched.
+			return responseWithBody(http.StatusServiceUnavailable, hdr, noProviderBody()), nil
+		}
+		return responseWithBody(http.StatusInternalServerError, hdr, routeSnapshotFailedCoordBody), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, nil)
+	fullKey := createAccountAndKey(t, store, cfg, "acct_cold503_then_snap")
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if calls != 2 {
+		t.Fatalf("coordinator calls=%d, want 2", calls)
+	}
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s — after a MARKED cold 503, a marked route_snapshot_failed must still refund (pass through 500)", resp.Code, resp.Body.String())
+	}
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	quota := readQuota(t, usageResp)
+	if used := quota["daily_tokens_used"].(float64); used != 0 {
+		t.Fatalf("daily_tokens_used=%v, want 0 — a cold-503-then-marked route_snapshot_failed must refund", used)
+	}
+	if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+		t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded", reserved)
+	}
+}
+
 func newRetryHarness(t *testing.T, client *http.Client, mutate func(*config.Config)) (http.Handler, *sqlite.Store, string, config.Config) {
 	t.Helper()
 	return newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {

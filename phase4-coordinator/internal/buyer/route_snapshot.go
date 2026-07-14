@@ -159,25 +159,9 @@ func stringPtrOrNil(value string) *string {
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
 	rec.logBuyerFailure(http.StatusInternalServerError, "Could not durably record route snapshot")
-	// Item 18 POSITIVE no-charge marker (deployment-robust). Emit
-	// X-MacProvider-Settlement-No-Prior-Dispatch ONLY on the genuine FIRST
-	// route-snapshot attempt of the request. routeSnapshotAttemptN is bumped
-	// once per recordRouteSnapshot call (i.e. once per provider dispatch
-	// attempt, at its top, before any skip/success/failure), so it is exactly
-	// 1 here iff NO earlier provider was dispatched in this request; a
-	// coordinator-internal failover that already dispatched an earlier provider
-	// (including a WS pre-first-chunk same-attempt re-route that records no
-	// billing row) raises it to >= 2, so the marker is withheld.
-	//
-	// The signal is POSITIVE (marker == "safe to refund"), not the absence of a
-	// negative one: the gateway refunds a route_snapshot_failed ONLY when this
-	// marker is present, so a pre-item-18 coordinator that emits no marker makes
-	// the gateway settle-on-estimate (pre-item-18 behavior) rather than wrongly
-	// refund. That keeps a gateway-first deploy — or a coordinator rollback —
-	// safe. DEPLOY COORDINATOR BEFORE GATEWAY; roll back in reverse.
-	if rec.routeSnapshotAttemptN <= 1 {
-		w.Header().Set(settlementNoPriorDispatchHeader, "1")
-	}
+	// The item-18 positive no-prior-dispatch marker is stamped centrally by
+	// noPriorDispatchResponseWriter at WriteHeader time (based on rec.attemptN),
+	// so it is present here iff no provider was credited earlier in this request.
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
@@ -189,12 +173,13 @@ const (
 	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
-	// settlementNoPriorDispatchHeader is the item-18 POSITIVE no-charge marker.
-	// The coordinator sets it on a route_snapshot_failed ONLY when it is the
-	// genuine first route-snapshot attempt of the request (no prior provider
-	// dispatch). The gateway refunds the reservation ONLY when this marker is
-	// present, so an unmarked (legacy / rolled-back coordinator) response
-	// settles on the estimate instead of wrongly refunding.
+	// settlementNoPriorDispatchHeader is the item-18 POSITIVE no-charge marker,
+	// stamped centrally by noPriorDispatchResponseWriter on any terminal
+	// response written while rec.attemptN == 0 (no provider credited yet in this
+	// request). The gateway refunds a route_snapshot_failed / treats a retried
+	// no_provider 503 as cold ONLY when this marker is present, so an unmarked
+	// response (a legacy/rolled-back coordinator, or one that followed a billed
+	// provider dispatch) settles on the estimate instead of wrongly refunding.
 	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
 )
 

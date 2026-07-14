@@ -962,21 +962,24 @@ as documented follow-ups rather than blocking it.
   previously read the absent settlement-finality headers as legacy and settled
   the reservation on the estimated prompt-token count — debiting the buyer for
   a request that never reached a provider. The gateway now treats a
-  first-attempt `route_snapshot_failed` (500, code `route_snapshot_failed`, no
-  finality header) as a **no-charge refund + verbatim passthrough**
+  `route_snapshot_failed` (500, code `route_snapshot_failed`, no finality
+  header) as a **no-charge refund + verbatim passthrough**
   (`coordinatorPreDispatchNoChargeError` in
   `phase5-gateway/internal/router/chat_proxy.go`) — but **only** when the
   coordinator sets the POSITIVE `X-MacProvider-Settlement-No-Prior-Dispatch`
-  marker (emitted iff `routeSnapshotAttemptN <= 1` in `writeRouteSnapshotError`)
-  and the gateway saw no prior provider-dispatched retry. Requiring the positive
-  marker (not the absence of a negative one) makes a gateway-first deploy /
+  marker and the gateway saw no prior provider-billed retry. The coordinator
+  stamps that marker centrally (`noPriorDispatchResponseWriter`) on any terminal
+  response written while no provider is credited (`attemptN == 0`, ledger-exact:
+  an admission failure or same-attempt re-route that records no row correctly
+  stays marked). The positive-marker design makes a gateway-first deploy /
   coordinator rollback safe — an unmarked response settles on the estimate.
   Two unmarked/settled cases preserve provider work credited in `observe` mode:
-  (1) coordinator-internal failover (marker withheld when
-  `routeSnapshotAttemptN >= 2`, including a WS same-attempt re-route that
-  records no billing row); (2) gateway retry past a provider-dispatched
-  `provider_*` 502 (`priorProviderDispatch`). **Deploy the coordinator before
-  the gateway; roll back in reverse.**
+  (1) coordinator-internal failover (marker withheld once a provider is
+  credited); (2) gateway retry of an unmarked earlier response — a provider-
+  dispatched `provider_*` 502 or a `no_provider` 503 from failover exhaustion
+  after a billed attempt (`priorProviderDispatch`); a cold marked 502/503 does
+  not poison the refund. **Deploy the coordinator before the gateway; roll back
+  in reverse.**
 - **(B) `route_snapshot_policy_version` marks default-cutover, not
   runtime-reconfiguration.** The policy version literal (`spec022-prereq-v0`
   = 30s-deadline era, `spec022-prereq-v1` = 300s-deadline era) marks when the

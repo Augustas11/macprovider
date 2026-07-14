@@ -131,6 +131,53 @@ func (w *phaseTimingResponseWriter) inject() {
 	})
 }
 
+// noPriorDispatchResponseWriter centrally stamps the item-18 POSITIVE
+// no-charge marker (settlementNoPriorDispatchHeader) on the FIRST response
+// write iff no provider has been credited in this request yet (rec.attemptN
+// == 0 — attemptN increments once per provider-bound recorded row, i.e. once
+// per billed provider attempt). Stamping at write time — the ledger-exact
+// moment — means every terminal response path is covered by one wrapper: a
+// genuine no-provider error (route_snapshot_failed, no_provider 503, ...)
+// carries the marker, while any response that follows a billed provider
+// dispatch is left unmarked so the gateway settles-on-estimate rather than
+// refunds. On a streaming 200 the marker is set (attemptN still 0 at the
+// early WriteHeader) but the gateway ignores/strips it there — it only reads
+// the marker on route_snapshot_failed and retried no_provider 503s.
+type noPriorDispatchResponseWriter struct {
+	http.ResponseWriter
+	rec  *billingRecorder
+	once sync.Once
+}
+
+func (w *noPriorDispatchResponseWriter) WriteHeader(code int) {
+	w.mark()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *noPriorDispatchResponseWriter) Write(b []byte) (int, error) {
+	w.mark()
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *noPriorDispatchResponseWriter) Flush() {
+	w.mark()
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *noPriorDispatchResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *noPriorDispatchResponseWriter) mark() {
+	w.once.Do(func() {
+		if w.rec != nil && w.rec.attemptN == 0 {
+			w.Header().Set(settlementNoPriorDispatchHeader, "1")
+		}
+	})
+}
+
 func writePhaseTimingHeaders(h http.Header, state *forwardState, now time.Time) {
 	if state == nil {
 		return

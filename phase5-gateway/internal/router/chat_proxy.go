@@ -497,10 +497,17 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			return resp, true, priorProviderDispatch, nil
 		}
 		// About to retry to a further attempt. If THIS (soon-to-be-discarded)
-		// attempt was a provider-dispatched 502 — not a 503 no_provider — a
-		// provider was reached and may have been billed, so remember it so a
-		// later terminal route_snapshot_failed is not wrongly refunded.
-		if isCoordTransientProvider502(resp.StatusCode, body) {
+		// response followed a billed provider dispatch, remember it so a later
+		// terminal route_snapshot_failed is not wrongly refunded. The
+		// coordinator stamps X-MacProvider-Settlement-No-Prior-Dispatch on any
+		// response written while nothing was credited yet (attemptN==0), so the
+		// marker's ABSENCE is the bill-exact "a provider was already credited
+		// this request" signal — covering both a provider-dispatched 502 and a
+		// failover-exhaustion no_provider 503 after a billed attempt. A marked
+		// response (genuine cold-start 502/503) leaves the flag clear. A legacy
+		// coordinator emits no marker, so the gateway conservatively settles —
+		// deploy the coordinator before the gateway.
+		if strings.TrimSpace(resp.Header.Get(settlementNoPriorDispatchHeader)) == "" {
 			priorProviderDispatch = true
 		}
 		if err := upCtx.Err(); err != nil {
@@ -1394,8 +1401,7 @@ func coordinatorIdempotencyError(status int, body []byte) bool {
 // Without this the gateway's generic upstream-error path settles the
 // reservation on the prompt estimate — shouldRefundLegacyPreStreamProvider502
 // only refunds 502s — debiting the buyer for a request that never reached a
-// provider (the exact charge the coordinator comment at route_snapshot.go:65
-// flags as a carried follow-up). Routing it through
+// provider. Routing it through
 // passThroughNoProviderCoordinatorError refunds the reservation, writes a
 // 0-token refunded audit row, and passes the coordinator body through
 // verbatim — identical to the 404 / idempotency / tier-2-policy no-provider

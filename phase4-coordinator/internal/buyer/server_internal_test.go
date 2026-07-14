@@ -3,7 +3,6 @@ package buyer
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,47 +12,43 @@ import (
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
-// TestWriteRouteSnapshotErrorMarksNoPriorDispatch pins the coordinator half of
-// the item-18 fix: writeRouteSnapshotError stamps the POSITIVE
-// X-MacProvider-Settlement-No-Prior-Dispatch marker IFF this is the genuine
-// first route-snapshot attempt of the request (routeSnapshotAttemptN <= 1 —
-// the recordRouteSnapshot bump has already run for the failing attempt). A
-// coordinator-internal failover that already dispatched an earlier provider
-// (routeSnapshotAttemptN >= 2, including a WS same-attempt re-route that
-// records no billing row) WITHHOLDS the marker, so the gateway does not refund
-// away prior provider work.
-func TestWriteRouteSnapshotErrorMarksNoPriorDispatch(t *testing.T) {
+// TestNoPriorDispatchResponseWriterMarks pins the coordinator half of the
+// item-18 fix: the central noPriorDispatchResponseWriter stamps the POSITIVE
+// X-MacProvider-Settlement-No-Prior-Dispatch marker on the first response write
+// IFF no provider has been credited in this request (rec.attemptN == 0). Once a
+// provider row is recorded (attemptN > 0 — a coordinator-internal failover that
+// billed an earlier provider) the terminal response is left unmarked, so the
+// gateway settles rather than refunds away prior provider work. attemptN is the
+// ledger-exact "was a provider credited" signal, so an admission failure or a
+// same-attempt re-route that records no billing row correctly stays marked.
+func TestNoPriorDispatchResponseWriterMarks(t *testing.T) {
 	for _, tc := range []struct {
-		name                 string
-		routeSnapshotAttempt int
-		wantMarker           bool
+		name       string
+		attemptN   int
+		viaWrite   bool // exercise Write() (streaming) instead of WriteHeader()
+		wantMarker bool
 	}{
-		{"first_attempt", 1, true},
-		{"second_attempt_after_failover", 2, false},
-		{"later_failover_attempt", 4, false},
+		{"no_prior_credit_writeheader", 0, false, true},
+		{"no_prior_credit_write", 0, true, true},
+		{"one_prior_credit", 1, false, false},
+		{"several_prior_credits", 3, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := &billingRecorder{
-				accountID:             "acct",
-				requestID:             "req",
-				server:                &Server{},
-				routeSnapshotAttemptN: tc.routeSnapshotAttempt,
+			inner := httptest.NewRecorder()
+			w := &noPriorDispatchResponseWriter{ResponseWriter: inner, rec: &billingRecorder{attemptN: tc.attemptN}}
+			if tc.viaWrite {
+				if _, err := w.Write([]byte("data: {}\n\n")); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			} else {
+				writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "boom")
 			}
-			w := httptest.NewRecorder()
-			writeRouteSnapshotError(w, rec, errors.New("route snapshot store unavailable"))
-
-			if w.Code != http.StatusInternalServerError {
-				t.Fatalf("status=%d, want 500", w.Code)
-			}
-			if !strings.Contains(w.Body.String(), "route_snapshot_failed") {
-				t.Fatalf("body=%s, want route_snapshot_failed envelope", w.Body.String())
-			}
-			got := w.Header().Get(settlementNoPriorDispatchHeader)
+			got := inner.Header().Get(settlementNoPriorDispatchHeader)
 			if tc.wantMarker && got == "" {
-				t.Fatalf("routeSnapshotAttemptN=%d: no-prior-dispatch marker must be set on a genuine first attempt", tc.routeSnapshotAttempt)
+				t.Fatalf("attemptN=%d: no-prior-dispatch marker must be set when nothing was credited yet", tc.attemptN)
 			}
 			if !tc.wantMarker && got != "" {
-				t.Fatalf("routeSnapshotAttemptN=%d: no-prior-dispatch marker must be WITHHELD after a prior dispatch, got %q", tc.routeSnapshotAttempt, got)
+				t.Fatalf("attemptN=%d: marker must be WITHHELD after a prior credit, got %q", tc.attemptN, got)
 			}
 		})
 	}
