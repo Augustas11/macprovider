@@ -94,6 +94,12 @@ if "--private-key \"$release_private_key\"" not in signer or "--public-key \"$re
     raise SystemExit("inner compatibility manifest is not main-owned and production-key verified")
 if "pearl-release.json.sig" not in signer or "-sign \"$private_key\"" not in signer:
     raise SystemExit("acceptance-only Pearl metadata is not separately signed")
+if '"$output_dir/release-assets.txt"' not in signer:
+    raise SystemExit("acceptance signer does not export the verifier asset selector")
+if signer.find('release_assets+=("$output_dir/release-provenance.json")') > signer.find('"$output_dir/release-assets.txt"'):
+    raise SystemExit("acceptance asset selector is emitted before the provenance asset is included")
+if signer.find('"$output_dir/release-assets.txt"') > signer.find('build-checksums'):
+    raise SystemExit("acceptance asset selector is emitted after signed checksum construction")
 if re.search(r'\$cli_work/macprovider-cli["}]?\s+--', signer):
     raise SystemExit("protected signer executes the candidate CLI")
 for value in (

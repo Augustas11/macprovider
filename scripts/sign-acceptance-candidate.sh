@@ -319,6 +319,34 @@ python3 "$root/scripts/build-release-provenance.py" \
   "$output_dir/release-provenance.json" \
   "${release_assets[@]}"
 release_assets+=("$output_dir/release-provenance.json")
+python3 - "$output_dir" "$output_dir/release-assets.txt" "${release_assets[@]}" <<'PY'
+import os
+import pathlib
+import re
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+output = pathlib.Path(sys.argv[2])
+paths = [pathlib.Path(value) for value in sys.argv[3:]]
+names = []
+for path in paths:
+    info = path.lstat()
+    if path.parent.resolve() != root or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise SystemExit(f"unsafe acceptance release asset: {path}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", path.name) or path.name in names:
+        raise SystemExit(f"invalid or duplicate acceptance release asset name: {path.name}")
+    names.append(path.name)
+descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+try:
+    with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+        handle.write("".join(f"{name}\n" for name in sorted(names)))
+        handle.flush()
+        os.fsync(handle.fileno())
+except Exception:
+    output.unlink(missing_ok=True)
+    raise
+PY
 
 checksum_arguments=()
 for release_asset in "${release_assets[@]}"; do
