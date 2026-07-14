@@ -55,6 +55,8 @@ EMERGENCY_CONFIG_SHA256="${MACPROVIDER_EMERGENCY_CONFIG_SHA256:-}"
 EMERGENCY_STAGED_CONFIG_SHA256=""
 EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256=""
 EMERGENCY_MODEL=""
+ACCEPTANCE_METADATA_PATH=""
+ACCEPTANCE_METADATA_SIGNATURE_PATH=""
 TMPDIR_PATH=""
 staging_dir=""
 STAGED_CONFIG_PATH=""
@@ -300,7 +302,14 @@ Environment overrides:
   MACPROVIDER_ACCEPTANCE_ASSET_DIR
                                  absolute owner-only directory containing a
                                  protected, non-public signed candidate; requires
-                                 MACPROVIDER_VERSION and never contacts Releases
+                                 all exact acceptance identity pins below and
+                                 never contacts Releases
+  MACPROVIDER_ACCEPTANCE_COMMIT exact 40-hex candidate commit
+  MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT
+                                 exact 40-hex trusted-main signer commit
+  MACPROVIDER_ACCEPTANCE_RUN_ID exact GitHub Actions run id
+  MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT
+                                 exact positive GitHub Actions run attempt
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
@@ -2698,8 +2707,28 @@ resolve_release_tag() {
   if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && [ -z "${MACPROVIDER_VERSION:-}" ]; then
     die 7 "emergency rollback requires MACPROVIDER_VERSION pinned to the prior signed tag"
   fi
-  if [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] && [ -z "${MACPROVIDER_VERSION:-}" ]; then
-    die 7 "MACPROVIDER_ACCEPTANCE_ASSET_DIR requires MACPROVIDER_VERSION"
+  acceptance_identity_fields=0
+  [ -z "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || acceptance_identity_fields=$((acceptance_identity_fields + 1))
+  [ -z "${MACPROVIDER_VERSION:-}" ] || acceptance_identity_fields=$((acceptance_identity_fields + 1))
+  [ -z "${MACPROVIDER_ACCEPTANCE_COMMIT:-}" ] || acceptance_identity_fields=$((acceptance_identity_fields + 1))
+  [ -z "${MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT:-}" ] || acceptance_identity_fields=$((acceptance_identity_fields + 1))
+  [ -z "${MACPROVIDER_ACCEPTANCE_RUN_ID:-}" ] || acceptance_identity_fields=$((acceptance_identity_fields + 1))
+  [ -z "${MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT:-}" ] || acceptance_identity_fields=$((acceptance_identity_fields + 1))
+  if [ "$acceptance_identity_fields" -ne 0 ] && [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ]; then
+    [ "$acceptance_identity_fields" -eq 6 ] \
+      || die 7 "acceptance candidates require version, candidate/control commits, and run id/attempt together"
+    [ "$GITHUB_REPO" = "Augustas11/macprovider" ] \
+      || die 7 "acceptance candidates are bound to repository Augustas11/macprovider"
+    [[ "$MACPROVIDER_ACCEPTANCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+      || die 7 "MACPROVIDER_ACCEPTANCE_COMMIT must be exactly 40 lowercase hex characters"
+    [[ "$MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+      || die 7 "MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT must be exactly 40 lowercase hex characters"
+    [[ "$MACPROVIDER_ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] \
+      || die 7 "MACPROVIDER_ACCEPTANCE_RUN_ID must be a positive decimal GitHub Actions run id"
+    [[ "$MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,9}$ ]] \
+      || die 7 "MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT must be a positive decimal run attempt"
+  elif [ -n "${MACPROVIDER_ACCEPTANCE_COMMIT:-}${MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT:-}${MACPROVIDER_ACCEPTANCE_RUN_ID:-}${MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT:-}" ]; then
+    die 7 "acceptance identity fields require MACPROVIDER_ACCEPTANCE_ASSET_DIR"
   fi
   if [ -n "${MACPROVIDER_VERSION:-}" ]; then
     validate_macprovider_version_tag "$MACPROVIDER_VERSION"
@@ -2759,6 +2788,8 @@ download_release() {
   pkg_path="$TMPDIR_PATH/$pkg_asset"
   checksums_path="$TMPDIR_PATH/checksums.txt"
   checksums_sig_path="$TMPDIR_PATH/checksums.txt.sig"
+  ACCEPTANCE_METADATA_PATH=""
+  ACCEPTANCE_METADATA_SIGNATURE_PATH=""
   asset_path=""
   asset_kind=""
 
@@ -2768,12 +2799,20 @@ download_release() {
       || die 7 "acceptance candidates cannot override the embedded release signing key"
     acceptance_dir="$(validated_acceptance_asset_dir "$MACPROVIDER_ACCEPTANCE_ASSET_DIR")" \
       || die 7 "unsafe MACPROVIDER_ACCEPTANCE_ASSET_DIR"
-    [ -f "$acceptance_dir/checksums.txt" ] && [ -f "$acceptance_dir/checksums.txt.sig" ] \
-      || die 3 "acceptance candidate is missing checksums.txt or checksums.txt.sig"
+    [ -f "$acceptance_dir/checksums.txt" ] \
+      && [ -f "$acceptance_dir/acceptance-candidate.json" ] \
+      && [ -f "$acceptance_dir/acceptance-candidate.json.sig" ] \
+      || die 3 "acceptance candidate is missing checksums.txt or domain-separated acceptance metadata"
+    [ ! -e "$acceptance_dir/checksums.txt.sig" ] \
+      || die 4 "acceptance candidate must not contain a production checksums.txt.sig"
     cp "$acceptance_dir/checksums.txt" "$checksums_path" \
       || die 3 "failed to stage acceptance checksums.txt"
-    cp "$acceptance_dir/checksums.txt.sig" "$checksums_sig_path" \
-      || die 3 "failed to stage acceptance checksums.txt.sig"
+    ACCEPTANCE_METADATA_PATH="$TMPDIR_PATH/acceptance-candidate.json"
+    ACCEPTANCE_METADATA_SIGNATURE_PATH="$TMPDIR_PATH/acceptance-candidate.json.sig"
+    cp "$acceptance_dir/acceptance-candidate.json" "$ACCEPTANCE_METADATA_PATH" \
+      || die 3 "failed to stage acceptance-candidate.json"
+    cp "$acceptance_dir/acceptance-candidate.json.sig" "$ACCEPTANCE_METADATA_SIGNATURE_PATH" \
+      || die 3 "failed to stage acceptance-candidate.json.sig"
     log "Using protected non-public acceptance assets for $tag."
   else
     curl -fL "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
@@ -2830,17 +2869,146 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwwd0Vzj35OP8DlZU+0lUa8vI9gHK
 EOF
 }
 
+write_acceptance_public_key() {
+  # Synced byte-for-byte from security/acceptance-candidate-signing-public.pem.
+  cat <<'EOF'
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEH3cSQs2LWFX2fP980/bheMCDuDRl
+9Rk7C3PxvOE96Lm1Iy2oZGgB7sA99226bl8irZKV2L9o7IL/2/mL/F0m8A==
+-----END PUBLIC KEY-----
+EOF
+}
+
 verify_checksum_signature() {
   public_key_path="$TMPDIR_PATH/release-signing-public.pem"
-  write_checksum_public_key > "$public_key_path"
+  if [ -n "$ACCEPTANCE_METADATA_PATH" ]; then
+    write_acceptance_public_key > "$public_key_path"
+  else
+    write_checksum_public_key > "$public_key_path"
+  fi
   if grep -q "REPLACE_WITH_MACPROVIDER" "$public_key_path"; then
     die 3 "release signing public key is not configured in install.sh"
   fi
-  openssl dgst -sha256 \
-    -verify "$public_key_path" \
-    -signature "$checksums_sig_path" \
-    "$checksums_path" >/dev/null || die 4 "checksums.txt signature verification failed"
-  log "checksums.txt signature verified."
+  if [ -n "$ACCEPTANCE_METADATA_PATH" ]; then
+    signature_payload_path="$TMPDIR_PATH/acceptance-candidate.signature-payload"
+    acceptance_signature_der_path="$TMPDIR_PATH/acceptance-candidate.signature.der"
+    python3 - "$ACCEPTANCE_METADATA_PATH" "$ACCEPTANCE_METADATA_SIGNATURE_PATH" \
+      "$checksums_path" "$GITHUB_REPO" "$tag" \
+      "$MACPROVIDER_ACCEPTANCE_COMMIT" "$MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT" \
+      "$MACPROVIDER_ACCEPTANCE_RUN_ID" "$MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT" \
+      "$signature_payload_path" "$acceptance_signature_der_path" <<'PY' \
+      || die 4 "acceptance-candidate metadata validation failed"
+import base64
+import datetime as dt
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+metadata_path, signature_path, checksums_path, repository, tag, candidate_commit, control_commit, run_id, run_attempt_raw, payload_path, signature_der_path = sys.argv[1:]
+metadata = pathlib.Path(metadata_path).read_bytes()
+checksums = pathlib.Path(checksums_path).read_bytes()
+if not 0 < len(metadata) <= 16_384:
+    raise SystemExit("metadata size")
+
+def pairs(values):
+    result = {}
+    for key, value in values:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+value = json.loads(
+    metadata.decode("utf-8"),
+    object_pairs_hook=pairs,
+    parse_constant=lambda raw: (_ for _ in ()).throw(ValueError(raw)),
+    parse_float=lambda raw: (_ for _ in ()).throw(ValueError(raw)),
+)
+fields = {
+    "candidate_commit", "candidate_ref", "channel", "checksums", "compatibility_set_id",
+    "control_commit", "expires_at", "issued_at", "repository", "run_attempt", "run_id",
+    "schema_version", "signing", "tag",
+}
+canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+if not isinstance(value, dict) or set(value) != fields or metadata != canonical:
+    raise SystemExit("noncanonical metadata")
+if value.get("schema_version") != "macprovider.acceptance-candidate.v1" or value.get("channel") != "acceptance":
+    raise SystemExit("wrong domain")
+if repository != "Augustas11/macprovider" or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+    raise SystemExit("invalid expected identity")
+if not re.fullmatch(r"[0-9a-f]{40}", candidate_commit) or not re.fullmatch(r"[0-9a-f]{40}", control_commit):
+    raise SystemExit("invalid expected identity")
+if not re.fullmatch(r"[1-9][0-9]{0,19}", run_id) or not re.fullmatch(r"[1-9][0-9]{0,9}", run_attempt_raw):
+    raise SystemExit("invalid expected identity")
+if any(value.get(name) != expected for name, expected in {
+    "repository": repository, "tag": tag, "candidate_commit": candidate_commit,
+    "control_commit": control_commit, "run_id": run_id, "run_attempt": int(run_attempt_raw),
+}.items()):
+    raise SystemExit("wrong expected identity")
+candidate_ref = value.get("candidate_ref")
+if not isinstance(candidate_ref, str) or not re.fullmatch(r"refs/heads/[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,253}[A-Za-z0-9])?", candidate_ref):
+    raise SystemExit("invalid candidate ref")
+branch = candidate_ref.removeprefix("refs/heads/")
+if ".." in branch or "@{" in branch or "//" in branch or branch.endswith(".") or any(
+    not component or component.startswith(".") or component.endswith(".") or component.endswith(".lock")
+    for component in branch.split("/")
+):
+    raise SystemExit("invalid candidate ref")
+set_id = f"{repository}:{tag}@{candidate_commit}"
+if value.get("compatibility_set_id") != set_id:
+    raise SystemExit("wrong compatibility set")
+checksums_descriptor = value.get("checksums")
+if checksums_descriptor != {"name": "checksums.txt", "sha256": hashlib.sha256(checksums).hexdigest()}:
+    raise SystemExit("wrong checksums digest")
+if value.get("signing") != {
+    "algorithm": "ecdsa-p256-sha256", "key_id": "macprovider-acceptance-p256-v1",
+}:
+    raise SystemExit("wrong signing descriptor")
+
+def timestamp(name):
+    raw = value.get(name)
+    if not isinstance(raw, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", raw):
+        raise SystemExit("invalid timestamp")
+    parsed = dt.datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != raw:
+        raise SystemExit("invalid timestamp")
+    return parsed
+
+issued_at = timestamp("issued_at")
+expires_at = timestamp("expires_at")
+now = dt.datetime.now(dt.timezone.utc)
+if not 300 <= (expires_at - issued_at).total_seconds() <= 86_400:
+    raise SystemExit("invalid validity window")
+if issued_at > now + dt.timedelta(minutes=5) or expires_at <= now:
+    raise SystemExit("expired or future candidate")
+pathlib.Path(payload_path).write_bytes(b"macprovider.acceptance-candidate.v1\n" + metadata)
+encoded_with_newline = pathlib.Path(signature_path).read_bytes()
+if not encoded_with_newline.endswith(b"\n") or b"\n" in encoded_with_newline[:-1]:
+    raise SystemExit("invalid signature encoding")
+encoded = encoded_with_newline[:-1]
+try:
+    signature = base64.b64decode(encoded, validate=True)
+except ValueError:
+    raise SystemExit("invalid signature encoding")
+if base64.b64encode(signature) != encoded or not 64 <= len(signature) <= 80:
+    raise SystemExit("invalid signature encoding")
+pathlib.Path(signature_der_path).write_bytes(signature)
+PY
+    openssl dgst -sha256 \
+      -verify "$public_key_path" \
+      -signature "$acceptance_signature_der_path" \
+      "$signature_payload_path" >/dev/null \
+      || die 4 "acceptance-candidate metadata signature verification failed"
+    log "Domain-separated acceptance-candidate metadata signature verified."
+  else
+    openssl dgst -sha256 \
+      -verify "$public_key_path" \
+      -signature "$checksums_sig_path" \
+      "$checksums_path" >/dev/null || die 4 "checksums.txt signature verification failed"
+    log "checksums.txt signature verified."
+  fi
 }
 
 checksum_for_asset() {
@@ -5482,6 +5650,90 @@ print_autotune_handoff() {
   printf "  macprovider-cli autotune --recommend --apply\n"
 }
 
+validate_acceptance_upgrade_target() {
+  target="$1"
+  [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 0
+  [ -x "$BINARY_PATH" ] || return 0
+  # Downgrades are never an acceptance shortcut. They continue only through
+  # the existing emergency path, which supplies coordinator/config/readiness gates.
+  [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && return 0
+  installed_version="$($BINARY_PATH --version 2>/dev/null | tr -d '\r\n')"
+  case "$installed_version" in
+    v*) installed_tag="$installed_version" ;;
+    *) installed_tag="v$installed_version" ;;
+  esac
+  validate_macprovider_version_tag "$installed_tag"
+  if version_at_least "$installed_tag" "$target"; then
+    die 7 "acceptance candidate $target must be newer than installed $installed_tag"
+  fi
+}
+
+validate_acceptance_staged_identity() {
+  [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 0
+  manifest="$staging_dir/compatibility-set.json"
+  [ -f "$manifest" ] || die 5 "acceptance payload is missing compatibility-set.json"
+  signed_payload="$TMPDIR_PATH/acceptance-compatibility-set.signed.json"
+  manifest_signature="$TMPDIR_PATH/acceptance-compatibility-set.signature.der"
+  python3 - "$manifest" "$GITHUB_REPO" "$tag" "$MACPROVIDER_ACCEPTANCE_COMMIT" \
+    "$signed_payload" "$manifest_signature" <<'PY' \
+    || die 5 "acceptance compatibility-set identity is invalid"
+import base64
+import json
+import pathlib
+import sys
+
+manifest_path, repository, tag, commit, payload_path, signature_path = sys.argv[1:]
+data = pathlib.Path(manifest_path).read_bytes()
+
+def pairs(values):
+    result = {}
+    for key, value in values:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+envelope = json.loads(data.decode("utf-8"), object_pairs_hook=pairs)
+canonical = (json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n").encode()
+if canonical != data or set(envelope) != {"schema_version", "signatures", "signed"}:
+    raise SystemExit("noncanonical envelope")
+if envelope.get("schema_version") != "macprovider.compatibility-set-envelope.v1":
+    raise SystemExit("wrong envelope schema")
+signatures = envelope.get("signatures")
+if not isinstance(signatures, list) or len(signatures) != 1:
+    raise SystemExit("wrong signature count")
+signature = signatures[0]
+if signature.keys() != {"algorithm", "key_id", "signature"}:
+    raise SystemExit("wrong signature fields")
+if signature.get("algorithm") != "ecdsa-p256-sha256" or signature.get("key_id") != "macprovider-release-p256-v1":
+    raise SystemExit("wrong production compatibility trust domain")
+signed = envelope.get("signed")
+if not isinstance(signed, dict):
+    raise SystemExit("missing signed payload")
+release = signed.get("release")
+set_id = f"{repository}:{tag}@{commit}"
+if not isinstance(release, dict) or release != {
+    "commit": commit,
+    "repository": repository,
+    "tag": tag,
+    "version": tag.removeprefix("v"),
+} or signed.get("compatibility_set_id") != set_id:
+    raise SystemExit("wrong acceptance release identity")
+signed_bytes = (json.dumps(signed, sort_keys=True, separators=(",", ":")) + "\n").encode()
+signature_bytes = base64.b64decode(signature["signature"], validate=True)
+if not 64 <= len(signature_bytes) <= 80:
+    raise SystemExit("invalid signature encoding")
+pathlib.Path(payload_path).write_bytes(signed_bytes)
+pathlib.Path(signature_path).write_bytes(signature_bytes)
+PY
+  compatibility_public_key="$TMPDIR_PATH/acceptance-compatibility-public.pem"
+  write_checksum_public_key > "$compatibility_public_key"
+  openssl dgst -sha256 -verify "$compatibility_public_key" \
+    -signature "$manifest_signature" "$signed_payload" >/dev/null \
+    || die 5 "acceptance compatibility-set signature verification failed"
+  log "Acceptance compatibility-set signature and exact candidate identity verified."
+}
+
 validate_emergency_target() {
   target="$1"
   [ -x "$BINARY_PATH" ] || die 7 "emergency rollback requires an installed provider binary"
@@ -5715,6 +5967,7 @@ main() {
   fi
 
   tag="$(resolve_release_tag)"
+  validate_acceptance_upgrade_target "$tag"
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
     validate_emergency_target "$tag"
     verify_emergency_coordinator_advertisement "$coordinator_base" "$tag"
@@ -5731,6 +5984,7 @@ main() {
   check_install_dir_clean
   begin_install_transaction
   stage_release_payload
+  validate_acceptance_staged_identity
   clear_quarantine "$staging_dir"
   prepare_staged_config
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then

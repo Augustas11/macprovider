@@ -13,6 +13,11 @@ struct LaunchdRestartFailure: Error, CustomStringConvertible {
     }
 }
 
+private enum ReleaseSignatureEncoding {
+    case der
+    case canonicalBase64DER
+}
+
 struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
     static let launchdLabel = "live.streamvc.macprovider"
@@ -115,12 +120,26 @@ struct SelfUpdate {
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
     }
 
-    func runAcceptanceCandidate(from directory: URL, tag: String) async throws {
+    func runAcceptanceCandidate(
+        from directory: URL,
+        tag: String,
+        expectedCommit: String,
+        expectedControlCommit: String,
+        expectedRunID: String,
+        expectedRunAttempt: Int
+    ) async throws {
         let target = try Self.validateReleaseTag(tag)
         guard Self.compareSemver(currentVersion, target) == .orderedAscending else {
             throw UpdateError.acceptanceCandidateNotNewer(current: currentVersion, target: target)
         }
-        let prepared = try prepareValidatedUpdate(fromAcceptanceDirectory: directory, tag: tag)
+        let prepared = try prepareValidatedUpdate(
+            fromAcceptanceDirectory: directory,
+            tag: tag,
+            expectedCommit: expectedCommit,
+            expectedControlCommit: expectedControlCommit,
+            expectedRunID: expectedRunID,
+            expectedRunAttempt: expectedRunAttempt
+        )
         defer { prepared.cleanup() }
         try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
         try await applyValidatedUpdate(
@@ -204,7 +223,14 @@ struct SelfUpdate {
         }
     }
 
-    func prepareValidatedUpdate(fromAcceptanceDirectory directory: URL, tag: String) throws -> PreparedSelfUpdate {
+    func prepareValidatedUpdate(
+        fromAcceptanceDirectory directory: URL,
+        tag: String,
+        expectedCommit: String,
+        expectedControlCommit: String,
+        expectedRunID: String,
+        expectedRunAttempt: Int
+    ) throws -> PreparedSelfUpdate {
         let targetVersion = try Self.validateReleaseTag(tag)
         let assetNames = try Self.validatedAcceptanceAssetNames(in: directory)
         let tarballName = "macprovider-cli-\(tag)-darwin-arm64.tar.gz"
@@ -214,9 +240,12 @@ struct SelfUpdate {
             malibuDMGName,
             CompatibilityArtifactIndex.fileName,
             "checksums.txt",
-            "checksums.txt.sig",
+            AcceptanceCandidateMetadata.fileName,
+            AcceptanceCandidateMetadata.signatureFileName,
         ]
-        guard requiredNames.allSatisfy(assetNames.contains) else {
+        guard requiredNames.allSatisfy(assetNames.contains),
+              !assetNames.contains("checksums.txt.sig")
+        else {
             throw UpdateError.missingAsset
         }
 
@@ -238,11 +267,25 @@ struct SelfUpdate {
             let malibuDMGURL = tempDir.appendingPathComponent(malibuDMGName)
             let artifactIndexURL = tempDir.appendingPathComponent(CompatibilityArtifactIndex.fileName)
             let checksumsURL = tempDir.appendingPathComponent("checksums.txt")
-            let checksumsSignatureURL = tempDir.appendingPathComponent("checksums.txt.sig")
-            try verifyChecksumSignature(
-                checksumsURL: checksumsURL,
-                signatureURL: checksumsSignatureURL,
-                tempDir: tempDir
+            let metadataURL = tempDir.appendingPathComponent(AcceptanceCandidateMetadata.fileName)
+            let metadataSignatureURL = tempDir.appendingPathComponent(AcceptanceCandidateMetadata.signatureFileName)
+            let metadataData = try Data(contentsOf: metadataURL)
+            try verifyReleaseSignature(
+                payload: AcceptanceCandidateMetadata.signaturePayload(metadata: metadataData),
+                signatureURL: metadataSignatureURL,
+                publicKeyPEM: AcceptanceCandidateMetadata.signingPublicKeyPEM,
+                signatureEncoding: .canonicalBase64DER,
+                failure: .acceptanceMetadataSignatureInvalid
+            )
+            let checksumsData = try Data(contentsOf: checksumsURL)
+            let acceptanceMetadata = try AcceptanceCandidateMetadata.loadValidated(
+                metadata: metadataData,
+                checksums: checksumsData,
+                expectedTag: tag,
+                expectedCandidateCommit: expectedCommit,
+                expectedControlCommit: expectedControlCommit,
+                expectedRunID: expectedRunID,
+                expectedRunAttempt: expectedRunAttempt
             )
             let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
             let expectedArtifactIndexSHA = try Self.expectedSHA256(
@@ -266,7 +309,8 @@ struct SelfUpdate {
                 expectedTarballSHA: Self.expectedSHA256(for: tarballName, in: checksumsText),
                 expectedMalibuSHA: Self.expectedSHA256(for: malibuDMGName, in: checksumsText),
                 signedPolicy: nil,
-                targetVersion: targetVersion
+                targetVersion: targetVersion,
+                expectedCompatibilitySetID: acceptanceMetadata.compatibilitySetID
             )
         } catch {
             try? FileManager.default.removeItem(at: tempDir)
@@ -284,7 +328,8 @@ struct SelfUpdate {
         expectedTarballSHA: String,
         expectedMalibuSHA: String,
         signedPolicy: GitHubSignedPolicy?,
-        targetVersion: String
+        targetVersion: String,
+        expectedCompatibilitySetID: String? = nil
     ) throws -> PreparedSelfUpdate {
         try validateFreeSpace(for: tempDir, requiredForKnownTarballAt: tarballURL)
         let actualSHA = try Self.sha256(file: tarballURL)
@@ -310,12 +355,17 @@ struct SelfUpdate {
             from: newBinary.deletingLastPathComponent(),
             expectedVersion: targetVersion
         )
-        _ = try CompatibilityArtifactIndex.loadValidated(
+        let artifactIndex = try CompatibilityArtifactIndex.loadValidated(
             from: artifactIndexURL,
             compatibilityManifest: compatibilityManifest,
             checksumsText: checksumsText,
             releaseAssetNames: assetNames
         )
+        if let expectedCompatibilitySetID,
+           artifactIndex.compatibilitySetID != expectedCompatibilitySetID
+        {
+            throw UpdateError.acceptanceMetadataInvalid("artifact_index_identity")
+        }
 
         if let stagedCLIValidator {
             try stagedCLIValidator(newBinary)
@@ -1211,16 +1261,52 @@ struct SelfUpdate {
     }
 
     private func verifyChecksumSignature(checksumsURL: URL, signatureURL: URL, tempDir _: URL) throws {
+        let checksums: Data
         do {
-            let publicKey = try P256.Signing.PublicKey(pemRepresentation: Self.checksumPublicKeyPEM)
-            let checksums = try Data(contentsOf: checksumsURL)
-            let signature = try P256.Signing.ECDSASignature(derRepresentation: Data(contentsOf: signatureURL))
-            let digest = SHA256.hash(data: checksums)
-            guard publicKey.isValidSignature(signature, for: digest) else {
-                throw UpdateError.checksumSignatureInvalid
-            }
+            checksums = try Data(contentsOf: checksumsURL)
         } catch {
             throw UpdateError.checksumSignatureInvalid
+        }
+        try verifyReleaseSignature(
+            payload: checksums,
+            signatureURL: signatureURL,
+            publicKeyPEM: Self.checksumPublicKeyPEM,
+            signatureEncoding: .der,
+            failure: .checksumSignatureInvalid
+        )
+    }
+
+    private func verifyReleaseSignature(
+        payload: Data,
+        signatureURL: URL,
+        publicKeyPEM: String,
+        signatureEncoding: ReleaseSignatureEncoding,
+        failure: UpdateError
+    ) throws {
+        do {
+            let publicKey = try P256.Signing.PublicKey(pemRepresentation: publicKeyPEM)
+            let signatureBytes: Data
+            switch signatureEncoding {
+            case .der:
+                signatureBytes = try Data(contentsOf: signatureURL)
+            case .canonicalBase64DER:
+                let encodedWithNewline = try Data(contentsOf: signatureURL)
+                guard encodedWithNewline.last == 0x0a else { throw failure }
+                let encoded = Data(encodedWithNewline.dropLast())
+                guard !encoded.isEmpty,
+                      !encoded.contains(0x0a),
+                      let decoded = Data(base64Encoded: encoded),
+                      decoded.count >= 64,
+                      decoded.count <= 80,
+                      Data(decoded.base64EncodedString().utf8) == encoded
+                else { throw failure }
+                signatureBytes = decoded
+            }
+            let signature = try P256.Signing.ECDSASignature(derRepresentation: signatureBytes)
+            let digest = SHA256.hash(data: payload)
+            guard publicKey.isValidSignature(signature, for: digest) else { throw failure }
+        } catch {
+            throw failure
         }
     }
 
@@ -1586,6 +1672,8 @@ enum UpdateError: Error, CustomStringConvertible {
     case checksumMissing(String)
     case checksumMismatch(expected: String, actual: String)
     case checksumSignatureInvalid
+    case acceptanceMetadataSignatureInvalid
+    case acceptanceMetadataInvalid(String)
     case missingExtractedBinary
     case currentBinaryUnknown
     case processFailed(String, Int32)
@@ -1627,6 +1715,10 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Checksum mismatch: expected \(expected), got \(actual)"
         case .checksumSignatureInvalid:
             return "checksums.txt signature verification failed"
+        case .acceptanceMetadataSignatureInvalid:
+            return "Acceptance-candidate metadata signature verification failed"
+        case .acceptanceMetadataInvalid(let reason):
+            return "Acceptance-candidate metadata is invalid: \(reason)"
         case .missingExtractedBinary:
             return "Downloaded archive does not contain macprovider-cli"
         case .currentBinaryUnknown:

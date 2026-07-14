@@ -1630,6 +1630,18 @@ struct UpdateCommand: AsyncParsableCommand {
     @Option(help: "Exact vX.Y.Z identity of the signed acceptance candidate.")
     var acceptanceTag: String?
 
+    @Option(help: "Exact 40-character commit identity of the signed acceptance candidate.")
+    var acceptanceCommit: String?
+
+    @Option(help: "Exact GitHub Actions run ID of the signed acceptance candidate.")
+    var acceptanceRunID: String?
+
+    @Option(help: "Exact trusted-main control commit that authorized the acceptance signature.")
+    var acceptanceControlCommit: String?
+
+    @Option(help: "Exact positive GitHub Actions run attempt that signed the candidate.")
+    var acceptanceRunAttempt: Int?
+
     func run() async throws {
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides())
         let updater = SelfUpdate(
@@ -1637,18 +1649,28 @@ struct UpdateCommand: AsyncParsableCommand {
             releasesAPIURL: releasesAPIURL,
             providerID: resolvedConfig?.providerID
         )
-        if acceptanceDirectory != nil || acceptanceTag != nil {
+        if acceptanceDirectory != nil || acceptanceTag != nil || acceptanceCommit != nil
+            || acceptanceRunID != nil || acceptanceControlCommit != nil || acceptanceRunAttempt != nil
+        {
             guard !check, releasesAPIURL == nil,
                   let acceptanceDirectory,
-                  let acceptanceTag
+                  let acceptanceTag,
+                  let acceptanceCommit,
+                  let acceptanceRunID,
+                  let acceptanceControlCommit,
+                  let acceptanceRunAttempt
             else {
                 throw ValidationError(
-                    "--acceptance-directory and --acceptance-tag must be supplied together and cannot be combined with --check or --releases-api-url"
+                    "all --acceptance-* identity options must be supplied together and cannot be combined with --check or --releases-api-url"
                 )
             }
             try await updater.runAcceptanceCandidate(
                 from: URL(fileURLWithPath: acceptanceDirectory, isDirectory: true),
-                tag: acceptanceTag
+                tag: acceptanceTag,
+                expectedCommit: acceptanceCommit,
+                expectedControlCommit: acceptanceControlCommit,
+                expectedRunID: acceptanceRunID,
+                expectedRunAttempt: acceptanceRunAttempt
             )
         } else {
             try await updater.run(checkOnly: check)

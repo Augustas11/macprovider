@@ -189,6 +189,7 @@ select the `production-release` environment and add these environment secrets:
 | `APPLE_NOTARY_PASSWORD` | The app-specific password from step 4 |
 | `APPLE_NOTARY_TEAM_ID` | The Team ID from step 5 |
 | `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` | P-256 private key matching the public key embedded in `phase3-binary/dist/install.sh` |
+| `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM` | Dedicated P-256 private key matching `security/acceptance-candidate-signing-public.pem`; provision with `scripts/provision-acceptance-signing-key.sh` |
 | `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read access |
 
 Do not duplicate release secrets at repository scope. The unsigned `build` job
@@ -206,55 +207,74 @@ verification.
 
 Issue #585 hardware acceptance may need the final signed and notarized
 compatibility set before its source branch is merged or a release tag exists.
-Use `acceptance_candidate=true` only for that purpose. The mode is fail closed:
-it also requires `candidate=true` and `prerelease=true`, and both release jobs
-must observe the dispatch SHA as the fresh head of the exact selected branch.
-
-The selected branch must be explicitly allowed by the `production-release`
-environment alongside `main` for the duration of the acceptance run. Wildcard
-or unrelated branch policies are rejected. The same independent reviewer,
-self-review prevention, and disabled admin bypass remain mandatory. Normal
-production verification continues to require that `main` is the environment's
-only allowed branch, so remove the temporary exact branch policy before any
-production release.
+Use the main-owned `acceptance-candidate.yml` workflow only for that purpose.
+Dispatch the workflow itself from the exact reviewed `main` control commit;
+the candidate branch ref and SHA are explicit untrusted build inputs. Keep the
+`production-release` environment restricted to `main`. The same independent
+reviewer, self-review prevention, and disabled admin bypass remain mandatory,
+but no candidate branch is ever added to the protected environment policy.
 
 ```bash
 export ACCEPTANCE_BRANCH=fix/585-provider-lifecycle-option2
+export ACCEPTANCE_REF="refs/heads/$ACCEPTANCE_BRANCH"
 export TAG=vX.Y.Z
-git fetch origin "$ACCEPTANCE_BRANCH"
+git fetch origin main "$ACCEPTANCE_BRANCH"
 export ACCEPTANCE_COMMIT="$(git rev-parse "origin/$ACCEPTANCE_BRANCH")"
+export ACCEPTANCE_CONTROL_COMMIT="$(git rev-parse origin/main)"
 test "$(git ls-remote origin "refs/heads/$ACCEPTANCE_BRANCH" | awk '{print $1}')" = \
   "$ACCEPTANCE_COMMIT"
-gh workflow run release.yml --repo Augustas11/macprovider \
-  --ref "$ACCEPTANCE_BRANCH" \
-  -f version="$TAG" -f prerelease=true -f candidate=true \
-  -f acceptance_candidate=true
+test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = \
+  "$ACCEPTANCE_CONTROL_COMMIT"
+gh workflow run acceptance-candidate.yml --repo Augustas11/macprovider \
+  --ref main \
+  -f candidate_ref="$ACCEPTANCE_REF" \
+  -f candidate_sha="$ACCEPTANCE_COMMIT" \
+  -f tag="$TAG" \
+  -f provider_admission_policy=strict_post_migration
 ```
 
 Approve the `production-release` job only after independently reviewing the
-captured branch and SHA. The protected job signs, notarizes, and verifies the
-same complete compatibility artifact index, checksums, and provenance as a
-production release. It then uploads `acceptance-candidate-$ACCEPTANCE_COMMIT`
-as a one-day Actions artifact. It does not create or patch a GitHub release,
-publish assets, create a tag, or deploy Pearl. Branch-head drift before the
-final upload invalidates the run; dispatch a new run instead of reusing its
-artifacts.
+captured control commit, candidate ref, and candidate SHA. The unprivileged job
+builds the candidate without secrets. The protected job checks out only the
+main-owned signer, never executes candidate binaries, signs/notarizes the
+complete compatibility set, and uploads
+`acceptance-candidate-$ACCEPTANCE_COMMIT` as a one-day Actions artifact. It
+does not create or patch a GitHub release, publish assets, create a tag, or
+deploy Pearl. Main or candidate ref drift before final export invalidates the
+run; dispatch a new run instead of reusing its artifacts.
 
-Consume the candidate only from a checkout at the captured commit. Download
-the private artifact into a fresh user-owned directory, verify the complete
-signed release set before extracting any executable content, and then use the
-verified tarball's installer with an exact version pin:
+Record both reviewed commits: `ACCEPTANCE_COMMIT` is the candidate branch tip;
+`ACCEPTANCE_CONTROL_COMMIT` is the trusted `main` revision that owns the signer
+workflow. The protected metadata signature binds both commits, the exact tag,
+branch ref, run ID/attempt, compatibility-set ID, expiry, and SHA-256 of
+`checksums.txt`. Its signature covers the literal ASCII domain
+`macprovider.acceptance-candidate.v1\n` followed by canonical metadata JSON.
+It uses only the public key in
+`security/acceptance-candidate-signing-public.pem`; the bundle deliberately
+omits production `checksums.txt.sig`, so no production verifier can consume an
+acceptance signature. The inner compatibility manifest remains
+production-signed so normal startup and reboot soak never need an acceptance
+bypass.
+
+Run the verifier only from a checkout at the captured trusted control commit.
+Download the private artifact into a fresh user-owned directory and verify the
+complete signed release set before extracting executable content:
 
 ```bash
-test "$(git rev-parse HEAD)" = "$ACCEPTANCE_COMMIT"
+test "$(git rev-parse HEAD)" = "$ACCEPTANCE_CONTROL_COMMIT"
 export ACCEPTANCE_RUN_ID="$(
-  gh run list --repo Augustas11/macprovider --workflow release.yml \
-    --branch "$ACCEPTANCE_BRANCH" --event workflow_dispatch \
+  gh run list --repo Augustas11/macprovider --workflow acceptance-candidate.yml \
+    --branch main --event workflow_dispatch --limit 20 \
     --json databaseId,headSha,conclusion \
-    --jq ".[] | select(.headSha == \"$ACCEPTANCE_COMMIT\" and .conclusion == \"success\") | .databaseId" \
+    --jq ".[] | select(.headSha == \"$ACCEPTANCE_CONTROL_COMMIT\" and .conclusion == \"success\") | .databaseId" \
     | head -n 1
 )"
 test -n "$ACCEPTANCE_RUN_ID"
+export ACCEPTANCE_RUN_ATTEMPT="$(
+  gh api "repos/Augustas11/macprovider/actions/runs/$ACCEPTANCE_RUN_ID" \
+    --jq .run_attempt
+)"
+test "$ACCEPTANCE_RUN_ATTEMPT" -ge 1
 mkdir -p "$HOME/Library/Caches"
 export ACCEPTANCE_ASSET_DIR="$(
   mktemp -d "$HOME/Library/Caches/macprovider-acceptance.XXXXXX"
@@ -270,26 +290,104 @@ while IFS= read -r release_asset; do
   test -n "$release_asset" && release_assets+=("$ACCEPTANCE_ASSET_DIR/$release_asset")
 done < "$ACCEPTANCE_ASSET_DIR/release-assets.txt"
 bash scripts/verify-release-checksums.sh \
+  --acceptance-candidate \
+  "$ACCEPTANCE_ASSET_DIR/acceptance-candidate.json" \
+  "$ACCEPTANCE_RUN_ID" "$ACCEPTANCE_RUN_ATTEMPT" "$ACCEPTANCE_CONTROL_COMMIT" \
   "$ACCEPTANCE_ASSET_DIR/checksums.txt" \
-  "$ACCEPTANCE_ASSET_DIR/checksums.txt.sig" \
+  "$ACCEPTANCE_ASSET_DIR/acceptance-candidate.json.sig" \
   "$ACCEPTANCE_ASSET_DIR/release-provenance.json" \
   Augustas11/macprovider "$TAG" "$ACCEPTANCE_COMMIT" \
   "${release_assets[@]}"
+test ! -e "$ACCEPTANCE_ASSET_DIR/checksums.txt.sig"
+```
+
+Run both acceptance paths on separate clean snapshots or hosts. First prove a
+clean bootstrap with no existing CLI or provider support directory:
+
+```bash
+test ! -e "$HOME/.local/bin/macprovider-cli"
+test ! -e "$HOME/macprovider"
 
 bootstrap_dir="$(mktemp -d "$HOME/Library/Caches/macprovider-bootstrap.XXXXXX")"
 tar -xzf "$ACCEPTANCE_ASSET_DIR/macprovider-cli-${TAG}-darwin-arm64.tar.gz" \
   -C "$bootstrap_dir" compatibility-set-local/install.sh
 MACPROVIDER_VERSION="$TAG" \
 MACPROVIDER_ACCEPTANCE_ASSET_DIR="$ACCEPTANCE_ASSET_DIR" \
+MACPROVIDER_ACCEPTANCE_COMMIT="$ACCEPTANCE_COMMIT" \
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$ACCEPTANCE_CONTROL_COMMIT" \
+MACPROVIDER_ACCEPTANCE_RUN_ID="$ACCEPTANCE_RUN_ID" \
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="$ACCEPTANCE_RUN_ATTEMPT" \
   bash "$bootstrap_dir/compatibility-set-local/install.sh"
+
+test "$("$HOME/.local/bin/macprovider-cli" --version)" = "${TAG#v}"
+codesign --verify --strict --deep "$HOME/.local/bin/macprovider-cli"
+test "$(codesign -dv --verbose=4 "$HOME/.local/bin/macprovider-cli" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
+  live.streamvc.macprovider.cli
+spctl -a -t exec "$HOME/.local/bin/macprovider-cli"
+python3 - "$HOME/macprovider/compatibility-set.json" \
+  "Augustas11/macprovider:$TAG@$ACCEPTANCE_COMMIT" <<'PY'
+import json, sys
+manifest, expected = sys.argv[1:]
+with open(manifest, encoding="utf-8") as handle:
+    value = json.load(handle)
+assert value["signed"]["compatibility_set_id"] == expected
+PY
+```
+
+Next, on a snapshot with the immediately prior production CLI and Malibu.app,
+prove the actual atomic Swift updater transaction. The updater is upgrade-only;
+an equal or older target is rejected unless the operator separately enters the
+complete emergency rollback flow.
+
+```bash
+export PRIOR_VERSION=vX.Y.Z
+test "$(macprovider-cli --version)" = "${PRIOR_VERSION#v}"
+if test -d /Applications/Malibu.app; then
+  export MALIBU_APP=/Applications/Malibu.app
+else
+  export MALIBU_APP="$HOME/Applications/Malibu.app"
+fi
+test -d "$MALIBU_APP"
+
+macprovider-cli update \
+  --acceptance-directory "$ACCEPTANCE_ASSET_DIR" \
+  --acceptance-tag "$TAG" \
+  --acceptance-commit "$ACCEPTANCE_COMMIT" \
+  --acceptance-control-commit "$ACCEPTANCE_CONTROL_COMMIT" \
+  --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+  --acceptance-run-attempt "$ACCEPTANCE_RUN_ATTEMPT"
+
+test "$(macprovider-cli --version)" = "${TAG#v}"
+codesign --verify --strict --deep "$(command -v macprovider-cli)"
+test "$(codesign -dv --verbose=4 "$(command -v macprovider-cli)" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
+  live.streamvc.macprovider.cli
+codesign --verify --strict --deep "$MALIBU_APP"
+test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleIdentifier)" = tech.malibu.app
+test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)" = "${TAG#v}"
+xcrun stapler validate "$MALIBU_APP"
+spctl -a -t exec "$MALIBU_APP"
+cmp "$HOME/macprovider/compatibility-set.json" \
+  "$MALIBU_APP/Contents/Resources/compatibility-set.json"
+launchctl print "gui/$(id -u)/live.streamvc.macprovider" >/dev/null
+```
+
+Before recording a pass, run the shared transaction rollback proofs. They
+assert restart failure and readiness failure restore the prior CLI, Malibu,
+resources, and catalog rather than leaving a mixed compatibility set:
+
+```bash
+(cd phase3-binary && swift test --filter SelfUpdateTests/testRestartFailureReturnsFailureAndRollsBackReplacement)
+(cd phase3-binary && swift test --filter SelfUpdateTests/testReadinessFailureRollsBackReplacement)
+(cd phase3-binary && swift test --filter AutoUpdateTests/testReleasePayloadActivationAndRollbackKeepBinaryResourcesAndCatalogTogether)
 ```
 
 `MACPROVIDER_ACCEPTANCE_ASSET_DIR` never falls back to GitHub Releases. It
-requires `MACPROVIDER_VERSION`, rejects symlinked or writable asset paths and
-hard-linked files, forbids a checksum-public-key override, and verifies the
-ordinary embedded P-256 checksum signature and payload hashes before staging
-the package or tarball. Delete both temporary directories after the hardware
-run; the GitHub artifact expires automatically after one day.
+requires every identity pin above, rejects symlinked/writable paths and hard
+links, forbids signing-key override, rejects expired/replayed/wrong-domain
+metadata, and verifies the outer acceptance signature, checksum hash chain,
+production-signed inner compatibility identity, and selected package/tarball
+before cutover. Delete temporary directories after both runs; the artifact
+expires automatically after one day.
 
 ### 8. Build the candidate, cut the release tag, and verify
 
@@ -306,8 +404,7 @@ git fetch origin main
 export RELEASE_COMMIT="$(git rev-parse origin/main)"
 test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$RELEASE_COMMIT"
 gh workflow run release.yml --repo Augustas11/macprovider --ref main \
-  -f version="$TAG" -f prerelease=false -f candidate=true \
-  -f acceptance_candidate=false
+  -f version="$TAG" -f prerelease=false -f candidate=true
 ```
 
 Wait until the unsigned `build` job succeeds and `sign_publish` is waiting for

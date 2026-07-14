@@ -96,7 +96,11 @@ final class SelfUpdateTests: XCTestCase {
         do {
             try await update.runAcceptanceCandidate(
                 from: URL(fileURLWithPath: "/path/that/does/not/exist", isDirectory: true),
-                tag: "v1.8.33"
+                tag: "v1.8.33",
+                expectedCommit: String(repeating: "a", count: 40),
+                expectedControlCommit: String(repeating: "b", count: 40),
+                expectedRunID: "12345",
+                expectedRunAttempt: 1
             )
             XCTFail("acceptance candidate unexpectedly allowed a downgrade")
         } catch let error as UpdateError {

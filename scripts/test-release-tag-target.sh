@@ -20,8 +20,6 @@ git -C "$work/source" commit -qam two
 second="$(git -C "$work/source" rev-parse HEAD)"
 git -C "$work/source" remote add origin "$work/remote.git"
 git -C "$work/source" push -q origin HEAD:refs/heads/main
-git -C "$work/source" push -q origin "$second":refs/heads/fix/acceptance
-git -C "$work/source" push -q origin "$first":refs/heads/fix/drifted-acceptance
 
 bash "$guard" v1.0.0 "$second" "$work/remote.git" --allow-absent | grep -q 'is absent and may be created'
 set +e
@@ -61,57 +59,6 @@ grep -q 'release tag v1.0.0 is absent' "$work/source-absent.out"
     GITHUB_SHA="$second" \
     bash "$source_guard" v1.0.0 "$second" "$work/remote.git" --allow-absent
 ) | grep -q 'ok: v1.0.0 at reviewed origin/main'
-
-# A protected acceptance candidate may use the exact selected branch head and
-# an absent tag, but the production mode must never inherit that relaxation.
-(
-  cd "$work/source"
-  git update-ref -d refs/remotes/origin/main
-  GITHUB_EVENT_NAME=workflow_dispatch \
-    GITHUB_REF=refs/heads/fix/acceptance \
-    GITHUB_SHA="$second" \
-    bash "$source_guard" v1.0.4 "$second" "$work/remote.git" \
-      --allow-absent --acceptance-candidate refs/heads/fix/acceptance
-  test "$(git rev-parse refs/remotes/origin/main)" = "$second"
-) | grep -q 'ok: v1.0.4 at reviewed refs/heads/fix/acceptance'
-if (
-  cd "$work/source"
-  GITHUB_EVENT_NAME=workflow_dispatch \
-    GITHUB_REF=refs/heads/fix/acceptance \
-    GITHUB_SHA="$second" \
-    bash "$source_guard" v1.0.4 "$second" "$work/remote.git" \
-      --allow-absent --production refs/heads/fix/acceptance
-) >"$work/production-branch.out" 2>&1; then
-  echo "production release source guard accepted branch mode" >&2
-  exit 1
-fi
-grep -q 'release dispatch must select refs/heads/main' "$work/production-branch.out"
-if (
-  cd "$work/source"
-  GITHUB_EVENT_NAME=workflow_dispatch \
-    GITHUB_REF=refs/heads/fix/drifted-acceptance \
-    GITHUB_SHA="$second" \
-    bash "$source_guard" v1.0.4 "$second" "$work/remote.git" \
-      --allow-absent --acceptance-candidate refs/heads/fix/drifted-acceptance
-) >"$work/acceptance-ref-drift.out" 2>&1; then
-  echo "acceptance-candidate source guard accepted ref drift" >&2
-  exit 1
-fi
-grep -q 'acceptance-candidate commit is not the fresh selected branch tip' \
-  "$work/acceptance-ref-drift.out"
-if (
-  cd "$work/source"
-  GITHUB_EVENT_NAME=workflow_dispatch \
-    GITHUB_REF=refs/heads/fix/acceptance \
-    GITHUB_SHA="$second" \
-    bash "$source_guard" v1.0.4 "$second" "$work/remote.git" \
-      --require-existing --acceptance-candidate refs/heads/fix/acceptance
-) >"$work/acceptance-tag-policy.out" 2>&1; then
-  echo "acceptance-candidate source guard accepted strict tag policy" >&2
-  exit 1
-fi
-grep -q 'acceptance-candidate source verification must allow an absent tag' \
-  "$work/acceptance-tag-policy.out"
 
 git -C "$work/source" tag v1.0.0 "$second"
 git -C "$work/source" push -q origin refs/tags/v1.0.0

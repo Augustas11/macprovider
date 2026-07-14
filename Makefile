@@ -54,6 +54,7 @@ test-dist:
 	bash scripts/test-coordinator-advertised-version-test.sh
 	bash scripts/test-release-tag-target.sh
 	bash scripts/test-release-security-posture.sh
+	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-release-toolchain.sh
 	bash scripts/test-release-publication-provenance.sh
 	bash scripts/test-compatibility-set-manifest.sh
