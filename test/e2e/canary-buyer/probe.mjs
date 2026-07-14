@@ -73,6 +73,7 @@ const isQualification = selectedMode === 'qualification';
 const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
+const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
 
 const CONFIG = {
   mode: selectedMode,
@@ -102,7 +103,7 @@ const CONFIG = {
   maxRequestsPerProvider: intEnv('CANARY_MAX_REQUESTS_PER_PROVIDER', isQualification ? 17 : 4, 1, 100),
   maxCompletionTokensPerProvider: intEnv('CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER', isQualification ? 512 : 32, 1, 4096),
   maxRunDurationMs: intEnv('CANARY_MAX_RUN_DURATION_MS', isQualification ? 300000 : 90000, 10000, 900000),
-  recoverySoakSeconds: intEnv('CANARY_RECOVERY_SOAK_SECONDS', isQualification ? 60 : 15, 2, 300),
+  recoverySoakSeconds: intEnv('CANARY_RECOVERY_SOAK_SECONDS', isQualification ? 60 : 45, 2, 300),
   recoveryPollMs: intEnv('CANARY_RECOVERY_POLL_MS', 7000, 6000, 30000),
   safetyPollMs: intEnv('CANARY_SAFETY_POLL_MS', 2000, 500, 5000),
   safetyObserverTimeoutMs: intEnv('CANARY_SAFETY_OBSERVER_TIMEOUT_MS', 5000, 1000, 10000),
@@ -733,10 +734,18 @@ export function shouldRunRecovery(attemptedRequests) {
   return Number.isSafeInteger(attemptedRequests) && attemptedRequests > 0;
 }
 
-export function recoveryCadenceReasons(soakSeconds, pollMs, heartbeatCadenceMs = 5000) {
+export function recoveryCadenceReasons(
+  soakSeconds,
+  pollMs,
+  heartbeatCadenceMs = PRODUCTION_HEARTBEAT_CADENCE_MS,
+) {
   const reasons = [];
-  if (pollMs <= heartbeatCadenceMs) reasons.push('recovery_poll_has_no_heartbeat_phase_margin');
+  if (pollMs >= heartbeatCadenceMs) reasons.push('recovery_poll_not_faster_than_heartbeat');
   if ((soakSeconds * 1000) < (pollMs * 2)) reasons.push('recovery_soak_cannot_fit_two_observations');
+  const recoverySampleSpanMs = (Math.floor((soakSeconds * 1000) / pollMs) - 1) * pollMs;
+  if (recoverySampleSpanMs < heartbeatCadenceMs) {
+    reasons.push('recovery_soak_cannot_observe_heartbeat_advance');
+  }
   return reasons;
 }
 

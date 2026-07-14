@@ -199,9 +199,19 @@ test('401 and 403 are classified as authentication errors, never generic failure
 });
 
 test('recovery polling has heartbeat phase margin and room for two observations', () => {
-  assert.deepEqual(recoveryCadenceReasons(15, 7_000), []);
-  assert.deepEqual(recoveryCadenceReasons(15, 5_000), ['recovery_poll_has_no_heartbeat_phase_margin']);
-  assert.deepEqual(recoveryCadenceReasons(10, 7_000), ['recovery_soak_cannot_fit_two_observations']);
+  assert.deepEqual(recoveryCadenceReasons(45, 7_000), []);
+  assert.deepEqual(recoveryCadenceReasons(45, 30_000), [
+    'recovery_poll_not_faster_than_heartbeat',
+    'recovery_soak_cannot_fit_two_observations',
+    'recovery_soak_cannot_observe_heartbeat_advance',
+  ]);
+  assert.deepEqual(recoveryCadenceReasons(10, 7_000), [
+    'recovery_soak_cannot_fit_two_observations',
+    'recovery_soak_cannot_observe_heartbeat_advance',
+  ]);
+  assert.deepEqual(recoveryCadenceReasons(37, 7_000), [
+    'recovery_soak_cannot_observe_heartbeat_advance',
+  ]);
 });
 
 test('an adaptive safety abort cancels an in-flight stream', async () => {

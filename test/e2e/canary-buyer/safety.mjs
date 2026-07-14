@@ -223,6 +223,10 @@ export function poolzInvariantReasons(initial, current, {
     const heartbeatAge = observed.heartbeat_age_ms;
     if (!Number.isFinite(heartbeatAge)) reasons.push(`${id}:heartbeat_signal_missing`);
     else if (heartbeatAge > maxHeartbeatAgeMs) reasons.push(`${id}:heartbeat_stale_${heartbeatAge}ms_gt_${maxHeartbeatAgeMs}ms`);
+    if (expected.last_heartbeat_at_ms != null && observed.last_heartbeat_at_ms != null
+        && observed.last_heartbeat_at_ms < expected.last_heartbeat_at_ms) {
+      reasons.push(`${id}:heartbeat_regressed`);
+    }
     if (requireHeartbeatAdvance) {
       const heartbeatAdvanced = expected.last_heartbeat_at_ms != null
         && observed.last_heartbeat_at_ms != null
@@ -590,9 +594,14 @@ export function recoverySoakReasons({
       const previous = index === 0 ? poolzInitial : poolzSamples[index - 1];
       reasons.push(...poolzInvariantReasons(previous, sample, {
         maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
-        requireHeartbeatAdvance: true,
       }).map((reason) => `sample_${index}:${reason}`));
     });
+    if (poolzSamples.length) {
+      reasons.push(...poolzInvariantReasons(poolzSamples[0], poolzSamples[poolzSamples.length - 1], {
+        maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
+        requireHeartbeatAdvance: true,
+      }).map((reason) => `final:${reason}`));
+    }
   }
   if (providerInitial.length) {
     if (providerSamples.length < 2) reasons.push('recovery_provider_samples_lt_2');

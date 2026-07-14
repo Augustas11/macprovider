@@ -220,6 +220,9 @@ test('baseline files require fresh provider, hardware, thermal, and build proven
   assert.throws(() => validateBaselineDocument({ schema_version: 3, entries: [{
     ...entries[0], measured_at: '2026-06-01T12:00:00Z', approved_at: '2026-07-14T12:00:00Z',
   }] }, now), /approval window/);
+  assert.throws(() => validateBaselineDocument({ schema_version: 3, entries: [{
+    ...entries[0], approved_at: '2026-07-14T12:07:00Z', valid_until: '2026-07-21T12:07:00Z',
+  }] }, now), /approval window/);
   assert.equal(findBaseline(entries, 'model-a', 'provider-a', '8GB', { ...identity, thermalCondition: 'fair' }), null);
 });
 
@@ -239,6 +242,13 @@ test('expected fleet and qualification isolation require exact provider/model/ro
   assert.deepEqual(expectedFleetReasons(activeRows, expected, {
     maxHeartbeatAgeMs: 90_000, activeProviderID: 'provider-a',
   }), []);
+  const rowsWithUnexpectedProvider = structuredClone(rows);
+  rowsWithUnexpectedProvider.push({
+    ...rowsWithUnexpectedProvider[0], provider_id: 'provider-c', model_id: 'model-c',
+  });
+  assert.ok(expectedFleetReasons(rowsWithUnexpectedProvider, expected, {
+    maxHeartbeatAgeMs: 90_000,
+  }).includes('provider-c:unexpected_provider'));
   rows[1].routing_eligible = false;
   rows[1].state = 'draining';
   assert.deepEqual(qualificationIsolationReasons(rows, {
@@ -273,7 +283,7 @@ test('response attribution requires exact provider and model in both canary mode
   ]);
 });
 
-test('recovery requires multiple stable samples and advancing actual heartbeat plus telemetry observation', () => {
+test('recovery allows stable heartbeat samples but requires eventual advance plus telemetry progress', () => {
   const now = Date.parse('2026-07-14T12:00:00Z');
   const gateway = healthyGateway();
   const operatorInitial = poolz(now);
@@ -296,17 +306,34 @@ test('recovery requires multiple stable samples and advancing actual heartbeat p
     row.heartbeat_age_ms = 0;
     row.activity_age_ms = 0;
   }
-  const advanced2 = structuredClone(advanced1);
-  for (const row of advanced2) row.last_heartbeat_at_ms += 30_000;
   assert.deepEqual(recoverySoakReasons({
     gatewayInitial: gateway,
     gatewaySamples: [gateway, gateway],
     poolzInitial: operatorInitial,
-    poolzSamples: [advanced1, advanced2],
+    poolzSamples: [operatorInitial, advanced1],
     providerInitial,
     providerSamples: [
       [provider({ uptime_s: 1_015, observation_id: 'observation-b' })],
       [provider({ uptime_s: 1_030, observation_id: 'observation-c' })],
     ],
   }, { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 }), []);
+
+  const regressed = structuredClone(operatorInitial);
+  for (const row of regressed) row.last_heartbeat_at_ms -= 1;
+  assert.ok(recoverySoakReasons({
+    gatewayInitial: gateway,
+    gatewaySamples: [gateway, gateway],
+    poolzInitial: operatorInitial,
+    poolzSamples: [regressed, advanced1],
+  }, { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 })
+    .some((reason) => reason.includes('heartbeat_regressed')));
+
+  const advancedBeforeRecovery = structuredClone(advanced1);
+  assert.ok(recoverySoakReasons({
+    gatewayInitial: gateway,
+    gatewaySamples: [gateway, gateway],
+    poolzInitial: operatorInitial,
+    poolzSamples: [advancedBeforeRecovery, structuredClone(advancedBeforeRecovery)],
+  }, { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 })
+    .some((reason) => reason.includes('heartbeat_did_not_advance')));
 });

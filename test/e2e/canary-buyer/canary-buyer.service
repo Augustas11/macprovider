@@ -49,7 +49,7 @@ Environment=CANARY_REQUIRE_HEARTBEAT=1
 Environment=CANARY_MAX_REQUESTS_PER_PROVIDER=4
 Environment=CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER=32
 Environment=CANARY_MAX_RUN_DURATION_MS=90000
-Environment=CANARY_RECOVERY_SOAK_SECONDS=15
+Environment=CANARY_RECOVERY_SOAK_SECONDS=45
 Environment=CANARY_PROBE_TIMEOUT_SECONDS=120
 Environment=CANARY_TIMEOUT_BIN=/usr/bin/timeout
 # This unit is never a performance or rollout qualification surface.

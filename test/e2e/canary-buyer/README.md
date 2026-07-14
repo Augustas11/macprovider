@@ -43,7 +43,7 @@ Default hard worst-case-per-provider budget:
 | Requests | 4 |
 | Reserved completion tokens | 32 |
 | Whole run, including soak | 90 seconds |
-| Recovery soak | 15 seconds |
+| Recovery soak | 45 seconds |
 
 The internal budget is enforced globally because the buyer cannot predict gateway
 routing. Even if every request routes to one provider, that provider cannot
@@ -197,8 +197,9 @@ Before load, between requests, after load, and throughout soak the probe checks:
 - total/Ready provider counts and per-model Ready counts do not change;
 - every expected rollout-safety provider stays Ready/routable with its exact model;
 - the isolated qualification target stays non-routable without reconnecting;
-- actual heartbeat timestamps (never generic activity) remain fresh and advance
-  on every successive soak sample;
+- actual heartbeat timestamps (never generic activity) remain fresh and never
+  regress between soak samples, and the final sample advances from the initial
+  timestamp across a soak longer than the production heartbeat cadence;
 - versioned provider telemetry observations advance on every successive sample,
   queues return to zero,
   memory stays below its configured fraction, RSS growth stays bounded, and
@@ -226,8 +227,8 @@ summaries so heartbeat and workload evolution can be audited after the run.
 | `CANARY_MAX_REQUESTS_PER_PROVIDER` | `4` | worst-case routed request cap |
 | `CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER` | `32` | worst-case reserved completion-token cap |
 | `CANARY_MAX_RUN_DURATION_MS` | `90000` | internal whole-run cap |
-| `CANARY_RECOVERY_SOAK_SECONDS` | `15` | stable post-workload interval |
-| `CANARY_RECOVERY_POLL_MS` | `7000` | phase-safe recovery cadence (strictly slower than the 5s heartbeat) |
+| `CANARY_RECOVERY_SOAK_SECONDS` | `45` | spans the 30-second production heartbeat cadence |
+| `CANARY_RECOVERY_POLL_MS` | `7000` | samples faster than the 30-second production heartbeat cadence |
 | `CANARY_SAFETY_POLL_MS` | `2000` | concurrent in-request safety observation cadence |
 | `CANARY_MIN_READY_PROVIDERS` | `2` | rollout-safety capacity floor (also at least expected-fleet size) |
 | `CANARY_MAX_HEARTBEAT_AGE_MS` | `90000` | operator-observed freshness cap |

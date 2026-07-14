@@ -3,7 +3,16 @@
 # credential resolution or network call; scheduler shutdown is defense in depth.
 set -euo pipefail
 
-platform="$(uname -s)"
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  : "${CANARY_TEST_PLATFORM:?CANARY_TEST_PLATFORM is required when sourcing emergency-disable.sh}"
+  platform="$CANARY_TEST_PLATFORM"
+else
+  case "$OSTYPE" in
+    darwin*) platform="Darwin" ;;
+    linux*) platform="Linux" ;;
+    *) platform="$(/usr/bin/uname -s)" ;;
+  esac
+fi
 target_uid=""
 if [[ "$platform" == "Darwin" ]]; then
   target_user="${CANARY_TARGET_USER:-${SUDO_USER:-$(id -un)}}"

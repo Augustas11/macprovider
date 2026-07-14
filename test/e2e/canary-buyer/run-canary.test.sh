@@ -62,6 +62,11 @@ printf '%s\n' "$*" >>"$CANARY_TEST_LAUNCHCTL"
 [[ "${1:-}" == "print" ]] && exit 1
 exit 0
 EOF
+cat >"$TMP/launchctl-stuck" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CANARY_TEST_LAUNCHCTL"
+exit 0
+EOF
 chmod +x "$TMP"/*
 
 export MACPROVIDER_BUYER_TOKEN=mp_test_token_not_secret
@@ -234,5 +239,38 @@ test ! -e "$TMP/enabled"
 grep -q '^disable --now canary-buyer.timer$' "$CANARY_TEST_SYSTEMCTL"
 grep -q '^stop canary-buyer.service$' "$CANARY_TEST_SYSTEMCTL"
 grep -q '^is-active --quiet canary-buyer.service$' "$CANARY_TEST_SYSTEMCTL"
+
+# The macOS emergency path unloads the exact per-user LaunchAgent label and
+# verifies that launchd no longer reports it. This runs on Linux with only the
+# platform probe injected; the production command path stays unchanged.
+: >"$TMP/darwin-enabled"
+: >"$CANARY_TEST_LAUNCHCTL"
+CANARY_TEST_PLATFORM=Darwin \
+  CANARY_DISABLE_FILE="$TMP/darwin-emergency/DISABLED" CANARY_ENABLE_FILE="$TMP/darwin-enabled" \
+  CANARY_SYSTEMCTL_BIN="$TMP/systemctl" CANARY_LAUNCHCTL_BIN="$TMP/launchctl" \
+  CANARY_TARGET_USER="$(id -un)" CANARY_TARGET_UID="$(id -u)" CANARY_TARGET_HOME="$TMP" \
+  bash -c 'source "$1"' _ "$HERE/emergency-disable.sh" >/dev/null
+test -e "$TMP/darwin-emergency/DISABLED"
+test ! -e "$TMP/darwin-enabled"
+grep -q "^bootout gui/$(id -u)/com.streamvc.canary-buyer$" "$CANARY_TEST_LAUNCHCTL"
+grep -q "^print gui/$(id -u)/com.streamvc.canary-buyer$" "$CANARY_TEST_LAUNCHCTL"
+
+# A scheduler that remains loaded makes the command fail, but the fail-closed
+# sentinel must already be present so no subsequent invocation can add load.
+: >"$TMP/darwin-stuck-enabled"
+: >"$CANARY_TEST_LAUNCHCTL"
+if CANARY_TEST_PLATFORM=Darwin \
+    CANARY_DISABLE_FILE="$TMP/darwin-stuck/DISABLED" CANARY_ENABLE_FILE="$TMP/darwin-stuck-enabled" \
+    CANARY_SYSTEMCTL_BIN="$TMP/systemctl" CANARY_LAUNCHCTL_BIN="$TMP/launchctl-stuck" \
+    CANARY_TARGET_USER="$(id -un)" CANARY_TARGET_UID="$(id -u)" CANARY_TARGET_HOME="$TMP" \
+    bash -c 'source "$1"' _ "$HERE/emergency-disable.sh" >/dev/null 2>"$TMP/darwin-stuck.err"; then
+  echo "launchd verification should fail while the agent remains loaded" >&2
+  exit 1
+else
+  test "$?" = 1
+fi
+test -e "$TMP/darwin-stuck/DISABLED"
+test ! -e "$TMP/darwin-stuck-enabled"
+grep -q 'class=emergency_disable_failed launchd agent remains loaded' "$TMP/darwin-stuck.err"
 
 echo 'PASS: canary wrapper issues one bounded attempt, honors kill switches, and never amplifies degradation'
