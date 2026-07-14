@@ -97,6 +97,13 @@ fi
 complete_payload="$(printf '%s\n' \
   macprovider-cli \
   mlx.metallib \
+  compatibility-set.json \
+  compatibility-set-local \
+  compatibility-set-local/install.sh \
+  compatibility-set-local/provider-launch-agent.plist.template \
+  compatibility-set-local/updater-rollback.json \
+  compatibility-set-local/watchdog-launch-agent.plist.template \
+  compatibility-set-local/watchdog.sh \
   Runtime.bundle \
   Runtime.bundle/resource \
   catalog-release \
@@ -117,6 +124,10 @@ if (validate_staged_entries "${complete_payload//$'\n'Runtime.bundle$'\n'Runtime
 fi
 if (validate_staged_entries "${complete_payload//$'\n'catalog-release\/release.json/}" "test payload"); then
   echo "payload without the signed catalog manifest unexpectedly passed validation" >&2
+  exit 1
+fi
+if (validate_staged_entries "${complete_payload//$'\n'compatibility-set.json/}" "test payload"); then
+  echo "payload without the compatibility-set manifest unexpectedly passed validation" >&2
   exit 1
 fi
 

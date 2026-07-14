@@ -18,6 +18,20 @@ final class ControlFrameCodecTests: XCTestCase {
         let f = ControlFrame.metricsResponse(
             earningsUsdc: 1.25,
             malibuAccrued: 3.5,
+            providerEarnings: ProviderEarnings(
+                walletBound: true,
+                trustTier: .trusted,
+                unpaidLedgerBacklogUSDC: 0.5,
+                unpaidLedgerBacklogMALIBU: 1.5,
+                usdcToday: 1.25,
+                usdcWeek: 4.5,
+                usdcPending: 0.75,
+                usdcLifetime: 100,
+                malibuToday: 3.5,
+                malibuAllTime: 42,
+                trustCriteriaMet: 4,
+                trustCriteriaRequired: 4
+            ),
             gpuC: 48.2,
             gpuUtilizationPct: 62,
             latencyP50Ms: 120,
@@ -39,6 +53,7 @@ final class ControlFrameCodecTests: XCTestCase {
         let f = ControlFrame.metricsResponse(
             earningsUsdc: nil,
             malibuAccrued: nil,
+            providerEarnings: nil,
             gpuC: nil,
             gpuUtilizationPct: nil,
             latencyP50Ms: nil,
@@ -58,6 +73,7 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertNotNil(obj)
         XCTAssertNil(obj?["earnings_usdc"])
         XCTAssertNil(obj?["malibu_accrued"])
+        XCTAssertNil(obj?["provider_earnings"])
         XCTAssertNil(obj?["gpu_c"])
         XCTAssertNil(obj?["gpu_utilization_pct"])
         XCTAssertNil(obj?["latency_p50_ms"])
@@ -74,7 +90,7 @@ final class ControlFrameCodecTests: XCTestCase {
         }
         """.utf8)
         let decoded = try ControlCodec.decode(data)
-        if case let .metricsResponse(usdc, malibu, _, _, _, _, queue, _, _, _, _, _, _, _, uptime) = decoded {
+        if case let .metricsResponse(usdc, malibu, _, _, _, _, _, queue, _, _, _, _, _, _, _, uptime) = decoded {
             XCTAssertNil(usdc)
             XCTAssertNil(malibu)
             XCTAssertEqual(queue, 3)
@@ -105,7 +121,7 @@ final class ControlFrameCodecTests: XCTestCase {
         }
         """.utf8)
         let decoded = try ControlCodec.decode(data)
-        if case let .metricsResponse(_, _, _, gpu, p50, p99, queue, today, allTime, rpm, inToday, outToday, inAll, outAll, _) = decoded {
+        if case let .metricsResponse(_, _, _, _, gpu, p50, p99, queue, today, allTime, rpm, inToday, outToday, inAll, outAll, _) = decoded {
             XCTAssertEqual(gpu, 62)
             XCTAssertEqual(p50, 42)
             XCTAssertEqual(p99, 180)
@@ -123,7 +139,7 @@ final class ControlFrameCodecTests: XCTestCase {
     }
 
     func testPauseAckAcceptedFalseCarriesReason() throws {
-        let f = ControlFrame.pauseAck(accepted: false, reason: "not_implemented")
+        let f = ControlFrame.pauseAck(accepted: false, reason: "lifecycle_control_unavailable")
         let decoded = try roundTrip(f)
         XCTAssertEqual(decoded, f)
     }
@@ -157,30 +173,4 @@ final class ControlFrameCodecTests: XCTestCase {
         }
     }
 
-    func testIdentitySignatureRequestRoundTrip() throws {
-        let frame = ControlFrame.identitySignatureRequest(
-            authAttemptID: "auth-1",
-            providerID: "p_abc",
-            binaryVersion: "1.8.6",
-            providerECDHPublicKey: "ecdh",
-            transcriptSHA256: "hash"
-        )
-        XCTAssertEqual(try roundTrip(frame), frame)
-    }
-
-    func testIdentitySignatureResponseOmitsSignatureOnRefusal() throws {
-        let frame = ControlFrame.identitySignatureResponse(
-            accepted: false,
-            identitySignature: nil,
-            transcriptSHA256: nil,
-            reason: "provider_id_mismatch"
-        )
-        let data = try ControlCodec.encode(frame)
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(obj?["type"] as? String, "identity_signature_response")
-        XCTAssertEqual(obj?["accepted"] as? Bool, false)
-        XCTAssertEqual(obj?["reason"] as? String, "provider_id_mismatch")
-        XCTAssertNil(obj?["identity_signature"])
-        XCTAssertEqual(try ControlCodec.decode(data), frame)
-    }
 }

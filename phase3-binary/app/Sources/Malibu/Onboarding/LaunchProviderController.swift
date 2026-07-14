@@ -15,7 +15,7 @@ final class LaunchProviderController: ObservableObject {
         case idle
         case runningCLIInstall
         case startingAgent
-        case importingProviderIdentity
+        case importingProviderCredential
         case live(model: String, tier: TrustTier)
         case failed(stage: String, retryable: Bool, message: String)
     }
@@ -171,7 +171,7 @@ final class LaunchProviderController: ObservableObject {
                 throw launchdMonitorUnavailableError(message: message)
             }
             if let pendingImportError {
-                stage = .importingProviderIdentity
+                stage = .importingProviderCredential
                 do {
                     try await retryPendingImportAfterProviderStart(initialError: pendingImportError)
                 } catch {

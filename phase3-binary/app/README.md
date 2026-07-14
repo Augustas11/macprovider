@@ -21,8 +21,7 @@ app/
     │   └── BrandMark.swift        # MalibuBrandTile + MalibuMenuBarIcon (template) + palette
     ├── Agent/
     │   ├── MalibuAgent.swift      # ObservableObject; snapshot published to menu bar + dashboard
-    │   ├── CLIChildProcess.swift  # owns the macprovider-cli child + restart backoff
-    │   ├── ControlSocketClient.swift  # unix-socket JSON framing client
+    │   ├── ControlSocketClient.swift  # read-only owner-local CLI projection client
     │   └── ControlSocketFrame.swift   # wire-format mirror of CLI's frames (DUPLICATED — see below)
     ├── Onboarding/
     │   ├── LaunchProviderController.swift # browserless provider launch state machine
@@ -31,12 +30,9 @@ app/
     │   └── DashboardWindow.swift  # SwiftUI dashboard
     └── System/
         ├── ProviderPaths.swift    # ~/.config/macprovider/... vs ~/Library/Application Support/Malibu/...
-        ├── ProviderConfig.swift   # writes shared config.yaml, tracks App-track ownership marker
-        ├── KeychainStore.swift    # provider_token in Keychain, service tech.malibu.provider
-        ├── ProviderIdentity.swift # App-track Ed25519 identity in Keychain
-        └── AppLoginItem.swift     # SMAppService.mainApp wrapper
-        ├── MalibuUpdateConfiguration.swift  # Sparkle feed URL + Ed25519 public key
-        └── SparkleUpdaterController.swift     # SPUStandardUpdaterController wrapper
+        ├── ProviderConfig.swift   # reads shared config, migrates legacy custody to CLI
+        ├── ProviderCredentialHandoffRunner.swift # invokes CLI-owned credential transactions
+        └── ProviderDiagnosticsBundle.swift       # read-only support export
 ```
 
 ## Build
@@ -67,13 +63,33 @@ export MALIBU_CLI_PATH="$PWD/phase3-binary/.build/release/macprovider-cli"
 open build/Release/Malibu.app
 ```
 
-## Known P0 gaps (tracked in SPEC-025 §12)
+## Issue 585 lifecycle contract
 
-1. **`ControlFrame` is duplicated**, not shared. Extract the wire-format frames from `phase3-binary/Sources/macprovider-cli/ControlSocket.swift` into a new `MacProviderControl` library target so both CLI and app import one source of truth.
-2. **CLI-side handler semantics.** Frames + wire format are wired end-to-end (`feat(control-socket): add metrics/pause/resume/shutdown frames`), but the server-side handlers are stubs — `pause_ack`/`resume_ack` return `accepted:false, reason:"not_implemented"` and `metrics_response` returns zeros. Real earnings / uptime source + pause gating land in P1.
-3. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, the App routes to the SPEC-026 migration surface instead of overwriting it silently.
-5. **Sparkle in-app updates** — wired via `SparkleUpdaterController` + `https://download.malibu.tech/appcast.xml`. Release CI signs appcast entries with `SPARKLE_EDDSA_PRIVATE_KEY`; publish with `scripts/publish-malibu-latest-dmg.sh` uploads `appcast.xml` beside `latest.dmg`. CLI self-update stays disabled under `--managed-by malibu-app`.
-6. **Signed release pipeline** — after a reviewed commit is merged to `main`, an operator creates its protected `vX.Y.Z` tag and manually dispatches `release.yml` from `main`. The protected workflow ships stapled `Malibu-{tag}.dmg` (primary) and optional `Malibu-{tag}.pkg`, captures signed provenance plus numeric GitHub release/asset IDs, and publishes `latest.dmg` + `appcast.xml` from the same workflow files. Manual Pearl recovery uses `scripts/recover-malibu-publication.sh`; tag-based redownload is not a recovery path.
+1. **One lifecycle owner.** The launchd-managed CLI owns provider credentials,
+   admission identity, persisted lifecycle state, pause/resume, updates, rollback,
+   repair, and uninstall. Malibu observes that state and invokes CLI transactions;
+   it does not keep a provider bearer or independently mutate provider state.
+2. **Operational control surface.** The owner-only control socket reports status,
+   metrics, provider earnings, and lifecycle acknowledgements. Pause/resume is
+   committed by the CLI state machine before Malibu presents the new state.
+3. **Restart-safe import.** Existing CLI configs route through the SPEC-026
+   migration surface. The protected legacy credential is retained until a
+   restarted launchd instance proves coordinator admission from CLI Keychain
+   custody.
+4. **Exact-set updates.** The CLI validates the signed compatibility set, obtains
+   the coordinator admission gate, holds a maintenance lease, drains work, and
+   replaces Malibu, the CLI, launchd, watchdog, catalog/policy material, and
+   rollback metadata as one transaction.
+5. **Signed release pipeline.** After a reviewed commit is merged to `main`, an
+   operator creates its protected `vX.Y.Z` tag and manually dispatches
+   `release.yml` from `main`. The protected workflow ships the stapled
+   `Malibu-{tag}.dmg` and the exact provider compatibility set bound by the
+   signed `compatibility-artifact-index.json`.
+
+The App and CLI currently compile separate representations of the newline JSON
+control frames. Cross-target codec parity tests lock the wire contract; extracting
+those representations into a small shared module remains a maintenance cleanup,
+not a second lifecycle or state authority.
 
 ## Uninstall (Malibu + CLI)
 
@@ -91,7 +107,10 @@ bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)
 macprovider-cli uninstall --yes
 ```
 
-CLI uninstall does **not** remove `~/Library/Application Support/Malibu` or Malibu Keychain tokens — use Malibu uninstall or delete App Support manually.
+CLI uninstall does **not** remove `~/Library/Application Support/Malibu`; use Malibu's
+confirmed **Quit and Uninstall…** action for the complete App-owned cleanup. Provider
+credentials and admission identity remain in CLI Keychain custody so reinstall can
+recover the same provider ownership.
 
 Malibu uninstall does **not** remove Hugging Face model caches (`~/.cache/huggingface/`) — same as CLI uninstall.
 

@@ -4,6 +4,94 @@ import XCTest
 @testable import macprovider_cli
 
 final class CoordinatorClientTests: XCTestCase {
+    func testConnectionFailuresMapToStableRecoveryLifecycleStates() {
+        let offline = CoordinatorClient.lifecycleClassification(
+            for: URLError(.notConnectedToInternet)
+        )
+        XCTAssertEqual(offline.state, .networkOffline)
+        XCTAssertEqual(offline.reasonCode, "network_offline")
+
+        let authentication = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(code: "invalid_token", message: "secret detail")
+        )
+        XCTAssertEqual(authentication.state, .authenticationRequired)
+        XCTAssertEqual(authentication.reasonCode, "authentication_required")
+
+        let identity = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "identity_signature_required",
+                message: "operator detail"
+            )
+        )
+        XCTAssertEqual(identity.state, .identityMigrationRequired)
+        XCTAssertEqual(identity.reasonCode, "identity_migration_required")
+
+        let catalog = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.invalidMessage(
+                "coordinator did not accept provider catalog release"
+            )
+        )
+        XCTAssertEqual(catalog.state, .catalogIncompatible)
+        XCTAssertEqual(catalog.reasonCode, "catalog_incompatible")
+
+        let compatibilitySet = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "compatibility_set_unaccepted",
+                message: "set is outside coordinator policy"
+            )
+        )
+        XCTAssertEqual(compatibilitySet.state, .catalogIncompatible)
+        XCTAssertEqual(compatibilitySet.reasonCode, "catalog_incompatible")
+
+        let protocolFailure = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "invalid_auth_request",
+                message: "wire detail"
+            )
+        )
+        XCTAssertEqual(protocolFailure.state, .failed)
+        XCTAssertEqual(protocolFailure.reasonCode, "coordinator_auth_protocol_invalid")
+
+        let unavailable = CoordinatorClient.lifecycleClassification(
+            for: URLError(.timedOut)
+        )
+        XCTAssertEqual(unavailable.state, .coordinatorUnavailable)
+        XCTAssertEqual(unavailable.reasonCode, "coordinator_unavailable")
+    }
+
+    func testOperatorPauseAndResumeFenceRequestsAndPublishCoordinatorState() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        let pauseResult = await client.pauseByOperator()
+        let pausedSnapshot = await status.snapshot()
+        let pausedRequest = await status.beginRequestIfAccepting(requestID: "paused-request")
+        XCTAssertEqual(pauseResult, .accepted)
+        XCTAssertEqual(pausedSnapshot.status, .unavailable)
+        XCTAssertNil(pausedRequest)
+
+        let pauseReplay = await client.pauseByOperator()
+        let resumeResult = await client.resumeByOperator()
+        let resumedSnapshot = await status.snapshot()
+        let resumedRequest = await status.beginRequestIfAccepting(requestID: "resumed-request")
+        XCTAssertEqual(pauseReplay, .accepted, "pause replay must be idempotent")
+        XCTAssertEqual(resumeResult, .accepted)
+        XCTAssertEqual(resumedSnapshot.status, .ready)
+        XCTAssertNotNil(resumedRequest)
+
+        let frames = await recorder.frames
+        let states = frames.compactMap { frame -> String? in
+            guard frame["type"] as? String == "state_update" else { return nil }
+            return frame["state"] as? String
+        }
+        XCTAssertEqual(states, ["draining", "unavailable", "ready"])
+    }
+
     func testIdlePrewarmEventIsNotSentBeforeCoordinatorAcceptsSession() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -555,12 +643,13 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertGreaterThan(recovered.cancelCountSnapshot(), 0)
     }
 
-    func testInvalidMalibuManagedBearerDoesNotEnterCLIBootstrapRecovery() async throws {
+    func testMalibuOriginDoesNotSuppressCLIOwnedBootstrapRecovery() async throws {
         let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-malibu-boundary-")
         defer { try? FileManager.default.removeItem(at: directory) }
         let configURL = directory.appendingPathComponent("config.yaml")
         let providerID = "mp-00112233445566778899aabbccddeeff"
         let staleToken = String(repeating: "d", count: 64)
+        let recoveredToken = String(repeating: "e", count: 64)
         try Data("""
         model: model-a
         coordinator_url: wss://127.0.0.1:8444/ws/provider
@@ -575,6 +664,7 @@ final class CoordinatorClientTests: XCTestCase {
         config.model = "model-a"
         config.providerToken = staleToken
         config.managedBy = "malibu-app"
+        let receiptKey = Curve25519.Signing.PrivateKey()
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
@@ -585,9 +675,20 @@ final class CoordinatorClientTests: XCTestCase {
             closeCodeRawValue: 4005,
             closeReasonText: "invalid_token"
         )
-        let unusedRecovery = FakeProviderWebSocketTask(receiveResults: [])
-        let factory = FakeProviderWebSocketFactory(sockets: [rejected, unusedRecovery])
+        let responder = FakeTier2AuthResponder(
+            outcome: .accepted,
+            providerID: providerID,
+            assignedProviderToken: recoveredToken
+        )
+        let recovered = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await responder.receive(from: socket)
+            }
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [rejected, recovered])
         let runtime = try await ModelRuntime(modelID: nil)
+        let credentialStore = InMemoryProviderCredentialStore(values: [providerID: staleToken])
         let client = try XCTUnwrap(CoordinatorClient(
             config: config,
             modelRuntime: runtime,
@@ -595,24 +696,28 @@ final class CoordinatorClientTests: XCTestCase {
             attestationGenerator: StaticAttestationGenerator(token: nil),
             webSocketFactory: { factory.makeSocket(for: $0) },
             sleepAssertionFactory: { nil },
-            receiptIdentitySigningKey: Curve25519.Signing.PrivateKey()
+            receiptIdentitySigningKey: receiptKey,
+            providerCredentialStore: credentialStore
         ))
 
         do {
             try await client.connectAndRunOnceForTest()
-            XCTFail("Malibu-managed invalid bearer must fail closed")
-        } catch let CoordinatorAuthError.rejected(code, _) {
-            XCTAssertEqual(code, "invalid_token")
+            XCTFail("successful credential recovery should request an authenticated reconnect")
+        } catch is CoordinatorAuthUpgradeReconnect {
         } catch {
-            XCTFail("unexpected Malibu-managed recovery error: \(error)")
+            XCTFail("unexpected recovery error: \(error)")
         }
 
-        XCTAssertEqual(factory.requestsSnapshot().count, 1)
+        let requests = factory.requestsSnapshot()
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer \(staleToken)")
+        XCTAssertNil(requests[1].value(forHTTPHeaderField: "Authorization"))
         let loaded = try ConfigLoader.load(
             cli: CLIOverrides(configPath: configURL.path),
             environment: [:]
         )
-        XCTAssertEqual(loaded.providerToken, staleToken)
+        XCTAssertNil(loaded.providerToken)
+        XCTAssertEqual(try credentialStore.load(providerID: providerID), recoveredToken)
     }
 
     func testConfirmedInstallerBootstrapCredentialRecoveryFailsClosedWithoutMutation() async throws {
@@ -830,6 +935,191 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
 
         XCTAssertNil(hello["model_hash"])
+    }
+
+    func testAdmissionMessagesIncludeInstalledSignedCompatibilitySetID() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let setID = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            compatibilitySetIDOverride: setID
+        )
+
+        let hello = await client.helloMessage()
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+
+        XCTAssertEqual(hello["compatibility_set_id"] as? String, setID)
+        XCTAssertEqual(auth["compatibility_set_id"] as? String, setID)
+    }
+
+    func testConfiguredHelloAckMustEchoInstalledCompatibilitySetID() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let installed = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let target = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            compatibilitySetIDOverride: installed
+        )
+
+        do {
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-v1",
+                "heartbeat_interval_s": 30,
+            ])
+            XCTFail("expected missing compatibility-set policy to fail")
+        } catch let CoordinatorAuthError.invalidMessage(message) {
+            XCTAssertTrue(message.contains("omitted explicit compatibility-set policy"), message)
+        }
+
+        do {
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-v1",
+                "heartbeat_interval_s": 30,
+                "compatibility_policy": "configured",
+                "accepted_compatibility_set_id": target,
+                "recommended_compatibility_set_id": target,
+            ])
+            XCTFail("expected mismatched compatibility-set acknowledgement to fail")
+        } catch let CoordinatorAuthError.invalidMessage(message) {
+            XCTAssertTrue(message.contains("compatibility-set acknowledgement"), message)
+        }
+    }
+
+    func testExplicitlyUnconfiguredHelloAckRetainsLegacyAdmission() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let installed = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let target = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("coordinator-compatibility-unconfigured-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let markerStore = AutoUpdateMarkerStore(homeDirectory: home)
+        try markerStore.persistCompatibilityAdmission(
+            acceptedCompatibilitySetID: installed,
+            recommendedCompatibilitySetID: target
+        )
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            compatibilitySetIDOverride: installed,
+            autoupdateMarkerStore: markerStore
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+            "compatibility_policy": "unconfigured",
+        ])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: markerStore.compatibilityAdmissionURL.path))
+        await client.stop()
+    }
+
+    func testConfiguredHelloAckPersistsFreshExactCompatibilityTargetUntilDisconnect() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let installed = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let target = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("coordinator-compatibility-configured-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let markerStore = AutoUpdateMarkerStore(homeDirectory: home)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            compatibilitySetIDOverride: installed,
+            autoupdateMarkerStore: markerStore
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": installed,
+            "recommended_compatibility_set_id": target,
+        ])
+
+        let admission = try markerStore.readCompatibilityAdmissionForTest()
+        XCTAssertEqual(admission.acceptedCompatibilitySetID, installed)
+        XCTAssertEqual(admission.recommendedCompatibilitySetID, target)
+        await client.stop()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: markerStore.compatibilityAdmissionURL.path))
+    }
+
+    func testConfiguredAuthResponseRejectsMismatchedCompatibilitySetBeforeSessionAcceptance() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let installed = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let target = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            compatibilitySetIDOverride: installed
+        )
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+
+        do {
+            try await client.acceptAuthResponseForTest([
+                "type": "auth_response",
+                "version": 2,
+                "status": "accepted",
+                "assigned_id": "assigned-v2",
+                "heartbeat_interval_s": 30,
+                "compatibility_policy": "configured",
+                "accepted_compatibility_set_id": target,
+                "recommended_compatibility_set_id": target,
+                "tier2_session": [
+                    "encrypted_leg": [
+                        "enabled": true,
+                        "alg": Tier2ProviderSession.aeadSuite,
+                        "kid": "kid-test",
+                    ],
+                ],
+            ], session: session)
+            XCTFail("expected mismatched compatibility-set acknowledgement to fail")
+        } catch let CoordinatorAuthError.invalidMessage(message) {
+            XCTAssertTrue(message.contains("compatibility-set acknowledgement"), message)
+        }
+        let acceptedKeyID = await client.tier2KeyIDForTest()
+        XCTAssertNil(acceptedKeyID)
     }
 
     func testWSScheme_MustBeWSS_NotWS() async throws {
@@ -2715,10 +3005,12 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNotNil(proof["identity_signature_transcript_sha256"] as? String)
     }
 
-    func testOrdinaryBearerV2SignsWithPersistedReceiptIdentity() async throws {
+    func testOrdinaryBearerV2PublishesAndSignsWithSeparateAdmissionIdentity() async throws {
         let recorder = CoordinatorFrameRecorder()
         let receiptKey = Curve25519.Signing.PrivateKey()
+        let admissionKey = Curve25519.Signing.PrivateKey()
         let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        let admissionPublicKey = Data(admissionKey.publicKey.rawRepresentation).base64EncodedString()
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
@@ -2728,7 +3020,8 @@ final class CoordinatorClientTests: XCTestCase {
             status: status,
             recorder: recorder,
             providerReceiptPublicKey: receiptPublicKey,
-            receiptIdentitySigningKey: receiptKey
+            providerAdmissionPublicKey: admissionPublicKey,
+            receiptIdentitySigningKey: admissionKey
         )
         let attempt = Tier2AuthAttempt()
         let initial = await client.authInitialMessage(attempt: attempt)
@@ -2748,9 +3041,380 @@ final class CoordinatorClientTests: XCTestCase {
             providerECDHPublicKey: attempt.publicKeyBase64URL,
             transcriptSHA256: transcript
         )
-        XCTAssertTrue(receiptKey.publicKey.isValidSignature(signature, for: payload))
+        XCTAssertEqual(initial["provider_receipt_public_key"] as? String, receiptPublicKey)
+        XCTAssertEqual(initial["provider_admission_public_key"] as? String, admissionPublicKey)
+        XCTAssertTrue(admissionKey.publicKey.isValidSignature(signature, for: payload))
+        XCTAssertFalse(receiptKey.publicKey.isValidSignature(signature, for: payload))
         XCTAssertEqual(transcript, try CoordinatorClient.initialAuthTranscriptHashBase64(initial))
         XCTAssertNil(proof["credential_bootstrap"])
+    }
+
+    func testAdmissionIdentityRotationPublishesPendingKeySignsCoordinatorHintAndCommitsAcceptance() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let currentKey = Curve25519.Signing.PrivateKey()
+        let pendingKey = Curve25519.Signing.PrivateKey()
+        let currentPublicKey = Data(currentKey.publicKey.rawRepresentation).base64EncodedString()
+        let pendingPublicKey = Data(pendingKey.publicKey.rawRepresentation).base64EncodedString()
+        let currentDigest = SHA256.hash(data: Data(currentKey.publicKey.rawRepresentation))
+            .map { String(format: "%02x", $0) }.joined()
+        let pendingDigest = SHA256.hash(data: Data(pendingKey.publicKey.rawRepresentation))
+            .map { String(format: "%02x", $0) }.joined()
+        let commits = LockedBox<[Data]>([])
+        let committedDeadlines = LockedBox<[Date?]>([])
+        let previousValidUntil = "2031-07-21T12:00:00.000Z"
+        let identityStatus = ProviderAdmissionIdentityStatusRuntime(.init(
+            source: "cli_keychain",
+            state: "rotation_pending",
+            publicKeySHA256: currentDigest,
+            pendingPublicKeySHA256: pendingDigest
+        ))
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerAdmissionPublicKey: currentPublicKey,
+            providerAdmissionNextPublicKey: pendingPublicKey,
+            commitAdmissionIdentityPublicKey: { raw, deadline in
+                commits.update { values in values.append(raw) }
+                committedDeadlines.update { values in values.append(deadline) }
+            },
+            receiptIdentitySigningKeyCandidates: [currentKey, pendingKey],
+            admissionIdentityStatusRuntime: identityStatus
+        )
+        let attempt = Tier2AuthAttempt()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-rotation-response-loss",
+            "attestation_challenge": Data(repeating: 0x41, count: 32).base64URLUnpadded(),
+            "admission_identity_public_key": pendingPublicKey,
+            "admission_identity_generation": 2,
+        ], attempt: attempt, initialMessage: initial)
+
+        XCTAssertEqual(initial["provider_admission_public_key"] as? String, currentPublicKey)
+        XCTAssertEqual(initial["provider_admission_next_public_key"] as? String, pendingPublicKey)
+        let transcript = try XCTUnwrap(proof["identity_signature_transcript_sha256"] as? String)
+        let signature = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(proof["identity_signature"] as? String)))
+        let payload = try CoordinatorClient.receiptIdentityPayload(
+            authAttemptID: "auth-rotation-response-loss",
+            providerID: "provider-test",
+            providerECDHPublicKey: attempt.publicKeyBase64URL,
+            transcriptSHA256: transcript
+        )
+        XCTAssertTrue(pendingKey.publicKey.isValidSignature(signature, for: payload))
+        XCTAssertFalse(currentKey.publicKey.isValidSignature(signature, for: payload))
+
+        try await client.reconcileAdmissionIdentityIfNeeded([
+            "admission_identity_public_key": pendingPublicKey,
+            "identity_admission_key_role": "current",
+            "identity_generation": 2,
+            "admission_identity_previous_valid_until": previousValidUntil,
+        ])
+        XCTAssertEqual(commits.get(), [Data(pendingKey.publicKey.rawRepresentation)])
+        XCTAssertEqual(
+            committedDeadlines.get().first.flatMap { $0 },
+            CredentialRestartProver.parseISO8601(previousValidUntil)
+        )
+        var identitySnapshot = await identityStatus.snapshot()
+        XCTAssertEqual(identitySnapshot.state, "ready")
+        XCTAssertEqual(identitySnapshot.publicKeySHA256, pendingDigest)
+        XCTAssertNil(identitySnapshot.pendingPublicKeySHA256)
+        XCTAssertEqual(identitySnapshot.previousPublicKeySHA256, currentDigest)
+        XCTAssertEqual(identitySnapshot.previousValidUntil, previousValidUntil)
+        XCTAssertEqual(identitySnapshot.coordinatorGeneration, 2)
+        XCTAssertEqual(identitySnapshot.coordinatorKeyRole, "current")
+        XCTAssertEqual(identitySnapshot.recoveryAction, "none")
+        // Once reconciled, the same authoritative response is idempotent.
+        try await client.reconcileAdmissionIdentityIfNeeded([
+            "admission_identity_public_key": pendingPublicKey,
+            "identity_admission_key_role": "current",
+            "identity_generation": 2,
+            "admission_identity_previous_valid_until": previousValidUntil,
+        ])
+        XCTAssertEqual(commits.get().count, 1)
+        identitySnapshot = await identityStatus.snapshot()
+        XCTAssertEqual(identitySnapshot.publicKeySHA256, pendingDigest)
+        XCTAssertEqual(identitySnapshot.previousPublicKeySHA256, currentDigest)
+    }
+
+    func testLegacySessionWithoutAdmissionIdentityOfferDoesNotRequireResponseContract() async throws {
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder()
+        )
+
+        try await client.reconcileAdmissionIdentityIfNeeded([:])
+    }
+
+    func testAdmissionIdentityOfferRequiresCompleteAuthoritativeResponseContract() async throws {
+        let currentKey = Curve25519.Signing.PrivateKey()
+        let publicKey = Data(currentKey.publicKey.rawRepresentation).base64EncodedString()
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            providerAdmissionPublicKey: publicKey,
+            receiptIdentitySigningKeyCandidates: [currentKey]
+        )
+
+        do {
+            try await client.reconcileAdmissionIdentityIfNeeded([:])
+            XCTFail("an offered admission identity requires an authoritative response")
+        } catch {
+            XCTAssertEqual(
+                error as? CoordinatorAuthError,
+                .invalidMessage("coordinator omitted the admission identity contract")
+            )
+        }
+        do {
+            try await client.reconcileAdmissionIdentityIfNeeded([
+                "admission_identity_public_key": publicKey,
+            ])
+            XCTFail("generation and key role are required")
+        } catch {
+            XCTAssertEqual(
+                error as? CoordinatorAuthError,
+                .invalidMessage("coordinator returned an incomplete admission identity contract")
+            )
+        }
+        do {
+            try await client.reconcileAdmissionIdentityIfNeeded([
+                "admission_identity_public_key": publicKey,
+                "identity_admission_key_role": "previous",
+                "identity_generation": 2,
+            ])
+            XCTFail("an ordinary current-key proof cannot be accepted as previous")
+        } catch {
+            XCTAssertEqual(
+                error as? CoordinatorAuthError,
+                .invalidMessage("coordinator returned a mismatched admission identity role")
+            )
+        }
+    }
+
+    func testAdmissionIdentityRotationRejectsUnknownAcceptedKey() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let currentKey = Curve25519.Signing.PrivateKey()
+        let pendingKey = Curve25519.Signing.PrivateKey()
+        let identityStatus = ProviderAdmissionIdentityStatusRuntime(.init(
+            source: "cli_keychain",
+            state: "rotation_pending",
+            publicKeySHA256: "current",
+            pendingPublicKeySHA256: "pending"
+        ))
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerAdmissionPublicKey: Data(currentKey.publicKey.rawRepresentation).base64EncodedString(),
+            providerAdmissionNextPublicKey: Data(pendingKey.publicKey.rawRepresentation).base64EncodedString(),
+            commitAdmissionIdentityPublicKey: { _, _ in },
+            receiptIdentitySigningKeyCandidates: [currentKey, pendingKey],
+            admissionIdentityStatusRuntime: identityStatus
+        )
+
+        do {
+            try await client.reconcileAdmissionIdentityIfNeeded([
+                "admission_identity_public_key": Data(Curve25519.Signing.PrivateKey().publicKey.rawRepresentation).base64EncodedString(),
+                "identity_admission_key_role": "current",
+                "identity_generation": 3,
+            ])
+            XCTFail("unknown coordinator admission key must fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? CoordinatorAuthError,
+                .invalidMessage("coordinator accepted an unknown admission identity")
+            )
+        }
+        let identitySnapshot = await identityStatus.snapshot()
+        XCTAssertEqual(identitySnapshot.state, "recovery_required")
+        XCTAssertEqual(identitySnapshot.transitionError, "coordinator_accepted_unknown_admission_identity")
+        XCTAssertEqual(identitySnapshot.recoveryAction, "run_credentials_repair_or_recover_admission_identity")
+    }
+
+    func testAdmissionIdentityRotationRejectsMissingAuthoritativePreviousDeadline() async throws {
+        let currentKey = Curve25519.Signing.PrivateKey()
+        let pendingKey = Curve25519.Signing.PrivateKey()
+        let currentPublicKey = Data(currentKey.publicKey.rawRepresentation).base64EncodedString()
+        let pendingPublicKey = Data(pendingKey.publicKey.rawRepresentation).base64EncodedString()
+        let identityStatus = ProviderAdmissionIdentityStatusRuntime(.init(
+            source: "cli_keychain",
+            state: "rotation_pending",
+            publicKeySHA256: "current",
+            pendingPublicKeySHA256: "pending"
+        ))
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            providerAdmissionPublicKey: currentPublicKey,
+            providerAdmissionNextPublicKey: pendingPublicKey,
+            commitAdmissionIdentityPublicKey: { _, _ in
+                XCTFail("a response without the coordinator deadline must not commit")
+            },
+            receiptIdentitySigningKeyCandidates: [currentKey, pendingKey],
+            admissionIdentityStatusRuntime: identityStatus
+        )
+
+        do {
+            try await client.reconcileAdmissionIdentityIfNeeded([
+                "admission_identity_public_key": pendingPublicKey,
+                "identity_admission_key_role": "current",
+                "identity_generation": 2,
+            ])
+            XCTFail("rotation acceptance requires the coordinator-authoritative previous-key deadline")
+        } catch {
+            XCTAssertEqual(
+                error as? CoordinatorAuthError,
+                .invalidMessage("coordinator omitted the previous admission identity deadline")
+            )
+        }
+        let snapshot = await identityStatus.snapshot()
+        XCTAssertEqual(snapshot.transitionError, "coordinator_omitted_previous_identity_deadline")
+    }
+
+    func testAdmissionIdentityPreviousKeyProofAdoptsDegradedSessionWithoutChangingCustody() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let previousKey = Curve25519.Signing.PrivateKey()
+        let authoritativeKey = Curve25519.Signing.PrivateKey()
+        let previousPublicKey = Data(previousKey.publicKey.rawRepresentation).base64EncodedString()
+        let authoritativePublicKey = Data(authoritativeKey.publicKey.rawRepresentation).base64EncodedString()
+        let commits = LockedBox<[Data]>([])
+        let identityStatus = ProviderAdmissionIdentityStatusRuntime(.init(
+            source: "cli_keychain",
+            state: "ready",
+            publicKeySHA256: "previous"
+        ))
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerAdmissionPublicKey: previousPublicKey,
+            commitAdmissionIdentityPublicKey: { raw, _ in
+                commits.update { values in values.append(raw) }
+            },
+            receiptIdentitySigningKeyCandidates: [previousKey],
+            admissionIdentityStatusRuntime: identityStatus
+        )
+        let attempt = Tier2AuthAttempt()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-previous-grace",
+            "attestation_challenge": Data(repeating: 0x51, count: 32).base64URLUnpadded(),
+            "admission_identity_public_key": previousPublicKey,
+            "admission_identity_generation": 2,
+        ], attempt: attempt, initialMessage: initial)
+
+        let transcript = try XCTUnwrap(proof["identity_signature_transcript_sha256"] as? String)
+        let signature = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(proof["identity_signature"] as? String)))
+        let payload = try CoordinatorClient.receiptIdentityPayload(
+            authAttemptID: "auth-previous-grace",
+            providerID: "provider-test",
+            providerECDHPublicKey: attempt.publicKeyBase64URL,
+            transcriptSHA256: transcript
+        )
+        XCTAssertTrue(previousKey.publicKey.isValidSignature(signature, for: payload))
+
+        try await client.reconcileAdmissionIdentityIfNeeded([
+            "admission_identity_public_key": authoritativePublicKey,
+            "identity_admission_key_role": "previous",
+            "identity_generation": 2,
+            "admission_identity_previous_valid_until": "2031-07-21T12:00:00.000Z",
+        ])
+        XCTAssertTrue(commits.get().isEmpty)
+        let identitySnapshot = await identityStatus.snapshot()
+        XCTAssertEqual(identitySnapshot.state, "degraded_previous_key")
+        XCTAssertEqual(identitySnapshot.coordinatorGeneration, 2)
+        XCTAssertEqual(identitySnapshot.coordinatorKeyRole, "previous")
+        XCTAssertEqual(identitySnapshot.previousValidUntil, "2031-07-21T12:00:00.000Z")
+        XCTAssertEqual(identitySnapshot.recoveryAction, "restore_current_key_or_run_recover_admission_identity")
+    }
+
+    func testOperatorAuthorizedAdmissionIdentityRecoveryPublishesAndCommitsStagedKey() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let recoveryKey = Curve25519.Signing.PrivateKey()
+        let recoveryPublicKey = Data(recoveryKey.publicKey.rawRepresentation).base64EncodedString()
+        let recoveryDigest = SHA256.hash(data: Data(recoveryKey.publicKey.rawRepresentation))
+            .map { String(format: "%02x", $0) }.joined()
+        let commits = LockedBox<[Data]>([])
+        let identityStatus = ProviderAdmissionIdentityStatusRuntime(.init(
+            source: "cli_keychain_pending",
+            state: "recovery_pending",
+            publicKeySHA256: recoveryDigest,
+            pendingPublicKeySHA256: recoveryDigest,
+            recoveryAction: "obtain_operator_recovery_approval_then_restart"
+        ))
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerAdmissionPublicKey: recoveryPublicKey,
+            providerAdmissionRecovery: true,
+            commitAdmissionIdentityPublicKey: { raw, deadline in
+                XCTAssertNil(deadline)
+                commits.update { values in values.append(raw) }
+            },
+            receiptIdentitySigningKeyCandidates: [recoveryKey],
+            admissionIdentityStatusRuntime: identityStatus
+        )
+        let attempt = Tier2AuthAttempt()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        XCTAssertEqual(initial["provider_admission_recovery"] as? Bool, true)
+        _ = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-recovery",
+            "attestation_challenge": Data(repeating: 0x61, count: 32).base64URLUnpadded(),
+            "admission_identity_public_key": recoveryPublicKey,
+            "admission_identity_generation": 1,
+        ], attempt: attempt, initialMessage: initial)
+
+        try await client.reconcileAdmissionIdentityIfNeeded([
+            "admission_identity_public_key": recoveryPublicKey,
+            "identity_admission_key_role": "recovery",
+            "identity_generation": 2,
+        ])
+        XCTAssertEqual(commits.get(), [Data(recoveryKey.publicKey.rawRepresentation)])
+        let identitySnapshot = await identityStatus.snapshot()
+        XCTAssertEqual(identitySnapshot.source, "cli_keychain")
+        XCTAssertEqual(identitySnapshot.state, "ready")
+        XCTAssertEqual(identitySnapshot.publicKeySHA256, recoveryDigest)
+        XCTAssertNil(identitySnapshot.pendingPublicKeySHA256)
+        XCTAssertEqual(identitySnapshot.coordinatorGeneration, 2)
+        XCTAssertEqual(identitySnapshot.coordinatorKeyRole, "recovery")
+        XCTAssertEqual(identitySnapshot.recoveryAction, "none")
+
+        let nextInitial = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        XCTAssertNil(nextInitial["provider_admission_recovery"])
     }
 
     func testOrdinaryBearerV2SelectsHistoricalBootstrapIdentityFromChallengeHint() async throws {
@@ -3041,6 +3705,59 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: configURL).contains("provider_token: migration-token"))
         let retainedStatus = await credentialStatus.snapshot()
         XCTAssertTrue(retainedStatus.migrationPending)
+    }
+
+    func testRestoredPreviousSetCleanupWaitsForExactAdmissionAndBuyerServing() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: "9.9.9",
+            transactionState: .awaitingPreviousReadiness
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let previousID = try XCTUnwrap(fixture.marker.previousCompatibilitySetID)
+        let previousDigest = try XCTUnwrap(fixture.marker.previousCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: previousID,
+            envelopeSHA256: previousDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 300
+        )
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            compatibilitySetIDOverride: previousID,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            coordinatorReadiness: { _, _, _ in true },
+            autoupdateMarkerStore: fixture.store
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": previousID,
+            "recommended_compatibility_set_id": previousID,
+        ])
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.marker.releaseBackupPath ?? ""))
     }
 
     func testCatalogWarmSwapNeverPublishesNewModelUnderBootRowIdentity() async throws {
@@ -3582,7 +4299,8 @@ final class CoordinatorClientTests: XCTestCase {
 
     private static func makeAutoupdateRecoveryFixture(
         targetVersion: String,
-        commitOwner: String? = nil
+        commitOwner: String? = nil,
+        transactionState: CompatibilitySetTransactionState? = nil
     ) throws -> (home: URL, store: AutoUpdateMarkerStore, marker: AutoUpdatePendingMarker, binary: URL, backup: URL) {
         let home = try makeTemporaryDirectory(prefix: "coordinator-autoupdate-")
         let store = AutoUpdateMarkerStore(homeDirectory: home)
@@ -3599,6 +4317,15 @@ final class CoordinatorClientTests: XCTestCase {
         let backup = binaryDir.appendingPathComponent(".macprovider-cli.rollback-\(updateID)")
         try Data("new".utf8).write(to: binary)
         try Data("old".utf8).write(to: backup)
+        let releaseBackup = store.releaseRollbackBackupPath(binaryURL: binary, updateID: updateID)
+        if transactionState != nil {
+            try FileManager.default.createDirectory(
+                at: releaseBackup,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        let previousID = "Augustas11/macprovider:v\(CoordinatorClient.binaryVersion)@0123456789abcdef0123456789abcdef01234567"
         let marker = AutoUpdatePendingMarker(
             updateID: updateID,
             targetVersion: targetVersion,
@@ -3608,7 +4335,21 @@ final class CoordinatorClientTests: XCTestCase {
             mode: 0o755,
             sha256: AutoUpdateEvent.sha256Hex("old"),
             markerDeadline: ISO8601DateFormatter.coordinatorAutoupdateTest.string(from: Date().addingTimeInterval(300)),
-            commitOwner: commitOwner
+            releaseBackupPath: transactionState == nil ? nil : releaseBackup.path,
+            releaseBackupSHA256: transactionState == nil ? nil : AutoUpdateEvent.sha256Hex(""),
+            commitOwner: commitOwner,
+            targetCompatibilitySetID: transactionState == nil
+                ? nil
+                : "Augustas11/macprovider:v9.9.9@fedcba9876543210fedcba9876543210fedcba98",
+            targetCompatibilitySetSHA256: transactionState == nil
+                ? nil
+                : String(repeating: "9", count: 64),
+            previousVersion: transactionState == nil ? nil : CoordinatorClient.binaryVersion,
+            previousCompatibilitySetID: transactionState == nil ? nil : previousID,
+            previousCompatibilitySetSHA256: transactionState == nil
+                ? nil
+                : String(repeating: "8", count: 64),
+            transactionState: transactionState
         )
         try store.writePending(marker)
         return (home, store, marker, binary, backup)
@@ -3723,6 +4464,10 @@ final class CoordinatorClientTests: XCTestCase {
         pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
         providerReceiptPublicKey: String? = nil,
+        providerAdmissionPublicKey: String? = nil,
+        providerAdmissionNextPublicKey: String? = nil,
+        providerAdmissionRecovery: Bool = false,
+        commitAdmissionIdentityPublicKey: (@Sendable (Data, Date?) throws -> Void)? = nil,
         sendOverride: CoordinatorClient.SendOverride? = nil,
         watchdogExitHook: (@Sendable (String) -> Void)? = nil,
         publishesSpecDecodeTelemetry: Bool = false,
@@ -3737,6 +4482,8 @@ final class CoordinatorClientTests: XCTestCase {
         catalogCandidateSHA256: String? = nil,
         catalogSignerKeyID: String? = nil,
         catalogRowIdentity: String? = nil,
+        compatibilitySetIDOverride: String? = nil,
+        installedCompatibilityManifest: CoordinatorClient.InstalledCompatibilityManifest? = nil,
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
@@ -3745,7 +4492,8 @@ final class CoordinatorClientTests: XCTestCase {
         configPath: String = "/tmp/macprovider-test.yaml",
         providerToken: String? = nil,
         providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
-        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured)
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
+        admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime()
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: configPath)
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -3782,11 +4530,17 @@ final class CoordinatorClientTests: XCTestCase {
             pairingController: pairingController,
             connectAndRunOverride: connectAndRunOverride,
             providerReceiptPublicKey: providerReceiptPublicKey,
+            providerAdmissionPublicKey: providerAdmissionPublicKey,
+            providerAdmissionNextPublicKey: providerAdmissionNextPublicKey,
+            providerAdmissionRecovery: providerAdmissionRecovery,
+            commitAdmissionIdentityPublicKey: commitAdmissionIdentityPublicKey,
             catalogReleaseID: catalogReleaseID,
             catalogPolicyVersion: catalogPolicyVersion,
             catalogCandidateSHA256: catalogCandidateSHA256,
             catalogSignerKeyID: catalogSignerKeyID,
             catalogRowIdentity: catalogRowIdentity,
+            compatibilitySetIDOverride: compatibilitySetIDOverride,
+            installedCompatibilityManifest: installedCompatibilityManifest,
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
             coordinatorReadiness: coordinatorReadiness,
@@ -3799,6 +4553,7 @@ final class CoordinatorClientTests: XCTestCase {
             receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
             providerCredentialStore: providerCredentialStore,
             credentialStatusRuntime: credentialStatusRuntime,
+            admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
             watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook
         ))
     }

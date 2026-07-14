@@ -119,7 +119,7 @@ private struct OnboardingRootView: View {
                     }
                 }
             }
-        case .importingProviderIdentity:
+        case .importingProviderCredential:
             stageRow(
                 title: "Importing provider identity",
                 detail: "Saving the provider identity to Keychain before connecting Malibu."

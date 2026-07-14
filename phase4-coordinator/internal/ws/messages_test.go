@@ -367,6 +367,9 @@ func TestParseAuthInitialAcceptsLegacyAbsentSpec010(t *testing.T) {
 	if req.ProviderReceiptPublicKey != "" || req.ProviderReceiptPubkey != nil {
 		t.Fatalf("receipt key = (%q, %#v), want absent", req.ProviderReceiptPublicKey, req.ProviderReceiptPubkey)
 	}
+	if req.ProviderAdmissionPublicKey != "" || req.ProviderAdmissionPubkey != nil {
+		t.Fatalf("admission key = (%q, %#v), want absent", req.ProviderAdmissionPublicKey, req.ProviderAdmissionPubkey)
+	}
 }
 
 func TestParseAuthInitialAcceptsNumericStringVersion(t *testing.T) {
@@ -456,6 +459,61 @@ func TestParseAuthInitialRejectsInvalidProviderReceiptPublicKey(t *testing.T) {
 				t.Fatalf("badField = %q", field)
 			}
 		})
+	}
+}
+
+func TestParseAuthInitialValidatesProviderAdmissionPublicKey(t *testing.T) {
+	pubkey := bytesOf(0x43, 32)
+	nextPubkey := bytesOf(0x44, 32)
+	payload := validAuthRequestInitial()
+	payload["provider_admission_public_key"] = base64.StdEncoding.EncodeToString(pubkey)
+	payload["provider_admission_next_public_key"] = base64.StdEncoding.EncodeToString(nextPubkey)
+	payload["provider_admission_recovery"] = true
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if req.ProviderAdmissionPublicKey != base64.StdEncoding.EncodeToString(pubkey) ||
+		string(req.ProviderAdmissionPubkey) != string(pubkey) ||
+		req.ProviderAdmissionNextPublicKey != base64.StdEncoding.EncodeToString(nextPubkey) ||
+		string(req.ProviderAdmissionNextPubkey) != string(nextPubkey) ||
+		!req.ProviderAdmissionRecovery {
+		t.Fatalf("admission keys current=(%q, %x) next=(%q, %x)",
+			req.ProviderAdmissionPublicKey, req.ProviderAdmissionPubkey,
+			req.ProviderAdmissionNextPublicKey, req.ProviderAdmissionNextPubkey)
+	}
+
+	for name, value := range map[string]string{
+		"invalid_base64": "not base64",
+		"wrong_length":   base64.StdEncoding.EncodeToString(bytesOf(0x43, 31)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := validAuthRequestInitial()
+			payload["provider_admission_public_key"] = value
+			_, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+			if err == nil || field != "provider_admission_public_key" {
+				t.Fatalf("field=%q err=%v", field, err)
+			}
+		})
+	}
+
+	for name, value := range map[string]string{
+		"invalid_base64": "not base64",
+		"wrong_length":   base64.StdEncoding.EncodeToString(bytesOf(0x44, 31)),
+	} {
+		t.Run("next_"+name, func(t *testing.T) {
+			payload := validAuthRequestInitial()
+			payload["provider_admission_next_public_key"] = value
+			_, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+			if err == nil || field != "provider_admission_next_public_key" {
+				t.Fatalf("field=%q err=%v", field, err)
+			}
+		})
+	}
+	payload = validAuthRequestInitial()
+	payload["provider_admission_recovery"] = "true"
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload)); err == nil || field != "provider_admission_recovery" {
+		t.Fatalf("recovery field=%q err=%v", field, err)
 	}
 }
 

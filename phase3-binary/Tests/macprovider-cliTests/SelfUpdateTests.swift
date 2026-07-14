@@ -172,6 +172,9 @@ final class SelfUpdateTests: XCTestCase {
         try Data("old-resource".utf8).write(to: oldBundle.appendingPathComponent("resource"))
         let oldCatalog = current.appendingPathComponent("catalog-release", isDirectory: true)
         try Self.writeCatalogFixture(to: oldCatalog, marker: "old")
+        try Data("old-compatibility-set".utf8).write(
+            to: current.appendingPathComponent(CompatibilitySetManifest.fileName)
+        )
 
         let newBinary = payload.appendingPathComponent("macprovider-cli")
         try Data("new-binary".utf8).write(to: newBinary)
@@ -182,6 +185,14 @@ final class SelfUpdateTests: XCTestCase {
         try Data("new-resource".utf8).write(to: newBundle.appendingPathComponent("resource"))
         let newCatalog = payload.appendingPathComponent("catalog-release", isDirectory: true)
         try Self.writeCatalogFixture(to: newCatalog, marker: "new")
+        try Data("new-notices".utf8).write(to: payload.appendingPathComponent("THIRD-PARTY-NOTICES.txt"))
+        try Data("new-compatibility-set".utf8).write(
+            to: payload.appendingPathComponent(CompatibilitySetManifest.fileName)
+        )
+        try Self.writeLocalCompatibilityArtifacts(to: payload)
+        try Data("new-compatibility-set".utf8).write(
+            to: payload.appendingPathComponent(CompatibilitySetManifest.fileName)
+        )
 
         let transaction = try ProviderReleasePayloadTransaction(
             currentBinary: currentBinary,
@@ -191,6 +202,10 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: currentBinary), "new-binary")
         XCTAssertEqual(try String(contentsOf: current.appendingPathComponent("mlx.metallib")), "new-metal")
         XCTAssertEqual(try String(contentsOf: oldCatalog.appendingPathComponent("release.json")), "new-release.json")
+        XCTAssertEqual(
+            try String(contentsOf: current.appendingPathComponent(CompatibilitySetManifest.fileName)),
+            "new-compatibility-set"
+        )
 
         try transaction.restore()
         transaction.cleanup()
@@ -199,6 +214,10 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: current.appendingPathComponent("mlx.metallib")), "old-metal")
         XCTAssertEqual(try String(contentsOf: oldBundle.appendingPathComponent("resource")), "old-resource")
         XCTAssertEqual(try String(contentsOf: oldCatalog.appendingPathComponent("release.json")), "old-release.json")
+        XCTAssertEqual(
+            try String(contentsOf: current.appendingPathComponent(CompatibilitySetManifest.fileName)),
+            "old-compatibility-set"
+        )
         XCTAssertFalse(FileManager.default.fileExists(atPath: transaction.backupDirectory.path))
     }
 
@@ -251,40 +270,126 @@ final class SelfUpdateTests: XCTestCase {
         }
     }
 
-    func testLaunchdRestartUsesKickstartForLoadedService() {
+    private static func writeLocalCompatibilityArtifacts(to directory: URL) throws {
+        let local = directory.appendingPathComponent(CompatibilitySetManifest.localArtifactDirectoryName, isDirectory: true)
+        try FileManager.default.createDirectory(at: local, withIntermediateDirectories: false)
+        for name in [
+            "install.sh",
+            "provider-launch-agent.plist.template",
+            "updater-rollback.json",
+            "watchdog-launch-agent.plist.template",
+            "watchdog.sh",
+        ] {
+            try Data(name.utf8).write(to: local.appendingPathComponent(name))
+        }
+    }
+
+    func testLaunchdReloadBootsOutAndBootstrapsLoadedService() {
         XCTAssertEqual(
-            SelfUpdate.launchdRestartArguments(
+            SelfUpdate.launchdReloadArguments(
+                label: SelfUpdate.launchdLabel,
                 serviceLoaded: true,
                 uid: 501,
                 plistPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
             ),
-            ["kickstart", "-k", "gui/501/live.streamvc.macprovider"]
+            [
+                ["bootout", "gui/501/live.streamvc.macprovider"],
+                ["bootstrap", "gui/501", "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"],
+            ]
         )
     }
 
-    func testLaunchdRestartBootstrapsOnlyWhenServiceIsNotLoaded() {
+    func testLaunchdReloadBootstrapsOnlyWhenServiceIsNotLoaded() {
         let plist = "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
 
         XCTAssertEqual(
-            SelfUpdate.launchdRestartArguments(serviceLoaded: false, uid: 501, plistPath: plist),
-            ["bootstrap", "gui/501", plist]
+            SelfUpdate.launchdReloadArguments(
+                label: SelfUpdate.launchdLabel,
+                serviceLoaded: false,
+                uid: 501,
+                plistPath: plist
+            ),
+            [["bootstrap", "gui/501", plist]]
         )
     }
 
-    func testRestartFailureRecoveryCommandUsesKickstart() {
+    func testCompatibilityReloadReloadsWatchdogBeforeProvider() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-reload-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        for label in [SelfUpdate.watchdogLaunchdLabel, SelfUpdate.launchdLabel] {
+            try Data("plist".utf8).write(to: launchAgents.appendingPathComponent("\(label).plist"))
+        }
+        var commands: [[String]] = []
+
+        try SelfUpdate.reloadCompatibilityLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            reloadID: "reload-test",
+            serviceLoaded: { _ in true },
+            runLaunchctl: { commands.append($0) }
+        )
+
+        XCTAssertEqual(commands.count, 3)
+        XCTAssertEqual(commands[0], ["bootout", "gui/501/live.streamvc.macprovider-watchdog"])
         XCTAssertEqual(
-            SelfUpdate.launchdRestartRecoveryCommand(uid: 501),
-            "launchctl kickstart -k gui/501/live.streamvc.macprovider"
+            commands[1],
+            [
+                "bootstrap",
+                "gui/501",
+                launchAgents.appendingPathComponent("live.streamvc.macprovider-watchdog.plist").path,
+            ]
+        )
+        XCTAssertEqual(
+            Array(commands[2].prefix(10)),
+            [
+                "submit",
+                "-l", "live.streamvc.macprovider-compatibility-reload.reload-test",
+                "-o", "/dev/null",
+                "-e", "/dev/null",
+                "--", "/bin/sh", "-c",
+            ]
+        )
+        let providerReloadScript = try XCTUnwrap(commands[2].last)
+        XCTAssertTrue(providerReloadScript.contains("bootout 'gui/501/live.streamvc.macprovider'"))
+        XCTAssertTrue(
+            providerReloadScript.contains(
+                "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.streamvc.macprovider.plist").path)'"
+            )
         )
     }
 
-    func testRestartFailureRecoveryCommandUsesBootstrapForUnloadedService() {
-        let plist = "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
-
-        XCTAssertEqual(
-            SelfUpdate.launchdRestartRecoveryCommand(serviceLoaded: false, uid: 501, plistPath: plist),
-            "launchctl bootstrap gui/501 \(plist)"
+    func testCompatibilityReloadValidatesBothPlistsBeforeUnloadingEitherJob() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-reload-missing-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        try Data("provider".utf8).write(
+            to: launchAgents.appendingPathComponent("\(SelfUpdate.launchdLabel).plist")
         )
+        var commands: [[String]] = []
+
+        XCTAssertThrowsError(try SelfUpdate.reloadCompatibilityLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            serviceLoaded: { _ in true },
+            runLaunchctl: { commands.append($0) }
+        ))
+        XCTAssertTrue(commands.isEmpty)
+    }
+
+    func testRestartFailureRecoveryCommandReloadsBothCompatibilityJobs() {
+        let home = URL(fileURLWithPath: "/Users/provider", isDirectory: true)
+
+        let command = SelfUpdate.launchdRestartRecoveryCommand(homeDirectory: home, uid: 501)
+
+        XCTAssertTrue(command.contains("launchctl bootout gui/501/live.streamvc.macprovider-watchdog"))
+        XCTAssertTrue(command.contains("launchctl bootstrap gui/501 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"))
+        XCTAssertTrue(command.contains("launchctl bootout gui/501/live.streamvc.macprovider"))
+        XCTAssertTrue(command.contains("launchctl bootstrap gui/501 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"))
     }
 
     func testUpdateRequiresSignedChecksumAsset() async throws {

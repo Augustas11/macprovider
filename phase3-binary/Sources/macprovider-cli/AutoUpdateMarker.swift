@@ -6,7 +6,9 @@ import Foundation
 /// ops/macprovider-watchdog/watchdog.sh:
 ///
 /// no_update -> download -> pending_install -> committed
-///                                      \-> rolled_back
+///                                      \-> restoring_previous
+///                                            \-> awaiting_previous_readiness
+///                                                  \-> rolled_back
 ///
 /// State is represented by durable filesystem markers. The CLI writes
 /// pending.json only after the binary and owned-release rollback snapshots are
@@ -30,6 +32,12 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
     let releaseBackupPath: String?
     let releaseBackupSHA256: String?
     let commitOwner: String?
+    let targetCompatibilitySetID: String?
+    let targetCompatibilitySetSHA256: String?
+    let previousVersion: String?
+    let previousCompatibilitySetID: String?
+    let previousCompatibilitySetSHA256: String?
+    let transactionState: CompatibilitySetTransactionState?
 
     init(
         updateID: String,
@@ -42,7 +50,13 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         markerDeadline: String,
         releaseBackupPath: String? = nil,
         releaseBackupSHA256: String? = nil,
-        commitOwner: String? = nil
+        commitOwner: String? = nil,
+        targetCompatibilitySetID: String? = nil,
+        targetCompatibilitySetSHA256: String? = nil,
+        previousVersion: String? = nil,
+        previousCompatibilitySetID: String? = nil,
+        previousCompatibilitySetSHA256: String? = nil,
+        transactionState: CompatibilitySetTransactionState? = nil
     ) {
         self.updateID = updateID
         self.targetVersion = targetVersion
@@ -55,6 +69,12 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         self.releaseBackupPath = releaseBackupPath
         self.releaseBackupSHA256 = releaseBackupSHA256
         self.commitOwner = commitOwner
+        self.targetCompatibilitySetID = targetCompatibilitySetID
+        self.targetCompatibilitySetSHA256 = targetCompatibilitySetSHA256
+        self.previousVersion = previousVersion
+        self.previousCompatibilitySetID = previousCompatibilitySetID
+        self.previousCompatibilitySetSHA256 = previousCompatibilitySetSHA256
+        self.transactionState = transactionState
     }
 
     enum CodingKeys: String, CodingKey {
@@ -69,6 +89,59 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         case releaseBackupPath = "release_backup_path"
         case releaseBackupSHA256 = "release_backup_sha256"
         case commitOwner = "commit_owner"
+        case targetCompatibilitySetID = "target_compatibility_set_id"
+        case targetCompatibilitySetSHA256 = "target_compatibility_set_sha256"
+        case previousVersion = "previous_version"
+        case previousCompatibilitySetID = "previous_compatibility_set_id"
+        case previousCompatibilitySetSHA256 = "previous_compatibility_set_sha256"
+        case transactionState = "transaction_state"
+    }
+
+    func withTransactionState(
+        _ state: CompatibilitySetTransactionState,
+        markerDeadline: String? = nil
+    ) -> AutoUpdatePendingMarker {
+        AutoUpdatePendingMarker(
+            updateID: updateID,
+            targetVersion: targetVersion,
+            targetPath: targetPath,
+            backupPath: backupPath,
+            size: size,
+            mode: mode,
+            sha256: sha256,
+            markerDeadline: markerDeadline ?? self.markerDeadline,
+            releaseBackupPath: releaseBackupPath,
+            releaseBackupSHA256: releaseBackupSHA256,
+            commitOwner: commitOwner,
+            targetCompatibilitySetID: targetCompatibilitySetID,
+            targetCompatibilitySetSHA256: targetCompatibilitySetSHA256,
+            previousVersion: previousVersion,
+            previousCompatibilitySetID: previousCompatibilitySetID,
+            previousCompatibilitySetSHA256: previousCompatibilitySetSHA256,
+            transactionState: state
+        )
+    }
+}
+
+enum CompatibilitySetTransactionState: String, Codable, Equatable, Sendable {
+    case activatingTarget = "activating_target"
+    case restoringPrevious = "restoring_previous"
+    case awaitingPreviousReadiness = "awaiting_previous_readiness"
+}
+
+struct CoordinatorCompatibilityAdmissionRecord: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let acceptedCompatibilitySetID: String
+    let recommendedCompatibilitySetID: String
+    let observedAt: String
+    let expiresAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case acceptedCompatibilitySetID = "accepted_compatibility_set_id"
+        case recommendedCompatibilitySetID = "recommended_compatibility_set_id"
+        case observedAt = "observed_at"
+        case expiresAt = "expires_at"
     }
 }
 
@@ -80,6 +153,7 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
     case writeFailed(String, Int32)
     case invalidMarker
     case backupCorrupt
+    case compatibilityAdmissionRequired(String)
 
     var description: String {
         switch self {
@@ -90,6 +164,8 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
         case let .writeFailed(path, errnoValue): return "write failed for \(path): errno \(errnoValue)"
         case .invalidMarker: return "pending marker is invalid"
         case .backupCorrupt: return "rollback backup is missing or hash-mismatched"
+        case let .compatibilityAdmissionRequired(reason):
+            return "fresh coordinator compatibility-set admission required: \(reason)"
         }
     }
 }
@@ -129,8 +205,19 @@ final class SessionAutoupdateGate: @unchecked Sendable {
 
 enum AutoUpdateOrphanRecoveryOutcome: Equatable {
     case restored(AutoUpdatePendingMarker)
+    case restoredAwaitingReadiness(AutoUpdatePendingMarker)
     case markerInvalid
     case backupCorrupt(AutoUpdatePendingMarker, String)
+}
+
+enum CompatibilitySetCutoverPhase: String, CaseIterable, Sendable {
+    case ownedResourcesRemoved
+    case ownedResourcesActivated
+    case watchdogScriptActivated
+    case providerPlistActivated
+    case watchdogPlistActivated
+    case binaryActivated
+    case malibuAppActivated
 }
 
 final class AutoUpdateLock: @unchecked Sendable {
@@ -152,21 +239,71 @@ final class AutoUpdateLock: @unchecked Sendable {
     }
 }
 
+private struct CompatibilityExternalMemberBackup: Codable, Equatable {
+    let schemaVersion: Int
+    let members: [CompatibilityExternalMemberRecord]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case members
+    }
+}
+
+private struct CompatibilityExternalMemberRecord: Codable, Equatable {
+    let member: String
+    let wasPresent: Bool
+    let mode: Int?
+    let sha256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case member
+        case wasPresent = "was_present"
+        case mode
+        case sha256
+    }
+}
+
+private struct MalibuAppRollbackRecord: Codable, Equatable {
+    let schemaVersion: Int
+    let targetPath: String
+    let archiveSHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case targetPath = "target_path"
+        case archiveSHA256 = "archive_sha256"
+    }
+}
+
 // FileManager is thread-safe for independent filesystem operations. The store
 // carries no mutable shared state beyond that Foundation reference.
 struct AutoUpdateMarkerStore: @unchecked Sendable {
+    private static let localArtifactDirectoryName = CompatibilitySetManifest.localArtifactDirectoryName
+    private static let externalBackupDirectoryName = "external-local-members"
+    private static let externalBackupStateName = "state.json"
+    private static let providerPlistName = "provider.plist"
+    private static let watchdogScriptName = "watchdog.sh"
+    private static let watchdogPlistName = "watchdog.plist"
+    private static let malibuAppBackupName = "Malibu.app.zip"
+    private static let malibuAppStateName = "malibu-app-state.json"
+    static let compatibilityAdmissionValiditySeconds: TimeInterval = 90
+    private static let compatibilityAdmissionMaximumBytes = 4_096
+
     let homeDirectory: URL
     let fileManager: FileManager
     private let installerOwnerLiveOverride: (@Sendable () -> Bool)?
+    private let malibuAppCandidateOverride: [URL]?
 
     init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default,
-        installerOwnerLiveOverride: (@Sendable () -> Bool)? = nil
+        installerOwnerLiveOverride: (@Sendable () -> Bool)? = nil,
+        malibuAppCandidateOverride: [URL]? = nil
     ) {
         self.homeDirectory = homeDirectory
         self.fileManager = fileManager
         self.installerOwnerLiveOverride = installerOwnerLiveOverride
+        self.malibuAppCandidateOverride = malibuAppCandidateOverride
     }
 
     var root: URL {
@@ -193,12 +330,132 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         root.appendingPathComponent("signed-policy.json")
     }
 
+    var compatibilityAdmissionURL: URL {
+        root.appendingPathComponent("compatibility-admission.json")
+    }
+
+    private var providerPlistURL: URL {
+        homeDirectory.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+    }
+
+    private var watchdogScriptURL: URL {
+        homeDirectory.appendingPathComponent(".local/share/macprovider-watchdog/macprovider-health-monitor")
+    }
+
+    private var watchdogPlistURL: URL {
+        homeDirectory.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist")
+    }
+
     func ensureTrustedRoot() throws {
         try ensureTrustedDirectory(homeDirectory.appendingPathComponent(".local", isDirectory: true))
         try ensureTrustedDirectory(homeDirectory.appendingPathComponent(".local/share", isDirectory: true))
         try ensureTrustedDirectory(homeDirectory.appendingPathComponent(".local/share/macprovider", isDirectory: true))
         try ensureTrustedDirectory(root)
         try rejectUnexpectedMountCrossing()
+    }
+
+    func persistCompatibilityAdmission(
+        acceptedCompatibilitySetID: String,
+        recommendedCompatibilitySetID: String,
+        now: Date = Date(),
+        validitySeconds: TimeInterval = Self.compatibilityAdmissionValiditySeconds
+    ) throws {
+        guard CompatibilitySetManifest.isCanonicalCompatibilitySetID(acceptedCompatibilitySetID),
+              CompatibilitySetManifest.isCanonicalCompatibilitySetID(recommendedCompatibilitySetID),
+              validitySeconds >= 30,
+              validitySeconds <= 300 else {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("invalid_admission_record")
+        }
+        try ensureTrustedRoot()
+        let record = CoordinatorCompatibilityAdmissionRecord(
+            schemaVersion: 1,
+            acceptedCompatibilitySetID: acceptedCompatibilitySetID,
+            recommendedCompatibilitySetID: recommendedCompatibilitySetID,
+            observedAt: ISO8601DateFormatter.autoupdate.string(from: now),
+            expiresAt: ISO8601DateFormatter.autoupdate.string(from: now.addingTimeInterval(validitySeconds))
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(record)
+        try atomicWrite(
+            data: data,
+            finalURL: compatibilityAdmissionURL,
+            mode: S_IRUSR | S_IWUSR
+        )
+    }
+
+    func clearCompatibilityAdmission() throws {
+        guard fileManager.fileExists(atPath: compatibilityAdmissionURL.path) else { return }
+        try ensureTrustedRoot()
+        guard unlink(compatibilityAdmissionURL.path) == 0 || errno == ENOENT else {
+            throw AutoUpdateMarkerError.writeFailed(compatibilityAdmissionURL.path, errno)
+        }
+        fsyncDirectory(root)
+    }
+
+    func requireCoordinatorCompatibilityTarget(
+        _ targetCompatibilitySetID: String,
+        currentCompatibilitySetID: String?,
+        now: Date = Date()
+    ) throws {
+        guard CompatibilitySetManifest.isCanonicalCompatibilitySetID(targetCompatibilitySetID),
+              let currentCompatibilitySetID,
+              CompatibilitySetManifest.isCanonicalCompatibilitySetID(currentCompatibilitySetID) else {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("invalid_current_or_target_set")
+        }
+        let record = try readCompatibilityAdmission()
+        guard record.acceptedCompatibilitySetID == currentCompatibilitySetID else {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("accepted_set_mismatch")
+        }
+        guard record.recommendedCompatibilitySetID == targetCompatibilitySetID else {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("recommended_set_mismatch")
+        }
+        guard let observedAt = ISO8601DateFormatter.autoupdate.date(from: record.observedAt),
+              let expiresAt = ISO8601DateFormatter.autoupdate.date(from: record.expiresAt),
+              observedAt <= now.addingTimeInterval(5),
+              expiresAt > now,
+              expiresAt.timeIntervalSince(observedAt) >= 30,
+              expiresAt.timeIntervalSince(observedAt) <= 300 else {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("admission_expired_or_invalid")
+        }
+    }
+
+    func readCompatibilityAdmissionForTest() throws -> CoordinatorCompatibilityAdmissionRecord {
+        try readCompatibilityAdmission()
+    }
+
+    private func readCompatibilityAdmission() throws -> CoordinatorCompatibilityAdmissionRecord {
+        guard fileManager.fileExists(atPath: compatibilityAdmissionURL.path) else {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("admission_missing")
+        }
+        let data = try readRegularFileNoFollow(compatibilityAdmissionURL)
+        guard data.count <= Self.compatibilityAdmissionMaximumBytes else {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("admission_too_large")
+        }
+        do {
+            try AutotuneStrictJSON.rejectDuplicateKeys(data)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(object.keys) == Set([
+                      "accepted_compatibility_set_id",
+                      "expires_at",
+                      "observed_at",
+                      "recommended_compatibility_set_id",
+                      "schema_version",
+                  ]) else {
+                throw AutoUpdateMarkerError.compatibilityAdmissionRequired("admission_fields")
+            }
+            let record = try JSONDecoder().decode(CoordinatorCompatibilityAdmissionRecord.self, from: data)
+            guard record.schemaVersion == 1,
+                  CompatibilitySetManifest.isCanonicalCompatibilitySetID(record.acceptedCompatibilitySetID),
+                  CompatibilitySetManifest.isCanonicalCompatibilitySetID(record.recommendedCompatibilitySetID) else {
+                throw AutoUpdateMarkerError.compatibilityAdmissionRequired("admission_values")
+            }
+            return record
+        } catch let error as AutoUpdateMarkerError {
+            throw error
+        } catch {
+            throw AutoUpdateMarkerError.compatibilityAdmissionRequired("admission_invalid")
+        }
     }
 
     func acquireLock() throws -> AutoUpdateLock {
@@ -430,7 +687,11 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         binaryURL: URL,
         updateID: String,
         targetVersion: String,
-        commitOwner: String = "coordinator"
+        previousVersion: String? = nil,
+        commitOwner: String = "coordinator",
+        targetCompatibilitySetID: String? = nil,
+        targetCompatibilitySetSHA256: String? = nil,
+        readinessTimeoutSeconds: Int = 300
     ) throws -> AutoUpdatePendingMarker {
         let installDirectory = binaryURL.deletingLastPathComponent()
         try validateTrustedBinaryDirectory(installDirectory)
@@ -440,6 +701,22 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         let sha = try Self.sha256(file: binaryURL)
         let binaryBackup = rollbackBackupPath(binaryURL: binaryURL, updateID: updateID)
         let releaseBackup = releaseRollbackBackupPath(binaryURL: binaryURL, updateID: updateID)
+
+        let previousCompatibilityManifest: CompatibilitySetManifest?
+        switch (targetCompatibilitySetID, targetCompatibilitySetSHA256) {
+        case (nil, nil):
+            previousCompatibilityManifest = nil
+        case (.some, .some):
+            guard let previousVersion else {
+                throw AutoUpdateMarkerError.invalidMarker
+            }
+            previousCompatibilityManifest = try CompatibilitySetManifest.loadValidated(
+                from: installDirectory,
+                expectedVersion: previousVersion
+            )
+        default:
+            throw AutoUpdateMarkerError.invalidMarker
+        }
 
         try atomicCopyNoFollow(from: binaryURL, to: binaryBackup, mode: mode)
         do {
@@ -455,9 +732,18 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                     to: releaseBackup.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
                 )
             }
+            try preserveExternalLocalMembers(
+                into: releaseBackup.appendingPathComponent(Self.externalBackupDirectoryName, isDirectory: true)
+            )
+            try preserveInstalledMalibuApp(into: releaseBackup)
             try fsyncTree(releaseBackup)
             let releaseSHA = try releaseTreeSHA256(releaseBackup)
-            let deadline = ISO8601DateFormatter.autoupdate.string(from: Date().addingTimeInterval(60 + 300))
+            guard (60...1_200).contains(readinessTimeoutSeconds) else {
+                throw AutoUpdateMarkerError.invalidMarker
+            }
+            let deadline = ISO8601DateFormatter.autoupdate.string(
+                from: Date().addingTimeInterval(60 + TimeInterval(readinessTimeoutSeconds))
+            )
             return AutoUpdatePendingMarker(
                 updateID: updateID,
                 targetVersion: targetVersion,
@@ -469,7 +755,13 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                 markerDeadline: deadline,
                 releaseBackupPath: releaseBackup.path,
                 releaseBackupSHA256: releaseSHA,
-                commitOwner: commitOwner
+                commitOwner: commitOwner,
+                targetCompatibilitySetID: targetCompatibilitySetID,
+                targetCompatibilitySetSHA256: targetCompatibilitySetSHA256,
+                previousVersion: previousCompatibilityManifest?.version,
+                previousCompatibilitySetID: previousCompatibilityManifest?.compatibilitySetID,
+                previousCompatibilitySetSHA256: previousCompatibilityManifest?.envelopeSHA256,
+                transactionState: previousCompatibilityManifest == nil ? nil : .activatingTarget
             )
         } catch {
             try? fileManager.removeItem(at: releaseBackup)
@@ -546,12 +838,75 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                         .appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
                 )
             }
+            try restoreExternalLocalMembersIfPresent(from: releaseBackup)
+            try restoreMalibuAppIfPresent(from: releaseBackup)
             fsyncDirectory(targetURL.deletingLastPathComponent())
         }
         try atomicCopyNoFollow(from: backupURL, to: targetURL, mode: marker.mode)
     }
 
-    func activateReleasePayload(from payloadDirectory: URL, newBinary: URL, to currentBinary: URL) throws {
+    /// Moves an exact compatibility-set rollback through durable phases. The
+    /// pending marker and both snapshots remain until the restored provider
+    /// proves exact coordinator admission and buyer-serving readiness.
+    @discardableResult
+    func restoreBackupAwaitingPreviousReadiness(
+        _ marker: AutoUpdatePendingMarker,
+        readinessTimeoutSeconds: Int = 300
+    ) throws -> AutoUpdatePendingMarker {
+        guard marker.transactionState != nil else {
+            try restoreBackup(marker)
+            return marker
+        }
+        guard (60...1_200).contains(readinessTimeoutSeconds) else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        let restoring = marker.withTransactionState(.restoringPrevious)
+        try writePending(restoring)
+        try restoreBackup(restoring)
+        return try markPreviousRestoredAwaitingReadiness(
+            restoring,
+            readinessTimeoutSeconds: readinessTimeoutSeconds
+        )
+    }
+
+    @discardableResult
+    func markPreviousRestoredAwaitingReadiness(
+        _ marker: AutoUpdatePendingMarker,
+        readinessTimeoutSeconds: Int = 300
+    ) throws -> AutoUpdatePendingMarker {
+        guard marker.transactionState == .restoringPrevious,
+              (60...1_200).contains(readinessTimeoutSeconds)
+        else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        let deadline = ISO8601DateFormatter.autoupdate.string(
+            from: Date().addingTimeInterval(TimeInterval(readinessTimeoutSeconds))
+        )
+        let awaiting = marker.withTransactionState(
+            .awaitingPreviousReadiness,
+            markerDeadline: deadline
+        )
+        try writePending(awaiting)
+        return awaiting
+    }
+
+    func completeRestoredPreviousSet(_ marker: AutoUpdatePendingMarker) throws {
+        guard marker.transactionState == .awaitingPreviousReadiness else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        try validateBackup(marker)
+        clearPending()
+        removeRollbackBackups(marker)
+    }
+
+    func activateReleasePayload(
+        from payloadDirectory: URL,
+        newBinary: URL,
+        to currentBinary: URL,
+        stagedMalibuApp: URL? = nil,
+        rollbackMarker: AutoUpdatePendingMarker? = nil,
+        cutoverCheckpoint: ((CompatibilitySetCutoverPhase) throws -> Void)? = nil
+    ) throws {
         try validateReleasePayload(at: payloadDirectory, newBinary: newBinary)
         let liveDirectory = currentBinary.deletingLastPathComponent()
         try validateTrustedBinaryDirectory(liveDirectory)
@@ -570,13 +925,30 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         }
         try fsyncTree(staging)
         try removeOwnedReleaseResources(in: liveDirectory)
+        fsyncDirectory(liveDirectory)
+        try cutoverCheckpoint?(.ownedResourcesRemoved)
         for entry in try ownedReleaseResourceEntries(in: staging) {
             try fileManager.moveItem(
                 at: entry,
                 to: liveDirectory.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
             )
         }
+        fsyncDirectory(liveDirectory)
+        try cutoverCheckpoint?(.ownedResourcesActivated)
+        try activateExternalLocalMembers(
+            from: liveDirectory.appendingPathComponent(Self.localArtifactDirectoryName, isDirectory: true),
+            installDirectory: liveDirectory,
+            cutoverCheckpoint: cutoverCheckpoint
+        )
         try atomicCopyNoFollow(from: newBinary, to: currentBinary, mode: 0o755)
+        try cutoverCheckpoint?(.binaryActivated)
+        if try activateMalibuAppIfInstalled(
+            stagedMalibuApp,
+            from: liveDirectory,
+            rollbackMarker: rollbackMarker
+        ) {
+            try cutoverCheckpoint?(.malibuAppActivated)
+        }
     }
 
     func cooldown(target: String, failureClass: AutoUpdateFailureClass) -> (attempt: Int, until: Date)? {
@@ -661,7 +1033,11 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             return .backupCorrupt(marker, "backup_missing_or_hash_mismatch")
         }
         do {
-            try restoreBackup(marker)
+            let restored = try restoreBackupAwaitingPreviousReadiness(marker)
+            if restored.transactionState == .awaitingPreviousReadiness {
+                recordCooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)
+                return .restoredAwaitingReadiness(restored)
+            }
             clearPending()
             removeRollbackBackups(marker)
             recordCooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)
@@ -745,9 +1121,14 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         for entry in try fileManager.contentsOfDirectory(
             at: backup,
             includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
-        ) where !isOwnedReleaseResource(entry) {
+        ) where !isOwnedReleaseResource(entry)
+            && entry.lastPathComponent != Self.externalBackupDirectoryName
+            && entry.lastPathComponent != Self.malibuAppBackupName
+            && entry.lastPathComponent != Self.malibuAppStateName {
             throw AutoUpdateMarkerError.backupCorrupt
         }
+        try validateExternalLocalMemberBackupIfPresent(in: backup)
+        try validateMalibuAppBackupIfPresent(in: backup)
     }
 
     private func validateReleasePayload(at directory: URL, newBinary: URL) throws {
@@ -774,8 +1155,12 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         }
         guard entries.contains(where: { $0.lastPathComponent == "mlx.metallib" && isRegular($0) }),
               entries.contains(where: { $0.lastPathComponent == "THIRD-PARTY-NOTICES.txt" && isRegular($0) }),
+              entries.contains(where: { $0.lastPathComponent == CompatibilitySetManifest.fileName && isRegular($0) }),
               entries.contains(where: { $0.pathExtension == "bundle" && isDirectory($0) }),
-              let catalog = entries.first(where: { $0.lastPathComponent == "catalog-release" && isDirectory($0) })
+              let catalog = entries.first(where: { $0.lastPathComponent == "catalog-release" && isDirectory($0) }),
+              let localArtifacts = entries.first(where: {
+                  $0.lastPathComponent == Self.localArtifactDirectoryName && isDirectory($0)
+              })
         else {
             throw AutoUpdateMarkerError.trustedRootInvalid("release_payload_incomplete")
         }
@@ -793,6 +1178,33 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                 throw AutoUpdateMarkerError.trustedRootInvalid("release_catalog_incomplete")
             }
         }
+        let requiredLocalArtifacts = Set([
+            "install.sh",
+            "provider-launch-agent.plist.template",
+            "updater-rollback.json",
+            "watchdog-launch-agent.plist.template",
+            "watchdog.sh",
+        ])
+        let localEntries = try fileManager.contentsOfDirectory(
+            at: localArtifacts,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        )
+        guard Set(localEntries.map(\.lastPathComponent)) == requiredLocalArtifacts else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_local_artifact_members_invalid")
+        }
+        for entry in localEntries {
+            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_local_artifact_invalid")
+            }
+        }
+        do {
+            _ = try CompatibilitySetRollbackPlan.loadValidated(
+                from: localArtifacts.appendingPathComponent("updater-rollback.json")
+            )
+        } catch {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_rollback_plan_invalid")
+        }
     }
 
     private func ownedReleaseResourceEntries(in directory: URL) throws -> [URL] {
@@ -807,7 +1219,9 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         let name = url.lastPathComponent
         return name == "mlx.metallib"
             || name == "THIRD-PARTY-NOTICES.txt"
+            || name == CompatibilitySetManifest.fileName
             || name == "catalog-release"
+            || name == Self.localArtifactDirectoryName
             || url.pathExtension == "bundle"
     }
 
@@ -815,6 +1229,608 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         for entry in try ownedReleaseResourceEntries(in: directory) {
             try fileManager.removeItem(at: entry)
         }
+    }
+
+    private func preserveExternalLocalMembers(into backupDirectory: URL) throws {
+        try fileManager.createDirectory(
+            at: backupDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        var records: [CompatibilityExternalMemberRecord] = []
+        for member in externalLocalMembers() {
+            var info = stat()
+            if lstat(member.target.path, &info) != 0 {
+                guard errno == ENOENT else {
+                    throw AutoUpdateMarkerError.openFailed(member.target.path, errno)
+                }
+                records.append(.init(member: member.identifier, wasPresent: false, mode: nil, sha256: nil))
+                continue
+            }
+            let opened = try regularFileStatNoFollow(member.target)
+            guard (opened.st_mode & (S_IWGRP | S_IWOTH)) == 0 else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("external_member_writable")
+            }
+            let mode = Int(opened.st_mode & 0o7777)
+            let destination = backupDirectory.appendingPathComponent(member.backupName)
+            try fileManager.copyItem(at: member.target, to: destination)
+            try fileManager.setAttributes([.posixPermissions: mode], ofItemAtPath: destination.path)
+            records.append(.init(
+                member: member.identifier,
+                wasPresent: true,
+                mode: mode,
+                sha256: try Self.sha256(file: destination)
+            ))
+        }
+        let payload = CompatibilityExternalMemberBackup(schemaVersion: 1, members: records)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try atomicWrite(
+            data: try encoder.encode(payload),
+            finalURL: backupDirectory.appendingPathComponent(Self.externalBackupStateName),
+            mode: S_IRUSR | S_IWUSR
+        )
+    }
+
+    @discardableResult
+    func preflightInstalledMalibuAppReplacement() throws -> URL? {
+        guard let app = try installedMalibuAppURL() else { return nil }
+        try validateMalibuInstallTarget(app, requireWritableParent: true)
+        try validateMalibuBundle(app, requireCurrentOwner: false)
+        return app
+    }
+
+    private func preserveInstalledMalibuApp(into releaseBackup: URL) throws {
+        guard let app = try preflightInstalledMalibuAppReplacement() else { return }
+        let archive = releaseBackup.appendingPathComponent(Self.malibuAppBackupName)
+        try runProcess(
+            "/usr/bin/ditto",
+            arguments: ["-c", "-k", "--sequesterRsrc", "--keepParent", app.path, archive.path]
+        )
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: archive.path)
+        let record = MalibuAppRollbackRecord(
+            schemaVersion: 1,
+            targetPath: app.standardizedFileURL.path,
+            archiveSHA256: try Self.sha256(file: archive)
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try atomicWrite(
+            data: try encoder.encode(record),
+            finalURL: releaseBackup.appendingPathComponent(Self.malibuAppStateName),
+            mode: S_IRUSR | S_IWUSR
+        )
+    }
+
+    private func validateMalibuAppBackupIfPresent(in releaseBackup: URL) throws {
+        _ = try validatedMalibuAppRollbackRecord(in: releaseBackup)
+    }
+
+    private func validatedMalibuAppRollbackRecord(
+        in releaseBackup: URL
+    ) throws -> MalibuAppRollbackRecord? {
+        let archive = releaseBackup.appendingPathComponent(Self.malibuAppBackupName)
+        let stateURL = releaseBackup.appendingPathComponent(Self.malibuAppStateName)
+        let archiveExists = fileManager.fileExists(atPath: archive.path)
+        let stateExists = fileManager.fileExists(atPath: stateURL.path)
+        guard archiveExists == stateExists else { throw AutoUpdateMarkerError.backupCorrupt }
+        guard stateExists else { return nil }
+
+        let data = try readRegularFileNoFollow(stateURL)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == ["archive_sha256", "schema_version", "target_path"]
+        else { throw AutoUpdateMarkerError.backupCorrupt }
+        let record = try JSONDecoder().decode(MalibuAppRollbackRecord.self, from: data)
+        guard record.schemaVersion == 1,
+              record.archiveSHA256.range(
+                of: #"^[0-9a-f]{64}$"#,
+                options: .regularExpression
+              ) != nil,
+              malibuAppCandidates().contains(where: {
+                  $0.standardizedFileURL.path == record.targetPath
+              })
+        else { throw AutoUpdateMarkerError.backupCorrupt }
+        let archiveInfo = try regularFileStatNoFollow(archive)
+        guard (archiveInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+              try Self.sha256(file: archive) == record.archiveSHA256
+        else { throw AutoUpdateMarkerError.backupCorrupt }
+        return record
+    }
+
+    private func restoreMalibuAppIfPresent(from releaseBackup: URL) throws {
+        guard let record = try validatedMalibuAppRollbackRecord(in: releaseBackup) else { return }
+        let target = URL(fileURLWithPath: record.targetPath, isDirectory: true)
+        try validateMalibuInstallTarget(target, requireWritableParent: true, requireExistingApp: false)
+        let extractionRoot = target.deletingLastPathComponent().appendingPathComponent(
+            ".malibu-rollback-extract-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: extractionRoot,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? fileManager.removeItem(at: extractionRoot) }
+        try runProcess(
+            "/usr/bin/ditto",
+            arguments: [
+                "-x", "-k",
+                releaseBackup.appendingPathComponent(Self.malibuAppBackupName).path,
+                extractionRoot.path,
+            ]
+        )
+        let entries = try fileManager.contentsOfDirectory(
+            at: extractionRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        )
+        guard entries.count == 1, entries[0].lastPathComponent == "Malibu.app" else {
+            throw AutoUpdateMarkerError.backupCorrupt
+        }
+        let restored = entries[0]
+        try validateMalibuBundle(restored, requireCurrentOwner: true)
+        try atomicReplaceMalibuApp(staged: restored, target: target)
+    }
+
+    @discardableResult
+    private func activateMalibuAppIfInstalled(
+        _ stagedMalibuApp: URL?,
+        from liveDirectory: URL,
+        rollbackMarker: AutoUpdatePendingMarker?
+    ) throws -> Bool {
+        guard let releaseBackupPath = rollbackMarker?.releaseBackupPath else {
+            guard stagedMalibuApp == nil else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_rollback_snapshot_missing")
+            }
+            return false
+        }
+        let releaseBackup = URL(fileURLWithPath: releaseBackupPath, isDirectory: true)
+        guard let record = try validatedMalibuAppRollbackRecord(in: releaseBackup) else {
+            guard try installedMalibuAppURL() == nil else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_raced_snapshot")
+            }
+            return false
+        }
+        guard let stagedMalibuApp else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_staged_bundle_missing")
+        }
+        let target = URL(fileURLWithPath: record.targetPath, isDirectory: true)
+        guard try installedMalibuAppURL()?.standardizedFileURL == target.standardizedFileURL else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_changed_after_snapshot")
+        }
+        try validateMalibuInstallTarget(target, requireWritableParent: true)
+        try validateMalibuBundle(
+            stagedMalibuApp,
+            requireCurrentOwner: true,
+            expectedVersion: rollbackMarker?.targetVersion,
+            expectedManifest: liveDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
+        )
+
+        let staging = target.deletingLastPathComponent().appendingPathComponent(
+            ".Malibu.app.activation-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: staging) }
+        try runProcess("/usr/bin/ditto", arguments: [stagedMalibuApp.path, staging.path])
+        try validateMalibuBundle(
+            staging,
+            requireCurrentOwner: true,
+            expectedVersion: rollbackMarker?.targetVersion,
+            expectedManifest: liveDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
+        )
+        try atomicReplaceMalibuApp(staged: staging, target: target)
+        return true
+    }
+
+    private func installedMalibuAppURL() throws -> URL? {
+        var installed: [URL] = []
+        for candidate in malibuAppCandidates() {
+            var info = stat()
+            if lstat(candidate.path, &info) != 0 {
+                guard errno == ENOENT else {
+                    throw AutoUpdateMarkerError.openFailed(candidate.path, errno)
+                }
+                continue
+            }
+            guard (info.st_mode & S_IFMT) == S_IFDIR else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_not_directory")
+            }
+            installed.append(candidate)
+        }
+        guard installed.count <= 1 else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("multiple_malibu_installations")
+        }
+        return installed.first
+    }
+
+    private func malibuAppCandidates() -> [URL] {
+        if let malibuAppCandidateOverride {
+            return malibuAppCandidateOverride
+        }
+        let perUser = homeDirectory.appendingPathComponent("Applications/Malibu.app", isDirectory: true)
+        guard homeDirectory.standardizedFileURL
+            == FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+        else {
+            return [perUser]
+        }
+        return [URL(fileURLWithPath: "/Applications/Malibu.app", isDirectory: true), perUser]
+    }
+
+    private func validateMalibuInstallTarget(
+        _ target: URL,
+        requireWritableParent: Bool,
+        requireExistingApp: Bool = true
+    ) throws {
+        let canonicalTarget = target.standardizedFileURL
+        guard canonicalTarget.path == target.path,
+              canonicalTarget.lastPathComponent == "Malibu.app",
+              malibuAppCandidates().contains(where: {
+                  $0.standardizedFileURL == canonicalTarget
+              })
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_path_invalid")
+        }
+        let parent = canonicalTarget.deletingLastPathComponent()
+        var parentInfo = stat()
+        guard lstat(parent.path, &parentInfo) == 0,
+              (parentInfo.st_mode & S_IFMT) == S_IFDIR,
+              (parentInfo.st_mode & S_IFMT) != S_IFLNK,
+              (parentInfo.st_mode & S_IWOTH) == 0
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_parent_untrusted")
+        }
+        if parent.path == "/Applications" {
+            guard parentInfo.st_uid == 0 else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("applications_owner_invalid")
+            }
+        } else {
+            guard parentInfo.st_uid == getuid(),
+                  (parentInfo.st_mode & S_IWGRP) == 0
+            else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_parent_untrusted")
+            }
+        }
+        if requireWritableParent, access(parent.path, W_OK) != 0 {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_app_requires_authorized_installer")
+        }
+        guard requireExistingApp else { return }
+        var appInfo = stat()
+        guard lstat(canonicalTarget.path, &appInfo) == 0,
+              (appInfo.st_mode & S_IFMT) == S_IFDIR,
+              (appInfo.st_mode & S_IFMT) != S_IFLNK,
+              (appInfo.st_mode & S_IWOTH) == 0
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_untrusted")
+        }
+    }
+
+    private func validateMalibuBundle(
+        _ app: URL,
+        requireCurrentOwner: Bool,
+        expectedVersion: String? = nil,
+        expectedManifest: URL? = nil
+    ) throws {
+        var rootInfo = stat()
+        guard lstat(app.path, &rootInfo) == 0,
+              (rootInfo.st_mode & S_IFMT) == S_IFDIR,
+              (rootInfo.st_mode & S_IFMT) != S_IFLNK,
+              (rootInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+              !requireCurrentOwner || rootInfo.st_uid == getuid()
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_root_invalid")
+        }
+        let resolvedRoot = app.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootPrefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
+        guard let enumerator = fileManager.enumerator(at: app, includingPropertiesForKeys: nil) else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_enumeration_failed")
+        }
+        for case let entry as URL in enumerator {
+            var info = stat()
+            guard lstat(entry.path, &info) == 0,
+                  (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+                  !requireCurrentOwner || info.st_uid == getuid()
+            else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_entry_invalid")
+            }
+            let type = info.st_mode & S_IFMT
+            switch type {
+            case S_IFDIR:
+                break
+            case S_IFREG:
+                guard info.st_nlink == 1 else {
+                    throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_hardlink")
+                }
+            case S_IFLNK:
+                let resolved = entry.resolvingSymlinksInPath().standardizedFileURL.path
+                guard resolved.hasPrefix(rootPrefix) else {
+                    throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_symlink_escape")
+                }
+            default:
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_entry_type")
+            }
+        }
+
+        let infoURL = app.appendingPathComponent("Contents/Info.plist")
+        guard let info = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: infoURL),
+            format: nil
+        ) as? [String: Any],
+              info["CFBundleIdentifier"] as? String == "tech.malibu.app"
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_identity_invalid")
+        }
+        if let expectedVersion {
+            guard info["CFBundleShortVersionString"] as? String == expectedVersion else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_version_mismatch")
+            }
+        }
+        if let expectedManifest {
+            let embedded = app.appendingPathComponent(
+                "Contents/Resources/\(CompatibilitySetManifest.fileName)"
+            )
+            guard try Data(contentsOf: embedded) == Data(contentsOf: expectedManifest) else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_manifest_mismatch")
+            }
+        }
+    }
+
+    private func atomicReplaceMalibuApp(staged: URL, target: URL) throws {
+        try fsyncTree(staged)
+        let parent = target.deletingLastPathComponent()
+        var targetInfo = stat()
+        if lstat(target.path, &targetInfo) == 0 {
+            guard (targetInfo.st_mode & S_IFMT) == S_IFDIR else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_not_directory")
+            }
+            if renamex_np(staged.path, target.path, UInt32(RENAME_SWAP)) != 0 {
+                throw AutoUpdateMarkerError.writeFailed(target.path, errno)
+            }
+            fsyncDirectory(parent)
+            do {
+                try fileManager.removeItem(at: staged)
+            } catch {
+                throw AutoUpdateMarkerError.writeFailed(staged.path, EIO)
+            }
+        } else {
+            guard errno == ENOENT else {
+                throw AutoUpdateMarkerError.openFailed(target.path, errno)
+            }
+            if rename(staged.path, target.path) != 0 {
+                throw AutoUpdateMarkerError.writeFailed(target.path, errno)
+            }
+        }
+        fsyncDirectory(parent)
+    }
+
+    private func runProcess(_ executable: String, arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_archive_process_failed")
+        }
+        guard process.terminationStatus == 0 else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_archive_process_failed")
+        }
+    }
+
+    private func validateExternalLocalMemberBackupIfPresent(in releaseBackup: URL) throws {
+        let backupDirectory = releaseBackup.appendingPathComponent(
+            Self.externalBackupDirectoryName,
+            isDirectory: true
+        )
+        guard fileManager.fileExists(atPath: backupDirectory.path) else { return }
+        _ = try validatedExternalLocalMemberBackup(in: backupDirectory)
+    }
+
+    private func validatedExternalLocalMemberBackup(
+        in backupDirectory: URL
+    ) throws -> CompatibilityExternalMemberBackup {
+        let stateURL = backupDirectory.appendingPathComponent(Self.externalBackupStateName)
+        let data = try readRegularFileNoFollow(stateURL)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == ["members", "schema_version"],
+              object["schema_version"] as? Int == 1,
+              let rawMembers = object["members"] as? [[String: Any]]
+        else { throw AutoUpdateMarkerError.backupCorrupt }
+        for record in rawMembers {
+            let keys = Set(record.keys)
+            guard keys == ["member", "was_present"]
+                    || keys == ["member", "mode", "sha256", "was_present"]
+            else {
+                throw AutoUpdateMarkerError.backupCorrupt
+            }
+        }
+        let state = try JSONDecoder().decode(CompatibilityExternalMemberBackup.self, from: data)
+        let members = externalLocalMembers()
+        guard state.schemaVersion == 1,
+              state.members.map(\.member) == members.map(\.identifier)
+        else { throw AutoUpdateMarkerError.backupCorrupt }
+
+        var expectedNames: Set<String> = [Self.externalBackupStateName]
+        for (record, member) in zip(state.members, members) {
+            let backup = backupDirectory.appendingPathComponent(member.backupName)
+            if record.wasPresent {
+                guard let mode = record.mode, (0...0o7777).contains(mode),
+                      let digest = record.sha256,
+                      digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+                else { throw AutoUpdateMarkerError.backupCorrupt }
+                let info = try regularFileStatNoFollow(backup)
+                guard Int(info.st_mode & 0o7777) == mode,
+                      try Self.sha256(file: backup) == digest
+                else { throw AutoUpdateMarkerError.backupCorrupt }
+                expectedNames.insert(member.backupName)
+            } else {
+                guard record.mode == nil, record.sha256 == nil,
+                      !fileManager.fileExists(atPath: backup.path)
+                else { throw AutoUpdateMarkerError.backupCorrupt }
+            }
+        }
+        let actualNames = try Set(fileManager.contentsOfDirectory(atPath: backupDirectory.path))
+        guard actualNames == expectedNames else { throw AutoUpdateMarkerError.backupCorrupt }
+        return state
+    }
+
+    private func restoreExternalLocalMembersIfPresent(from releaseBackup: URL) throws {
+        let backupDirectory = releaseBackup.appendingPathComponent(
+            Self.externalBackupDirectoryName,
+            isDirectory: true
+        )
+        guard fileManager.fileExists(atPath: backupDirectory.path) else { return }
+        let state = try validatedExternalLocalMemberBackup(in: backupDirectory)
+        for (record, member) in zip(state.members, externalLocalMembers()) {
+            try ensureExternalMemberParent(member.target.deletingLastPathComponent())
+            if record.wasPresent {
+                guard let mode = record.mode else { throw AutoUpdateMarkerError.backupCorrupt }
+                try atomicCopyNoFollow(
+                    from: backupDirectory.appendingPathComponent(member.backupName),
+                    to: member.target,
+                    mode: mode
+                )
+            } else if fileManager.fileExists(atPath: member.target.path) {
+                _ = try regularFileStatNoFollow(member.target)
+                try fileManager.removeItem(at: member.target)
+                fsyncDirectory(member.target.deletingLastPathComponent())
+            }
+        }
+    }
+
+    private func activateExternalLocalMembers(
+        from artifactDirectory: URL,
+        installDirectory: URL,
+        cutoverCheckpoint: ((CompatibilitySetCutoverPhase) throws -> Void)?
+    ) throws {
+        let coordinatorHost = try installedWatchdogCoordinatorHost()
+        let staging = installDirectory.appendingPathComponent(
+            ".macprovider-cli.external-activation-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: staging,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? fileManager.removeItem(at: staging) }
+
+        let replacements = [
+            "__HOME__": xmlEscape(homeDirectory.path),
+            "__INSTALL_DIR__": xmlEscape(installDirectory.path),
+            "__COORDINATOR_HOST__": xmlEscape(coordinatorHost),
+        ]
+        let providerPlist = try renderPlistTemplate(
+            artifactDirectory.appendingPathComponent("provider-launch-agent.plist.template"),
+            replacements: replacements
+        )
+        try validateProviderPlist(providerPlist, installDirectory: installDirectory)
+        let watchdogPlist = try renderPlistTemplate(
+            artifactDirectory.appendingPathComponent("watchdog-launch-agent.plist.template"),
+            replacements: replacements
+        )
+        try validateWatchdogPlist(watchdogPlist, installDirectory: installDirectory, coordinatorHost: coordinatorHost)
+
+        let stagedProviderPlist = staging.appendingPathComponent(Self.providerPlistName)
+        let stagedWatchdogPlist = staging.appendingPathComponent(Self.watchdogPlistName)
+        try providerPlist.write(to: stagedProviderPlist)
+        try watchdogPlist.write(to: stagedWatchdogPlist)
+        let stagedWatchdog = artifactDirectory.appendingPathComponent("watchdog.sh")
+
+        for target in [providerPlistURL, watchdogScriptURL, watchdogPlistURL] {
+            try ensureExternalMemberParent(target.deletingLastPathComponent())
+        }
+        try atomicCopyNoFollow(from: stagedWatchdog, to: watchdogScriptURL, mode: 0o755)
+        try cutoverCheckpoint?(.watchdogScriptActivated)
+        try atomicCopyNoFollow(from: stagedProviderPlist, to: providerPlistURL, mode: 0o644)
+        try cutoverCheckpoint?(.providerPlistActivated)
+        try atomicCopyNoFollow(from: stagedWatchdogPlist, to: watchdogPlistURL, mode: 0o644)
+        try cutoverCheckpoint?(.watchdogPlistActivated)
+    }
+
+    private func renderPlistTemplate(_ url: URL, replacements: [String: String]) throws -> Data {
+        guard var rendered = String(data: try readRegularFileNoFollow(url), encoding: .utf8) else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("plist_template_utf8_invalid")
+        }
+        for (token, replacement) in replacements {
+            guard rendered.contains(token) else {
+                if token == "__COORDINATOR_HOST__", url.lastPathComponent == "provider-launch-agent.plist.template" {
+                    continue
+                }
+                throw AutoUpdateMarkerError.trustedRootInvalid("plist_template_token_missing")
+            }
+            rendered = rendered.replacingOccurrences(of: token, with: replacement)
+        }
+        guard !rendered.contains("__") else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("plist_template_token_unresolved")
+        }
+        return Data(rendered.utf8)
+    }
+
+    private func installedWatchdogCoordinatorHost() throws -> String {
+        guard fileManager.fileExists(atPath: watchdogPlistURL.path) else {
+            return "coordinator.streamvc.live"
+        }
+        let data = try readRegularFileNoFollow(watchdogPlistURL)
+        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let environment = plist["EnvironmentVariables"] as? [String: Any],
+              let host = environment["MACPROVIDER_COORDINATOR_HOST"] as? String,
+              host.range(of: #"^[A-Za-z0-9.-]{1,253}$"#, options: .regularExpression) != nil
+        else { throw AutoUpdateMarkerError.trustedRootInvalid("installed_watchdog_plist_invalid") }
+        return host
+    }
+
+    private func validateProviderPlist(_ data: Data, installDirectory: URL) throws {
+        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              plist["Label"] as? String == "live.streamvc.macprovider",
+              plist["ProgramArguments"] as? [String] == [
+                  installDirectory.appendingPathComponent("macprovider-cli").path,
+                  "serve", "--config", homeDirectory.appendingPathComponent(".config/macprovider/config.yaml").path,
+              ],
+              plist["WorkingDirectory"] as? String == installDirectory.path
+        else { throw AutoUpdateMarkerError.trustedRootInvalid("rendered_provider_plist_invalid") }
+    }
+
+    private func validateWatchdogPlist(_ data: Data, installDirectory: URL, coordinatorHost: String) throws {
+        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              plist["Label"] as? String == "live.streamvc.macprovider-watchdog",
+              plist["ProgramArguments"] as? [String] == [watchdogScriptURL.path],
+              let environment = plist["EnvironmentVariables"] as? [String: Any],
+              environment["MACPROVIDER_BINARY_PATH"] as? String == installDirectory.appendingPathComponent("macprovider-cli").path,
+              environment["MACPROVIDER_COORDINATOR_HOST"] as? String == coordinatorHost
+        else { throw AutoUpdateMarkerError.trustedRootInvalid("rendered_watchdog_plist_invalid") }
+    }
+
+    private func externalLocalMembers() -> [(identifier: String, target: URL, backupName: String)] {
+        [
+            ("launchd", providerPlistURL, Self.providerPlistName),
+            ("watchdog_script", watchdogScriptURL, Self.watchdogScriptName),
+            ("watchdog_plist", watchdogPlistURL, Self.watchdogPlistName),
+        ]
+    }
+
+    private func ensureExternalMemberParent(_ directory: URL) throws {
+        let homePath = homeDirectory.standardizedFileURL.path
+        let targetPath = directory.standardizedFileURL.path
+        guard targetPath.hasPrefix(homePath + "/") else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("external_member_outside_home")
+        }
+        var current = homeDirectory
+        let suffix = String(targetPath.dropFirst(homePath.count + 1))
+        for component in suffix.split(separator: "/") {
+            current.appendPathComponent(String(component), isDirectory: true)
+            try ensureTrustedDirectory(current)
+        }
+    }
+
+    private func xmlEscape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 
     func removeRollbackBackups(_ marker: AutoUpdatePendingMarker) {
@@ -956,7 +1972,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             if let marker = try? readPending(),
                fileManager.fileExists(atPath: marker.backupPath)
             {
-                try? restoreBackup(marker)
+                _ = try? restoreBackupAwaitingPreviousReadiness(marker)
             }
             let marker = try? readPending()
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
@@ -989,6 +2005,37 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         }
         if let commitOwner = pending.commitOwner,
            commitOwner != "coordinator", commitOwner != "self_update" {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        switch (pending.targetCompatibilitySetID, pending.targetCompatibilitySetSHA256) {
+        case (nil, nil):
+            break
+        case let (.some(identifier), .some(digest)):
+            guard !identifier.isEmpty,
+                  identifier == identifier.trimmingCharacters(in: .whitespacesAndNewlines),
+                  identifier.utf8.count <= 512,
+                  digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+            else { throw AutoUpdateMarkerError.invalidMarker }
+        default:
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        switch (
+            pending.previousVersion,
+            pending.previousCompatibilitySetID,
+            pending.previousCompatibilitySetSHA256,
+            pending.transactionState
+        ) {
+        case (nil, nil, nil, nil):
+            break
+        case let (.some(version), .some(identifier), .some(digest), .some(state)):
+            guard pending.targetCompatibilitySetID != nil,
+                  pending.releaseBackupPath != nil,
+                  (try? AutoUpdateRecommendation.validate(version).normalized) == version,
+                  CompatibilitySetManifest.isCanonicalCompatibilitySetID(identifier),
+                  digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                  CompatibilitySetTransactionState(rawValue: state.rawValue) != nil
+            else { throw AutoUpdateMarkerError.invalidMarker }
+        default:
             throw AutoUpdateMarkerError.invalidMarker
         }
         guard let normalized = try? AutoUpdateRecommendation.validate(pending.targetVersion).normalized,

@@ -52,6 +52,13 @@ var ErrBootstrapTokenUsed = errors.New("bootstrap token was already used")
 var ErrBootstrapTokenExpired = errors.New("bootstrap token expired")
 var ErrBootstrapRateLimited = errors.New("bootstrap mint rate limited")
 var ErrBootstrapOutstandingLimit = errors.New("bootstrap outstanding token limit reached")
+var ErrAdmissionIdentityMismatch = errors.New("admission identity public key mismatch")
+var ErrAdmissionIdentityBearerMismatch = errors.New("admission identity bearer does not own provider_id")
+var ErrAdmissionIdentityRotationMismatch = errors.New("admission identity rotation compare-and-swap mismatch")
+var ErrAdmissionIdentityRecoveryMismatch = errors.New("admission identity recovery authorization or compare-and-swap mismatch")
+var ErrAdmissionIdentityRecoveryNotFound = errors.New("pending recovery not found")
+var ErrAdmissionIdentityRecoveryCommitted = errors.New("pending recovery already committed")
+var ErrAdmissionIdentityRecoveryDualControl = errors.New("dual_control_required")
 
 type Store struct {
 	db *sql.DB
@@ -76,6 +83,18 @@ type BootstrapIdentityRecord struct {
 	ConfirmedAt       sql.NullString
 	OperatorRevokedAt sql.NullString
 }
+
+// AdmissionIdentityState is the coordinator-authoritative key state used for
+// provider admission. PreviousPublicKey is returned only while its bounded
+// rollback window remains active.
+type AdmissionIdentityState struct {
+	CurrentPublicKey   []byte
+	Generation         int
+	PreviousPublicKey  []byte
+	PreviousValidUntil *time.Time
+}
+
+const AdmissionIdentityPreviousKeyGrace = 7 * 24 * time.Hour
 
 type PairOTMint struct {
 	PairOT    string
@@ -370,14 +389,59 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			ts TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_apptrack_register_reissues_provider_ts ON apptrack_register_reissues(provider_id, ts)`,
+		// Historical name retained for an additive migration. The table is the
+		// durable admission-key registry for every provider ID: installer mp-*
+		// identities begin provisional and legacy bearer-owned identities are
+		// inserted confirmed after challenge-signature proof.
 		`CREATE TABLE IF NOT EXISTS provider_bootstrap_identities (
 			provider_id TEXT PRIMARY KEY,
 			receipt_pubkey BLOB NOT NULL UNIQUE,
+			identity_generation INTEGER NOT NULL DEFAULT 1,
+			previous_receipt_pubkey BLOB,
+			previous_valid_until TEXT,
+			rotated_at TEXT,
 			created_at TEXT NOT NULL,
 			confirmed_at TEXT,
 			operator_revoked_at TEXT,
 			expires_at TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS admission_identity_recovery_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id TEXT NOT NULL,
+			prior_generation INTEGER NOT NULL,
+			new_generation INTEGER NOT NULL,
+			prior_public_key_sha256 TEXT NOT NULL,
+			new_public_key_sha256 TEXT NOT NULL,
+			granted_by TEXT NOT NULL,
+			recovery_authorization_id TEXT,
+			incident_id TEXT,
+			recovered_at TEXT NOT NULL,
+			UNIQUE(provider_id, prior_generation, new_generation)
+		)`,
+		`CREATE TABLE IF NOT EXISTS admission_identity_recovery_authorizations (
+			pending_id TEXT PRIMARY KEY,
+			provider_id TEXT NOT NULL,
+			candidate_public_key_sha256 TEXT NOT NULL,
+			expected_current_public_key_sha256 TEXT NOT NULL,
+			expected_generation INTEGER NOT NULL,
+			requested_by TEXT NOT NULL,
+			requested_until TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			incident_id TEXT NOT NULL,
+			approved_by TEXT,
+			approved_at TEXT,
+			consumed_at TEXT,
+			cancelled_at TEXT,
+			created_at TEXT NOT NULL,
+			CHECK (expected_generation >= 1),
+			CHECK (candidate_public_key_sha256 <> expected_current_public_key_sha256),
+			CHECK ((approved_by IS NULL) = (approved_at IS NULL)),
+			CHECK (approved_by IS NULL OR approved_by <> requested_by),
+			UNIQUE(provider_id, incident_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_admission_identity_recovery_open
+			ON admission_identity_recovery_authorizations(provider_id)
+			WHERE consumed_at IS NULL AND cancelled_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_mint_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			provider_id TEXT NOT NULL,
@@ -418,6 +482,24 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "operator_revoked_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN operator_revoked_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "identity_generation", `ALTER TABLE provider_bootstrap_identities ADD COLUMN identity_generation INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "previous_receipt_pubkey", `ALTER TABLE provider_bootstrap_identities ADD COLUMN previous_receipt_pubkey BLOB`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "previous_valid_until", `ALTER TABLE provider_bootstrap_identities ADD COLUMN previous_valid_until TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "rotated_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN rotated_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "admission_identity_recovery_audit", "recovery_authorization_id", `ALTER TABLE admission_identity_recovery_audit ADD COLUMN recovery_authorization_id TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "admission_identity_recovery_audit", "incident_id", `ALTER TABLE admission_identity_recovery_audit ADD COLUMN incident_id TEXT`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1244,10 +1326,43 @@ func (s *Store) LookupBootstrapIdentityPubkey(ctx context.Context, providerID st
 	if !IsCredentialBootstrapPrincipal(providerID) {
 		return nil, false, nil
 	}
-	nowText := timeText(time.Now().UTC())
-	var pubkey []byte
+	return s.LookupAdmissionIdentityPubkey(ctx, providerID)
+}
+
+// LookupAdmissionIdentityPubkey returns the coordinator-owned durable
+// admission key for any provider ID. Confirmed identities survive coordinator
+// and provider restarts without consulting the live provider pool. An
+// unconfirmed installer identity remains usable only while its provisional
+// bearer is active and unexpired.
+func (s *Store) LookupAdmissionIdentityPubkey(ctx context.Context, providerID string) ([]byte, bool, error) {
+	state, ok, err := s.LookupAdmissionIdentityState(ctx, providerID, time.Now().UTC())
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return append([]byte(nil), state.CurrentPublicKey...), true, nil
+}
+
+// LookupAdmissionIdentityState returns the active admission-key generation.
+// Confirmed identities remain active until operator revocation. A provisional
+// bootstrap identity remains active only while its matching unused bearer is
+// active and unexpired. Expired previous keys are deliberately omitted while
+// their authoritative deadline remains available for response-loss replay.
+func (s *Store) LookupAdmissionIdentityState(ctx context.Context, providerID string, now time.Time) (AdmissionIdentityState, bool, error) {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return AdmissionIdentityState{}, false, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	nowText := timeText(now)
+	var current, previous []byte
+	var generation int
+	var previousValidUntil sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-SELECT i.receipt_pubkey
+SELECT i.receipt_pubkey, i.identity_generation,
+       i.previous_receipt_pubkey, i.previous_valid_until
   FROM provider_bootstrap_identities i
  WHERE i.provider_id = ?
    AND i.operator_revoked_at IS NULL
@@ -1268,17 +1383,31 @@ SELECT i.receipt_pubkey
                   AND t.bootstrap_expires_at > ?
            )
        )
-   )`, providerID, nowText, nowText).Scan(&pubkey)
+   )`, providerID, nowText, nowText).Scan(&current, &generation, &previous, &previousValidUntil)
 	if err == sql.ErrNoRows {
-		return nil, false, nil
+		return AdmissionIdentityState{}, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return AdmissionIdentityState{}, false, err
 	}
-	if len(pubkey) != ed25519.PublicKeySize {
-		return nil, false, nil
+	if len(current) != ed25519.PublicKeySize || generation < 1 {
+		return AdmissionIdentityState{}, false, nil
 	}
-	return append([]byte(nil), pubkey...), true, nil
+	state := AdmissionIdentityState{
+		CurrentPublicKey: append([]byte(nil), current...),
+		Generation:       generation,
+	}
+	if previousValidUntil.Valid {
+		validUntil, parseErr := time.Parse(time.RFC3339, previousValidUntil.String)
+		if parseErr == nil {
+			validUntil = validUntil.UTC()
+			state.PreviousValidUntil = &validUntil
+			if len(previous) == ed25519.PublicKeySize && validUntil.After(now) {
+				state.PreviousPublicKey = append([]byte(nil), previous...)
+			}
+		}
+	}
+	return state, true, nil
 }
 
 // BootstrapIdentityExists distinguishes a legacy mp-* principal that predates
@@ -1289,6 +1418,16 @@ func (s *Store) BootstrapIdentityExists(ctx context.Context, providerID string) 
 	if !IsCredentialBootstrapPrincipal(providerID) {
 		return false, nil
 	}
+	return s.AdmissionIdentityExists(ctx, providerID)
+}
+
+// AdmissionIdentityExists distinguishes an identity that has never enrolled
+// from a durable binding that is inactive or operator-revoked. Callers must
+// never downgrade an existing binding to self-declared or live-pool identity.
+func (s *Store) AdmissionIdentityExists(ctx context.Context, providerID string) (bool, error) {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return false, err
+	}
 	var exists int
 	err := s.db.QueryRowContext(ctx, `
 SELECT EXISTS(
@@ -1298,6 +1437,686 @@ SELECT EXISTS(
 		return false, err
 	}
 	return exists == 1, nil
+}
+
+// BindAdmissionIdentity atomically enrolls a challenge-signature-proven public
+// key for the provider ID owned by bearer. The WS layer verifies possession of
+// the matching private key before calling this method; this transaction then
+// revalidates that the still-active bearer owns providerID and makes the
+// binding durable. Existing keys are idempotent and can never be replaced by
+// this first-enrollment path.
+func (s *Store) BindAdmissionIdentity(ctx context.Context, providerID, bearer string, pubkey []byte, now time.Time) error {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return err
+	}
+	bearer = strings.TrimSpace(bearer)
+	if bearer == "" {
+		return ErrAdmissionIdentityBearerMismatch
+	}
+	if len(pubkey) != ed25519.PublicKeySize {
+		return fmt.Errorf("admission identity public key must be %d bytes", ed25519.PublicKeySize)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	var decisionErr error
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var tokenProviderID string
+		var bootstrapIssued int
+		var bootstrapExpiresAt, lastUsedAt sql.NullString
+		err := conn.QueryRowContext(ctx, `
+SELECT provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, tokenHash(bearer)).
+			Scan(&tokenProviderID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt)
+		if err == sql.ErrNoRows {
+			decisionErr = ErrAdmissionIdentityBearerMismatch
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if tokenProviderID != providerID {
+			decisionErr = ErrAdmissionIdentityBearerMismatch
+			return nil
+		}
+		if bootstrapIssued == 1 && !lastUsedAt.Valid {
+			expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+			if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(now) {
+				decisionErr = ErrAdmissionIdentityBearerMismatch
+				return nil
+			}
+		}
+
+		var stored []byte
+		var operatorRevokedAt sql.NullString
+		lookupErr := conn.QueryRowContext(ctx, `
+SELECT receipt_pubkey, operator_revoked_at
+  FROM provider_bootstrap_identities
+ WHERE provider_id = ?`, providerID).Scan(&stored, &operatorRevokedAt)
+		if lookupErr != nil && lookupErr != sql.ErrNoRows {
+			return lookupErr
+		}
+		if lookupErr == nil {
+			if operatorRevokedAt.Valid || !bytes.Equal(stored, pubkey) {
+				decisionErr = ErrAdmissionIdentityMismatch
+			}
+			return nil
+		}
+
+		_, err = conn.ExecContext(ctx, `
+INSERT INTO provider_bootstrap_identities (
+    provider_id, receipt_pubkey, created_at, confirmed_at, expires_at
+) VALUES (?, ?, ?, ?, NULL)`, providerID, append([]byte(nil), pubkey...), timeText(now), timeText(now))
+		if err != nil {
+			if isConstraintFailure(err) {
+				decisionErr = ErrAdmissionIdentityMismatch
+				return nil
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return decisionErr
+}
+
+// RotateAdmissionIdentity advances the admission key by one generation after
+// the WS layer has verified a signature by expectedCurrent over the initial
+// transcript containing next. The transaction revalidates the exact active
+// bearer and performs a generation/key compare-and-swap, so a bearer alone
+// cannot replace identity custody. Repeating the exact transition after a
+// lost response is idempotent.
+func (s *Store) RotateAdmissionIdentity(
+	ctx context.Context,
+	providerID, bearer string,
+	expectedCurrent, next []byte,
+	expectedGeneration int,
+	now time.Time,
+) (AdmissionIdentityState, error) {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return AdmissionIdentityState{}, err
+	}
+	bearer = strings.TrimSpace(bearer)
+	if bearer == "" {
+		return AdmissionIdentityState{}, ErrAdmissionIdentityBearerMismatch
+	}
+	if len(expectedCurrent) != ed25519.PublicKeySize || len(next) != ed25519.PublicKeySize {
+		return AdmissionIdentityState{}, fmt.Errorf("admission identity rotation keys must be %d bytes", ed25519.PublicKeySize)
+	}
+	if bytes.Equal(expectedCurrent, next) || expectedGeneration < 1 {
+		return AdmissionIdentityState{}, ErrAdmissionIdentityRotationMismatch
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	var result AdmissionIdentityState
+	var decisionErr error
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var tokenProviderID string
+		var bootstrapIssued int
+		var bootstrapExpiresAt, lastUsedAt sql.NullString
+		if err := conn.QueryRowContext(ctx, `
+SELECT provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, tokenHash(bearer)).
+			Scan(&tokenProviderID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt); err != nil {
+			if err == sql.ErrNoRows {
+				decisionErr = ErrAdmissionIdentityBearerMismatch
+				return nil
+			}
+			return err
+		}
+		if tokenProviderID != providerID {
+			decisionErr = ErrAdmissionIdentityBearerMismatch
+			return nil
+		}
+		if bootstrapIssued == 1 && !lastUsedAt.Valid {
+			expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+			if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(now) {
+				decisionErr = ErrAdmissionIdentityBearerMismatch
+				return nil
+			}
+		}
+
+		var stored, previous []byte
+		var generation int
+		var confirmedAt, operatorRevokedAt, previousValidUntil sql.NullString
+		if err := conn.QueryRowContext(ctx, `
+SELECT receipt_pubkey, identity_generation, previous_receipt_pubkey,
+       previous_valid_until, confirmed_at, operator_revoked_at
+  FROM provider_bootstrap_identities
+ WHERE provider_id = ?`, providerID).
+			Scan(&stored, &generation, &previous, &previousValidUntil, &confirmedAt, &operatorRevokedAt); err != nil {
+			if err == sql.ErrNoRows {
+				decisionErr = ErrAdmissionIdentityRotationMismatch
+				return nil
+			}
+			return err
+		}
+		if operatorRevokedAt.Valid || !confirmedAt.Valid {
+			decisionErr = ErrAdmissionIdentityRotationMismatch
+			return nil
+		}
+
+		// Exact replay after the commit but before the provider received the
+		// response. The old key must still be the recorded previous key and
+		// the generation must have advanced exactly once.
+		if bytes.Equal(stored, next) && generation == expectedGeneration+1 && bytes.Equal(previous, expectedCurrent) {
+			result = admissionIdentityStateFromStored(stored, generation, previous, previousValidUntil, now)
+			return nil
+		}
+		if !bytes.Equal(stored, expectedCurrent) || generation != expectedGeneration {
+			decisionErr = ErrAdmissionIdentityRotationMismatch
+			return nil
+		}
+
+		rotatedAt := timeText(now)
+		previousUntil := timeText(now.Add(AdmissionIdentityPreviousKeyGrace))
+		res, err := conn.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET receipt_pubkey = ?,
+       identity_generation = identity_generation + 1,
+       previous_receipt_pubkey = ?,
+       previous_valid_until = ?,
+       rotated_at = ?
+ WHERE provider_id = ?
+   AND operator_revoked_at IS NULL
+   AND receipt_pubkey = ?
+   AND identity_generation = ?`,
+			append([]byte(nil), next...), append([]byte(nil), expectedCurrent...), previousUntil,
+			rotatedAt, providerID, append([]byte(nil), expectedCurrent...), expectedGeneration)
+		if err != nil {
+			if isConstraintFailure(err) {
+				decisionErr = ErrAdmissionIdentityRotationMismatch
+				return nil
+			}
+			return err
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			decisionErr = ErrAdmissionIdentityRotationMismatch
+			return nil
+		}
+		validUntil := now.Add(AdmissionIdentityPreviousKeyGrace).UTC().Truncate(time.Second)
+		result = AdmissionIdentityState{
+			CurrentPublicKey:   append([]byte(nil), next...),
+			Generation:         expectedGeneration + 1,
+			PreviousPublicKey:  append([]byte(nil), expectedCurrent...),
+			PreviousValidUntil: &validUntil,
+		}
+		return nil
+	})
+	if err != nil {
+		return AdmissionIdentityState{}, err
+	}
+	if decisionErr != nil {
+		return AdmissionIdentityState{}, decisionErr
+	}
+	return result, nil
+}
+
+func (s *Store) RequestAdmissionIdentityRecovery(
+	ctx context.Context,
+	authorization AdmissionIdentityRecoveryAuthorization,
+	now time.Time,
+) (AdmissionIdentityRecoveryAuthorization, error) {
+	if err := validateAdmissionIdentityRecoveryAuthorization(authorization, false); err != nil {
+		return AdmissionIdentityRecoveryAuthorization{}, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if !authorization.RequestedUntil.After(now) || authorization.RequestedUntil.Sub(now) > 24*time.Hour {
+		return AdmissionIdentityRecoveryAuthorization{}, ErrAdmissionIdentityRecoveryMismatch
+	}
+	var canonical AdmissionIdentityRecoveryAuthorization
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `
+UPDATE admission_identity_recovery_authorizations
+   SET cancelled_at = ?
+ WHERE provider_id = ?
+   AND consumed_at IS NULL
+   AND cancelled_at IS NULL
+   AND requested_until <= ?`,
+			timeText(now), authorization.ProviderID, timeText(now)); err != nil {
+			return err
+		}
+
+		var requestedUntilText string
+		var approvedBy sql.NullString
+		err := conn.QueryRowContext(ctx, `
+SELECT pending_id, provider_id, candidate_public_key_sha256,
+       expected_current_public_key_sha256, expected_generation,
+       requested_by, requested_until, reason, incident_id, approved_by
+  FROM admission_identity_recovery_authorizations
+ WHERE provider_id = ?
+   AND consumed_at IS NULL
+   AND cancelled_at IS NULL`, authorization.ProviderID).Scan(
+			&canonical.PendingID, &canonical.ProviderID,
+			&canonical.CandidatePublicKeySHA256,
+			&canonical.ExpectedCurrentPublicKeySHA256,
+			&canonical.ExpectedGeneration, &canonical.RequestedBy,
+			&requestedUntilText, &canonical.Reason, &canonical.IncidentID,
+			&approvedBy,
+		)
+		if err == nil {
+			canonical.RequestedUntil = parseTimeOrZero(requestedUntilText)
+			if approvedBy.Valid {
+				canonical.ApprovedBy = approvedBy.String
+			}
+			if sameAdmissionIdentityRecoveryRequest(canonical, authorization) {
+				return nil
+			}
+			return ErrAdmissionIdentityRecoveryCommitted
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+
+		_, err = conn.ExecContext(ctx, `
+INSERT INTO admission_identity_recovery_authorizations (
+    pending_id, provider_id, candidate_public_key_sha256,
+    expected_current_public_key_sha256, expected_generation,
+    requested_by, requested_until, reason, incident_id, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			authorization.PendingID, authorization.ProviderID,
+			authorization.CandidatePublicKeySHA256,
+			authorization.ExpectedCurrentPublicKeySHA256,
+			authorization.ExpectedGeneration, authorization.RequestedBy,
+			timeText(authorization.RequestedUntil), authorization.Reason,
+			authorization.IncidentID, timeText(now))
+		if err != nil && isConstraintFailure(err) {
+			return ErrAdmissionIdentityRecoveryCommitted
+		}
+		if err == nil {
+			canonical = authorization
+			canonical.RequestedUntil = parseTimeOrZero(timeText(authorization.RequestedUntil))
+		}
+		return err
+	})
+	if err != nil {
+		return AdmissionIdentityRecoveryAuthorization{}, err
+	}
+	return canonical, nil
+}
+
+func sameAdmissionIdentityRecoveryRequest(
+	left, right AdmissionIdentityRecoveryAuthorization,
+) bool {
+	// pending_id is coordinator-generated response state. Every field bound to
+	// the operator request and current identity authority must still match.
+	return left.ProviderID == right.ProviderID &&
+		left.CandidatePublicKeySHA256 == right.CandidatePublicKeySHA256 &&
+		left.ExpectedCurrentPublicKeySHA256 == right.ExpectedCurrentPublicKeySHA256 &&
+		left.ExpectedGeneration == right.ExpectedGeneration &&
+		left.RequestedBy == right.RequestedBy &&
+		timeText(left.RequestedUntil) == timeText(right.RequestedUntil) &&
+		left.Reason == right.Reason &&
+		left.IncidentID == right.IncidentID
+}
+
+func (s *Store) ApproveAdmissionIdentityRecovery(
+	ctx context.Context,
+	pendingID, approvedBy string,
+	now time.Time,
+) (AdmissionIdentityRecoveryAuthorization, error) {
+	pendingID = strings.TrimSpace(pendingID)
+	approvedBy = strings.TrimSpace(approvedBy)
+	if pendingID == "" || len(pendingID) > 128 || !validRecoveryOperatorActor(approvedBy) {
+		return AdmissionIdentityRecoveryAuthorization{}, ErrAdmissionIdentityRecoveryMismatch
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	var result AdmissionIdentityRecoveryAuthorization
+	var decisionErr error
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var requestedUntilText string
+		var existingApprovedBy, approvedAt, consumedAt, cancelledAt sql.NullString
+		err := conn.QueryRowContext(ctx, `
+SELECT pending_id, provider_id, candidate_public_key_sha256,
+       expected_current_public_key_sha256, expected_generation,
+       requested_by, requested_until, reason, incident_id,
+       approved_by, approved_at, consumed_at, cancelled_at
+  FROM admission_identity_recovery_authorizations
+ WHERE pending_id = ?`, pendingID).Scan(
+			&result.PendingID, &result.ProviderID,
+			&result.CandidatePublicKeySHA256,
+			&result.ExpectedCurrentPublicKeySHA256,
+			&result.ExpectedGeneration, &result.RequestedBy,
+			&requestedUntilText, &result.Reason, &result.IncidentID,
+			&existingApprovedBy, &approvedAt, &consumedAt, &cancelledAt,
+		)
+		if err == sql.ErrNoRows {
+			decisionErr = ErrAdmissionIdentityRecoveryNotFound
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		result.RequestedUntil = parseTimeOrZero(requestedUntilText)
+		if existingApprovedBy.Valid || approvedAt.Valid || consumedAt.Valid || cancelledAt.Valid {
+			decisionErr = ErrAdmissionIdentityRecoveryCommitted
+			return nil
+		}
+		if result.RequestedBy == approvedBy {
+			decisionErr = ErrAdmissionIdentityRecoveryDualControl
+			return nil
+		}
+		if !result.RequestedUntil.After(now) {
+			decisionErr = ErrAdmissionIdentityRecoveryMismatch
+			return nil
+		}
+		res, err := conn.ExecContext(ctx, `
+UPDATE admission_identity_recovery_authorizations
+   SET approved_by = ?, approved_at = ?
+ WHERE pending_id = ?
+   AND approved_at IS NULL
+   AND consumed_at IS NULL
+   AND cancelled_at IS NULL`, approvedBy, timeText(now), pendingID)
+		if err != nil {
+			return err
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			decisionErr = ErrAdmissionIdentityRecoveryCommitted
+			return nil
+		}
+		result.ApprovedBy = approvedBy
+		return nil
+	})
+	if err != nil {
+		return AdmissionIdentityRecoveryAuthorization{}, err
+	}
+	if decisionErr != nil {
+		return AdmissionIdentityRecoveryAuthorization{}, decisionErr
+	}
+	return result, nil
+}
+
+func validateAdmissionIdentityRecoveryAuthorization(authorization AdmissionIdentityRecoveryAuthorization, approved bool) error {
+	if err := config.ValidateProviderID(strings.TrimSpace(authorization.ProviderID)); err != nil {
+		return err
+	}
+	if strings.TrimSpace(authorization.PendingID) == "" || len(authorization.PendingID) > 128 ||
+		!validRecoveryDigest(authorization.CandidatePublicKeySHA256) ||
+		!validRecoveryDigest(authorization.ExpectedCurrentPublicKeySHA256) ||
+		authorization.CandidatePublicKeySHA256 == authorization.ExpectedCurrentPublicKeySHA256 ||
+		authorization.ExpectedGeneration < 1 ||
+		!validRecoveryOperatorActor(authorization.RequestedBy) ||
+		strings.TrimSpace(authorization.Reason) == "" || len(authorization.Reason) > 2048 ||
+		strings.TrimSpace(authorization.IncidentID) == "" || len(authorization.IncidentID) > 256 {
+		return ErrAdmissionIdentityRecoveryMismatch
+	}
+	if approved && !validRecoveryOperatorActor(authorization.ApprovedBy) {
+		return ErrAdmissionIdentityRecoveryMismatch
+	}
+	return nil
+}
+
+func validRecoveryDigest(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func validRecoveryOperatorActor(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "operator:") &&
+		strings.TrimSpace(strings.TrimPrefix(value, "operator:")) != "" &&
+		!strings.ContainsAny(value, " \t\r\n") && len(value) <= 256
+}
+
+// RecoverAdmissionIdentity atomically consumes the exact one-shot operator
+// approval while replacing the durable key generation and writing its audit
+// row. The WS layer has already verified the active bearer and possession of
+// next. A stale key, generation, candidate, expired approval, or replay rolls
+// the whole SQLite transaction back without changing authority.
+func (s *Store) RecoverAdmissionIdentity(
+	ctx context.Context,
+	providerID, bearer string,
+	expectedCurrent, next []byte,
+	expectedGeneration int,
+	now time.Time,
+) (AdmissionIdentityState, AdmissionIdentityRecoveryAuthorization, error) {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return AdmissionIdentityState{}, AdmissionIdentityRecoveryAuthorization{}, err
+	}
+	bearer = strings.TrimSpace(bearer)
+	if bearer == "" {
+		return AdmissionIdentityState{}, AdmissionIdentityRecoveryAuthorization{}, ErrAdmissionIdentityBearerMismatch
+	}
+	if len(expectedCurrent) != ed25519.PublicKeySize || len(next) != ed25519.PublicKeySize {
+		return AdmissionIdentityState{}, AdmissionIdentityRecoveryAuthorization{}, fmt.Errorf("admission identity recovery keys must be %d bytes", ed25519.PublicKeySize)
+	}
+	if bytes.Equal(expectedCurrent, next) || expectedGeneration < 1 {
+		return AdmissionIdentityState{}, AdmissionIdentityRecoveryAuthorization{}, ErrAdmissionIdentityRecoveryMismatch
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	priorDigest := sha256.Sum256(expectedCurrent)
+	newDigest := sha256.Sum256(next)
+	priorDigestText := hex.EncodeToString(priorDigest[:])
+	newDigestText := hex.EncodeToString(newDigest[:])
+
+	var result AdmissionIdentityState
+	var authorization AdmissionIdentityRecoveryAuthorization
+	var decisionErr error
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var tokenProviderID string
+		var bootstrapIssued int
+		var bootstrapExpiresAt, lastUsedAt sql.NullString
+		if err := conn.QueryRowContext(ctx, `
+SELECT provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, tokenHash(bearer)).
+			Scan(&tokenProviderID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt); err != nil {
+			if err == sql.ErrNoRows {
+				decisionErr = ErrAdmissionIdentityBearerMismatch
+				return nil
+			}
+			return err
+		}
+		if tokenProviderID != providerID {
+			decisionErr = ErrAdmissionIdentityBearerMismatch
+			return nil
+		}
+		if bootstrapIssued == 1 && !lastUsedAt.Valid {
+			expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+			if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(now) {
+				decisionErr = ErrAdmissionIdentityBearerMismatch
+				return nil
+			}
+		}
+
+		var requestedUntilText string
+		if err := conn.QueryRowContext(ctx, `
+SELECT pending_id, provider_id, candidate_public_key_sha256,
+       expected_current_public_key_sha256, expected_generation,
+       requested_by, approved_by, requested_until, reason, incident_id
+  FROM admission_identity_recovery_authorizations
+ WHERE provider_id = ?
+   AND candidate_public_key_sha256 = ?
+   AND expected_current_public_key_sha256 = ?
+   AND expected_generation = ?
+   AND approved_at IS NOT NULL
+   AND consumed_at IS NULL
+   AND cancelled_at IS NULL
+   AND requested_until > ?`,
+			providerID, newDigestText, priorDigestText, expectedGeneration, timeText(now)).Scan(
+			&authorization.PendingID, &authorization.ProviderID,
+			&authorization.CandidatePublicKeySHA256,
+			&authorization.ExpectedCurrentPublicKeySHA256,
+			&authorization.ExpectedGeneration, &authorization.RequestedBy,
+			&authorization.ApprovedBy, &requestedUntilText,
+			&authorization.Reason, &authorization.IncidentID,
+		); err != nil {
+			if err == sql.ErrNoRows {
+				decisionErr = ErrAdmissionIdentityRecoveryMismatch
+				return nil
+			}
+			return err
+		}
+		authorization.RequestedUntil = parseTimeOrZero(requestedUntilText)
+		if err := validateAdmissionIdentityRecoveryAuthorization(authorization, true); err != nil ||
+			!authorization.RequestedUntil.After(now) {
+			decisionErr = ErrAdmissionIdentityRecoveryMismatch
+			return nil
+		}
+
+		var stored []byte
+		var generation int
+		var confirmedAt, operatorRevokedAt sql.NullString
+		lookupErr := conn.QueryRowContext(ctx, `
+SELECT receipt_pubkey, identity_generation, confirmed_at, operator_revoked_at
+  FROM provider_bootstrap_identities
+ WHERE provider_id = ?`, providerID).Scan(&stored, &generation, &confirmedAt, &operatorRevokedAt)
+		if lookupErr != nil && lookupErr != sql.ErrNoRows {
+			return lookupErr
+		}
+		if lookupErr == nil {
+			if operatorRevokedAt.Valid || !confirmedAt.Valid {
+				decisionErr = ErrAdmissionIdentityRecoveryMismatch
+				return nil
+			}
+			if !bytes.Equal(stored, expectedCurrent) || generation != expectedGeneration {
+				decisionErr = ErrAdmissionIdentityRecoveryMismatch
+				return nil
+			}
+			res, err := conn.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET receipt_pubkey = ?,
+       identity_generation = identity_generation + 1,
+       previous_receipt_pubkey = NULL,
+       previous_valid_until = NULL,
+       rotated_at = ?
+ WHERE provider_id = ?
+   AND operator_revoked_at IS NULL
+   AND receipt_pubkey = ?
+   AND identity_generation = ?`,
+				append([]byte(nil), next...), timeText(now), providerID,
+				append([]byte(nil), expectedCurrent...), expectedGeneration)
+			if err != nil {
+				if isConstraintFailure(err) {
+					decisionErr = ErrAdmissionIdentityRecoveryMismatch
+					return nil
+				}
+				return err
+			}
+			rows, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if rows != 1 {
+				decisionErr = ErrAdmissionIdentityRecoveryMismatch
+				return nil
+			}
+		} else {
+			// Migration from an external App/Postgres identity has no SQLite
+			// admission row yet. The WS verifier supplied that authoritative
+			// expectedCurrent after validating the operator recovery policy.
+			_, err := conn.ExecContext(ctx, `
+INSERT INTO provider_bootstrap_identities (
+    provider_id, receipt_pubkey, identity_generation, created_at,
+    confirmed_at, expires_at, rotated_at
+) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+				providerID, append([]byte(nil), next...), expectedGeneration+1,
+				timeText(now), timeText(now), timeText(now))
+			if err != nil {
+				if isConstraintFailure(err) {
+					decisionErr = ErrAdmissionIdentityRecoveryMismatch
+					return nil
+				}
+				return err
+			}
+		}
+
+		consume, err := conn.ExecContext(ctx, `
+UPDATE admission_identity_recovery_authorizations
+   SET consumed_at = ?
+ WHERE pending_id = ?
+   AND consumed_at IS NULL
+   AND cancelled_at IS NULL`, timeText(now), authorization.PendingID)
+		if err != nil {
+			return err
+		}
+		consumedRows, err := consume.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if consumedRows != 1 {
+			return ErrAdmissionIdentityRecoveryMismatch
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO admission_identity_recovery_audit (
+    provider_id, prior_generation, new_generation,
+    prior_public_key_sha256, new_public_key_sha256, granted_by,
+    recovery_authorization_id, incident_id, recovered_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			providerID, expectedGeneration, expectedGeneration+1,
+			priorDigestText, newDigestText, authorization.ApprovedBy,
+			authorization.PendingID, authorization.IncidentID, timeText(now)); err != nil {
+			if isConstraintFailure(err) {
+				return ErrAdmissionIdentityRecoveryMismatch
+			}
+			return err
+		}
+		result = AdmissionIdentityState{
+			CurrentPublicKey: append([]byte(nil), next...),
+			Generation:       expectedGeneration + 1,
+		}
+		return nil
+	})
+	if err != nil {
+		return AdmissionIdentityState{}, AdmissionIdentityRecoveryAuthorization{}, err
+	}
+	if decisionErr != nil {
+		return AdmissionIdentityState{}, AdmissionIdentityRecoveryAuthorization{}, decisionErr
+	}
+	return result, authorization, nil
+}
+
+func admissionIdentityStateFromStored(current []byte, generation int, previous []byte, previousValidUntil sql.NullString, now time.Time) AdmissionIdentityState {
+	state := AdmissionIdentityState{
+		CurrentPublicKey: append([]byte(nil), current...),
+		Generation:       generation,
+	}
+	if !previousValidUntil.Valid {
+		return state
+	}
+	validUntil, err := time.Parse(time.RFC3339, previousValidUntil.String)
+	if err == nil {
+		validUntil = validUntil.UTC()
+		state.PreviousValidUntil = &validUntil
+		if len(previous) == ed25519.PublicKeySize && validUntil.After(now) {
+			state.PreviousPublicKey = append([]byte(nil), previous...)
+		}
+	}
+	return state
 }
 
 func (s *Store) MarkTokenUsed(ctx context.Context, token string) error {

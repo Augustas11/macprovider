@@ -56,6 +56,8 @@ test-dist:
 	bash scripts/test-release-security-posture.sh
 	bash scripts/test-release-toolchain.sh
 	bash scripts/test-release-publication-provenance.sh
+	bash scripts/test-compatibility-set-manifest.sh
+	bash scripts/test-compatibility-artifact-index.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
@@ -86,9 +88,9 @@ test-dist:
 	bash phase3-binary/dist/test/install_coordinator_admission.test.sh
 	bash phase3-binary/dist/test/provider_upgrade_transaction.test.sh
 	bash scripts/test-watchdog-inline-drift.sh
+	bash phase3-binary/dist/test/watchdog_health_scope.test.sh
 	bash phase3-binary/dist/test/watchdog_rollback_paths.test.sh
 	bash ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh
-	bash scripts/test-malibu-download-publish.sh
 	node --test test/e2e/canary-buyer/probe.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh
 

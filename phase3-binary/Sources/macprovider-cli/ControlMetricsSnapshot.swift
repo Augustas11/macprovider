@@ -2,8 +2,9 @@ import Foundation
 
 /// Wire payload for metrics_response (SPEC-025 §5.2 / Session C3).
 public struct ControlMetricsSnapshot: Equatable, Sendable {
-    public var earningsUsdc: Double = 0
-    public var malibuAccrued: Double = 0
+    public var earningsUsdc: Double?
+    public var malibuAccrued: Double?
+    public var providerEarnings: ProviderEarningsSummary?
     public var gpuC: Double?
     public var latencyP50Ms: Int?
     public var uptimeSec: Int = 0
@@ -17,8 +18,9 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
     public var queueDepth: Int?
 
     public init(
-        earningsUsdc: Double = 0,
-        malibuAccrued: Double = 0,
+        earningsUsdc: Double? = nil,
+        malibuAccrued: Double? = nil,
+        providerEarnings: ProviderEarningsSummary? = nil,
         gpuC: Double? = nil,
         latencyP50Ms: Int? = nil,
         uptimeSec: Int = 0,
@@ -33,6 +35,7 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
     ) {
         self.earningsUsdc = earningsUsdc
         self.malibuAccrued = malibuAccrued
+        self.providerEarnings = providerEarnings
         self.gpuC = gpuC
         self.latencyP50Ms = latencyP50Ms
         self.uptimeSec = uptimeSec
@@ -46,7 +49,10 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
         self.queueDepth = queueDepth
     }
 
-    static func from(provider snapshot: ProviderSnapshot, malibuAccrued: Double) -> ControlMetricsSnapshot {
+    static func from(
+        provider snapshot: ProviderSnapshot,
+        providerEarnings: ProviderEarningsSummary?
+    ) -> ControlMetricsSnapshot {
         let rpm: Double?
         if let tps = snapshot.throughputTPSSinceLast, tps > 0 {
             rpm = tps * 60
@@ -54,8 +60,9 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
             rpm = nil
         }
         return ControlMetricsSnapshot(
-            earningsUsdc: 0,
-            malibuAccrued: malibuAccrued,
+            earningsUsdc: providerEarnings?.usdcToday,
+            malibuAccrued: providerEarnings?.malibuToday,
+            providerEarnings: providerEarnings,
             gpuC: nil,
             latencyP50Ms: snapshot.avgLatencyMSSinceLast.map { Int($0.rounded()) },
             uptimeSec: snapshot.uptimeSeconds,
@@ -74,6 +81,7 @@ public struct ControlMetricsSnapshot: Equatable, Sendable {
 enum ControlMetricsBuilder {
     static func build(
         providerStatus: ProviderStatus?,
+        providerEarningsClient: ProviderEarningsClient?,
         malibuAccrualClient: MalibuAccrualClient?,
         providerToken: String?
     ) async -> ControlMetricsSnapshot {
@@ -87,13 +95,24 @@ enum ControlMetricsBuilder {
         // here — the two share one ProviderStatus instance — truncated the next
         // heartbeat's window to the post-poll sliver. Read without resetting.
         let snapshot = await providerStatus.snapshot(resetWindow: false)
-        var malibu = 0.0
-        if let malibuAccrualClient,
-           let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+        var earnings: ProviderEarningsSummary?
+        var accrual: MalibuAccrualSummary?
+        if let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !token.isEmpty {
-            malibu = (try? await malibuAccrualClient.fetch(bearerToken: token).accruedMALIBU) ?? 0
+            if let providerEarningsClient {
+                earnings = try? await providerEarningsClient.fetch(bearerToken: token)
+            }
+            if let malibuAccrualClient {
+                accrual = try? await malibuAccrualClient.fetch(bearerToken: token)
+            }
         }
-        return .from(provider: snapshot, malibuAccrued: malibu)
+        if let accrual {
+            earnings = earnings?.merging(accrual: accrual) ?? .from(accrual: accrual)
+        }
+        return .from(
+            provider: snapshot,
+            providerEarnings: earnings
+        )
     }
 }
 

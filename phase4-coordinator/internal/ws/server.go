@@ -110,23 +110,24 @@ type Server struct {
 	// catalog holds an explicitly-injected tier2.Catalog for tests that
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
-	catalog                       *tier2.Catalog
-	autotuneCatalog               *autotune.Catalog
-	autotuneCompatibleCatalogs    map[string]*autotune.Catalog
-	autotuneCatalogEnforced       bool
-	autotuneCatalogBridgeDeadline time.Time
-	autotuneCatalogBridgeMu       sync.Mutex
-	autotuneEvidence              autotune.EvidenceStore
-	telemetryDrift                *pow.Evaluator
-	identitySignatures            IdentitySignatureStore
-	authPolicyAdmin               ProviderAuthPolicyAdminStore
-	idlePrewarm                   IdlePrewarmRecorder
-	idlePrewarmMetrics            IdlePrewarmMetrics
-	modelHashMismatchMetrics      ModelHashMismatchMetrics
-	credentialBootstrapMetrics    CredentialBootstrapMetrics
-	bootstrapLimiter              *bootstrapMintLimiter
-	idlePrewarmLimits             sync.Map
-	idlePrewarmQueue              chan idlePrewarmRecord
+	catalog                        *tier2.Catalog
+	autotuneCatalog                *autotune.Catalog
+	autotuneCompatibleCatalogs     map[string]*autotune.Catalog
+	autotuneCatalogEnforced        bool
+	autotuneCatalogBridgeDeadline  time.Time
+	autotuneCatalogBridgeMu        sync.Mutex
+	autotuneEvidence               autotune.EvidenceStore
+	telemetryDrift                 *pow.Evaluator
+	identitySignatures             IdentitySignatureStore
+	authPolicyAdmin                ProviderAuthPolicyAdminStore
+	admissionIdentityRecoveryAdmin AdmissionIdentityRecoveryAdminStore
+	idlePrewarm                    IdlePrewarmRecorder
+	idlePrewarmMetrics             IdlePrewarmMetrics
+	modelHashMismatchMetrics       ModelHashMismatchMetrics
+	credentialBootstrapMetrics     CredentialBootstrapMetrics
+	bootstrapLimiter               *bootstrapMintLimiter
+	idlePrewarmLimits              sync.Map
+	idlePrewarmQueue               chan idlePrewarmRecord
 
 	// SE liveness (Phase 1, Track P1-C).
 	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
@@ -184,6 +185,25 @@ type BootstrapTokenStore interface {
 	BootstrapIdentityExists(context.Context, string) (bool, error)
 }
 
+// admissionIdentityStore is optional so bootstrap-only alternate stores and
+// narrow test doubles remain source-compatible. Ordinary provider enrollment
+// fails closed when this capability is unavailable.
+type admissionIdentityStore interface {
+	LookupAdmissionIdentityPubkey(context.Context, string) ([]byte, bool, error)
+	AdmissionIdentityExists(context.Context, string) (bool, error)
+	BindAdmissionIdentity(context.Context, string, string, []byte, time.Time) error
+}
+
+// admissionIdentityRotationStore is optional so narrow test doubles and
+// alternate bootstrap stores remain source-compatible. Production *auth.Store
+// implements it; a proposed rotation fails closed when the capability is not
+// available.
+type admissionIdentityRotationStore interface {
+	LookupAdmissionIdentityState(context.Context, string, time.Time) (auth.AdmissionIdentityState, bool, error)
+	RotateAdmissionIdentity(context.Context, string, string, []byte, []byte, int, time.Time) (auth.AdmissionIdentityState, error)
+	RecoverAdmissionIdentity(context.Context, string, string, []byte, []byte, int, time.Time) (auth.AdmissionIdentityState, auth.AdmissionIdentityRecoveryAuthorization, error)
+}
+
 type providerAuth struct {
 	validated  bool
 	providerID string
@@ -196,10 +216,17 @@ type IdentitySignatureStore interface {
 	LookupProviderIdentityPubkey(ctx context.Context, providerID string) ([]byte, bool, error)
 }
 
+type AdmissionIdentityRecoveryAuthorization = auth.AdmissionIdentityRecoveryAuthorization
+
 type ProviderAuthPolicyAdminStore interface {
 	RequestProviderAuthPolicyExemption(ctx context.Context, pendingID, providerID, requestedBy string, requestedUntil time.Time, reason, incidentID string) error
 	ApproveProviderAuthPolicyExemption(ctx context.Context, pendingID, approvedBy string) (providerID, requestedBy string, requestedUntil time.Time, reason, incidentID string, err error)
 	SeedProviderAuthPolicyCutover(ctx context.Context, cutover time.Time, cliProviderIDs []string) (int64, error)
+}
+
+type AdmissionIdentityRecoveryAdminStore interface {
+	RequestAdmissionIdentityRecovery(ctx context.Context, authorization AdmissionIdentityRecoveryAuthorization, now time.Time) (AdmissionIdentityRecoveryAuthorization, error)
+	ApproveAdmissionIdentityRecovery(ctx context.Context, pendingID, approvedBy string, now time.Time) (AdmissionIdentityRecoveryAuthorization, error)
 }
 
 type IdlePrewarmRecorder interface {
@@ -333,6 +360,12 @@ func WithProviderAuthPolicyAdminStore(store ProviderAuthPolicyAdminStore) Option
 	}
 }
 
+func WithAdmissionIdentityRecoveryAdminStore(store AdmissionIdentityRecoveryAdminStore) Option {
+	return func(s *Server) {
+		s.admissionIdentityRecoveryAdmin = store
+	}
+}
+
 func WithIdlePrewarmRecorder(recorder IdlePrewarmRecorder) Option {
 	return func(s *Server) {
 		s.idlePrewarm = recorder
@@ -456,6 +489,10 @@ type pendingPreflight struct {
 }
 
 func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger, opts ...Option) *Server {
+	// Config validation guarantees a valid deadline whenever strict provider
+	// admission is disabled. Parse defensively here as well: a malformed value
+	// becomes a zero deadline, which keeps the runtime fail-closed.
+	providerAdmissionBridgeDeadline, _ := cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadlineTime()
 	s := &Server{
 		cfg:                           cfg,
 		tier2:                         cfg.Tier2,
@@ -470,6 +507,8 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		losslessnessDraftAdmissions:   map[losslessnessDraftAdmissionKey]LosslessnessDraftAdmissionRecord{},
 		losslessnessTargetGenerations: map[string]int{},
 		losslessnessProfileCursor:     map[string]int{},
+		autotuneCatalogEnforced:       cfg.AutotuneFeeds.EnforceProviderAdmission,
+		autotuneCatalogBridgeDeadline: providerAdmissionBridgeDeadline,
 		version:                       "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
@@ -607,6 +646,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/provider-auth-policy/seed-cutover", s.handleProviderAuthPolicySeedCutover)
 	mux.HandleFunc("/admin/provider-auth-policy/exempt", s.handleProviderAuthPolicyExemptRequest)
 	mux.HandleFunc("/admin/provider-auth-policy/exempt/", s.handleProviderAuthPolicyExemptApprove)
+	mux.HandleFunc("/admin/provider-admission-identity/recover", s.handleAdmissionIdentityRecoveryRequest)
+	mux.HandleFunc("/admin/provider-admission-identity/recover/", s.handleAdmissionIdentityRecoveryApprove)
 	if s.cfg.Auth.GitHubOAuth.Enabled {
 		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
 		mux.HandleFunc("/v1/auth/github/callback", s.handleGitHubCallback)
@@ -935,6 +976,9 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseTierUnsupported, "tier_unsupported: tier "+itoa(hello.Tier)+" not supported")
 		return "", ""
 	}
+	if !s.requireCompatibleSet(conn, hello.CompatibilitySetID, false) {
+		return "", ""
+	}
 	if s.tier2Config().RequireEncryptedLeg {
 		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_encrypted_leg_required")
 		return "", ""
@@ -955,6 +999,10 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_requires_v2")
 			return "", ""
 		}
+	}
+	if _, found, blocked := s.durableIdentitySignaturePubkey(context.Background(), hello.ProviderID); found || blocked {
+		s.close(conn, CloseIdentitySignatureRequired, "durable_identity_requires_v2")
+		return "", ""
 	}
 	entry, ok := s.prepareProviderAdmission(conn, connectionAuth, hello, true)
 	if !ok {
@@ -1008,6 +1056,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		ClaimURL:                  claimURL,
 	}
 	s.populateCatalogHelloAck(&ack)
+	s.populateCompatibilityHelloAck(&ack, hello.CompatibilitySetID)
 	b, err := json.Marshal(ack)
 	if err != nil {
 		// runWriter is already running for `session`; route the Close through
@@ -1046,6 +1095,9 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			return "", ""
 		}
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
+		return "", ""
+	}
+	if !s.requireCompatibleSet(conn, initial.CompatibilitySetID, true) {
 		return "", ""
 	}
 	initialTranscriptHash, err := initialAuthTranscriptHash(payload)
@@ -1098,17 +1150,23 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	supportedModelsPresent := initialPresence.SupportedModels
 	publishesPresent := initialPresence.PublishesSupportedModels
 	retainSpec010 := supportedModelsPresent || publishesPresent
-	durableBootstrapIdentity := false
-	if !initial.CredentialBootstrap && auth.IsCredentialBootstrapPrincipal(initial.ProviderID) && s.bootstrapTokens != nil {
+	durableAdmissionIdentity := false
+	identities, supportsAdmissionIdentity := s.bootstrapTokens.(admissionIdentityStore)
+	if !initial.CredentialBootstrap && supportsAdmissionIdentity {
 		var lookupErr error
-		durableBootstrapIdentity, lookupErr = s.bootstrapTokens.BootstrapIdentityExists(context.Background(), initial.ProviderID)
+		durableAdmissionIdentity, lookupErr = identities.AdmissionIdentityExists(context.Background(), initial.ProviderID)
 		if lookupErr != nil {
-			s.log.Warn().Err(lookupErr).Str("provider_id", initial.ProviderID).Msg("bootstrap identity proof requirement lookup failed")
+			s.log.Warn().Err(lookupErr).Str("provider_id", initial.ProviderID).Msg("admission identity proof requirement lookup failed")
 			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_lookup_failed")
 			return "", ""
 		}
 	}
-	retainAuthAttempt := retainSpec010 || s.identitySignatures != nil || durableBootstrapIdentity || initial.CredentialBootstrap
+	identityEnrollmentOffered := !initial.CredentialBootstrap && supportsAdmissionIdentity &&
+		connectionAuth.validated && connectionAuth.providerID == initial.ProviderID &&
+		len(initial.ProviderAdmissionPubkey) == ed25519.PublicKeySize
+	identityVerificationRequired := !initial.CredentialBootstrap &&
+		(s.identitySignatures != nil || durableAdmissionIdentity || identityEnrollmentOffered)
+	retainAuthAttempt := retainSpec010 || identityVerificationRequired || initial.CredentialBootstrap
 	if retainAuthAttempt {
 		state := AuthAttemptState{
 			AuthAttemptID:            authAttemptID,
@@ -1151,15 +1209,23 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		KeyID:                    keys.KeyID,
 		ExpiresAt:                challengeExpiresAt.Format(time.RFC3339),
 	}
-	if !initial.CredentialBootstrap && auth.IsCredentialBootstrapPrincipal(initial.ProviderID) && s.bootstrapTokens != nil {
-		pubkey, found, lookupErr := s.bootstrapTokens.LookupBootstrapIdentityPubkey(context.Background(), initial.ProviderID)
-		if lookupErr != nil {
-			s.log.Warn().Err(lookupErr).Str("provider_id", initial.ProviderID).Msg("bootstrap identity challenge lookup failed")
-			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_lookup_failed")
-			return "", ""
-		}
-		if found {
-			challenge.BootstrapIdentityPubkey = base64.StdEncoding.EncodeToString(pubkey)
+	if !initial.CredentialBootstrap && identityVerificationRequired {
+		selection := s.durableIdentitySignatureSelection(context.Background(), initial)
+		if selection.Found {
+			verificationPubkey := selection.VerificationPubkey
+			if initial.ProviderAdmissionRecovery &&
+				len(initial.ProviderAdmissionPubkey) == ed25519.PublicKeySize &&
+				!bytes.Equal(initial.ProviderAdmissionPubkey, selection.ActivePubkey) {
+				verificationPubkey = initial.ProviderAdmissionPubkey
+			}
+			challenge.AdmissionIdentityPubkey = base64.StdEncoding.EncodeToString(verificationPubkey)
+			challenge.AdmissionIdentityGeneration = selection.Generation
+			if auth.IsCredentialBootstrapPrincipal(initial.ProviderID) {
+				challenge.BootstrapIdentityPubkey = challenge.AdmissionIdentityPubkey
+			}
+		} else if !selection.Blocked && identityEnrollmentOffered {
+			challenge.AdmissionIdentityPubkey = base64.StdEncoding.EncodeToString(initial.ProviderAdmissionPubkey)
+			challenge.AdmissionIdentityGeneration = 1
 		}
 	}
 	rawChallenge, err := json.Marshal(challenge)
@@ -1213,10 +1279,14 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_proof_required")
 		return "", ""
 	}
-	if !initial.CredentialBootstrap && (s.identitySignatures != nil || durableBootstrapIdentity) && !s.verifyIdentitySignature(context.Background(), initial, proof, retained) {
-		s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
-		s.close(conn, CloseIdentitySignatureRequired, "identity_signature_required")
-		return "", ""
+	identityProof := identityProofResult{}
+	if identityVerificationRequired {
+		identityProof = s.verifyIdentitySignature(context.Background(), initial, proof, retained, connectionAuth)
+		if !identityProof.Accepted {
+			s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
+			s.close(conn, CloseIdentitySignatureRequired, "identity_signature_required")
+			return "", ""
+		}
 	}
 	// SPEC-002 v1.3.5 §7.8 R-7.8.7 + AC-K.3 — when proof carries
 	// SPEC-010 fields, they MUST byte-identical-compare to the
@@ -1276,6 +1346,8 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			Type: "auth_response", Version: 2, Status: "accepted", AssignedID: entry.AssignedID,
 			HeartbeatIntervalS: int(s.cfg.HeartbeatInterval().Seconds()), Tier: string(pool.TierProvisional),
 			AssignedProviderToken: mint.ProviderToken,
+			IdentityAdmissionMode: identityAdmissionSignature,
+			IdentityGeneration:    1,
 			Tier2Session: &AuthTier2Session{
 				EncryptedLeg: AuthEncryptedLegSession{
 					Enabled: true, Alg: selectedAEAD, KID: keys.KeyID,
@@ -1289,6 +1361,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			},
 		}
 		s.populateCatalogAuthResponse(&response)
+		s.populateCompatibilityAuthResponse(&response, initial.CompatibilitySetID)
 		rawResponse, err := json.Marshal(response)
 		if err != nil || s.writeServerText(conn, rawResponse) != nil {
 			return "", ""
@@ -1384,6 +1457,77 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
+	if len(identityProof.EnrollmentPubkey) > 0 {
+		identities, ok := s.bootstrapTokens.(admissionIdentityStore)
+		if !ok {
+			s.close(conn, CloseIdentitySignatureRequired, "identity_enrollment_unavailable")
+			return "", ""
+		}
+		if err := identities.BindAdmissionIdentity(
+			context.Background(), initial.ProviderID, connectionAuth.token,
+			identityProof.EnrollmentPubkey, s.now(),
+		); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity enrollment failed")
+			s.close(conn, CloseIdentitySignatureRequired, "identity_enrollment_failed")
+			return "", ""
+		}
+		s.log.Info().
+			Str("provider_id", initial.ProviderID).
+			Int("identity_generation", identityProof.Generation).
+			Msg("durable admission identity enrolled")
+	}
+	if len(identityProof.RotationPubkey) > 0 {
+		rotations, ok := s.bootstrapTokens.(admissionIdentityRotationStore)
+		if !ok {
+			s.close(conn, CloseIdentitySignatureRequired, "identity_rotation_unavailable")
+			return "", ""
+		}
+		state, err := rotations.RotateAdmissionIdentity(
+			context.Background(), initial.ProviderID, connectionAuth.token,
+			identityProof.VerifiedPubkey, identityProof.RotationPubkey,
+			identityProof.Generation, s.now(),
+		)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity rotation failed")
+			s.close(conn, CloseIdentitySignatureRequired, "identity_rotation_failed")
+			return "", ""
+		}
+		identityProof.Generation = state.Generation
+		identityProof.ActivePubkey = append([]byte(nil), state.CurrentPublicKey...)
+		identityProof.PreviousValidUntil = state.PreviousValidUntil
+		s.log.Info().
+			Str("provider_id", initial.ProviderID).
+			Int("identity_generation", state.Generation).
+			Msg("durable admission identity rotated")
+	}
+	if len(identityProof.RecoveryPubkey) > 0 {
+		rotations, ok := s.bootstrapTokens.(admissionIdentityRotationStore)
+		if !ok {
+			s.close(conn, CloseIdentitySignatureRequired, "identity_recovery_unavailable")
+			return "", ""
+		}
+		state, authorization, err := rotations.RecoverAdmissionIdentity(
+			context.Background(), initial.ProviderID, connectionAuth.token,
+			identityProof.ActivePubkey, identityProof.RecoveryPubkey,
+			identityProof.Generation, s.now(),
+		)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity recovery failed")
+			s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
+			s.close(conn, CloseIdentitySignatureRequired, "identity_recovery_failed")
+			return "", ""
+		}
+		identityProof.Generation = state.Generation
+		identityProof.ActivePubkey = append([]byte(nil), state.CurrentPublicKey...)
+		identityProof.RecoveryGrantedBy = authorization.ApprovedBy
+		s.log.Warn().
+			Str("provider_id", initial.ProviderID).
+			Str("recovery_authorization_id", authorization.PendingID).
+			Str("incident_id", authorization.IncidentID).
+			Str("granted_by", identityProof.RecoveryGrantedBy).
+			Int("identity_generation", state.Generation).
+			Msg("durable admission identity recovered under operator authorization")
+	}
 	entry.AuthState = authState
 	session, refusal := s.registerProviderSession(conn, entry)
 	if session == nil {
@@ -1411,6 +1555,9 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		AssignedProviderToken:     assignedProviderToken,
 		PairOT:                    pairOT,
 		ClaimURL:                  claimURL,
+		IdentityAdmissionMode:     identityProof.AdmissionMode,
+		IdentityAdmissionKeyRole:  identityProof.VerifiedKeyRole,
+		IdentityGeneration:        identityProof.Generation,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
 				Enabled:                        true,
@@ -1428,7 +1575,14 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			ModelHash: AuthModelHashSession{Status: string(entry.HashStatus)},
 		},
 	}
+	if len(identityProof.ActivePubkey) == ed25519.PublicKeySize {
+		response.AdmissionIdentityPubkey = base64.StdEncoding.EncodeToString(identityProof.ActivePubkey)
+	}
+	if identityProof.PreviousValidUntil != nil {
+		response.AdmissionIdentityPreviousValidUntil = identityProof.PreviousValidUntil.UTC().Format(time.RFC3339Nano)
+	}
 	s.populateCatalogAuthResponse(&response)
+	s.populateCompatibilityAuthResponse(&response, initial.CompatibilitySetID)
 	rawResponse, err := json.Marshal(response)
 	if err != nil {
 		// runWriter is already running for `session`; route the Close through
@@ -1788,6 +1942,58 @@ func (s *Server) populateCatalogAuthResponse(response *AuthResponse) {
 	response.CatalogPolicyVersion = s.autotuneCatalog.PolicyVersion
 	response.CandidateCatalogSHA256 = s.autotuneCatalog.SHA256
 	response.CatalogSignerKeyID = s.autotuneCatalog.SignerKeyID
+}
+
+func (s *Server) requireCompatibleSet(conn net.Conn, providedID string, authV2 bool) bool {
+	policy := s.cfg.Coordinator.CompatibilitySet
+	if !policy.Configured() {
+		return true
+	}
+	reject := func(code string) bool {
+		if authV2 {
+			s.sendAuthRejection(conn, code, code)
+		}
+		s.close(conn, CloseInvalidHello, code)
+		return false
+	}
+	if providedID == "" {
+		return reject("compatibility_set_required")
+	}
+	if err := config.ValidateCompatibilitySetID(providedID); err != nil {
+		return reject("compatibility_set_invalid")
+	}
+	if !policy.Accepts(providedID) {
+		return reject("compatibility_set_unaccepted")
+	}
+	return true
+}
+
+func (s *Server) populateCompatibilityHelloAck(ack *HelloAck, acceptedID string) {
+	if ack == nil {
+		return
+	}
+	policy := s.cfg.Coordinator.CompatibilitySet
+	if !policy.Configured() {
+		ack.CompatibilityPolicy = "unconfigured"
+		return
+	}
+	ack.CompatibilityPolicy = "configured"
+	ack.AcceptedCompatibilitySetID = acceptedID
+	ack.RecommendedCompatibilitySetID = policy.TargetID
+}
+
+func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, acceptedID string) {
+	if response == nil {
+		return
+	}
+	policy := s.cfg.Coordinator.CompatibilitySet
+	if !policy.Configured() {
+		response.CompatibilityPolicy = "unconfigured"
+		return
+	}
+	response.CompatibilityPolicy = "configured"
+	response.AcceptedCompatibilitySetID = acceptedID
+	response.RecommendedCompatibilitySetID = policy.TargetID
 }
 
 func (s *Server) recordProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {

@@ -47,7 +47,7 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertTrue(rewritten.contains("model: test"))
         XCTAssertTrue(rewritten.contains("provider_token: secret-token"))
         let importedToken = await KeychainStore.readProviderToken(providerID: "p_import")
-        XCTAssertEqual(importedToken, "secret-token")
+        XCTAssertNil(importedToken)
     }
 
     func testMigrationStartFreshMovesConfigAsideAndShowsOnboarding() async throws {

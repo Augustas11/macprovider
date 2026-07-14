@@ -88,6 +88,7 @@ INSTALL_LOCK_TOKEN=""
 INSTALL_LOCK_HOLDER_PID=""
 CUTOVER_STARTED=0
 AUTOTUNE_RECOMMENDATION_REQUIRED=0
+LIFECYCLE_INSTALL_OPERATION_ID="install:$$"
 
 log() { printf "[macprovider-install] %s\n" "$*"; }
 die() {
@@ -95,6 +96,30 @@ die() {
   shift
   printf "[macprovider-install] ERROR: %s\n" "$*" >&2
   exit "$code"
+}
+
+record_lifecycle_state() {
+  lifecycle_state="$1"
+  lifecycle_reason="$2"
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  [ -x "$BINARY_PATH" ] || return 1
+  lifecycle_args=(
+    lifecycle-state transition
+    --state "$lifecycle_state"
+    --reason-code "$lifecycle_reason"
+    --writer installer
+    --operation-id "$LIFECYCLE_INSTALL_OPERATION_ID"
+  )
+  [ -z "${provider_id:-}" ] || lifecycle_args+=(--provider-id "$provider_id")
+  [ -z "${model:-}" ] || lifecycle_args+=(--model-id "$model")
+  if "$BINARY_PATH" "${lifecycle_args[@]}" >/dev/null; then
+    return 0
+  fi
+  if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
+    log "Emergency target predates the lifecycle-state contract; rollback remains protected by the install transaction."
+    return 0
+  fi
+  return 1
 }
 
 validate_install_dir() {
@@ -1835,6 +1860,8 @@ rollback_install_transaction() {
     return 70
   fi
   INSTALL_TX_ROLLING_BACK=1
+  record_lifecycle_state rollback_in_progress install_admission_failed \
+    || log "WARNING: could not persist rollback lifecycle state before restoring the previous install"
   log "Install did not pass admission; restoring the previous provider installation."
   if [ -n "$MANUAL_PID" ] && pid_is_live_non_zombie "$MANUAL_PID"; then
     if ! stop_owned_manual_provider "$MANUAL_PID" "$INSTALL_DIR/macprovider-cli"; then
@@ -2785,6 +2812,12 @@ validate_staged_entries() {
   has_catalog_candidates_signature=0
   has_catalog_demand=0
   has_catalog_demand_signature=0
+  has_compatibility_set=0
+  has_local_install_contract=0
+  has_local_provider_plist=0
+  has_local_updater_metadata=0
+  has_local_watchdog_plist=0
+  has_local_watchdog_script=0
   while IFS= read -r entry; do
     normalized_entry="$entry"
     while :; do
@@ -2811,6 +2844,26 @@ validate_staged_entries() {
         has_bundled_metallib=1
         ;;
       THIRD-PARTY-NOTICES.txt)
+        ;;
+      compatibility-set.json)
+        has_compatibility_set=1
+        ;;
+      compatibility-set-local|compatibility-set-local/)
+        ;;
+      compatibility-set-local/install.sh)
+        has_local_install_contract=1
+        ;;
+      compatibility-set-local/provider-launch-agent.plist.template)
+        has_local_provider_plist=1
+        ;;
+      compatibility-set-local/updater-rollback.json)
+        has_local_updater_metadata=1
+        ;;
+      compatibility-set-local/watchdog-launch-agent.plist.template)
+        has_local_watchdog_plist=1
+        ;;
+      compatibility-set-local/watchdog.sh)
+        has_local_watchdog_script=1
         ;;
       *.bundle|*.bundle/*)
         has_bundle=1
@@ -2865,6 +2918,20 @@ EOF
     [ "$has_catalog_candidates_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json.sig"
     [ "$has_catalog_demand" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json"
     [ "$has_catalog_demand_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json.sig"
+    if [ "$has_compatibility_set" -ne 1 ]; then
+      if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
+        log "Emergency rollback accepted a signed legacy payload without compatibility-set.json."
+      else
+        die 5 "$label does not contain compatibility-set.json"
+      fi
+    fi
+    if [ "$has_compatibility_set" -eq 1 ]; then
+      [ "$has_local_install_contract" -eq 1 ] || die 5 "$label does not contain compatibility-set-local/install.sh"
+      [ "$has_local_provider_plist" -eq 1 ] || die 5 "$label does not contain the provider launchd template"
+      [ "$has_local_updater_metadata" -eq 1 ] || die 5 "$label does not contain updater rollback metadata"
+      [ "$has_local_watchdog_plist" -eq 1 ] || die 5 "$label does not contain the watchdog launchd template"
+      [ "$has_local_watchdog_script" -eq 1 ] || die 5 "$label does not contain the watchdog script"
+    fi
   fi
 }
 
@@ -3334,6 +3401,18 @@ install_binary() {
   if [ -f "$staging_dir/THIRD-PARTY-NOTICES.txt" ]; then
     cp "$staging_dir/THIRD-PARTY-NOTICES.txt" "$INSTALL_DIR/THIRD-PARTY-NOTICES.txt"
   fi
+  rm -f "$INSTALL_DIR/compatibility-set.json"
+  if [ -f "$staging_dir/compatibility-set.json" ]; then
+    cp "$staging_dir/compatibility-set.json" "$INSTALL_DIR/compatibility-set.json"
+  elif [ "${EMERGENCY_ROLLBACK:-0}" != "1" ]; then
+    die 5 "staged provider release is missing compatibility-set.json"
+  fi
+  rm -rf "$INSTALL_DIR/compatibility-set-local"
+  if [ -d "$staging_dir/compatibility-set-local" ]; then
+    cp -R "$staging_dir/compatibility-set-local" "$INSTALL_DIR/compatibility-set-local"
+  elif [ "${EMERGENCY_ROLLBACK:-0}" != "1" ]; then
+    die 5 "staged provider release is missing compatibility-set-local"
+  fi
   find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec rm -rf {} +
   find "$staging_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$INSTALL_DIR"/ \;
   rm -rf "$INSTALL_DIR/catalog-release"
@@ -3350,6 +3429,13 @@ install_binary() {
   [ -x "$real_binary" ] || die 5 "macprovider-cli was not installed at $real_binary"
   [ -L "$BINARY_PATH" ] || die 5 "symlink not created at $BINARY_PATH"
   MACPROVIDER_CLI_EXECUTABLE="$real_binary"
+  if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
+    record_lifecycle_state rollback_in_progress signed_emergency_rollback_activated \
+      || die 5 "failed to persist emergency rollback lifecycle state"
+  else
+    record_lifecycle_state installing signed_compatibility_set_activated \
+      || die 5 "failed to persist install lifecycle state"
+  fi
 }
 
 check_install_dir_clean() {
@@ -3359,7 +3445,7 @@ check_install_dir_clean() {
   local entries
   # F-603-V7-7: warn on mixed-state directories such as leftover Python
   # virtualenvs, but do not block an otherwise valid partner upgrade.
-  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|mlx\.metallib|THIRD-PARTY-NOTICES\.txt|catalog-release|.*\.bundle)$' | head -20 || true)
+  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|mlx\.metallib|THIRD-PARTY-NOTICES\.txt|compatibility-set\.json|compatibility-set-local|catalog-release|.*\.bundle)$' | head -20 || true)
   if [ -n "$entries" ]; then
     log "WARNING: $INSTALL_DIR contains non-macprovider entries:"
     while IFS= read -r entry; do
@@ -3489,7 +3575,17 @@ EOF
 write_watchdog_script() {
   cat <<'WATCHDOG_EOF' > "$WATCHDOG_PATH"
 #!/usr/bin/env bash
+# macprovider-watchdog: local provider liveness monitor plus
+# auto-update rollback observer.
+#
+# Health verdict: the exact launchd service PID must own the configured local
+# listener and its /v1/health endpoint must answer. Other macprovider-cli
+# diagnostics are structurally irrelevant. Coordinator TCP
+# reachability is advisory logging only; a missing ESTABLISHED coordinator
+# connection no longer causes a kick by itself.
+
 set -euo pipefail
+
 LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.streamvc.macprovider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
@@ -3497,14 +3593,46 @@ COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
 LOG_PATH="$LOG_DIR/watchdog.log"
+# Issue #191 R1 architect HIGH: arming + grace state. Without
+# these, a first-time install can spin in a restart loop — the
+# Swift CLI loads the model BEFORE connecting to the coordinator
+# (cold-cache model load is 10-20 minutes), and a watchdog that
+# kicks on "no ESTABLISHED connection" would Darwin.exit the
+# process every 60s before it ever opens its socket.
+#
+# Arming rule: the watchdog stays disarmed (no kicks) until it
+# observes at least ONE successful ESTABLISHED connection IN THE
+# CURRENT BOOT. The armed marker stores the boot id (kern.boottime
+# sec) so a reboot — which restarts the provider into a fresh
+# cold-cache model load — re-disarms the watchdog and prevents the
+# stale-arming restart loop the R1 fix did not cover (R2 ARCH HIGH).
+#
+# Grace rule: after we observe a restart-worthy failure, we wait at least KICK_GRACE_SECONDS
+# before logging another restart request. This covers the post-restart model-reload
+# window without re-triggering on the gap between launchd respawn
+# and re-establishing the coordinator socket.
 STATE_DIR="${MACPROVIDER_WATCHDOG_STATE_DIR:-$HOME/.local/share/macprovider-watchdog/state}"
 ARMED_FILE="$STATE_DIR/armed"
 LAST_KICK_FILE="$STATE_DIR/last_kick"
 KICK_GRACE_SECONDS="${MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS:-300}"
+
 mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+# Boot id: per-boot identifier sourced from kern.bootsessionuuid.
+# Apple-provided UUID is immutable for the lifetime of a single
+# boot (verified against XNU sysctl: read-only). Unlike
+# kern.boottime, this value is NOT affected by NTP / manual
+# wall-clock time correction (R3 architect MEDIUM #1), so a
+# clock-set event during a wedge cannot silently re-disarm the
+# watchdog and let the wedge persist.
 current_boot_id() {
   sysctl -n kern.bootsessionuuid 2>/dev/null
 }
+
+# Acceptable formats in config.yaml are: `provider_id: ID` (yaml
+# key) or `provider-id: ID` (alternate hyphenated form some operator
+# tools have written historically). Either matches and surfaces the
+# value with surrounding whitespace stripped.
 read_provider_id() {
   if [ ! -f "$CONFIG_PATH" ]; then
     return 1
@@ -3520,6 +3648,7 @@ read_provider_id() {
     }
   ' "$CONFIG_PATH"
 }
+
 read_config_port() {
   if [ ! -f "$CONFIG_PATH" ]; then
     return 1
@@ -3534,9 +3663,13 @@ read_config_port() {
     }
   ' "$CONFIG_PATH"
 }
+
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { printf "[%s] %s\n" "$(ts)" "$*" >> "$LOG_PATH"; }
+
 resolve_coordinator_ip() {
+  # First try dscacheutil (no network call if already cached);
+  # fall back to host(1) which most macs have via bind-utils.
   ip="$(dscacheutil -q host -a name "$COORDINATOR_HOST" 2>/dev/null \
         | awk '/^ip_address:/ { print $2; exit }')"
   if [ -z "$ip" ] && command -v host >/dev/null 2>&1; then
@@ -3545,36 +3678,47 @@ resolve_coordinator_ip() {
   fi
   printf "%s" "${ip:-}"
 }
+
 has_established_conn() {
   ip="$1"
   if [ -z "$ip" ]; then
     return 1
   fi
+  # BSD netstat on macOS: print ESTABLISHED TCP rows; awk matches
+  # the foreign-address column against our coordinator IP:port.
+  # Format: Proto Recv-Q Send-Q Local-Address Foreign-Address (state)
   netstat -an -p tcp 2>/dev/null \
     | awk -v target="${ip}.${COORDINATOR_PORT}" '
         $0 ~ /ESTABLISHED/ && $5 == target { found = 1; exit }
         END { exit found ? 0 : 1 }
       '
 }
+
 provider_process_pid() {
+  launchctl_bin="${MACPROVIDER_LAUNCHCTL:-launchctl}"
+  service_target="gui/$(id -u)/$LABEL"
+  if ! service_output="$("$launchctl_bin" print "$service_target" 2>/dev/null)"; then
+    return 1
+  fi
+  candidates="$(printf "%s\n" "$service_output" | awk 'NF == 3 && $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3 }')"
+  [ "$(printf "%s\n" "$candidates" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
+  candidate="$candidates"
   expected="$BINARY_PATH"
   if command -v realpath >/dev/null 2>&1 && [ -e "$expected" ]; then
     expected="$(realpath "$expected" 2>/dev/null || printf "%s" "$expected")"
   fi
-  matches=""
-  for candidate in $(pgrep -x macprovider-cli 2>/dev/null || true); do
-    cmd="$(ps -p "$candidate" -o command= 2>/dev/null || true)"
-    command_path="${cmd%% *}"
-    if command -v realpath >/dev/null 2>&1 && [ -e "$command_path" ]; then
-      command_path="$(realpath "$command_path" 2>/dev/null || printf "%s" "$command_path")"
-    fi
-    [ "$command_path" = "$expected" ] && matches="${matches}${candidate}
-"
-  done
-  count="$(printf "%s" "$matches" | awk 'NF { n++ } END { print n + 0 }')"
-  [ "$count" -eq 1 ] || return 1
-  printf "%s" "$matches" | awk 'NF { print; exit }'
+  command -v lsof >/dev/null 2>&1 || return 1
+  executable_output="$(lsof -a -p "$candidate" -d txt -Fn 2>/dev/null)" || return 1
+  command_paths="$(printf "%s\n" "$executable_output" | awk 'substr($0, 1, 1) == "n" && length($0) > 1 { print substr($0, 2) }')"
+  [ "$(printf "%s\n" "$command_paths" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
+  command_path="$command_paths"
+  if command -v realpath >/dev/null 2>&1 && [ -e "$command_path" ]; then
+    command_path="$(realpath "$command_path" 2>/dev/null || printf "%s" "$command_path")"
+  fi
+  [ "$command_path" = "$expected" ] || return 1
+  printf "%s" "$candidate"
 }
+
 local_health_listener_owned_by_provider() {
   provider_pid="$1"
   port="$2"
@@ -3583,6 +3727,7 @@ local_health_listener_owned_by_provider() {
   fi
   lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | awk -v pid="$provider_pid" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }'
 }
+
 local_provider_health_ok() {
   provider_pid="$1"
   port="$(read_config_port || true)"
@@ -3593,12 +3738,25 @@ local_provider_health_ok() {
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   "$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/health" >/dev/null 2>&1
 }
+
+valid_lifecycle_lease() {
+  provider_pid="$1"
+  [ -x "$BINARY_PATH" ] || return 1
+  if "$BINARY_PATH" lifecycle-lease status --expected-kind startup --expected-pid "$provider_pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  "$BINARY_PATH" lifecycle-lease status --expected-kind maintenance >/dev/null 2>&1
+}
+
 note_provider_restart_request() {
   log "provider restart requested for $LABEL but skipped: launchd KeepAlive is the sole runtime manager"
 }
+
 now_epoch() { date -u +%s; }
+
 autoupdate_recovery_tick() {
   AUTUPDATE_STATE_ROOT="${MACPROVIDER_AUTOUPDATE_STATE_ROOT:-$HOME/.local/share/macprovider/autoupdate}" \
+  MACPROVIDER_BINARY_PATH="$BINARY_PATH" \
   MACPROVIDER_LABEL="$LABEL" \
   LOG_PATH="$LOG_PATH" \
   python3 <<'PY'
@@ -3615,19 +3773,26 @@ import subprocess
 import sys
 import time
 import uuid
+
 root = os.environ["AUTUPDATE_STATE_ROOT"]
+binary_path = os.environ["MACPROVIDER_BINARY_PATH"]
 label = os.environ["MACPROVIDER_LABEL"]
 log_path = os.environ["LOG_PATH"]
 pending = os.path.join(root, "pending.json")
 lock_path = os.path.join(root, "update.lock")
 install_lock_path = os.path.expanduser("~/.config/macprovider/install.lock")
+lifecycle_root = os.path.expanduser("~/Library/Application Support/macprovider/lifecycle")
+lifecycle_lock_path = os.path.join(lifecycle_root, ".lease.json.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
+
 def ts():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 def log(message):
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(f"[{ts()}] autoupdate {message}\n")
+
 def event(outcome, phase, failure_class, reason, marker=None):
     payload = {
         "event": "provider_autoupdate_watchdog",
@@ -3643,6 +3808,42 @@ def event(outcome, phase, failure_class, reason, marker=None):
         payload["update_id"] = marker.get("update_id", "")
         payload["target_version"] = marker.get("target_version", "")
     log(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+def record_watchdog_recovery(marker, failure_class):
+    target = marker["target_path"]
+    reason_code = f"watchdog_rollback_{failure_class}"
+    operation_id = f"watchdog-recovery:{marker['update_id']}"
+    command = [
+        target,
+        "lifecycle-state",
+        "transition",
+        "--state",
+        "watchdog_recovery",
+        "--reason-code",
+        reason_code,
+        "--writer",
+        "watchdog",
+        "--operation-id",
+        operation_id,
+    ]
+    compatibility_id = marker.get("previous_compatibility_set_id") or marker.get("target_compatibility_set_id")
+    if compatibility_id:
+        command.extend(["--compatibility-set-id", compatibility_id])
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            log(f"lifecycle_transition=watchdog_recovery reason_code={reason_code} operation_id={operation_id}")
+        else:
+            log(f"lifecycle_transition_failed=watchdog_recovery exit_status={result.returncode}")
+    except Exception as exc:
+        log(f"lifecycle_transition_failed=watchdog_recovery error={type(exc).__name__}")
+
 def reject_path(path, must_exist=True):
     try:
         st = os.lstat(path)
@@ -3669,6 +3870,7 @@ def reject_path(path, must_exist=True):
     except FileNotFoundError:
         pass
     return st
+
 def verify_root():
     current = root
     parts = []
@@ -3683,6 +3885,7 @@ def verify_root():
             st = reject_path(path)
             if not stat.S_ISDIR(st.st_mode):
                 raise RuntimeError(f"not_directory:{path}")
+
 def read_marker():
     fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -3692,6 +3895,7 @@ def read_marker():
     marker = json.loads(raw.decode("utf-8"))
     validate_marker_strict(marker)
     return marker
+
 def validate_marker_strict(marker):
     required = {"update_id", "target_version", "target_path", "backup_path", "size", "mode", "sha256", "marker_deadline"}
     if not required.issubset(marker.keys()):
@@ -3722,6 +3926,42 @@ def validate_marker_strict(marker):
             raise RuntimeError("marker_release_backup_path_invalid")
         if not re.match(r"^[0-9a-f]{64}$", str(release_sha)):
             raise RuntimeError("marker_release_backup_sha256_invalid")
+    compatibility_id = marker.get("target_compatibility_set_id")
+    compatibility_sha = marker.get("target_compatibility_set_sha256")
+    if (compatibility_id is None) != (compatibility_sha is None):
+        raise RuntimeError("marker_compatibility_set_incomplete")
+    if compatibility_id is not None:
+        if not isinstance(compatibility_id, str) or not compatibility_id or compatibility_id.strip() != compatibility_id or len(compatibility_id.encode("utf-8")) > 512:
+            raise RuntimeError("marker_compatibility_set_id_invalid")
+        if not re.match(r"^[0-9a-f]{64}$", str(compatibility_sha)):
+            raise RuntimeError("marker_compatibility_set_sha256_invalid")
+    previous_fields = (
+        marker.get("previous_version"),
+        marker.get("previous_compatibility_set_id"),
+        marker.get("previous_compatibility_set_sha256"),
+        marker.get("transaction_state"),
+    )
+    if any(value is not None for value in previous_fields):
+        if any(value is None for value in previous_fields):
+            raise RuntimeError("marker_previous_compatibility_set_incomplete")
+        previous_version, previous_id, previous_sha, transaction_state = previous_fields
+        if compatibility_id is None or release_backup is None:
+            raise RuntimeError("marker_previous_compatibility_set_unbound")
+        if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", str(previous_version)):
+            raise RuntimeError("marker_previous_version_invalid")
+        if not re.match(
+            r"^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}$",
+            str(previous_id),
+        ):
+            raise RuntimeError("marker_previous_compatibility_set_id_invalid")
+        if not re.match(r"^[0-9a-f]{64}$", str(previous_sha)):
+            raise RuntimeError("marker_previous_compatibility_set_sha256_invalid")
+        if transaction_state not in {
+            "activating_target",
+            "restoring_previous",
+            "awaiting_previous_readiness",
+        }:
+            raise RuntimeError("marker_transaction_state_invalid")
     raw_deadline = str(marker["marker_deadline"])
     if not raw_deadline.endswith("Z"):
         raise RuntimeError("marker_deadline_invalid")
@@ -3734,6 +3974,7 @@ def validate_marker_strict(marker):
     future_tolerance = post_start_window + 30 * 60
     if deadline > now + datetime.timedelta(seconds=future_tolerance):
         raise RuntimeError("marker_deadline_out_of_bounds")
+
 def current_binary_version(path):
     try:
         result = subprocess.run([path, "--version"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
@@ -3742,6 +3983,7 @@ def current_binary_version(path):
     output = f"{result.stdout}\n{result.stderr}"
     match = re.search(r"([0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?)", output)
     return match.group(1) if match else ""
+
 def read_success_sentinel(path):
     reject_path(path)
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -3756,7 +3998,13 @@ def read_success_sentinel(path):
         "update_id": update_id,
         "binary_version": str(payload.get("binary_version", "")),
     }
+
 def process_success_sentinel(marker):
+    if marker.get("transaction_state") in {
+        "restoring_previous",
+        "awaiting_previous_readiness",
+    }:
+        return False
     binary_dir = os.path.dirname(marker["target_path"])
     for name in os.listdir(binary_dir):
         if not name.startswith(".macprovider-cli.success-"):
@@ -3796,6 +4044,7 @@ def process_success_sentinel(marker):
             except FileNotFoundError:
                 pass
     return False
+
 def sha256(path):
     h = hashlib.sha256()
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -3808,11 +4057,13 @@ def sha256(path):
     finally:
         os.close(fd)
     return h.hexdigest()
+
 def binary_path_without_pending():
     candidate = os.environ.get("MACPROVIDER_BINARY_PATH", "")
     if candidate:
         return candidate
     return shutil.which("macprovider-cli") or ""
+
 def known_binary_dir():
     configured = os.environ.get("MACPROVIDER_BINARY_DIR", "")
     if configured:
@@ -3835,6 +4086,7 @@ def known_binary_dir():
     if binary:
         return os.path.realpath(os.path.dirname(binary))
     return ""
+
 def scan_without_pending():
     binary = binary_path_without_pending()
     if not binary:
@@ -3863,6 +4115,7 @@ def scan_without_pending():
                 pass
         elif name.startswith(".macprovider-cli.release-rollback-"):
             shutil.rmtree(path, ignore_errors=True)
+
 def quarantine(reason, marker=None):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = os.path.join(root, f"pending-quarantined-{stamp}.json")
@@ -3871,10 +4124,57 @@ def quarantine(reason, marker=None):
         log(f"pending_marker_quarantined={dest} reason={reason}")
     except FileNotFoundError:
         pass
+
 def marker_deadline_expired(marker):
     raw_deadline = str(marker["marker_deadline"])
     deadline = datetime.datetime.strptime(raw_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
     return datetime.datetime.now(datetime.timezone.utc) >= deadline
+
+def write_marker(marker):
+    validate_marker_strict(marker)
+    payload = json.dumps(marker, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    temporary = os.path.join(root, f".pending-{uuid.uuid4()}.json")
+    fd = os.open(
+        temporary,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise RuntimeError("marker_write_failed")
+            offset += written
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(temporary, pending)
+        directory_fd = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+def transition_marker(marker, state, readiness_seconds=None):
+    updated = dict(marker)
+    updated["transaction_state"] = state
+    if readiness_seconds is not None:
+        updated["marker_deadline"] = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(seconds=readiness_seconds)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_marker(updated)
+    return updated
+
 def process_start(pid):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return ""
@@ -3886,6 +4186,7 @@ def process_start(pid):
         text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
+
 def boot_session():
     try:
         result = subprocess.run(
@@ -3905,6 +4206,7 @@ def boot_session():
             return handle.read().strip()
     except OSError:
         return ""
+
 def normalize_lock_fd(fd, path):
     info = os.fstat(fd)
     if (
@@ -3917,6 +4219,90 @@ def normalize_lock_fd(fd, path):
     os.fchmod(fd, 0o600)
     if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
         raise RuntimeError(f"mutation_lock_mode_invalid:{path}")
+
+def acquire_lifecycle_lock():
+    os.makedirs(lifecycle_root, mode=0o700, exist_ok=True)
+    directory_st = reject_path(lifecycle_root)
+    if not stat.S_ISDIR(directory_st.st_mode) or stat.S_IMODE(directory_st.st_mode) != 0o700:
+        raise RuntimeError("lifecycle_lease_directory_invalid")
+    fd = os.open(
+        lifecycle_lock_path,
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        path_st = reject_path(lifecycle_lock_path)
+        descriptor_st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(descriptor_st.st_mode)
+            or descriptor_st.st_uid != uid
+            or descriptor_st.st_nlink != 1
+            or stat.S_IMODE(descriptor_st.st_mode) != 0o600
+            or (descriptor_st.st_dev, descriptor_st.st_ino) != (path_st.st_dev, path_st.st_ino)
+        ):
+            raise RuntimeError("lifecycle_lease_lock_invalid")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+def inspect_lifecycle_lease():
+    if not os.path.isfile(binary_path) or not os.access(binary_path, os.X_OK):
+        return None
+    try:
+        result = subprocess.run(
+            [binary_path, "lifecycle-lease", "status"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    kind = payload.get("kind")
+    owner_pid = payload.get("owner_pid")
+    if (
+        payload.get("state") != "valid"
+        or kind not in {"startup", "maintenance"}
+        or not isinstance(owner_pid, int)
+        or isinstance(owner_pid, bool)
+        or owner_pid <= 0
+    ):
+        return None
+    return {"kind": kind, "owner_pid": owner_pid}
+
+def launchd_provider_pid():
+    launchctl = os.environ.get("MACPROVIDER_LAUNCHCTL", "launchctl")
+    try:
+        result = subprocess.run(
+            [launchctl, "print", f"gui/{uid}/{label}"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    candidates = re.findall(r"^\s*pid\s*=\s*([0-9]+)\s*$", result.stdout, re.MULTILINE)
+    if len(candidates) != 1:
+        return None
+    return int(candidates[0])
+
 def installer_owner_is_live(lock_fd):
     os.lseek(lock_fd, 0, os.SEEK_SET)
     payload = os.read(lock_fd, 4097)
@@ -3947,10 +4333,12 @@ def installer_owner_is_live(lock_fd):
     if not current_boot:
         raise RuntimeError("installer_owner_boot_identity_unavailable")
     return owner_boot == current_boot and process_start(owner_pid) == owner_start
+
 def release_transaction_locks(descriptors):
     for descriptor in reversed(descriptors):
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
 def acquire_transaction_locks():
     os.makedirs(root, mode=0o700, exist_ok=True)
     os.makedirs(os.path.dirname(install_lock_path), mode=0o700, exist_ok=True)
@@ -3979,6 +4367,7 @@ def acquire_transaction_locks():
             release_transaction_locks(descriptors)
             return None
     return descriptors
+
 def validate_restore_inputs(marker):
     backup = marker["backup_path"]
     target = marker["target_path"]
@@ -4016,12 +4405,17 @@ def validate_restore_inputs(marker):
         release_st = reject_path(release_backup)
         if not stat.S_ISDIR(release_st.st_mode):
             raise RuntimeError("release_backup_not_directory")
-        allowed = lambda name: name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "catalog-release"} or name.endswith(".bundle")
+        allowed = lambda name: name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "compatibility-set.json", "compatibility-set-local", "catalog-release", "external-local-members", "Malibu.app.zip", "malibu-app-state.json"} or name.endswith(".bundle")
         if any(not allowed(name) for name in os.listdir(release_backup)):
             raise RuntimeError("release_backup_unexpected_entry")
         if release_tree_sha256(release_backup) != str(marker["release_backup_sha256"]):
             raise RuntimeError("release_backup_sha256_mismatch")
+        external_backup = os.path.join(release_backup, "external-local-members")
+        if os.path.exists(external_backup):
+            validate_external_local_backup(external_backup)
+        validate_malibu_app_backup(release_backup)
     return backup, target, release_backup
+
 def release_tree_sha256(root_path):
     records = []
     for current, directory_names, file_names in os.walk(root_path, topdown=True, followlinks=False):
@@ -4045,10 +4439,180 @@ def release_tree_sha256(root_path):
     for _, record in sorted(records, key=lambda item: item[0]):
         digest.update(record)
     return digest.hexdigest()
+
 def owned_release_resource(name):
-    return name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "catalog-release"} or name.endswith(".bundle")
+    return name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "compatibility-set.json", "compatibility-set-local", "catalog-release"} or name.endswith(".bundle")
+
+def external_local_members():
+    home = os.path.expanduser("~")
+    return [
+        ("launchd", os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider.plist"), "provider.plist"),
+        ("watchdog_script", os.path.join(home, ".local/share/macprovider-watchdog/macprovider-health-monitor"), "watchdog.sh"),
+        ("watchdog_plist", os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"), "watchdog.plist"),
+    ]
+
+def validate_external_local_backup(backup_directory):
+    reject_path(backup_directory)
+    state_path = os.path.join(backup_directory, "state.json")
+    reject_path(state_path)
+    with open(state_path, "r", encoding="utf-8") as handle:
+        state = json.load(handle)
+    if set(state) != {"schema_version", "members"} or state["schema_version"] != 1 or not isinstance(state["members"], list):
+        raise RuntimeError("external_backup_state_invalid")
+    expected = external_local_members()
+    if [record.get("member") for record in state["members"]] != [member[0] for member in expected]:
+        raise RuntimeError("external_backup_members_invalid")
+    expected_names = {"state.json"}
+    for record, (_, _, backup_name) in zip(state["members"], expected):
+        present = record.get("was_present")
+        if not isinstance(present, bool):
+            raise RuntimeError("external_backup_presence_invalid")
+        backup_path = os.path.join(backup_directory, backup_name)
+        if present:
+            if set(record) != {"member", "mode", "sha256", "was_present"}:
+                raise RuntimeError("external_backup_record_invalid")
+            mode = record.get("mode")
+            digest = record.get("sha256")
+            if not isinstance(mode, int) or isinstance(mode, bool) or mode < 0 or mode > 0o7777:
+                raise RuntimeError("external_backup_mode_invalid")
+            if not isinstance(digest, str) or not re.match(r"^[0-9a-f]{64}$", digest):
+                raise RuntimeError("external_backup_sha256_invalid")
+            backup_st = reject_path(backup_path)
+            if not stat.S_ISREG(backup_st.st_mode) or stat.S_IMODE(backup_st.st_mode) != mode or sha256(backup_path) != digest:
+                raise RuntimeError("external_backup_file_invalid")
+            expected_names.add(backup_name)
+        elif set(record) != {"member", "was_present"} or os.path.exists(backup_path):
+            raise RuntimeError("external_backup_absence_invalid")
+    if set(os.listdir(backup_directory)) != expected_names:
+        raise RuntimeError("external_backup_unexpected_entry")
+    return state
+
+def restore_external_local_members(release_backup):
+    backup_directory = os.path.join(release_backup, "external-local-members")
+    if not os.path.exists(backup_directory):
+        return
+    state = validate_external_local_backup(backup_directory)
+    for record, (_, target, backup_name) in zip(state["members"], external_local_members()):
+        os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+        reject_path(os.path.dirname(target))
+        if record["was_present"]:
+            atomic_copy_binary(os.path.join(backup_directory, backup_name), target, int(record["mode"]))
+        elif os.path.exists(target):
+            target_st = reject_path(target)
+            if not stat.S_ISREG(target_st.st_mode):
+                raise RuntimeError("external_restore_target_invalid")
+            os.unlink(target)
+
+def validate_malibu_app_backup(release_backup):
+    archive = os.path.join(release_backup, "Malibu.app.zip")
+    state_path = os.path.join(release_backup, "malibu-app-state.json")
+    archive_exists = os.path.exists(archive)
+    state_exists = os.path.exists(state_path)
+    if archive_exists != state_exists:
+        raise RuntimeError("malibu_backup_incomplete")
+    if not state_exists:
+        return None
+    archive_st = reject_path(archive)
+    state_st = reject_path(state_path)
+    if not stat.S_ISREG(archive_st.st_mode) or not stat.S_ISREG(state_st.st_mode):
+        raise RuntimeError("malibu_backup_not_regular")
+    fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        raw = os.read(fd, 65537)
+    finally:
+        os.close(fd)
+    if len(raw) > 65536:
+        raise RuntimeError("malibu_backup_state_oversized")
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("malibu_backup_state_invalid") from exc
+    if set(record) != {"archive_sha256", "schema_version", "target_path"} or record["schema_version"] != 1:
+        raise RuntimeError("malibu_backup_state_invalid")
+    target = record.get("target_path")
+    candidates = {
+        "/Applications/Malibu.app",
+        os.path.normpath(os.path.join(os.path.expanduser("~"), "Applications/Malibu.app")),
+    }
+    if target not in candidates or os.path.normpath(target) != target:
+        raise RuntimeError("malibu_backup_target_invalid")
+    digest = record.get("archive_sha256")
+    if not isinstance(digest, str) or not re.match(r"^[0-9a-f]{64}$", digest) or sha256(archive) != digest:
+        raise RuntimeError("malibu_backup_sha256_mismatch")
+    return record
+
+def validate_extracted_malibu_app(app):
+    app_st = reject_path(app)
+    if not stat.S_ISDIR(app_st.st_mode) or os.path.basename(app) != "Malibu.app":
+        raise RuntimeError("malibu_restored_bundle_invalid")
+    for current, directory_names, file_names in os.walk(app, topdown=True, followlinks=False):
+        reject_path(current)
+        for name in directory_names + file_names:
+            reject_path(os.path.join(current, name))
+    info_plist = os.path.join(app, "Contents", "Info.plist")
+    info_st = reject_path(info_plist)
+    if not stat.S_ISREG(info_st.st_mode):
+        raise RuntimeError("malibu_restored_bundle_invalid")
+
+def restore_malibu_app_if_present(release_backup):
+    record = validate_malibu_app_backup(release_backup)
+    if record is None:
+        return
+    target = record["target_path"]
+    parent = os.path.dirname(target)
+    parent_st = reject_path(parent)
+    if not stat.S_ISDIR(parent_st.st_mode) or not os.access(parent, os.W_OK):
+        raise RuntimeError("malibu_restore_parent_unwritable")
+    extraction = os.path.join(parent, f".malibu-rollback-extract-{uuid.uuid4()}")
+    displaced = os.path.join(parent, f".Malibu.app.rollback-displaced-{uuid.uuid4()}")
+    os.mkdir(extraction, 0o700)
+    target_displaced = False
+    try:
+        ditto = os.environ.get("MACPROVIDER_DITTO", "/usr/bin/ditto")
+        result = subprocess.run(
+            [ditto, "-x", "-k", os.path.join(release_backup, "Malibu.app.zip"), extraction],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("malibu_backup_extract_failed")
+        entries = os.listdir(extraction)
+        if entries != ["Malibu.app"]:
+            raise RuntimeError("malibu_backup_archive_shape_invalid")
+        restored = os.path.join(extraction, "Malibu.app")
+        validate_extracted_malibu_app(restored)
+        if os.path.exists(target):
+            reject_path(target)
+            os.replace(target, displaced)
+            target_displaced = True
+        try:
+            os.replace(restored, target)
+        except Exception:
+            if target_displaced and not os.path.exists(target):
+                os.replace(displaced, target)
+                target_displaced = False
+            raise
+        parent_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        if target_displaced:
+            shutil.rmtree(displaced)
+            target_displaced = False
+    finally:
+        shutil.rmtree(extraction, ignore_errors=True)
+        if target_displaced and not os.path.exists(target) and os.path.exists(displaced):
+            os.replace(displaced, target)
+        elif os.path.exists(displaced):
+            shutil.rmtree(displaced, ignore_errors=True)
+
 def copy_release_resources(source, destination):
     for name in os.listdir(source):
+        if name in {"external-local-members", "Malibu.app.zip", "malibu-app-state.json"}:
+            continue
         if not owned_release_resource(name):
             raise RuntimeError("release_backup_unexpected_entry")
         source_path = os.path.join(source, name)
@@ -4057,6 +4621,7 @@ def copy_release_resources(source, destination):
             shutil.copytree(source_path, destination_path, symlinks=False, copy_function=shutil.copy2)
         else:
             shutil.copy2(source_path, destination_path, follow_symlinks=False)
+
 def fsync_release_tree(root_path):
     directories = []
     for current, directory_names, file_names in os.walk(root_path, topdown=True, followlinks=False):
@@ -4074,6 +4639,7 @@ def fsync_release_tree(root_path):
             os.fsync(fd)
         finally:
             os.close(fd)
+
 def atomic_copy_binary(source, target, mode):
     temporary = os.path.join(os.path.dirname(target), f".macprovider-cli.rollback-restore-{uuid.uuid4()}")
     try:
@@ -4104,8 +4670,12 @@ def atomic_copy_binary(source, target, mode):
         except FileNotFoundError:
             pass
         raise
-def restore(marker):
+
+def restore(marker, failure_class):
     backup, target, release_backup = validate_restore_inputs(marker)
+    exact_compatibility_transaction = marker.get("transaction_state") is not None
+    if exact_compatibility_transaction and marker.get("transaction_state") != "restoring_previous":
+        marker = transition_marker(marker, "restoring_previous")
     target_directory = os.path.dirname(target)
     if release_backup:
         staging = os.path.join(target_directory, f".macprovider-cli.release-restore-{uuid.uuid4()}")
@@ -4125,17 +4695,34 @@ def restore(marker):
                 os.replace(os.path.join(staging, name), os.path.join(target_directory, name))
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+        restore_external_local_members(release_backup)
+        restore_malibu_app_if_present(release_backup)
     atomic_copy_binary(backup, target, int(marker["mode"]))
     dir_fd = os.open(os.path.dirname(target), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+    # The newly restored prior release is the only executable trusted to
+    # author the watchdog transition. This is best effort for legacy rollback
+    # binaries that predate lifecycle-state; recovery itself must still run.
+    record_watchdog_recovery(marker, failure_class)
     try:
         subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
         log(f"launchctl_restore_warning={exc}")
+    reason = "restored_prior_release" if release_backup else "restored_prior_binary"
+    if exact_compatibility_transaction:
+        marker = transition_marker(marker, "awaiting_previous_readiness", readiness_seconds=300)
+        event(
+            "in_progress",
+            "rollback",
+            failure_class,
+            f"{reason}_awaiting_buyer_serving",
+            marker,
+        )
+        return
     try:
         os.unlink(pending)
     except FileNotFoundError:
@@ -4146,8 +4733,33 @@ def restore(marker):
         pass
     if release_backup:
         shutil.rmtree(release_backup, ignore_errors=True)
-    reason = "restored_prior_release" if release_backup else "restored_prior_binary"
-    event("failure", "rollback", classify_post_start_failure(marker), reason, marker)
+    event("failure", "rollback", failure_class, reason, marker)
+
+def keep_previous_readiness_recovery_live(marker):
+    validate_restore_inputs(marker)
+    current_version = current_binary_version(marker["target_path"])
+    if current_version != str(marker["previous_version"]):
+        restore(marker, "previous_release_version_mismatch")
+        return
+    try:
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except Exception as exc:
+        log(f"launchctl_previous_readiness_warning={exc}")
+    marker = transition_marker(marker, "awaiting_previous_readiness", readiness_seconds=300)
+    event(
+        "in_progress",
+        "rollback",
+        "previous_set_readiness_pending",
+        "previous_release_still_awaiting_buyer_serving",
+        marker,
+    )
+
 def classify_post_start_failure(marker):
     try:
         printed = subprocess.run(["launchctl", "print", f"gui/{uid}/{label}"], check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout.lower()
@@ -4170,30 +4782,62 @@ def classify_post_start_failure(marker):
     if current_version and current_version != str(marker["target_version"]):
         return "post_start_rejoin_timeout"
     return "post_start_rejoin_timeout"
+
 transaction_locks = []
+lifecycle_lock = None
 try:
     verify_root()
+    lifecycle_lock = acquire_lifecycle_lock()
+    if lifecycle_lock is None:
+        log("recovery_deferred=lifecycle_lease_lock_contended")
+        sys.exit(0)
     acquired = acquire_transaction_locks()
     if acquired is None:
         sys.exit(0)
     transaction_locks = acquired
+    lease = inspect_lifecycle_lease()
+    prevalidated_marker = None
+    if lease is not None:
+        if lease["kind"] == "maintenance":
+            log(f"recovery_deferred=validated_maintenance_lease owner_pid={lease['owner_pid']}")
+            sys.exit(0)
+        if not os.path.exists(pending):
+            log(f"recovery_deferred=validated_startup_lease owner_pid={lease['owner_pid']}")
+            sys.exit(0)
+        try:
+            reject_path(pending)
+            prevalidated_marker = read_marker()
+        except Exception:
+            log(f"recovery_deferred=validated_startup_lease owner_pid={lease['owner_pid']}")
+            sys.exit(0)
+        provider_pid = launchd_provider_pid()
+        if not marker_deadline_expired(prevalidated_marker) or provider_pid != lease["owner_pid"]:
+            log(f"recovery_deferred=validated_unrelated_startup_lease owner_pid={lease['owner_pid']}")
+            sys.exit(0)
+        log(f"recovery_continuing=expired_autoupdate_startup owner_pid={lease['owner_pid']}")
     if not os.path.exists(pending):
         scan_without_pending()
         sys.exit(0)
     reject_path(pending)
-    try:
-        marker = read_marker()
-    except Exception as exc:
-        event("failure", "rollback", "orphaned_pending_marker", "marker_invalid", None)
-        quarantine(f"marker_invalid:{exc}", None)
-        sys.exit(0)
+    marker = prevalidated_marker
+    if marker is None:
+        try:
+            marker = read_marker()
+        except Exception as exc:
+            event("failure", "rollback", "orphaned_pending_marker", "marker_invalid", None)
+            quarantine(f"marker_invalid:{exc}", None)
+            sys.exit(0)
     if process_success_sentinel(marker):
         sys.exit(0)
     if not marker_deadline_expired(marker):
         log("pending_marker_still_inside_post_start_window")
         sys.exit(0)
     try:
-        restore(marker)
+        if marker.get("transaction_state") == "awaiting_previous_readiness":
+            keep_previous_readiness_recovery_live(marker)
+            sys.exit(0)
+        failure_class = classify_post_start_failure(marker)
+        restore(marker, failure_class)
     except Exception as exc:
         unsupported_topology = str(exc).startswith("unsupported_install_topology")
         failure_class = "other" if unsupported_topology else "rollback_backup_corrupt"
@@ -4208,23 +4852,35 @@ finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+    if lifecycle_lock is not None:
+        try:
+            fcntl.flock(lifecycle_lock, fcntl.LOCK_UN)
+        finally:
+            os.close(lifecycle_lock)
 PY
 }
+
 main() {
   autoupdate_recovery_tick
   pid="$(read_provider_id || true)"
   if [ -z "$pid" ]; then
+    # Provider not yet installed / configured. Stay silent; if the
+    # operator installs later we'll start working on the next tick.
     exit 0
   fi
   provider_pid="$(provider_process_pid || true)"
   if [ -z "$provider_pid" ]; then
-    log "provider process unhealthy: expected exactly one macprovider-cli at $BINARY_PATH"
+    log "provider process unhealthy: launchd service $LABEL has no validated PID at $BINARY_PATH"
     now_epoch > "$LAST_KICK_FILE"
     note_provider_restart_request
     exit 0
   fi
   boot_id="$(current_boot_id)"
   if ! local_provider_health_ok "$provider_pid"; then
+    if valid_lifecycle_lease "$provider_pid"; then
+      log "provider process $provider_pid is inside a validated startup/maintenance lease; watchdog grants bounded grace"
+      exit 0
+    fi
     armed_boot=""
     if [ -f "$ARMED_FILE" ]; then
       armed_boot="$(cat "$ARMED_FILE" 2>/dev/null || true)"
@@ -4259,11 +4915,17 @@ main() {
     exit 0
   fi
   if has_established_conn "$coord_ip"; then
+    # Healthy. Stay silent so the log file does not bloat.
     exit 0
   fi
   log "warning: provider process $provider_pid is locally healthy, but no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT} for provider_id=${pid}"
+  # No ESTABLISHED connection. Coordinator TCP state is advisory only:
+  # the health verdict is the installed provider process plus local
+  # /v1/health. Do not kick solely because another process can or
+  # cannot reach the coordinator.
   exit 0
 }
+
 main "$@"
 WATCHDOG_EOF
   chmod 0755 "$WATCHDOG_PATH"
@@ -4741,7 +5403,8 @@ print_pid() {
     printf "%s\n" "$MANUAL_PID"
     return
   fi
-  launchctl list 2>/dev/null | awk '/live.streamvc.macprovider/ {print $1; exit}'
+  launchctl print "gui/$(id -u)/live.streamvc.macprovider" 2>/dev/null \
+    | awk 'NF == 3 && $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3 }'
 }
 
 print_autotune_handoff() {
@@ -5035,6 +5698,8 @@ main() {
     activate_staged_config
     check_path_hint
     write_install_manifest "$tag"
+    record_lifecycle_state paused_by_operator install_committed_without_start \
+      || die 5 "failed to persist paused lifecycle state"
     # An explicit no-start choice has no new local service to validate, but its
     # manifest mutation is still covered by the recovery transaction.
     commit_install_transaction
@@ -5063,6 +5728,8 @@ main() {
       activate_staged_config
       check_path_hint
       write_install_manifest "$tag"
+      record_lifecycle_state paused_by_operator install_committed_without_start \
+        || die 5 "failed to persist paused lifecycle state"
       commit_install_transaction
       log "Install complete without starting a provider service."
       exit 0

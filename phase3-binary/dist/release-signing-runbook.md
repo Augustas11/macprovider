@@ -22,7 +22,7 @@ script fails direct Installer.app installs so operators do not bypass
 `install.sh`'s user-level config, launchd, and support-file setup.
 
 Production releases fail closed unless the operator-supplied signing,
-notarization, Sparkle, checksum-signing, and Pearl publication secrets are
+notarization, and checksum-signing secrets are
 available through the protected `production-release` environment. The release
 workflow no longer publishes an adhoc-signed compatibility artifact: fresh
 installs on macOS >= 26.3.1 cannot run it through launchd, so such an artifact
@@ -188,10 +188,7 @@ select the `production-release` environment and add these environment secrets:
 | `APPLE_NOTARY_APPLE_ID` | The enrolled Apple ID email |
 | `APPLE_NOTARY_PASSWORD` | The app-specific password from step 4 |
 | `APPLE_NOTARY_TEAM_ID` | The Team ID from step 5 |
-| `SPARKLE_EDDSA_PRIVATE_KEY` | Sparkle Ed25519 private key matching `SUPublicEDKey` in `phase3-binary/app/project.yml` |
 | `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` | P-256 private key matching the public key embedded in `phase3-binary/dist/install.sh` |
-| `MALIBU_DOWNLOAD_SSH_KEY` | Root SSH private key for the Pearl publication host |
-| `MALIBU_DOWNLOAD_VPS_HOST` | Pearl publication host address |
 | `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read access |
 
 Do not duplicate release secrets at repository scope. The unsigned `build` job
@@ -200,12 +197,10 @@ artifact. Only the reviewed `sign_publish` job can enter the protected
 environment and read the release secrets.
 
 The unsigned build is content-pinned as part of the reviewed commit:
-`phase3-binary/Package.resolved` and `phase3-binary/app/Package.resolved`
-must match the dispatch commit byte-for-byte, Malibu resolves Sparkle at its
-reviewed 2.6.4 revision, and XcodeGen 2.45.4 is installed only from its fixed
-release archive after SHA-256 verification. The signing job likewise verifies
-the fixed Sparkle 2.6.4 tools archive before extraction and deletes the Apple
-keychain and imported signing material before invoking `generate_appcast`.
+`phase3-binary/Package.resolved` must match the dispatch commit byte-for-byte,
+the Malibu project has no package dependency or independent updater, and
+XcodeGen 2.45.4 is installed only from its fixed release archive after SHA-256
+verification.
 
 ### 8. Build the candidate, cut the release tag, and verify
 
@@ -257,19 +252,22 @@ is 1-15 minutes for notarization. The workflow:
 5. Re-tars with the signed, notarization-accepted binary
 6. Builds a signed flat `.pkg` when the Installer certificate secrets exist
 7. Notarizes and staples the `.pkg`
-8. Deletes the transient keychain before running the digest-pinned Sparkle tool
-9. Verifies `checksums.txt.sig` against the canonical public key embedded in
+8. Builds and validates the canonical `compatibility-artifact-index.json`, which
+   binds the exact app, CLI, coordinator, gateway, catalog/key, Pearl metadata,
+   and compatibility manifest members to one tag and commit
+9. Deletes the transient Apple keychain
+10. Verifies `checksums.txt.sig` against the canonical public key embedded in
    `install.sh`, then verifies the exact signed provenance/asset set
-10. Creates a draft GitHub release and re-fetches every uploaded asset through
+11. Creates a draft GitHub release and re-fetches every uploaded asset through
     the captured numeric release ID
-11. Revalidates `origin/main`, the protected tag, repository release posture,
+12. Revalidates `origin/main`, the protected tag, repository release posture,
     checksum signature, numeric ID, and asset digests immediately before the
     numeric API transition from draft to public
-12. Re-fetches the published numeric release and requires GitHub immutability
-    before producing the Pearl publication manifest
+13. Re-fetches the published numeric release and requires GitHub immutability
+    before recording the numeric release publication evidence
 
 If any draft verification or final gate fails, the workflow does not make the
-release public and does not publish to Pearl. Inspect or delete the retained
+release public. Inspect or delete the retained
 draft by numeric ID before deliberately retrying; never replace assets on a
 public immutable release.
 
@@ -280,6 +278,8 @@ Expected release assets:
   container for `install.sh`
 - `checksums.txt`
 - `checksums.txt.sig`
+- `compatibility-set.json` — signed local/external transaction contract
+- `compatibility-artifact-index.json` — exact release-set inventory
 - `release-provenance.json` — signed through `checksums.txt`; binds every
   release asset hash to the exact tag, commit, and repository
 
@@ -344,38 +344,15 @@ bash scripts/verify-malibu-release-artifacts.sh Malibu-vX.Y.Z.dmg
 Expect `codesign --verify`, `stapler validate`, and `spctl` to pass
 without `xattr -d`.
 
-## Numeric-ID-only Pearl recovery
+## Publication recovery
 
-Normal Pearl publication uses files captured in the same protected workflow;
-it never redownloads by tag. Manual recovery likewise requires the immutable
-numeric release ID and the five numeric asset IDs recorded by GitHub. Do not
-substitute tag-based download commands or regenerate `checksums.txt`.
-
-```bash
-export GITHUB_REPOSITORY=Augustas11/macprovider
-export GH_TOKEN='<fine-grained contents:read token>'
-export MALIBU_DOWNLOAD_SSH_KEY="$HOME/.ssh/pearl_operator_ed25519"
-
-# Run from an isolated clean worktree whose HEAD is the exact reviewed commit.
-test "$(git rev-parse HEAD)" = '<40-hex reviewed origin/main commit>'
-
-bash scripts/recover-malibu-publication.sh \
-  vX.Y.Z '<40-hex reviewed origin/main commit>' \
-  '<release ID>' \
-  '<Malibu DMG asset ID>' \
-  '<appcast.xml asset ID>' \
-  '<checksums.txt asset ID>' \
-  '<checksums.txt.sig asset ID>' \
-  '<release-provenance.json asset ID>'
-```
-
-Recovery fails unless the numeric release is immutable and its exact tag,
-commit, asset IDs, GitHub SHA-256 digests, signed checksums/provenance, Malibu
-DMG Apple signature/notarization/staple, Sparkle Ed25519 signature and appcast
-URL/length/version all agree. Pearl receives the verified files in an
-unpredictable root-owned `0700` staging directory; the helper publishes a
-root-owned `0755`/`0644` immutable graph. A permanent tag manifest rejects
-same-tag drift and versioned download pointers are never retargeted.
+GitHub's immutable numeric release is the sole release publication. There is no
+second appcast or Pearl-hosted `latest.dmg` authority to repair. If protected
+publication stops before the draft-to-public transition, inspect or delete the
+numeric draft and rerun from the same reviewed tag. Never regenerate checksums,
+replace a public asset, or construct a partial compatibility set. Installed
+providers consume the signed index and checksums and reject an incomplete or
+drifting member set before mutation.
 
 ## Related
 

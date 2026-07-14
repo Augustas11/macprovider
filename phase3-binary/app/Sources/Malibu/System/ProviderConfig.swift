@@ -2,9 +2,9 @@ import CryptoKit
 import Darwin
 import Foundation
 
-// Read / write the shared ~/.config/macprovider/config.yaml. CLI Keychain is
-// authoritative for launchd credentials. A temporary App-Keychain compatibility
-// copy remains only for shipped earnings views and is never launchd authority.
+// Read / write the shared ~/.config/macprovider/config.yaml. The CLI Keychain is
+// the sole provider-credential authority. Malibu may read and retire a legacy
+// App-Keychain item only while handing custody to the installed CLI.
 
 enum ProviderConfig {
     enum LinkState: String, Equatable {
@@ -14,9 +14,8 @@ enum ProviderConfig {
     }
 
     // Malibu recognizes an installed identity from the shared config plus its
-    // ownership marker. The launchd CLI independently proves credential
-    // readiness through its versioned local status contract; the App Keychain
-    // compatibility copy is not lifecycle authority.
+    // ownership marker plus the CLI-custody receipt written after a versioned
+    // credential handoff succeeds.
     static var isConfigured: Bool {
         get async {
             await isConfigured(paths: .current)
@@ -50,6 +49,65 @@ enum ProviderConfig {
             return nil
         }
         return LinkState(rawValue: value)
+    }
+
+    /// Automatic updates are a whole-provider policy. Any explicit false or
+    /// malformed present value disables background updates fail-closed; manual
+    /// user-initiated update actions remain available.
+    static func automaticUpdatesEnabled(
+        paths: ProviderPaths = .current,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        let contents = try? String(contentsOf: paths.configFile)
+        return automaticUpdatesEnabled(configContents: contents, environment: environment)
+    }
+
+    static func automaticUpdatesEnabled(
+        configContents: String?,
+        environment: [String: String]
+    ) -> Bool {
+        var values: [Bool] = []
+        if let rawEnvironment = environment["MACPROVIDER_AUTOUPDATE"] {
+            guard let parsed = parsePolicyBool(rawEnvironment) else { return false }
+            values.append(parsed)
+        }
+        if let configContents {
+            var insideLegacyAutoupdate = false
+            for rawLine in configContents
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init) {
+                let uncommented = rawLine.split(separator: "#", maxSplits: 1).first.map(String.init) ?? ""
+                let trimmed = uncommented.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                let isTopLevel = uncommented == uncommented.trimmingCharacters(in: .whitespaces)
+                if isTopLevel {
+                    insideLegacyAutoupdate = trimmed == "autoupdate:"
+                    for key in ["auto_update_enabled", "autoupdate_enabled"] where trimmed.hasPrefix("\(key):") {
+                        let value = String(trimmed.dropFirst("\(key):".count))
+                        guard let parsed = parsePolicyBool(value) else { return false }
+                        values.append(parsed)
+                    }
+                } else if insideLegacyAutoupdate, trimmed.hasPrefix("enabled:") {
+                    let value = String(trimmed.dropFirst("enabled:".count))
+                    guard let parsed = parsePolicyBool(value) else { return false }
+                    values.append(parsed)
+                }
+            }
+        }
+        return !values.contains(false)
+    }
+
+    private static func parsePolicyBool(_ raw: String) -> Bool? {
+        switch raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            .lowercased() {
+        case "true", "on", "yes", "1": return true
+        case "false", "off", "no", "0": return false
+        default: return nil
+        }
     }
 
     static func writeLinkState(_ state: LinkState, paths: ProviderPaths = .current) throws {
@@ -174,106 +232,6 @@ enum ProviderConfig {
         }
     }
 
-    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL) async throws {
-        try await saveProviderIdentity(providerID: providerID, token: token, coordinatorWSURL: coordinatorWSURL, paths: .current)
-    }
-
-    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL, paths: ProviderPaths) async throws {
-        try await saveProviderIdentity(
-            providerID: providerID,
-            token: token,
-            coordinatorWSURL: coordinatorWSURL,
-            paths: paths,
-            readToken: { await KeychainStore.readProviderToken(providerID: $0) },
-            saveToken: { try await KeychainStore.saveProviderToken(providerID: $0, token: $1) },
-            deleteToken: { try await KeychainStore.deleteProviderToken(providerID: $0) }
-        )
-    }
-
-    static func saveProviderIdentity(
-        providerID: String,
-        token: String,
-        coordinatorWSURL: URL,
-        paths: ProviderPaths,
-        readToken: @escaping (String) async -> String?,
-        saveToken: @escaping (String, String) async throws -> Void,
-        deleteToken: @escaping (String) async throws -> Void,
-        createAppMarker: (() throws -> Void)? = nil,
-        verifyConfigured: (() async -> Bool)? = nil
-    ) async throws {
-        try paths.ensureDirectories()
-        let lockFD = try acquireConfigMutationLock(paths: paths)
-        defer { releaseConfigMutationLock(lockFD) }
-        let fm = FileManager.default
-
-        // AUDIT R1 ARCHITECT A2: fail-fast on config collision instead of
-        // silently rewriting a file the CLI track owns.
-        let configExists = fm.fileExists(atPath: paths.configFile.path)
-        let markerExists = fm.fileExists(atPath: paths.appMarkerFile.path)
-        if configExists && !markerExists {
-            throw SaveError.existingConfigNotOwnedByApp
-        }
-        let originalData = configExists ? try Data(contentsOf: paths.configFile) : nil
-        let originalToken = await readToken(providerID)
-
-        // Merge into any existing YAML rather than clobbering — a developer who
-        // ran install.sh first might have coordinator overrides here.
-        var lines: [String] = []
-        if let existing = try? String(contentsOf: paths.configFile) {
-            // Same CRLF-grapheme note as readProviderID above.
-            let normalized = existing
-                .replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
-            lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-                .filter {
-                    !$0.hasPrefix("provider_id:")
-                        && !$0.hasPrefix("provider_token:")
-                        && !$0.hasPrefix("link_state:")
-                        && !$0.hasPrefix("coordinator_url:")
-                }
-        }
-        lines.append("provider_id: \(providerID)")
-        lines.append("coordinator_url: \(coordinatorWSURL.absoluteString)")
-        lines.append("link_state: \(LinkState.pendingLink.rawValue)")
-        // This dormant direct-save path deliberately does not write the token to
-        // disk. Production CLI-track imports use importExistingCLIConfig(), which
-        // stages authoritative custody in the installed CLI while retaining the
-        // launchd-readable source until the restarted provider proves admission.
-        let joined = lines.joined(separator: "\n") + "\n"
-        do {
-            try await saveToken(providerID, token)
-            try Data(joined.utf8).write(to: paths.configFile, options: [.atomic])
-            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
-            if let createAppMarker {
-                try createAppMarker()
-            } else {
-                try writeAppMarker(paths: paths, fileManager: fm)
-            }
-            let configured: Bool
-            if let verifyConfigured {
-                configured = await verifyConfigured()
-            } else {
-                configured = await isConfigured(paths: paths)
-            }
-            guard configured else { throw SaveError.savedIdentityNotConfigured }
-        } catch {
-            if let originalToken {
-                try? await saveToken(providerID, originalToken)
-            } else {
-                try? await deleteToken(providerID)
-            }
-            if let originalData {
-                try? originalData.write(to: paths.configFile, options: [.atomic])
-            } else {
-                try? fm.removeItem(at: paths.configFile)
-            }
-            if !markerExists {
-                try? fm.removeItem(at: paths.appMarkerFile)
-            }
-            throw error
-        }
-    }
-
     static func importExistingCLIConfig() async throws {
         try await importExistingCLIConfig(paths: .current)
     }
@@ -291,8 +249,8 @@ enum ProviderConfig {
         readAppCredential: @escaping @Sendable (String) async -> String? = {
             await KeychainStore.readProviderToken(providerID: $0)
         },
-        saveAppCredential: @escaping @Sendable (String, String) async throws -> Void = {
-            try await KeychainStore.saveProviderToken(providerID: $0, token: $1)
+        deleteAppCredential: @escaping @Sendable (String) async throws -> Void = {
+            try await KeychainStore.deleteProviderToken(providerID: $0)
         }
     ) async throws {
         try paths.ensureDirectories()
@@ -348,6 +306,10 @@ enum ProviderConfig {
                   await isConfigured(paths: paths) else {
                 throw SaveError.savedIdentityNotConfigured
             }
+            try await deleteAppCredential(providerID)
+            guard await readAppCredential(providerID) == nil else {
+                throw SaveError.importKeychainVerificationFailed
+            }
             return
         }
 
@@ -375,21 +337,15 @@ enum ProviderConfig {
             guard (try? Data(contentsOf: paths.configFile)) == originalData else {
                 throw CocoaError(.fileWriteFileExists)
             }
-            if let existingAppToken = await readAppCredential(providerID) {
-                guard existingAppToken == token else {
-                    throw SaveError.importKeychainVerificationFailed
-                }
-            } else {
-                try await saveAppCredential(providerID, token)
-            }
-            guard await readAppCredential(providerID) == token else {
-                throw SaveError.importKeychainVerificationFailed
-            }
             try writeCredentialCustodyMarker(providerID: providerID, paths: paths)
             try writeAppMarker(paths: paths, fileManager: fm)
             guard readProviderID(paths: paths) == providerID,
                   await isConfigured(paths: paths) else {
                 throw SaveError.existingConfigNotOwnedByApp
+            }
+            try await deleteAppCredential(providerID)
+            guard await readAppCredential(providerID) == nil else {
+                throw SaveError.importKeychainVerificationFailed
             }
             try cleanupImportArtifacts(backup: backup, marker: marker, fileManager: fm)
         } catch {
@@ -475,23 +431,6 @@ enum ProviderConfig {
         try cleanupImportArtifacts(backup: expectedBackupURL, marker: markerURL, fileManager: fm)
     }
 
-    static func repairMarkerlessAppOwnedConfig(providerID: String, paths: ProviderPaths = .current) async throws {
-        try paths.ensureDirectories()
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: paths.configFile.path) else {
-            throw SaveError.missingProviderID
-        }
-        if fm.fileExists(atPath: paths.appMarkerFile.path) {
-            guard await isConfigured(paths: paths) else { throw SaveError.savedIdentityNotConfigured }
-            return
-        }
-        guard readProviderID(paths: paths) == providerID else {
-            throw SaveError.existingConfigNotOwnedByApp
-        }
-        try writeAppMarker(paths: paths, fileManager: fm)
-        guard await isConfigured(paths: paths) else { throw SaveError.savedIdentityNotConfigured }
-    }
-
     static func startFreshMovingCLIConfigAside(now: Date = Date()) throws -> URL? {
         try startFreshMovingCLIConfigAside(now: now, paths: .current)
     }
@@ -569,14 +508,7 @@ enum ProviderConfig {
               let providerID = readProviderID(paths: paths) else {
             return false
         }
-        // A legacy App bearer is compatible only after a fresh installed CLI
-        // process proved its own custody. The local marker does not authorize
-        // launchd; it only prevents repeatedly routing the already-verified
-        // compatibility copy through migration.
-        if await KeychainStore.readProviderToken(providerID: providerID) != nil {
-            return readCredentialCustodyMarker(paths: paths) == providerID
-        }
-        return true
+        return readCredentialCustodyMarker(paths: paths) == providerID
     }
 
     private static func writeAppMarker(paths: ProviderPaths, fileManager fm: FileManager) throws {

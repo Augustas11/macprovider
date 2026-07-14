@@ -92,10 +92,9 @@ public struct AppConfig: Equatable, Sendable {
     // never logs the token (URL is redacted, headers are not logged).
     public var providerToken: String?
 
-    // SPEC-025 §12 conflict #2 — set to "malibu-app" when the CLI is spawned as a
-    // managed child of Malibu.app. The AutoUpdater checks this and no-ops so the
-    // App track's Sparkle update path owns whole-bundle updates end-to-end. Other
-    // values are reserved (e.g. future MDM wrappers can set their own tag).
+    // Optional origin metadata retained for diagnostics and control-socket
+    // compatibility. It never transfers lifecycle, credential, identity, or
+    // update authority away from the launchd-managed CLI.
     public var managedBy: String?
 
     // T3-01 token/chunk batching: number of content-token deltas to accumulate
@@ -190,7 +189,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var switchStatePath: String?
     public var providerToken: String?
     public var providerTokenFile: String?
-    // SPEC-025 §12 conflict #2 — see AppConfig.managedBy.
+    // See AppConfig.managedBy; this is origin metadata, not an authority flag.
     public var managedBy: String?
     // SPEC-013 autoresearch serving knobs. nil ⇒ defer to env / YAML /
     // built-in default (the latter mirrors prior single-slot behavior).

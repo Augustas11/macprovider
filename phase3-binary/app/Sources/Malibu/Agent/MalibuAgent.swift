@@ -15,8 +15,8 @@ import Foundation
 //         is false. Onboarding "Start earning" no longer bypasses the deep-
 //         link + Keychain gate.
 //   - A1 (R1+R2): pause/resume no longer optimistically flip snapshot.state.
-//         Metrics stubs (usdc==0 && malibu==0 && uptime==0 && no gpu/latency)
-//         are dropped as "not implemented" — the presenter shows "—".
+//         A legacy all-zero metrics tuple is treated as unavailable so older
+//         supported CLI peers cannot misreport "no earnings" as authoritative.
 
 @MainActor
 final class MalibuAgent: ObservableObject {
@@ -32,8 +32,6 @@ final class MalibuAgent: ObservableObject {
     private var providerLogTail: ProviderLogTail?
     private var providerLogTailCancellable: AnyCancellable?
     private var reconnect = ReconnectPolicy()
-    private let earningsClient = EarningsClient()
-    private let malibuAccrualClient = MalibuAccrualClient()
     private let thermalMonitor = ThermalMonitor()
     private var cancellables: Set<AnyCancellable> = []
     // AUDIT R2 CODE H3 fix: once shutdown begins, refuse any subsequent start()
@@ -45,6 +43,8 @@ final class MalibuAgent: ObservableObject {
     private var lastRequestsRateSample: (total: Int, date: Date)?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
+    private var credentialRepairTask: Task<Void, Never>?
+    private var admissionIdentityRecoveryTask: Task<Void, Never>?
     private let latestReleaseTTL: TimeInterval = 3600
 
     init() {
@@ -107,24 +107,31 @@ final class MalibuAgent: ObservableObject {
         await scheduleReconnect()
     }
 
-    // AUDIT R1 ARCHITECT A1: don't flip state until the CLI acks. If the CLI
-    // returns accepted:false (current stub does), leave state where it was
-    // and surface the reason in snapshot.lastError.
+    // Do not flip state until the CLI persists and acknowledges the lifecycle
+    // transition. Malibu requests the transaction but never owns pause state.
     func pause() async {
-        if monitorsLaunchdProvider {
-            snapshot.lastError = "Pause is not available while Malibu monitors the background provider."
+        guard let control else {
+            snapshot.lastError = "Provider control is unavailable. Malibu will retry the local connection."
             return
         }
         snapshot.pauseAcknowledged = false
-        try? await control?.send(.pauseRequest)
+        do {
+            try await control.send(.pauseRequest)
+        } catch {
+            snapshot.lastError = "Could not request provider pause: \(error.localizedDescription)"
+        }
     }
 
     func resume() async {
-        if monitorsLaunchdProvider {
-            snapshot.lastError = "Resume is not available while Malibu monitors the background provider."
+        guard let control else {
+            snapshot.lastError = "Provider control is unavailable. Malibu will retry the local connection."
             return
         }
-        try? await control?.send(.resumeRequest)
+        do {
+            try await control.send(.resumeRequest)
+        } catch {
+            snapshot.lastError = "Could not request provider resume: \(error.localizedDescription)"
+        }
     }
 
     func updateCLINow() async {
@@ -136,7 +143,7 @@ final class MalibuAgent: ObservableObject {
             guard let self else { return }
             do {
                 try await CLIUpdateRunner.run { line in
-                    self.logLines.append(line)
+                    self.logLines.append(LogTailBuffer.redacted(line))
                     if self.logLines.count > 400 {
                         self.logLines.removeFirst(self.logLines.count - 400)
                     }
@@ -154,21 +161,130 @@ final class MalibuAgent: ObservableObject {
         await cliUpdateTask?.value
     }
 
-    // AUDIT R2 CODE H2/H3: shutdown is the single termination path. Called from
-    // both Quit-and-Uninstall and applicationShouldTerminate for plain Quit.
-    // Cancels reconnect BEFORE marking child as stopping so nothing sneaks a
-    // start() past the isShuttingDown gate.
+    func repairProviderCredential() async {
+        guard !isShuttingDown,
+              AgentSnapshotPresenter.canRepairCredential(snapshot),
+              let expectedProviderID = snapshot.localProviderID,
+              ProviderConfig.readProviderID() == expectedProviderID else { return }
+        if let previous = credentialRepairTask {
+            previous.cancel()
+            await previous.value
+        }
+        guard !isShuttingDown, !Task.isCancelled else { return }
+        snapshot.credentialRepairInProgress = true
+        snapshot.credentialRepairLastError = nil
+        credentialRepairTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await ProviderCredentialHandoffRunner.repairCredential(
+                    configURL: ProviderPaths.current.configFile,
+                    expectedProviderID: expectedProviderID,
+                    previousServiceInstanceID: self.snapshot.serviceInstanceID
+                )
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.applyCredentialSnapshot(result)
+                if let port = ProviderConfig.readHTTPPort() {
+                    await self.applyProviderSnapshot(port: port)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.snapshot.credentialRepairLastError = error.localizedDescription
+                await self.refreshCredentialDiagnosis()
+            }
+            if !self.isShuttingDown {
+                self.snapshot.credentialRepairInProgress = false
+            }
+        }
+        await credentialRepairTask?.value
+    }
+
+    func repairAdmissionIdentity() async {
+        guard !isShuttingDown,
+              AgentSnapshotPresenter.canRepairAdmissionIdentity(snapshot) else { return }
+        let expectedProviderID = snapshot.localProviderID
+        if let configError = AgentSnapshotPresenter.admissionIdentityRecoveryConfigError(
+            expectedProviderID: expectedProviderID,
+            configuredProviderID: ProviderConfig.readProviderID()
+        ) {
+            snapshot.admissionIdentityRecoveryLastError = configError
+            return
+        }
+        guard let expectedProviderID else { return }
+        if let previous = admissionIdentityRecoveryTask {
+            previous.cancel()
+            await previous.value
+        }
+        guard !isShuttingDown, !Task.isCancelled else { return }
+        let activate = ["approval_required", "committed_cleanup"]
+            .contains(snapshot.admissionIdentityRecoveryJournalState)
+            || snapshot.admissionIdentityState == "recovery_pending"
+        snapshot.admissionIdentityRecoveryInProgress = true
+        snapshot.admissionIdentityRecoveryLastError = nil
+        admissionIdentityRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                if activate {
+                    let result = try await ProviderCredentialHandoffRunner.activateAdmissionIdentityRecovery(
+                        configURL: ProviderPaths.current.configFile,
+                        expectedProviderID: expectedProviderID,
+                        previousServiceInstanceID: self.snapshot.serviceInstanceID
+                    )
+                    guard !Task.isCancelled, !self.isShuttingDown else { return }
+                    self.snapshot.applyAdmissionIdentityRecoveryJournal(result)
+                    self.snapshot.admissionIdentityState = "ready"
+                    self.snapshot.admissionIdentityPublicKeySHA256 = result.publicKeySHA256
+                    self.snapshot.admissionIdentityPendingPublicKeySHA256 = nil
+                    self.snapshot.admissionIdentityTransitionError = nil
+                    self.snapshot.admissionIdentityRecoveryAction = "none"
+                    if let port = ProviderConfig.readHTTPPort() {
+                        await self.applyProviderSnapshot(port: port)
+                    }
+                } else {
+                    let incidentID = "malibu-\(UUID().uuidString.lowercased())"
+                    let result = try await ProviderCredentialHandoffRunner.stageAdmissionIdentityRecovery(
+                        configURL: ProviderPaths.current.configFile,
+                        expectedProviderID: expectedProviderID,
+                        incidentID: incidentID,
+                        reason: "Malibu admission identity recovery"
+                    )
+                    guard !Task.isCancelled, !self.isShuttingDown else { return }
+                    self.snapshot.applyAdmissionIdentityRecoveryJournal(result)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.snapshot.admissionIdentityRecoveryLastError = error.localizedDescription
+            }
+            if !self.isShuttingDown {
+                self.snapshot.admissionIdentityRecoveryInProgress = false
+            }
+        }
+        await admissionIdentityRecoveryTask?.value
+    }
+
+    // Detach Malibu from the standalone launchd provider. Option 2 makes the
+    // CLI the lifecycle owner, so quitting or updating the read-only app must
+    // never drain, stop, or restart a healthy provider. Explicit uninstall is
+    // performed separately by the CLI-owned teardown transaction.
     func shutdown(gracefulSeconds: Int) async {
+        _ = gracefulSeconds
         isShuttingDown = true
         reconnectTask?.cancel(); reconnectTask = nil
         healthPollTask?.cancel(); healthPollTask = nil
         cliUpdateTask?.cancel(); cliUpdateTask = nil
+        let admissionRecoveryTask = admissionIdentityRecoveryTask
+        admissionIdentityRecoveryTask = nil
+        admissionRecoveryTask?.cancel()
+        await admissionRecoveryTask?.value
+        let repairTask = credentialRepairTask
+        credentialRepairTask = nil
+        repairTask?.cancel()
+        await repairTask?.value
         monitorsLaunchdProvider = false
         lastRequestsRateSample = nil
-        child?.markStopping()
-
-        try? await control?.send(.shutdownRequest(graceSeconds: gracefulSeconds))
-        await child?.stop(gracePeriod: TimeInterval(gracefulSeconds))
         await control?.close()
         metricsPoller?.cancel(); metricsPoller = nil
         eventStreamTask?.cancel(); eventStreamTask = nil
@@ -202,14 +318,16 @@ final class MalibuAgent: ObservableObject {
                 monitorsLaunchdProvider = true
                 providerStartFailure = nil
                 await applyProviderSnapshot(port: port)
+                await refreshAdmissionIdentityRecoveryDiagnosis()
+                await attachInstalledProviderControlIfAvailable()
                 startHealthPolling(port: port)
-                await refreshEarnings()
                 return snapshot.state == .serving
             }
             if let failure = diagnosedProviderFailure() {
                 providerStartFailure = failure
                 snapshot.state = .error
                 snapshot.lastError = failure
+                await refreshCredentialDiagnosis()
                 return false
             }
             let remaining = deadline.timeIntervalSinceNow
@@ -222,6 +340,7 @@ final class MalibuAgent: ObservableObject {
         providerStartFailure = failure
         snapshot.state = .error
         snapshot.lastError = failure
+        await refreshCredentialDiagnosis()
         return false
     }
 
@@ -246,14 +365,76 @@ final class MalibuAgent: ObservableObject {
 
     private func applyProviderSnapshot(port: Int) async {
         let localReady = await applyHealthSnapshot(port: port)
-        if let status = await InstalledProviderMonitor.fetchStatus(port: port) {
+        if let status = await InstalledProviderMonitor.fetchStatus(port: port),
+           let expectedProviderID = ProviderConfig.readProviderID(),
+           InstalledProviderMonitor.serviceIdentityMatches(
+               status,
+               expectedProviderID: expectedProviderID,
+               launchdPID: InstalledProviderMonitor.launchdServicePID(),
+               liveCodeMatches: ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
+           ) {
+            snapshot.localProviderID = expectedProviderID
+            snapshot.localStatusContractVersion = status.contractVersion
+            snapshot.localStatusMinimumReaderVersion = status.minimumReaderVersion
+            snapshot.localStatusContractCompatible = status.contractCompatible
+            snapshot.localStatusLifecycleOwner = status.lifecycleOwner
+            snapshot.localStatusCapabilities = status.capabilities
+            snapshot.statusObservationID = status.observationID
+            snapshot.statusObservedAt = status.observedAt
+            snapshot.statusObservationValidForMS = status.observationValidForMS
+            snapshot.statusObservationFresh = status.observationFresh
+            snapshot.serviceInstanceID = status.serviceInstanceID
+            snapshot.servicePID = status.servicePID
+            snapshot.serviceBootSession = status.serviceBootSession
+            snapshot.serviceStartedAt = status.serviceStartedAt
+            snapshot.serviceRole = status.serviceRole
+            snapshot.lifecycleRecordState = status.transitionRecordState
+            snapshot.lifecycleSequence = status.transitionSequence
+            snapshot.lifecycleTransitionID = status.transitionID
+            snapshot.lifecycleTransitionAt = status.transitionAt
+            snapshot.lifecycleState = status.transitionState
+            snapshot.lifecycleReason = status.transitionReason
+            snapshot.lifecycleAuthority = status.transitionAuthority
+            snapshot.lifecycleWriter = status.transitionWriter
+            snapshot.lifecycleOperationID = status.transitionOperationID
+            snapshot.lifecycleOperatorPaused = status.operatorPaused
+            snapshot.lifecycleLastRestart = status.lastRestart
+            snapshot.lifecycleLastRejection = status.lastRejection
+            snapshot.lifecycleLastUpdate = status.lastUpdate
+            snapshot.lifecycleLastWatchdog = status.lastWatchdog
+            snapshot.lifecycleLeaseState = status.lifecycleLeaseState
+            snapshot.lifecycleLeaseKind = status.lifecycleLeaseKind
+            snapshot.lifecycleLeaseOperationID = status.lifecycleLeaseOperationID
+            snapshot.lifecycleLeaseExpiresWallMS = status.lifecycleLeaseExpiresWallMS
+            snapshot.credentialSource = status.credentialSource
+            snapshot.credentialState = status.credentialState
+            snapshot.credentialRestartSafe = status.credentialRestartSafe
+            snapshot.credentialMigrationPending = status.credentialMigrationPending
+            snapshot.credentialRecoveryAction = status.credentialRecoveryAction
+            snapshot.credentialStatusObservedAt = status.observedAt
+            snapshot.credentialStatusFromDiagnostic = false
+            snapshot.admissionIdentitySource = status.admissionIdentitySource
+            snapshot.admissionIdentityState = status.admissionIdentityState
+            snapshot.admissionIdentityPublicKeySHA256 = status.admissionIdentityPublicKeySHA256
+            snapshot.admissionIdentityPendingPublicKeySHA256 = status.admissionIdentityPendingPublicKeySHA256
+            snapshot.admissionIdentityPreviousPublicKeySHA256 = status.admissionIdentityPreviousPublicKeySHA256
+            snapshot.admissionIdentityPreviousValidUntil = status.admissionIdentityPreviousValidUntil
+            snapshot.admissionIdentityCoordinatorGeneration = status.admissionIdentityCoordinatorGeneration
+            snapshot.admissionIdentityCoordinatorPublicKeySHA256 = status.admissionIdentityCoordinatorPublicKeySHA256
+            snapshot.admissionIdentityCoordinatorKeyRole = status.admissionIdentityCoordinatorKeyRole
+            snapshot.admissionIdentityTransitionError = status.admissionIdentityTransitionError
+            snapshot.admissionIdentityRecoveryAction = status.admissionIdentityRecoveryAction
+            snapshot.coordinatorIdentityAdmissionMode = status.coordinatorIdentityAdmissionMode
             snapshot.coordinatorConnected = status.coordinatorConnected
             snapshot.networkState = status.networkState
+            snapshot.advertisedMaxConcurrency = status.advertisedMaxConcurrency
             snapshot.catalogState = status.catalogState
             snapshot.catalogReleaseID = status.catalogReleaseID
             snapshot.catalogDigest = status.catalogDigest
             snapshot.catalogSignerKeyID = status.catalogSignerKeyID
             snapshot.catalogSource = status.catalogSource
+            snapshot.compatibilitySetID = status.compatibilitySetID
+            snapshot.compatibilitySetSHA256 = status.compatibilitySetSHA256
             if let version = status.binaryVersion {
                 snapshot.cliVersion = ProviderCLIVersion.normalize(version)
             }
@@ -263,10 +444,57 @@ final class MalibuAgent: ObservableObject {
         } else {
             // Never carry a prior authoritative serving verdict across a
             // failed status/readiness refresh.
-            snapshot.markCoordinatorReadinessUnknown()
+            snapshot.invalidateLocalStatusObservation()
         }
         reconcileNetworkState(localReady: localReady)
         await refreshLatestReleaseIfNeeded()
+    }
+
+    private func refreshCredentialDiagnosis() async {
+        guard FileManager.default.fileExists(atPath: ProviderPaths.current.configFile.path),
+              let expectedProviderID = ProviderConfig.readProviderID() else { return }
+        do {
+            let result = try await ProviderCredentialHandoffRunner.credentialStatus(
+                configURL: ProviderPaths.current.configFile,
+                expectedProviderID: expectedProviderID
+            )
+            applyCredentialSnapshot(result)
+        } catch {
+            snapshot.credentialRepairLastError = snapshot.credentialRepairLastError
+                ?? error.localizedDescription
+        }
+        await refreshAdmissionIdentityRecoveryDiagnosis()
+    }
+
+    private func refreshAdmissionIdentityRecoveryDiagnosis() async {
+        guard FileManager.default.fileExists(atPath: ProviderPaths.current.configFile.path),
+              let expectedProviderID = ProviderConfig.readProviderID() else {
+            if snapshot.admissionIdentityRecoveryJournalState != nil {
+                snapshot.admissionIdentityRecoveryLastError =
+                    "Admission identity recovery requires the canonical provider config."
+            }
+            return
+        }
+        do {
+            let result = try await ProviderCredentialHandoffRunner.admissionIdentityRecoveryStatus(
+                configURL: ProviderPaths.current.configFile,
+                expectedProviderID: expectedProviderID
+            )
+            snapshot.applyAdmissionIdentityRecoveryJournal(result)
+        } catch {
+            snapshot.admissionIdentityRecoveryLastError = error.localizedDescription
+        }
+    }
+
+    private func applyCredentialSnapshot(_ credential: ProviderCredentialHandoffRunner.CredentialSnapshot) {
+        snapshot.localProviderID = credential.providerID
+        snapshot.credentialSource = credential.source
+        snapshot.credentialState = credential.condition
+        snapshot.credentialRestartSafe = credential.restartSafe
+        snapshot.credentialMigrationPending = credential.migrationPending
+        snapshot.credentialRecoveryAction = credential.action
+        snapshot.credentialStatusObservedAt = Date()
+        snapshot.credentialStatusFromDiagnostic = true
     }
 
     /// Local /v1/health readiness only — coordinator session is reconciled separately.
@@ -307,8 +535,21 @@ final class MalibuAgent: ObservableObject {
     /// Serving requires the CLI's coordinator-authoritative buyer-serving
     /// state. A WebSocket connection proves transport only, not admission.
     private func reconcileNetworkState(localReady: Bool) {
-        guard snapshot.state != .paused else { return }
-        let buyerServing = snapshot.networkState == "buyer_serving"
+        if snapshot.lifecycleRecordState == "valid",
+           (snapshot.lifecycleState == "paused_by_operator" || snapshot.lifecycleOperatorPaused == true) {
+            snapshot.state = .paused
+            snapshot.pauseAcknowledged = true
+            snapshot.lastError = nil
+            return
+        }
+        if snapshot.state == .paused {
+            // The persisted CLI transition, not an old UI acknowledgement, is
+            // authoritative. Once it advances, clear the local paused view.
+            snapshot.state = localReady ? .reconnecting : .starting
+            snapshot.pauseAcknowledged = false
+        }
+        let buyerServing = snapshot.isLocalStatusObservationCurrent()
+            && snapshot.networkState == "buyer_serving"
         if localReady && buyerServing {
             snapshot.state = .serving
             snapshot.lastError = nil
@@ -322,6 +563,12 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func coordinatorDisconnectMessage() -> String {
+        if snapshot.localStatusContractCompatible == false {
+            return "Provider running · status contract requires a newer Malibu version"
+        }
+        if !snapshot.isLocalStatusObservationCurrent() {
+            return "Provider running · local status observation expired; retrying"
+        }
         switch snapshot.networkState {
         case "safe_offline_fallback":
             return "Model loaded locally · signed catalog is offline fallback; not serving buyers"
@@ -387,9 +634,12 @@ final class MalibuAgent: ObservableObject {
                 guard let self else { return }
                 if await InstalledProviderMonitor.isHealthy(port: port) {
                     await self.applyProviderSnapshot(port: port)
-                    await self.refreshEarnings()
+                    await self.attachInstalledProviderControlIfAvailable()
+                    try? await self.control?.send(.metricsRequest)
+                    try? await self.control?.send(.statusRequest)
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
+                        self.snapshot.invalidateLocalStatusObservation()
                         if let failure = self.diagnosedProviderFailure() {
                             self.providerStartFailure = failure
                             self.snapshot.state = .error
@@ -443,6 +693,9 @@ final class MalibuAgent: ObservableObject {
             for await frame in client.stream {
                 self?.consume(frame)
             }
+            if self?.monitorsLaunchdProvider == true {
+                self?.control = nil
+            }
         }
 
         metricsPoller = Task { [weak self] in
@@ -453,13 +706,41 @@ final class MalibuAgent: ObservableObject {
                 if let port = ProviderConfig.readHTTPPort() {
                     await self?.applyProviderSnapshot(port: port)
                 }
-                await self?.refreshEarnings()
             }
         }
 
         try? await client.send(.statusRequest)
         try? await client.send(.metricsRequest)
-        await refreshEarnings()
+    }
+
+    /// Attach a strictly read-only Malibu client to the launchd-owned CLI.
+    /// Failure is non-fatal because HTTP health/status remains the lifecycle
+    /// source; the control socket adds the CLI-authenticated earnings view.
+    private func attachInstalledProviderControlIfAvailable() async {
+        guard monitorsLaunchdProvider, control == nil else { return }
+        let client = ControlSocketClient(socketPath: ProviderPaths.current.controlSocket.path)
+        do {
+            try await client.connect(timeout: 2)
+        } catch {
+            await client.close()
+            return
+        }
+        guard monitorsLaunchdProvider, !isShuttingDown else {
+            await client.close()
+            return
+        }
+        control = client
+        eventStreamTask?.cancel()
+        eventStreamTask = Task { [weak self] in
+            for await frame in client.stream {
+                self?.consume(frame)
+            }
+            if self?.monitorsLaunchdProvider == true {
+                self?.control = nil
+            }
+        }
+        try? await client.send(.statusRequest)
+        try? await client.send(.metricsRequest)
     }
 
     private func consume(_ frame: ControlFrame) {
@@ -479,6 +760,7 @@ final class MalibuAgent: ObservableObject {
         case let .metricsResponse(
             usdc,
             malibu,
+            providerEarnings,
             gpuTemperature,
             gpuUtilization,
             latencyP50,
@@ -493,13 +775,11 @@ final class MalibuAgent: ObservableObject {
             outputTokensAllTime,
             uptime
         ):
-            // AUDIT R2 ARCHITECT A1 fix: the CLI stub emits earnings_usdc=0,
-            // malibu_accrued=0, uptime_sec=0 with no gpu/latency until real
-            // metrics land in SPEC-025 §11 P1. Rendering this tuple as
-            // authoritative "$0.00" masked "unimplemented" as "you earned
-            // nothing." Suppress the stub-shaped tuple to `nil` so the
-            // presenter shows "—" instead. Real metric responses populate
-            // at least uptime > 0 within seconds of the daemon coming up.
+            // Supported legacy CLI peers emitted an all-zero tuple before the
+            // operational metrics contract existed. Rendering that tuple as
+            // authoritative "$0.00" masks "not reported" as "you earned
+            // nothing." Suppress only that legacy shape; current peers report
+            // uptime and the CLI-owned provider earnings projection.
             let looksLikeStub = usdc == 0 && malibu == 0 && uptime == 0
                                  && gpuTemperature == nil && gpuUtilization == nil
                                  && latencyP50 == nil && latencyP99 == nil
@@ -526,6 +806,20 @@ final class MalibuAgent: ObservableObject {
                 snapshot.inputTokensAllTime = inputTokensAllTime
                 snapshot.outputTokensAllTime = outputTokensAllTime
             }
+            if let providerEarnings {
+                snapshot.walletBound = providerEarnings.walletBound
+                snapshot.trustTier = providerEarnings.trustTier
+                snapshot.unpaidLedgerBacklogUSDC = providerEarnings.unpaidLedgerBacklogUSDC
+                snapshot.unpaidLedgerBacklogMALIBU = providerEarnings.unpaidLedgerBacklogMALIBU
+                snapshot.earningsUsdcToday = providerEarnings.usdcToday
+                snapshot.earningsUsdcWeek = providerEarnings.usdcWeek
+                snapshot.earningsUsdcPending = providerEarnings.usdcPending
+                snapshot.earningsUsdcLifetime = providerEarnings.usdcLifetime
+                snapshot.malibuAccruedToday = providerEarnings.malibuToday
+                snapshot.malibuAccruedAllTime = providerEarnings.malibuAllTime
+                snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
+                snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
+            }
         case let .pauseAck(accepted, reason):
             if accepted {
                 snapshot.state = .paused
@@ -535,20 +829,11 @@ final class MalibuAgent: ObservableObject {
             }
         case let .resumeAck(accepted, reason):
             if accepted {
+                snapshot.state = .reconnecting
                 reconcileNetworkState(localReady: true)
                 snapshot.pauseAcknowledged = false
             } else {
                 snapshot.lastError = reason ?? "Resume was refused"
-            }
-        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
-            Task { [weak self] in
-                await self?.handleIdentitySignatureRequest(
-                    authAttemptID: authAttemptID,
-                    providerID: providerID,
-                    binaryVersion: binaryVersion,
-                    providerECDHPublicKey: ecdhKey,
-                    transcriptSHA256: transcriptSHA256
-                )
             }
         default:
             break
@@ -573,36 +858,6 @@ final class MalibuAgent: ObservableObject {
         snapshot.outputTokensAllTime = nil
     }
 
-    private func refreshEarnings() async {
-        guard let providerID = ProviderConfig.readProviderID(),
-              let token = await KeychainStore.readProviderToken(providerID: providerID) else {
-            return
-        }
-        if let earnings = try? await earningsClient.fetch(providerID: providerID, bearerToken: token) {
-            snapshot.walletBound = earnings.walletBound
-            snapshot.trustTier = earnings.trustTier
-            snapshot.unpaidLedgerBacklogUSDC = earnings.unpaidLedgerBacklogUSDC
-            snapshot.unpaidLedgerBacklogMALIBU = earnings.unpaidLedgerBacklogMALIBU
-            snapshot.earningsUsdcToday = earnings.usdcToday
-            snapshot.earningsUsdcWeek = earnings.usdcWeek
-            snapshot.earningsUsdcPending = earnings.usdcPending
-            snapshot.earningsUsdcLifetime = earnings.usdcLifetime
-            snapshot.malibuAccruedToday = earnings.malibuToday
-            snapshot.malibuAccruedAllTime = earnings.malibuAllTime
-            snapshot.trustCriteriaMet = earnings.trustCriteriaMet
-            snapshot.trustCriteriaRequired = earnings.trustCriteriaRequired
-        }
-        if let accrual = try? await malibuAccrualClient.fetch(bearerToken: token) {
-            snapshot.malibuAccruedAllTime = accrual.accruedMALIBU
-            snapshot.trustTier = accrual.trustTier
-            snapshot.trustCriteriaMet = accrual.trustCriteriaMet
-            snapshot.trustCriteriaRequired = accrual.trustCriteriaRequired
-            if let walletBound = accrual.walletBound {
-                snapshot.walletBound = walletBound
-            }
-        }
-    }
-
     private func startProviderLogTail(paths: ProviderPaths = .current) {
         providerLogTailCancellable?.cancel()
         providerLogTail?.stop()
@@ -624,58 +879,6 @@ final class MalibuAgent: ObservableObject {
 
     private func diagnosedProviderFailure() -> String? {
         ProviderLogDiagnostics.diagnose(lines: logLines)?.userMessage
-    }
-
-    private func handleIdentitySignatureRequest(
-        authAttemptID: String,
-        providerID: String,
-        binaryVersion: String,
-        providerECDHPublicKey: String,
-        transcriptSHA256: String
-    ) async {
-        guard ProviderConfig.readProviderID() == providerID else {
-            try? await control?.send(.identitySignatureResponse(
-                accepted: false,
-                identitySignature: nil,
-                transcriptSHA256: nil,
-                reason: "provider_id_mismatch"
-            ))
-            return
-        }
-
-        do {
-            let key = try await ProviderIdentity.loadExisting()
-            guard ProviderIdentity.providerID(for: key) == providerID else {
-                try? await control?.send(.identitySignatureResponse(
-                    accepted: false,
-                    identitySignature: nil,
-                    transcriptSHA256: nil,
-                    reason: "provider_identity_mismatch"
-                ))
-                return
-            }
-            let payload = try RegisterClient.identitySignaturePayload(
-                authAttemptID: authAttemptID,
-                providerID: providerID,
-                binaryVersion: binaryVersion,
-                providerECDHPublicKey: providerECDHPublicKey,
-                transcriptSHA256: transcriptSHA256
-            )
-            let signature = try ProviderIdentity.sign(payload, using: key).base64EncodedString()
-            try await control?.send(.identitySignatureResponse(
-                accepted: true,
-                identitySignature: signature,
-                transcriptSHA256: transcriptSHA256,
-                reason: nil
-            ))
-        } catch {
-            try? await control?.send(.identitySignatureResponse(
-                accepted: false,
-                identitySignature: nil,
-                transcriptSHA256: nil,
-                reason: "identity_signature_failed"
-            ))
-        }
     }
 
     private func scheduleReconnect() async {

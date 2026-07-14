@@ -3,8 +3,14 @@ import SwiftUI
 
 @MainActor
 enum DashboardWindow {
-    static func make(agent: MalibuAgent, sparkleUpdater: SparkleUpdaterController) -> NSWindow {
-        let hosting = NSHostingController(rootView: DashboardView(agent: agent, sparkleUpdater: sparkleUpdater))
+    static func make(
+        agent: MalibuAgent,
+        onExportDiagnostics: @escaping () -> Void
+    ) -> NSWindow {
+        let hosting = NSHostingController(rootView: DashboardView(
+            agent: agent,
+            onExportDiagnostics: onExportDiagnostics
+        ))
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Malibu"
@@ -17,7 +23,7 @@ enum DashboardWindow {
 
 private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
-    @ObservedObject var sparkleUpdater: SparkleUpdaterController
+    let onExportDiagnostics: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -72,16 +78,87 @@ private struct DashboardView: View {
                         MetricRow(title: "Weights path", value: "Managed by provider")
                     }
                     MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
+                    MetricRow(
+                        title: "Malibu app",
+                        value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
+                    )
                     MetricRow(title: "Provider CLI", value: AgentSnapshotPresenter.cliVersionLine(agent.snapshot))
+                    MetricRow(title: "Compatibility set", value: AgentSnapshotPresenter.compatibilitySetLine(agent.snapshot))
+                    MetricRow(title: "Buyer capacity", value: AgentSnapshotPresenter.advertisedCapacityLine(agent.snapshot))
+                    MetricRow(title: "Status protocol", value: AgentSnapshotPresenter.statusContractLine(agent.snapshot))
+                    if let instance = AgentSnapshotPresenter.serviceInstanceLine(agent.snapshot) {
+                        MetricRow(title: "Service instance", value: instance)
+                    }
+                    if let lifecycle = AgentSnapshotPresenter.lifecycleLine(agent.snapshot) {
+                        MetricRow(title: "Lifecycle", value: lifecycle)
+                    }
+                    if let event = agent.snapshot.lifecycleLastRestart {
+                        MetricRow(title: "Last restart", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                    }
+                    if let event = agent.snapshot.lifecycleLastRejection {
+                        MetricRow(title: "Last rejection", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                    }
+                    if let event = agent.snapshot.lifecycleLastUpdate {
+                        MetricRow(title: "Last update", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                    }
+                    if let event = agent.snapshot.lifecycleLastWatchdog {
+                        MetricRow(title: "Last watchdog action", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                    }
+                    MetricRow(title: "Credential", value: AgentSnapshotPresenter.credentialLine(agent.snapshot))
+                    MetricRow(title: "Admission identity", value: AgentSnapshotPresenter.admissionIdentityLine(agent.snapshot))
+                    if AgentSnapshotPresenter.canRepairCredential(agent.snapshot)
+                        || AgentSnapshotPresenter.canRepairAdmissionIdentity(agent.snapshot) {
+                        Button("Repair") {
+                            Task {
+                                if AgentSnapshotPresenter.canRepairCredential(agent.snapshot) {
+                                    await agent.repairProviderCredential()
+                                } else {
+                                    await agent.repairAdmissionIdentity()
+                                }
+                            }
+                        }
+                    } else if agent.snapshot.credentialRepairInProgress
+                        || agent.snapshot.admissionIdentityRecoveryInProgress {
+                        ProgressView("Repairing provider…")
+                            .controlSize(.small)
+                    }
+                    if let error = agent.snapshot.credentialRepairLastError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    if let instruction = agent.snapshot.admissionIdentityRecoveryApprovalInstruction {
+                        Text(instruction)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if let request = agent.snapshot.admissionIdentityRecoveryOperatorRequest {
+                        Text(request)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if let error = agent.snapshot.admissionIdentityRecoveryLastError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                     if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
                         Text(status)
                             .font(.caption)
                             .foregroundStyle(agent.snapshot.cliUpdateLastError == nil ? Color.secondary : Color.red)
                     }
-                    Button(sparkleUpdater.updateAvailable ? "Check for Updates… (available)" : "Check for Updates…") {
-                        sparkleUpdater.checkForUpdates(nil)
+                    Button(agent.snapshot.cliUpdateInProgress ? "Updating compatibility set…" : "Update compatibility set") {
+                        Task { await agent.updateCLINow() }
                     }
-                    .disabled(!sparkleUpdater.canCheckForUpdates)
+                    .disabled(
+                        !AgentSnapshotPresenter.updateAvailable(agent.snapshot)
+                            || agent.snapshot.cliUpdateInProgress
+                    )
+                    Button("Export redacted diagnostics…") {
+                        onExportDiagnostics()
+                    }
                     MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
                     MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
                     MetricRow(title: "Uptime", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))

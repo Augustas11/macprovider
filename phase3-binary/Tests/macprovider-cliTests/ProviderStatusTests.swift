@@ -7,6 +7,25 @@ final class ProviderStatusTests: XCTestCase {
         ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: maxConcurrency)
     }
 
+    func testPausedAndDrainingStatesAtomicallyFenceNewRequests() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+
+        let beforePause = await status.beginRequestIfAccepting(requestID: "before-pause")
+        XCTAssertNotNil(beforePause)
+        await status.setState(.draining, reason: "operator_pause_draining")
+        let duringDrain = await status.beginRequestIfAccepting(requestID: "during-drain")
+        XCTAssertNil(duringDrain)
+        let draining = await status.snapshot()
+        XCTAssertEqual(draining.requestsInFlight, 1)
+
+        await status.finishRequest(startedAt: Date(), completion: nil, failed: false, requestID: "before-pause")
+        await status.setState(.unavailable, reason: "operator_paused")
+        let whilePaused = await status.beginRequestIfAccepting(requestID: "while-paused")
+        let drained = await status.waitUntilDrained(timeoutSeconds: 0)
+        XCTAssertNil(whilePaused)
+        XCTAssertTrue(drained)
+    }
+
     func testStatusResponseExposesOnlyRedactedCredentialLifecycleState() async throws {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         let snap = await status.snapshot()
@@ -29,6 +48,202 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(credential["migration_pending"] as? Bool, true)
         XCTAssertNil(credential["token"])
         XCTAssertFalse(String(describing: body).contains("provider_token"))
+    }
+
+    func testStatusResponsePublishesVersionedLocalCapabilityContract() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snapshot = await status.snapshot()
+        let persistedLifecycle = try ProviderLifecycleStateRecord.make(
+            previous: nil,
+            state: .servingBuyers,
+            reasonCode: "coordinator_buyer_serving_confirmed",
+            writer: .serve,
+            providerID: "provider-a",
+            modelID: "m",
+            compatibilitySetID: "set-a",
+            operationID: "serve-a",
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let body = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            admissionIdentityStatus: ProviderAdmissionIdentityStatusContext(
+                source: "cli_keychain",
+                state: "degraded_previous_key",
+                publicKeySHA256: String(repeating: "a", count: 64),
+                pendingPublicKeySHA256: String(repeating: "b", count: 64),
+                previousPublicKeySHA256: String(repeating: "c", count: 64),
+                previousValidUntil: "2026-07-21T12:00:00.000Z",
+                coordinatorGeneration: 3,
+                coordinatorPublicKeySHA256: String(repeating: "d", count: 64),
+                coordinatorKeyRole: "previous",
+                transitionError: "coordinator_previous_key_grace",
+                recoveryAction: "restore_current_key_or_run_recover_admission_identity"
+            ),
+            lifecycleStateInspection: .valid(persistedLifecycle)
+        )
+
+        let contract = try XCTUnwrap(body["local_status_contract"] as? [String: Any])
+        XCTAssertEqual(contract["version"] as? Int, 1)
+        XCTAssertEqual(contract["minimum_reader_version"] as? Int, 1)
+        XCTAssertEqual(contract["lifecycle_owner"] as? String, "macprovider_cli")
+        let capabilities = try XCTUnwrap(contract["capabilities"] as? [String])
+        XCTAssertTrue(capabilities.contains("buyer_serving_authority_v1"))
+        XCTAssertTrue(capabilities.contains("catalog_status_v1"))
+        XCTAssertTrue(capabilities.contains("compatibility_set_v1"))
+        XCTAssertTrue(capabilities.contains("credential_status_v1"))
+        XCTAssertTrue(capabilities.contains("admission_identity_v1"))
+        XCTAssertTrue(capabilities.contains("lifecycle_lease_v1"))
+        XCTAssertTrue(capabilities.contains("lifecycle_transition_v1"))
+        XCTAssertTrue(capabilities.contains("persisted_lifecycle_state_v1"))
+        XCTAssertTrue(capabilities.contains("legacy_reader_fallback_v1"))
+        XCTAssertTrue(capabilities.contains("service_instance_v1"))
+        XCTAssertTrue(capabilities.contains("status_observation_v1"))
+
+        let observation = try XCTUnwrap(body["observation"] as? [String: Any])
+        XCTAssertNotNil(observation["id"] as? String)
+        XCTAssertNotNil(observation["observed_at"] as? String)
+        XCTAssertEqual(observation["valid_for_ms"] as? Int, 5_000)
+
+        let service = try XCTUnwrap(body["service_instance"] as? [String: Any])
+        XCTAssertEqual(service["instance_id"] as? String, RouterHandler.serviceInstanceID)
+        XCTAssertEqual(service["pid"] as? Int, Int(getpid()))
+        XCTAssertEqual(service["role"] as? String, "serve")
+
+        let lifecycle = try XCTUnwrap(body["lifecycle"] as? [String: Any])
+        XCTAssertEqual(lifecycle["record_state"] as? String, "valid")
+        XCTAssertEqual(lifecycle["transition_id"] as? String, persistedLifecycle.transitionID)
+        XCTAssertEqual(lifecycle["sequence"] as? UInt64, 1)
+        XCTAssertEqual(lifecycle["state"] as? String, "serving_buyers")
+        XCTAssertEqual(lifecycle["reason_code"] as? String, "coordinator_buyer_serving_confirmed")
+        XCTAssertEqual(lifecycle["authority"] as? String, "macprovider_cli")
+        XCTAssertEqual(lifecycle["operator_paused"] as? Bool, false)
+
+        let identity = try XCTUnwrap(body["admission_identity"] as? [String: Any])
+        XCTAssertEqual(identity["owner"] as? String, "macprovider_cli")
+        XCTAssertEqual(identity["source"] as? String, "cli_keychain")
+        XCTAssertEqual(identity["state"] as? String, "degraded_previous_key")
+        XCTAssertEqual(identity["public_key_sha256"] as? String, String(repeating: "a", count: 64))
+        XCTAssertEqual(identity["pending_public_key_sha256"] as? String, String(repeating: "b", count: 64))
+        XCTAssertEqual(identity["previous_public_key_sha256"] as? String, String(repeating: "c", count: 64))
+        XCTAssertEqual(identity["previous_valid_until"] as? String, "2026-07-21T12:00:00.000Z")
+        XCTAssertEqual(identity["coordinator_generation"] as? Int, 3)
+        XCTAssertEqual(identity["coordinator_public_key_sha256"] as? String, String(repeating: "d", count: 64))
+        XCTAssertEqual(identity["coordinator_key_role"] as? String, "previous")
+        XCTAssertEqual(identity["transition_error"] as? String, "coordinator_previous_key_grace")
+        XCTAssertEqual(identity["recovery_action"] as? String, "restore_current_key_or_run_recover_admission_identity")
+    }
+
+    func testStatusResponsePublishesCompatibilitySetAndRedactedLifecycleLease() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snapshot = await status.snapshot()
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: "Augustas11/macprovider:v1.9.0@0123456789abcdef0123456789abcdef01234567",
+            envelopeSHA256: String(repeating: "a", count: 64),
+            version: "1.9.0",
+            catalogReleaseID: "published-2026-07-14",
+            catalogPolicyVersion: "catalog-policy-v1",
+            maintenanceLeaseSeconds: 1_200,
+            readinessTimeoutSeconds: 1_200
+        )
+        let lease = ProviderLifecycleLeaseRecord(
+            version: 1,
+            leaseID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            operationID: "autoupdate:ffffffff-1111-4222-8333-444444444444",
+            kind: .maintenance,
+            owner: ProviderLifecycleLeaseOwner(
+                pid: 4321,
+                processStartMicroseconds: 10,
+                bootSession: "boot-a"
+            ),
+            issuedWallMilliseconds: 100,
+            expiresWallMilliseconds: 1_200_100,
+            issuedMonotonicNanoseconds: 1_000,
+            expiresMonotonicNanoseconds: 1_200_001_000
+        )
+
+        let body = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            lifecycleLeaseInspection: .valid(lease),
+            compatibilitySetManifest: manifest
+        )
+
+        XCTAssertEqual(body["compatibility_set_id"] as? String, manifest.compatibilitySetID)
+        XCTAssertEqual(body["compatibility_set_sha256"] as? String, manifest.envelopeSHA256)
+        let lifecycle = try XCTUnwrap(body["lifecycle_lease"] as? [String: Any])
+        XCTAssertEqual(lifecycle["state"] as? String, "active")
+        XCTAssertEqual(lifecycle["kind"] as? String, "maintenance")
+        XCTAssertEqual(lifecycle["operation_id"] as? String, lease.operationID)
+        XCTAssertEqual(lifecycle["owner_pid"] as? Int, 4321)
+        XCTAssertEqual(lifecycle["expires_wall_ms"] as? Int64, 1_200_100)
+        XCTAssertNil(lifecycle["lease_id"])
+        XCTAssertNil(lifecycle["process_start_us"])
+        XCTAssertNil(lifecycle["boot_session"])
+    }
+
+    func testStatusObservationsAreUniqueWhileServiceInstanceRemainsStable() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snapshot = await status.snapshot()
+        let first = RouterHandler.statusResponse(snapshot, providerID: "provider-a", coordinatorURL: nil)
+        let second = RouterHandler.statusResponse(snapshot, providerID: "provider-a", coordinatorURL: nil)
+
+        let firstObservation = try XCTUnwrap(first["observation"] as? [String: Any])
+        let secondObservation = try XCTUnwrap(second["observation"] as? [String: Any])
+        XCTAssertNotEqual(firstObservation["id"] as? String, secondObservation["id"] as? String)
+
+        let firstService = try XCTUnwrap(first["service_instance"] as? [String: Any])
+        let secondService = try XCTUnwrap(second["service_instance"] as? [String: Any])
+        XCTAssertEqual(firstService["instance_id"] as? String, secondService["instance_id"] as? String)
+        XCTAssertEqual(firstService["started_at"] as? String, secondService["started_at"] as? String)
+    }
+
+    func testStatusFailsClosedWhenPersistedLifecycleIsMissingOrInvalid() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snapshot = await status.snapshot()
+
+        let missing = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            lifecycleStateInspection: .missing
+        )
+        let missingLifecycle = try XCTUnwrap(missing["lifecycle"] as? [String: Any])
+        XCTAssertEqual(missingLifecycle["record_state"] as? String, "missing")
+        XCTAssertEqual(missingLifecycle["state"] as? String, "failed")
+        XCTAssertEqual(missingLifecycle["reason_code"] as? String, "lifecycle_state_missing")
+        XCTAssertTrue(missingLifecycle["transition_id"] is NSNull)
+
+        let invalid = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            lifecycleStateInspection: .invalid(reason: "unsafe storage")
+        )
+        let invalidLifecycle = try XCTUnwrap(invalid["lifecycle"] as? [String: Any])
+        XCTAssertEqual(invalidLifecycle["record_state"] as? String, "invalid")
+        XCTAssertEqual(invalidLifecycle["state"] as? String, "failed")
+        XCTAssertEqual(invalidLifecycle["reason_code"] as? String, "lifecycle_state_invalid")
+        XCTAssertEqual(invalidLifecycle["invalid_reason"] as? String, "unsafe storage")
+    }
+
+    func testLifecycleTransitionIdentifiesCapacityEdges() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 1))
+        let initial = await status.snapshot()
+
+        let startedAt = await status.beginRequest(requestID: "request-1")
+        let busy = await status.snapshot()
+        XCTAssertEqual(busy.status, .busy)
+        XCTAssertEqual(busy.transitionReason, "request_capacity_full")
+        XCTAssertNotEqual(busy.transitionID, initial.transitionID)
+
+        await status.finishRequest(startedAt: startedAt, completion: nil, failed: false, requestID: "request-1")
+        let ready = await status.snapshot()
+        XCTAssertEqual(ready.status, .ready)
+        XCTAssertEqual(ready.transitionReason, "request_capacity_available")
+        XCTAssertNotEqual(ready.transitionID, busy.transitionID)
     }
 
     func testSpecDecodeStatusFieldsAreDisabledWithoutDraftConfig() async {

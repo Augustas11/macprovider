@@ -186,4 +186,33 @@ final class UninstallCommandTests: XCTestCase {
         XCTAssertFalse(try UninstallCommand.path("/opt/macprovider/../etc", isAllowedBy: allowed.dataDirs))
         XCTAssertFalse(try UninstallCommand.path("/Users/tester/Library/LaunchAgents/other.plist", isAllowedBy: allowed.plists))
     }
+
+    func testApplicationSupportCleanupRetainsOnlyLifecycleTombstone() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("macprovider-uninstall-state-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lifecycle = root.appendingPathComponent("lifecycle", isDirectory: true)
+        try FileManager.default.createDirectory(at: lifecycle, withIntermediateDirectories: true)
+        try Data("state".utf8).write(to: lifecycle.appendingPathComponent("state-v1.json"))
+        try Data().write(to: lifecycle.appendingPathComponent(".state-v1.json.lock"))
+        try Data("lease".utf8).write(to: lifecycle.appendingPathComponent("lease-v1.json"))
+        try Data("manifest".utf8).write(to: root.appendingPathComponent("install_manifest.json"))
+        try Data("hidden".utf8).write(to: root.appendingPathComponent(".residue"))
+
+        var warnings: [String] = []
+        UninstallCommand.cleanupApplicationSupportPreservingLifecycleState(
+            root,
+            warnings: &warnings
+        )
+
+        XCTAssertTrue(warnings.isEmpty, "\(warnings)")
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.path).sorted(),
+            ["lifecycle"]
+        )
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: lifecycle.path).sorted(),
+            [".state-v1.json.lock", "state-v1.json"]
+        )
+    }
 }

@@ -1,6 +1,8 @@
 import Foundation
 
-struct ProviderEarnings: Decodable, Equatable {
+/// Non-secret earnings projection received from the CLI over the same-user
+/// control socket. Malibu never receives or stores the provider bearer.
+struct ProviderEarnings: Codable, Equatable {
     let walletBound: Bool
     let trustTier: AgentSnapshot.TrustTier
     let unpaidLedgerBacklogUSDC: Double
@@ -44,47 +46,34 @@ struct ProviderEarnings: Decodable, Equatable {
         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
     }
-}
-
-struct EarningsClient {
-    let coordinatorBaseURL: URL
-    private let session: URLSession?
 
     init(
-        coordinatorBaseURL: URL = URL(string: "https://coordinator.streamvc.live")!,
-        session: URLSession? = nil
+        walletBound: Bool,
+        trustTier: AgentSnapshot.TrustTier,
+        unpaidLedgerBacklogUSDC: Double,
+        unpaidLedgerBacklogMALIBU: Double,
+        usdcToday: Double?,
+        usdcWeek: Double?,
+        usdcPending: Double?,
+        usdcLifetime: Double?,
+        malibuToday: Double?,
+        malibuAllTime: Double?,
+        trustCriteriaMet: Int?,
+        trustCriteriaRequired: Int?
     ) {
-        self.coordinatorBaseURL = coordinatorBaseURL
-        self.session = session
+        self.walletBound = walletBound
+        self.trustTier = trustTier
+        self.unpaidLedgerBacklogUSDC = unpaidLedgerBacklogUSDC
+        self.unpaidLedgerBacklogMALIBU = unpaidLedgerBacklogMALIBU
+        self.usdcToday = usdcToday
+        self.usdcWeek = usdcWeek
+        self.usdcPending = usdcPending
+        self.usdcLifetime = usdcLifetime
+        self.malibuToday = malibuToday
+        self.malibuAllTime = malibuAllTime
+        self.trustCriteriaMet = trustCriteriaMet
+        self.trustCriteriaRequired = trustCriteriaRequired
     }
-
-    func fetch(providerID: String, bearerToken: String) async throws -> ProviderEarnings {
-        let escapedProviderID = providerID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? providerID
-        let url = coordinatorBaseURL
-            .appendingPathComponent("providers")
-            .appendingPathComponent(escapedProviderID)
-            .appendingPathComponent("earnings")
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        let data: Data
-        let response: URLResponse
-        if let session {
-            (data, response) = try await session.data(for: request)
-        } else {
-            let guarded = ProviderBearerURLSession.make()
-            defer { guarded.finishTasksAndInvalidate() }
-            (data, response) = try await guarded.data(for: request)
-        }
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw EarningsClientError.httpStatus(http.statusCode)
-        }
-        return try JSONDecoder().decode(ProviderEarnings.self, from: data)
-    }
-}
-
-enum EarningsClientError: Error {
-    case httpStatus(Int)
 }
 
 enum UnclaimedBadgePolicy {

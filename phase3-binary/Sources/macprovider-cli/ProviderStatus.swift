@@ -121,6 +121,7 @@ struct ProviderSnapshot: Sendable {
     let coordinatorConnected: Bool
     let coordinatorAssignedID: String?
     let coordinatorTier: String?
+    let coordinatorIdentityAdmissionMode: String?
     let recommendedBinaryVersion: String?
     let catalogCompatibilityConfirmed: Bool
     let activeRequestIDCount: Int
@@ -134,6 +135,9 @@ struct ProviderSnapshot: Sendable {
     let specDecodeAcceptedTokensSinceLast: Int
     let specDecodeAcceptanceRate: Double?
     let specDecodeGeneration: Int
+    let transitionID: String
+    let transitionAt: Date
+    let transitionReason: String
 
     var slotsFree: Int {
         if thermallyThrottled { return 0 }
@@ -172,6 +176,7 @@ actor ProviderStatus {
     private var coordinatorConnected = false
     private var coordinatorAssignedID: String?
     private var coordinatorTier: String?
+    private var coordinatorIdentityAdmissionMode: String?
     private var recommendedBinaryVersion: String?
     private var catalogCompatibilityConfirmed = false
     private var activeRequestIDs = Set<String>()
@@ -185,6 +190,10 @@ actor ProviderStatus {
     private var specDecodeWindowDraftedTokens = 0
     private var specDecodeWindowAcceptedTokens = 0
     private var specDecodeGeneration = 0
+    private var transitionID = UUID().uuidString.lowercased()
+    private var transitionAt = Date()
+    private var transitionReason: String
+    private var lastObservedThermalThrottle = false
 
     init(
         modelID: String?,
@@ -206,6 +215,7 @@ actor ProviderStatus {
         self.specDecodeEnabled = modelLoaded && specDecodeDraftModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         self.specDecodeDraftModelID = Self.publicSpecDecodeDraftModelID(specDecodeDraftModelID)
         self.specDecodeNumDraftTokens = self.specDecodeEnabled ? specDecodeNumDraftTokens : nil
+        self.transitionReason = modelLoaded ? "model_ready" : "model_not_loaded"
         let trimmedProviderID = providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmedProviderID, !trimmedProviderID.isEmpty {
             persistedProviderID = trimmedProviderID
@@ -225,6 +235,14 @@ actor ProviderStatus {
         }
         refreshAvailabilityState()
         return Date()
+    }
+
+    /// Atomically fences new work once an operator pause or drain begins.
+    /// Requests admitted before the transition remain counted and are drained;
+    /// requests racing after it are rejected without entering the runtime.
+    func beginRequestIfAccepting(requestID: String? = nil) -> Date? {
+        guard status != .draining, status != .unavailable else { return nil }
+        return beginRequest(requestID: requestID)
     }
 
     func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) {
@@ -287,7 +305,7 @@ actor ProviderStatus {
         self.modelHash = modelHash
         modelLoaded = true
         if status == .unavailable {
-            status = .ready
+            transition(to: .ready, reason: "target_swap_completed")
         }
         setSpecDecodeConfig(draftModelID: specDecodeDraftModelID, numDraftTokens: specDecodeNumDraftTokens)
         refreshAvailabilityState()
@@ -322,20 +340,30 @@ actor ProviderStatus {
         lastPrewarmElapsedMS = elapsedMS
     }
 
-    func setState(_ newState: ProviderHealthState) {
-        status = newState
+    func setState(_ newState: ProviderHealthState, reason: String = "state_update") {
+        transition(to: newState, reason: reason)
     }
 
-    func setCoordinatorSession(connected: Bool, assignedID: String? = nil, tier: String? = nil, recommendedBinaryVersion: String? = nil) {
+    func setCoordinatorSession(
+        connected: Bool,
+        assignedID: String? = nil,
+        tier: String? = nil,
+        identityAdmissionMode: String? = nil,
+        recommendedBinaryVersion: String? = nil
+    ) {
         coordinatorConnected = connected
         if !connected {
             catalogCompatibilityConfirmed = false
+            coordinatorIdentityAdmissionMode = nil
         }
         if let assignedID {
             coordinatorAssignedID = assignedID
         }
         if let tier {
             coordinatorTier = tier
+        }
+        if let identityAdmissionMode {
+            coordinatorIdentityAdmissionMode = identityAdmissionMode
         }
         if let recommendedBinaryVersion {
             self.recommendedBinaryVersion = recommendedBinaryVersion
@@ -353,6 +381,12 @@ actor ProviderStatus {
         // running during the suspension could mutate `windowRequests` and
         // friends between read and reset.
         let throttled = await thermalGate?.isThrottled() ?? false
+        if throttled != lastObservedThermalThrottle {
+            lastObservedThermalThrottle = throttled
+            transitionID = UUID().uuidString.lowercased()
+            transitionAt = Date()
+            transitionReason = throttled ? "thermal_throttled" : "thermal_recovered"
+        }
         let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
         let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
         let specAcceptanceRate = specDecodeWindowDraftedTokens > 0
@@ -383,6 +417,7 @@ actor ProviderStatus {
             coordinatorConnected: coordinatorConnected,
             coordinatorAssignedID: coordinatorAssignedID,
             coordinatorTier: coordinatorTier,
+            coordinatorIdentityAdmissionMode: coordinatorIdentityAdmissionMode,
             recommendedBinaryVersion: recommendedBinaryVersion,
             catalogCompatibilityConfirmed: catalogCompatibilityConfirmed,
             activeRequestIDCount: activeRequestIDs.count,
@@ -395,7 +430,10 @@ actor ProviderStatus {
             specDecodeDraftedTokensSinceLast: specDecodeWindowDraftedTokens,
             specDecodeAcceptedTokensSinceLast: specDecodeWindowAcceptedTokens,
             specDecodeAcceptanceRate: specAcceptanceRate,
-            specDecodeGeneration: specDecodeGeneration
+            specDecodeGeneration: specDecodeGeneration,
+            transitionID: transitionID,
+            transitionAt: transitionAt,
+            transitionReason: transitionReason
         )
         if resetWindow {
             windowRequests = 0
@@ -423,7 +461,18 @@ actor ProviderStatus {
         guard modelLoaded, status == .ready || status == .busy else {
             return
         }
-        status = requestsInFlight >= capacity.maxConcurrency ? .busy : .ready
+        transition(
+            to: requestsInFlight >= capacity.maxConcurrency ? .busy : .ready,
+            reason: requestsInFlight >= capacity.maxConcurrency ? "request_capacity_full" : "request_capacity_available"
+        )
+    }
+
+    private func transition(to newState: ProviderHealthState, reason: String) {
+        guard status != newState else { return }
+        status = newState
+        transitionID = UUID().uuidString.lowercased()
+        transitionAt = Date()
+        transitionReason = reason
     }
 
     private func rolloverDayCountersIfNeeded(now: Date = Date()) {

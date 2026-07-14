@@ -139,6 +139,9 @@ validate_payload_entries() {
   local has_catalog_candidates_signature=0
   local has_catalog_demand=0
   local has_catalog_demand_signature=0
+  local has_compatibility_set=0
+  local has_local_install_contract=0 has_local_provider_plist=0 has_local_updater_metadata=0
+  local has_local_watchdog_plist=0 has_local_watchdog_script=0
 
   entries="$(cd "$payload_dir" && find . -mindepth 1 -print)" || die "failed to list $label"
   [ -n "$entries" ] || die "$label is empty"
@@ -163,6 +166,26 @@ validate_payload_entries() {
       mlx.metallib)
         ;;
       THIRD-PARTY-NOTICES.txt)
+        ;;
+      compatibility-set.json)
+        has_compatibility_set=$((has_compatibility_set + 1))
+        ;;
+      compatibility-set-local)
+        ;;
+      compatibility-set-local/install.sh)
+        has_local_install_contract=$((has_local_install_contract + 1))
+        ;;
+      compatibility-set-local/provider-launch-agent.plist.template)
+        has_local_provider_plist=$((has_local_provider_plist + 1))
+        ;;
+      compatibility-set-local/updater-rollback.json)
+        has_local_updater_metadata=$((has_local_updater_metadata + 1))
+        ;;
+      compatibility-set-local/watchdog-launch-agent.plist.template)
+        has_local_watchdog_plist=$((has_local_watchdog_plist + 1))
+        ;;
+      compatibility-set-local/watchdog.sh)
+        has_local_watchdog_script=$((has_local_watchdog_script + 1))
         ;;
       catalog-release)
         ;;
@@ -202,6 +225,17 @@ EOF
     [ "$has_catalog_candidates_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/autotune-candidates.json.sig"
     [ "$has_catalog_demand" -eq 1 ] || die "$label must contain exactly one catalog-release/demand-rank.json"
     [ "$has_catalog_demand_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/demand-rank.json.sig"
+  fi
+  if [[ "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] && \
+     { [ "${BASH_REMATCH[1]}" -gt 1 ] || \
+       { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -gt 8 ]; } || \
+       { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -eq 8 ] && [ "${BASH_REMATCH[3]}" -ge 33 ]; }; }; then
+    [ "$has_compatibility_set" -eq 1 ] || die "$label must contain exactly one compatibility-set.json"
+    [ "$has_local_install_contract" -eq 1 ] || die "$label must contain exactly one local install contract"
+    [ "$has_local_provider_plist" -eq 1 ] || die "$label must contain exactly one provider launchd template"
+    [ "$has_local_updater_metadata" -eq 1 ] || die "$label must contain exactly one updater rollback metadata file"
+    [ "$has_local_watchdog_plist" -eq 1 ] || die "$label must contain exactly one watchdog launchd template"
+    [ "$has_local_watchdog_script" -eq 1 ] || die "$label must contain exactly one watchdog script"
   fi
   if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
     die "$label contains unsafe link or device members"

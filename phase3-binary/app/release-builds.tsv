@@ -1,4 +1,4 @@
-# Malibu marketing version	Sparkle/CFBundle build number
+# Malibu marketing version	CFBundle build number
 #
 # Append one strictly increasing entry for every Malibu release. The baseline
 # records the last correctly versioned release before this ledger was added;

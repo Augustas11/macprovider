@@ -529,7 +529,10 @@ func TestProviderAuthV2IdentitySignaturePolicyExemptionAcceptsBearerOnly(t *test
 	_, _, providerID := testIdentityKey(t)
 	exemptUntil := time.Now().Add(time.Hour)
 	store := &fakeIdentitySignatureStore{policyOK: true, exemptUntil: &exemptUntil, grantedBy: "migration"}
-	h := newIdentitySignatureHarness(t, providerID, store)
+	h := newIdentitySignatureHarness(t, providerID, store, func(cfg *config.Config) {
+		cfg.AutotuneFeeds.EnforceProviderAdmission = false
+		cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadline = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	})
 	defer h.HTTP.Close()
 	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
 	defer conn.Close()
@@ -538,6 +541,25 @@ func TestProviderAuthV2IdentitySignaturePolicyExemptionAcceptsBearerOnly(t *test
 	response := readAuthResponse(t, conn)
 	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
 		t.Fatalf("auth_response = %+v", response)
+	}
+	if response.IdentityAdmissionMode != "exemption" {
+		t.Fatalf("identity_admission_mode=%q, want exemption", response.IdentityAdmissionMode)
+	}
+}
+
+func TestProviderAuthV2StrictAdmissionRefusesActivePolicyExemption(t *testing.T) {
+	_, _, providerID := testIdentityKey(t)
+	exemptUntil := time.Now().Add(time.Hour)
+	store := &fakeIdentitySignatureStore{policyOK: true, exemptUntil: &exemptUntil, grantedBy: "migration"}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("strict auth_response = %+v", response)
 	}
 }
 
@@ -554,6 +576,9 @@ func TestProviderAuthV2IdentitySignatureValidAppTrackProofAccepts(t *testing.T) 
 	response := readAuthResponse(t, conn)
 	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
 		t.Fatalf("auth_response = %+v", response)
+	}
+	if response.IdentityAdmissionMode != "signature" || response.IdentityGeneration != 1 {
+		t.Fatalf("identity admission=(%q, %d), want signature generation 1", response.IdentityAdmissionMode, response.IdentityGeneration)
 	}
 }
 
@@ -3835,11 +3860,14 @@ func testIdentityKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, strin
 	return pub, priv, onboarding.ProviderIDForIdentityPubkey(pub)
 }
 
-func newIdentitySignatureHarness(t *testing.T, providerID string, store providerws.IdentitySignatureStore) providerHarness {
+func newIdentitySignatureHarness(t *testing.T, providerID string, store providerws.IdentitySignatureStore, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
 	return newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithIdentitySignatureStore(store)}, func(cfg *config.Config) {
 		cfg.Providers[0].ProviderID = providerID
 		cfg.Providers[0].EndpointURL = ""
+		for _, opt := range opts {
+			opt(cfg)
+		}
 	})
 }
 

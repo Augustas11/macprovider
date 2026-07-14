@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct MalibuApp: App {
@@ -13,20 +14,25 @@ struct MalibuApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let agent = MalibuAgent()
-    private lazy var sparkleUpdater = SparkleUpdaterController { [unowned self] in self.agent }
     private var menuBar: MenuBarController!
     private var onboardingWindow: NSWindow?
     private var dashboardWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // AUDIT R1 ARCHITECT A4 fix: log both authorities' versions on startup so
-        // support can tell a Sparkle-only update from a get.streamvc.live-only one.
+        // Log both installed versions so support can identify a partially
+        // completed compatibility-set transaction without reading the bundle.
         logStartupProvenance()
 
-        menuBar = MenuBarController(agent: agent, sparkleUpdater: sparkleUpdater) { [weak self] action in
+        menuBar = MenuBarController(agent: agent) { [weak self] action in
             self?.handle(action)
         }
 
+        // Host-based unit tests launch the real AppDelegate. Do not let that
+        // test host inspect, start, repair, or terminate the user's installed
+        // provider while XCTest is still executing.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            return
+        }
         Task { @MainActor [weak self] in
             await self?.handleStartup()
         }
@@ -58,9 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if terminationDrain == nil {
             terminationDrain = Task { @MainActor [weak self] in
                 guard let self else { NSApp.reply(toApplicationShouldTerminate: true); return }
-                // Always drain the CLI daemon first. shutdown() is idempotent —
-                // if performUninstall already called it, isShuttingDown makes
-                // this a no-op.
+                // Always detach Malibu's observers first. Option 2 keeps the
+                // launchd provider running on ordinary app quit. shutdown() is
+                // idempotent; if uninstall already detached, this is a no-op.
                 await self.agent.shutdown(gracefulSeconds: 15)
                 // If an uninstall was in-flight (or started concurrently), wait
                 // for it to complete before signalling termination.
@@ -86,14 +92,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .openOnboarding: presentOnboarding()
         case .pause: Task { await agent.pause() }
         case .resume: Task { await agent.resume() }
-        case .checkForUpdates: sparkleUpdater.checkForUpdates(nil)
-        case .updateCLI: sparkleUpdater.checkForUpdates(nil)
+        case .checkForUpdates, .updateCLI: Task { await agent.updateCLINow() }
+        case .exportDiagnostics: exportDiagnostics()
         case .quitAndUninstall:
             guard uninstallTask == nil else { return }
+            guard confirmUninstall() else { return }
             uninstallTask = Task { @MainActor [weak self] in
                 await self?.performUninstall()
             }
         }
+    }
+
+    private func confirmUninstall() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Uninstall Malibu and stop this provider?"
+        alert.informativeText = "This removes the launchd provider, Malibu settings, and local provider configuration. It preserves the CLI Keychain credential so the same provider ownership can be recovered by reinstalling. Downloaded model caches are not removed."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Quit and Uninstall")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // SPEC-026 §7.3: consume(_:) / presentLinkError(_:) retired along with
@@ -174,14 +191,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentDashboard() {
         if dashboardWindow == nil {
-            dashboardWindow = DashboardWindow.make(agent: agent, sparkleUpdater: sparkleUpdater)
+            dashboardWindow = DashboardWindow.make(
+                agent: agent,
+                onExportDiagnostics: { [weak self] in self?.exportDiagnostics() }
+            )
         }
         dashboardWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // AUDIT R1 CODE M2 / SECURITY S3 / ARCHITECT A6 + R3 CODE M1 fix:
-    // uninstall runs to completion (residue reporting included) BEFORE any
+    private func exportDiagnostics() {
+        let panel = NSSavePanel()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        panel.nameFieldStringValue = "malibu-diagnostics-\(formatter.string(from: Date())).json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        do {
+            let appVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                ?? "unknown"
+            let data = try ProviderDiagnosticsBundle.make(
+                snapshot: agent.snapshot,
+                providerLogLines: agent.logLines,
+                watchdogLogURL: ProviderPaths.current.watchdogLog,
+                appVersion: appVersion
+            )
+            try data.write(to: destination, options: [.atomic])
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Could not export diagnostics"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
+    }
+
+    // Uninstall runs to completion (residue reporting included) BEFORE any
     // termination path resolves. If applicationShouldTerminate is already
     // awaiting `uninstallTask`, we let it drive termination; otherwise we
     // request termination ourselves.
@@ -189,9 +238,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         await agent.shutdown(gracefulSeconds: 30)
         let cliTeardown = await CLIInstallTeardown.uninstallBackgroundProvider()
         let unregisterFailure = await AppLoginItem.unregisterReturningError()
-        // SPEC-026 §6.5: also wipe the Ed25519 identity Keychain slot.
-        do { try await ProviderIdentity.deleteFromKeychain() }
-        catch { NSLog("[malibu] provider identity delete failed: %@", error.localizedDescription) }
         var residue = await ProviderConfig.wipeAppOwnedState()
         residue.cliUninstallWarnings = cliTeardown.warnings
 
