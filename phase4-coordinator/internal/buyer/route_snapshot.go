@@ -159,6 +159,18 @@ func stringPtrOrNil(value string) *string {
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
 	rec.logBuyerFailure(http.StatusInternalServerError, "Could not durably record route snapshot")
+	// Item 18 request-wide prior-dispatch signal: attemptN counts recorded
+	// provider-bound attempts, so attemptN>0 means an EARLIER provider was
+	// already dispatched (and possibly credited in observe mode) in THIS
+	// request before we failed the route-snapshot write on a failover attempt.
+	// Emit a header so the gateway does NOT treat this terminal
+	// route_snapshot_failed as a no-charge "no provider ran" case (which would
+	// erase that prior provider work). logBuyerFailure above does not bump
+	// attemptN (its row is not provider-bound: empty assigned id), so the
+	// count still reflects only prior provider attempts here.
+	if rec.attemptN > 0 {
+		w.Header().Set(settlementPriorDispatchHeader, "1")
+	}
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
@@ -170,6 +182,10 @@ const (
 	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	// settlementPriorDispatchHeader is set on a route_snapshot_failed emitted
+	// AFTER a prior provider dispatch in the same request (coordinator-internal
+	// failover). The gateway refuses the item-18 no-charge refund when present.
+	settlementPriorDispatchHeader = "X-MacProvider-Settlement-Prior-Dispatch"
 )
 
 var settlementOutcomeHeaderNames = []string{

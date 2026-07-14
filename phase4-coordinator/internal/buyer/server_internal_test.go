@@ -3,6 +3,7 @@ package buyer
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,50 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
+
+// TestWriteRouteSnapshotErrorSignalsPriorDispatch pins the coordinator half of
+// the item-18 fix: writeRouteSnapshotError stamps the request-wide
+// X-MacProvider-Settlement-Prior-Dispatch header IFF a prior provider attempt
+// was already recorded in this request (attemptN>0 — a coordinator-internal
+// failover), so the gateway does not refund a route_snapshot_failed that
+// followed billable provider work. A genuine first-attempt failure (attemptN
+// 0) carries no header and stays a no-charge refund.
+func TestWriteRouteSnapshotErrorSignalsPriorDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		attemptN   int
+		wantHeader bool
+	}{
+		{"first_attempt_no_prior_dispatch", 0, false},
+		{"failover_attempt_prior_dispatch", 1, true},
+		{"later_failover_attempt", 3, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &billingRecorder{
+				accountID: "acct",
+				requestID: "req",
+				server:    &Server{},
+				attemptN:  tc.attemptN,
+			}
+			w := httptest.NewRecorder()
+			writeRouteSnapshotError(w, rec, errors.New("route snapshot store unavailable"))
+
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d, want 500", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), "route_snapshot_failed") {
+				t.Fatalf("body=%s, want route_snapshot_failed envelope", w.Body.String())
+			}
+			got := w.Header().Get(settlementPriorDispatchHeader)
+			if tc.wantHeader && got == "" {
+				t.Fatalf("attemptN=%d: prior-dispatch header must be set (a prior provider was dispatched)", tc.attemptN)
+			}
+			if !tc.wantHeader && got != "" {
+				t.Fatalf("attemptN=%d: prior-dispatch header must be ABSENT on a genuine first-attempt failure, got %q", tc.attemptN, got)
+			}
+		})
+	}
+}
 
 func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *testing.T) {
 	prompt, _, completion := tokenPointersFromUsageObject(json.RawMessage(`{"prompt_tokens":-1,"completion_tokens":10}`))

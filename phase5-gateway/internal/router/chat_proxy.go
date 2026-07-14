@@ -55,6 +55,13 @@ const (
 	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	// settlementPriorDispatchHeader mirrors the coordinator constant of the
+	// same name (separate Go module, intentionally duplicated). The
+	// coordinator sets it on a route_snapshot_failed emitted after a prior
+	// provider dispatch in the same request; item 18 refuses the no-charge
+	// refund when it is present. Keep in sync with
+	// phase4-coordinator/internal/buyer/route_snapshot.go.
+	settlementPriorDispatchHeader = "X-MacProvider-Settlement-Prior-Dispatch"
 	// settlementPolicyVersion is the current coordinator route-snapshot
 	// policy version (see billing.RouteSnapshotPolicyVersion). It was
 	// bumped v0 -> v1 when the settlement pending-deadline default moved
@@ -1395,13 +1402,25 @@ func coordinatorIdempotencyError(status int, body []byte) bool {
 // coordinator ever attaches finality to this code, the finality-policy path
 // handles it instead.
 //
-// Callers additionally gate on `!priorProviderDispatch`: a route_snapshot_failed
-// that follows a retried provider-dispatched 502 (which may have billed a
-// prompt credit in observe settlement mode) must NOT be refunded — it falls
-// through to the estimate-settling path instead. This predicate only certifies
-// the response SHAPE; the caller certifies no prior billable dispatch.
+// Two prior-dispatch guards keep the refund scoped to genuinely no-provider
+// requests (a route_snapshot_failed can be terminal AFTER real provider work):
+//   - the coordinator's request-wide X-MacProvider-Settlement-Prior-Dispatch
+//     header, set when a route_snapshot_failed follows a prior provider attempt
+//     WITHIN one coordinator request (coordinator-internal failover); and
+//   - the caller's `!priorProviderDispatch` gate, which covers a
+//     route_snapshot_failed the gateway reached only AFTER retrying a prior
+//     provider-dispatched 502 across separate coordinator requests.
+//
+// Either signal means real provider work may have been billed (observe
+// settlement mode credits a dispatched-but-failed attempt), so refunding would
+// erase it — the response instead settles on the prompt estimate. This
+// predicate certifies the response shape + the coordinator signal; the caller
+// certifies no cross-retry dispatch.
 func coordinatorPreDispatchNoChargeError(status int, body []byte, h http.Header) bool {
 	if status != http.StatusInternalServerError || hasAnySettlementFinalityHeader(h) {
+		return false
+	}
+	if strings.TrimSpace(h.Get(settlementPriorDispatchHeader)) != "" {
 		return false
 	}
 	return openAIErrorCode(body) == "route_snapshot_failed"
