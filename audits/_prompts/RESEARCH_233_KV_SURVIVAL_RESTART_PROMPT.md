@@ -1,6 +1,6 @@
 # RESEARCH PROMPT — KV cache survival across process restarts for macprovider
 
-Run as: `omc ask codex "$(cat specs/RESEARCH_233_KV_SURVIVAL_RESTART_PROMPT.md)"`
+Run as: `omc ask codex "$(cat audits/_prompts/RESEARCH_233_KV_SURVIVAL_RESTART_PROMPT.md)"`
 
 This is a **technical research prompt**, not a code-audit prompt. Single
 codex call (or twice with different models). Output is a decision-grade
@@ -201,7 +201,7 @@ Quarterly milestones (2026–2027) with gates tied to KVS bench IDs.
 
 ## Output format
 
-Markdown memo `specs/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md`,
+Markdown memo `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md`,
 **~400–700 lines**.
 
 Executive summary ≤ 10 bullets. Threat table in Part 4 required.

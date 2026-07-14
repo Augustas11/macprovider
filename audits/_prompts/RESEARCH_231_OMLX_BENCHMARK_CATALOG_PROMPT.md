@@ -1,6 +1,6 @@
 # RESEARCH PROMPT — oMLX community benchmarks → model catalog calibration
 
-Run as: `omc ask codex "$(cat specs/RESEARCH_231_OMLX_BENCHMARK_CATALOG_PROMPT.md)"`
+Run as: `omc ask codex "$(cat audits/_prompts/RESEARCH_231_OMLX_BENCHMARK_CATALOG_PROMPT.md)"`
 
 This is a **technical research prompt**, not a code-audit prompt. Single
 codex call (or twice with different models). Output is a decision-grade
@@ -221,7 +221,7 @@ after applying catalog deltas (model, chip, expected TG band).
 
 ## Output format
 
-Markdown memo `specs/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md`,
+Markdown memo `docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md`,
 **~400–800 lines**.
 
 Required sections: Parts 1–5 above + **Executive summary** (≤ 15 bullets)

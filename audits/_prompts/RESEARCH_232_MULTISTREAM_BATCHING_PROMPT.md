@@ -1,6 +1,6 @@
 # RESEARCH PROMPT — Multi-stream / continuous batching on Apple Silicon for macprovider
 
-Run as: `omc ask codex "$(cat specs/RESEARCH_232_MULTISTREAM_BATCHING_PROMPT.md)"`
+Run as: `omc ask codex "$(cat audits/_prompts/RESEARCH_232_MULTISTREAM_BATCHING_PROMPT.md)"`
 
 This is a **technical research prompt**, not a code-audit prompt. Single
 codex call (or twice with different models). Output is a decision-grade
@@ -185,7 +185,7 @@ Quarterly milestones with go/no-go gates:
 
 ## Output format
 
-Markdown memo `specs/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md`,
+Markdown memo `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md`,
 **~500–900 lines**.
 
 Executive summary ≤ 12 bullets. Tables for Parts 1, 3, 4, 6. Mermaid
