@@ -61,6 +61,16 @@ for value in (
 ):
     if value not in build:
         raise SystemExit(f"candidate binary version check is incomplete: {value}")
+for value in (
+    'package_resolution_args=()',
+    'if [ -f Package.resolved ]; then',
+    'package_resolution_args=(-onlyUsePackageVersionsFromResolvedFile)',
+    '"${package_resolution_args[@]}"',
+):
+    if value not in build:
+        raise SystemExit(f"candidate Malibu dependency handling is incomplete: {value}")
+if re.search(r'^\s*cp Package\.resolved ', build, re.MULTILINE) and 'if [ -f Package.resolved ]; then' not in build:
+    raise SystemExit("candidate Malibu build requires a removed optional lockfile")
 if "retention-days: 1" not in protected or "actions/upload-artifact@ea165f8d" not in protected:
     raise SystemExit("private acceptance artifact is not short-lived and action-pinned")
 for secret in (
