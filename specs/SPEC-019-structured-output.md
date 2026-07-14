@@ -2,7 +2,7 @@
 
 **Version:** 0.2.5 (2026-07-14, item 20 — streaming SSE retryable-override symmetry made explicit in §5)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 is a normative clarification of the existing §5 "preserve retryability" requirement — the coordinator streaming SSE writer MUST honor the provider `end.Retryable` override, matching the non-streaming path (runbook item 20; codex 3-lane 0 C/H/M).
+**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 is a normative clarification of the existing §8 "preserve retryability" requirement — the coordinator streaming SSE writer MUST honor the provider `end.Retryable` override, matching the non-streaming path (runbook item 20; codex 3-lane 0 C/H/M).
 
 ## Quick orientation
 
@@ -1613,7 +1613,7 @@ v0.2 audit lanes should additionally probe:
 
 **Version:** 0.2.5 (2026-07-14, item 20 amendment)
 
-**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 adds one normative clause to §5 (streaming SSE writer MUST honor the provider `end.Retryable` override) — a clarification of the pre-existing "preserve retryability" requirement, landed with the item-20 code fix under a codex 3-lane 0 C/H/M audit.
+**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 adds one normative clause to §8 (streaming SSE writer MUST honor the provider `end.Retryable` override) — a clarification of the pre-existing "preserve retryability" requirement, landed with the item-20 code fix under a codex 3-lane 0 C/H/M audit.
 
 Audit trajectory:
 - r1: 1C + 9H + 9M → absorbed in v0.2.1.
@@ -1637,7 +1637,7 @@ change, no new HTTP endpoint.
 ### Change log
 
 - **v0.2.5 (2026-07-14, runbook item 20 — streaming retryable-override
-  symmetry):** §5's "Provider-to-coordinator WS terminal validation failure
+  symmetry):** §8's "Provider-to-coordinator WS terminal validation failure
   MUST ... preserve retryability" clause now states explicitly that the
   coordinator terminal **SSE** writer MUST honor the provider-supplied
   `inference_response_end.retryable` override — the same override the

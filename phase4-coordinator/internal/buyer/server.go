@@ -3236,17 +3236,22 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			if end.Status != "complete" && end.Status != "cancelled" {
 				if isSpec019ProviderDetailCode(end.Status) {
-					// SPEC-019 §5: honor the provider-supplied end.Retryable
+					// SPEC-019 §8: honor the provider-supplied end.Retryable
 					// override on the synthesized SSE error, mirroring the
 					// non-streaming writeWSEndError path — but ONLY for the two
 					// codes that path actually routes through
 					// writeProviderStructuredOutputError (which reads
 					// end.Retryable): malformed_json_response and
-					// json_schema_validation_failed. response_byte_cap_exceeded
-					// and provider_timeout keep their static default on BOTH
-					// transports, so a provider cannot flip a non-retryable
+					// json_schema_validation_failed. For response_byte_cap_exceeded
+					// and provider_timeout the provider override is IGNORED on
+					// BOTH transports, so a provider cannot flip a non-retryable
 					// byte-cap failure to retryable and invite repeated large
-					// re-sends. isSpec019RetryableOverrideCode is that scope.
+					// re-sends. (The base code/retryable each transport emits for
+					// those two still differs — streaming keeps the literal code
+					// with its static default, non-streaming writeWSEndError falls
+					// through to provider_error — but that divergence is
+					// pre-existing and out of scope here.)
+					// isSpec019RetryableOverrideCode is that override scope.
 					override := end.Retryable
 					if !isSpec019RetryableOverrideCode(end.Status) {
 						override = nil
@@ -6976,9 +6981,10 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
 // inference_response_end.retryable. It MUST match the non-streaming override
 // scope in writeWSEndError: only malformed_json_response and
 // json_schema_validation_failed route through writeProviderStructuredOutputError
-// (which reads end.Retryable). response_byte_cap_exceeded and provider_timeout
-// keep their static spec018Retryable default on both transports so a provider
-// cannot flip a non-retryable cap failure to retryable.
+// (which reads end.Retryable). For response_byte_cap_exceeded and provider_timeout
+// the provider override is ignored on both transports (streaming keeps the code's
+// static spec018Retryable default; non-streaming writeWSEndError maps them to
+// provider_error), so a provider cannot flip a non-retryable cap failure.
 func isSpec019RetryableOverrideCode(code string) bool {
 	switch code {
 	case "malformed_json_response", "json_schema_validation_failed":
