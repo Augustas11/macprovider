@@ -423,6 +423,7 @@ jobs:
           codesign --force \
             --options runtime \
             --timestamp \
+            --identifier live.streamvc.macprovider.cli \
             --sign "$SIGNING_ID" \
             "$WORK/macprovider-cli"
 
@@ -430,6 +431,15 @@ jobs:
           # early (e.g. cert expired) without burning notary submission
           # quota.
           codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
+          CLI_REQUIREMENT=$(codesign -d -r- "$WORK/macprovider-cli" 2>&1)
+          printf '%s\n' "$CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+            echo "::error::CLI designated requirement lacks the stable release identifier" >&2
+            exit 1
+          }
+          printf '%s\n' "$CLI_REQUIREMENT" | grep -F "certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" >/dev/null || {
+            echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
+            exit 1
+          }
 
           # Step 3: notarize. notarytool needs a zip or dmg, not a raw
           # binary, so wrap the binary in a transient zip for submission
@@ -563,14 +573,29 @@ jobs:
           find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' \
             -exec cp -R {} "$APP/Contents/MacOS"/ \;
 
+          SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
           codesign --force --deep \
             --options runtime \
             --timestamp \
+            --preserve-metadata=identifier \
             --entitlements phase3-binary/app/Malibu.entitlements \
             --sign "$SIGNING_ID" \
             "$APP"
 
           codesign --verify --strict --verbose=2 --deep "$APP"
+          BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
+          printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+            echo "::error::Bundling changed the CLI designated requirement identifier" >&2
+            exit 1
+          }
+          printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F "certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" >/dev/null || {
+            echo "::error::Bundled CLI designated requirement is not pinned to the release Team ID" >&2
+            exit 1
+          }
+          test "$SOURCE_CLI_REQUIREMENT" = "$BUNDLED_CLI_REQUIREMENT" || {
+            echo "::error::Bundling changed the CLI designated requirement" >&2
+            exit 1
+          }
 
           NOTARIZE_ZIP="$RUNNER_TEMP/Malibu-notary.zip"
           /usr/bin/ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"

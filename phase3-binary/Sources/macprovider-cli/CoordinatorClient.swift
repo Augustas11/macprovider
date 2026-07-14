@@ -144,7 +144,7 @@ actor CoordinatorClient {
     ) async -> Bool?
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
 
-    static let binaryVersion = "1.8.32"
+    static let binaryVersion = "1.8.33"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -191,6 +191,8 @@ actor CoordinatorClient {
     // acceptCoordinatorSession knows where to write the new token
     // without taking another dependency on the loader.
     private let configPath: String
+    private let providerCredentialStore: any ProviderCredentialStoring
+    private let credentialStatusRuntime: ProviderCredentialStatusRuntime
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private let pairingController: PairingController
     private struct PendingAEADRekey {
@@ -321,6 +323,8 @@ actor CoordinatorClient {
         receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = nil,
         receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = [],
         persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)? = nil,
+        providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         // Issue #189: injectable in tests; production uses Darwin.exit(1)
         // so the launchd KeepAlive contract recovers the wedged process.
         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
@@ -370,6 +374,8 @@ actor CoordinatorClient {
             return trimmed.isEmpty ? nil : trimmed
         }
         self.configPath = config.configPath
+        self.providerCredentialStore = providerCredentialStore
+        self.credentialStatusRuntime = credentialStatusRuntime
         self.sleepAssertionFactory = sleepAssertionFactory
         self.pairingController = pairingController ?? PairingController(configPath: config.configPath)
         self.connectAndRunOverride = connectAndRunOverride
@@ -701,6 +707,8 @@ actor CoordinatorClient {
             providerReceiptPublicKey: publicKey,
             credentialBootstrap: true,
             bootstrapReceiptSigningKey: receiptKey,
+            providerCredentialStore: providerCredentialStore,
+            credentialStatusRuntime: credentialStatusRuntime,
             watchdogExitHook: watchdogExitHook
         ) else {
             return false
@@ -710,16 +718,15 @@ actor CoordinatorClient {
             try await recoveryClient.connectAndRunOnce()
         } catch is CoordinatorAuthUpgradeReconnect {
             await recoveryClient.stop()
-            let loaded = try? ConfigLoader.load(
-                cli: CLIOverrides(configPath: configPath),
-                environment: [:]
-            )
-            guard let recovered = loaded?.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+            let recoveredFromKeychain = try? providerCredentialStore.load(providerID: providerID)
+            guard let recovered = recoveredFromKeychain?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
                   !recovered.isEmpty,
                   recovered != rejectedToken else {
                 Self.keepaliveDebug("bootstrap_credential_recovery_persist_missing")
                 return false
             }
+            await removeRejectedLegacyCredentialSource(rejectedToken)
             providerToken = recovered
             Self.keepaliveDebug("bootstrap_credential_recovery_succeeded")
             return true
@@ -1986,36 +1993,10 @@ actor CoordinatorClient {
         inBandAEADRekeyEnabled = encryptedLeg["in_band_aead_rekey_v1"] as? Bool == true
     }
 
-    /// SPEC-003 v0.8.2 FR-C9.3 — extract `assigned_provider_token` from
-    /// a hello_ack / auth_response payload, persist it to disk via a
-    /// detached I/O task, and adopt it in-memory ONLY on persist
-    /// success. The token is `await`-gated by the persist outcome.
-    ///
-    /// v0.8.2 hardening: v0.8.1 implemented this as "adopt in memory
-    /// FIRST, then fire-and-forget detached persist". The codex security
-    /// re-audit on PR #44 (MINOR-1) flagged the brick-mode window:
-    /// process crash / SIGKILL between in-memory adoption and persist
-    /// flush leaves the coordinator holding a valid token row that the
-    /// binary will never use. On next process restart the binary
-    /// reconnects tokenless, the coordinator's FR-C9.4 TOFU gate refuses
-    /// it ("an active token already exists"), and the provider is
-    /// bricked until operator runs `coordinator-cli revoke-token`.
-    ///
-    /// v0.8.2 closes this by awaiting the persist task before adopting
-    /// in memory. The disk I/O still runs on a detached priority-utility
-    /// task so the receive loop is suspended (not the whole runtime)
-    /// during the ~10ms persist; this preserves the FR-C9.3 SHOULD-not-
-    /// block contract because it is a `Task.detached(...).value` await,
-    /// not a sync blocking call.
-    ///
-    /// On persist failure the in-memory token is NOT adopted. The
-    /// current WS session continues with whatever bearer (if any) was
-    /// already configured — the connect already authenticated, so the
-    /// session itself is fine. Next reconnect attempt will retry from
-    /// scratch and the legitimate provider can mint cleanly. The
-    /// asymmetry "coordinator has token / binary doesn't" never appears
-    /// in this design.
-    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async -> Bool {
+    /// Persist-before-adopt for newly assigned credentials. CLI Keychain is
+    /// the only durable destination; a failed commit leaves the in-memory
+    /// credential unchanged and fails this admission attempt.
+    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async throws -> Bool {
         guard let assigned = payload["assigned_provider_token"] as? String else {
             return false
         }
@@ -2023,40 +2004,70 @@ actor CoordinatorClient {
         guard !trimmed.isEmpty else {
             return false
         }
-        // AUDIT R1 SECURITY S4 fix (PR #334) — when the CLI is spawned as a
-        // managed child of Malibu.app, disk persistence of the bearer token
-        // is contrary to the App-track security model: the app stores the
-        // token in Keychain and NEVER wants it landed in
-        // ~/.config/macprovider/config.yaml. We still adopt in-memory so
-        // the current WS session keeps authenticating, and emit an event
-        // so operators can see the skip. Keychain-side rotation lands with
-        // SPEC-025 §11 P1 alongside the "CLI reads Keychain directly" work.
-        if appConfig.managedBy == "malibu-app" {
-            self.providerToken = trimmed
-            Self.emitTokenPersistEvent(
-                event: "provider_token_persist_skipped_managed_by_malibu_app",
-                path: configPath,
-                error: nil
-            )
-            return true
-        }
         let path = configPath
+        let providerID = providerID
+        let store = providerCredentialStore
+        let rejectedToken = providerToken
         let result: Result<Void, Error> = await Task.detached(priority: .utility) {
             do {
-                try ProviderTokenPersist.write(token: trimmed, configPath: path)
+                try store.replace(providerID: providerID, token: trimmed)
                 return .success(())
             } catch {
                 return .failure(error)
             }
         }.value
+
         switch result {
         case .success:
-            self.providerToken = trimmed
-            Self.emitTokenPersistEvent(event: "provider_token_persisted", path: path, error: nil)
-            return true
+            Self.emitTokenPersistEvent(event: "provider_token_keychain_persisted", path: path, error: nil)
         case .failure(let error):
-            Self.emitTokenPersistEvent(event: "provider_token_persist_failed", path: path, error: error)
-            return false
+            Self.emitTokenPersistEvent(event: "provider_token_keychain_persist_failed", path: path, error: error)
+            throw CoordinatorAuthError.invalidMessage("assigned provider credential could not be committed")
+        }
+
+        if let rejectedToken, rejectedToken != trimmed {
+            await removeRejectedLegacyCredentialSource(rejectedToken)
+        }
+
+        self.providerToken = trimmed
+        await credentialStatusRuntime.update(
+            ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+        )
+        return true
+    }
+
+    private func removeRejectedLegacyCredentialSource(_ rejectedToken: String) async {
+        guard !rejectedToken.isEmpty else { return }
+        let path = configPath
+        let cleanup: Result<Bool, Error> = await Task.detached(priority: .utility) {
+            do {
+                return .success(try ProviderTokenPersist.remove(
+                    expectedToken: rejectedToken,
+                    configPath: path
+                ))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        switch cleanup {
+        case .success(true):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_rejected_legacy_source_removed",
+                path: path,
+                error: nil
+            )
+        case .success(false):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_rejected_legacy_source_preserved_mismatch",
+                path: path,
+                error: nil
+            )
+        case .failure(let error):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_rejected_legacy_source_cleanup_failed",
+                path: path,
+                error: error
+            )
         }
     }
 
@@ -2093,7 +2104,7 @@ actor CoordinatorClient {
         // and v2 (auth_response) ack paths since both funnel here.
         // Awaited so that persist-before-adopt holds: see
         // adoptAssignedProviderTokenIfPresent doc-comment.
-        let assignedProviderTokenAdopted = await adoptAssignedProviderTokenIfPresent(payload)
+        let assignedProviderTokenAdopted = try await adoptAssignedProviderTokenIfPresent(payload)
         if assignedProviderTokenAdopted {
             // The current tokenless WS session stays auth_state=self_minted and is
             // not buyer-routable until we reconnect with Authorization: Bearer.
@@ -2142,40 +2153,23 @@ actor CoordinatorClient {
         sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
         try await sendStateUpdate(state: nil, reason: reason)
-        if let completedAutoupdate = await pendingSuccessfulAutoupdate(),
-           await waitForCoordinatorServingCapability() {
-            do {
-                let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
-                defer { withExtendedLifetime(transactionLock) {} }
-                guard let current = try autoupdateMarkerStore.readPending(),
-                      current == completedAutoupdate else {
-                    throw AutoUpdateMarkerError.invalidMarker
-                }
-                try autoupdateMarkerStore.completeSuccessfulUpdate(current)
-                try autoupdateMarkerStore.finalizeSuccessfulUpdate(current)
-                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                    updateID: completedAutoupdate.updateID,
-                    currentVersion: Self.binaryVersion,
-                    targetVersion: completedAutoupdate.targetVersion,
-                    phase: .postStart,
-                    outcome: .success,
-                    reason: "coordinator_admitted_serving_capability_confirmed",
-                    attempt: 1
-                ))
-            } catch {
-                // Preserve the sentinel/pending state when cleanup is
-                // incomplete so startup recovery can finish it idempotently.
-                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                    updateID: completedAutoupdate.updateID,
-                    currentVersion: Self.binaryVersion,
-                    targetVersion: completedAutoupdate.targetVersion,
-                    phase: .postStart,
-                    outcome: .failure,
-                    reason: "buyer_serving_commit_cleanup_failed",
-                    attempt: 1,
-                    failureClass: .other
-                ))
-            }
+        let updateBoundary = await commitPendingAutoupdateAfterServingProof()
+        if updateBoundary != .pendingRollback {
+            // A pre-v1.8.33 rollback binary cannot read CLI Keychain. Commit
+            // the coordinator update transaction before removing its YAML
+            // compatibility bearer; failed readiness must leave rollback viable.
+            await finalizeLegacyCredentialSourceAfterAdmission()
+        }
+        if case .committed(let completedAutoupdate) = updateBoundary {
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: completedAutoupdate.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: completedAutoupdate.targetVersion,
+                phase: .postStart,
+                outcome: .success,
+                reason: "coordinator_admitted_serving_capability_confirmed",
+                attempt: 1
+            ))
         }
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
@@ -2201,6 +2195,116 @@ actor CoordinatorClient {
         }
     }
 
+    private enum AdmissionUpdateBoundary: Equatable {
+        case noPendingUpdate
+        case committed(AutoUpdatePendingMarker)
+        case pendingRollback
+    }
+
+    private func commitPendingAutoupdateAfterServingProof() async -> AdmissionUpdateBoundary {
+        guard let completedAutoupdate = await pendingSuccessfulAutoupdate() else {
+            return .noPendingUpdate
+        }
+        // The old `macprovider-cli update` process owns this transaction and
+        // may still roll back its child. The child must not clear either the
+        // marker or the legacy YAML credential.
+        guard completedAutoupdate.commitOwner != "self_update" else {
+            return .pendingRollback
+        }
+        guard await waitForCoordinatorServingCapability() else {
+            return .pendingRollback
+        }
+        do {
+            let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
+            defer { withExtendedLifetime(transactionLock) {} }
+            guard let current = try autoupdateMarkerStore.readPending(),
+                  current == completedAutoupdate else {
+                throw AutoUpdateMarkerError.invalidMarker
+            }
+            try autoupdateMarkerStore.completeSuccessfulUpdate(current)
+            try autoupdateMarkerStore.finalizeSuccessfulUpdate(current)
+            return .committed(completedAutoupdate)
+        } catch {
+            // Preserve the sentinel/pending state when cleanup is incomplete so
+            // startup recovery can finish it idempotently. Credential cleanup
+            // is also withheld because rollback may still restore an old binary.
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: completedAutoupdate.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: completedAutoupdate.targetVersion,
+                phase: .postStart,
+                outcome: .failure,
+                reason: "buyer_serving_commit_cleanup_failed",
+                attempt: 1,
+                failureClass: .other
+            ))
+            return .pendingRollback
+        }
+    }
+
+    func finalizeCredentialAfterAutoupdateBoundaryForTest(assignedProviderID: String) async {
+        acceptedAssignedProviderID = assignedProviderID
+        let boundary = await commitPendingAutoupdateAfterServingProof()
+        if boundary != .pendingRollback {
+            await finalizeLegacyCredentialSourceAfterAdmission()
+        }
+    }
+
+    /// The compatibility YAML remains intact until a restarted provider that
+    /// resolved this exact value from CLI Keychain completes authenticated
+    /// coordinator admission and publishes its first state update. Cleanup is
+    /// compare-and-remove under the config lock, so a newer or conflicting
+    /// credential is never deleted.
+    private func finalizeLegacyCredentialSourceAfterAdmission() async {
+        let status = await credentialStatusRuntime.snapshot()
+        guard status.source == .cliKeychain,
+              status.migrationPending,
+              let expected = providerToken,
+              !expected.isEmpty else {
+            return
+        }
+        let store = providerCredentialStore
+        let providerID = providerID
+        let path = configPath
+        let result: Result<Bool, Error> = await Task.detached(priority: .utility) {
+            do {
+                guard try store.load(providerID: providerID) == expected else {
+                    return .success(false)
+                }
+                return .success(try ProviderTokenPersist.remove(
+                    expectedToken: expected,
+                    configPath: path
+                ))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        switch result {
+        case .success(true):
+            await credentialStatusRuntime.update(
+                ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+            )
+            Self.emitTokenPersistEvent(
+                event: "provider_token_legacy_source_removed_after_admission",
+                path: path,
+                error: nil
+            )
+        case .success(false):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_legacy_source_preserved_mismatch",
+                path: path,
+                error: nil
+            )
+        case .failure(let error):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_legacy_source_cleanup_failed",
+                path: path,
+                error: error
+            )
+        }
+    }
+
     private static func emitClaimURLHandoffEvent(error: Error) {
         let payload = [
             "event": "claim_url_handoff_failed",
@@ -2217,8 +2321,7 @@ actor CoordinatorClient {
 
     private func pendingSuccessfulAutoupdate() async -> AutoUpdatePendingMarker? {
         guard let marker = try? autoupdateMarkerStore.readPending(),
-              marker.targetVersion == Self.binaryVersion,
-              marker.commitOwner == nil || marker.commitOwner == "coordinator"
+              marker.targetVersion == Self.binaryVersion
         else {
             return nil
         }

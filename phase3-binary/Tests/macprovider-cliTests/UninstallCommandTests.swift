@@ -2,6 +2,113 @@ import XCTest
 @testable import macprovider_cli
 
 final class UninstallCommandTests: XCTestCase {
+    func testStopLaunchdServicesAcceptsVerifiedAbsentJob() throws {
+        var calls: [[String]] = []
+
+        try UninstallCommand.stopLaunchdServices(labels: ["live.streamvc.macprovider"], uid: 501) { arguments in
+            calls.append(arguments)
+            return arguments.first == "bootout" ? 3 : 113
+        }
+
+        XCTAssertEqual(calls, [
+            ["bootout", "gui/501/live.streamvc.macprovider-watchdog"],
+            ["print", "gui/501/live.streamvc.macprovider-watchdog"],
+            ["bootout", "gui/501/live.streamvc.macprovider"],
+            ["print", "gui/501/live.streamvc.macprovider"],
+            ["print", "gui/501/live.streamvc.macprovider-watchdog"],
+            ["print", "gui/501/live.streamvc.macprovider"],
+        ])
+    }
+
+    func testStopLaunchdServicesRejectsJobThatRemainsLoaded() {
+        XCTAssertThrowsError(
+            try UninstallCommand.stopLaunchdServices(
+                labels: ["live.streamvc.macprovider"],
+                uid: 501,
+                run: { arguments in
+                    guard arguments.first == "print" else { return 0 }
+                    return arguments.last?.hasSuffix("/live.streamvc.macprovider-watchdog") == true ? 113 : 0
+                }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .serviceStillLoaded("live.streamvc.macprovider")
+            )
+        }
+    }
+
+    func testStopLaunchdServicesRejectsIndeterminatePrintFailure() {
+        var printCount = 0
+        XCTAssertThrowsError(
+            try UninstallCommand.stopLaunchdServices(
+                labels: ["live.streamvc.macprovider"],
+                uid: 501,
+                run: { arguments in
+                    guard arguments.first == "print" else { return 5 }
+                    printCount += 1
+                    return printCount == 1 ? 64 : 113
+                }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .serviceAbsenceVerificationFailed("live.streamvc.macprovider-watchdog", 64)
+            )
+        }
+    }
+
+    func testStopLaunchdServicesRejectsProviderRestartedAfterInitialStopProof() {
+        var calls: [[String]] = []
+        var providerPrints = 0
+
+        XCTAssertThrowsError(
+            try UninstallCommand.stopLaunchdServices(
+                labels: ["live.streamvc.macprovider", "live.streamvc.macprovider-watchdog"],
+                uid: 501,
+                run: { arguments in
+                    calls.append(arguments)
+                    guard arguments.first == "print" else { return 0 }
+                    if arguments.last?.hasSuffix("/live.streamvc.macprovider") == true {
+                        providerPrints += 1
+                        return providerPrints == 1 ? 113 : 0
+                    }
+                    return 113
+                }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .serviceStillLoaded("live.streamvc.macprovider")
+            )
+        }
+
+        XCTAssertEqual(Array(calls.suffix(2)), [
+            ["print", "gui/501/live.streamvc.macprovider-watchdog"],
+            ["print", "gui/501/live.streamvc.macprovider"],
+        ])
+    }
+
+    func testStopLaunchdServicesRejectsUnexpectedManifestLabelBeforeLaunchctl() {
+        var called = false
+        XCTAssertThrowsError(
+            try UninstallCommand.stopLaunchdServices(
+                labels: ["com.example.unrelated"],
+                uid: 501,
+                run: { _ in
+                    called = true
+                    return 113
+                }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? UninstallCommand.UninstallError,
+                .unexpectedServiceLabel("com.example.unrelated")
+            )
+        }
+        XCTAssertFalse(called)
+    }
+
     func testArtifactPathsMatchCanonicalInstallLayout() {
         let home = URL(fileURLWithPath: "/Users/tester")
         let paths = UninstallCommand.artifactPaths(home: home)

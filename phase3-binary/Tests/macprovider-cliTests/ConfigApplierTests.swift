@@ -12,7 +12,11 @@ final class ConfigApplierTests: XCTestCase {
         let applied = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now)
 
         XCTAssertEqual(applied.backupPath.lastPathComponent, "config.yaml.bak-1718712345-0")
-        XCTAssertEqual(try String(contentsOf: applied.backupPath), sampleConfig())
+        XCTAssertEqual(
+            try String(contentsOf: applied.backupPath),
+            ProviderTokenPersist.removingProviderTokenLines(in: sampleConfig())
+        )
+        XCTAssertFalse(try String(contentsOf: applied.backupPath).contains("provider_token:"))
         XCTAssertTrue(applied.summary.contains("backup at \(applied.backupPath.path)"))
         XCTAssertEqual(try fileMode(applied.backupPath) & 0o777, 0o600)
         XCTAssertEqual(try fileMode(fixture.configURL) & 0o777, 0o600)
@@ -173,8 +177,14 @@ final class ConfigApplierTests: XCTestCase {
             .appendingPathComponent("config.yaml.bak-1718712345-1")
 
         XCTAssertEqual(secondPost, firstPost)
-        XCTAssertEqual(try String(contentsOf: secondBackup), secondPost)
-        XCTAssertEqual(try String(contentsOf: firstBackup), sampleConfig())
+        XCTAssertEqual(
+            try String(contentsOf: secondBackup),
+            ProviderTokenPersist.removingProviderTokenLines(in: secondPost)
+        )
+        XCTAssertEqual(
+            try String(contentsOf: firstBackup),
+            ProviderTokenPersist.removingProviderTokenLines(in: sampleConfig())
+        )
     }
 
     func testApplyWriteIsAtomic() throws {
@@ -200,6 +210,36 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: tempPaths[0].path))
     }
 
+    func testApplyWaitsForSharedProviderConfigMutationLock() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let lockURL = fixture.configURL.deletingLastPathComponent()
+            .appendingPathComponent(".config.yaml.lock")
+        let lockFD = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        XCTAssertGreaterThanOrEqual(lockFD, 0)
+        guard lockFD >= 0 else { return }
+        XCTAssertEqual(flock(lockFD, LOCK_EX), 0)
+
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        let recommendation = recommendation()
+        DispatchQueue.global().async {
+            started.signal()
+            _ = try? fixture.applier().apply(recommendation: recommendation, now: fixture.now)
+            finished.signal()
+        }
+
+        XCTAssertEqual(started.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(
+            finished.wait(timeout: .now() + 0.15),
+            .timedOut,
+            "ConfigApplier must not read or rename while credential cleanup owns the shared lock"
+        )
+        XCTAssertEqual(flock(lockFD, LOCK_UN), 0)
+        _ = close(lockFD)
+        XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
+    }
+
     func testApplyBackupUsesExclusiveCreateAgainstTOCTOURace() throws {
         let fixture = try ConfigFixture()
         try fixture.writeConfig(sampleConfig())
@@ -219,7 +259,10 @@ final class ConfigApplierTests: XCTestCase {
             XCTAssertEqual(try String(contentsOf: preExisting), "collision-\(counter)",
                            "pre-existing backup at counter \(counter) must not be overwritten")
         }
-        XCTAssertEqual(try String(contentsOf: applied.backupPath), sampleConfig())
+        XCTAssertEqual(
+            try String(contentsOf: applied.backupPath),
+            ProviderTokenPersist.removingProviderTokenLines(in: sampleConfig())
+        )
     }
 
     func testApplyPreservesNonOwnedLinesByteIdentically() throws {

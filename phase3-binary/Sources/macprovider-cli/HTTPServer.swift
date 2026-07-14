@@ -22,6 +22,7 @@ struct HTTPServer: Sendable {
     let idlePrewarmer: IdlePrewarmer?
     let catalogModelIDAlias: String?
     let catalogStatus: ProviderCatalogStatusContext
+    let credentialStatusRuntime: ProviderCredentialStatusRuntime
 
     init(
         config: AppConfig,
@@ -30,7 +31,8 @@ struct HTTPServer: Sendable {
         receiptBuilder: ReceiptBuilder?,
         idlePrewarmer: IdlePrewarmer? = nil,
         catalogModelIDAlias: String? = nil,
-        catalogTrust: ServeCommand.CatalogRuntimeTrust? = nil
+        catalogTrust: ServeCommand.CatalogRuntimeTrust? = nil,
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured)
     ) {
         self.config = config
         self.modelRuntime = modelRuntime
@@ -38,6 +40,7 @@ struct HTTPServer: Sendable {
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
         self.catalogModelIDAlias = catalogModelIDAlias
+        self.credentialStatusRuntime = credentialStatusRuntime
         self.catalogStatus = ProviderCatalogStatusContext(
             trust: catalogTrust,
             donorMode: config.donorMode,
@@ -73,7 +76,8 @@ struct HTTPServer: Sendable {
                             receiptBuilder: receiptBuilder,
                             idlePrewarmer: idlePrewarmer,
                             catalogModelIDAlias: catalogModelIDAlias,
-                            catalogStatus: catalogStatus
+                            catalogStatus: catalogStatus,
+                            credentialStatusRuntime: credentialStatusRuntime
                         )
                     )
                 }
@@ -101,6 +105,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let idlePrewarmer: IdlePrewarmer?
     private let catalogModelIDAlias: String?
     private let catalogStatus: ProviderCatalogStatusContext?
+    private let credentialStatusRuntime: ProviderCredentialStatusRuntime
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
@@ -116,7 +121,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         receiptBuilder: ReceiptBuilder? = nil,
         idlePrewarmer: IdlePrewarmer? = nil,
         catalogModelIDAlias: String? = nil,
-        catalogStatus: ProviderCatalogStatusContext? = nil
+        catalogStatus: ProviderCatalogStatusContext? = nil,
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured)
     ) {
         self.modelID = modelID
         self.providerID = providerID
@@ -129,6 +135,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.idlePrewarmer = idlePrewarmer
         self.catalogModelIDAlias = catalogModelIDAlias
         self.catalogStatus = catalogStatus
+        self.credentialStatusRuntime = credentialStatusRuntime
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -247,8 +254,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let providerID = providerID
         let coordinatorURL = coordinatorURL
         let catalogStatus = catalogStatus
-        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus] in
+        let credentialStatusRuntime = credentialStatusRuntime
+        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime] in
             let snapshot = await providerStatus.snapshot()
+            let credentialStatus = await credentialStatusRuntime.snapshot()
             async let coordinatorBuyerServing = CoordinatorReadinessClient.fetch(
                 coordinatorURL: coordinatorURL,
                 providerID: providerID,
@@ -267,7 +276,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
 	                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
 	                    catalogStatus: catalogStatus,
-	                    coordinatorBuyerServing: await coordinatorBuyerServing
+	                    coordinatorBuyerServing: await coordinatorBuyerServing,
+	                    credentialStatus: credentialStatus
 	                )
             )
         }
@@ -1221,7 +1231,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         specDecodeTelemetryMatchesRuntime: Bool = true,
         specDecodeTelemetryRuntimeEligible: Bool = true,
         catalogStatus: ProviderCatalogStatusContext? = nil,
-        coordinatorBuyerServing: Bool? = nil
+        coordinatorBuyerServing: Bool? = nil,
+        credentialStatus: ProviderCredentialStatus = .unconfigured
     ) -> [String: Any] {
         let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
         let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
@@ -1256,6 +1267,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "session": jsonNullable(snapshot.coordinatorAssignedID),
                 "tier": jsonNullable(snapshot.coordinatorTier),
                 "recommended_binary_version": jsonNullable(snapshot.recommendedBinaryVersion),
+            ],
+            "credential": [
+                "source": credentialStatus.source.rawValue,
+                "state": credentialStatus.state.rawValue,
+                "restart_safe": credentialStatus.restartSafe,
+                "migration_pending": credentialStatus.migrationPending,
             ],
         ]
         body.merge(specDecodeTelemetryFields(

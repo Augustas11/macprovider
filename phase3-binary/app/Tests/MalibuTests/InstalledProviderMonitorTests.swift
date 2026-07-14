@@ -69,6 +69,12 @@ final class InstalledProviderMonitorTests: XCTestCase {
             "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "signer_key_id": "streamvc-autotune-static-v4",
             "source": "coordinator"
+          },
+          "credential": {
+            "source": "cli_keychain",
+            "state": "ready",
+            "restart_safe": true,
+            "migration_pending": false
           }
         }
         """.data(using: .utf8)!
@@ -80,6 +86,10 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertEqual(snapshot.catalogReleaseID, "published-2026-07-10-catalog-recovery-v1")
         XCTAssertEqual(snapshot.catalogSignerKeyID, "streamvc-autotune-static-v4")
         XCTAssertEqual(snapshot.catalogSource, "coordinator")
+        XCTAssertEqual(snapshot.credentialSource, "cli_keychain")
+        XCTAssertEqual(snapshot.credentialState, "ready")
+        XCTAssertEqual(snapshot.credentialRestartSafe, true)
+        XCTAssertEqual(snapshot.credentialMigrationPending, false)
     }
 
     func testBusyHealthStatusRemainsHealthyDuringBuyerRequest() {
@@ -100,6 +110,9 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertTrue(snapshot.coordinatorConnected)
         XCTAssertNil(snapshot.networkState)
         XCTAssertNil(snapshot.catalogState)
+        XCTAssertNil(snapshot.credentialSource)
+        XCTAssertNil(snapshot.credentialRestartSafe)
+        XCTAssertNil(snapshot.credentialMigrationPending)
     }
 
     private static func int64Value(_ value: Any?) -> Int64? {

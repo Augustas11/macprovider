@@ -26,9 +26,13 @@ struct UninstallCommand: ParsableCommand {
             manifest = Self.legacyManifest(home: home)
         }
 
-        for label in manifest.launchdLabels {
-            try runProcess("/bin/launchctl", arguments: ["bootout", "gui/\(getuid())/\(label)"], allowFailure: true)
+        try Self.stopLaunchdServices(labels: manifest.launchdLabels, uid: getuid()) { arguments in
+            try runProcess("/bin/launchctl", arguments: arguments)
         }
+        // Preserve the provider identity credential for safe reinstall. A
+        // routine uninstall is reversible and does not constitute an explicit
+        // cryptographic identity reset; destroying the bearer while provider_id
+        // survives would strand an already-used coordinator principal.
         let allowed = try Self.allowedRemovalPaths(home: home, manifest: manifest)
         for plist in manifest.launchdPlists {
             removeIfPresent(URL(fileURLWithPath: plist), allowed: allowed.plists, label: "plist", warnings: &warnings)
@@ -67,6 +71,72 @@ struct UninstallCommand: ParsableCommand {
         let applicationSupportDirectory: URL
         let manifest: URL
         let cacheDirectory: URL
+    }
+
+    enum UninstallError: Error, Equatable, CustomStringConvertible {
+        case serviceStillLoaded(String)
+        case serviceAbsenceVerificationFailed(String, Int32)
+        case unexpectedServiceLabel(String)
+
+        var description: String {
+            switch self {
+            case .serviceStillLoaded(let label):
+                return "refusing to remove provider artifacts while launchd service remains loaded: \(label)"
+            case .serviceAbsenceVerificationFailed(let label, let status):
+                return "refusing to remove provider artifacts because launchd service absence could not be verified: \(label) (launchctl print exited \(status))"
+            case .unexpectedServiceLabel(let label):
+                return "refusing to use an unrecognized launchd service label from the install manifest: \(label)"
+            }
+        }
+    }
+
+    // Stop the watchdog before the provider so no managed process remains that
+    // can bootstrap or kickstart the provider during uninstall. The fixed list
+    // also prevents a user-writable manifest from targeting unrelated jobs.
+    static let managedLaunchdStopOrder = [
+        "live.streamvc.macprovider-watchdog",
+        "live.streamvc.macprovider",
+    ]
+
+    static func stopLaunchdServices(
+        labels: [String],
+        uid: uid_t,
+        run: ([String]) throws -> Int32
+    ) throws {
+        let managedLabels = Set(managedLaunchdStopOrder)
+        for label in Set(labels) where !managedLabels.contains(label) {
+            throw UninstallError.unexpectedServiceLabel(label)
+        }
+
+        for label in managedLaunchdStopOrder {
+            let target = "gui/\(uid)/\(label)"
+            _ = try run(["bootout", target])
+            // `bootout` returns nonzero both for an absent job and for real
+            // failures. A follow-up `print` is the stop proof: only a missing
+            // job is safe before deleting the executable and plist.
+            try verifyServiceAbsent(label: label, uid: uid, run: run)
+        }
+
+        // Recheck the complete managed set only after every restart-capable job
+        // has stopped. This closes the provider-first/watchdog-restart race.
+        for label in managedLaunchdStopOrder {
+            try verifyServiceAbsent(label: label, uid: uid, run: run)
+        }
+    }
+
+    private static func verifyServiceAbsent(
+        label: String,
+        uid: uid_t,
+        run: ([String]) throws -> Int32
+    ) throws {
+        let target = "gui/\(uid)/\(label)"
+        let printStatus = try run(["print", target])
+        guard printStatus != 0 else {
+            throw UninstallError.serviceStillLoaded(label)
+        }
+        guard printStatus == 113 else {
+            throw UninstallError.serviceAbsenceVerificationFailed(label, printStatus)
+        }
     }
 
     static func artifactPaths(home: URL) -> ArtifactPaths {
@@ -202,19 +272,15 @@ struct UninstallCommand: ParsableCommand {
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
     }
 
-    private func runProcess(_ executable: String, arguments: [String], allowFailure: Bool = false) throws {
+    private func runProcess(_ executable: String, arguments: [String]) throws -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         try process.run()
         process.waitUntilExit()
-        if !allowFailure, process.terminationStatus != 0 {
-            throw NSError(
-                domain: "macprovider.uninstall",
-                code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: "\(executable) exited with status \(process.terminationStatus)"]
-            )
-        }
+        return process.terminationStatus
     }
 
     private func removePathMarker(from file: URL) throws {

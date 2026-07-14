@@ -19,7 +19,8 @@ final class AutotuneACOutputTests: XCTestCase {
 
         let directory = fixture.configURL.deletingLastPathComponent()
         let firstBackup = directory.appendingPathComponent("config.yaml.bak-1781740800-0")
-        XCTAssertEqual(try String(contentsOf: firstBackup), original)
+        let redactedOriginal = ProviderTokenPersist.removingProviderTokenLines(in: original)
+        XCTAssertEqual(try String(contentsOf: firstBackup), redactedOriginal)
         let firstPost = try String(contentsOf: fixture.configURL)
         XCTAssertTrue(firstPost.contains("model: \(AutotuneCommand.defaultCandidates[0].modelID)"))
         XCTAssertTrue(firstPost.contains("kv_bits: 4"))
@@ -36,8 +37,11 @@ final class AutotuneACOutputTests: XCTestCase {
         try await command.run(dependencies: deps)
 
         let secondBackup = directory.appendingPathComponent("config.yaml.bak-1781740800-1")
-        XCTAssertEqual(try String(contentsOf: firstBackup), original)
-        XCTAssertEqual(try String(contentsOf: secondBackup), firstPost)
+        XCTAssertEqual(try String(contentsOf: firstBackup), redactedOriginal)
+        XCTAssertEqual(
+            try String(contentsOf: secondBackup),
+            ProviderTokenPersist.removingProviderTokenLines(in: firstPost)
+        )
         XCTAssertEqual(try String(contentsOf: fixture.configURL), firstPost)
     }
 

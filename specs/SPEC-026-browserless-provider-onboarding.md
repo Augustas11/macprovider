@@ -1,6 +1,23 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.21 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.22 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.22 (2026-07-14, issue #585 Option 2 credential-custody
+slice).** The shipped CLI-track onboarding now hands the bearer to CLI-owned Keychain
+storage while Malibu retains YAML. Import calls the installed
+`macprovider-cli credentials import --config` and then a separate
+`credentials verify --config` against one immutable snapshot; the second process's
+exact-value proof permits the App marker/link transition but not YAML removal. A
+restarted launchd provider removes YAML only after authenticated coordinator admission.
+Failure preserves the original 0600 YAML. Existing token-bearing migrations retain a
+temporary App-Keychain compatibility copy, while fresh tokenless bootstrap keeps the
+bearer exclusively in CLI Keychain. A provider-ID-bound App-local custody marker is
+required whenever that compatibility copy exists. The exact shipped
+tokenless-YAML/App-only incident state restores its bearer to private YAML before the
+ordinary handoff, and backup deletion is confirmed before the journal is retired.
+Removing Malibu's residual direct earnings-token dependency belongs to issue #585's
+later versioned-status transaction.
+This v0.22 rule supersedes historical v0.17 best-effort backup-cleanup notes.
 
 **Change log v0.21 (2026-07-13, R8 audit-loop convergence — code source of truth;
 architect lane PASS 0/0/0).** R8 (code 0C/0H/1M, security 0C/0H/1M, architect
@@ -146,8 +163,11 @@ bootstrap identity for `mp-*` admission — a LIVE §4.3 dependency; only the Ap
 `mp-<32-hex>` principal and runs `macprovider-cli bootstrap-auth`, which acquires a
 `provider_token` via the coordinator's **tokenless WebSocket admission** handshake
 (`install.sh:2484-2505,3112-3125`; `BootstrapAuthCommand.swift`;
-`CoordinatorClient.swift:569-575,1989-2056`). The app then imports that `provider_token`
-into its Keychain and monitors the launchd-managed CLI. The App-track `p_*` identity
+`CoordinatorClient.swift:569-575,1989-2056`). Bootstrap persists that bearer directly
+to the installed CLI's separate Keychain service; Malibu verifies custody through a
+fresh installed-CLI process and then monitors it. Only an existing token-bearing YAML
+migration also creates the temporary App-Keychain compatibility copy. The
+App-track `p_*` identity
 (`ProviderIdentity`), `RegisterClient.postRegister`, App Attest, and the
 `identity_signature` responder all **compile** and the coordinator-side contracts (§4)
 still **conform**, but **no shipped client path exercises them** — they are a
@@ -895,11 +915,9 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   Malibu; user-visible strings never say "MacProvider",
   `streamvc.live`, or "node".
 - **CLI track** — existing `macprovider-cli` binary launched via
-  `install.sh` by developer users. Coexists — but with the App-import
-  token-custody caveat (reconciled v0.16, §6.1 step 7c / SPEC-025 §1): an
-  App import strips the CLI's `provider_token` from `config.yaml`, leaving
-  the launchd-managed CLI bearerless on unattended restart. A CLI user who
-  never imports into the App is unaffected.
+  `install.sh` by developer users. As of v0.22, App import stages the YAML bearer in
+  CLI Keychain and keeps the private YAML until a restarted launchd process is admitted;
+  older installed CLIs fail the handoff without losing the source.
 - **Provider identity key** — Ed25519 keypair DEFINED for the App track,
   stored in Keychain slot `provider_identity_v1`, distinct from the
   SPEC-015 receipt key. **DORMANT in the shipped build (reconciled
@@ -1025,12 +1043,12 @@ and without entering a wallet address unless they want to.
   the `malibu://` / `PendingLinkState` machinery is removed (§7.3). There is no
   onboarding flag; `MalibuAgent.start()` is gated by the three conditions in §7.6
   (provider_id + launchd evidence + `ProviderConfig.isConfigured`).
-- `phase3-binary/Sources/MacProviderCore/ProviderTokenPersist.swift:42-113`
-  — CLI-track atomic write of `provider_token` to YAML. **Reconciled v0.14:** this is
-  the path `install.sh` writes to; the app then **imports** the token via
-  `ProviderConfig.importExistingCLIConfig()` (`ProviderConfig.swift:280-352`), which
-  strips it from YAML into the Keychain (§6.1). `saveProviderIdentity` also exists but
-  is not the shipped onboarding path.
+- `phase3-binary/Sources/MacProviderCore/ProviderTokenPersist.swift`
+  — compatibility helper for locked, exact YAML credential migration. New coordinator
+  assignments persist only to CLI Keychain. Existing YAML remains readable during the
+  handoff and is removed by the restarted CLI only after authenticated admission plus
+  its first state update (§6.1). `saveProviderIdentity` also exists but is not the
+  shipped onboarding path.
 - `phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift:64-87` —
   launch gate is now **three** conditions (provider_id + launchd install evidence +
   `ProviderConfig.isConfigured`) and drives a **monitor**, not a spawn (§7.6).
@@ -1062,7 +1080,8 @@ and without entering a wallet address unless they want to.
 > (`CoordinatorClient.swift:1842`; coordinator `identity_signature.go:127`), NOT the
 > rotatable `.receipt-key`, which signs SPEC-015 receipts and may rotate. The current
 > receipt key is only a legacy fallback (proven durable-row absence). The app's finalize
-> gate is `ProviderConfig.isConfigured` (bearer token), **not** `ProviderIdentity.isReady`
+> gate is `ProviderConfig.isConfigured` (App ownership/config identity plus the
+> conditional CLI-custody marker), **not** `ProviderIdentity.isReady`
 > (`LaunchProviderController.swift:65`; §6.1). Deleting `provider_identity_v1` does **not**
 > force a fresh provider ID. Treat everything in §3 as a **designed but client-dormant**
 > contract (the App `p_*` Keychain slot and derivation exist in code, but the shipped
@@ -1978,7 +1997,8 @@ slower payout release. Not required for this spec to ship.
    fires.
 3. `ProviderConfig.isConfigured == false` (reconciled v0.15 — the
    shipped cold-install path gates on config / `.installed-by-app`
-   marker / Keychain bearer only; the `ProviderIdentity.isReady()`
+   marker / provider ID, plus a matching `.cli-credential-custody-v1` marker only
+   when an App compatibility bearer remains; the `ProviderIdentity.isReady()`
    check is dormant, §7.1). No configured provider present.
 4. `presentOnboarding()` opens the launch window (same NSWindow as
    today, new content — see §7.2).
@@ -2024,23 +2044,26 @@ slower payout release. Not required for this spec to ship.
       weights, and installs the launchd provider service + watchdog. The app surfaces a progress hint by
       scraping `ps` for the autotune stage (`:110-149`). **The initial token import
       happens here, still in `.runningCLIInstall`.**
-   c. **Import the token** (`ProviderConfig.importExistingCLIConfig()`, `:128`,
-      `ProviderConfig.swift:280-352`): move `provider_token` from the
-      `install.sh`-written `config.yaml` into the app Keychain. **Token-custody gap
-      (reconciled v0.14):** the import **strips** the token from `config.yaml`
-      (`removingTopLevelValue` + `atomicWrite0600`, `:312-335`) and writes a
-      token-bearing `config.yaml.import-backup` (0600). The launchd-managed CLI reads
-      its bearer from `config.yaml` (`Config.swift:406,457,527`) and the plist
-      provides no token env / `--token-file`, so **after import a launchd restart
-      (crash / reboot / logout) starts bearerless and cannot authenticate** until the
-      token is re-supplied. This is a shipped gap, documented not fixed. A
-      not-yet-written token is a retriable deferred error (`.importingProviderIdentity`
-      retry, `:126-137,205-223`).
+   c. **Verify CLI credential custody** (`ProviderConfig.importExistingCLIConfig()`,
+      `:128`): for an existing YAML bearer, save and verify the temporary App-Keychain
+      compatibility copy, then invoke the installed CLI with `credentials import
+      --config` and a distinct fresh-process `credentials verify --config`. Fresh
+      tokenless bootstrap runs verify-only. Both paths use one immutable private 0600
+      snapshot and emit redacted metadata only. A legacy tokenless YAML whose only
+      surviving bearer is the App compatibility item is first repaired back to private
+      live YAML and then takes the token-bearing path. The App writes its ownership and
+      provider-ID-bound custody markers after the
+      second CLI process proves custody but retains any live top-level bearer. A
+      restarted CLI removes it only after Keychain-backed coordinator admission and a
+      successful first state update. A missing/old CLI credential or failed proof
+      preserves the original config and removes partial App ownership state.
    d. **Finalize** (`.startingAgent` → `finalizeInstall`, `:165-199`): wait for the
       launchd provider's `GET /v1/health`, retry the token import, then check
       **`appIdentityConfigured`, which is actually `ProviderConfig.isConfigured`**
-      (config + `.installed-by-app` marker + Keychain **bearer** token, `:65`,
-      `ProviderConfig.swift:503-511`) — **NOT** `ProviderIdentity.isReady`. Attach the
+      (config + `.installed-by-app` marker + provider ID, plus the matching
+      `.cli-credential-custody-v1` marker whenever an App bearer remains, `:65`,
+      `ProviderConfig.swift`) — **NOT** `ProviderIdentity.isReady`. The launchd
+      health/status response separately proves CLI credential readiness. Attach the
       `MalibuAgent` **monitor** (no child spawn), then register the `SMAppService`
       login item and mark `.live(model, tier: .provisional)`. The login item is
       registered **only after** a successful attach.
@@ -2098,9 +2121,9 @@ v0.15/v0.18 — routing is evaluated ONCE per app launch, not continuously.**
 onboarding — the user re-triggers it via the explicit menu action
 (`MalibuApp.swift:83`) or a relaunch. On the **next app launch**, routing
 sends the install to onboarding when (1) `ProviderConfig.isConfigured` is
-false (config / `.installed-by-app` marker / Keychain bearer — NOT the
-dormant App identity; e.g. after uninstall+reinstall or Keychain
-bearer-item deletion), OR (2) a fully-configured App-owned install has
+false (config / `.installed-by-app` marker / provider ID, with the conditional custody
+marker above — NOT the dormant App identity; e.g. after uninstall+reinstall or loss
+of required App-local custody evidence), OR (2) a fully-configured App-owned install has
 **launchd install evidence missing** (`route()`,
 `LaunchProviderController.swift:352`; §7.6 / §8 precedence table). A
 markerless CLI-owned config instead routes to the import dialog.
@@ -2318,11 +2341,12 @@ doc-comment says so, `OnboardingState.swift:3-5`; fields
 older `onboarding.json` still parses — but the shipped flow does **not** write it and
 does **not** use `onboardingSchemaVersion` as a live migration disambiguator.
 
-Instead, install/onboarding state is derived from **disk evidence** at startup
-(`StartupState.detect().route()`, §7.6): the `.installed-by-app` marker, the
-`config.yaml`, the Keychain token, and the **launchd install evidence**
-(`install_manifest.json` / `live.streamvc.macprovider.plist`). There is no `v2` vs
-`v1` schema flag on the live path.
+Instead, install/onboarding state is derived from local evidence at startup
+(`StartupState.detect().route()`, §7.6): the `.installed-by-app` marker,
+`config.yaml`, the conditional provider-ID-bound CLI-custody marker, the redacted CLI
+status contract, and the **launchd install evidence** (`install_manifest.json` /
+`live.streamvc.macprovider.plist`). There is no `v2` vs `v1` schema flag on the live
+path.
 
 The historical v2 JSON shape (retained for provenance):
 
@@ -2355,12 +2379,14 @@ guard await ProviderConfig.isConfigured else { … }                    // :74-7
   (the PR #418 bugbot follow-up; `route()` at `LaunchProviderController.swift:352-372`,
   `StartupRouteTests.swift:9`).
 - `ProviderConfig.isConfigured` = config present AND `.installed-by-app` marker AND
-  Keychain token bound to the config's `provider_id` (`ProviderConfig.swift:503-511`).
+  provider ID; if an App-Keychain compatibility bearer exists, its provider-ID-bound
+  `.cli-credential-custody-v1` marker is also required (`ProviderConfig.swift`). CLI
+  runtime credential readiness remains the separate redacted status contract.
 - `start()` then calls `monitorInstalledProviderIfPresent()` and **never instantiates
   `CLIChildProcess`** — the daemon is launchd-owned (§6.1, SPEC-025 §5).
 
 **App-owned-but-unconfigured state** (`.installed-by-app` marker present but not yet
-`isConfigured` — bearer/config incomplete) never reaches monitoring; `StartupState.route()`
+`isConfigured` — config identity or required custody evidence incomplete) never reaches monitoring; `StartupState.route()`
 sends it to `.showOnboarding` to (re-)run `install.sh` (reconciled v0.15 — routing keys on
 `ProviderConfig.isConfigured`, not the dormant App identity; `StartupRouteTests.swift`
 `app-owned-missing-identity → .showOnboarding`).
@@ -2379,14 +2405,15 @@ longer apply** and are retained below only as provenance.
 **What replaced the flag matrix: `StartupState.detect().route()`**
 (`LaunchProviderController.swift:302-372`, pinned by
 `StartupRouteTests.testStartupRouteInstallStates`). **`detect()` is NOT pure
-disk-state** (reconciled v0.14) — it also checks Keychain configuration and probes the
-provider's HTTP health (`:328-341`). **`route()` checks App-ownership FIRST**, so the
+disk-state** (reconciled v0.14) — `ProviderConfig.isConfigured` conditionally checks
+App compatibility/custody evidence, and detection probes the provider's HTTP health
+(`:328-341`). **`route()` checks App-ownership FIRST**, so the
 precedence is (evaluated top-down):
 
 | Precedence | State | Route |
 |---|---|---|
 | 1 | `config.yaml` present but **no** `.installed-by-app` marker (CLI-owned) → **wins even when the launchd provider is healthy** | `.showImportDialog` (§8.4) |
-| 2 | app-owned (marker present) but not yet `isConfigured` (bearer/config incomplete) | `.showOnboarding` (run `install.sh`) |
+| 2 | app-owned (marker present) but not yet `isConfigured` (config identity/custody evidence incomplete) | `.showOnboarding` (run `install.sh`) |
 | 3 | App-owned + `isConfigured` AND launchd install evidence present (healthy or attachable) | `.startAgent` (monitor) |
 | 4 | App-owned + `isConfigured` but **launchd install evidence missing** (e.g. the provider-service plist `live.streamvc.macprovider.plist` / `install_manifest.json` removed — the app's gate checks these, NOT the watchdog) | `.showOnboarding` (re-run `install.sh`) |
 | 5 | launchd install evidence present but **no config** | `.showOnboarding` |
@@ -2474,55 +2501,59 @@ would throw `existingConfigNotOwnedByApp` at
   How do you want to proceed?"
 - Option A (primary): **Import my existing provider** — crash-safe
   three-phase sequence matching SPEC-025 §7's import contract:
-  1. Parse `provider_id` and top-level `provider_token` from
-     `config.yaml`.
+  1. Parse `provider_id` and any top-level `provider_token` from `config.yaml`.
   2. Write an App-support `.import_pending` marker containing the
      source path, destination Keychain slot, timestamp, provider_id,
      SHA-256 of the token, SHA-256 of the original config, and the
      import backup path.
-  3. Save the `provider_token` to the App-track Keychain slot. The
+  3. When the YAML contains a bearer, save it to the App-track compatibility slot. If
+     YAML is tokenless but the exact provider ID still has a legacy App compatibility
+     bearer, first restore that bearer to private live YAML as the launchd-readable
+     rollback source, then continue as a bearer-bearing import. The
      shipped import path is `ProviderConfig.importExistingCLIConfig()`
      (`ProviderConfig.swift:280-352`), using the same Keychain
      account/service as
      `ProviderConfig.saveProviderIdentity(providerID:token:coordinatorWSURL:)`
      (reconciled v0.15 — note the shipped **3-arg** signature including
      `coordinatorWSURL`, `ProviderConfig.swift:181`). Then read it back
-     and verify the SHA-256 matches the pending marker.
-  4. Persist a 0600 `config.yaml.import-backup` copy of the original
-     YAML, then rewrite `config.yaml` with the `provider_token` field
-     removed. **Reconciled v0.16 — NOT "redundant":** the launchd CLI is
-     started with `serve --config <config.yaml>` only (`install.sh:3425`)
-     and reads its bearer from that file, so stripping the token leaves
-     the launchd-managed CLI **bearerless on unattended restart** (the
-     documented token-custody gap — §6.1 step 7c, SPEC-025 §7). The App
-     holds the live bearer in Keychain; the CLI does not read Keychain.
-  5. Create the `.installed-by-app` marker file at
+     and verify the SHA-256 matches the pending marker. A tokenless config skips the
+     App-Keychain copy and proceeds only if the installed CLI verifies its own item.
+  4. Write one immutable 0600 snapshot of the original YAML. For a bearer-bearing
+     snapshot, run the installed CLI's `credentials import --config <path>`, then run
+     `credentials verify --config <same-snapshot>` as a second process. The
+     second invocation MUST compare the exact value from the selected config against
+     CLI-owned Keychain storage; for a tokenless snapshot it MUST instead prove a
+     non-empty CLI-Keychain item for the exact provider ID. No bundled-binary fallback is allowed:
+     the installed launchd executable is the process that must prove access.
+  5. Revalidate that live `config.yaml` still has the original hash. Keep its
+     `provider_token` intact; fresh-process Keychain proof is staging evidence, not
+     launchd coordinator admission. A handoff failure preserves the original YAML and
+     removes partial App-Keychain/marker state.
+  6. Write `.cli-credential-custody-v1` with the exact provider ID, then create the
+     `.installed-by-app` marker file at
      `ProviderPaths.appMarkerFile` (per `ProviderPaths.swift:24`
      that path is
      `~/Library/Application Support/Malibu/.installed-by-app`).
-  6. Set `link_state: linked`, verify `ProviderConfig.isConfigured ==
-     true`, then delete the import backup and `.import_pending`
-     marker before dismissing the dialog. **Reconciled v0.16 —
-     backup deletion is best-effort:** the delete error is ignored
-     (`ProviderConfig.swift:336`) and one recovery branch retains the
-     backup (`:354`), so a token-bearing 0600 backup can persist (§7).
-     If verification fails, roll
-     back by deleting the Keychain item, restoring the original YAML
-     with atomic replace + fsync, deleting any app marker, and keeping
-     startup recovery idempotent via `.import_pending` while the
-     process is still in flight.
+  7. Except for the explicit legacy App-only repair in step 3, leave live CLI-owned
+     YAML byte-for-byte unchanged. Verify `ProviderConfig.isConfigured == true` from
+     provider ID plus the App-local ownership marker and, when an App bearer remains,
+     the matching custody marker. The fixed import backup is the immutable CLI handoff
+     snapshot. Confirm its deletion before deleting `.import_pending` and dismissing
+     the dialog; cleanup failure retains the journal and fails the import. If verification fails,
+     restore the prior App-Keychain value, delete any new app marker, preserve live
+     YAML, and leave the import retriable.
 
-  On startup, if `.import_pending` exists, the app verifies the
-  Keychain token hash. If valid, it removes any remaining top-level
-  `provider_token` from YAML, writes the app marker, sets
-  `link_state: linked`, and removes the backup plus marker. If invalid
-  and the backup exists, it atomically restores the backup, deletes the
-  Keychain copy and marker, and leaves the config CLI-owned for the
-  import dialog to reappear.
+  On startup, if `.import_pending` exists, the app locates the marker-bound
+  hash-matching secret-bearing current config or backup. It restores that source to
+  live YAML when necessary, removes the stale transaction artifacts, and returns to
+  the import dialog; recovery never treats an unbound backup as authority.
+  Tests MUST cover the exact tokenless-YAML/App-only incident repair, rejection without
+  overwrite of a divergent App bearer, retry after an equal App bearer was saved before
+  interruption, and backup-before-journal cleanup ordering.
 
   The install transitions to `v1-complete` state (§8.1). No
   re-onboarding required **provided launchd install evidence is also
-  present** (reconciled v0.16): the import sets config + marker + bearer,
+  present** (reconciled v0.16): the import sets config plus ownership/custody markers after CLI custody proof,
   but `route()` still checks launchd evidence — an imported config whose
   launchd install is missing routes to `.showOnboarding` to (re-)run
   `install.sh` (`LaunchProviderController.swift:352`, §8 precedence
@@ -2889,10 +2920,12 @@ criteria in §5.2 by 25%.
 - **AC-026-08 — SUPERSEDED (reconciled v0.14).** It asserted that deleting
   `provider_identity_v1` forces a fresh `provider_id` — **false** in the shipped app.
   `ProviderIdentity` is dormant (§3): the onboarding gate is `ProviderConfig.isConfigured`
-  (config + marker + Keychain **bearer**), not `ProviderIdentity.isReady`, so deleting
+  (config + marker + provider ID, plus the conditional custody marker above), not
+  `ProviderIdentity.isReady`, so deleting
   the App identity key does not re-onboard. The shipped provider_id is the CLI-track
-  `mp-*` (from `install.sh`). A fresh onboarding is forced by removing the app marker /
-  config / bearer, not the App identity key.
+  `mp-*` (from `install.sh`). A fresh onboarding is forced by removing the app marker or
+  config, not the dormant App identity key; launchd status separately reports missing
+  CLI credential custody.
 - **AC-026-09 — SUPERSEDED (reconciled v0.14).** This criterion asserted
   `MALIBU_ONBOARD_V2=0` / `onboardingFlow` flag behavior, which PR #418 **removed**
   (§8): there is no onboarding flag and no setup-paused state. The still-valid *residual*
@@ -2953,12 +2986,14 @@ criteria in §5.2 by 25%.
   config present but no App marker: the dialog presents "Import
   existing CLI provider" / "Start fresh with a new provider" /
   "Cancel". Each outcome is verified end-to-end:
-  - **Import:** parses `provider_id` + `provider_token` from the
-    existing YAML, saves the token to the App-track Keychain slot,
-    rewrites the YAML without the token, creates
-    `.installed-by-app`, and verifies
-    `ProviderConfig.isConfigured == true`. Rollback on any
-    intermediate failure.
+  - **Import:** parses `provider_id` plus any `provider_token` from the existing YAML,
+    imports an existing bearer absent-or-equal into CLI Keychain, and proves custody in
+    a distinct installed-CLI process. Tokenless input is normally verify-only; the
+    exact legacy App-only incident state first restores its matching bearer to private
+    YAML. It retains live YAML, creates `.installed-by-app` plus the provider-ID-bound
+    custody marker, and verifies `ProviderConfig.isConfigured == true`. Rollback on any
+    intermediate failure preserves the original config, and the secret snapshot is
+    confirmed absent before its journal is retired.
   - **Start fresh:** moves `config.yaml` to
     `~/.config/macprovider/config.yaml.cli-backup-<UTC-timestamp>`,
     proceeds to Fresh state, and displays the exact

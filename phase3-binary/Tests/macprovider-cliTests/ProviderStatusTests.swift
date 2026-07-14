@@ -7,6 +7,30 @@ final class ProviderStatusTests: XCTestCase {
         ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: maxConcurrency)
     }
 
+    func testStatusResponseExposesOnlyRedactedCredentialLifecycleState() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snap = await status.snapshot()
+        let body = RouterHandler.statusResponse(
+            snap,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            credentialStatus: ProviderCredentialStatus(
+                source: .cliKeychain,
+                state: .ready,
+                restartSafe: true,
+                migrationPending: true
+            )
+        )
+
+        let credential = try XCTUnwrap(body["credential"] as? [String: Any])
+        XCTAssertEqual(credential["source"] as? String, "cli_keychain")
+        XCTAssertEqual(credential["state"] as? String, "ready")
+        XCTAssertEqual(credential["restart_safe"] as? Bool, true)
+        XCTAssertEqual(credential["migration_pending"] as? Bool, true)
+        XCTAssertNil(credential["token"])
+        XCTAssertFalse(String(describing: body).contains("provider_token"))
+    }
+
     func testSpecDecodeStatusFieldsAreDisabledWithoutDraftConfig() async {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         let snap = await status.snapshot()

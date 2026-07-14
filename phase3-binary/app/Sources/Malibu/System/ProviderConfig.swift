@@ -2,9 +2,9 @@ import CryptoKit
 import Darwin
 import Foundation
 
-// Read / write the shared ~/.config/macprovider/config.yaml. We touch the same
-// file the CLI track's install.sh renders, but we own the provider_token via
-// Keychain (never persisted to disk in this track). See SPEC-025 §7.
+// Read / write the shared ~/.config/macprovider/config.yaml. CLI Keychain is
+// authoritative for launchd credentials. A temporary App-Keychain compatibility
+// copy remains only for shipped earnings views and is never launchd authority.
 
 enum ProviderConfig {
     enum LinkState: String, Equatable {
@@ -13,12 +13,10 @@ enum ProviderConfig {
         case unlinkPending = "unlink_pending"
     }
 
-    // AUDIT R1 CODE H4 / SECURITY S1 / ARCHITECT A2 fix:
-    //   * config exists AND
-    //   * app-ownership marker exists (we did not inherit a CLI-track config) AND
-    //   * a Keychain token is bound to the config-file's provider_id.
-    // Missing any of these routes the user to onboarding rather than spawning
-    // the CLI unauthenticated or trampling a config the CLI track owns.
+    // Malibu recognizes an installed identity from the shared config plus its
+    // ownership marker. The launchd CLI independently proves credential
+    // readiness through its versioned local status contract; the App Keychain
+    // compatibility copy is not lifecycle authority.
     static var isConfigured: Bool {
         get async {
             await isConfigured(paths: .current)
@@ -55,6 +53,8 @@ enum ProviderConfig {
     }
 
     static func writeLinkState(_ state: LinkState, paths: ProviderPaths = .current) throws {
+        let lockFD = try acquireConfigMutationLock(paths: paths)
+        defer { releaseConfigMutationLock(lockFD) }
         let contents = (try? String(contentsOf: paths.configFile)) ?? ""
         let rewritten = upsertingTopLevelLine(
             named: "link_state",
@@ -116,6 +116,8 @@ enum ProviderConfig {
     ) throws {
         try validate(config)
         try paths.ensureDirectories()
+        let lockFD = try acquireConfigMutationLock(paths: paths)
+        defer { releaseConfigMutationLock(lockFD) }
         let contents = (try? String(contentsOf: paths.configFile)) ?? ""
         let rewritten = upsertingRecommendationConfigLines(into: contents, config: config)
         try atomicWrite0600(Data(rewritten.utf8), to: paths.configFile)
@@ -151,9 +153,7 @@ enum ProviderConfig {
         case existingConfigNotOwnedByApp
         case missingProviderID
         case missingProviderToken
-        case importBackupProviderMismatch
         case importKeychainVerificationFailed
-        case importRollbackFailed(importError: Error, rollbackError: Error)
         case appMarkerCreateFailed
         case savedIdentityNotConfigured
         var errorDescription: String? {
@@ -164,12 +164,8 @@ enum ProviderConfig {
                 return "The existing macprovider config does not contain a provider_id."
             case .missingProviderToken:
                 return "The existing macprovider config does not contain a provider_token."
-            case .importBackupProviderMismatch:
-                return "The import backup does not match the current provider_id."
             case .importKeychainVerificationFailed:
                 return "The imported provider token could not be verified in Keychain."
-            case let .importRollbackFailed(importError, rollbackError):
-                return "Import failed (\(importError.localizedDescription)) and the original config could not be restored (\(rollbackError.localizedDescription))."
             case .appMarkerCreateFailed:
                 return "The app ownership marker could not be written."
             case .savedIdentityNotConfigured:
@@ -206,6 +202,8 @@ enum ProviderConfig {
         verifyConfigured: (() async -> Bool)? = nil
     ) async throws {
         try paths.ensureDirectories()
+        let lockFD = try acquireConfigMutationLock(paths: paths)
+        defer { releaseConfigMutationLock(lockFD) }
         let fm = FileManager.default
 
         // AUDIT R1 ARCHITECT A2: fail-fast on config collision instead of
@@ -237,11 +235,10 @@ enum ProviderConfig {
         lines.append("provider_id: \(providerID)")
         lines.append("coordinator_url: \(coordinatorWSURL.absoluteString)")
         lines.append("link_state: \(LinkState.pendingLink.rawValue)")
-        // We deliberately do NOT write the token to disk. The CLI must be
-        // launched with the token in the environment (MACPROVIDER_PROVIDER_TOKEN),
-        // which MalibuAgent will set from Keychain before spawning the process.
-        // Followup: teach the CLI to read the token from Keychain directly so
-        // the environment-variable path can be removed.
+        // This dormant direct-save path deliberately does not write the token to
+        // disk. Production CLI-track imports use importExistingCLIConfig(), which
+        // stages authoritative custody in the installed CLI while retaining the
+        // launchd-readable source until the restarted provider proves admission.
         let joined = lines.joined(separator: "\n") + "\n"
         do {
             try await saveToken(providerID, token)
@@ -282,91 +279,161 @@ enum ProviderConfig {
     }
 
     static func importExistingCLIConfig(paths: ProviderPaths) async throws {
+        try await importExistingCLIConfig(
+            paths: paths,
+            importCredentialIntoCLI: { try await ProviderCredentialHandoffRunner.migrate(configURL: $0) }
+        )
+    }
+
+    static func importExistingCLIConfig(
+        paths: ProviderPaths,
+        importCredentialIntoCLI: @escaping @Sendable (URL) async throws -> Void,
+        readAppCredential: @escaping @Sendable (String) async -> String? = {
+            await KeychainStore.readProviderToken(providerID: $0)
+        },
+        saveAppCredential: @escaping @Sendable (String, String) async throws -> Void = {
+            try await KeychainStore.saveProviderToken(providerID: $0, token: $1)
+        }
+    ) async throws {
         try paths.ensureDirectories()
         let fm = FileManager.default
-        try await recoverPendingImportIfNeeded(paths: paths)
+        try await recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: importCredentialIntoCLI
+        )
+        let lockFD = try acquireConfigMutationLock(paths: paths)
+        defer { releaseConfigMutationLock(lockFD) }
         let backup = paths.configFile.appendingPathExtension("import-backup")
         let marker = importPendingMarker(paths: paths)
-        let backupExisted = fm.fileExists(atPath: backup.path)
-        let originalData = try Data(contentsOf: paths.configFile)
-        let current = String(decoding: originalData, as: UTF8.self)
-        let backupData = backupExisted ? try Data(contentsOf: backup) : nil
-        if backupExisted {
-            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
-        }
-        let backupContents = backupData.map { String(decoding: $0, as: UTF8.self) }
-        let secretSource = backupContents ?? current
-
-        let currentProviderID = parseTopLevelValue(named: "provider_id", from: current)
-        let backupProviderID = backupContents.flatMap { parseTopLevelValue(named: "provider_id", from: $0) }
-        if let currentProviderID, let backupProviderID, currentProviderID != backupProviderID {
-            throw SaveError.importBackupProviderMismatch
-        }
-        guard let providerID = currentProviderID ?? backupProviderID else {
+        var originalData = try Data(contentsOf: paths.configFile)
+        var current = String(decoding: originalData, as: UTF8.self)
+        guard let providerID = parseTopLevelValue(named: "provider_id", from: current) else {
             throw SaveError.missingProviderID
         }
-        guard let token = parseTopLevelValue(named: "provider_token", from: secretSource) else {
-            throw SaveError.missingProviderToken
+        var token = parseTopLevelValue(named: "provider_token", from: current)
+
+        // Repair the exact shipped #585 incident state: old Malibu already
+        // stripped YAML, while the only surviving bearer is in its App-owned
+        // Keychain item. Restore a private launchd-readable rollback source
+        // before asking the installed CLI to assume durable custody.
+        if token == nil,
+           let legacyToken = await readAppCredential(providerID),
+           !legacyToken.isEmpty {
+            current = upsertingTopLevelLine(
+                named: "provider_token",
+                line: "provider_token: \(legacyToken)",
+                into: current
+            )
+            originalData = Data(current.utf8)
+            try atomicWrite0600(originalData, to: paths.configFile)
+            guard parseTopLevelValue(named: "provider_token", from: current) == legacyToken else {
+                throw SaveError.importKeychainVerificationFailed
+            }
+            token = legacyToken
         }
 
-        let rewritten = removingTopLevelValue(named: "provider_token", from: current)
+        guard let token else {
+            let snapshot = paths.appSupport.appendingPathComponent(
+                ".credential-handoff-\(UUID().uuidString).yaml"
+            )
+            defer { try? fm.removeItem(at: snapshot) }
+            try writeExclusive0600(originalData, to: snapshot)
+            try await importCredentialIntoCLI(snapshot)
+            guard (try? Data(contentsOf: paths.configFile)) == originalData else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            try writeCredentialCustodyMarker(providerID: providerID, paths: paths)
+            try writeAppMarker(paths: paths, fileManager: fm)
+            guard readProviderID(paths: paths) == providerID,
+                  await isConfigured(paths: paths) else {
+                throw SaveError.savedIdentityNotConfigured
+            }
+            return
+        }
+
         let importMarker = ImportPendingMarker(
             from: paths.configFile.path,
-            to: "keychain://tech.malibu.provider/\(providerID)",
+            to: "keychain://live.streamvc.macprovider.provider-token.v1/\(providerID)",
             timestamp: importTimestampString(Date()),
             providerID: providerID,
             tokenSHA256: sha256String(token),
             configSHA256: sha256Data(originalData),
             backupPath: backup.path
         )
+        let appMarkerExisted = fm.fileExists(atPath: paths.appMarkerFile.path)
+        let custodyMarkerExisted = fm.fileExists(atPath: credentialCustodyMarker(paths: paths).path)
         do {
+            // A backup without its exact hash-bound marker is stale and never
+            // becomes a credential source.
+            try? fm.removeItem(at: backup)
             try writeImportMarker(importMarker, to: marker)
-            try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
-            guard await KeychainStore.readProviderToken(providerID: providerID).map(sha256String) == importMarker.tokenSHA256 else {
+            try writeExclusive0600(originalData, to: backup)
+            guard (try? Data(contentsOf: paths.configFile)) == originalData else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            try await importCredentialIntoCLI(backup)
+            guard (try? Data(contentsOf: paths.configFile)) == originalData else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            if let existingAppToken = await readAppCredential(providerID) {
+                guard existingAppToken == token else {
+                    throw SaveError.importKeychainVerificationFailed
+                }
+            } else {
+                try await saveAppCredential(providerID, token)
+            }
+            guard await readAppCredential(providerID) == token else {
                 throw SaveError.importKeychainVerificationFailed
             }
-            if !backupExisted {
-                try? fm.removeItem(at: backup)
-                try writeExclusive0600(originalData, to: backup)
-            }
-            try atomicWrite0600(Data(rewritten.utf8), to: paths.configFile)
+            try writeCredentialCustodyMarker(providerID: providerID, paths: paths)
             try writeAppMarker(paths: paths, fileManager: fm)
-            try writeLinkState(.linked, paths: paths)
-            guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
-            try? fm.removeItem(at: backup)
-            try? fm.removeItem(at: marker)
-        } catch {
-            try? await KeychainStore.deleteProviderToken(providerID: providerID)
-            try? fm.removeItem(at: paths.appMarkerFile)
-            do {
-                try atomicWrite0600(originalData, to: paths.configFile)
-                if !backupExisted {
-                    try? fm.removeItem(at: backup)
-                }
-                try? fm.removeItem(at: marker)
-            } catch let rollbackError {
-                throw SaveError.importRollbackFailed(importError: error, rollbackError: rollbackError)
+            guard readProviderID(paths: paths) == providerID,
+                  await isConfigured(paths: paths) else {
+                throw SaveError.existingConfigNotOwnedByApp
             }
+            try cleanupImportArtifacts(backup: backup, marker: marker, fileManager: fm)
+        } catch {
+            if !appMarkerExisted { try? fm.removeItem(at: paths.appMarkerFile) }
+            if !custodyMarkerExisted { try? fm.removeItem(at: credentialCustodyMarker(paths: paths)) }
+            // Keep the journal while a secret-bearing artifact remains so
+            // startup recovery can retry cleanup deterministically.
+            try? cleanupImportArtifacts(backup: backup, marker: marker, fileManager: fm)
             throw error
         }
     }
 
     static func recoverPendingImportIfNeeded(paths: ProviderPaths) async throws {
+        try await recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: { try await ProviderCredentialHandoffRunner.migrate(configURL: $0) }
+        )
+    }
+
+    static func recoverPendingImportIfNeeded(
+        paths: ProviderPaths,
+        importCredentialIntoCLI: @escaping @Sendable (URL) async throws -> Void
+    ) async throws {
+        _ = importCredentialIntoCLI // Recovery restores a safe source; retry stages it.
         let fm = FileManager.default
         let markerURL = importPendingMarker(paths: paths)
+        let expectedBackupURL = paths.configFile.appendingPathExtension("import-backup")
         guard fm.fileExists(atPath: markerURL.path) else { return }
+        let lockFD = try acquireConfigMutationLock(paths: paths)
+        defer { releaseConfigMutationLock(lockFD) }
         guard let markerData = try? Data(contentsOf: markerURL),
               let marker = try? JSONDecoder().decode(ImportPendingMarker.self, from: markerData)
         else {
-            try? fm.removeItem(at: markerURL)
+            try? cleanupImportArtifacts(backup: expectedBackupURL, marker: markerURL, fileManager: fm)
             return
         }
-        let expectedBackupURL = paths.configFile.appendingPathExtension("import-backup")
-        let expectedKeychainDestination = "keychain://tech.malibu.provider/\(marker.providerID)"
+        let expectedKeychainDestinations = [
+            "keychain://live.streamvc.macprovider.provider-token.v1/\(marker.providerID)",
+            "keychain://tech.malibu.provider/\(marker.providerID)",
+        ]
         guard marker.from == paths.configFile.path,
-              marker.to == expectedKeychainDestination,
+              expectedKeychainDestinations.contains(marker.to),
               marker.backupPath == expectedBackupURL.path else {
-            try? fm.removeItem(at: markerURL)
+            try? cleanupImportArtifacts(backup: expectedBackupURL, marker: markerURL, fileManager: fm)
             return
         }
 
@@ -382,38 +449,30 @@ enum ProviderConfig {
         }
         guard currentConfigMatches || backupConfigMatches,
               currentProviderID == marker.providerID || backupProviderID == marker.providerID else {
-            try? fm.removeItem(at: markerURL)
+            try? cleanupImportArtifacts(backup: expectedBackupURL, marker: markerURL, fileManager: fm)
             return
         }
-
-        if await KeychainStore.readProviderToken(providerID: marker.providerID).map(sha256String) == marker.tokenSHA256 {
-            if let current = try? String(contentsOf: paths.configFile), current.contains("provider_token:") {
-                try atomicWrite0600(
-                    Data(removingTopLevelValue(named: "provider_token", from: current).utf8),
-                    to: paths.configFile
-                )
-            }
-            try writeAppMarker(paths: paths, fileManager: fm)
-            try writeLinkState(.linked, paths: paths)
-            if await isConfigured(paths: paths) {
-                try? fm.removeItem(atPath: marker.backupPath)
-                try? fm.removeItem(at: markerURL)
-            }
+        let sourceData: Data?
+        if currentConfigMatches {
+            sourceData = currentData
+        } else if backupConfigMatches {
+            sourceData = backupData
+        } else {
+            sourceData = nil
+        }
+        guard let sourceData,
+              let sourceToken = parseTopLevelValue(
+                named: "provider_token",
+                from: String(decoding: sourceData, as: UTF8.self)
+              ),
+              sha256String(sourceToken) == marker.tokenSHA256 else {
+            try? cleanupImportArtifacts(backup: expectedBackupURL, marker: markerURL, fileManager: fm)
             return
         }
-
-        if let backupData, backupConfigMatches, backupProviderID == marker.providerID {
-            try atomicWrite0600(backupData, to: paths.configFile)
-            try? await KeychainStore.deleteProviderToken(providerID: marker.providerID)
-            try? fm.removeItem(at: paths.appMarkerFile)
-            try? fm.removeItem(atPath: marker.backupPath)
-            try? fm.removeItem(at: markerURL)
-            return
+        if !currentConfigMatches {
+            try atomicWrite0600(sourceData, to: paths.configFile)
         }
-
-        try? await KeychainStore.deleteProviderToken(providerID: marker.providerID)
-        try? fm.removeItem(at: paths.appMarkerFile)
-        try? fm.removeItem(at: markerURL)
+        try cleanupImportArtifacts(backup: expectedBackupURL, marker: markerURL, fileManager: fm)
     }
 
     static func repairMarkerlessAppOwnedConfig(providerID: String, paths: ProviderPaths = .current) async throws {
@@ -429,9 +488,6 @@ enum ProviderConfig {
         guard readProviderID(paths: paths) == providerID else {
             throw SaveError.existingConfigNotOwnedByApp
         }
-        guard await KeychainStore.readProviderToken(providerID: providerID) != nil else {
-            throw SaveError.missingProviderToken
-        }
         try writeAppMarker(paths: paths, fileManager: fm)
         guard await isConfigured(paths: paths) else { throw SaveError.savedIdentityNotConfigured }
     }
@@ -444,6 +500,8 @@ enum ProviderConfig {
         let fm = FileManager.default
         guard fm.fileExists(atPath: paths.configFile.path) else { return nil }
         try paths.ensureDirectories()
+        let lockFD = try acquireConfigMutationLock(paths: paths)
+        defer { releaseConfigMutationLock(lockFD) }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -480,7 +538,11 @@ enum ProviderConfig {
         let paths = ProviderPaths.current
         let markerExists = FileManager.default.fileExists(atPath: paths.appMarkerFile.path)
         if markerExists {
-            do { try FileManager.default.removeItem(at: paths.configFile) }
+            do {
+                let lockFD = try acquireConfigMutationLock(paths: paths)
+                defer { releaseConfigMutationLock(lockFD) }
+                try FileManager.default.removeItem(at: paths.configFile)
+            }
             catch {
                 let ns = error as NSError
                 if !(ns.domain == NSCocoaErrorDomain && ns.code == NSFileNoSuchFileError) {
@@ -507,7 +569,14 @@ enum ProviderConfig {
               let providerID = readProviderID(paths: paths) else {
             return false
         }
-        return await KeychainStore.readProviderToken(providerID: providerID) != nil
+        // A legacy App bearer is compatible only after a fresh installed CLI
+        // process proved its own custody. The local marker does not authorize
+        // launchd; it only prevents repeatedly routing the already-verified
+        // compatibility copy through migration.
+        if await KeychainStore.readProviderToken(providerID: providerID) != nil {
+            return readCredentialCustodyMarker(paths: paths) == providerID
+        }
+        return true
     }
 
     private static func writeAppMarker(paths: ProviderPaths, fileManager fm: FileManager) throws {
@@ -515,6 +584,44 @@ enum ProviderConfig {
         guard fm.createFile(atPath: paths.appMarkerFile.path, contents: Data()) else {
             throw SaveError.appMarkerCreateFailed
         }
+    }
+
+    private static func removeAndConfirm(_ url: URL, fileManager fm: FileManager) throws {
+        if fm.fileExists(atPath: url.path) {
+            try fm.removeItem(at: url)
+        }
+        guard !fm.fileExists(atPath: url.path) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    private static func cleanupImportArtifacts(
+        backup: URL,
+        marker: URL,
+        fileManager fm: FileManager
+    ) throws {
+        // The marker is the only durable pointer to the secret snapshot. Never
+        // retire it until backup deletion has been positively confirmed.
+        try removeAndConfirm(backup, fileManager: fm)
+        try removeAndConfirm(marker, fileManager: fm)
+    }
+
+    static func credentialCustodyMarker(paths: ProviderPaths) -> URL {
+        paths.appSupport.appendingPathComponent(".cli-credential-custody-v1")
+    }
+
+    private static func writeCredentialCustodyMarker(providerID: String, paths: ProviderPaths) throws {
+        try atomicWrite0600(Data((providerID + "\n").utf8), to: credentialCustodyMarker(paths: paths))
+    }
+
+    private static func readCredentialCustodyMarker(paths: ProviderPaths) -> String? {
+        guard let contents = try? String(
+            contentsOf: credentialCustodyMarker(paths: paths),
+            encoding: .utf8
+        ) else {
+            return nil
+        }
+        return contents.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func importPendingMarker(paths: ProviderPaths) -> URL {
@@ -731,19 +838,6 @@ enum ProviderConfig {
         }
     }
 
-    private static func removingTopLevelValue(named key: String, from contents: String) -> String {
-        var output = ""
-        for (line, rawLine) in normalizedLineRanges(contents) {
-            if !topLevelKey(key, matches: line) {
-                output += rawLine
-            }
-        }
-        if !output.isEmpty, !output.hasSuffix("\n") {
-            output += "\n"
-        }
-        return output
-    }
-
     private static func normalizedLines(_ contents: String) -> [String] {
         contents
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -826,6 +920,23 @@ enum ProviderConfig {
             try? FileManager.default.removeItem(at: temp)
             throw error
         }
+    }
+
+    private static func acquireConfigMutationLock(paths: ProviderPaths) throws -> Int32 {
+        let lockURL = paths.configFile.deletingLastPathComponent()
+            .appendingPathComponent(".\(paths.configFile.lastPathComponent).lock")
+        let fd = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        if fchmod(fd, S_IRUSR | S_IWUSR) != 0 || flock(fd, LOCK_EX) != 0 {
+            _ = close(fd)
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return fd
+    }
+
+    private static func releaseConfigMutationLock(_ fd: Int32) {
+        _ = flock(fd, LOCK_UN)
+        _ = close(fd)
     }
 
     private static func writeAll(_ data: Data, fd: Int32) throws {

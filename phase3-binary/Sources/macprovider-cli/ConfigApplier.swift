@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MacProviderCore
 import Yams
 
 enum ConfigApplierError: Error, Equatable, CustomStringConvertible {
@@ -48,24 +49,29 @@ struct ConfigApplier {
         let fileManager = FileManager.default
         let directory = configPath.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return try ProviderConfigMutationLock.withExclusiveLock(configPath: configPath.path) {
+            let originalData = (try? Data(contentsOf: configPath)) ?? Data()
+            let originalText = String(decoding: originalData, as: UTF8.self)
+            try validateYAML(originalText)
 
-        let originalData = (try? Data(contentsOf: configPath)) ?? Data()
-        let originalText = String(decoding: originalData, as: UTF8.self)
-        try validateYAML(originalText)
+            let unixTS = Int(now.timeIntervalSince1970)
+            // Autotune backups are model/config rollback artifacts, never
+            // credential stores. The live file retains its compatibility token
+            // until admission-gated cleanup; durable `.bak-*` copies omit it.
+            let backupText = ProviderTokenPersist.removingProviderTokenLines(in: originalText)
+            let backupPath = try writeBackupExclusively(Data(backupText.utf8), unixTS: unixTS)
 
-        let unixTS = Int(now.timeIntervalSince1970)
-        let backupPath = try writeBackupExclusively(originalData, unixTS: unixTS)
+            let updatedText = try updatedConfigText(originalText, recommendation: recommendation, donorMode: donorMode)
+            guard let updatedData = updatedText.data(using: .utf8) else {
+                throw ConfigApplierError.stringEncodingFailed(configPath.path)
+            }
+            try atomicWrite(updatedData, to: configPath, unixTS: unixTS)
 
-        let updatedText = try updatedConfigText(originalText, recommendation: recommendation, donorMode: donorMode)
-        guard let updatedData = updatedText.data(using: .utf8) else {
-            throw ConfigApplierError.stringEncodingFailed(configPath.path)
+            return AppliedConfig(
+                backupPath: backupPath,
+                summary: Self.summary(recommendation: recommendation, backupPath: backupPath, donorMode: donorMode)
+            )
         }
-        try atomicWrite(updatedData, to: configPath, unixTS: unixTS)
-
-        return AppliedConfig(
-            backupPath: backupPath,
-            summary: Self.summary(recommendation: recommendation, backupPath: backupPath, donorMode: donorMode)
-        )
     }
 
     struct AppliedConfig {

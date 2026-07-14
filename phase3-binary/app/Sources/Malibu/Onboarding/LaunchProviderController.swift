@@ -382,11 +382,19 @@ struct StartupState: Equatable {
     static func applyMigrationDecision(
         _ decision: MigrationDecision,
         paths: ProviderPaths = .current,
-        now: Date = Date()
+        now: Date = Date(),
+        importCredentialIntoCLI: (@Sendable (URL) async throws -> Void)? = nil
     ) async throws -> MigrationResult {
         switch decision {
         case .importExisting:
-            try await ProviderConfig.importExistingCLIConfig(paths: paths)
+            if let importCredentialIntoCLI {
+                try await ProviderConfig.importExistingCLIConfig(
+                    paths: paths,
+                    importCredentialIntoCLI: importCredentialIntoCLI
+                )
+            } else {
+                try await ProviderConfig.importExistingCLIConfig(paths: paths)
+            }
             let state = await StartupState.detect(paths: paths)
             return MigrationResult(route: state.route(), backupPath: nil)
         case .startFresh:

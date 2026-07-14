@@ -143,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Existing provider config found"
         alert.informativeText = """
-        Malibu found a macprovider config that was not installed by the app. Import saves the existing provider token to Keychain and removes it from config.yaml. Start fresh moves the old config aside.
+        Malibu found a macprovider config that was not installed by the app. Import asks the installed provider CLI to verify restart-safe credential custody; the CLI removes any migration token only after coordinator admission. Start fresh moves the old config aside.
         """
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Import")

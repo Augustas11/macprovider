@@ -11,7 +11,7 @@ set -euo pipefail
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
-MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
+MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.33"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -53,6 +53,7 @@ EMERGENCY_ROLLBACK="${MACPROVIDER_EMERGENCY_ROLLBACK:-0}"
 EMERGENCY_CONFIG_BACKUP="${MACPROVIDER_EMERGENCY_CONFIG_BACKUP:-}"
 EMERGENCY_CONFIG_SHA256="${MACPROVIDER_EMERGENCY_CONFIG_SHA256:-}"
 EMERGENCY_STAGED_CONFIG_SHA256=""
+EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256=""
 EMERGENCY_MODEL=""
 TMPDIR_PATH=""
 staging_dir=""
@@ -1074,7 +1075,7 @@ stop_owned_manual_provider() {
   fi
   ! pid_is_live_non_zombie "$candidate_pid"
 }
-preserve_failed_bootstrap_credential() {
+preserve_failed_bootstrap_identity() {
   failed_config="$1"
   restored_config="$2"
   restored_provider_id="$3"
@@ -1104,25 +1105,32 @@ with open(failed_path, "r", encoding="utf-8") as handle:
     failed_text = handle.read()
 provider_id = scalar(failed_text, "provider_id")
 token = scalar(failed_text, "provider_token")
-if token is None:
-    raise SystemExit(0)
 if not isinstance(provider_id, str) or re.fullmatch(r"mp-[0-9a-f]{32}", provider_id) is None:
     # Ordinary operator-issued identities are restored from the transaction
     # backup unchanged. Only installer-bootstrap identities participate in
     # durable same-key recovery and therefore need cross-rollback preservation.
     raise SystemExit(0)
-if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
+if token is not None and (not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None):
     raise SystemExit(0)
 
 if os.path.exists(restored_path):
     with open(restored_path, "r", encoding="utf-8") as handle:
         restored_text = handle.read()
-    lines = [
-        line for line in restored_text.splitlines()
-        if not line.startswith("provider_id:") and not line.startswith("provider_token:")
-    ]
+    lines = []
+    for line in restored_text.splitlines():
+        if line.startswith("provider_id:"):
+            continue
+        # A failed v1.8.33+ bootstrap can be tokenless because its bearer is
+        # already in CLI Keychain. If transaction rollback restored an older
+        # token-bearing config, preserve that compatibility bearer so the old
+        # binary remains viable. Only replace it when the failed config itself
+        # carries an exact bootstrap token.
+        if token is not None and line.startswith("provider_token:"):
+            continue
+        lines.append(line)
     lines.append("provider_id: " + json.dumps(provider_id))
-    lines.append("provider_token: " + token)
+    if token is not None:
+        lines.append("provider_token: " + token)
     updated = "\n".join(lines) + "\n"
 else:
     updated = failed_text if failed_text.endswith("\n") else failed_text + "\n"
@@ -1222,8 +1230,8 @@ swap_restore binary-path "$REC_BINARY_PATH" "$BINARY_CANDIDATE" "$REC_HAD_BINARY
 swap_restore config.yaml "$REC_CONFIG_PATH" "$CONFIG_CANDIDATE" "$REC_HAD_CONFIG" || recovery_failed "could not restore the previous config"
 swap_restore provider_id "$REC_PROVIDER_ID_PATH" "$PROVIDER_ID_CANDIDATE" "$REC_HAD_PROVIDER_ID" || recovery_failed "could not restore the previous provider id"
 swap_restore last-recommendation.json "$REC_RECOMMENDATION_PATH" "$RECOMMENDATION_CANDIDATE" "$REC_HAD_RECOMMENDATION" || recovery_failed "could not restore the previous recommendation"
-preserve_failed_bootstrap_credential "$FAILED_CURRENT_DIR/config.yaml" "$REC_CONFIG_PATH" "$REC_PROVIDER_ID_PATH" \
-  || recovery_failed "could not preserve the installer bootstrap credential through rollback"
+preserve_failed_bootstrap_identity "$FAILED_CURRENT_DIR/config.yaml" "$REC_CONFIG_PATH" "$REC_PROVIDER_ID_PATH" \
+  || recovery_failed "could not preserve the installer bootstrap identity through rollback"
 swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST" || recovery_failed "could not restore the previous launchd plist"
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"
@@ -3111,8 +3119,20 @@ read_config_donor_mode() {
 
 ensure_provider_credentials() {
   if [ -n "$(read_config_provider_token_line || true)" ]; then
+    run_macprovider_cli_with_amfi_retry credentials import --config "$CONFIG_PATH" \
+      || die 6 "provider credential migration into CLI Keychain failed"
+    run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
+      || die 6 "provider credential migration verification failed"
     return 0
   fi
+  credential_verify_rc=0
+  run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
+    || credential_verify_rc=$?
+  case "$credential_verify_rc" in
+    0) return 0 ;;
+    3) ;;
+    *) die 6 "existing CLI Keychain credential is unavailable or invalid; refusing unsafe bootstrap" ;;
+  esac
   provider_id="$(read_config_provider_id || true)"
   case "$provider_id" in
     mp-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
@@ -3121,21 +3141,22 @@ ensure_provider_credentials() {
   log "Acquiring first-install provider credential before evidence admission."
   run_macprovider_cli_with_amfi_retry bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH" \
     || die 6 "provider credential bootstrap failed before evidence admission"
-  [ -n "$(read_config_provider_token_line || true)" ] \
-    || die 6 "provider credential bootstrap completed without persisting provider_token"
+  run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
+    || die 6 "provider credential bootstrap completed without restart-safe CLI custody"
   if [ -n "${STAGED_CONFIG_PATH:-}" ] && [ "$CONFIG_PATH" = "$STAGED_CONFIG_PATH" ]; then
-    # Coordinator bootstrap creates a durable principal. Publish its exact key
-    # material into the protected live transaction immediately so #547's
-    # rollback helper can preserve custody even if later evidence or startup
-    # admission fails. The incumbent process remains running until cutover.
+    # Coordinator bootstrap creates a durable Keychain principal. Publish its
+    # provider ID and tokenless config into the protected live transaction
+    # immediately so #547's rollback helper preserves the identity even if
+    # later evidence or startup admission fails. The incumbent process remains
+    # running until cutover.
     assert_install_lock_ownership
     mkdir -p "$CONFIG_DIR"
     bootstrap_config_temp="$LIVE_CONFIG_PATH.bootstrap.$$"
     cp "$STAGED_CONFIG_PATH" "$bootstrap_config_temp" \
-      || die 70 "could not preserve the bootstrapped provider credential for rollback"
+      || die 70 "could not preserve the bootstrapped provider identity for rollback"
     chmod 600 "$bootstrap_config_temp" 2>/dev/null || true
     mv "$bootstrap_config_temp" "$LIVE_CONFIG_PATH" \
-      || die 70 "could not publish the bootstrapped provider credential for rollback"
+      || die 70 "could not publish the bootstrapped provider identity for rollback"
     if [ -f "$STAGED_PROVIDER_ID_PATH" ]; then
       bootstrap_provider_id_temp="$LIVE_PROVIDER_ID_PATH.bootstrap.$$"
       cp "$STAGED_PROVIDER_ID_PATH" "$bootstrap_provider_id_temp" \
@@ -4901,13 +4922,31 @@ PY
 verify_emergency_config_activation() {
   [ -n "$EMERGENCY_STAGED_CONFIG_SHA256" ] \
     || die 7 "emergency staged config digest was not recorded"
+  [ -n "$EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256" ] \
+    || die 7 "emergency tokenless staged config digest was not recorded"
   actual_config_sha="$(shasum -a 256 "$LIVE_CONFIG_PATH" | awk '{print $1}')"
-  [ "$actual_config_sha" = "$EMERGENCY_STAGED_CONFIG_SHA256" ] \
-    || die 7 "activated emergency config does not match the verified staged config"
+  if [ "$actual_config_sha" != "$EMERGENCY_STAGED_CONFIG_SHA256" ] \
+    && [ "$actual_config_sha" != "$EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256" ]; then
+    die 7 "activated emergency config does not match the verified staged config or its admission-cleaned form"
+  fi
   activated_model="$(read_config_model || true)"
   [ -n "$activated_model" ] && [ "$activated_model" = "$EMERGENCY_MODEL" ] \
     || die 7 "activated emergency config does not retain the inventoried model"
-  log "Emergency config proof: source_sha256=$EMERGENCY_CONFIG_SHA256 activated_sha256=$actual_config_sha model=$activated_model"
+  log "Emergency config proof: source_sha256=$EMERGENCY_CONFIG_SHA256 staged_sha256=$EMERGENCY_STAGED_CONFIG_SHA256 tokenless_sha256=$EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256 activated_sha256=$actual_config_sha model=$activated_model"
+}
+
+config_without_provider_token_sha256() {
+  python3 - "$1" <<'PY'
+import hashlib
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    text = handle.read()
+tokenless = "\n".join(
+    line for line in text.split("\n") if not line.startswith("provider_token:")
+)
+print(hashlib.sha256(tokenless.encode("utf-8")).hexdigest())
+PY
 }
 
 main() {
@@ -4975,6 +5014,7 @@ main() {
     EMERGENCY_MODEL="$model"
     disable_staged_autoupdate
     EMERGENCY_STAGED_CONFIG_SHA256="$(shasum -a 256 "$STAGED_CONFIG_PATH" | awk '{print $1}')"
+    EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256="$(config_without_provider_token_sha256 "$STAGED_CONFIG_PATH")"
     log "Emergency rollback: restoring the verified pre-upgrade config and model while disabling provider autoupdate."
     log "The signed prior release will commit only after exact legacy_bridge buyer admission."
   else

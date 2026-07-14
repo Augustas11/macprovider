@@ -56,17 +56,35 @@ awk '
 ' "$INSTALL_SH" >> "$lib"
 
 awk '
+  /^verify_emergency_config_activation\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^config_without_provider_token_sha256\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^preserve_failed_bootstrap_identity\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
   /^validate_emergency_target\(\)/ { emit = 1 }
   /^disable_staged_autoupdate\(\)/ { emit = 0 }
   emit { print }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag download_release verify_sha256 validate_staged_entries validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate; do
+for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag download_release verify_sha256 validate_staged_entries validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
-MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
+MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.33"
 GITHUB_REPO="Augustas11/macprovider"
 TMPDIR_PATH=""
 asset_path=""
@@ -95,6 +113,10 @@ validate_release_payload() {
   log "payload validated"
 }
 shasum() {
+  if [ "${MOCK_REAL_SHA:-0}" = "1" ]; then
+    command shasum "$@"
+    return
+  fi
   printf '%s  %s\n' "${MOCK_SHA:-goodhash}" "$2"
 }
 curl() {
@@ -166,9 +188,10 @@ reset_mocks() {
   VALIDATE_CALLED=0
   MOCK_SHA="goodhash"
   MOCK_SIGNATURE_FAIL=0
+  MOCK_REAL_SHA=0
   MOCK_CHECKSUMS="goodhash macprovider-cli-v1.7.11-darwin-arm64.pkg"
   MOCK_RELEASES_JSON='[{"tag_name":"v1.8.0","prerelease":true},{"tag_name":"verify-v1.0.0","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
-  MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.30"}'
+  MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.33"}'
   unset MACPROVIDER_VERSION
   EMERGENCY_ROLLBACK=0
 }
@@ -312,7 +335,7 @@ rc=0
 report "case11-emergency-keeps-path-allowlist" 5 "$rc"
 
 ################################################################
-# Case 12 — emergency rollback adds the v1.8.30-compatible top-level
+# Case 12 — emergency rollback adds the v1.8.33-compatible top-level
 # opt-out without rewriting any valid nested YAML representation.
 ################################################################
 STAGED_CONFIG_PATH="$workdir/emergency-config.yaml"
@@ -345,26 +368,26 @@ report "case12-flow-legacy-opt-out-added" 1 \
 ################################################################
 cat > "$BINARY_PATH" <<'SH'
 #!/usr/bin/env bash
-printf '1.8.31\n'
+printf '1.8.34\n'
 SH
 chmod +x "$BINARY_PATH"
 reset_mocks
 rc=0
-( validate_emergency_target v1.8.30 ) >/dev/null 2>&1 || rc=$?
+( validate_emergency_target v1.8.33 ) >/dev/null 2>&1 || rc=$?
 report "case13-older-target-accepted" 0 "$rc"
 rc=0
-( validate_emergency_target v1.8.31 ) >/dev/null 2>&1 || rc=$?
+( validate_emergency_target v1.8.34 ) >/dev/null 2>&1 || rc=$?
 report "case13-equal-target-rejected" 7 "$rc"
 rc=0
-( validate_emergency_target v1.8.32 ) >/dev/null 2>&1 || rc=$?
+( validate_emergency_target v1.8.35 ) >/dev/null 2>&1 || rc=$?
 report "case13-newer-target-rejected" 7 "$rc"
 
 rc=0
-( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.33 ) >/dev/null 2>&1 || rc=$?
 report "case13-exact-advertisement-accepted" 0 "$rc"
 MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.29"}'
 rc=0
-( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.33 ) >/dev/null 2>&1 || rc=$?
 report "case13-mismatched-advertisement-rejected" 7 "$rc"
 
 ################################################################
@@ -401,6 +424,48 @@ EMERGENCY_CONFIG_SHA256="$(printf '0%.0s' {1..64})"
 rc=0
 ( validate_emergency_config_backup ) >/dev/null 2>&1 || rc=$?
 report "case14-mismatched-backup-hash-rejected" 7 "$rc"
+
+################################################################
+# Case 15 — a v1.8.33 emergency activation may remove only the
+# provider_token after admission; all other byte drift is rejected.
+################################################################
+STAGED_CONFIG_PATH="$workdir/staged-with-token.yaml"
+LIVE_CONFIG_PATH="$workdir/live-emergency-config.yaml"
+printf 'provider_id: mp-test\nprovider_token: secret-token\nmodel: prior-model\nauto_update_enabled: false\n' > "$STAGED_CONFIG_PATH"
+cp "$STAGED_CONFIG_PATH" "$LIVE_CONFIG_PATH"
+MOCK_REAL_SHA=1
+EMERGENCY_STAGED_CONFIG_SHA256="$(command shasum -a 256 "$STAGED_CONFIG_PATH" | awk '{print $1}')"
+EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256="$(config_without_provider_token_sha256 "$STAGED_CONFIG_PATH")"
+EMERGENCY_MODEL="prior-model"
+read_config_model() { sed -n 's/^model:[[:space:]]*//p' "$LIVE_CONFIG_PATH" | tail -n 1; }
+rc=0
+( verify_emergency_config_activation ) >/dev/null 2>&1 || rc=$?
+report "case15-exact-activation-accepted" 0 "$rc"
+grep -v '^provider_token:' "$STAGED_CONFIG_PATH" > "$LIVE_CONFIG_PATH"
+rc=0
+( verify_emergency_config_activation ) >/dev/null 2>&1 || rc=$?
+report "case15-tokenless-activation-accepted" 0 "$rc"
+printf 'provider_id: mp-test\nmodel: changed-model\nauto_update_enabled: false\n' > "$LIVE_CONFIG_PATH"
+rc=0
+( verify_emergency_config_activation ) >/dev/null 2>&1 || rc=$?
+report "case15-noncredential-drift-rejected" 7 "$rc"
+
+################################################################
+# Case 16 — failed tokenless v1.8.33 bootstrap identity recovery
+# preserves the transaction-restored legacy bearer for an old binary.
+################################################################
+failed_config="$workdir/failed-tokenless.yaml"
+restored_config="$workdir/restored-token-bearing.yaml"
+restored_provider_id="$workdir/restored-provider-id"
+provider_id="mp-0123456789abcdef0123456789abcdef"
+legacy_token="$(printf 'a%.0s' {1..64})"
+printf 'provider_id: %s\nmodel: new-model\n' "$provider_id" > "$failed_config"
+printf 'provider_id: old-provider\nprovider_token: %s\nmodel: old-model\n' "$legacy_token" > "$restored_config"
+preserve_failed_bootstrap_identity "$failed_config" "$restored_config" "$restored_provider_id"
+report "case16-tokenless-failure-preserves-restored-bearer" 1 \
+  "$(grep -c "^provider_token: $legacy_token$" "$restored_config")"
+report "case16-tokenless-failure-preserves-new-provider-id" 1 \
+  "$(grep -c "^provider_id: \"$provider_id\"$" "$restored_config")"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

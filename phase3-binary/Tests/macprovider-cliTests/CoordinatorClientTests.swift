@@ -525,6 +525,7 @@ final class CoordinatorClientTests: XCTestCase {
         )
         let factory = FakeProviderWebSocketFactory(sockets: [rejected, recovered])
         let runtime = try await ModelRuntime(modelID: nil)
+        let credentialStore = InMemoryProviderCredentialStore(values: [providerID: staleToken])
         let client = try XCTUnwrap(CoordinatorClient(
             config: config,
             modelRuntime: runtime,
@@ -532,7 +533,8 @@ final class CoordinatorClientTests: XCTestCase {
             attestationGenerator: StaticAttestationGenerator(token: nil),
             webSocketFactory: { factory.makeSocket(for: $0) },
             sleepAssertionFactory: { nil },
-            receiptIdentitySigningKey: receiptKey
+            receiptIdentitySigningKey: receiptKey,
+            providerCredentialStore: credentialStore
         ))
 
         do {
@@ -547,11 +549,9 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(requests.count, 2)
         XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer \(staleToken)")
         XCTAssertNil(requests[1].value(forHTTPHeaderField: "Authorization"))
-        let loaded = try ConfigLoader.load(
-            cli: CLIOverrides(configPath: configURL.path),
-            environment: [:]
-        )
-        XCTAssertEqual(loaded.providerToken, recoveredToken)
+        let onDisk = try String(contentsOf: configURL)
+        XCTAssertFalse(onDisk.contains("provider_token:"))
+        XCTAssertEqual(try credentialStore.load(providerID: providerID), recoveredToken)
         XCTAssertGreaterThan(recovered.cancelCountSnapshot(), 0)
     }
 
@@ -868,7 +868,6 @@ final class CoordinatorClientTests: XCTestCase {
     }
 
     func testHelloAckAssignedProviderTokenTriggersAuthUpgradeReconnect() async throws {
-        let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
@@ -887,12 +886,16 @@ final class CoordinatorClientTests: XCTestCase {
         config.model = "model-a"
         config.wsTunneledMode = false
         let runtime = try await ModelRuntime(modelID: nil)
+        let credentialStore = InMemoryProviderCredentialStore()
+        let credentialStatus = ProviderCredentialStatusRuntime(.unconfigured)
         let client = try XCTUnwrap(CoordinatorClient(
             config: config,
             modelRuntime: runtime,
             providerStatus: status,
             webSocketFactory: { _ in FakeProviderWebSocketTask(receiveResults: []) },
-            sleepAssertionFactory: { nil }
+            sleepAssertionFactory: { nil },
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
         ))
 
         do {
@@ -906,6 +909,172 @@ final class CoordinatorClientTests: XCTestCase {
         } catch is CoordinatorAuthUpgradeReconnect {
             // FR-C9.3: tokenless bootstrap must reconnect with Bearer before serving buyers.
         }
+        XCTAssertEqual(try credentialStore.load(providerID: "provider-test"), "minted-provisional-token")
+        let persistedCredentialStatus = await credentialStatus.snapshot()
+        XCTAssertEqual(
+            persistedCredentialStatus,
+            ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+        )
+    }
+
+    func testHelloAckAssignedProviderTokenDoesNotAdoptOrWriteYAMLWhenKeychainFails() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-token-fallback-")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let configPath = dir.appendingPathComponent("config.yaml").path
+        try "provider_id: provider-test\nmodel: model-a\n".write(
+            toFile: configPath,
+            atomically: true,
+            encoding: .utf8
+        )
+        var config = AppConfig.defaults(configPath: configPath)
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        let runtime = try await ModelRuntime(modelID: nil)
+        let credentialStore = InMemoryProviderCredentialStore(
+            replaceError: NSError(domain: "ProviderCredentialStoreTests", code: 1)
+        )
+        let credentialStatus = ProviderCredentialStatusRuntime(.unconfigured)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            webSocketFactory: { _ in FakeProviderWebSocketTask(receiveResults: []) },
+            sleepAssertionFactory: { nil },
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
+        ))
+
+        do {
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-a",
+                "heartbeat_interval_s": 30,
+                "assigned_provider_token": "fallback-token",
+            ])
+            XCTFail("expected credential commit failure")
+        } catch let error as CoordinatorAuthError {
+            guard case .invalidMessage(let message) = error else {
+                XCTFail("unexpected auth error: \(error)")
+                return
+            }
+            XCTAssertEqual(message, "assigned provider credential could not be committed")
+        }
+
+        XCTAssertFalse(try String(contentsOfFile: configPath).contains("provider_token:"))
+        let persistedCredentialStatus = await credentialStatus.snapshot()
+        XCTAssertEqual(persistedCredentialStatus, .unconfigured)
+    }
+
+    func testHelloAckAssignedProviderTokenDoesNotAdoptAppManagedTokenWhenKeychainFails() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-token-managed-failure-")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let configPath = dir.appendingPathComponent("config.yaml").path
+        let originalConfig = "provider_id: provider-test\nmanaged_by: malibu-app\nmodel: model-a\n"
+        try originalConfig.write(toFile: configPath, atomically: true, encoding: .utf8)
+        var config = AppConfig.defaults(configPath: configPath)
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.managedBy = "malibu-app"
+        let runtime = try await ModelRuntime(modelID: nil)
+        let credentialStore = InMemoryProviderCredentialStore(
+            replaceError: NSError(domain: "ProviderCredentialStoreTests", code: 1)
+        )
+        let credentialStatus = ProviderCredentialStatusRuntime(.unconfigured)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            webSocketFactory: { _ in FakeProviderWebSocketTask(receiveResults: []) },
+            sleepAssertionFactory: { nil },
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
+        ))
+
+        do {
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-a",
+                "heartbeat_interval_s": 30,
+                "assigned_provider_token": "must-not-be-adopted",
+            ])
+        } catch let error as CoordinatorAuthError {
+            guard case .invalidMessage(let message) = error else {
+                XCTFail("unexpected auth error: \(error)")
+                return
+            }
+            XCTAssertEqual(message, "assigned provider credential could not be committed")
+        }
+
+        XCTAssertEqual(try String(contentsOfFile: configPath), originalConfig)
+        let persistedCredentialStatus = await credentialStatus.snapshot()
+        XCTAssertEqual(persistedCredentialStatus, .unconfigured)
+    }
+
+    func testAcceptedKeychainBackedRestartRemovesMatchingLegacyYAMLToken() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-token-migration-commit-")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let configPath = dir.appendingPathComponent("config.yaml").path
+        let token = "migration-token"
+        try "provider_id: provider-test\nprovider_token: \(token)\nmodel: model-a\n".write(
+            toFile: configPath,
+            atomically: true,
+            encoding: .utf8
+        )
+        var config = AppConfig.defaults(configPath: configPath)
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.providerToken = token
+        config.model = "model-a"
+        let runtime = try await ModelRuntime(modelID: nil)
+        let credentialStore = InMemoryProviderCredentialStore(values: ["provider-test": token])
+        let credentialStatus = ProviderCredentialStatusRuntime(ProviderCredentialStatus(
+            source: .cliKeychain,
+            state: .ready,
+            restartSafe: true,
+            migrationPending: true
+        ))
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            sendOverride: { _ in },
+            sleepAssertionFactory: { nil },
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
+        ))
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 3_600,
+        ])
+        await client.stop()
+
+        let onDisk = try String(contentsOfFile: configPath)
+        XCTAssertFalse(onDisk.contains("provider_token:"))
+        XCTAssertTrue(onDisk.contains("provider_id: provider-test"))
+        let finalCredentialStatus = await credentialStatus.snapshot()
+        XCTAssertEqual(
+            finalCredentialStatus,
+            ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+        )
     }
 
     func testHelloAckPairingMaterial_WritesClaimURLBeforeFailedOpen() async throws {
@@ -2663,10 +2832,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.32")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.32")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.32")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.32")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.33")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.33")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.33")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.33")
     }
 
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
@@ -2702,6 +2871,21 @@ final class CoordinatorClientTests: XCTestCase {
     func testCoordinatorAutoupdateKeepsRollbackArmedWithoutServingCapability() async throws {
         let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
         defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let configURL = fixture.home.appendingPathComponent("config.yaml")
+        try "provider_id: provider-test\nprovider_token: migration-token\nmodel: model-a\n".write(
+            to: configURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let credentialStore = InMemoryProviderCredentialStore(values: ["provider-test": "migration-token"])
+        let credentialStatus = ProviderCredentialStatusRuntime(
+            ProviderCredentialStatus(
+                source: .cliKeychain,
+                state: .ready,
+                restartSafe: true,
+                migrationPending: true
+            )
+        )
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
             modelID: "model-a",
@@ -2717,7 +2901,11 @@ final class CoordinatorClientTests: XCTestCase {
             catalogSignerKeyID: "operator-2026-01",
             catalogRowIdentity: String(repeating: "b", count: 64),
             coordinatorReadiness: { _, _, _ in false },
-            autoupdateMarkerStore: fixture.store
+            autoupdateMarkerStore: fixture.store,
+            configPath: configURL.path,
+            providerToken: "migration-token",
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
         )
 
         try await client.handleCoordinatorPayloadForTest([
@@ -2729,11 +2917,29 @@ final class CoordinatorClientTests: XCTestCase {
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(try String(contentsOf: configURL).contains("provider_token: migration-token"))
+        let pendingStatus = await credentialStatus.snapshot()
+        XCTAssertTrue(pendingStatus.migrationPending)
     }
 
     func testCoordinatorAutoupdateCommitsAfterAuthoritativeServingCapability() async throws {
         let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
         defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let configURL = fixture.home.appendingPathComponent("config.yaml")
+        try "provider_id: provider-test\nprovider_token: migration-token\nmodel: model-a\n".write(
+            to: configURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let credentialStore = InMemoryProviderCredentialStore(values: ["provider-test": "migration-token"])
+        let credentialStatus = ProviderCredentialStatusRuntime(
+            ProviderCredentialStatus(
+                source: .cliKeychain,
+                state: .ready,
+                restartSafe: true,
+                migrationPending: true
+            )
+        )
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
             modelID: "model-a",
@@ -2757,7 +2963,11 @@ final class CoordinatorClientTests: XCTestCase {
                     && envelope.signerKeyID == "operator-2026-01"
                     && envelope.rowIdentity == String(repeating: "b", count: 64)
             },
-            autoupdateMarkerStore: fixture.store
+            autoupdateMarkerStore: fixture.store,
+            configPath: configURL.path,
+            providerToken: "migration-token",
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
         )
 
         try await client.handleCoordinatorPayloadForTest([
@@ -2769,6 +2979,68 @@ final class CoordinatorClientTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertFalse(try String(contentsOf: configURL).contains("provider_token:"))
+        let committedStatus = await credentialStatus.snapshot()
+        XCTAssertFalse(committedStatus.migrationPending)
+    }
+
+    func testSelfUpdateOwnedRollbackRetainsLegacyCredentialUntilParentCommits() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            commitOwner: "self_update"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let configURL = fixture.home.appendingPathComponent("config.yaml")
+        try "provider_id: provider-test\nprovider_token: migration-token\nmodel: model-a\n".write(
+            to: configURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let credentialStore = InMemoryProviderCredentialStore(values: ["provider-test": "migration-token"])
+        let credentialStatus = ProviderCredentialStatusRuntime(
+            ProviderCredentialStatus(
+                source: .cliKeychain,
+                state: .ready,
+                restartSafe: true,
+                migrationPending: true
+            )
+        )
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            coordinatorReadiness: { _, _, _ in
+                XCTFail("self-update child must not claim its parent-owned rollback")
+                return true
+            },
+            autoupdateMarkerStore: fixture.store,
+            configPath: configURL.path,
+            providerToken: "migration-token",
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(try String(contentsOf: configURL).contains("provider_token: migration-token"))
+        let retainedStatus = await credentialStatus.snapshot()
+        XCTAssertTrue(retainedStatus.migrationPending)
     }
 
     func testCatalogWarmSwapNeverPublishesNewModelUnderBootRowIdentity() async throws {
@@ -3308,7 +3580,10 @@ final class CoordinatorClientTests: XCTestCase {
         return dir
     }
 
-    private static func makeAutoupdateRecoveryFixture(targetVersion: String) throws -> (home: URL, store: AutoUpdateMarkerStore, marker: AutoUpdatePendingMarker, binary: URL, backup: URL) {
+    private static func makeAutoupdateRecoveryFixture(
+        targetVersion: String,
+        commitOwner: String? = nil
+    ) throws -> (home: URL, store: AutoUpdateMarkerStore, marker: AutoUpdatePendingMarker, binary: URL, backup: URL) {
         let home = try makeTemporaryDirectory(prefix: "coordinator-autoupdate-")
         let store = AutoUpdateMarkerStore(homeDirectory: home)
         try store.ensureTrustedRoot()
@@ -3332,7 +3607,8 @@ final class CoordinatorClientTests: XCTestCase {
             size: 3,
             mode: 0o755,
             sha256: AutoUpdateEvent.sha256Hex("old"),
-            markerDeadline: ISO8601DateFormatter.coordinatorAutoupdateTest.string(from: Date().addingTimeInterval(300))
+            markerDeadline: ISO8601DateFormatter.coordinatorAutoupdateTest.string(from: Date().addingTimeInterval(300)),
+            commitOwner: commitOwner
         )
         try store.writePending(marker)
         return (home, store, marker, binary, backup)
@@ -3465,11 +3741,16 @@ final class CoordinatorClientTests: XCTestCase {
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 1,
-        autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()
+        autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
+        configPath: String = "/tmp/macprovider-test.yaml",
+        providerToken: String? = nil,
+        providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured)
     ) async throws -> CoordinatorClient {
-        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        var config = AppConfig.defaults(configPath: configPath)
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
+        config.providerToken = providerToken
         config.model = "model-a"
         config.modelCatalogModelID = modelCatalogModelID
         config.drainTimeoutSeconds = drainTimeoutSeconds
@@ -3516,6 +3797,8 @@ final class CoordinatorClientTests: XCTestCase {
             bootstrapReceiptSigningKey: bootstrapReceiptSigningKey,
             receiptIdentitySigningKey: receiptIdentitySigningKey,
             receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
+            providerCredentialStore: providerCredentialStore,
+            credentialStatusRuntime: credentialStatusRuntime,
             watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook
         ))
     }

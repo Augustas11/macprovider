@@ -26,6 +26,10 @@ enum InstalledProviderMonitor {
         let catalogDigest: String?
         let catalogSignerKeyID: String?
         let catalogSource: String?
+        let credentialSource: String?
+        let credentialState: String?
+        let credentialRestartSafe: Bool?
+        let credentialMigrationPending: Bool?
     }
 
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
@@ -102,6 +106,7 @@ enum InstalledProviderMonitor {
         }
         let coordinator = object["coordinator"] as? [String: Any] ?? [:]
         let catalog = object["catalog"] as? [String: Any] ?? [:]
+        let credential = object["credential"] as? [String: Any] ?? [:]
         return StatusSnapshot(
             binaryVersion: stringValue(object["binary_version"]),
             recommendedVersion: stringValue(coordinator["recommended_binary_version"]),
@@ -112,7 +117,11 @@ enum InstalledProviderMonitor {
             catalogReleaseID: stringValue(catalog["release_id"]),
             catalogDigest: stringValue(catalog["digest"]),
             catalogSignerKeyID: stringValue(catalog["signer_key_id"]),
-            catalogSource: stringValue(catalog["source"])
+            catalogSource: stringValue(catalog["source"]),
+            credentialSource: stringValue(credential["source"]),
+            credentialState: stringValue(credential["state"]),
+            credentialRestartSafe: credential["restart_safe"] as? Bool,
+            credentialMigrationPending: credential["migration_pending"] as? Bool
         )
     }
 

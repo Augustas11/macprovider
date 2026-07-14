@@ -11,7 +11,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -536,6 +536,23 @@ struct ServeCommand: AsyncParsableCommand {
         // downstream.
         unsetenv("MACPROVIDER_PROVIDER_TOKEN")
 
+        let credentialStore = KeychainProviderCredentialStore()
+        let credentialStatus = try ProviderCredentialResolver.resolve(
+            config: &resolved,
+            store: credentialStore
+        )
+        if !noJoin,
+           !resolved.donorMode,
+           credentialStatus == .unconfigured,
+           let configuredProviderID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !configuredProviderID.isEmpty,
+            !BootstrapAuthCommand.isCredentialBootstrapPrincipal(configuredProviderID) {
+            throw ValidationError(
+                "coordinator join requires a CLI-owned provider credential; run credentials import with the protected config"
+            )
+        }
+        let credentialStatusRuntime = ProviderCredentialStatusRuntime(credentialStatus)
+
         let startupPreflight = try await Self.runServeStartupPreflights(&resolved, joiningCoordinator: !noJoin)
         let serveLock = startupPreflight.serveLock
         defer { serveLock.release() }
@@ -671,7 +688,9 @@ struct ServeCommand: AsyncParsableCommand {
                 catalogRowIdentity: startupPreflight.catalogTrust?.rowIdentity,
                 catalogModelSHA256: startupPreflight.catalogTrust?.modelSHA256,
                 receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
-                persistReceiptIdentitySigningKey: persistReceiptIdentitySigningKey
+                persistReceiptIdentitySigningKey: persistReceiptIdentitySigningKey,
+                providerCredentialStore: credentialStore,
+                credentialStatusRuntime: credentialStatusRuntime
             )
         }
         let idlePrewarmLogger = IdlePrewarmLogger { object in
@@ -742,7 +761,8 @@ struct ServeCommand: AsyncParsableCommand {
             receiptBuilder: receiptRuntime.builder,
             idlePrewarmer: idlePrewarmer,
             catalogModelIDAlias: catalogModelIDAlias,
-            catalogTrust: startupPreflight.catalogTrust
+            catalogTrust: startupPreflight.catalogTrust,
+            credentialStatusRuntime: credentialStatusRuntime
         )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer)
         defer {

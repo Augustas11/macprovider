@@ -22,12 +22,21 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             throw ValidationError("--timeout-seconds must be in 1...120")
         }
         let resolved = try ConfigLoader.load(cli: CLIOverrides(configPath: config))
-        if Self.hasToken(resolved.providerToken) {
-            return
-        }
         guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !providerID.isEmpty else {
             throw ValidationError("provider_id is required before credential bootstrap")
+        }
+        let providerCredentialStore = KeychainProviderCredentialStore()
+        if let configToken = resolved.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !configToken.isEmpty {
+            try providerCredentialStore.importIfAbsentOrMatches(
+                providerID: providerID,
+                token: configToken
+            )
+            return
+        }
+        if try Self.storedCredentialPresent(providerID: providerID, store: providerCredentialStore) {
+            return
         }
         guard Self.isCredentialBootstrapPrincipal(providerID) else {
             throw ValidationError(
@@ -65,7 +74,8 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             providerStatus: status,
             providerReceiptPublicKey: receiptPublicKey,
             credentialBootstrap: true,
-            bootstrapReceiptSigningKey: receiptKey
+            bootstrapReceiptSigningKey: receiptKey,
+            providerCredentialStore: providerCredentialStore
         ) else {
             throw ValidationError("credential bootstrap requires a secure wss coordinator_url")
         }
@@ -74,7 +84,10 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
         do {
             while Date() < deadline {
-                if Self.persistedToken(configPath: resolved.configPath) {
+                if Self.persistedToken(
+                    providerID: providerID,
+                    store: providerCredentialStore
+                ) {
                     await client.stop()
                     return
                 }
@@ -88,12 +101,18 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         throw ValidationError("coordinator did not persist a provider token before the bootstrap timeout")
     }
 
-    static func persistedToken(configPath: String) -> Bool {
-        let loaded = try? ConfigLoader.load(
-            cli: CLIOverrides(configPath: configPath),
-            environment: [:]
-        )
-        return hasToken(loaded?.providerToken)
+    static func persistedToken(
+        providerID: String,
+        store: any ProviderCredentialStoring = KeychainProviderCredentialStore()
+    ) -> Bool {
+        hasToken(try? store.load(providerID: providerID))
+    }
+
+    static func storedCredentialPresent(
+        providerID: String,
+        store: any ProviderCredentialStoring
+    ) throws -> Bool {
+        hasToken(try store.load(providerID: providerID))
     }
 
     static func isCredentialBootstrapPrincipal(_ providerID: String) -> Bool {
