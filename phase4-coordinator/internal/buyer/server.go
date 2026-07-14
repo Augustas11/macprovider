@@ -1764,9 +1764,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
 	// Item 18: centrally stamp the positive no-prior-dispatch marker on any
-	// terminal response written while rec.attemptN == 0 (no provider credited
-	// yet). Wrapped after the recorder so mark() reads the final billing count
-	// at write time; outermost so it covers every downstream write path.
+	// terminal response written while no provider has been billably credited
+	// for this request (rec.providerCredited false, and — for the current
+	// terminal attempt whose billing row lands after its write on the WS paths
+	// — dispatchedThisAttempt with a non-503 terminal). Wrapped after the
+	// recorder so mark() reads the live billing state at write time; outermost
+	// so it covers every downstream write path.
 	w = &noPriorDispatchResponseWriter{ResponseWriter: w, rec: rec}
 	if !contentEncodingSupported(r.Header.Values("Content-Encoding")) {
 		msg := "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10."

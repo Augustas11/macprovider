@@ -21,17 +21,21 @@ const noPriorDispatchMarkerHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
 // TestNoPriorDispatchMarkerReflectsRealDispatch is the real-server counterpart
 // to the fabricated-header gateway tests: it drives the actual coordinator so
 // the marker is stamped by the live billingRecorder + noPriorDispatchResponseWriter
-// rather than a hand-set header. It pins the two regression-critical outcomes:
+// rather than a hand-set header. It pins the two dispatch outcomes over the HTTP
+// transport (registerWithEndpoint selects HTTP forwarding, which bills its
+// terminal row before the write):
 //
 //   - a dispatched provider that terminates 502 (provider_failed) leaves the
-//     response UNMARKED even though the WS/HTTP billing row is recorded AFTER
-//     the terminal write — this is the round-5 HIGH. With the old attemptN==0
-//     marker the row had not yet incremented at write time, so the response was
-//     wrongly marked "no prior dispatch" and a retried route_snapshot_failed
-//     refunded away a real provider credit. dispatchedThisAttempt (set before
-//     the relay) closes that.
+//     response UNMARKED (dispatchedThisAttempt set before the relay), so a
+//     retried route_snapshot_failed does not refund away a real provider credit.
 //   - a pre-dispatch routing failure (no provider available) never dispatches,
 //     so the response IS marked and the gateway refunds correctly.
+//
+// NOTE: this does not exercise the WS-tunneled write-before-bill ordering (where
+// the billing row is recorded after the terminal write); that path's marker
+// behavior is pinned by the unit-level TestNoPriorDispatchResponseWriterMarks,
+// and the outward-wire-status vs ledger-status divergence on the streaming/WS
+// write-before-bill paths is a documented carried limitation (SPEC-006 §17.7).
 func TestNoPriorDispatchMarkerReflectsRealDispatch(t *testing.T) {
 	t.Run("dispatched_provider_502_is_unmarked", func(t *testing.T) {
 		var calls int

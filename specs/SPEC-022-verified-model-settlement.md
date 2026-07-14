@@ -986,7 +986,14 @@ as documented follow-ups rather than blocking it.
   dispatched `provider_*` 502 or a `no_provider` 503 from failover exhaustion
   after a billed attempt (`priorProviderDispatch`); a cold marked 502/503 does
   not poison the refund. **Deploy the coordinator before the gateway; roll back
-  in reverse.**
+  in reverse.** **Carried limitation:** on the coordinator's write-before-bill
+  streaming / WS-tunneled terminal paths the marker is decided from the outward
+  wire status, so a non-billable `503` rendered as `502` can be left unmarked and
+  a subsequent `route_snapshot_failed` settled instead of refunded. This is the
+  SAME outcome as pre-item-18 (route_snapshot_failed was always settled), so the
+  edge is pre-existing and not worsened; a fully ledger-exact marker on these
+  paths (canonical billing status, or terminal-billing-before-write) is a tracked
+  follow-up.
 - **(B) `route_snapshot_policy_version` marks default-cutover, not
   runtime-reconfiguration.** The policy version literal (`spec022-prereq-v0`
   = 30s-deadline era, `spec022-prereq-v1` = 300s-deadline era) marks when the

@@ -160,8 +160,10 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
 	rec.logBuyerFailure(http.StatusInternalServerError, "Could not durably record route snapshot")
 	// The item-18 positive no-prior-dispatch marker is stamped centrally by
-	// noPriorDispatchResponseWriter at WriteHeader time (based on rec.attemptN),
-	// so it is present here iff no provider was credited earlier in this request.
+	// noPriorDispatchResponseWriter at WriteHeader time (based on the ledger-exact
+	// rec.providerCredited signal). route_snapshot_failed is pre-dispatch — no
+	// provider relayed this attempt — so the marker is present here iff no
+	// provider was billably credited earlier in this request.
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
@@ -175,11 +177,15 @@ const (
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 	// settlementNoPriorDispatchHeader is the item-18 POSITIVE no-charge marker,
 	// stamped centrally by noPriorDispatchResponseWriter on any terminal
-	// response written while rec.attemptN == 0 (no provider credited yet in this
-	// request). The gateway refunds a route_snapshot_failed / treats a retried
-	// no_provider 503 as cold ONLY when this marker is present, so an unmarked
-	// response (a legacy/rolled-back coordinator, or one that followed a billed
-	// provider dispatch) settles on the estimate instead of wrongly refunding.
+	// response written while no provider has been billably credited for this
+	// request (ledger-exact rec.providerCredited, plus dispatchedThisAttempt for
+	// the current terminal). The gateway refunds a route_snapshot_failed / treats
+	// a retried no_provider 503 as cold ONLY when this marker is present, so an
+	// unmarked response (a legacy/rolled-back coordinator, or one that followed a
+	// billed provider dispatch) settles on the estimate instead of wrongly
+	// refunding. Known limitation (documented, carried): on the write-before-bill
+	// streaming/WS paths the marker is decided from the outward wire status, which
+	// can render a non-billable 503 as 502 — see SPEC-006 §17.7.
 	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
 )
 

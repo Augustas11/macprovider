@@ -500,13 +500,14 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		// response followed a billed provider dispatch, remember it so a later
 		// terminal route_snapshot_failed is not wrongly refunded. The
 		// coordinator stamps X-MacProvider-Settlement-No-Prior-Dispatch on any
-		// response written while nothing was credited yet (attemptN==0), so the
-		// marker's ABSENCE is the bill-exact "a provider was already credited
-		// this request" signal — covering both a provider-dispatched 502 and a
-		// failover-exhaustion no_provider 503 after a billed attempt. A marked
-		// response (genuine cold-start 502/503) leaves the flag clear. A legacy
-		// coordinator emits no marker, so the gateway conservatively settles —
-		// deploy the coordinator before the gateway.
+		// response written while no provider has been billably credited yet
+		// (ledger-exact providerCredited, plus the current terminal attempt's
+		// dispatch), so the marker's ABSENCE is the "a provider was already
+		// credited this request" signal — covering both a provider-dispatched 502
+		// and a failover-exhaustion no_provider 503 after a billed attempt. A
+		// marked response (genuine cold-start 502/503) leaves the flag clear. A
+		// legacy coordinator emits no marker, so the gateway conservatively
+		// settles — deploy the coordinator before the gateway.
 		if strings.TrimSpace(resp.Header.Get(settlementNoPriorDispatchHeader)) == "" {
 			priorProviderDispatch = true
 		}
