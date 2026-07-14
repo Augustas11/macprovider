@@ -22,10 +22,15 @@ raw account scope. Verdict events now include:
 - buyer debit, provider settlement, and payout exclusion outcomes.
 
 `/admin/ledger/summary` now exposes `settlement_verdict_counters`, grouped by
-policy version, model id, entrypoint, and reason code. Each grouped row includes
-counters for verified, pending, quarantined, zero-settled, legacy receipt,
-missing receipt, catalog mismatch, model-hash null, and receipt-key mismatch
-outcomes.
+policy version, effective `pending_deadline_seconds`, model id, entrypoint, and
+reason code (item 19 / SPEC-022 (B): the effective deadline is resolved from the
+route snapshot via `route_snapshot_digest`, so a runtime deadline reconfiguration
+that keeps the same policy-version literal is not merged into one row — consumers
+MUST NOT assume uniqueness on the original four dimensions; the deadline dimension
+multiplies rows accordingly, and `0` marks an unknown/absent snapshot). Each
+grouped row includes counters for verified, pending, quarantined, zero-settled,
+legacy receipt, missing receipt, catalog mismatch, model-hash null, and
+receipt-key mismatch outcomes.
 
 ## Validation
 

@@ -1019,21 +1019,25 @@ as documented follow-ups rather than blocking it.
   **effective per-request deadline is authoritatively captured per-row** in
   `settlement_route_snapshots.pending_deadline_seconds` (set from the runtime
   config at dispatch and included in the route-snapshot digest), so it is
-  always recoverable regardless of the coarse version literal. **Reporting that
-  needs the effective deadline MUST read/group by that column, not the version
-  string.** Accordingly, the `settlement_verdict_counters` diagnostics
+  recoverable — independent of the coarse version literal — as long as the pinned
+  route-snapshot row is retained (verdict and snapshot rows are co-retained; no
+  repository pruning path removes a snapshot ahead of its verdict). **Reporting
+  that needs the effective deadline MUST read/group by that column, not the
+  version string.** Accordingly, the `settlement_verdict_counters` diagnostics
   (`/admin/ledger/summary`) now disaggregate by the effective
   `pending_deadline_seconds` (resolved from the route snapshot via
   `route_snapshot_digest`), so counters are no longer merged across deadline
-  regimes under one policy version (item 19). A verdict whose route-snapshot row
-  is absent reports deadline `0`. Fully deriving a single authoritative version
+  regimes under one policy version (item 19). Deadline `0` is reserved as the
+  **unknown** sentinel: a verdict whose route-snapshot row is absent reports `0`
+  (which itself groups all unknown regimes together — an accepted degenerate case,
+  not a valid 1..900 deadline). Fully deriving a single authoritative version
   from the effective policy object (so the version literal *itself* tracks
   runtime reconfiguration) remains the unimplemented SPEC-022 R-1.1 policy
   object; carried as a follow-up.
 
 ## Open questions
 
-None for v0.1.4. Deferred implementation details belong in the receipt-profile
+None for v0.1.5. Deferred implementation details belong in the receipt-profile
 spec or the SPEC-022 implementation prompt, not in the locked settlement gate.
 
 ## Decision log
