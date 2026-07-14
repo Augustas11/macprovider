@@ -956,15 +956,19 @@ audit (2026-07). Neither is new or worsened by that change; both are carried
 as documented follow-ups rather than blocking it.
 
 - **(A) Gateway settles `route_snapshot_failed` on estimate instead of
-  no-charge.** When the coordinator fails to persist a route snapshot
-  pre-dispatch (e.g. `route_snapshot_failed`), no provider invocation occurs,
-  but the gateway currently reads the absent settlement-finality headers as
-  legacy and settles the reservation on the estimated prompt-token count —
-  i.e. it can debit the buyer for a request that never reached a provider.
-  The gateway SHOULD instead treat a pre-dispatch `route_snapshot_failed` as
-  a no-charge refund. This is pre-existing gateway error-classification
-  behavior, independent of the pending-deadline change; carried as a
-  follow-up.
+  no-charge. — RESOLVED 2026-07-14 (runbook item 18; SPEC-006 v0.9.10 § 17.7).**
+  When the coordinator fails to persist a route snapshot pre-dispatch (e.g.
+  `route_snapshot_failed`), no provider invocation occurs, but the gateway
+  previously read the absent settlement-finality headers as legacy and settled
+  the reservation on the estimated prompt-token count — debiting the buyer for
+  a request that never reached a provider. The gateway now treats a genuine
+  pre-dispatch `route_snapshot_failed` (500, code `route_snapshot_failed`, no
+  finality header, no prior provider-dispatched retry) as a **no-charge
+  refund + verbatim passthrough** (`coordinatorPreDispatchNoChargeError` in
+  `phase5-gateway/internal/router/chat_proxy.go`). The **cross-attempt
+  exception** — a terminal `route_snapshot_failed` that follows a retried
+  provider-dispatched 502, which may have been credited in `observe` mode —
+  still settles on the estimate so real provider work is not erased.
 - **(B) `route_snapshot_policy_version` marks default-cutover, not
   runtime-reconfiguration.** The policy version literal (`spec022-prereq-v0`
   = 30s-deadline era, `spec022-prereq-v1` = 300s-deadline era) marks when the

@@ -6946,6 +6946,14 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 	}
 }
 
+// routeSnapshotFailedCoordBody is the exact OpenAI-shaped envelope the
+// coordinator emits for a pre-dispatch route_snapshot_failed: writeError →
+// errorType(500)="upstream_error", spec018Retryable("route_snapshot_failed")=true,
+// inference_ran/settlement_ran hardcoded false
+// (phase4-coordinator/internal/buyer/server.go writeErrorTypedParam).
+const routeSnapshotFailedCoordBody = `{"error":{"code":"route_snapshot_failed","inference_ran":false,"message":"Could not durably record route snapshot","param":null,"request_id":null,"retryable":true,"settlement_ran":false,"type":"upstream_error"}}
+`
+
 // TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge pins item 18: a
 // coordinator 500 route_snapshot_failed is emitted BEFORE any provider is
 // dispatched (SPEC-022 durable route-snapshot write failure) with no
@@ -6960,14 +6968,14 @@ func TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge(t *testing.T) {
 			name = "stream"
 		}
 		t.Run(name, func(t *testing.T) {
-			coordBody := `{"error":{"message":"Could not durably record route snapshot","type":"api_error","param":null,"code":"route_snapshot_failed","retryable":false,"request_id":null,"inference_ran":false,"settlement_ran":false}}`
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+				return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, routeSnapshotFailedCoordBody), nil
 			})}
-			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 				cfg.Coordinator.BuyerURL = "http://coordinator.test"
 			}, WithHTTPClient(client))
-			fullKey := createAccountAndKey(t, store, cfg, "acct_route_snap_"+name)
+			acct := "acct_route_snap_" + name
+			fullKey := createAccountAndKey(t, store, cfg, acct)
 
 			body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
 			if stream {
@@ -6975,16 +6983,20 @@ func TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge(t *testing.T) {
 			}
 			resp := postChat(t, h, fullKey, body, nil)
 
-			// (a) Status passes through as 500 with the coordinator body verbatim
-			// — NOT mapped to a 502 upstream_provider_error (the settle-on-error path).
+			// (a) Status passes through as 500 with the coordinator body VERBATIM
+			// — NOT mapped to a 502 upstream_provider_error (the settle path).
 			if resp.Code != http.StatusInternalServerError {
 				t.Fatalf("status=%d body=%s — route_snapshot_failed must pass through as 500, not map to 502", resp.Code, resp.Body.String())
 			}
-			if !strings.Contains(resp.Body.String(), `"code":"route_snapshot_failed"`) {
-				t.Fatalf("body=%s — expected route_snapshot_failed body to pass through verbatim", resp.Body.String())
+			if got := resp.Body.String(); got != routeSnapshotFailedCoordBody {
+				t.Fatalf("body must be the coordinator envelope verbatim.\n got=%q\nwant=%q", got, routeSnapshotFailedCoordBody)
 			}
-			if strings.Contains(resp.Body.String(), "upstream_provider_error") {
-				t.Fatalf("body=%s — must NOT use upstream_provider_error wording (that path settles on estimate)", resp.Body.String())
+			// (a2) retryable:true (the coordinator classifies this transient) is
+			// preserved, and the gateway attaches NO Retry-After (no fixed backoff
+			// for this code).
+			assertBodyRetryable(t, resp.Body.String(), true)
+			if got := resp.Header().Get("Retry-After"); got != "" {
+				t.Fatalf("Retry-After=%q, want empty for route_snapshot_failed", got)
 			}
 
 			// (b) No charge: no provider was reached, so quota is unchanged and
@@ -6997,23 +7009,61 @@ func TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge(t *testing.T) {
 			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
 				t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on route_snapshot_failed", reserved)
 			}
+			// (c) The ledger records a zero-token refunded audit row keyed to the
+			// coordinator code (not a settled charge).
+			assertRefundedAuditOutcome(t, dbPath, acct, "route_snapshot_failed")
 		})
+	}
+}
+
+// TestCoordinatorPreDispatchNoChargeErrorGuards pins the classifier directly:
+// eligibility requires status 500 AND code route_snapshot_failed AND the
+// ABSENCE of every settlement-finality header. Removing the finality-header
+// guard would wrongly refund a finalized response; removing the code/status
+// checks would over-refund unrelated errors.
+func TestCoordinatorPreDispatchNoChargeErrorGuards(t *testing.T) {
+	body := []byte(`{"error":{"code":"route_snapshot_failed","type":"upstream_error"}}`)
+	if !coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, body, http.Header{}) {
+		t.Fatal("bare 500 route_snapshot_failed must be no-charge eligible")
+	}
+	for _, hdr := range []string{
+		"X-MacProvider-Settlement-Outcome",
+		"X-MacProvider-Settlement-Receipt-Result",
+		"X-MacProvider-Settlement-Reason",
+		"X-MacProvider-Settlement-Closed",
+		"X-MacProvider-Settlement-Mode",
+		"X-MacProvider-Settlement-Policy-Version",
+		"X-MacProvider-Settlement-Pending-Deadline-Unix-Ms",
+	} {
+		h := http.Header{}
+		h.Set(hdr, "x")
+		if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, body, h) {
+			t.Fatalf("finality header %s present must disable no-charge eligibility (finality path owns it)", hdr)
+		}
+	}
+	if coordinatorPreDispatchNoChargeError(http.StatusBadGateway, body, http.Header{}) {
+		t.Fatal("502 must not be no-charge eligible (that is the legacy-502 refund path)")
+	}
+	if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, []byte(`{"error":{"code":"internal_error"}}`), http.Header{}) {
+		t.Fatal("a non-route_snapshot 500 must not be no-charge eligible")
 	}
 }
 
 // TestCoordinatorGeneric500StillSettlesUpstreamError is the narrowness guard
 // for item 18: a 500 whose code is NOT route_snapshot_failed must keep the
-// pre-existing settle-on-estimate → 502 upstream_provider_error behavior, so
-// the no-charge classifier is scoped to the pre-dispatch code alone.
+// pre-existing settle-on-estimate → 502 upstream_provider_error behavior AND
+// charge the prompt estimate, so the no-charge classifier is scoped to the
+// pre-dispatch code alone.
 func TestCoordinatorGeneric500StillSettlesUpstreamError(t *testing.T) {
-	coordBody := `{"error":{"message":"boom","type":"api_error","param":null,"code":"internal_error"}}`
+	coordBody := `{"error":{"message":"boom","type":"upstream_error","param":null,"code":"internal_error"}}`
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 	}, WithHTTPClient(client))
-	fullKey := createAccountAndKey(t, store, cfg, "acct_generic_500")
+	acct := "acct_generic_500"
+	fullKey := createAccountAndKey(t, store, cfg, acct)
 
 	resp := postChat(t, h, fullKey, `{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`, nil)
 
@@ -7022,6 +7072,11 @@ func TestCoordinatorGeneric500StillSettlesUpstreamError(t *testing.T) {
 	}
 	if !strings.Contains(resp.Body.String(), "upstream_provider_error") {
 		t.Fatalf("body=%s — generic 500 must still surface upstream_provider_error", resp.Body.String())
+	}
+	// The generic 500 settles on the prompt estimate (buyer IS charged).
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	if used := readQuota(t, usageResp)["daily_tokens_used"].(float64); used == 0 {
+		t.Fatalf("daily_tokens_used=0 — a generic 500 must still settle the prompt estimate")
 	}
 }
 

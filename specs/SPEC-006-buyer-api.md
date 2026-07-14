@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.9 (2026-07-14, SPEC-018 AC-45 streaming-mode diagnostic added to the response-pass-through allowlist)
+**Version:** 0.9.10 (2026-07-14, § 17.7 route_snapshot_failed pre-dispatch no-charge refund + cross-attempt exception — item 18)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.3, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.10 (2026-07-14, runbook item 18 — pre-dispatch route_snapshot_failed settlement):**
+- § 17.7 quota-refund matrix gains a `500 route_snapshot_failed` row: a genuine pre-dispatch snapshot-write failure (no provider reached, no finality header) is a **no-charge refund** (was: settled on the prompt estimate — SPEC-022 "Known limitations (A)", now resolved). Documents the **cross-attempt exception**: when an earlier gateway-retried attempt was a provider-dispatched `provider_*` 502 (potentially billed in `observe` mode), the terminal `route_snapshot_failed` settles on the estimate instead of refunding, so real provider work is not erased. § 17.1 notes the coordinator `500 route_snapshot_failed` is passed through verbatim. Gateway-only behavior change; SPEC-022 item (A) reconciled to resolved.
 
 **Change log v0.9.9 (2026-07-14, SPEC-018 AC-45 gateway-strip reconciliation):**
 - Added `X-MacProvider-Streaming-Mode` to the § 5.4 response-pass-through allowlist (and its outbound-strip-summary duplicate). The coordinator has always set this SPEC-018 AC-45 buyer-visible streaming-mode diagnostic on streaming `200` responses, but the gateway's blanket `X-MacProvider-*` strip removed it before the buyer on `api.streamvc.live`, making AC-45's "header absent" fail condition live in production. The gateway now forwards it, validated against AC-45's closed enum (`incremental` / `buffered_kill_switch` / `buffered_provider_downgrade`) and dropped otherwise (defense-in-depth against header-content injection past the strip). Resolves runbook item 15 / the SPEC-018 v0.2.4 "Known open gap" note. No wire-contract change beyond un-stripping an already-specified header; the header remains observation-only.
@@ -2847,6 +2850,8 @@ The gateway MUST use:
 - `503` for known model with no provider available, demo paused, public API paused, coordinator unavailable, or no immediate slot.
 - `504` for provider timeout.
 
+A coordinator-issued `500` with `code: "route_snapshot_failed"` (a SPEC-022 pre-dispatch durable route-snapshot write failure — no provider reached) is passed through to the buyer verbatim rather than re-mapped, and is settled per § 17.7 (no charge on a genuine first-attempt failure). See § 17.7 for the cross-attempt exception.
+
 405 Method Not Allowed MUST use `type: "invalid_request_error"` and `code: "method_not_allowed"`.
 
 413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`.
@@ -2917,6 +2922,7 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 |---|---:|---|---|
 | 200 | as reported, subject to § 7.2 symmetric clamp | prompt + completion | Successful work performed; streaming `completion_tokens` symmetric-clamped within `2 < overshoot ≤ 20`: downward (#255) clamps to gateway observed (`token_source = "gateway_estimated"`); upward (#278) clamps to provider reported (`token_source = "provider_reported"`) |
 | 503 | 0 | none | No provider was reached; request never forwarded |
+| 500 `route_snapshot_failed` (pre-dispatch, no prior provider dispatch) | 0 | **none** | Coordinator failed to durably persist the SPEC-022 route snapshot before dispatching any provider; no provider was reached. Gateway refunds the reservation, writes a zero-token audit row, and passes the coordinator body through verbatim (item 18). Applies only when NO settlement-finality header is present. **Cross-attempt exception:** if an earlier gateway-retried attempt was a provider-dispatched `provider_error`/`provider_failed`/`provider_disconnected` 502 (which may already have been credited in `observe` settlement mode), the terminal `route_snapshot_failed` instead settles on the prompt estimate per the 502 rows below — refunding would erase real provider work. |
 | Context cancelled (buyer disconnects mid-reservation) | n/a | none; reservation refunded before return | Gateway MUST exit silently without writing a 500 to the dead connection |
 | Context cancelled (buyer disconnects at concurrency gate) | n/a | none; quota reservation refunded before return | Same as above |
 | SPEC-001 null-usage error (`error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal`) | 0 (NULL) | **none** | Provider was reached but performed no countable work; no buyer debit |

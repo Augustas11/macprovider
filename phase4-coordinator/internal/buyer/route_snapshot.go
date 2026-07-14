@@ -63,11 +63,12 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if pendingDeadline <= 0 {
 		// Fail-open to the SPEC-022 default (300s) rather than fail-closed.
 		// Fail-closing emits route_snapshot_failed pre-dispatch. As of item
-		// 18 the gateway no longer charges for it — coordinatorPreDispatchNoChargeError
-		// refunds the reservation and passes the body through verbatim (no
-		// provider was invoked) — so the buyer-charge concern that once made
-		// fail-open load-bearing is resolved. Fail-open to 300 is still the
-		// better default here: it lets the request proceed on the SPEC-022
+		// 18 the gateway treats a genuine first-attempt route_snapshot_failed
+		// as no-charge (coordinatorPreDispatchNoChargeError refunds the
+		// reservation and passes the body through verbatim — no provider was
+		// invoked), so the buyer-charge concern that once made fail-open
+		// load-bearing is resolved for that case. Fail-open to 300 is still
+		// the better default here: it lets the request proceed on the SPEC-022
 		// default deadline instead of failing outright on an unvalidated
 		// in-memory deadline of 0.
 		// Validated YAML config already rejects deadline 0 (config.Validate
