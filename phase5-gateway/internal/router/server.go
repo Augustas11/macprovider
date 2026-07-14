@@ -1162,15 +1162,19 @@ func isStreamingModeResponseHeader(key string) bool {
 	return strings.EqualFold(key, streamingModeResponseHeader)
 }
 
-// buyerVisibleStreamingModeHeader returns the value only if it is one of
-// AC-45's three canonical streaming-mode values, else "" (drop). The header
-// is observation-only (SPEC-018 §10d.4) — buyers MUST NOT negotiate on it —
-// so validating against the closed enum is safe and prevents header
+// buyerVisibleStreamingModeHeader returns the value only if it is byte-exactly
+// one of AC-45's three canonical streaming-mode values, else "" (drop). The
+// match is strict — no trimming or case-folding — because SPEC-006 §5.4
+// mandates dropping any value outside the closed enum rather than normalizing
+// it, and the coordinator emits the bare constants verbatim, so a value with
+// surrounding whitespace or altered case is not something the trusted upstream
+// produces. The header is observation-only (SPEC-018 §10d.4) — buyers MUST NOT
+// negotiate on it — so the strict enum guard is safe and prevents header
 // injection should the upstream ever be compromised.
 func buyerVisibleStreamingModeHeader(raw string) string {
-	switch strings.TrimSpace(raw) {
+	switch raw {
 	case "incremental", "buffered_kill_switch", "buffered_provider_downgrade":
-		return strings.TrimSpace(raw)
+		return raw
 	}
 	return ""
 }
