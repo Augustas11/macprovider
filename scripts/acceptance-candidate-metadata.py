@@ -90,7 +90,7 @@ def read_regular(path: pathlib.Path, label: str, maximum: int | None = None) -> 
         fail(f"{label}: cannot read {path}: {exc}")
 
 
-def strict_json(path: pathlib.Path, label: str) -> dict:
+def strict_json(path: pathlib.Path, label: str, *, catalog_release: bool = False) -> dict:
     data = read_regular(path, label, MAX_JSON_BYTES)
 
     def reject_pairs(pairs: list[tuple[str, object]]) -> dict:
@@ -112,8 +112,14 @@ def strict_json(path: pathlib.Path, label: str) -> dict:
         fail(f"{label}: invalid JSON: {exc}")
     if not isinstance(value, dict):
         fail(f"{label}: top level must be an object")
-    if data != canonical_bytes(value):
-        fail(f"{label}: must be canonical sorted compact JSON with one trailing newline")
+    expected = (
+        json.dumps(value, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        if catalog_release
+        else canonical_bytes(value)
+    )
+    if data != expected:
+        json_style = "indented" if catalog_release else "compact"
+        fail(f"{label}: must be canonical sorted {json_style} JSON with one trailing newline")
     return value
 
 
@@ -297,7 +303,7 @@ def build_pearl(args: argparse.Namespace) -> dict:
     commit = require_string(args.commit, HEX40, "commit")
     catalog = args.catalog_directory
     files = {name: sha256(catalog / name, f"catalog {name}") for name in CATALOG_NAMES}
-    release = strict_json(catalog / "release.json", "catalog release")
+    release = strict_json(catalog / "release.json", "catalog release", catalog_release=True)
     release_id = release.get("release_id")
     policy_version = release.get("policy_version")
     if not isinstance(release_id, str) or not release_id or not isinstance(policy_version, str) or not policy_version:

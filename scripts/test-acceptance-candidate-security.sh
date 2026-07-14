@@ -307,6 +307,61 @@ if python3 "$metadata" validate-provider-payload --directory "$work/provider" >"
 fi
 grep -q 'unexpected top-level members' "$work/extra-provider.out"
 
+# Catalog release manifests have their own deterministic pretty-JSON contract.
+# The acceptance signer must preserve and parse those exact bytes rather than
+# imposing the compact acceptance-envelope format on them.
+mkdir "$work/pearl-catalog"
+python3 "$root/scripts/catalog-release.py" verify
+cp "$root/phase3-binary/catalog/autotune/release.json" \
+  "$root/phase3-binary/catalog/autotune/trusted-keys.json" \
+  "$root/phase3-binary/dist/static/autotune-candidates.json" \
+  "$root/phase3-binary/dist/static/autotune-candidates.json.sig" \
+  "$root/phase3-binary/dist/static/demand-rank.json" \
+  "$root/phase3-binary/dist/static/demand-rank.json.sig" \
+  "$work/pearl-catalog/"
+python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy strict_post_migration \
+  --catalog-directory "$work/pearl-catalog" \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-release.json"
+python3 - "$work/pearl-catalog/release.json" "$work/pearl-release.json" <<'PY'
+import json
+import pathlib
+import sys
+
+catalog = json.loads(pathlib.Path(sys.argv[1]).read_text())
+pearl = json.loads(pathlib.Path(sys.argv[2]).read_text())
+if pearl["catalog"]["release_id"] != catalog["release_id"]:
+    raise SystemExit("Pearl metadata did not preserve the verified catalog release ID")
+PY
+python3 - "$work/pearl-catalog/release.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.write_text(json.dumps(json.loads(path.read_text()), sort_keys=True, separators=(",", ":")) + "\n")
+PY
+if python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy strict_post_migration \
+  --catalog-directory "$work/pearl-catalog" \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/noncanonical-pearl-release.json" >"$work/noncanonical-catalog.out" 2>&1; then
+  echo "Pearl metadata builder accepted a noncanonical catalog release" >&2
+  exit 1
+fi
+grep -q 'catalog release: must be canonical' "$work/noncanonical-catalog.out"
+
 cat > "$work/compatibility.json.tmp" <<EOF
 {"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}
 EOF
