@@ -297,7 +297,7 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         case .importingCredentials:
             [.startingProvider]
         case .validatingCatalog:
-            [.importingCredentials]
+            [.importingCredentials, .authenticationRequired, .keychainUnavailable, .identityMigrationRequired]
         case .loadingModel:
             [.validatingCatalog]
         case .degradedServing:
@@ -309,8 +309,13 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
                 .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
                 .degradedServing, .pausedByOperator, .servingBuyers, .updateInProgress,
             ]
-        case .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
-             .authenticationRequired, .identityMigrationRequired, .catalogIncompatible:
+        case .authenticationRequired, .identityMigrationRequired:
+            [
+                .loadingModel, .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
+                .authenticationRequired, .identityMigrationRequired, .catalogIncompatible,
+                .servingBuyers, .degradedServing, .pausedByOperator, .importingCredentials,
+            ]
+        case .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable, .catalogIncompatible:
             [
                 .loadingModel, .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
                 .authenticationRequired, .identityMigrationRequired, .catalogIncompatible,

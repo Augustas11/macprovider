@@ -234,6 +234,46 @@ final class ProviderLifecycleStateTests: XCTestCase {
         }
     }
 
+    func testNonJoiningStartupCanValidateCatalogFromEveryCredentialRecoveryState() throws {
+        let credentialRecoveryStates: [ProviderLifecycleState] = [
+            .authenticationRequired,
+            .keychainUnavailable,
+            .identityMigrationRequired,
+        ]
+
+        for credentialState in credentialRecoveryStates {
+            let fixture = try Fixture()
+            let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+            _ = try store.transition(
+                to: .startingProvider,
+                reasonCode: "serve_invoked",
+                writer: .serve,
+                operationID: "serve:\(credentialState.rawValue)"
+            )
+            _ = try store.transition(
+                to: .importingCredentials,
+                reasonCode: "resolving_cli_keychain_custody",
+                writer: .serve,
+                operationID: "serve:\(credentialState.rawValue)"
+            )
+            let recovery = try store.transition(
+                to: credentialState,
+                reasonCode: "credential_\(credentialState.rawValue)",
+                writer: .serve,
+                operationID: "serve:\(credentialState.rawValue)"
+            )
+            let validating = try store.transition(
+                to: .validatingCatalog,
+                reasonCode: "non_joining_startup_preflight",
+                writer: .serve,
+                operationID: "serve:\(credentialState.rawValue)"
+            )
+
+            XCTAssertEqual(recovery.state, credentialState)
+            XCTAssertEqual(validating.previousTransitionID, recovery.transitionID)
+        }
+    }
+
     func testMalformedRecordFailsClosed() throws {
         let fixture = try Fixture()
         try FileManager.default.createDirectory(

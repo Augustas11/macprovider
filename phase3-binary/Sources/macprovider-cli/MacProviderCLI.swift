@@ -688,6 +688,12 @@ struct ServeCommand: AsyncParsableCommand {
             )
         )
 
+        // Reject invalid invocation-only model catalogs before startup writes
+        // lifecycle state or touches credential custody. The complete startup
+        // preflight bundle repeats this idempotent check after acquiring its
+        // dependencies so direct callers retain the same validation contract.
+        try Self.runSupportedModelsPreflight(&resolved)
+
         let lifecycleStateStore = ProviderLifecycleStateStore()
         let lifecycleLeaseStore = ProviderLifecycleLeaseStore()
         let existingLifecycle: ProviderLifecycleStateRecord?
