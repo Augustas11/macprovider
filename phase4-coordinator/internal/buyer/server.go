@@ -3238,8 +3238,20 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if isSpec019ProviderDetailCode(end.Status) {
 					// SPEC-019 §5: honor the provider-supplied end.Retryable
 					// override on the synthesized SSE error, mirroring the
-					// non-streaming writeProviderStructuredOutputError path.
-					writeSSEErrorWithRetryable(w, endErrorMessage(end), end.Status, end.Retryable, requestID)
+					// non-streaming writeWSEndError path — but ONLY for the two
+					// codes that path actually routes through
+					// writeProviderStructuredOutputError (which reads
+					// end.Retryable): malformed_json_response and
+					// json_schema_validation_failed. response_byte_cap_exceeded
+					// and provider_timeout keep their static default on BOTH
+					// transports, so a provider cannot flip a non-retryable
+					// byte-cap failure to retryable and invite repeated large
+					// re-sends. isSpec019RetryableOverrideCode is that scope.
+					override := end.Retryable
+					if !isSpec019RetryableOverrideCode(end.Status) {
+						override = nil
+					}
+					writeSSEErrorWithRetryable(w, endErrorMessage(end), end.Status, override, requestID)
 				} else {
 					writeSSEError(w, "Provider failed during streaming", "provider_error")
 				}
@@ -6959,6 +6971,23 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
 	}
 }
 
+// isSpec019RetryableOverrideCode reports whether a structured-output terminal
+// status is one whose retryable verdict a provider MAY override via
+// inference_response_end.retryable. It MUST match the non-streaming override
+// scope in writeWSEndError: only malformed_json_response and
+// json_schema_validation_failed route through writeProviderStructuredOutputError
+// (which reads end.Retryable). response_byte_cap_exceeded and provider_timeout
+// keep their static spec018Retryable default on both transports so a provider
+// cannot flip a non-retryable cap failure to retryable.
+func isSpec019RetryableOverrideCode(code string) bool {
+	switch code {
+	case "malformed_json_response", "json_schema_validation_failed":
+		return true
+	default:
+		return false
+	}
+}
+
 func endErrorMessage(end providerws.InferenceResponseEnd) string {
 	if spec001EndStatus(end.Status) != "" {
 		return end.Status
@@ -7209,7 +7238,8 @@ func writeSSEError(w http.ResponseWriter, message, code string, requestID ...str
 // codes), the provider may have stamped end.Retryable to override the static
 // spec018Retryable(code) default — the non-streaming path already honors it via
 // writeProviderStructuredOutputError, so the streaming path MUST too or the two
-// transports disagree on a money-path signal for the same terminal outcome.
+// transports disagree on a buyer-visible contract signal (the retryable field)
+// for the same terminal outcome. This is not a settlement/money-path change.
 // Pass override=nil for the common case (coordinator-detected faults with no
 // provider verdict), which keeps the static default.
 func writeSSEErrorWithRetryable(w http.ResponseWriter, message, code string, retryableOverride *bool, requestID string) {

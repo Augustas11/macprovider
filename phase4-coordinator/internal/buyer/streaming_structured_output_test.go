@@ -53,7 +53,11 @@ func TestStreamingStructuredOutputSSEErrorCarriesRequestAndSettlement(t *testing
 // (runbook item 20 / SPEC-019 §5): a provider-supplied end.Retryable on a
 // synthesized terminal SSE error must reach the buyer, and must agree with the
 // non-streaming transport for the same (code, override) pair. A nil override
-// leaves the static spec018Retryable default untouched.
+// leaves the static spec018Retryable default untouched. This exercises the
+// writeSSEErrorWithRetryable helper mechanics; the real forwardWSStreaming
+// routing + scope guard is covered by TestForwardWSStreamingHonorsScopedRetryableOverride.
+// Cases use only override-ELIGIBLE codes (both statically true) so a false
+// override proves a real flip.
 func TestStreamingSSEErrorHonorsProviderRetryableOverride(t *testing.T) {
 	tr := func(b bool) *bool { return &b }
 	cases := []struct {
@@ -62,12 +66,12 @@ func TestStreamingSSEErrorHonorsProviderRetryableOverride(t *testing.T) {
 		override *bool
 		want     bool
 	}{
-		// nil override → static default is preserved for both directions.
-		{"nil_default_true", "malformed_json_response", nil, spec018Retryable("malformed_json_response")},
-		{"nil_default_false", "response_byte_cap_exceeded", nil, spec018Retryable("response_byte_cap_exceeded")},
-		// override flips a code whose static default is the opposite value.
-		{"override_false_over_true_default", "malformed_json_response", tr(false), false},
-		{"override_true_over_false_default", "response_byte_cap_exceeded", tr(true), true},
+		// nil override → static default is preserved.
+		{"nil_keeps_default_malformed", "malformed_json_response", nil, spec018Retryable("malformed_json_response")},
+		{"nil_keeps_default_schema", "json_schema_validation_failed", nil, spec018Retryable("json_schema_validation_failed")},
+		// override:false flips a statically-true code to false.
+		{"override_false_flips_malformed", "malformed_json_response", tr(false), false},
+		{"override_false_flips_schema", "json_schema_validation_failed", tr(false), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
