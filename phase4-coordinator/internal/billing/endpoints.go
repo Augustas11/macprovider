@@ -171,7 +171,14 @@ type settlementReceiptDiagnostic struct {
 }
 
 type settlementVerdictCounter struct {
-	PolicyVersion           string `json:"policy_version"`
+	PolicyVersion string `json:"policy_version"`
+	// PendingDeadlineSeconds is the EFFECTIVE per-request settlement deadline
+	// (settlement.pending_deadline_seconds) captured on the route snapshot, not
+	// derivable from PolicyVersion — a runtime SIGHUP that changes the deadline
+	// keeps the same policy-version literal (SPEC-022 "Known limitations (B)"),
+	// so counters are disaggregated by this to avoid merging deadline regimes. 0
+	// when the verdict's route snapshot row is absent (LEFT JOIN miss).
+	PendingDeadlineSeconds  int64  `json:"pending_deadline_seconds"`
 	ModelID                 string `json:"model_id"`
 	Entrypoint              string `json:"entrypoint"`
 	ReasonCode              string `json:"reason_code"`
@@ -1071,36 +1078,51 @@ func diagnosticsWindowString(t time.Time, enabled bool) string {
 }
 
 func (h *handler) settlementVerdictCounters(ctx context.Context) ([]settlementVerdictCounter, error) {
+	// Item 19 / SPEC-022 (B): disaggregate by the EFFECTIVE deadline, not just
+	// the coarse route_snapshot_policy_version literal. The verdict row carries
+	// only the absolute pending_deadline_unix_ms, so the effective
+	// settlement.pending_deadline_seconds is pulled from the route snapshot the
+	// verdict was pinned to (joined by digest). The subquery collapses to one
+	// deadline per digest (the digest hashes the snapshot incl. the deadline, so
+	// this is a defensive dedup against any digest collision — never a fan-out).
+	// LEFT JOIN so a verdict whose snapshot row was pruned still reports (as
+	// deadline 0), rather than silently dropping from the counters.
 	rows, err := h.store.db.QueryContext(ctx, `
-SELECT route_snapshot_policy_version,
-       model_id,
-       paid_entrypoint,
-       reason,
-       COALESCE(SUM(CASE WHEN settlement_outcome='verified' THEN 1 ELSE 0 END), 0) AS verified_count,
-       COALESCE(SUM(CASE WHEN settlement_outcome='pending' THEN 1 ELSE 0 END), 0) AS pending_count,
-       COALESCE(SUM(CASE WHEN settlement_outcome='quarantined' THEN 1 ELSE 0 END), 0) AS quarantined_count,
-       COALESCE(SUM(CASE WHEN settlement_outcome='zero_settled' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
+SELECT srv.route_snapshot_policy_version,
+       COALESCE(srs.pending_deadline_seconds, 0) AS pending_deadline_seconds,
+       srv.model_id,
+       srv.paid_entrypoint,
+       srv.reason,
+       COALESCE(SUM(CASE WHEN srv.settlement_outcome='verified' THEN 1 ELSE 0 END), 0) AS verified_count,
+       COALESCE(SUM(CASE WHEN srv.settlement_outcome='pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+       COALESCE(SUM(CASE WHEN srv.settlement_outcome='quarantined' THEN 1 ELSE 0 END), 0) AS quarantined_count,
+       COALESCE(SUM(CASE WHEN srv.settlement_outcome='zero_settled' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
        COALESCE(SUM(CASE
-           WHEN reason IN ('unknown_receipt_version', 'legacy_receipt_version')
-             OR (receipt_present=1 AND receipt_version IS NOT NULL AND receipt_version NOT IN ('4', 'spec015-v0.4', 'v0.4'))
+           WHEN srv.reason IN ('unknown_receipt_version', 'legacy_receipt_version')
+             OR (srv.receipt_present=1 AND srv.receipt_version IS NOT NULL AND srv.receipt_version NOT IN ('4', 'spec015-v0.4', 'v0.4'))
            THEN 1 ELSE 0 END), 0) AS legacy_receipt_count,
        COALESCE(SUM(CASE
-           WHEN receipt_present=0 OR reason IN ('missing_receipt', 'missing_receipt_deadline_elapsed')
+           WHEN srv.receipt_present=0 OR srv.reason IN ('missing_receipt', 'missing_receipt_deadline_elapsed')
            THEN 1 ELSE 0 END), 0) AS missing_receipt_count,
        COALESCE(SUM(CASE
-           WHEN reason IN ('catalog_snapshot_mismatch', 'expected_catalog_model_hash_mismatch')
-             OR reason LIKE 'catalog_%'
+           WHEN srv.reason IN ('catalog_snapshot_mismatch', 'expected_catalog_model_hash_mismatch')
+             OR srv.reason LIKE 'catalog_%'
            THEN 1 ELSE 0 END), 0) AS catalog_mismatch_count,
        COALESCE(SUM(CASE
-           WHEN reason IN ('model_hash_invalid', 'model_hash_null')
-             OR spec008_hash_status IN ('missing', 'null', 'unavailable')
+           WHEN srv.reason IN ('model_hash_invalid', 'model_hash_null')
+             OR srv.spec008_hash_status IN ('missing', 'null', 'unavailable')
            THEN 1 ELSE 0 END), 0) AS model_hash_null_count,
        COALESCE(SUM(CASE
-           WHEN reason IN ('provider_receipt_key_id_invalid', 'provider_receipt_key_id_mismatch', 'receipt_key_mismatch')
+           WHEN srv.reason IN ('provider_receipt_key_id_invalid', 'provider_receipt_key_id_mismatch', 'receipt_key_mismatch')
            THEN 1 ELSE 0 END), 0) AS receipt_key_mismatch_count
-  FROM settlement_receipt_verdicts
- GROUP BY route_snapshot_policy_version, model_id, paid_entrypoint, reason
- ORDER BY route_snapshot_policy_version, model_id, paid_entrypoint, reason`)
+  FROM settlement_receipt_verdicts srv
+  LEFT JOIN (
+      SELECT route_snapshot_digest, MIN(pending_deadline_seconds) AS pending_deadline_seconds
+        FROM settlement_route_snapshots
+       GROUP BY route_snapshot_digest
+  ) srs ON srs.route_snapshot_digest = srv.route_snapshot_digest
+ GROUP BY srv.route_snapshot_policy_version, pending_deadline_seconds, srv.model_id, srv.paid_entrypoint, srv.reason
+ ORDER BY srv.route_snapshot_policy_version, pending_deadline_seconds, srv.model_id, srv.paid_entrypoint, srv.reason`)
 	if err != nil {
 		return nil, err
 	}
@@ -1111,6 +1133,7 @@ SELECT route_snapshot_policy_version,
 		var counter settlementVerdictCounter
 		if err := rows.Scan(
 			&counter.PolicyVersion,
+			&counter.PendingDeadlineSeconds,
 			&counter.ModelID,
 			&counter.Entrypoint,
 			&counter.ReasonCode,

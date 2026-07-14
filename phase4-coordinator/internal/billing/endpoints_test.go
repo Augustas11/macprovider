@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -158,6 +159,11 @@ func TestSummaryEndpointIncludesSettlementVerdictCounters(t *testing.T) {
 			counter.Entrypoint != input.RouteSnapshot.PaidEntrypoint {
 			t.Fatalf("counter grouping fields=%#v want route policy/model/entrypoint", counter)
 		}
+		// Item 19: the effective deadline is resolved from the route snapshot,
+		// not the policy-version literal.
+		if counter.PendingDeadlineSeconds != input.RouteSnapshot.PendingDeadlineSeconds {
+			t.Fatalf("counter pending_deadline_seconds=%d want %d (from route snapshot)", counter.PendingDeadlineSeconds, input.RouteSnapshot.PendingDeadlineSeconds)
+		}
 		byReason[counter.ReasonCode] = counter
 	}
 	for _, row := range counterRows {
@@ -200,6 +206,73 @@ func TestSummaryEndpointIncludesSettlementVerdictCounters(t *testing.T) {
 			}
 		default:
 			t.Fatalf("unhandled counter assertion %s", row.wantField)
+		}
+	}
+}
+
+// TestSettlementVerdictCountersDisaggregateByEffectiveDeadline is the item-19
+// regression: two verdicts that share the same route_snapshot_policy_version,
+// model, entrypoint and reason but were pinned to DIFFERENT effective
+// settlement.pending_deadline_seconds (a runtime SIGHUP does not bump the
+// policy-version literal — SPEC-022 (B)) must NOT be merged into one counter
+// row. Before the fix they collapsed under the coarse policy version
+// (verified_count=2); now they split by the effective deadline resolved from the
+// route snapshot.
+func TestSettlementVerdictCountersDisaggregateByEffectiveDeadline(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	base := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
+	_, store := newRequestAndBillingStores(t)
+
+	// Same grouping keys, different effective deadline regimes.
+	for _, deadline := range []int64{300, 120} {
+		rowInput := input
+		rowInput.RequestID = fmt.Sprintf("%s-dl%d", input.RequestID, deadline)
+		rowInput.RouteSnapshot.RequestID = rowInput.RequestID
+		rowInput.RouteSnapshot.PendingDeadlineSeconds = deadline
+		seedSettlementVerdictCounterRow(t, store, rowInput, 1, "4", "valid",
+			SettlementOutcomeVerified, "verified_settlement",
+			rowInput.RouteSnapshot.Spec008HashStatus, 1)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		SettlementVerdictCounters []settlementVerdictCounter `json:"settlement_verdict_counters"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	byDeadline := map[int64]settlementVerdictCounter{}
+	for _, c := range resp.SettlementVerdictCounters {
+		if c.ReasonCode != "verified_settlement" ||
+			c.PolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+			c.ModelID != input.RouteSnapshot.ModelID ||
+			c.Entrypoint != input.RouteSnapshot.PaidEntrypoint {
+			continue
+		}
+		if _, dup := byDeadline[c.PendingDeadlineSeconds]; dup {
+			t.Fatalf("duplicate counter row for deadline %d: %#v", c.PendingDeadlineSeconds, c)
+		}
+		byDeadline[c.PendingDeadlineSeconds] = c
+	}
+	if len(byDeadline) != 2 {
+		t.Fatalf("verified_settlement counters not disaggregated by effective deadline: got %d rows %#v", len(byDeadline), byDeadline)
+	}
+	for _, deadline := range []int64{300, 120} {
+		c, ok := byDeadline[deadline]
+		if !ok {
+			t.Fatalf("missing counter for effective deadline %d: %#v", deadline, byDeadline)
+		}
+		if c.VerifiedCount != 1 {
+			t.Fatalf("deadline %d verified_count=%d want 1 (rows merged across deadlines?)", deadline, c.VerifiedCount)
 		}
 	}
 }
