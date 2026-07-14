@@ -135,8 +135,10 @@ jobs:
           grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$RUNNER_TEMP/pearl-file.txt"
           grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$RUNNER_TEMP/pearl-file.txt"
           grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$RUNNER_TEMP/pearl-file.txt"
-          strings "$RUNNER_TEMP/coordinator-linux-amd64" | grep -Fq "$TAG"
-          strings "$RUNNER_TEMP/gateway-linux-amd64" | grep -Fq "$TAG"
+          strings "$RUNNER_TEMP/coordinator-linux-amd64" > "$RUNNER_TEMP/coordinator-strings.txt"
+          strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-strings.txt"
+          grep -Fq "$TAG" "$RUNNER_TEMP/coordinator-strings.txt"
+          grep -Fq "$TAG" "$RUNNER_TEMP/gateway-strings.txt"
 
       - name: Install main-reviewed XcodeGen artifact
         shell: bash
