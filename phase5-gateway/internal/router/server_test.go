@@ -6969,7 +6969,12 @@ func TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, routeSnapshotFailedCoordBody), nil
+				// Genuine first attempt → coordinator emits the POSITIVE
+				// no-prior-dispatch marker; the gateway refunds only then.
+				hdr := http.Header{}
+				hdr.Set("Content-Type", "application/json")
+				hdr.Set("X-MacProvider-Settlement-No-Prior-Dispatch", "1")
+				return responseWithBody(http.StatusInternalServerError, hdr, routeSnapshotFailedCoordBody), nil
 			})}
 			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 				cfg.Coordinator.BuyerURL = "http://coordinator.test"
@@ -7016,14 +7021,14 @@ func TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge(t *testing.T) {
 	}
 }
 
-// TestCoordinatorRouteSnapshotFailedAfterInternalDispatchIsCharged pins the
-// coordinator-internal-failover half of the item-18 fix: when the coordinator
-// dispatches (and in observe mode credits) a provider on an earlier attempt,
-// then fails the route-snapshot write on a failover attempt in the SAME
-// request, it stamps X-MacProvider-Settlement-Prior-Dispatch. The gateway must
-// then NOT refund — it settles on the prompt estimate — so the prior provider
-// work is not erased. Covers both streaming modes.
-func TestCoordinatorRouteSnapshotFailedAfterInternalDispatchIsCharged(t *testing.T) {
+// TestCoordinatorRouteSnapshotFailedWithoutMarkerIsCharged pins the
+// deployment-robust positive-marker design: a route_snapshot_failed that
+// carries NO X-MacProvider-Settlement-No-Prior-Dispatch marker must settle on
+// the estimate, NOT refund. This one case covers both (a) a coordinator-
+// internal failover after a prior provider dispatch (the coordinator withholds
+// the marker), and (b) a legacy / rolled-back pre-item-18 coordinator that
+// never emits the marker — a gateway-first deploy must not wrongly refund.
+func TestCoordinatorRouteSnapshotFailedWithoutMarkerIsCharged(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		name := "non_stream"
 		if stream {
@@ -7031,18 +7036,13 @@ func TestCoordinatorRouteSnapshotFailedAfterInternalDispatchIsCharged(t *testing
 		}
 		t.Run(name, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				// Build via Set so the key is canonicalized exactly as the
-				// coordinator's w.Header().Set and http.ReadResponse produce it
-				// (a raw non-canonical map literal would not be found by h.Get).
-				hdr := http.Header{}
-				hdr.Set("Content-Type", "application/json")
-				hdr.Set("X-MacProvider-Settlement-Prior-Dispatch", "1")
-				return responseWithBody(http.StatusInternalServerError, hdr, routeSnapshotFailedCoordBody), nil
+				// No no-prior-dispatch marker (internal failover OR legacy coord).
+				return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, routeSnapshotFailedCoordBody), nil
 			})}
 			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 				cfg.Coordinator.BuyerURL = "http://coordinator.test"
 			}, WithHTTPClient(client))
-			acct := "acct_route_snap_prior_" + name
+			acct := "acct_route_snap_unmarked_" + name
 			fullKey := createAccountAndKey(t, store, cfg, acct)
 
 			body := `{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`
@@ -7051,19 +7051,14 @@ func TestCoordinatorRouteSnapshotFailedAfterInternalDispatchIsCharged(t *testing
 			}
 			resp := postChat(t, h, fullKey, body, nil)
 
-			// NOT the no-charge passthrough: the prior-dispatch signal forces the
-			// estimate-settle path → 502 upstream_provider_error.
+			// No marker → estimate-settle path → 502 upstream_provider_error.
 			if resp.Code != http.StatusBadGateway {
-				t.Fatalf("status=%d body=%s — route_snapshot_failed with prior-dispatch header must settle (502), not refund", resp.Code, resp.Body.String())
+				t.Fatalf("status=%d body=%s — an unmarked route_snapshot_failed must settle (502), not refund", resp.Code, resp.Body.String())
 			}
-			// Buyer IS charged the prompt estimate (prior provider work preserved).
+			// Buyer IS charged the prompt estimate (prior work / legacy safety).
 			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 			if used := readQuota(t, usageResp)["daily_tokens_used"].(float64); used == 0 {
-				t.Fatalf("daily_tokens_used=0 — a prior-dispatch route_snapshot_failed must charge the estimate, not refund")
-			}
-			// And the internal prior-dispatch header must NOT leak to the buyer.
-			if got := resp.Header().Get("X-MacProvider-Settlement-Prior-Dispatch"); got != "" {
-				t.Fatalf("internal prior-dispatch header leaked to buyer = %q", got)
+				t.Fatalf("daily_tokens_used=0 — an unmarked route_snapshot_failed must charge the estimate, not refund")
 			}
 		})
 	}
@@ -7071,14 +7066,27 @@ func TestCoordinatorRouteSnapshotFailedAfterInternalDispatchIsCharged(t *testing
 
 // TestCoordinatorPreDispatchNoChargeErrorGuards pins the classifier directly:
 // eligibility requires status 500 AND code route_snapshot_failed AND the
-// ABSENCE of every settlement-finality header. Removing the finality-header
-// guard would wrongly refund a finalized response; removing the code/status
-// checks would over-refund unrelated errors.
+// POSITIVE X-MacProvider-Settlement-No-Prior-Dispatch marker AND the ABSENCE of
+// every settlement-finality header. The positive marker is required (not the
+// absence of a negative one) so an unmarked legacy/rolled-back-coordinator
+// response is never refunded.
 func TestCoordinatorPreDispatchNoChargeErrorGuards(t *testing.T) {
 	body := []byte(`{"error":{"code":"route_snapshot_failed","type":"upstream_error"}}`)
-	if !coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, body, http.Header{}) {
-		t.Fatal("bare 500 route_snapshot_failed must be no-charge eligible")
+	marked := func() http.Header {
+		h := http.Header{}
+		h.Set("X-MacProvider-Settlement-No-Prior-Dispatch", "1")
+		return h
 	}
+	// Genuine first attempt (marker present) → eligible.
+	if !coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, body, marked()) {
+		t.Fatal("marked 500 route_snapshot_failed must be no-charge eligible")
+	}
+	// The load-bearing inversion: NO marker → NOT eligible (legacy coordinator
+	// or coordinator-internal failover → settle, never refund).
+	if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, body, http.Header{}) {
+		t.Fatal("an UNMARKED route_snapshot_failed must NOT be no-charge eligible (deploy-safety + internal-failover)")
+	}
+	// Marker present but a finality header also present → finality path owns it.
 	for _, hdr := range []string{
 		"X-MacProvider-Settlement-Outcome",
 		"X-MacProvider-Settlement-Receipt-Result",
@@ -7088,25 +7096,17 @@ func TestCoordinatorPreDispatchNoChargeErrorGuards(t *testing.T) {
 		"X-MacProvider-Settlement-Policy-Version",
 		"X-MacProvider-Settlement-Pending-Deadline-Unix-Ms",
 	} {
-		h := http.Header{}
+		h := marked()
 		h.Set(hdr, "x")
 		if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, body, h) {
 			t.Fatalf("finality header %s present must disable no-charge eligibility (finality path owns it)", hdr)
 		}
 	}
-	if coordinatorPreDispatchNoChargeError(http.StatusBadGateway, body, http.Header{}) {
+	if coordinatorPreDispatchNoChargeError(http.StatusBadGateway, body, marked()) {
 		t.Fatal("502 must not be no-charge eligible (that is the legacy-502 refund path)")
 	}
-	if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, []byte(`{"error":{"code":"internal_error"}}`), http.Header{}) {
+	if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, []byte(`{"error":{"code":"internal_error"}}`), marked()) {
 		t.Fatal("a non-route_snapshot 500 must not be no-charge eligible")
-	}
-	// The coordinator's request-wide prior-dispatch signal (set on a
-	// route_snapshot_failed emitted after an earlier provider attempt within
-	// the same coordinator request) must disable the no-charge refund.
-	priorDispatch := http.Header{}
-	priorDispatch.Set("X-MacProvider-Settlement-Prior-Dispatch", "1")
-	if coordinatorPreDispatchNoChargeError(http.StatusInternalServerError, body, priorDispatch) {
-		t.Fatal("X-MacProvider-Settlement-Prior-Dispatch present must disable no-charge eligibility (coordinator-internal failover billed a prior provider)")
 	}
 }
 

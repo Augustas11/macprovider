@@ -683,7 +683,15 @@ func TestGatewayRetriedProvider502ThenRouteSnapshotFailedDoesNotRefund(t *testin
 		if calls == 1 {
 			return responseWithBody(http.StatusBadGateway, http.Header{"Content-Type": []string{"application/json"}}, providerFailedBody), nil
 		}
-		return responseWithBody(http.StatusInternalServerError, http.Header{"Content-Type": []string{"application/json"}}, routeSnapshotFailedCoordBody), nil
+		// Request B is a fresh coordinator request (first attempt), so the
+		// coordinator DOES emit the positive no-prior-dispatch marker. The
+		// gateway must STILL refuse the refund via its own retry-side
+		// priorProviderDispatch guard — the prior billable dispatch was in
+		// request A, invisible to the coordinator's per-request marker.
+		hdr := http.Header{}
+		hdr.Set("Content-Type", "application/json")
+		hdr.Set("X-MacProvider-Settlement-No-Prior-Dispatch", "1")
+		return responseWithBody(http.StatusInternalServerError, hdr, routeSnapshotFailedCoordBody), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, nil)
 	acct := "acct_retry_then_route_snapshot"

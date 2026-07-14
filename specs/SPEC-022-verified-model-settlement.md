@@ -962,18 +962,21 @@ as documented follow-ups rather than blocking it.
   previously read the absent settlement-finality headers as legacy and settled
   the reservation on the estimated prompt-token count — debiting the buyer for
   a request that never reached a provider. The gateway now treats a
-  **genuinely first-attempt, no-prior-dispatch** `route_snapshot_failed` (500,
-  code `route_snapshot_failed`, no finality header, no prior-dispatch signal)
-  as a **no-charge refund + verbatim passthrough**
+  first-attempt `route_snapshot_failed` (500, code `route_snapshot_failed`, no
+  finality header) as a **no-charge refund + verbatim passthrough**
   (`coordinatorPreDispatchNoChargeError` in
-  `phase5-gateway/internal/router/chat_proxy.go`). Two **prior-dispatch
-  exceptions** still settle on the estimate so provider work credited in
-  `observe` mode is not erased: (1) coordinator-internal failover — the
-  coordinator stamps `X-MacProvider-Settlement-Prior-Dispatch` on a
-  `route_snapshot_failed` emitted after a prior provider attempt in the same
-  request (`attemptN > 0`, `writeRouteSnapshotError`); (2) gateway retry past a
-  provider-dispatched `provider_*` 502 (a `priorProviderDispatch` signal
-  threaded out of the gateway retry loop).
+  `phase5-gateway/internal/router/chat_proxy.go`) — but **only** when the
+  coordinator sets the POSITIVE `X-MacProvider-Settlement-No-Prior-Dispatch`
+  marker (emitted iff `routeSnapshotAttemptN <= 1` in `writeRouteSnapshotError`)
+  and the gateway saw no prior provider-dispatched retry. Requiring the positive
+  marker (not the absence of a negative one) makes a gateway-first deploy /
+  coordinator rollback safe — an unmarked response settles on the estimate.
+  Two unmarked/settled cases preserve provider work credited in `observe` mode:
+  (1) coordinator-internal failover (marker withheld when
+  `routeSnapshotAttemptN >= 2`, including a WS same-attempt re-route that
+  records no billing row); (2) gateway retry past a provider-dispatched
+  `provider_*` 502 (`priorProviderDispatch`). **Deploy the coordinator before
+  the gateway; roll back in reverse.**
 - **(B) `route_snapshot_policy_version` marks default-cutover, not
   runtime-reconfiguration.** The policy version literal (`spec022-prereq-v0`
   = 30s-deadline era, `spec022-prereq-v1` = 300s-deadline era) marks when the

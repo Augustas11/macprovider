@@ -159,17 +159,24 @@ func stringPtrOrNil(value string) *string {
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
 	rec.logBuyerFailure(http.StatusInternalServerError, "Could not durably record route snapshot")
-	// Item 18 request-wide prior-dispatch signal: attemptN counts recorded
-	// provider-bound attempts, so attemptN>0 means an EARLIER provider was
-	// already dispatched (and possibly credited in observe mode) in THIS
-	// request before we failed the route-snapshot write on a failover attempt.
-	// Emit a header so the gateway does NOT treat this terminal
-	// route_snapshot_failed as a no-charge "no provider ran" case (which would
-	// erase that prior provider work). logBuyerFailure above does not bump
-	// attemptN (its row is not provider-bound: empty assigned id), so the
-	// count still reflects only prior provider attempts here.
-	if rec.attemptN > 0 {
-		w.Header().Set(settlementPriorDispatchHeader, "1")
+	// Item 18 POSITIVE no-charge marker (deployment-robust). Emit
+	// X-MacProvider-Settlement-No-Prior-Dispatch ONLY on the genuine FIRST
+	// route-snapshot attempt of the request. routeSnapshotAttemptN is bumped
+	// once per recordRouteSnapshot call (i.e. once per provider dispatch
+	// attempt, at its top, before any skip/success/failure), so it is exactly
+	// 1 here iff NO earlier provider was dispatched in this request; a
+	// coordinator-internal failover that already dispatched an earlier provider
+	// (including a WS pre-first-chunk same-attempt re-route that records no
+	// billing row) raises it to >= 2, so the marker is withheld.
+	//
+	// The signal is POSITIVE (marker == "safe to refund"), not the absence of a
+	// negative one: the gateway refunds a route_snapshot_failed ONLY when this
+	// marker is present, so a pre-item-18 coordinator that emits no marker makes
+	// the gateway settle-on-estimate (pre-item-18 behavior) rather than wrongly
+	// refund. That keeps a gateway-first deploy — or a coordinator rollback —
+	// safe. DEPLOY COORDINATOR BEFORE GATEWAY; roll back in reverse.
+	if rec.routeSnapshotAttemptN <= 1 {
+		w.Header().Set(settlementNoPriorDispatchHeader, "1")
 	}
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
@@ -182,10 +189,13 @@ const (
 	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
-	// settlementPriorDispatchHeader is set on a route_snapshot_failed emitted
-	// AFTER a prior provider dispatch in the same request (coordinator-internal
-	// failover). The gateway refuses the item-18 no-charge refund when present.
-	settlementPriorDispatchHeader = "X-MacProvider-Settlement-Prior-Dispatch"
+	// settlementNoPriorDispatchHeader is the item-18 POSITIVE no-charge marker.
+	// The coordinator sets it on a route_snapshot_failed ONLY when it is the
+	// genuine first route-snapshot attempt of the request (no prior provider
+	// dispatch). The gateway refunds the reservation ONLY when this marker is
+	// present, so an unmarked (legacy / rolled-back coordinator) response
+	// settles on the estimate instead of wrongly refunding.
+	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
 )
 
 var settlementOutcomeHeaderNames = []string{

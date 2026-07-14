@@ -55,13 +55,16 @@ const (
 	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
-	// settlementPriorDispatchHeader mirrors the coordinator constant of the
-	// same name (separate Go module, intentionally duplicated). The
-	// coordinator sets it on a route_snapshot_failed emitted after a prior
-	// provider dispatch in the same request; item 18 refuses the no-charge
-	// refund when it is present. Keep in sync with
-	// phase4-coordinator/internal/buyer/route_snapshot.go.
-	settlementPriorDispatchHeader = "X-MacProvider-Settlement-Prior-Dispatch"
+	// settlementNoPriorDispatchHeader mirrors the coordinator constant of the
+	// same name (separate Go module, intentionally duplicated). The coordinator
+	// sets it on a route_snapshot_failed ONLY when it is the genuine first
+	// route-snapshot attempt of the request (no prior provider dispatch); item
+	// 18 refunds the reservation ONLY when this POSITIVE marker is present, so
+	// an unmarked legacy/rolled-back-coordinator response settles on the
+	// estimate. Keep in sync with
+	// phase4-coordinator/internal/buyer/route_snapshot.go (deploy coordinator
+	// first, roll back in reverse).
+	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
 	// settlementPolicyVersion is the current coordinator route-snapshot
 	// policy version (see billing.RouteSnapshotPolicyVersion). It was
 	// bumped v0 -> v1 when the settlement pending-deadline default moved
@@ -1402,25 +1405,28 @@ func coordinatorIdempotencyError(status int, body []byte) bool {
 // coordinator ever attaches finality to this code, the finality-policy path
 // handles it instead.
 //
-// Two prior-dispatch guards keep the refund scoped to genuinely no-provider
-// requests (a route_snapshot_failed can be terminal AFTER real provider work):
-//   - the coordinator's request-wide X-MacProvider-Settlement-Prior-Dispatch
-//     header, set when a route_snapshot_failed follows a prior provider attempt
-//     WITHIN one coordinator request (coordinator-internal failover); and
+// Two independent proofs are required before refunding, because a
+// route_snapshot_failed can be terminal AFTER real provider work that observe
+// settlement mode credits:
+//   - the coordinator's POSITIVE X-MacProvider-Settlement-No-Prior-Dispatch
+//     marker, present ONLY when this is the genuine first route-snapshot
+//     attempt of the request (no coordinator-internal prior dispatch). Its
+//     ABSENCE — a legacy/rolled-back coordinator, or an internal-failover
+//     response — disqualifies the refund; and
 //   - the caller's `!priorProviderDispatch` gate, which covers a
 //     route_snapshot_failed the gateway reached only AFTER retrying a prior
 //     provider-dispatched 502 across separate coordinator requests.
 //
-// Either signal means real provider work may have been billed (observe
-// settlement mode credits a dispatched-but-failed attempt), so refunding would
-// erase it — the response instead settles on the prompt estimate. This
-// predicate certifies the response shape + the coordinator signal; the caller
-// certifies no cross-retry dispatch.
+// Requiring the positive marker (rather than the absence of a negative one)
+// makes a gateway-first deploy / coordinator rollback safe: no marker →
+// settle-on-estimate, never a wrongful refund. This predicate certifies the
+// response shape + the coordinator marker; the caller certifies no cross-retry
+// dispatch.
 func coordinatorPreDispatchNoChargeError(status int, body []byte, h http.Header) bool {
 	if status != http.StatusInternalServerError || hasAnySettlementFinalityHeader(h) {
 		return false
 	}
-	if strings.TrimSpace(h.Get(settlementPriorDispatchHeader)) != "" {
+	if strings.TrimSpace(h.Get(settlementNoPriorDispatchHeader)) == "" {
 		return false
 	}
 	return openAIErrorCode(body) == "route_snapshot_failed"

@@ -13,29 +13,31 @@ import (
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
-// TestWriteRouteSnapshotErrorSignalsPriorDispatch pins the coordinator half of
-// the item-18 fix: writeRouteSnapshotError stamps the request-wide
-// X-MacProvider-Settlement-Prior-Dispatch header IFF a prior provider attempt
-// was already recorded in this request (attemptN>0 — a coordinator-internal
-// failover), so the gateway does not refund a route_snapshot_failed that
-// followed billable provider work. A genuine first-attempt failure (attemptN
-// 0) carries no header and stays a no-charge refund.
-func TestWriteRouteSnapshotErrorSignalsPriorDispatch(t *testing.T) {
+// TestWriteRouteSnapshotErrorMarksNoPriorDispatch pins the coordinator half of
+// the item-18 fix: writeRouteSnapshotError stamps the POSITIVE
+// X-MacProvider-Settlement-No-Prior-Dispatch marker IFF this is the genuine
+// first route-snapshot attempt of the request (routeSnapshotAttemptN <= 1 —
+// the recordRouteSnapshot bump has already run for the failing attempt). A
+// coordinator-internal failover that already dispatched an earlier provider
+// (routeSnapshotAttemptN >= 2, including a WS same-attempt re-route that
+// records no billing row) WITHHOLDS the marker, so the gateway does not refund
+// away prior provider work.
+func TestWriteRouteSnapshotErrorMarksNoPriorDispatch(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		attemptN   int
-		wantHeader bool
+		name                 string
+		routeSnapshotAttempt int
+		wantMarker           bool
 	}{
-		{"first_attempt_no_prior_dispatch", 0, false},
-		{"failover_attempt_prior_dispatch", 1, true},
-		{"later_failover_attempt", 3, true},
+		{"first_attempt", 1, true},
+		{"second_attempt_after_failover", 2, false},
+		{"later_failover_attempt", 4, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &billingRecorder{
-				accountID: "acct",
-				requestID: "req",
-				server:    &Server{},
-				attemptN:  tc.attemptN,
+				accountID:             "acct",
+				requestID:             "req",
+				server:                &Server{},
+				routeSnapshotAttemptN: tc.routeSnapshotAttempt,
 			}
 			w := httptest.NewRecorder()
 			writeRouteSnapshotError(w, rec, errors.New("route snapshot store unavailable"))
@@ -46,12 +48,12 @@ func TestWriteRouteSnapshotErrorSignalsPriorDispatch(t *testing.T) {
 			if !strings.Contains(w.Body.String(), "route_snapshot_failed") {
 				t.Fatalf("body=%s, want route_snapshot_failed envelope", w.Body.String())
 			}
-			got := w.Header().Get(settlementPriorDispatchHeader)
-			if tc.wantHeader && got == "" {
-				t.Fatalf("attemptN=%d: prior-dispatch header must be set (a prior provider was dispatched)", tc.attemptN)
+			got := w.Header().Get(settlementNoPriorDispatchHeader)
+			if tc.wantMarker && got == "" {
+				t.Fatalf("routeSnapshotAttemptN=%d: no-prior-dispatch marker must be set on a genuine first attempt", tc.routeSnapshotAttempt)
 			}
-			if !tc.wantHeader && got != "" {
-				t.Fatalf("attemptN=%d: prior-dispatch header must be ABSENT on a genuine first-attempt failure, got %q", tc.attemptN, got)
+			if !tc.wantMarker && got != "" {
+				t.Fatalf("routeSnapshotAttemptN=%d: no-prior-dispatch marker must be WITHHELD after a prior dispatch, got %q", tc.routeSnapshotAttempt, got)
 			}
 		})
 	}
