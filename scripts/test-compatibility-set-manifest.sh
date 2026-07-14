@@ -95,6 +95,7 @@ PY
 
 python3 - "$root" <<'PY'
 import pathlib
+import re
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -104,9 +105,70 @@ installer = (root / "phase3-binary/dist/install.sh").read_text(encoding="utf-8")
 for required in (
     'cp "$COMPATIBILITY_SET_MANIFEST" "$STAGE_DIR/compatibility-set.json"',
     'cp -R "$LOCAL_COMPATIBILITY_SET_DIR" "$STAGE_DIR/compatibility-set-local"',
+    'archive_members=(',
+    'tar czf "$TARBALL" -C "$STAGE_DIR" "${archive_members[@]}"',
     'compatibility-set envelope',
 ):
     assert required in package, required
+assert 'tar czf "$TARBALL" -C "$STAGE_DIR" .' not in package
+archive_contract = re.search(
+    r'archive_members=\(\n(?P<required>.*?)\n\)\n'
+    r'swiftpm_bundle_count=0\n'
+    r'for swiftpm_bundle in (?P<optional>[^;]+); do\n'
+    r'(?P<body>.*?)\ndone',
+    package,
+    re.DOTALL,
+)
+assert archive_contract is not None
+assert archive_contract.group("required").split() == [
+    "macprovider-cli",
+    "mlx.metallib",
+    "THIRD-PARTY-NOTICES.txt",
+    "compatibility-set.json",
+    "compatibility-set-local",
+    "catalog-release",
+]
+assert archive_contract.group("optional").split() == [
+    "mlx-swift_Cmlx.bundle",
+    "swift-nio_NIOPosix.bundle",
+]
+for required in (
+    'if [ -d "$STAGE_DIR/$swiftpm_bundle" ]; then',
+    'archive_members+=("$swiftpm_bundle")',
+    'swiftpm_bundle_count=$((swiftpm_bundle_count + 1))',
+):
+    assert required in archive_contract.group("body"), required
+assert '[ "$swiftpm_bundle_count" -gt 0 ]' in package
+release_archive_contract = re.search(
+    r'release_archive_members=\(\n(?P<required>.*?)\n\s+\)\n'
+    r'\s+release_bundle_count=0\n'
+    r'\s+for release_bundle in (?P<optional>[^;]+); do\n'
+    r'(?P<body>.*?)\n\s+done',
+    workflow,
+    re.DOTALL,
+)
+assert release_archive_contract is not None
+assert release_archive_contract.group("required").split() == [
+    "macprovider-cli",
+    "mlx.metallib",
+    "THIRD-PARTY-NOTICES.txt",
+    "compatibility-set.json",
+    "compatibility-set-local",
+    "catalog-release",
+]
+assert release_archive_contract.group("optional").split() == [
+    "mlx-swift_Cmlx.bundle",
+    "swift-nio_NIOPosix.bundle",
+]
+for required in (
+    'if [ -d "$WORK/$release_bundle" ]; then',
+    'release_archive_members+=("$release_bundle")',
+    'release_bundle_count=$((release_bundle_count + 1))',
+):
+    assert required in release_archive_contract.group("body"), required
+assert '[ "$release_bundle_count" -gt 0 ]' in workflow
+assert 'tar czf "$src" -C "$WORK" "${release_archive_members[@]}"' in workflow
+assert 'tar czf "$src" -C "$WORK" .' not in workflow
 for required in (
     "scripts/compatibility-set-manifest.py sign",
     'cp "$WORK/compatibility-set.json" "$PKG_ROOT/compatibility-set.json"',
@@ -122,6 +184,40 @@ for required in (
 ):
     assert required in installer, required
 PY
+
+archive_fixture="$work/archive-fixture"
+mkdir -p "$archive_fixture/compatibility-set-local" "$archive_fixture/catalog-release" \
+  "$archive_fixture/mlx-swift_Cmlx.bundle/Contents/Resources"
+printf 'fixture\n' > "$archive_fixture/macprovider-cli"
+printf 'fixture\n' > "$archive_fixture/mlx.metallib"
+printf 'fixture\n' > "$archive_fixture/THIRD-PARTY-NOTICES.txt"
+printf 'fixture\n' > "$archive_fixture/compatibility-set.json"
+printf 'fixture\n' > "$archive_fixture/compatibility-set-local/install.sh"
+printf 'fixture\n' > "$archive_fixture/catalog-release/release.json"
+printf 'fixture\n' > "$archive_fixture/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+archive_members=(
+  macprovider-cli
+  mlx.metallib
+  THIRD-PARTY-NOTICES.txt
+  compatibility-set.json
+  compatibility-set-local
+  catalog-release
+  mlx-swift_Cmlx.bundle
+)
+tar czf "$work/provider.tar.gz" -C "$archive_fixture" "${archive_members[@]}"
+python3 "$root/scripts/acceptance-candidate-metadata.py" validate-archive \
+  --input "$work/provider.tar.gz" --forbid-links
+tar tzf "$work/provider.tar.gz" > "$work/provider-archive-members.txt"
+if grep -Fxq . "$work/provider-archive-members.txt"; then
+  fail "provider archive contains an ambiguous root member"
+fi
+tar czf "$work/provider-with-root.tar.gz" -C "$archive_fixture" .
+if python3 "$root/scripts/acceptance-candidate-metadata.py" validate-archive \
+  --input "$work/provider-with-root.tar.gz" --forbid-links \
+  > "$work/provider-with-root.out" 2>&1; then
+  fail "acceptance archive validation accepted an ambiguous root member"
+fi
+grep -Fq "archive: unsafe member path" "$work/provider-with-root.out"
 
 openssl ecparam -name prime256v1 -genkey -noout -out "$work/private.pem" >/dev/null 2>&1
 openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1

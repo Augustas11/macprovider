@@ -493,9 +493,30 @@ jobs:
           # Step 4: re-tar with the signed + notarized binary.
           # Preserve the same internal layout package.sh produced; the
           # only difference vs the input tarball is that
-          # ./macprovider-cli now carries a real signature chain.
+          # macprovider-cli now carries a real signature chain. Name every
+          # member explicitly so the shipped archive cannot regain an
+          # ambiguous root entry after the unsigned archive was validated.
           rm -f "$src"
-          tar czf "$src" -C "$WORK" .
+          release_archive_members=(
+            macprovider-cli
+            mlx.metallib
+            THIRD-PARTY-NOTICES.txt
+            compatibility-set.json
+            compatibility-set-local
+            catalog-release
+          )
+          release_bundle_count=0
+          for release_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+            if [ -d "$WORK/$release_bundle" ]; then
+              release_archive_members+=("$release_bundle")
+              release_bundle_count=$((release_bundle_count + 1))
+            fi
+          done
+          [ "$release_bundle_count" -gt 0 ] || {
+            echo "::error::Signed release payload lacks a SwiftPM resource bundle" >&2
+            exit 1
+          }
+          tar czf "$src" -C "$WORK" "${release_archive_members[@]}"
 
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
           if [ -n "$INSTALLER_ID" ]; then

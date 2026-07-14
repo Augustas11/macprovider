@@ -151,7 +151,26 @@ echo "==> Packaging tarball: $TARBALL"
 # launchd/watchdog/install/rollback members, and the verified catalog release
 # evidence. Final container hashes intentionally live in the signed release
 # checksum set rather than the embedded envelope.
-tar czf "$TARBALL" -C "$STAGE_DIR" .
+archive_members=(
+  macprovider-cli
+  mlx.metallib
+  THIRD-PARTY-NOTICES.txt
+  compatibility-set.json
+  compatibility-set-local
+  catalog-release
+)
+swiftpm_bundle_count=0
+for swiftpm_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+  if [ -d "$STAGE_DIR/$swiftpm_bundle" ]; then
+    archive_members+=("$swiftpm_bundle")
+    swiftpm_bundle_count=$((swiftpm_bundle_count + 1))
+  fi
+done
+[ "$swiftpm_bundle_count" -gt 0 ] || {
+  echo "FATAL: no SwiftPM resource bundle found in $PRODUCTS" >&2
+  exit 1
+}
+tar czf "$TARBALL" -C "$STAGE_DIR" "${archive_members[@]}"
 
 echo "==> Tarball stats:"
 ls -la "$TARBALL"
