@@ -176,6 +176,12 @@ func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
 	failedAt := time.Date(2026, 6, 7, 12, 6, 0, 0, time.UTC)
 	p.CanaryLastCheckedAt = &checkedAt
 	p.CanaryLastFailedAt = &failedAt
+	p.SafetyTelemetry = &ProviderSafetyTelemetry{
+		SchemaVersion: 1, ProviderID: p.ProviderID, ModelID: p.ModelID, ModelLoaded: true,
+		RuntimeState: "ready", HardwareTier: "m1-16gb", MemoryCapacityMB: 16384,
+		MemoryPressure: "normal", ThermalState: "nominal", CoordinatorConnected: true,
+		ObservationID: "observation-a", ObservedAt: "2026-07-14T12:00:00Z", ValidForMS: 90000,
+	}
 
 	got, err := json.Marshal(p)
 	if err != nil {
@@ -189,6 +195,10 @@ func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
 	models, ok := fields["supported_models"].([]any)
 	if !ok || len(models) != 1 || models[0] != "mlx-community/Qwen2.5-7B-Instruct-4bit" {
 		t.Fatalf("supported_models = %#v, want one model id", fields["supported_models"])
+	}
+	telemetry, ok := fields["safety_telemetry"].(map[string]any)
+	if !ok || telemetry["observation_id"] != "observation-a" || telemetry["memory_pressure"] != "normal" {
+		t.Fatalf("safety_telemetry = %#v", fields["safety_telemetry"])
 	}
 	if fields["publishes_supported_models"] != true {
 		t.Fatalf("publishes_supported_models = %#v, want true", fields["publishes_supported_models"])
@@ -965,6 +975,32 @@ func TestApplyHeartbeatStoresHardwareCapacity(t *testing.T) {
 	snap := registry.Snapshot()
 	if len(snap) != 1 || snap[0].HardwareCapacity == nil || snap[0].HardwareCapacity.GPUCoresTotal != 20 {
 		t.Fatalf("Snapshot hardware capacity = %+v", snap)
+	}
+}
+
+func TestApplyHeartbeatStoresFreshSafetyTelemetry(t *testing.T) {
+	start := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	registry := NewRegistry(nil)
+	registerHeartbeatProvider(t, registry, "model-a", "", HashStatusUncatalogued, start)
+	telemetry := &ProviderSafetyTelemetry{
+		SchemaVersion: 1, ProviderID: "p1", ModelID: "model-a", ModelLoaded: true,
+		RuntimeState: "ready", HardwareTier: "m1-16gb", MemoryCapacityMB: 16384,
+		MemoryPressure: "normal", ThermalState: "nominal", CoordinatorConnected: true,
+		ObservationID: "observation-a", ObservedAt: "2000-01-01T00:00:00Z", ValidForMS: 90000,
+	}
+	observedAt := start.Add(time.Minute)
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status: StateReady, ModelID: "model-a", SlotsFree: 1, SlotsTotal: 1,
+		SafetyTelemetry: telemetry, At: observedAt,
+	})
+	if !ok || provider.SafetyTelemetry == nil {
+		t.Fatalf("ApplyHeartbeat ok=%v provider=%+v", ok, provider)
+	}
+	if provider.SafetyTelemetry.ObservedAt != observedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("observed_at=%q want coordinator receipt %q", provider.SafetyTelemetry.ObservedAt, observedAt.Format(time.RFC3339Nano))
+	}
+	if telemetry.ObservedAt != "2000-01-01T00:00:00Z" {
+		t.Fatal("ApplyHeartbeat mutated caller telemetry")
 	}
 }
 

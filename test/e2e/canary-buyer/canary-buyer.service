@@ -7,11 +7,13 @@
 # Install (Pearl):
 #   apt-get install -y nodejs            # >= 18 (ships probe-compatible ESM)
 #   install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
-#   install -o root -g root -m 0755 probe.mjs run-canary.sh /opt/macprovider-canary-buyer/
+#   install -o root -g root -m 0755 probe.mjs safety.mjs run-canary.sh emergency-disable.sh /opt/macprovider-canary-buyer/
 #   # Credentials remain root-only at rest and are exposed by systemd only to
 #   # this service's isolated dynamic identity:
 #   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.token
 #   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.heartbeat
+#   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.operator-token
+#   #   install -o root -g root -m 0600 ./expected-fleet.json /etc/macprovider/canary-buyer.expected-fleet.json
 #   #   printf '%s\n' "$TOKEN" > /etc/macprovider/canary-buyer.token
 #   #   printf '%s\n' "$HEARTBEAT_URL" > /etc/macprovider/canary-buyer.heartbeat
 #   #   rm -f /etc/macprovider/canary-buyer.env  # rotate both copied secrets first
@@ -28,7 +30,12 @@ Type=oneshot
 DynamicUser=true
 LoadCredential=buyer_token:/etc/macprovider/canary-buyer.token
 LoadCredential=heartbeat_url:/etc/macprovider/canary-buyer.heartbeat
+LoadCredential=operator_token:/etc/macprovider/canary-buyer.operator-token
+LoadCredential=expected_fleet:/etc/macprovider/canary-buyer.expected-fleet.json
 Environment=CANARY_BASE=https://api.streamvc.live
+Environment=CANARY_POOLZ_URL=https://coordinator.streamvc.live/poolz
+Environment=CANARY_MODELS=mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit,mlx-community/Llama-3.2-3B-Instruct-4bit
+Environment=CANARY_MIN_READY_PROVIDERS=2
 Environment=CANARY_NODE_BIN=/usr/bin/node
 Environment=CANARY_METRICS_OUT=/var/lib/macprovider-canary-buyer/canary_buyer.prom
 Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts

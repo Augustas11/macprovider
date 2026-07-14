@@ -3500,6 +3500,15 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	if state == pool.StateReady && s.warmupGatePending(providerID) {
 		state = pool.StateDegraded
 	}
+	if hb.SafetyTelemetry != nil && hb.SafetyTelemetry.ProviderID != providerID {
+		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat safety telemetry provider_id mismatch")
+		return
+	}
+	if hb.SafetyTelemetry != nil && hb.SafetyTelemetry.SchemaVersion == 2 &&
+		hb.SafetyTelemetry.CoordinatorSessionID != assignedID {
+		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat safety telemetry coordinator session mismatch")
+		return
+	}
 	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
 		Status:                  state,
 		ModelID:                 hb.ModelID,
@@ -3518,6 +3527,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		LoadingPresent:          presence.Loading,
 		LastAutoupdateEvent:     hb.LastAutoupdateEvent,
 		HardwareCapacity:        poolHardwareCapacity(hb.HardwareSummary),
+		SafetyTelemetry:         hb.SafetyTelemetry,
 		At:                      s.now(),
 	})
 	if !ok {

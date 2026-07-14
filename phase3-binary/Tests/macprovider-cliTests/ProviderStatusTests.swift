@@ -3,6 +3,16 @@ import XCTest
 @testable import macprovider_cli
 
 final class ProviderStatusTests: XCTestCase {
+    private struct FixedMemoryPressureProvider: MemoryPressureProviding {
+        let value: ProviderMemoryPressure
+        func currentMemoryPressure() -> ProviderMemoryPressure { value }
+    }
+
+    private struct FixedWorkloadTelemetryProvider: ProviderWorkloadTelemetryProviding {
+        let value: ProviderWorkloadTelemetry
+        func currentWorkloadTelemetry() -> ProviderWorkloadTelemetry { value }
+    }
+
     private func makeCapacity(maxConcurrency: Int = 4) -> ProviderCapacity {
         ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: maxConcurrency)
     }
@@ -100,6 +110,8 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertTrue(capabilities.contains("legacy_reader_fallback_v1"))
         XCTAssertTrue(capabilities.contains("service_instance_v1"))
         XCTAssertTrue(capabilities.contains("status_observation_v1"))
+        XCTAssertTrue(capabilities.contains("provider_safety_telemetry_v1"))
+        XCTAssertTrue(capabilities.contains("provider_safety_telemetry_v2"))
 
         let observation = try XCTUnwrap(body["observation"] as? [String: Any])
         XCTAssertNotNil(observation["id"] as? String)
@@ -133,6 +145,124 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(identity["coordinator_key_role"] as? String, "previous")
         XCTAssertEqual(identity["transition_error"] as? String, "coordinator_previous_key_grace")
         XCTAssertEqual(identity["recovery_action"] as? String, "restore_current_key_or_run_recover_admission_identity")
+    }
+
+    func testStatusResponsePublishesFreshCompleteSafetyTelemetry() async throws {
+        let gate = ThermalGate(stateProvider: FixedThermalProvider(state: .serious))
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: makeCapacity(maxConcurrency: 1),
+            thermalGate: gate,
+            memoryPressureProvider: FixedMemoryPressureProvider(value: .warning)
+        )
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a", tier: "pinned")
+        let snapshot = await status.snapshot()
+        let body = RouterHandler.statusResponse(snapshot, providerID: "provider-a", coordinatorURL: nil)
+        let observation = try XCTUnwrap(body["observation"] as? [String: Any])
+        let telemetry = try XCTUnwrap(body["safety_telemetry"] as? [String: Any])
+
+        XCTAssertEqual(telemetry["schema_version"] as? Int, 1)
+        XCTAssertEqual(telemetry["provider_id"] as? String, "provider-a")
+        XCTAssertEqual(telemetry["model_id"] as? String, "model-a")
+        XCTAssertEqual(telemetry["model_loaded"] as? Bool, true)
+        XCTAssertEqual(telemetry["runtime_state"] as? String, "busy")
+        XCTAssertEqual(telemetry["hardware_tier"] as? String, snapshot.capacity.ramTier)
+        XCTAssertEqual(telemetry["requests_in_flight"] as? Int, 0)
+        XCTAssertEqual(telemetry["requests_queued"] as? Int, 0)
+        XCTAssertEqual(telemetry["memory_rss_mb"] as? Int, snapshot.memoryRSSMB)
+        XCTAssertEqual(telemetry["memory_capacity_mb"] as? Int, snapshot.capacity.ramGB * 1024)
+        XCTAssertEqual(telemetry["memory_pressure"] as? String, "warning")
+        XCTAssertEqual(telemetry["thermal_state"] as? String, "serious")
+        XCTAssertEqual(telemetry["thermally_throttled"] as? Bool, true)
+        XCTAssertEqual(telemetry["restart_count"] as? Int, snapshot.restartCount)
+        XCTAssertEqual(telemetry["uptime_s"] as? Int, snapshot.uptimeSeconds)
+        XCTAssertEqual(telemetry["coordinator_connected"] as? Bool, true)
+        XCTAssertEqual(telemetry["observation_id"] as? String, observation["id"] as? String)
+        XCTAssertEqual(telemetry["observed_at"] as? String, observation["observed_at"] as? String)
+        XCTAssertEqual(telemetry["valid_for_ms"] as? Int, 5_000)
+    }
+
+    func testStatusResponsePublishesSessionAndBuildBoundV2SafetyTelemetry() async throws {
+        let modelHash = String(repeating: "a", count: 64)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: makeCapacity(maxConcurrency: 1),
+            modelHash: modelHash,
+            workloadTelemetryProvider: FixedWorkloadTelemetryProvider(value: ProviderWorkloadTelemetry(
+                cpuUtilizationPercent: 12.5,
+                gpuUtilizationPercent: 18.0,
+                gpuUtilizationScope: "host",
+                powerSource: .external
+            ))
+        )
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a", tier: "pinned")
+        let snapshot = await status.snapshot()
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: "Augustas11/macprovider:v1.8.33@0123456789abcdef0123456789abcdef01234567",
+            envelopeSHA256: String(repeating: "b", count: 64),
+            version: "1.8.33",
+            catalogReleaseID: "acceptance-2026-07-14",
+            catalogPolicyVersion: "catalog-policy-v1",
+            maintenanceLeaseSeconds: 1_200,
+            readinessTimeoutSeconds: 1_200
+        )
+        let body = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            compatibilitySetManifest: manifest
+        )
+        let telemetry = try XCTUnwrap(body["safety_telemetry"] as? [String: Any])
+        XCTAssertEqual(telemetry["schema_version"] as? Int, 2)
+        XCTAssertEqual(telemetry["coordinator_session_id"] as? String, "session-a")
+        XCTAssertEqual(telemetry["cpu_utilization_pct"] as? Double, 12.5)
+        XCTAssertEqual(telemetry["gpu_utilization_pct"] as? Double, 18.0)
+        XCTAssertEqual(telemetry["gpu_utilization_scope"] as? String, "host")
+        XCTAssertEqual(telemetry["power_source"] as? String, "external")
+        XCTAssertEqual(telemetry["binary_version"] as? String, CoordinatorClient.binaryVersion)
+        XCTAssertEqual(telemetry["compatibility_set_id"] as? String, manifest.compatibilitySetID)
+        XCTAssertEqual(telemetry["model_hash"] as? String, modelHash)
+    }
+
+    func testV2SafetyTelemetryKeepsHostGPUScopeWhenSampleIsTemporarilyUnavailable() async {
+        let modelHash = String(repeating: "a", count: 64)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: makeCapacity(maxConcurrency: 1),
+            modelHash: modelHash,
+            workloadTelemetryProvider: FixedWorkloadTelemetryProvider(value: ProviderWorkloadTelemetry(
+                cpuUtilizationPercent: 12.5,
+                gpuUtilizationPercent: nil,
+                gpuUtilizationScope: "host",
+                powerSource: .external
+            ))
+        )
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a", tier: "pinned")
+        let snapshot = await status.snapshot()
+        let telemetry = snapshot.safetyTelemetry(
+            providerID: "provider-a",
+            modelID: "model-a",
+            binaryVersion: CoordinatorClient.binaryVersion,
+            compatibilitySetID: "set-a",
+            modelHash: modelHash,
+            observationID: "observation-a",
+            observedAt: "2026-07-14T12:00:00Z",
+            validForMS: 90_000
+        )
+        XCTAssertTrue(telemetry["gpu_utilization_pct"] is NSNull)
+        XCTAssertEqual(telemetry["gpu_utilization_scope"] as? String, "host")
+    }
+
+    func testQueueDepthCountsAdmittedRequestsBeyondInferenceCapacity() async {
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 1))
+        _ = await status.beginRequest(requestID: "running")
+        _ = await status.beginRequest(requestID: "waiting")
+        let queued = await status.snapshot()
+        XCTAssertEqual(queued.requestsInFlight, 2)
+        XCTAssertEqual(queued.requestsQueued, 1)
     }
 
     func testStatusResponsePublishesCompatibilitySetAndRedactedLifecycleLease() async throws {

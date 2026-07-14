@@ -49,6 +49,48 @@ func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	}
 }
 
+func TestParseHeartbeatAcceptsCompleteVersionedSafetyTelemetry(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":1,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"m1-16gb","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if hb.SafetyTelemetry == nil || hb.SafetyTelemetry.ProviderID != "provider-a" || hb.SafetyTelemetry.MemoryPressure != "normal" {
+		t.Fatalf("safety telemetry = %+v", hb.SafetyTelemetry)
+	}
+}
+
+func TestParseHeartbeatAcceptsBuildAndSessionBoundV2SafetyTelemetry(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":12.5,"gpu_utilization_pct":null,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if hb.SafetyTelemetry == nil || hb.SafetyTelemetry.SchemaVersion != 2 ||
+		hb.SafetyTelemetry.CoordinatorSessionID != "session-a" || hb.SafetyTelemetry.CPUUtilizationPct == nil ||
+		hb.SafetyTelemetry.GPUUtilizationPct != nil {
+		t.Fatalf("safety telemetry = %+v", hb.SafetyTelemetry)
+	}
+}
+
+func TestParseHeartbeatRejectsInvalidV2Utilization(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":101,"gpu_utilization_pct":10,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil || field != "safety_telemetry.cpu_utilization_pct" {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+}
+
+func TestParseHeartbeatRejectsIncompleteSafetyTelemetry(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":1}}`)
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil || !strings.HasPrefix(field, "safety_telemetry.") {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+}
+
 func TestParseIdlePrewarmEventAcceptsStructuredEvents(t *testing.T) {
 	cases := []string{
 		"idle_prewarm_fired",

@@ -1542,6 +1542,14 @@ final class CoordinatorClientTests: XCTestCase {
         )
         var heartbeatWithoutHardware = heartbeat
         heartbeatWithoutHardware.removeValue(forKey: "hardware_summary")
+        let safetyTelemetry = try XCTUnwrap(heartbeatWithoutHardware.removeValue(forKey: "safety_telemetry") as? [String: Any])
+        XCTAssertEqual(safetyTelemetry["schema_version"] as? Int, 1)
+        XCTAssertEqual(safetyTelemetry["provider_id"] as? String, "provider-test")
+        XCTAssertEqual(safetyTelemetry["model_id"] as? String, "model-a")
+        XCTAssertEqual(safetyTelemetry["requests_queued"] as? Int, 0)
+        XCTAssertTrue(["normal", "warning", "critical"].contains(try XCTUnwrap(safetyTelemetry["memory_pressure"] as? String)))
+        XCTAssertTrue(["nominal", "fair", "serious", "critical"].contains(try XCTUnwrap(safetyTelemetry["thermal_state"] as? String)))
+        XCTAssertNotNil(safetyTelemetry["observation_id"] as? String)
         let heartbeatJSON = Self.jsonString(heartbeatWithoutHardware)
         let helloJSON = Self.jsonString(await client.helloMessage())
         let expectedHeartbeat = """

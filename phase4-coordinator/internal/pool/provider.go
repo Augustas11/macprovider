@@ -174,6 +174,11 @@ type Provider struct {
 	// AttestationStatus and from verified stats hardware inventory: it can make
 	// cores/bandwidth visible without claiming hardware attestation.
 	HardwareCapacity *ProviderHardwareCapacity `json:"hardware_capacity,omitempty"`
+	// SafetyTelemetry is the latest versioned provider-health observation
+	// accepted on this session's heartbeat. /poolz exposes it to authenticated
+	// operators so remote canaries can enforce queue, memory, thermal, restart,
+	// and runtime invariants without a provider-local network route.
+	SafetyTelemetry *ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
 	// Proof of Weights W2 — coordinator-side autotune hello gate cap derived
 	// from latest verified hardware-evidence benchmarks. Empty when gate off
 	// or provider admitted before W2 rollout.
@@ -215,6 +220,44 @@ type Provider struct {
 	Tier2Session *Tier2Session `json:"-"`
 
 	conn net.Conn
+}
+
+type ProviderSafetyTelemetry struct {
+	SchemaVersion        int      `json:"schema_version"`
+	ProviderID           string   `json:"provider_id"`
+	ModelID              string   `json:"model_id"`
+	ModelLoaded          bool     `json:"model_loaded"`
+	RuntimeState         string   `json:"runtime_state"`
+	HardwareTier         string   `json:"hardware_tier"`
+	RequestsInFlight     int      `json:"requests_in_flight"`
+	RequestsQueued       int      `json:"requests_queued"`
+	MemoryRSSMB          int      `json:"memory_rss_mb"`
+	MemoryCapacityMB     int      `json:"memory_capacity_mb"`
+	MemoryPressure       string   `json:"memory_pressure"`
+	ThermalState         string   `json:"thermal_state"`
+	ThermallyThrottled   bool     `json:"thermally_throttled"`
+	RestartCount         int      `json:"restart_count"`
+	UptimeS              int      `json:"uptime_s"`
+	CoordinatorConnected bool     `json:"coordinator_connected"`
+	CoordinatorSessionID string   `json:"coordinator_session_id,omitempty"`
+	CPUUtilizationPct    *float64 `json:"cpu_utilization_pct"`
+	GPUUtilizationPct    *float64 `json:"gpu_utilization_pct"`
+	GPUUtilizationScope  string   `json:"gpu_utilization_scope,omitempty"`
+	PowerSource          string   `json:"power_source,omitempty"`
+	BinaryVersion        string   `json:"binary_version,omitempty"`
+	CompatibilitySetID   string   `json:"compatibility_set_id,omitempty"`
+	ModelHash            string   `json:"model_hash,omitempty"`
+	ObservationID        string   `json:"observation_id"`
+	ObservedAt           string   `json:"observed_at"`
+	ValidForMS           int      `json:"valid_for_ms"`
+}
+
+func cloneProviderSafetyTelemetry(in *ProviderSafetyTelemetry) *ProviderSafetyTelemetry {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 type ProviderHardwareCapacity struct {
@@ -1497,6 +1540,7 @@ type HeartbeatUpdate struct {
 	LoadingPresent      bool
 	LastAutoupdateEvent json.RawMessage
 	HardwareCapacity    *ProviderHardwareCapacity
+	SafetyTelemetry     *ProviderSafetyTelemetry
 	At                  time.Time
 }
 
@@ -1557,6 +1601,15 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	}
 	if hb.HardwareCapacity != nil {
 		p.HardwareCapacity = sanitizeProviderHardwareCapacity(hb.HardwareCapacity)
+	}
+	if hb.SafetyTelemetry == nil {
+		p.SafetyTelemetry = nil
+	} else {
+		telemetry := *hb.SafetyTelemetry
+		// Coordinator receipt time is authoritative for freshness. Provider
+		// clocks are not trusted to make stale observations look current.
+		telemetry.ObservedAt = hb.At.UTC().Format(time.RFC3339Nano)
+		p.SafetyTelemetry = &telemetry
 	}
 	// SPEC-010 v1.5 R-3.3.4: union the heartbeat's served model_id with
 	// the provider's declared supported_models. Heartbeat frames do not
@@ -1823,6 +1876,7 @@ func (r *Registry) Snapshot() []Provider {
 		cp := *p
 		cp.conn = nil
 		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
+		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
 		out = append(out, cp)
 	}
 	return out

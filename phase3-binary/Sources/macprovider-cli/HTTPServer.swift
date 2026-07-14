@@ -227,6 +227,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "legacy_reader_fallback_v1",
         "service_instance_v1",
         "status_observation_v1",
+        "provider_safety_telemetry_v1",
+        "provider_safety_telemetry_v2",
     ]
     static let serviceInstanceID = UUID().uuidString.lowercased()
     static let serviceStartedAt = Date()
@@ -842,6 +844,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 writer.startSSE(extraHeaders: Self.streamingSettlementHeadHeaders(settlementMetadata: settlementMetadata) + [
                     ("X-MacProvider-Provider-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
+                    ("X-Provider-Id", providerID ?? ""),
                 ])
                 sseStarted = true
                 writer.writeSSEJSON(
@@ -1417,6 +1420,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         compatibilitySetManifest: CompatibilitySetManifest? = nil
     ) -> [String: Any] {
         let observedAt = Date()
+        let observationID = UUID().uuidString.lowercased()
         let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
         let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
         var body: [String: Any] = [
@@ -1430,7 +1434,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "capabilities": localStatusCapabilities,
             ],
             "observation": [
-                "id": UUID().uuidString.lowercased(),
+                "id": observationID,
                 "observed_at": iso8601(observedAt),
                 "valid_for_ms": statusObservationValidityMS,
             ],
@@ -1455,10 +1459,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "input_tokens_all_time": snapshot.inputTokensAllTime,
             "output_tokens_all_time": snapshot.outputTokensAllTime,
             "requests_in_flight": snapshot.requestsInFlight,
+            "requests_queued": snapshot.requestsQueued,
             "active_request_id_count": snapshot.activeRequestIDCount,
             "errors_total": snapshot.errorsTotal,
             "restart_count": snapshot.restartCount,
             "memory_rss_mb": snapshot.memoryRSSMB,
+            "memory_pressure": snapshot.memoryPressure.rawValue,
+            "thermal_state": snapshot.thermalState,
+            "thermally_throttled": snapshot.thermallyThrottled,
             "capacity": [
                 "ram_gb": snapshot.capacity.ramGB,
                 "ram_tier": snapshot.capacity.ramTier,
@@ -1474,6 +1482,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "identity_admission_mode": jsonNullable(snapshot.coordinatorIdentityAdmissionMode),
                 "recommended_binary_version": jsonNullable(snapshot.recommendedBinaryVersion),
             ],
+            "safety_telemetry": snapshot.safetyTelemetry(
+                providerID: providerID,
+                modelID: effectiveModelID,
+                modelLoaded: effectiveModelLoaded,
+                binaryVersion: CoordinatorClient.binaryVersion,
+                compatibilitySetID: compatibilitySetManifest?.compatibilitySetID,
+                modelHash: runtimeSnapshot?.modelHash ?? snapshot.modelHash,
+                observationID: observationID,
+                observedAt: iso8601(observedAt),
+                validForMS: statusObservationValidityMS
+            ),
             "credential": [
                 "source": credentialStatus.source.rawValue,
                 "state": credentialStatus.state.rawValue,

@@ -11,11 +11,24 @@ printf 'attempt %s\n' "$*" >>"$CANARY_TEST_ATTEMPTS"
 if [[ -n "${CANARY_OPERATOR_TOKEN:-}" ]]; then
   printf 'operator-loaded\n' >>"$CANARY_TEST_OPERATOR"
 fi
+if [[ -r "${CANARY_EXPECTED_FLEET_FILE:-/nonexistent}" ]]; then
+  printf 'fleet-loaded\n' >>"$CANARY_TEST_OPERATOR"
+fi
+if [[ -n "${CANARY_HEARTBEAT_URL:-}" ]]; then
+  echo 'heartbeat URL leaked into probe environment' >&2
+  exit 91
+fi
+if [[ -z "${CANARY_DISABLE_FILE:-}" ]]; then
+  echo 'disable sentinel path missing from probe environment' >&2
+  exit 92
+fi
 exit "${CANARY_TEST_NODE_EXIT:-0}"
 EOF
 cat >"$TMP/curl-ok" <<'EOF'
 #!/usr/bin/env bash
 printf 'pinged\n' >>"$CANARY_TEST_PINGS"
+printf '%s\n' "$*" >>"$CANARY_TEST_CURL_ARGS"
+cat >>"$CANARY_TEST_CURL_STDIN"
 printf '204'
 EOF
 cat >"$TMP/curl-fail" <<'EOF'
@@ -30,9 +43,24 @@ cat >"$TMP/timeout-fail" <<'EOF'
 #!/usr/bin/env bash
 exit 124
 EOF
+cat >"$TMP/timeout-pass" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CANARY_TEST_TIMEOUTS"
+shift 3
+exec "$@"
+EOF
 cat >"$TMP/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$CANARY_TEST_SYSTEMCTL"
+case "${1:-}" in
+  is-active|is-enabled) exit 1 ;;
+esac
+EOF
+cat >"$TMP/launchctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CANARY_TEST_LAUNCHCTL"
+[[ "${1:-}" == "print" ]] && exit 1
+exit 0
 EOF
 chmod +x "$TMP"/*
 
@@ -43,7 +71,12 @@ export CANARY_TEST_ATTEMPTS="$TMP/attempts"
 export CANARY_TEST_PINGS="$TMP/pings"
 export CANARY_TEST_OPERATOR="$TMP/operator"
 export CANARY_TEST_SYSTEMCTL="$TMP/systemctl.log"
+export CANARY_TEST_LAUNCHCTL="$TMP/launchctl.log"
+export CANARY_TEST_CURL_ARGS="$TMP/curl.args"
+export CANARY_TEST_CURL_STDIN="$TMP/curl.stdin"
+export CANARY_TEST_TIMEOUTS="$TMP/timeouts"
 export CANARY_DISABLE_FILE="$TMP/DISABLED"
+export CANARY_TIMEOUT_BIN="$TMP/timeout-pass"
 
 # Scheduled gates fail closed before credential resolution or process launch.
 if env -u MACPROVIDER_BUYER_TOKEN CANARY_ENABLE_FILE="$TMP/missing-enable" \
@@ -79,6 +112,12 @@ CANARY_REQUIRE_HEARTBEAT=1 CANARY_HEARTBEAT_URL=https://heartbeat.invalid/token 
 test "$(wc -l <"$CANARY_TEST_ATTEMPTS" | tr -d ' ')" = 1
 test "$(wc -l <"$CANARY_TEST_PINGS" | tr -d ' ')" = 1
 grep -q -- '--mode liveness' "$CANARY_TEST_ATTEMPTS"
+grep -q -- '--signal=TERM --kill-after=5 120s' "$CANARY_TEST_TIMEOUTS"
+if grep -q 'heartbeat.invalid/token' "$CANARY_TEST_CURL_ARGS"; then
+  echo "heartbeat secret leaked into curl argv" >&2
+  exit 1
+fi
+grep -q 'url = "https://heartbeat.invalid/token"' "$CANARY_TEST_CURL_STDIN"
 
 # A degraded/failed probe is invoked exactly once and is never amplified.
 if CANARY_HEARTBEAT_URL=https://heartbeat.invalid/token CANARY_TEST_NODE_EXIT=7 \
@@ -137,19 +176,63 @@ mkdir "$TMP/credentials"
 printf '%s\n' 'mp_credential_token' >"$TMP/credentials/buyer_token"
 printf '%s\n' 'https://heartbeat.invalid/token' >"$TMP/credentials/heartbeat_url"
 printf '%s\n' 'operator-secret-token' >"$TMP/credentials/operator_token"
+printf '%s\n' '{"schema_version":1,"providers":[{"provider_id":"provider-a","model_id":"model-a"}]}' >"$TMP/credentials/expected_fleet"
 env -u HOME -u MACPROVIDER_BUYER_TOKEN -u MALIBU_API_KEY -u CANARY_HEARTBEAT_URL -u CANARY_OPERATOR_TOKEN \
   CREDENTIALS_DIRECTORY="$TMP/credentials" CANARY_REQUIRE_HEARTBEAT=1 \
   CANARY_DISABLE_FILE="$TMP/credential-disabled" CANARY_NODE_BIN="$TMP/node-controlled" CANARY_CURL_BIN="$TMP/curl-ok" \
   "$HERE/run-canary.sh" >/dev/null
 grep -q 'operator-loaded' "$CANARY_TEST_OPERATOR"
+grep -q 'fleet-loaded' "$CANARY_TEST_OPERATOR"
+
+# The documented installed layout is complete: probe.mjs can resolve its
+# sibling safety module and emergency command when only service-installed files exist.
+mkdir "$TMP/installed-layout"
+cp "$HERE/probe.mjs" "$HERE/safety.mjs" "$HERE/run-canary.sh" "$HERE/emergency-disable.sh" "$TMP/installed-layout/"
+if node "$TMP/installed-layout/probe.mjs" >/dev/null 2>"$TMP/layout.err"; then
+  echo "layout smoke unexpectedly passed without required configuration" >&2
+  exit 1
+else
+  test "$?" = 2
+fi
+grep -q 'liveness requires' "$TMP/layout.err"
+if grep -q 'ERR_MODULE_NOT_FOUND' "$TMP/layout.err"; then
+  echo "installed layout omitted a runtime module" >&2
+  exit 1
+fi
+test -x "$TMP/installed-layout/emergency-disable.sh"
+
+# Per-user fallback credentials fail closed on symlinks or broad permissions.
+mkdir "$TMP/user-files"
+printf '%s\n' 'operator-secret-token' >"$TMP/user-files/operator"
+chmod 0644 "$TMP/user-files/operator"
+if CANARY_OPERATOR_TOKEN='' CANARY_OPERATOR_TOKEN_FILE="$TMP/user-files/operator" \
+    CANARY_NODE_BIN="$TMP/node-controlled" CANARY_CURL_BIN="$TMP/curl-ok" \
+    "$HERE/run-canary.sh" >/dev/null 2>"$TMP/broad-mode.err"; then
+  echo "broad-mode credential should be rejected" >&2
+  exit 1
+fi
+grep -q 'mode 0400 or 0600' "$TMP/broad-mode.err"
+chmod 0600 "$TMP/user-files/operator"
+ln -s "$TMP/user-files/operator" "$TMP/user-files/operator-link"
+if CANARY_OPERATOR_TOKEN='' CANARY_OPERATOR_TOKEN_FILE="$TMP/user-files/operator-link" \
+    CANARY_NODE_BIN="$TMP/node-controlled" CANARY_CURL_BIN="$TMP/curl-ok" \
+    "$HERE/run-canary.sh" >/dev/null 2>"$TMP/symlink.err"; then
+  echo "symlinked credential should be rejected" >&2
+  exit 1
+fi
+grep -q 'not a symlink' "$TMP/symlink.err"
 
 # The emergency command removes the enable gate, creates the pre-network
 # sentinel, and stops the systemd timer in one invocation.
 : >"$TMP/enabled"
 CANARY_DISABLE_FILE="$TMP/emergency/DISABLED" CANARY_ENABLE_FILE="$TMP/enabled" \
-  CANARY_SYSTEMCTL_BIN="$TMP/systemctl" "$HERE/emergency-disable.sh" >/dev/null
+  CANARY_SYSTEMCTL_BIN="$TMP/systemctl" CANARY_LAUNCHCTL_BIN="$TMP/launchctl" \
+  CANARY_TARGET_USER="$(id -un)" CANARY_TARGET_UID="$(id -u)" CANARY_TARGET_HOME="$TMP" \
+  "$HERE/emergency-disable.sh" >/dev/null
 test -e "$TMP/emergency/DISABLED"
 test ! -e "$TMP/enabled"
 grep -q '^disable --now canary-buyer.timer$' "$CANARY_TEST_SYSTEMCTL"
+grep -q '^stop canary-buyer.service$' "$CANARY_TEST_SYSTEMCTL"
+grep -q '^is-active --quiet canary-buyer.service$' "$CANARY_TEST_SYSTEMCTL"
 
 echo 'PASS: canary wrapper issues one bounded attempt, honors kill switches, and never amplifies degradation'

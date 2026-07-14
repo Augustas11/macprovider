@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -270,23 +271,24 @@ type AuthModelHashSession struct {
 }
 
 type Heartbeat struct {
-	Type                    string           `json:"type"`
-	Status                  string           `json:"status"`
-	ModelID                 string           `json:"model_id"`
-	ModelParamsB            float64          `json:"model_params_b"`
-	RAMGB                   int              `json:"ram_gb"`
-	MaxContextTokens        int              `json:"max_context_tokens"`
-	MaxConcurrency          int              `json:"max_concurrency"`
-	SlotsFree               int              `json:"slots_free"`
-	SlotsTotal              int              `json:"slots_total"`
-	ThroughputTPSEstimate   float64          `json:"throughput_tps_estimate"`
-	RequestsServedSinceLast int              `json:"requests_served_since_last"`
-	AvgLatencyMSSinceLast   float64          `json:"avg_latency_ms_since_last"`
-	ThroughputTPSSinceLast  float64          `json:"throughput_tps_since_last"`
-	ModelHash               string           `json:"model_hash,omitempty"`
-	Loading                 bool             `json:"loading,omitempty"`
-	LastAutoupdateEvent     json.RawMessage  `json:"last_autoupdate_event,omitempty"`
-	HardwareSummary         *HardwareSummary `json:"hardware_summary,omitempty"`
+	Type                    string                        `json:"type"`
+	Status                  string                        `json:"status"`
+	ModelID                 string                        `json:"model_id"`
+	ModelParamsB            float64                       `json:"model_params_b"`
+	RAMGB                   int                           `json:"ram_gb"`
+	MaxContextTokens        int                           `json:"max_context_tokens"`
+	MaxConcurrency          int                           `json:"max_concurrency"`
+	SlotsFree               int                           `json:"slots_free"`
+	SlotsTotal              int                           `json:"slots_total"`
+	ThroughputTPSEstimate   float64                       `json:"throughput_tps_estimate"`
+	RequestsServedSinceLast int                           `json:"requests_served_since_last"`
+	AvgLatencyMSSinceLast   float64                       `json:"avg_latency_ms_since_last"`
+	ThroughputTPSSinceLast  float64                       `json:"throughput_tps_since_last"`
+	ModelHash               string                        `json:"model_hash,omitempty"`
+	Loading                 bool                          `json:"loading,omitempty"`
+	LastAutoupdateEvent     json.RawMessage               `json:"last_autoupdate_event,omitempty"`
+	HardwareSummary         *HardwareSummary              `json:"hardware_summary,omitempty"`
+	SafetyTelemetry         *pool.ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
 }
 
 type HeartbeatPresence struct {
@@ -951,6 +953,15 @@ func containsControlChar(s string) bool {
 	return false
 }
 
+func isLowerHex(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return s != ""
+}
+
 func requireInt(raw map[string]json.RawMessage, field string, out *int) *fieldError {
 	v, ok := raw[field]
 	if !ok {
@@ -1091,6 +1102,86 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 				hb.HardwareSummary = &summary
 			}
 		}
+	}
+	if v, ok := raw["safety_telemetry"]; ok && string(v) != "null" {
+		var telemetryRaw map[string]json.RawMessage
+		if err := json.Unmarshal(v, &telemetryRaw); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry", err
+		}
+		for _, required := range []string{
+			"schema_version", "provider_id", "model_id", "model_loaded", "runtime_state",
+			"hardware_tier", "requests_in_flight", "requests_queued", "memory_rss_mb",
+			"memory_capacity_mb", "memory_pressure", "thermal_state", "thermally_throttled",
+			"restart_count", "uptime_s", "coordinator_connected", "observation_id",
+			"observed_at", "valid_for_ms",
+		} {
+			if value, exists := telemetryRaw[required]; !exists || string(value) == "null" {
+				return Heartbeat{}, presence, "safety_telemetry." + required, fmt.Errorf("missing safety telemetry field %s", required)
+			}
+		}
+		var schemaVersion int
+		if err := json.Unmarshal(telemetryRaw["schema_version"], &schemaVersion); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry.schema_version", err
+		}
+		if schemaVersion == 2 {
+			for _, required := range []string{
+				"coordinator_session_id", "cpu_utilization_pct", "gpu_utilization_pct", "gpu_utilization_scope", "power_source",
+				"binary_version", "compatibility_set_id", "model_hash",
+			} {
+				if _, exists := telemetryRaw[required]; !exists {
+					return Heartbeat{}, presence, "safety_telemetry." + required, fmt.Errorf("missing safety telemetry field %s", required)
+				}
+			}
+		}
+		var telemetry pool.ProviderSafetyTelemetry
+		if err := json.Unmarshal(v, &telemetry); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry", err
+		}
+		if (telemetry.SchemaVersion != 1 && telemetry.SchemaVersion != 2) || telemetry.ProviderID == "" || telemetry.ModelID != hb.ModelID ||
+			telemetry.RuntimeState != hb.Status || telemetry.HardwareTier == "" ||
+			len(telemetry.ProviderID) > 256 || len(telemetry.ModelID) > maxHandshakeModelIDBytes ||
+			len(telemetry.HardwareTier) > 128 || len(telemetry.ObservationID) > 128 || len(telemetry.ObservedAt) > 64 ||
+			containsControlChar(telemetry.ProviderID) || containsControlChar(telemetry.ModelID) ||
+			containsControlChar(telemetry.HardwareTier) || containsControlChar(telemetry.ObservationID) ||
+			telemetry.RequestsInFlight < 0 || telemetry.RequestsQueued < 0 ||
+			telemetry.MemoryRSSMB < 0 || telemetry.MemoryCapacityMB < 1 ||
+			telemetry.RestartCount < 0 || telemetry.UptimeS < 0 ||
+			telemetry.ObservationID == "" ||
+			telemetry.ValidForMS < 1 || telemetry.ValidForMS > 300_000 {
+			return Heartbeat{}, presence, "safety_telemetry", fmt.Errorf("invalid safety telemetry")
+		}
+		if telemetry.SchemaVersion == 2 {
+			if telemetry.CoordinatorSessionID == "" || telemetry.GPUUtilizationScope != "host" ||
+				telemetry.BinaryVersion == "" || telemetry.CompatibilitySetID == "" ||
+				telemetry.ModelHash == "" || len(telemetry.CoordinatorSessionID) > 256 ||
+				len(telemetry.BinaryVersion) > maxHandshakeBinaryVersionBytes || len(telemetry.CompatibilitySetID) > 1024 ||
+				len(telemetry.ModelHash) != 64 || containsControlChar(telemetry.CoordinatorSessionID) ||
+				containsControlChar(telemetry.BinaryVersion) || containsControlChar(telemetry.CompatibilitySetID) ||
+				!isLowerHex(telemetry.ModelHash) {
+				return Heartbeat{}, presence, "safety_telemetry", fmt.Errorf("invalid version 2 safety telemetry identity")
+			}
+			for field, value := range map[string]*float64{
+				"cpu_utilization_pct": telemetry.CPUUtilizationPct,
+				"gpu_utilization_pct": telemetry.GPUUtilizationPct,
+			} {
+				if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 || *value > 100) {
+					return Heartbeat{}, presence, "safety_telemetry." + field, fmt.Errorf("invalid utilization")
+				}
+			}
+			if telemetry.PowerSource != "external" && telemetry.PowerSource != "battery" && telemetry.PowerSource != "unknown" {
+				return Heartbeat{}, presence, "safety_telemetry.power_source", fmt.Errorf("invalid power source")
+			}
+		}
+		if telemetry.MemoryPressure != "normal" && telemetry.MemoryPressure != "warning" && telemetry.MemoryPressure != "critical" {
+			return Heartbeat{}, presence, "safety_telemetry.memory_pressure", fmt.Errorf("invalid memory pressure")
+		}
+		if telemetry.ThermalState != "nominal" && telemetry.ThermalState != "fair" && telemetry.ThermalState != "serious" && telemetry.ThermalState != "critical" {
+			return Heartbeat{}, presence, "safety_telemetry.thermal_state", fmt.Errorf("invalid thermal state")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, telemetry.ObservedAt); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry.observed_at", err
+		}
+		hb.SafetyTelemetry = &telemetry
 	}
 	return hb, presence, "", nil
 }

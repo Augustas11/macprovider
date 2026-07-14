@@ -3760,6 +3760,17 @@ actor CoordinatorClient {
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event
         }
+        let observedAt = Date()
+        payload["safety_telemetry"] = snapshot.safetyTelemetry(
+            providerID: providerID,
+            modelID: payload["model_id"] as? String ?? snapshotWireModelID,
+            binaryVersion: Self.binaryVersion,
+            compatibilitySetID: compatibilitySetID,
+            modelHash: payload["model_hash"] as? String ?? snapshot.modelHash,
+            observationID: UUID().uuidString.lowercased(),
+            observedAt: ISO8601DateFormatter().string(from: observedAt),
+            validForMS: 90_000
+        )
         try await send(payload)
     }
 
