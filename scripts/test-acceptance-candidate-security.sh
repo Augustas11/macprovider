@@ -5,13 +5,19 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 workflow="$root/.github/workflows/acceptance-candidate.yml"
 metadata="$root/scripts/acceptance-candidate-metadata.py"
 signer="$root/scripts/sign-acceptance-candidate.sh"
+keychain_helper="$root/scripts/acceptance-signing-keychain.sh"
 source_guard="$root/scripts/verify-acceptance-candidate-source.sh"
 remote_guard="$root/scripts/verify-acceptance-remote-state.sh"
 provisioner="$root/scripts/provision-acceptance-signing-key.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-security.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-python3 - "$workflow" "$metadata" "$signer" "$provisioner" "$root/schemas/acceptance-candidate-v1.schema.json" <<'PY'
+fail() {
+  printf '[test-acceptance-candidate-security] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+python3 - "$workflow" "$metadata" "$signer" "$keychain_helper" "$provisioner" "$root/schemas/acceptance-candidate-v1.schema.json" <<'PY'
 import ast
 import pathlib
 import re
@@ -20,8 +26,9 @@ import sys
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 metadata = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 signer = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
-provisioner = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
-schema = __import__("json").loads(pathlib.Path(sys.argv[5]).read_text(encoding="utf-8"))
+keychain_helper = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+provisioner = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
+schema = __import__("json").loads(pathlib.Path(sys.argv[6]).read_text(encoding="utf-8"))
 
 if "\n  workflow_dispatch:\n" not in workflow or "\n  push:" in workflow:
     raise SystemExit("acceptance workflow must be manual dispatch only")
@@ -90,6 +97,29 @@ if "pearl-release.json.sig" not in signer or "-sign \"$private_key\"" not in sig
 if re.search(r'\$cli_work/macprovider-cli["}]?\s+--', signer):
     raise SystemExit("protected signer executes the candidate CLI")
 for value in (
+    'keychain="acceptance-signing-${run_id}-${run_attempt}-${keychain_nonce}.keychain"',
+    'acceptance_keychain_capture_default || die',
+    'acceptance_keychain_create_and_select "$keychain" "$keychain_password"',
+    'acceptance_keychain_cleanup "$keychain"',
+):
+    if value not in signer:
+        raise SystemExit(f"acceptance signer keychain contract is incomplete: {value}")
+if "$signing_tmp/acceptance-signing.keychain-db" in signer:
+    raise SystemExit("acceptance signer places its codesigning keychain outside the user keychain directory")
+for value in (
+    'acceptance_keychain_restore_required=1',
+    'security default-keychain -d user -s "$keychain"',
+    'security default-keychain -d user -s "$acceptance_previous_default_keychain"',
+    'if [[ "$acceptance_keychain_created" == 1 ]]',
+    'security delete-keychain "$keychain"',
+):
+    if value not in keychain_helper:
+        raise SystemExit(f"acceptance keychain helper contract is incomplete: {value}")
+if keychain_helper.find('acceptance_keychain_restore_required=1') > keychain_helper.find('security default-keychain -d user -s "$keychain"'):
+    raise SystemExit("acceptance keychain restore flag is set after default-keychain mutation")
+if keychain_helper.find('security default-keychain -d user -s "$acceptance_previous_default_keychain"') > keychain_helper.find('security delete-keychain "$keychain"'):
+    raise SystemExit("acceptance signer deletes the active keychain before restoring the prior default")
+for value in (
     'SIGNING_DOMAIN = b"macprovider.acceptance-candidate.v1\\n"',
     '"candidate_ref"',
     '"control_commit"',
@@ -130,6 +160,68 @@ for index, line in enumerate(lines):
     if any("${{" in row for row in block):
         raise SystemExit("GitHub expression is interpolated directly into a shell block")
 PY
+
+mkdir -p "$work/bin"
+cat > "$work/bin/security" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$SECURITY_LOG"
+case "$1" in
+  default-keychain)
+    if [[ "$*" == "default-keychain -d user" ]]; then
+      [[ "$SECURITY_SCENARIO" != query_failure ]] || exit 71
+      printf '    "/Users/fixture/Library/Keychains/login.keychain-db"\n'
+    fi
+    ;;
+  create-keychain)
+    [[ "$SECURITY_SCENARIO" != create_failure ]] || exit 72
+    ;;
+esac
+SH
+chmod 0755 "$work/bin/security"
+
+query_failure_log="$work/query-failure.log"
+if PATH="$work/bin:$PATH" SECURITY_LOG="$query_failure_log" SECURITY_SCENARIO=query_failure \
+  bash -c 'source "$1"; acceptance_keychain_capture_default' _ "$keychain_helper"; then
+  fail "keychain lifecycle accepted an unreadable prior default"
+fi
+printf '%s\n' 'default-keychain -d user' > "$work/query-failure.expected"
+cmp "$work/query-failure.expected" "$query_failure_log"
+
+create_failure_log="$work/create-failure.log"
+PATH="$work/bin:$PATH" SECURITY_LOG="$create_failure_log" SECURITY_SCENARIO=create_failure \
+  bash -c '
+    source "$1"
+    acceptance_keychain_capture_default
+    if acceptance_keychain_create_and_select collision.keychain fixture; then
+      exit 73
+    fi
+    acceptance_keychain_cleanup collision.keychain
+  ' _ "$keychain_helper"
+printf '%s\n' \
+  'default-keychain -d user' \
+  'create-keychain -p fixture collision.keychain' \
+  > "$work/create-failure.expected"
+cmp "$work/create-failure.expected" "$create_failure_log"
+
+downstream_failure_log="$work/downstream-failure.log"
+PATH="$work/bin:$PATH" SECURITY_LOG="$downstream_failure_log" SECURITY_SCENARIO=downstream_failure \
+  bash -c '
+    source "$1"
+    acceptance_keychain_capture_default
+    acceptance_keychain_create_and_select owned.keychain fixture
+    acceptance_keychain_cleanup owned.keychain
+  ' _ "$keychain_helper"
+printf '%s\n' \
+  'default-keychain -d user' \
+  'create-keychain -p fixture owned.keychain' \
+  'default-keychain -d user -s owned.keychain' \
+  'unlock-keychain -p fixture owned.keychain' \
+  'set-keychain-settings -lut 3600 owned.keychain' \
+  'default-keychain -d user -s /Users/fixture/Library/Keychains/login.keychain-db' \
+  'delete-keychain owned.keychain' \
+  > "$work/downstream-failure.expected"
+cmp "$work/downstream-failure.expected" "$downstream_failure_log"
 
 # macOS runners still invoke Bash 3.2, where expanding an initialized empty
 # array under `set -u` fails as an unbound variable. Keep the workflow's array
