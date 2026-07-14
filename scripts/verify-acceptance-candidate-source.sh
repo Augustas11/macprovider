@@ -48,6 +48,16 @@ read -r remote_sha remote_ref extra <<<"$remote_row"
 [[ "$remote_sha" == "$candidate_sha" ]] ||
   die "candidate ref tip is $remote_sha, not requested SHA $candidate_sha"
 
+# package.sh verifies the immutable catalog release ledger against origin/main.
+# Materialize that read-only ref from the same repository and bind it to the
+# exact main control commit that owns this workflow run.
+git -C "$candidate_dir" fetch --quiet --no-tags --depth=1 origin \
+  "+refs/heads/main:refs/remotes/origin/main" ||
+  die "could not refresh origin/main release-ledger base"
+ledger_base_sha="$(git -C "$candidate_dir" rev-parse refs/remotes/origin/main)"
+[[ "$ledger_base_sha" == "$GITHUB_SHA" ]] ||
+  die "origin/main release-ledger base is $ledger_base_sha, not control commit $GITHUB_SHA"
+
 tag_rows="$(git -C "$candidate_dir" ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")" ||
   die "could not verify candidate tag absence"
 [[ -z "$tag_rows" ]] || die "candidate tag already exists on origin; acceptance signing is forbidden"

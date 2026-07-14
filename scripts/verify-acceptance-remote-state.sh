@@ -20,6 +20,12 @@ git check-ref-format --branch "${candidate_ref#refs/heads/}" >/dev/null 2>&1 || 
 [[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || die "candidate SHA is invalid"
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "candidate tag is invalid"
 
+main_row="$(git ls-remote --exit-code origin refs/heads/main)" || die "main control branch is unavailable"
+[[ "$(printf '%s\n' "$main_row" | wc -l | tr -d ' ')" == "1" ]] || die "main branch lookup was ambiguous"
+read -r main_sha main_ref main_extra <<<"$main_row"
+[[ -z "${main_extra:-}" && "$main_ref" == refs/heads/main && "$main_sha" == "$GITHUB_SHA" ]] ||
+  die "main control branch drifted after dispatch"
+
 remote_row="$(git ls-remote --exit-code origin "$candidate_ref")" || die "candidate branch is unavailable"
 [[ "$(printf '%s\n' "$remote_row" | wc -l | tr -d ' ')" == "1" ]] || die "candidate branch lookup was ambiguous"
 read -r remote_sha remote_ref extra <<<"$remote_row"

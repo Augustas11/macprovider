@@ -308,16 +308,17 @@ candidate_sha="$(git -C "$work/source" rev-parse HEAD)"
 git -C "$work/source" push -q -u origin candidate
 git clone -q "file://$work/bare.git" "$work/candidate"
 git -C "$work/candidate" checkout -q "$candidate_sha"
-GITHUB_EVENT_NAME=workflow_dispatch \
-GITHUB_REF=refs/heads/main \
-GITHUB_SHA="$(git -C "$root" rev-parse HEAD)" \
-GITHUB_REPOSITORY=Augustas11/macprovider \
-  bash "$source_guard" "$root" "$work/candidate" "file://$work/bare.git" \
-    refs/heads/candidate "$candidate_sha" v9.9.9
-
 git clone -q "file://$work/bare.git" "$work/control"
 git -C "$work/control" checkout -q main
 control_sha="$(git -C "$work/control" rev-parse HEAD)"
+GITHUB_EVENT_NAME=workflow_dispatch \
+GITHUB_REF=refs/heads/main \
+GITHUB_SHA="$control_sha" \
+GITHUB_REPOSITORY=Augustas11/macprovider \
+  bash "$source_guard" "$work/control" "$work/candidate" "file://$work/bare.git" \
+    refs/heads/candidate "$candidate_sha" v9.9.9
+test "$(git -C "$work/candidate" rev-parse refs/remotes/origin/main)" = "$control_sha"
+
 (
   cd "$work/control"
   GITHUB_EVENT_NAME=workflow_dispatch \
@@ -329,14 +330,33 @@ git -C "$work/source" tag v9.9.9 "$candidate_sha"
 git -C "$work/source" push -q origin v9.9.9
 if GITHUB_EVENT_NAME=workflow_dispatch \
   GITHUB_REF=refs/heads/main \
-  GITHUB_SHA="$(git -C "$root" rev-parse HEAD)" \
+  GITHUB_SHA="$control_sha" \
   GITHUB_REPOSITORY=Augustas11/macprovider \
-    bash "$source_guard" "$root" "$work/candidate" "file://$work/bare.git" \
+    bash "$source_guard" "$work/control" "$work/candidate" "file://$work/bare.git" \
       refs/heads/candidate "$candidate_sha" v9.9.9 >"$work/existing-tag.out" 2>&1; then
   echo "source guard accepted an existing production tag" >&2
   exit 1
 fi
 grep -q 'candidate tag already exists' "$work/existing-tag.out"
+git -C "$work/source" tag -d v9.9.9 >/dev/null
+git -C "$work/source" push -q origin :refs/tags/v9.9.9
+
+git -C "$work/source" checkout -q main
+printf 'drift\n' >> "$work/source/value"
+git -C "$work/source" add value
+git -C "$work/source" commit -qm drift-main
+git -C "$work/source" push -q origin main
+if (
+  cd "$work/control"
+  GITHUB_EVENT_NAME=workflow_dispatch \
+  GITHUB_REF=refs/heads/main \
+  GITHUB_SHA="$control_sha" \
+    bash "$remote_guard" refs/heads/candidate "$candidate_sha" v9.9.9
+) >"$work/main-drift.out" 2>&1; then
+  echo "protected remote guard accepted a drifted main control branch" >&2
+  exit 1
+fi
+grep -q 'main control branch drifted after dispatch' "$work/main-drift.out"
 
 bash -n "$signer" "$source_guard" "$remote_guard" "$provisioner"
 printf '[test-acceptance-candidate-security] ok: read-only signer, exact source, expiry, domain separation, and no publication\n'
