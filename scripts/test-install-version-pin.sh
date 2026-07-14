@@ -602,6 +602,28 @@ rc=0
 ( validate_acceptance_upgrade_target v1.8.33 && validate_emergency_target v1.8.33 ) >/dev/null 2>&1 || rc=$?
 report "case20-emergency-downgrade-reaches-existing-gate" 0 "$rc"
 
+################################################################
+# Case 21 — validating the installed version must not overwrite
+# the acceptance target selected by the installer transaction.
+################################################################
+printf '#!/usr/bin/env bash\nprintf "1.8.30\\n"\n' > "$BINARY_PATH"
+chmod +x "$BINARY_PATH"
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+rc=0
+observed_tag="$(
+  tag="$(resolve_release_tag)"
+  validate_acceptance_upgrade_target "$tag"
+  printf '%s' "$tag"
+)" || rc=$?
+report "case21-older-install-accepts-newer-candidate" 0 "$rc"
+report "case21-installed-version-does-not-rewrite-target" "v1.8.33" "$observed_tag"
+
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2
   exit 1

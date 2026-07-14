@@ -2687,7 +2687,7 @@ version_at_least() (
 )
 
 validate_macprovider_version_tag() {
-  tag="$1"
+  local tag="$1"
   case "$tag" in
     *[[:space:]]*|*[[:cntrl:]]*) die 7 "MACPROVIDER_VERSION must not contain whitespace or control characters" ;;
   esac
