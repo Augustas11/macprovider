@@ -123,7 +123,7 @@ assert_exit() { # $1 expected rc, $2 test name
 }
 
 assert_contains() { # $1 substring, $2 test name
-  if printf '%s' "$OUT" | grep -qF "$1"; then
+  if grep -qF -- "$1" <<<"$OUT"; then
     PASS=$((PASS+1)); echo "  ok: $2 (found: $1)"
   else
     FAIL=$((FAIL+1)); FAIL_NAMES+=("$2"); echo "  FAIL: $2 — output missing: $1"
@@ -132,7 +132,7 @@ assert_contains() { # $1 substring, $2 test name
 }
 
 assert_absent() { # $1 substring that must NOT appear, $2 test name
-  if printf '%s' "$OUT" | grep -qF "$1"; then
+  if grep -qF -- "$1" <<<"$OUT"; then
     FAIL=$((FAIL+1)); FAIL_NAMES+=("$2"); echo "  FAIL: $2 — output should not contain: $1"
     printf '%s\n' "$OUT" | sed 's/^/      | /'
   else
