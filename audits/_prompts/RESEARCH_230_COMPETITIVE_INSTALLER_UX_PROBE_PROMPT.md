@@ -1,6 +1,6 @@
 # RESEARCH PROBE — competitive provider-installer UX + analogous yield-recommendation surfaces (SPEC-018 v0.1 input)
 
-Run as: `omc ask codex "$(cat specs/RESEARCH_230_COMPETITIVE_INSTALLER_UX_PROBE_PROMPT.md)"`
+Run as: `omc ask codex "$(cat audits/_prompts/RESEARCH_230_COMPETITIVE_INSTALLER_UX_PROBE_PROMPT.md)"`
 
 This is a **scoped pre-SPEC probe**, not a full research memo. Single codex call, ~20-40 min wall time, ~200-400 line output. Feeds directly into `specs/SPEC-018-installer-autotune-recommend-v0.1.md` drafting on the same day.
 
