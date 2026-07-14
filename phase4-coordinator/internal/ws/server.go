@@ -2080,7 +2080,14 @@ func isLoopbackHost(host string) bool {
 }
 
 func (s *Server) setReadDeadline(conn net.Conn, timeout time.Duration) {
-	_ = conn.SetReadDeadline(s.now().Add(timeout))
+	// Physical socket deadlines MUST use the real wall clock — the OS poller
+	// compares SetReadDeadline against time.Now(), not our injectable logical
+	// clock. In production s.now() == time.Now().UTC() so this is unchanged, but
+	// a test that injects a frozen/offset clock (WithNow) would otherwise hand
+	// the poller a deadline in the past, expiring the read immediately and
+	// closing the handshake ("read auth_challenge: EOF"). s.now() stays the
+	// source of truth for LOGICAL time (token/challenge expiry, epoch age).
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
 func (s *Server) enableProviderTCPKeepAlive(conn net.Conn) {
@@ -2097,7 +2104,8 @@ func (s *Server) enableProviderTCPKeepAlive(conn net.Conn) {
 }
 
 func (s *Server) setWriteDeadline(conn net.Conn) {
-	_ = conn.SetWriteDeadline(s.now().Add(s.cfg.ProviderWSWriteTimeout()))
+	// Real wall clock for the physical socket deadline — see setReadDeadline.
+	_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.ProviderWSWriteTimeout()))
 }
 
 func (s *Server) writeServerText(conn net.Conn, payload []byte) error {
