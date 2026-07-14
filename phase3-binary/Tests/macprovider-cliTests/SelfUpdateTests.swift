@@ -60,6 +60,55 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertNoThrow(try SelfUpdate.requireStagedBinaryVersion("1.2.1\n", targetVersion: "1.2.1"))
     }
 
+    func testStagedCLIPreflightCannotLoadTheServingModel() {
+        XCTAssertEqual(SelfUpdate.stagedCLIPreflightArguments, ["--version"])
+        XCTAssertFalse(SelfUpdate.stagedCLIPreflightArguments.contains("self-test"))
+    }
+
+    func testAcceptanceDirectoryRequiresOwnedFlatNonWritableRegularFiles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acceptance-assets-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("signed-assets".utf8).write(to: root.appendingPathComponent("checksums.txt"))
+
+        XCTAssertEqual(
+            try SelfUpdate.validatedAcceptanceAssetNames(in: root),
+            ["checksums.txt"]
+        )
+
+        let link = root.appendingPathComponent("checksums.txt.sig")
+        try FileManager.default.createSymbolicLink(
+            at: link,
+            withDestinationURL: root.appendingPathComponent("checksums.txt")
+        )
+        XCTAssertThrowsError(try SelfUpdate.validatedAcceptanceAssetNames(in: root)) { error in
+            XCTAssertTrue(String(describing: error).contains("asset_permissions_or_type"))
+        }
+    }
+
+    func testAcceptanceCandidateRejectsDowngradeBeforeReadingAssets() async {
+        let update = SelfUpdate(currentVersion: "1.8.34", releasesAPIURL: nil)
+        do {
+            try await update.runAcceptanceCandidate(
+                from: URL(fileURLWithPath: "/path/that/does/not/exist", isDirectory: true),
+                tag: "v1.8.33"
+            )
+            XCTFail("acceptance candidate unexpectedly allowed a downgrade")
+        } catch let error as UpdateError {
+            XCTAssertEqual(
+                error.description,
+                UpdateError.acceptanceCandidateNotNewer(current: "1.8.34", target: "1.8.33").description
+            )
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testCopiedOlderSignedPayloadCannotMasqueradeAsNewRelease() {
         XCTAssertThrowsError(
             try SelfUpdate.requireStagedBinaryVersion("1.2.0\n", targetVersion: "1.2.1")

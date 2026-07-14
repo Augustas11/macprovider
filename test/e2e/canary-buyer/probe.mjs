@@ -41,6 +41,19 @@ import dns from 'node:dns/promises';
 import { webcrypto } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import {
+  RunBudget,
+  findBaseline,
+  gatewayInvariantReasons,
+  gatewaySnapshot,
+  performanceRegressionReasons,
+  poolzInvariantReasons,
+  poolzSnapshot,
+  providerSignalReasons,
+  providerSignalSnapshot,
+  recoverySoakReasons,
+  validateBaselineDocument,
+} from './safety.mjs';
 
 // `crypto` is a global on Node 20+ / browsers, but NOT on Node 18 (where it's
 // gated behind a flag). Fall back to node:crypto's webcrypto so the probe runs
@@ -48,16 +61,29 @@ import { fileURLToPath } from 'node:url';
 const crypto = globalThis.crypto ?? webcrypto;
 
 const args = parseArgs(process.argv.slice(2));
+const selectedMode = args.mode || env('CANARY_MODE') || 'liveness';
+const isQualification = selectedMode === 'qualification';
+const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
+const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 
 const CONFIG = {
+  mode: selectedMode,
+  qualificationConfirmed: 'capacity-isolated' in args || env('CANARY_CAPACITY_ISOLATED') === '1',
   base: (env('CANARY_BASE') || 'https://api.streamvc.live').replace(/\/$/, ''),
   token: env('MACPROVIDER_BUYER_TOKEN') || env('MALIBU_API_KEY') || '',
+  operatorToken: env('CANARY_OPERATOR_TOKEN') || '',
+  poolzURL: env('CANARY_POOLZ_URL'),
+  providerStatusURLs: (env('CANARY_PROVIDER_STATUS_URLS') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+  baselineFile: env('CANARY_BASELINE_FILE'),
   models: (env('CANARY_MODELS') || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-  ttftSamples: intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20),
-  tpsSamples: intEnv('CANARY_TPS_SAMPLES', 3, 1, 10),
+  ttftSamples: isQualification ? configuredTTFTSamples : 1,
+  tpsSamples: isQualification ? configuredTPSSamples : 0,
   tpsMaxTokens: intEnv('CANARY_TPS_MAX_TOKENS', 128, 1, 512),
   intervalMs: intEnv('CANARY_INTERVAL_MS', 1500, 1, 10000),
   reqTimeoutMs: intEnv('CANARY_REQ_TIMEOUT_MS', 45000, 1000, 120000),
@@ -65,6 +91,15 @@ const CONFIG = {
   maxTtftP95Ms: numberEnv('CANARY_MAX_TTFT_P95_MS', 7000),
   minDecodeTpsP50: numberEnv('CANARY_MIN_DECODE_TPS_P50', 15),
   minCachedPromptRatio: numberEnv('CANARY_MIN_CACHED_PROMPT_RATIO', 0.1),
+  minReadyProviders: intEnv('CANARY_MIN_READY_PROVIDERS', isQualification ? 2 : 1, 1, 100),
+  maxRequestsPerProvider: intEnv('CANARY_MAX_REQUESTS_PER_PROVIDER', isQualification ? 17 : 4, 1, 100),
+  maxCompletionTokensPerProvider: intEnv('CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER', isQualification ? 512 : 32, 1, 4096),
+  maxRunDurationMs: intEnv('CANARY_MAX_RUN_DURATION_MS', isQualification ? 300000 : 90000, 10000, 900000),
+  recoverySoakSeconds: intEnv('CANARY_RECOVERY_SOAK_SECONDS', isQualification ? 60 : 15, 2, 300),
+  recoveryPollMs: intEnv('CANARY_RECOVERY_POLL_MS', 5000, 250, 30000),
+  maxHeartbeatAgeMs: intEnv('CANARY_MAX_HEARTBEAT_AGE_MS', 90000, 1000, 300000),
+  maxMemoryGrowthMB: intEnv('CANARY_MAX_MEMORY_GROWTH_MB', 512, 1, 65536),
+  maxMemoryFraction: numberEnv('CANARY_MAX_MEMORY_FRACTION', 0.9),
   metricsOut: args['metrics-out'] || env('CANARY_METRICS_OUT') || '',
   jsonOut: args['json-out'] || env('CANARY_JSON_OUT') || '',
   pushgateway: args['pushgateway'] || env('CANARY_PUSHGATEWAY') || '',
@@ -127,7 +162,9 @@ function redact(text) {
   // (harness buyer keys are mp_ + 20+ chars). A pathologically short token would
   // otherwise corrupt legitimate output by matching common substrings. The
   // Bearer-pattern scrub below still catches the credential regardless.
-  if (CONFIG.token && CONFIG.token.length >= 8) s = s.split(CONFIG.token).join('***');
+  for (const secret of [CONFIG.token, CONFIG.operatorToken]) {
+    if (secret && secret.length >= 8) s = s.split(secret).join('***');
+  }
   return s.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ***');
 }
 
@@ -235,12 +272,49 @@ async function getStatus() {
   return JSON.parse(text);
 }
 
+async function getJSON(url, { authorization = '', label = url, timeoutMs = CONFIG.reqTimeoutMs } = {}) {
+  const headers = { Accept: 'application/json' };
+  if (authorization) headers.Authorization = `Bearer ${authorization}`;
+  const r = await fetch(url, {
+    headers,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(redact(`${label} HTTP ${r.status}: ${text.slice(0, 200)}`));
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${label} returned invalid JSON`);
+  }
+}
+
+async function observeSafety() {
+  const observedAtMs = Date.now();
+  const gatewayRaw = await getStatus();
+  const gateway = gatewaySnapshot(gatewayRaw);
+  let operatorPool = null;
+  if (CONFIG.poolzURL) {
+    const raw = await getJSON(CONFIG.poolzURL, {
+      authorization: CONFIG.operatorToken,
+      label: 'CANARY_POOLZ_URL',
+    });
+    operatorPool = poolzSnapshot(raw, observedAtMs);
+  }
+  const providers = [];
+  for (const url of CONFIG.providerStatusURLs) {
+    const raw = await getJSON(url, { label: `provider status ${url}` });
+    providers.push(providerSignalSnapshot(raw, url));
+  }
+  return { observed_at: new Date(observedAtMs).toISOString(), gateway, operator_pool: operatorPool, providers };
+}
+
 /**
  * Stream one chat completion, measuring TTFT and decode-window timing.
  * Never throws on HTTP/stream errors — returns {ok:false, status, error} so
  * the caller can record failures as metrics (recording failures is the point).
  */
-async function streamOne({ model, messages, conversationId, maxTokens }) {
+async function streamOne({ model, messages, conversationId, maxTokens, timeoutMs = CONFIG.reqTimeoutMs }) {
   const headers = authHeaders({
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
@@ -271,7 +345,7 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
         stream_options: { include_usage: true },
       }),
       redirect: 'manual',
-      signal: AbortSignal.timeout(CONFIG.reqTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     requestId = r.headers.get('x-request-id') || '';
     provider = r.headers.get('x-provider-id') || r.headers.get('x-macprovider-provider') || '';
@@ -376,7 +450,7 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
   };
 }
 
-async function sampleModel(model) {
+async function sampleModel(model, control) {
   const res = {
     model,
     ttftMs: [],
@@ -388,6 +462,7 @@ async function sampleModel(model) {
     cachedPromptTokens: null,
     promptTokens: null,
     provider: '',
+    requests: [],
   };
 
   // Metric collection is per sample class: only the short-request loop feeds the
@@ -395,11 +470,24 @@ async function sampleModel(model) {
   // them would contaminate TTFT percentiles with long-generation requests and
   // TPS with 8-token noise. `collect` selects which array (if any) this request
   // contributes to; every request still contributes to outcome counts.
-  const record = (r, collect = {}) => {
+  const record = (r, collect = {}, maxTokens = null) => {
     res.samples++;
     if (r.provider && !res.provider) res.provider = r.provider;
     const bucket = outcomeBucket(r);
     res.outcomes[bucket] = (res.outcomes[bucket] || 0) + 1;
+    res.requests.push({
+      sequence: res.samples,
+      outcome: bucket,
+      status: r.status,
+      provider: r.provider || null,
+      request_id: r.requestId || null,
+      max_completion_tokens: maxTokens,
+      ttft_ms: r.ttftMs ?? null,
+      decode_ms: r.decodeMs ?? null,
+      total_ms: r.totalMs ?? null,
+      decode_tps: r.decodeTps ?? null,
+      completion_tokens: numOrNull(r.usage?.completion_tokens),
+    });
     if (r.ok) {
       if (collect.ttft) res.ttftMs.push(r.ttftMs);
       if (collect.tps && r.decodeTps != null) res.decodeTps.push(r.decodeTps);
@@ -408,30 +496,56 @@ async function sampleModel(model) {
     }
   };
 
-  // 1. TTFT distribution — many short requests, fresh conversation each.
-  for (let i = 0; i < CONFIG.ttftSamples; i++) {
+  const runRequest = async ({ messages, conversationId, maxTokens, collect = {} }) => {
+    if (!(await control.beforeRequest(maxTokens))) return null;
     const r = await streamOne({
       model,
+      messages,
+      conversationId,
+      maxTokens,
+      timeoutMs: control.requestTimeoutMs(),
+    });
+    record(r, collect, maxTokens);
+    await control.afterRequest(model, r, maxTokens);
+    return r;
+  };
+
+  // 1. TTFT distribution — many short requests, fresh conversation each.
+  for (let i = 0; i < CONFIG.ttftSamples; i++) {
+    const r = await runRequest({
       conversationId: randUUID(),
       messages: [{ role: 'user', content: 'Say: ready.' }],
       maxTokens: 8,
+      collect: { ttft: true },
     });
-    record(r, { ttft: true });
+    if (!r || control.failed()) break;
     if (i < CONFIG.ttftSamples - 1) await sleep(CONFIG.intervalMs);
+  }
+
+  // Scheduled liveness intentionally stops after one 8-token request per
+  // model. Performance, decode, and cache work is qualification-only.
+  if (CONFIG.mode === 'liveness' || control.failed()) {
+    res.serviceable = (res.outcomes['2xx'] || 0) > 0 ? 1 : 0;
+    return res;
   }
 
   // 2. Sustained decode TPS — fewer, longer requests.
   for (let i = 0; i < CONFIG.tpsSamples; i++) {
     await sleep(CONFIG.intervalMs);
-    const r = await streamOne({
-      model,
+    const r = await runRequest({
       conversationId: randUUID(),
       messages: [
         { role: 'user', content: 'Count from 1 to 100, one number per line.' },
       ],
       maxTokens: CONFIG.tpsMaxTokens,
+      collect: { tps: true },
     });
-    record(r, { tps: true });
+    if (!r || control.failed()) break;
+  }
+
+  if (control.failed()) {
+    res.serviceable = (res.outcomes['2xx'] || 0) > 0 ? 1 : 0;
+    return res;
   }
 
   // 3. Sticky KV-cache reuse — two turns, same conversation tag, sharing a
@@ -442,17 +556,14 @@ async function sampleModel(model) {
   await sleep(CONFIG.intervalMs);
   const conv = randUUID();
   const prefix = stickyPrefix(CONFIG.stickyPrefixLines);
-  const t1 = await streamOne({
-    model,
+  const t1 = await runRequest({
     conversationId: conv,
     messages: [{ role: 'user', content: `${prefix}\n\nReply with exactly: pong` }],
     maxTokens: 16,
   });
-  record(t1);
-  if (t1.ok) {
+  if (t1?.ok && !control.failed()) {
     await sleep(CONFIG.intervalMs);
-    const t2 = await streamOne({
-      model,
+    const t2 = await runRequest({
       conversationId: conv,
       messages: [
         { role: 'user', content: `${prefix}\n\nReply with exactly: pong` },
@@ -461,8 +572,7 @@ async function sampleModel(model) {
       ],
       maxTokens: 16,
     });
-    record(t2);
-    if (t2.ok && t2.usage) {
+    if (t2?.ok && t2.usage) {
       const cached = numOrNull(t2.usage.cached_prompt_tokens);
       const prompt = numOrNull(t2.usage.prompt_tokens);
       res.cachedPromptTokens = cached;
@@ -523,15 +633,19 @@ function mean(arr) {
 
 // ── metrics emission ────────────────────────────────────────────────────────
 
-function buildRun(status, modelResults, runStartUnix) {
+function buildRun(status, modelResults, runStartUnix, details = {}) {
   return {
-    schema_version: 1,
+    schema_version: 2,
     probe: 'canary_buyer',
+    mode: CONFIG.mode,
     run_at: new Date(runStartUnix * 1000).toISOString(),
     base: CONFIG.base,
-    up: status ? 1 : 0,
+    up: status && status.status !== 'down' ? 1 : 0,
     pool: status?.pool || null,
-    coordinator_status: status?.coordinator?.status || null,
+    coordinator_status: status?.coordinator?.status || status?.coordinator_status || null,
+    result: details.result || { outcome: 'healthy', failure_class: null, reasons: [], phase: 'complete', aborted: false },
+    budget: details.budget || null,
+    safety: details.safety || null,
     models: modelResults.map((m) => ({
       model: m.model,
       serviceable: m.serviceable,
@@ -553,6 +667,7 @@ function buildRun(status, modelResults, runStartUnix) {
       prompt_tokens: m.promptTokens,
       provider: m.provider,
       first_error: m.firstError || null,
+      requests: m.requests,
     })),
   };
 }
@@ -578,6 +693,9 @@ function toProm(run) {
 
   h('macprovider_canary_run_timestamp_seconds', 'Unix time of this probe run.', 'gauge');
   L.push(`macprovider_canary_run_timestamp_seconds ${Math.floor(ts / 1000)}`);
+
+  h('macprovider_canary_result', 'Canary outcome by mode and failure class (1 for this run).', 'gauge');
+  L.push(`macprovider_canary_result{${lbl({ mode: run.mode || 'legacy', outcome: run.result?.outcome || 'unknown', failure_class: run.result?.failure_class || 'none' })}} 1`);
 
   if (run.pool) {
     h('macprovider_canary_pool_providers', 'Providers by pool state from /v1/status.', 'gauge');
@@ -631,6 +749,8 @@ function round(v, d = 2) {
  * not ping the heartbeat.
  */
 export function degradedReasons(run, thresholds = {}) {
+  const livenessOnly = run?.mode === 'liveness';
+  const baselineQualified = run?.mode === 'qualification';
   const limits = {
     maxTtftP95Ms: thresholds.maxTtftP95Ms ?? 7000,
     minDecodeTpsP50: thresholds.minDecodeTpsP50 ?? 15,
@@ -639,6 +759,9 @@ export function degradedReasons(run, thresholds = {}) {
     minTpsSamples: thresholds.tpsSamples ?? 3,
   };
   const reasons = [];
+  if (run?.result?.outcome && run.result.outcome !== 'healthy') {
+    reasons.push(`canary:${run.result.failure_class || 'failed'}`);
+  }
   if (!run || run.up !== 1) reasons.push('gateway_down');
 
   for (const model of run?.models || []) {
@@ -665,16 +788,17 @@ export function degradedReasons(run, thresholds = {}) {
     }
     if (!model.ttft_ms || model.ttft_ms.n < 1 || model.ttft_ms.p95 == null) {
       reasons.push(`${id}:ttft_signal_missing`);
-    } else if (model.ttft_ms.n < limits.minTtftSamples) {
+    } else if (!livenessOnly && model.ttft_ms.n < limits.minTtftSamples) {
       reasons.push(`${id}:ttft_samples_${model.ttft_ms.n}_lt_${limits.minTtftSamples}`);
-    } else if (model.ttft_ms.p95 > limits.maxTtftP95Ms) {
+    } else if (!livenessOnly && !baselineQualified && model.ttft_ms.p95 > limits.maxTtftP95Ms) {
       reasons.push(`${id}:ttft_p95_${round(model.ttft_ms.p95)}ms_gt_${limits.maxTtftP95Ms}ms`);
     }
+    if (livenessOnly) continue;
     if (!model.decode_tps || model.decode_tps.n < 1 || model.decode_tps.p50 == null) {
       reasons.push(`${id}:decode_tps_signal_missing`);
     } else if (model.decode_tps.n < limits.minTpsSamples) {
       reasons.push(`${id}:decode_tps_samples_${model.decode_tps.n}_lt_${limits.minTpsSamples}`);
-    } else if (model.decode_tps.p50 < limits.minDecodeTpsP50) {
+    } else if (!baselineQualified && model.decode_tps.p50 < limits.minDecodeTpsP50) {
       reasons.push(`${id}:decode_tps_p50_${round(model.decode_tps.p50)}_lt_${limits.minDecodeTpsP50}`);
     }
     if (model.cached_prompt_ratio == null) {
@@ -703,65 +827,146 @@ async function pushMetrics(text) {
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
-async function main() {
-  if (!CONFIG.token) {
-    console.error('FAIL: set MACPROVIDER_BUYER_TOKEN or MALIBU_API_KEY');
-    process.exit(2);
-  }
+async function loadBaselines() {
+  if (!CONFIG.baselineFile) return [];
+  const fs = await import('node:fs/promises');
+  let parsed;
   try {
-    const baseUrl = parseSafeUrl(`${CONFIG.base}/v1/status`, 'CANARY_BASE');
-    await assertResolvesPublic(baseUrl, 'CANARY_BASE');
-    if (CONFIG.pushgateway) {
-      const pgUrl = parseSafeUrl(CONFIG.pushgateway, 'CANARY_PUSHGATEWAY');
-      await assertResolvesPublic(pgUrl, 'CANARY_PUSHGATEWAY');
+    parsed = JSON.parse(await fs.readFile(CONFIG.baselineFile, 'utf8'));
+  } catch (error) {
+    throw new Error(`cannot read CANARY_BASELINE_FILE: ${error.message || error}`);
+  }
+  return validateBaselineDocument(parsed);
+}
+
+function classifySignalReasons(reasons) {
+  const joined = reasons.join(' ');
+  if (/thermal/.test(joined)) return 'thermal_regression';
+  if (/memory/.test(joined)) return 'memory_regression';
+  if (/heartbeat|activity|connection_changed|provider_disappeared|coordinator_disconnected/.test(joined)) {
+    return 'heartbeat_regression';
+  }
+  return 'provider_state_regression';
+}
+
+function createControl(initial, baselines, budget) {
+  let failure = null;
+  const observations = [initial];
+
+  const fail = (failureClass, reasons, phase) => {
+    if (failure) return;
+    failure = {
+      outcome: 'aborted',
+      failure_class: failureClass,
+      reasons: [...new Set(reasons)],
+      phase,
+      aborted: true,
+    };
+  };
+
+  const observationReasons = (observed) => {
+    const reasons = gatewayInvariantReasons(initial.gateway, observed.gateway, {
+      minReadyProviders: CONFIG.minReadyProviders,
+    });
+    if (initial.operator_pool) {
+      if (!observed.operator_pool) reasons.push('operator_pool_signal_missing');
+      else reasons.push(...poolzInvariantReasons(initial.operator_pool, observed.operator_pool, {
+        maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+      }));
     }
-  } catch (e) {
-    console.error(`FAIL: ${redact(e.message)}`);
-    process.exit(2);
-  }
-  const runStartUnix = Math.floor(realUnix());
+    if (initial.providers.length) {
+      const byID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
+      for (const expected of initial.providers) {
+        const current = byID.get(expected.provider_id);
+        if (!current) reasons.push(`${expected.provider_id}:provider_signal_missing`);
+        else reasons.push(...providerSignalReasons(expected, current, {
+          maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+          maxMemoryFraction: CONFIG.maxMemoryFraction,
+        }));
+      }
+    }
+    return [...new Set(reasons)];
+  };
 
-  let status = null;
-  try {
-    status = await getStatus();
-  } catch (e) {
-    console.error(`WARN: /v1/status failed: ${redact(e.message)}`);
-  }
+  const observeAndCheck = async (phase) => {
+    if (failure) return null;
+    try {
+      const observed = await observeSafety();
+      observations.push(observed);
+      const reasons = observationReasons(observed);
+      if (reasons.length) fail(classifySignalReasons(reasons), reasons, phase);
+      return observed;
+    } catch (error) {
+      fail('safety_observer_failure', [redact(error.message || String(error))], phase);
+      return null;
+    }
+  };
 
-  let models = CONFIG.models;
-  if (!models.length) {
-    models = (status?.models || []).map((m) => m.id).filter(Boolean);
-  }
-  if (!models.length) {
-    console.error('WARN: no models to probe (status unreachable and CANARY_MODELS unset)');
-  }
+  return {
+    async beforeRequest(maxTokens) {
+      const reason = budget.reserve(maxTokens);
+      if (reason) {
+        fail('budget_exhausted', [reason], 'before_request');
+        return false;
+      }
+      await observeAndCheck(`before_request_${budget.requests}`);
+      return !failure;
+    },
+    async afterRequest(model, result, maxTokens) {
+      budget.recordProvider(result.provider, maxTokens);
+      if (!result.ok) {
+        fail('request_failure', [`${model}:${outcomeBucket(result)}`], `request_${budget.requests}`);
+        return;
+      }
+      if (CONFIG.mode === 'qualification') {
+        const baseline = findBaseline(baselines, model, result.provider || '');
+        const reasons = performanceRegressionReasons(result, baseline);
+        if (reasons.length) {
+          fail(reasons.includes('baseline_unavailable') ? 'baseline_unavailable' : 'performance_regression',
+            reasons.map((reason) => `${model}:${result.provider || '<unknown>'}:${reason}`),
+            `request_${budget.requests}`);
+          return;
+        }
+      }
+      await observeAndCheck(`after_request_${budget.requests}`);
+    },
+    requestTimeoutMs() {
+      return Math.max(1, Math.min(CONFIG.reqTimeoutMs, budget.remainingDurationMs()));
+    },
+    failed() {
+      return failure != null;
+    },
+    failure() {
+      return failure;
+    },
+    fail,
+    observations,
+    observeAndCheck,
+  };
+}
 
-  const results = [];
-  for (const model of models) {
-    process.stderr.write(redact(`probing ${model} ...\n`));
-    const r = await sampleModel(model);
-    results.push(r);
-    const t = r.ttftMs.length ? `ttft_p50=${percentile(r.ttftMs, 50)}ms p95=${percentile(r.ttftMs, 95)}ms` : 'ttft=none';
-    const tps = r.decodeTps.length ? `tps_p50=${round(percentile(r.decodeTps, 50))}` : 'tps=none';
-    const cache = r.cachedRatio != null ? `cache=${round(r.cachedRatio, 3)}` : 'cache=n/a';
-    // redact: a hostile gateway could plant the token in a server-controlled
-    // field (model id, provider id, error) that lands in this progress line.
-    console.error(
-      redact(
-        `  ${model}: serviceable=${r.serviceable} ${t} ${tps} ${cache} outcomes=${JSON.stringify(r.outcomes)}${r.firstError ? ` firstErr="${r.firstError}"` : ''}`
-      )
-    );
+function preconditionReasons(observed) {
+  const reasons = gatewayInvariantReasons(observed.gateway, observed.gateway, {
+    minReadyProviders: CONFIG.minReadyProviders,
+  });
+  if (CONFIG.mode === 'qualification') {
+    reasons.push(...poolzInvariantReasons(observed.operator_pool || [], observed.operator_pool || [], {
+      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+    }));
+    for (const provider of observed.providers) {
+      reasons.push(...providerSignalReasons(provider, provider, {
+        maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+        maxMemoryFraction: CONFIG.maxMemoryFraction,
+      }));
+    }
   }
+  return [...new Set(reasons)];
+}
 
-  const run = buildRun(status, results, runStartUnix);
-  // Redact every serialized sink, not just error text: any server-controlled
-  // string (model/provider id, coordinator status) could carry the token.
+async function emitRun(run) {
   const prom = redact(toProm(run));
   const runJson = redact(JSON.stringify(run, null, 2));
-
-  // stdout: the JSON run summary (machine-readable). Diagnostics go to stderr.
   console.log(runJson);
-
   if (CONFIG.metricsOut) {
     await writeAtomic(CONFIG.metricsOut, prom);
     console.error(redact(`wrote metrics → ${CONFIG.metricsOut}`));
@@ -777,20 +982,173 @@ async function main() {
     try {
       await pushMetrics(prom);
       console.error(redact(`pushed metrics → ${CONFIG.pushgateway}`));
-    } catch (e) {
-      console.error(`WARN: pushgateway failed: ${redact(e.message)}`);
+    } catch (error) {
+      console.error(`WARN: pushgateway failed: ${redact(error.message)}`);
     }
   }
+}
 
-  // Exit code policy: 0 by default even on failures (recording is the job, and
-  // launchd should not treat a bad-network run as a probe crash). Opt into a
-  // non-zero exit for CI/alerting with --fail-on-degraded.
-  if (CONFIG.failOnDegraded) {
-    const reasons = degradedReasons(run, CONFIG);
-    if (reasons.length) {
-      console.error(`DEGRADED: ${reasons.join(', ')}`);
-      process.exit(1);
+async function main() {
+  if (!CONFIG.token) {
+    console.error('FAIL: set MACPROVIDER_BUYER_TOKEN or MALIBU_API_KEY');
+    process.exitCode = 2;
+    return;
+  }
+  if (!['liveness', 'qualification'].includes(CONFIG.mode)) {
+    console.error('FAIL: --mode must be liveness or qualification');
+    process.exitCode = 2;
+    return;
+  }
+  if (CONFIG.maxMemoryFraction <= 0 || CONFIG.maxMemoryFraction > 1) {
+    console.error('FAIL: CANARY_MAX_MEMORY_FRACTION must be greater than 0 and at most 1');
+    process.exitCode = 2;
+    return;
+  }
+  if (CONFIG.mode === 'qualification') {
+    const missing = [];
+    if (!CONFIG.qualificationConfirmed) missing.push('--capacity-isolated');
+    if (!CONFIG.baselineFile) missing.push('CANARY_BASELINE_FILE');
+    if (!CONFIG.poolzURL) missing.push('CANARY_POOLZ_URL');
+    if (!CONFIG.operatorToken) missing.push('CANARY_OPERATOR_TOKEN');
+    if (!CONFIG.providerStatusURLs.length) missing.push('CANARY_PROVIDER_STATUS_URLS');
+    if (missing.length) {
+      console.error(`FAIL: qualification requires ${missing.join(', ')}`);
+      process.exitCode = 2;
+      return;
     }
+  }
+  let baselines = [];
+  try {
+    const baseUrl = parseSafeUrl(`${CONFIG.base}/v1/status`, 'CANARY_BASE');
+    await assertResolvesPublic(baseUrl, 'CANARY_BASE');
+    if (CONFIG.pushgateway) {
+      const pgUrl = parseSafeUrl(CONFIG.pushgateway, 'CANARY_PUSHGATEWAY');
+      await assertResolvesPublic(pgUrl, 'CANARY_PUSHGATEWAY');
+    }
+    if (CONFIG.poolzURL) {
+      const poolzUrl = parseSafeUrl(CONFIG.poolzURL, 'CANARY_POOLZ_URL');
+      await assertResolvesPublic(poolzUrl, 'CANARY_POOLZ_URL');
+    }
+    for (const raw of CONFIG.providerStatusURLs) {
+      const providerUrl = parseSafeUrl(raw, 'CANARY_PROVIDER_STATUS_URLS');
+      await assertResolvesPublic(providerUrl, 'CANARY_PROVIDER_STATUS_URLS');
+    }
+    baselines = await loadBaselines();
+  } catch (e) {
+    console.error(`FAIL: ${redact(e.message)}`);
+    process.exitCode = 2;
+    return;
+  }
+  const runStartUnix = Math.floor(realUnix());
+  const budget = new RunBudget({
+    maxRequests: CONFIG.maxRequestsPerProvider,
+    maxCompletionTokens: CONFIG.maxCompletionTokensPerProvider,
+    maxDurationMs: CONFIG.maxRunDurationMs,
+  });
+  let initial = null;
+  let initialFailure = null;
+  try {
+    initial = await observeSafety();
+  } catch (e) {
+    initialFailure = {
+      outcome: 'aborted', failure_class: 'safety_observer_failure',
+      reasons: [redact(e.message || String(e))], phase: 'precondition', aborted: true,
+    };
+  }
+  if (!initial) {
+    const run = buildRun(null, [], runStartUnix, {
+      result: initialFailure,
+      budget: budget.snapshot(),
+      safety: { initial: null, final: null, observation_count: 0 },
+    });
+    await emitRun(run);
+    console.error(`ABORTED [${initialFailure.failure_class}]: ${initialFailure.reasons.join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  const control = createControl(initial, baselines, budget);
+  const preReasons = preconditionReasons(initial);
+  if (preReasons.length) control.fail('precondition_failed', preReasons, 'precondition');
+  let models = CONFIG.models;
+  if (!models.length) {
+    models = (initial.gateway.models || []).map((m) => m.id).filter(Boolean);
+  }
+  if (!models.length) {
+    control.fail('precondition_failed', ['no_models_to_probe'], 'precondition');
+  }
+  const results = [];
+  for (const model of models) {
+    if (control.failed()) break;
+    process.stderr.write(redact(`probing ${model} ...\n`));
+    const r = await sampleModel(model, control);
+    results.push(r);
+    const t = r.ttftMs.length ? `ttft_p50=${percentile(r.ttftMs, 50)}ms p95=${percentile(r.ttftMs, 95)}ms` : 'ttft=none';
+    const tps = r.decodeTps.length ? `tps_p50=${round(percentile(r.decodeTps, 50))}` : 'tps=none';
+    const cache = r.cachedRatio != null ? `cache=${round(r.cachedRatio, 3)}` : 'cache=n/a';
+    // redact: a hostile gateway could plant the token in a server-controlled
+    // field (model id, provider id, error) that lands in this progress line.
+    console.error(
+      redact(
+        `  ${model}: serviceable=${r.serviceable} ${t} ${tps} ${cache} outcomes=${JSON.stringify(r.outcomes)}${r.firstError ? ` firstErr="${r.firstError}"` : ''}`
+      )
+    );
+  }
+  let post = control.observations.at(-1);
+  const recoverySamples = [];
+  if (!control.failed()) {
+    post = await control.observeAndCheck('postcondition');
+  }
+  if (!control.failed()) {
+    const soakDeadline = Date.now() + (CONFIG.recoverySoakSeconds * 1000);
+    while (Date.now() < soakDeadline && !control.failed()) {
+      const timeReason = budget.timeReason();
+      if (timeReason) {
+        control.fail('budget_exhausted', [timeReason], 'recovery_soak');
+        break;
+      }
+      await sleep(Math.min(CONFIG.recoveryPollMs, Math.max(1, soakDeadline - Date.now())));
+      const observed = await control.observeAndCheck('recovery_soak');
+      if (observed) recoverySamples.push(observed);
+    }
+  }
+  if (!control.failed()) {
+    const recoveryReasons = recoverySoakReasons({
+      gatewayInitial: initial.gateway,
+      gatewaySamples: recoverySamples.map((sample) => sample.gateway),
+      poolzInitial: initial.operator_pool,
+      poolzSamples: recoverySamples.map((sample) => sample.operator_pool),
+      providerInitial: initial.providers,
+      providerSamples: recoverySamples.map((sample) => sample.providers),
+    }, {
+      minReadyProviders: CONFIG.minReadyProviders,
+      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+      maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+      maxMemoryFraction: CONFIG.maxMemoryFraction,
+    });
+    if (recoveryReasons.length) control.fail('recovery_failed', recoveryReasons, 'recovery_soak');
+  }
+  const result = control.failure() || {
+    outcome: 'healthy', failure_class: null, reasons: [], phase: 'complete', aborted: false,
+  };
+  const run = buildRun(initial.gateway, results, runStartUnix, {
+    result,
+    budget: budget.snapshot(),
+    safety: {
+      initial,
+      final: post,
+      observation_count: control.observations.length,
+      recovery_samples: recoverySamples.length,
+      qualification_capacity_isolated: CONFIG.mode === 'qualification' ? CONFIG.qualificationConfirmed : null,
+    },
+  });
+  await emitRun(run);
+  const reasons = degradedReasons(run, CONFIG);
+  if (result.outcome !== 'healthy') {
+    console.error(`ABORTED [${result.failure_class}]: ${result.reasons.join(', ')}`);
+    process.exitCode = 1;
+  } else if (CONFIG.failOnDegraded && reasons.length) {
+    console.error(`DEGRADED: ${reasons.join(', ')}`);
+    process.exitCode = 1;
   }
 }
 

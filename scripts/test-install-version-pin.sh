@@ -17,6 +17,7 @@ fatal() {
 
 lib="$(mktemp "${TMPDIR:-/tmp}/macprovider-install-version-lib.XXXXXX")"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-install-version.XXXXXX")"
+workdir="$(cd "$workdir" && pwd -P)"
 trap 'rm -f "$lib"; rm -rf "$workdir"' EXIT
 
 awk '
@@ -79,7 +80,7 @@ awk '
   emit { print }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag download_release verify_sha256 validate_staged_entries validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
+for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
@@ -192,7 +193,7 @@ reset_mocks() {
   MOCK_CHECKSUMS="goodhash macprovider-cli-v1.7.11-darwin-arm64.pkg"
   MOCK_RELEASES_JSON='[{"tag_name":"v1.8.0","prerelease":true},{"tag_name":"verify-v1.0.0","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
   MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.33"}'
-  unset MACPROVIDER_VERSION
+  unset MACPROVIDER_VERSION MACPROVIDER_ACCEPTANCE_ASSET_DIR MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM
   EMERGENCY_ROLLBACK=0
 }
 
@@ -466,6 +467,85 @@ report "case16-tokenless-failure-preserves-restored-bearer" 1 \
   "$(grep -c "^provider_token: $legacy_token$" "$restored_config")"
 report "case16-tokenless-failure-preserves-new-provider-id" 1 \
   "$(grep -c "^provider_id: \"$provider_id\"$" "$restored_config")"
+
+################################################################
+# Case 17 — protected acceptance assets require an exact version
+# and use only locally staged, signed payloads.
+################################################################
+acceptance_dir="$workdir/acceptance-v1.8.33"
+mkdir -m 700 "$acceptance_dir"
+printf 'goodhash macprovider-cli-v1.8.33-darwin-arm64.pkg\n' > "$acceptance_dir/checksums.txt"
+printf 'signature\n' > "$acceptance_dir/checksums.txt.sig"
+printf 'candidate-package\n' > "$acceptance_dir/macprovider-cli-v1.8.33-darwin-arm64.pkg"
+chmod 600 "$acceptance_dir"/*
+
+reset_mocks
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case17-acceptance-assets-require-version" 7 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+run_release_chain
+report "case17-local-candidate-skips-release-download" "" "$(cat "$DOWNLOAD_LOG")"
+report "case17-local-candidate-payload-staged" "candidate-package" \
+  "$(tr -d '\n' < "$asset_path")"
+report "case17-local-candidate-validation-chain-called" 1 "$VALIDATE_CALLED"
+
+################################################################
+# Case 18 — unsafe acceptance paths and signing-key substitution
+# fail closed before a candidate payload is staged.
+################################################################
+acceptance_link="$workdir/acceptance-link"
+ln -s "$acceptance_dir" "$acceptance_link"
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_link"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case18-symlinked-acceptance-dir-rejected" 7 "$rc"
+
+unsafe_acceptance_dir="$workdir/acceptance-world-writable"
+cp -R "$acceptance_dir" "$unsafe_acceptance_dir"
+chmod 700 "$unsafe_acceptance_dir"
+chmod 666 "$unsafe_acceptance_dir/checksums.txt"
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$unsafe_acceptance_dir"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case18-world-writable-acceptance-asset-rejected" 7 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="untrusted replacement key"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case18-acceptance-signing-key-override-rejected" 7 "$rc"
+
+################################################################
+# Case 19 — acceptance candidates retain the ordinary checksum
+# signature and hash fail-closed chain.
+################################################################
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MOCK_SIGNATURE_FAIL=1
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case19-acceptance-signature-mismatch-fails" 4 "$rc"
+report "case19-signature-failure-stages-no-payload" "" "$(cat "$DOWNLOAD_LOG")"
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MOCK_SHA="badhash"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case19-acceptance-checksum-mismatch-fails" 4 "$rc"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

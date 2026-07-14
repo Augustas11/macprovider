@@ -1624,13 +1624,35 @@ struct UpdateCommand: AsyncParsableCommand {
     @Option(help: "GitHub latest-release API URL. Defaults to the public macprovider release repository.")
     var releasesAPIURL: String?
 
+    @Option(help: "Protected signed acceptance-candidate asset directory. Never fetches or publishes a release.")
+    var acceptanceDirectory: String?
+
+    @Option(help: "Exact vX.Y.Z identity of the signed acceptance candidate.")
+    var acceptanceTag: String?
+
     func run() async throws {
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides())
-        try await SelfUpdate(
+        let updater = SelfUpdate(
             currentVersion: CoordinatorClient.binaryVersion,
             releasesAPIURL: releasesAPIURL,
             providerID: resolvedConfig?.providerID
-        ).run(checkOnly: check)
+        )
+        if acceptanceDirectory != nil || acceptanceTag != nil {
+            guard !check, releasesAPIURL == nil,
+                  let acceptanceDirectory,
+                  let acceptanceTag
+            else {
+                throw ValidationError(
+                    "--acceptance-directory and --acceptance-tag must be supplied together and cannot be combined with --check or --releases-api-url"
+                )
+            }
+            try await updater.runAcceptanceCandidate(
+                from: URL(fileURLWithPath: acceptanceDirectory, isDirectory: true),
+                tag: acceptanceTag
+            )
+        } else {
+            try await updater.run(checkOnly: check)
+        }
         if let staleSince = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).staleRecommendationSince() {
             FileHandle.standardError.write(Data("""
 

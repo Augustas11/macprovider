@@ -19,7 +19,7 @@
 #   cp canary-buyer.service canary-buyer.timer /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now canary-buyer.timer
 [Unit]
-Description=macprovider canary buyer probe (e2e serving/perf harness)
+Description=macprovider low-impact scheduled buyer liveness probe
 After=network-online.target
 Wants=network-online.target
 
@@ -32,20 +32,22 @@ Environment=CANARY_BASE=https://api.streamvc.live
 Environment=CANARY_NODE_BIN=/usr/bin/node
 Environment=CANARY_METRICS_OUT=/var/lib/macprovider-canary-buyer/canary_buyer.prom
 Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts
+# The shipped schedule remains inert until reviewed approval creates this gate.
+Environment=CANARY_ENABLE_FILE=/etc/macprovider/canary-buyer.enabled
+Environment=CANARY_DISABLE_FILE=/var/lib/macprovider-canary-buyer/DISABLED
 # Production must never silently degrade back to journal-only monitoring.
 Environment=CANARY_REQUIRE_HEARTBEAT=1
-# A scheduled run may overlap the mandatory AEAD session handoff. Retry the
-# entire strict probe once; no partial-success attempt is ever declared healthy.
-Environment=CANARY_DEGRADED_RETRIES=1
-Environment=CANARY_RETRY_DELAY_SECONDS=15
-Environment=CANARY_PROBE_TIMEOUT_SECONDS=300
+# Scheduled liveness is one 8-token request/model with a worst-case global cap;
+# all traffic could route to one provider, so these are true per-provider caps.
+Environment=CANARY_MAX_REQUESTS_PER_PROVIDER=4
+Environment=CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER=32
+Environment=CANARY_MAX_RUN_DURATION_MS=90000
+Environment=CANARY_RECOVERY_SOAK_SECONDS=15
+Environment=CANARY_PROBE_TIMEOUT_SECONDS=120
 Environment=CANARY_TIMEOUT_BIN=/usr/bin/timeout
-# --fail-on-degraded: exit non-zero for availability, request failures, TTFT,
-# decode-TPS, cache, or missing-signal regressions, so the heartbeat is not
-# pinged and deploys can use this same service as their final serving gate.
-ExecStart=/bin/bash /opt/macprovider-canary-buyer/run-canary.sh --fail-on-degraded
-# Two bounded 5-minute attempts plus retry delay and process/service overhead.
-TimeoutStartSec=11min
+# This unit is never a performance or rollout qualification surface.
+ExecStart=/bin/bash /opt/macprovider-canary-buyer/run-canary.sh --mode liveness --fail-on-degraded
+TimeoutStartSec=3min
 # Hardening — the probe only needs outbound https + its own state dir.
 NoNewPrivileges=true
 ProtectSystem=strict

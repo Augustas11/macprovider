@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      acceptance_candidate:
+        description: "Sign a protected non-public acceptance candidate from the selected branch head"
+        required: false
+        default: false
+        type: boolean
       provider_admission_policy:
         description: "Signed provider admission rollout policy"
         required: true
@@ -35,7 +40,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build unsigned release inputs from reviewed main
+    name: Build unsigned release inputs from reviewed source
     # The official macos-15 image contract carries Xcode 16.4 (16F6) at
     # /Applications/Xcode_16.4.app and macOS SDK 15.5:
     # https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md
@@ -46,6 +51,7 @@ jobs:
       tag: ${{ steps.release_source.outputs.tag }}
       commit: ${{ steps.release_source.outputs.commit }}
       prerelease: ${{ steps.release_source.outputs.prerelease }}
+      acceptance_candidate: ${{ steps.release_source.outputs.acceptance_candidate }}
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6.0.3. Re-resolve deliberately
@@ -61,12 +67,27 @@ jobs:
           RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
           RELEASE_PRERELEASE_INPUT: ${{ github.event.inputs.prerelease || 'false' }}
           RELEASE_CANDIDATE_INPUT: ${{ github.event.inputs.candidate || 'false' }}
+          RELEASE_ACCEPTANCE_CANDIDATE_INPUT: ${{ github.event.inputs.acceptance_candidate || 'false' }}
           PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
           bash scripts/validate-release-inputs.sh \
             "$RELEASE_VERSION_INPUT" "$RELEASE_PRERELEASE_INPUT" \
             "$RELEASE_CANDIDATE_INPUT"
+          case "$RELEASE_ACCEPTANCE_CANDIDATE_INPUT" in
+            true|false) ;;
+            *) echo "::error::acceptance_candidate must be true or false" >&2; exit 1 ;;
+          esac
+          if [[ "$RELEASE_ACCEPTANCE_CANDIDATE_INPUT" == "true" ]]; then
+            [[ "$RELEASE_CANDIDATE_INPUT" == "true" ]] || {
+              echo "::error::acceptance_candidate requires candidate=true" >&2
+              exit 1
+            }
+            [[ "$RELEASE_PRERELEASE_INPUT" == "true" ]] || {
+              echo "::error::acceptance_candidate requires prerelease=true" >&2
+              exit 1
+            }
+          fi
           case "$PROVIDER_ADMISSION_POLICY_INPUT" in
             bridge_required|strict_post_migration) ;;
             *) echo "::error::invalid provider admission rollout policy" >&2; exit 1 ;;
@@ -74,14 +95,19 @@ jobs:
           tag="$RELEASE_VERSION_INPUT"
           commit="$(git rev-parse HEAD)"
           absence_policy="--require-existing"
+          source_mode="--production"
           if [[ "$RELEASE_CANDIDATE_INPUT" == "true" ]]; then
             absence_policy="--allow-absent"
           fi
+          if [[ "$RELEASE_ACCEPTANCE_CANDIDATE_INPUT" == "true" ]]; then
+            source_mode="--acceptance-candidate"
+          fi
           bash scripts/verify-release-source.sh \
-            "$tag" "$commit" origin "$absence_policy"
+            "$tag" "$commit" origin "$absence_policy" "$source_mode" "$GITHUB_REF"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "prerelease=$RELEASE_PRERELEASE_INPUT" >> "$GITHUB_OUTPUT"
+          echo "acceptance_candidate=$RELEASE_ACCEPTANCE_CANDIDATE_INPUT" >> "$GITHUB_OUTPUT"
 
       - name: Verify content-pinned app build inputs
         shell: bash
@@ -229,7 +255,7 @@ jobs:
           retention-days: 1
 
   sign_publish:
-    name: Sign and publish reviewed release
+    name: Sign reviewed release or acceptance candidate
     needs: build
     runs-on: macos-15
     environment: production-release
@@ -252,11 +278,28 @@ jobs:
 
       - name: Restore captured unsigned inputs
         shell: bash
+        env:
+          ACCEPTANCE_CANDIDATE: ${{ needs.build.outputs.acceptance_candidate }}
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
+          case "$ACCEPTANCE_CANDIDATE" in
+            true)
+              absence_policy="--allow-absent"
+              source_mode="--acceptance-candidate"
+              ;;
+            false)
+              absence_policy="--require-existing"
+              source_mode="--production"
+              ;;
+            *)
+              echo "::error::validated acceptance-candidate state was lost" >&2
+              exit 1
+              ;;
+          esac
           bash scripts/verify-release-source.sh \
-            "$tag" "${{ needs.build.outputs.commit }}" origin --require-existing
+            "$tag" "${{ needs.build.outputs.commit }}" origin \
+            "$absence_policy" "$source_mode" "$GITHUB_REF"
           unsigned_dir="$RUNNER_TEMP/unsigned-release-inputs"
           unsigned_assets=(
             "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
@@ -290,7 +333,19 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
-        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+          ACCEPTANCE_CANDIDATE: ${{ needs.build.outputs.acceptance_candidate }}
+        run: |
+          set -euo pipefail
+          posture_mode="--production"
+          if [[ "$ACCEPTANCE_CANDIDATE" == "true" ]]; then
+            posture_mode="--acceptance-candidate"
+          elif [[ "$ACCEPTANCE_CANDIDATE" != "false" ]]; then
+            echo "::error::validated acceptance-candidate state was lost" >&2
+            exit 1
+          fi
+          bash scripts/verify-github-release-posture.sh \
+            "$GITHUB_REPOSITORY" production-release 28995904 285575208 \
+            antfleet-ops "$posture_mode" "$GITHUB_REF"
 
       - name: Reverify captured release toolchain
         shell: bash
@@ -1196,7 +1251,56 @@ jobs:
           EOF
           fi
 
+      - name: Stage protected non-public acceptance candidate
+        if: needs.build.outputs.acceptance_candidate == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          commit="${{ needs.build.outputs.commit }}"
+
+          # Re-fetch the selected branch immediately before exporting signed
+          # evidence. Ref drift invalidates the acceptance candidate instead
+          # of publishing artifacts built from a stale branch head.
+          bash scripts/verify-release-source.sh \
+            "$tag" "$commit" origin --allow-absent \
+            --acceptance-candidate "$GITHUB_REF"
+          bash scripts/verify-github-release-posture.sh \
+            "$GITHUB_REPOSITORY" production-release 28995904 285575208 \
+            antfleet-ops --acceptance-candidate "$GITHUB_REF"
+
+          release_assets=()
+          while IFS= read -r release_asset; do
+            [ -n "$release_asset" ] && release_assets+=("$release_asset")
+          done < release-assets.txt
+          bash scripts/verify-release-checksums.sh \
+            checksums.txt checksums.txt.sig release-provenance.json \
+            "$GITHUB_REPOSITORY" "$tag" "$commit" \
+            "${release_assets[@]}"
+
+          destination="$RUNNER_TEMP/acceptance-candidate-assets"
+          mkdir -p "$destination"
+          for release_asset in "${release_assets[@]}"; do
+            test -f "$release_asset"
+            test ! -L "$release_asset"
+            cp -p "$release_asset" "$destination/"
+          done
+          cp -p checksums.txt checksums.txt.sig release-assets.txt release-notes.md \
+            "$destination/"
+
+      - name: Upload protected non-public acceptance candidate
+        if: needs.build.outputs.acceptance_candidate == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: acceptance-candidate-${{ needs.build.outputs.commit }}
+          path: ${{ runner.temp }}/acceptance-candidate-assets/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Create verified draft GitHub release
+        if: needs.build.outputs.acceptance_candidate != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
@@ -1233,6 +1337,7 @@ jobs:
             draft-release-cli.json "$tag" "$release_commit" > draft-release-id.txt
 
       - name: Verify draft release assets by numeric ID
+        if: needs.build.outputs.acceptance_candidate != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -1258,6 +1363,7 @@ jobs:
             "${release_assets[@]}" checksums.txt checksums.txt.sig
 
       - name: Publish only the revalidated numeric draft
+        if: needs.build.outputs.acceptance_candidate != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
@@ -1341,6 +1447,7 @@ jobs:
           cmp final-draft-manifest.json publication-manifest.json
 
       - name: Verify published Tier-2 Release assets
+        if: needs.build.outputs.acceptance_candidate != 'true'
         shell: bash
         run: |
           set -euo pipefail

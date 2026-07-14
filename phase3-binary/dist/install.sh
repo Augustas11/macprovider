@@ -297,6 +297,10 @@ Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
   MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
                                  (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR
+                                 absolute owner-only directory containing a
+                                 protected, non-public signed candidate; requires
+                                 MACPROVIDER_VERSION and never contacts Releases
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
@@ -2694,6 +2698,9 @@ resolve_release_tag() {
   if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && [ -z "${MACPROVIDER_VERSION:-}" ]; then
     die 7 "emergency rollback requires MACPROVIDER_VERSION pinned to the prior signed tag"
   fi
+  if [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] && [ -z "${MACPROVIDER_VERSION:-}" ]; then
+    die 7 "MACPROVIDER_ACCEPTANCE_ASSET_DIR requires MACPROVIDER_VERSION"
+  fi
   if [ -n "${MACPROVIDER_VERSION:-}" ]; then
     validate_macprovider_version_tag "$MACPROVIDER_VERSION"
     if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && ! version_at_least "$MACPROVIDER_VERSION" "$MACPROVIDER_MIN_EMERGENCY_VERSION"; then
@@ -2704,6 +2711,42 @@ resolve_release_tag() {
     tag="$(latest_release_tag)"
     printf "%s" "$tag"
   fi
+}
+
+validated_acceptance_asset_dir() {
+  raw="$1"
+  python3 - "$raw" <<'PY'
+import os
+import stat
+import sys
+
+raw = sys.argv[1]
+if not raw.startswith("/") or any(part in {".", ".."} for part in raw.split("/")):
+    raise SystemExit("acceptance asset directory must be an absolute canonical path")
+path = os.path.normpath(raw)
+if os.path.realpath(path) != path:
+    raise SystemExit("acceptance asset directory must not contain symlinks")
+root = os.lstat(path)
+if not stat.S_ISDIR(root.st_mode) or root.st_uid != os.getuid() or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    raise SystemExit("acceptance asset directory must be owned by the installing user and not group/world-writable")
+entries = os.listdir(path)
+if not 1 <= len(entries) <= 64:
+    raise SystemExit("acceptance asset directory has an invalid asset count")
+total = 0
+for name in entries:
+    if not name or name in {".", ".."} or "/" in name or "\x00" in name:
+        raise SystemExit("acceptance asset directory contains an invalid name")
+    candidate = os.path.join(path, name)
+    info = os.lstat(candidate)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise SystemExit("acceptance assets must be owned regular files without hard links")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit("acceptance assets must not be group/world-writable")
+    total += info.st_size
+    if total > 8 * 1024 * 1024 * 1024:
+        raise SystemExit("acceptance asset directory exceeds the size limit")
+print(path)
+PY
 }
 
 download_release() {
@@ -2719,8 +2762,23 @@ download_release() {
   asset_path=""
   asset_kind=""
 
-  curl -fL "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
-  curl -fL "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
+  acceptance_dir=""
+  if [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ]; then
+    [ -z "${MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM:-}" ] \
+      || die 7 "acceptance candidates cannot override the embedded release signing key"
+    acceptance_dir="$(validated_acceptance_asset_dir "$MACPROVIDER_ACCEPTANCE_ASSET_DIR")" \
+      || die 7 "unsafe MACPROVIDER_ACCEPTANCE_ASSET_DIR"
+    [ -f "$acceptance_dir/checksums.txt" ] && [ -f "$acceptance_dir/checksums.txt.sig" ] \
+      || die 3 "acceptance candidate is missing checksums.txt or checksums.txt.sig"
+    cp "$acceptance_dir/checksums.txt" "$checksums_path" \
+      || die 3 "failed to stage acceptance checksums.txt"
+    cp "$acceptance_dir/checksums.txt.sig" "$checksums_sig_path" \
+      || die 3 "failed to stage acceptance checksums.txt.sig"
+    log "Using protected non-public acceptance assets for $tag."
+  else
+    curl -fL "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
+    curl -fL "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
+  fi
   verify_checksum_signature
 
   release_format="${MACPROVIDER_RELEASE_FORMAT:-auto}"
@@ -2732,8 +2790,13 @@ download_release() {
   if [ "$release_format" != "tar" ]; then
     pkg_expected="$(checksum_for_asset "$pkg_asset")"
     if [ -n "$pkg_expected" ]; then
-      log "Downloading signed package $pkg_asset from GitHub Releases."
-      curl -fL "$base/$pkg_asset" -o "$pkg_path" || die 3 "failed to download release package"
+      if [ -n "$acceptance_dir" ]; then
+        [ -f "$acceptance_dir/$pkg_asset" ] || die 3 "acceptance candidate is missing $pkg_asset"
+        cp "$acceptance_dir/$pkg_asset" "$pkg_path" || die 3 "failed to stage acceptance package"
+      else
+        log "Downloading signed package $pkg_asset from GitHub Releases."
+        curl -fL "$base/$pkg_asset" -o "$pkg_path" || die 3 "failed to download release package"
+      fi
       asset_path="$pkg_path"
       asset_kind="pkg"
       log "Using signed package release asset: $pkg_asset"
@@ -2743,8 +2806,13 @@ download_release() {
     log "Signed release manifest has no package for $tag; falling back to tarball."
   fi
 
-  log "Downloading $tarball_asset from GitHub Releases."
-  curl -fL "$base/$tarball_asset" -o "$tarball_path" || die 3 "failed to download release tarball"
+  if [ -n "$acceptance_dir" ]; then
+    [ -f "$acceptance_dir/$tarball_asset" ] || die 3 "acceptance candidate is missing $tarball_asset"
+    cp "$acceptance_dir/$tarball_asset" "$tarball_path" || die 3 "failed to stage acceptance tarball"
+  else
+    log "Downloading $tarball_asset from GitHub Releases."
+    curl -fL "$base/$tarball_asset" -o "$tarball_path" || die 3 "failed to download release tarball"
+  fi
   asset_path="$tarball_path"
   asset_kind="tar"
 }

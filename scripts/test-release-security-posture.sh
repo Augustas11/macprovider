@@ -29,6 +29,15 @@ candidate_input = re.search(
 )
 if candidate_input is None:
     raise SystemExit("candidate dispatch input must be a boolean defaulting to false")
+acceptance_input = re.search(
+    r"\n      acceptance_candidate:\n"
+    r"(?:        .*\n)*?"
+    r"        default: false\n"
+    r"        type: boolean\n",
+    text,
+)
+if acceptance_input is None:
+    raise SystemExit("acceptance_candidate dispatch input must be a boolean defaulting to false")
 build = text.split("\n  build:\n", 1)[1].split("\n  sign_publish:\n", 1)[0]
 publish = text.split("\n  sign_publish:\n", 1)[1]
 if "secrets." in build or "contents: write" in build:
@@ -36,11 +45,18 @@ if "secrets." in build or "contents: write" in build:
 if "environment: production-release" not in publish:
     raise SystemExit("secret-bearing publish job lacks the protected environment")
 if "scripts/verify-release-source.sh" not in build or "scripts/verify-release-source.sh" not in publish:
-    raise SystemExit("both jobs must verify the fresh reviewed main commit")
+    raise SystemExit("both jobs must verify the fresh reviewed source commit")
 if "RELEASE_CANDIDATE_INPUT" not in build or 'absence_policy="--allow-absent"' not in build:
     raise SystemExit("unprivileged build job lacks explicit candidate tag-absence handling")
-if "--allow-absent" in publish:
-    raise SystemExit("protected publish job must always require the exact release tag")
+for requirement in (
+    "RELEASE_ACCEPTANCE_CANDIDATE_INPUT",
+    '[[ "$RELEASE_CANDIDATE_INPUT" == "true" ]]',
+    '[[ "$RELEASE_PRERELEASE_INPUT" == "true" ]]',
+    'source_mode="--acceptance-candidate"',
+    'echo "acceptance_candidate=$RELEASE_ACCEPTANCE_CANDIDATE_INPUT"',
+):
+    if requirement not in build:
+        raise SystemExit(f"acceptance-candidate input contract is missing: {requirement}")
 if "unsigned-release-manifest.json" not in build or "unsigned-release-manifest.json" not in publish:
     raise SystemExit("unsigned candidate inputs lack an end-to-end provenance manifest")
 for requirement in ("MACPROVIDER_PROVIDER_ADMISSION_POLICY",):
@@ -101,13 +117,22 @@ manifest_position = restore.find("expected-unsigned-release-manifest.json")
 manifest_cmp_position = restore.find('cmp "$unsigned_dir/unsigned-release-manifest.json"')
 if (
     source_gate_position < 0
-    or "--require-existing" not in restore[source_gate_position:restore_position]
     or manifest_position < source_gate_position
     or manifest_cmp_position < manifest_position
     or restore_position < manifest_cmp_position
     or restore_position < source_gate_position
 ):
     raise SystemExit("protected job must verify the exact tag and candidate manifest before restoring inputs")
+for requirement in (
+    "ACCEPTANCE_CANDIDATE:",
+    'absence_policy="--allow-absent"',
+    'source_mode="--acceptance-candidate"',
+    'absence_policy="--require-existing"',
+    'source_mode="--production"',
+    '"$absence_policy" "$source_mode" "$GITHUB_REF"',
+):
+    if requirement not in restore:
+        raise SystemExit(f"protected source-mode gate is missing: {requirement}")
 for asset in ("coordinator-linux-amd64", "coordinator-cli-linux-amd64", "gateway-linux-amd64"):
     if asset not in restore:
         raise SystemExit(f"Pearl artifact does not cross the reviewed build boundary: {asset}")
@@ -191,9 +216,41 @@ if "actions/checkout v6.0.3" not in build:
     raise SystemExit("checkout provenance comment differs from the pinned action commit")
 if "Clean Apple signing material after notarization" not in publish:
     raise SystemExit("Apple keychain and private material must be deleted after notarization")
+acceptance_stage = publish.split(
+    "- name: Stage protected non-public acceptance candidate", 1
+)[1].split("\n      - name:", 1)[0]
+acceptance_upload = publish.split(
+    "- name: Upload protected non-public acceptance candidate", 1
+)[1].split("\n      - name:", 1)[0]
+acceptance_path = acceptance_stage + acceptance_upload
+for block in (acceptance_stage, acceptance_upload):
+    if "if: needs.build.outputs.acceptance_candidate == 'true'" not in block:
+        raise SystemExit("acceptance-only step is not guarded by the validated mode output")
+for requirement in (
+    "scripts/verify-release-source.sh",
+    "--allow-absent",
+    "--acceptance-candidate",
+    '"$GITHUB_REF"',
+    "scripts/verify-github-release-posture.sh",
+    "scripts/verify-release-checksums.sh",
+    "release-assets.txt",
+    "checksums.txt.sig",
+    "release-provenance.json",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "retention-days: 1",
+):
+    if requirement not in acceptance_path:
+        raise SystemExit(f"protected acceptance artifact path is missing: {requirement}")
+for forbidden in ("gh release create", "gh release view", "gh api --method PATCH", "deploy-malibu", "deploy-pearl"):
+    if forbidden in acceptance_path:
+        raise SystemExit(f"acceptance-candidate path contains a publication/deploy operation: {forbidden}")
 create = publish.split("- name: Create verified draft GitHub release", 1)[1].split("\n      - name:", 1)[0]
 verify_draft = publish.split("- name: Verify draft release assets by numeric ID", 1)[1].split("\n      - name:", 1)[0]
 make_public = publish.split("- name: Publish only the revalidated numeric draft", 1)[1].split("\n      - name:", 1)[0]
+verify_published = publish.split("- name: Verify published Tier-2 Release assets", 1)[1]
+for block in (create, verify_draft, make_public, verify_published):
+    if "if: needs.build.outputs.acceptance_candidate != 'true'" not in block:
+        raise SystemExit("public release step can execute for an acceptance candidate")
 if "--draft" not in create or create.find("scripts/verify-release-checksums.sh") > create.find("gh release create"):
     raise SystemExit("GitHub publication must verify canonical checksums before creating a draft")
 if (
@@ -485,5 +542,20 @@ if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
   exit 1
 fi
 grep -q 'must allow only the main branch' "$work/policies.out"
+
+printf '%s\n' '{"branch_policies":[{"id":3,"name":"main","type":"branch"},{"id":4,"name":"fix/acceptance","type":"branch"}]}' \
+  > "$work/fixtures/policies.json"
+PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  bash "$guard" Augustas11/macprovider production-release 28995904 285575208 \
+    antfleet-ops --acceptance-candidate refs/heads/fix/acceptance >/dev/null
+if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  bash "$guard" Augustas11/macprovider production-release 28995904 285575208 \
+    antfleet-ops --acceptance-candidate refs/heads/fix/other \
+    >"$work/acceptance-policy.out" 2>&1; then
+  echo "posture guard accepted an unapproved acceptance-candidate branch" >&2
+  exit 1
+fi
+grep -q 'must allow exactly main and the selected acceptance-candidate branch fix/other' \
+  "$work/acceptance-policy.out"
 
 echo "release security posture regression checks passed"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Wrapper for the canary buyer probe. Resolves the buyer token, runs the probe,
-# and writes a Prometheus textfile + a rotated JSON artifact. Intended to be
+# Wrapper for the canary buyer probe. Resolves credentials, runs exactly one
+# bounded probe, and writes a Prometheus textfile + a rotated JSON artifact. Intended to be
 # invoked by launchd (com.streamvc.canary-buyer.plist) on a lab Mac, or by hand.
 #
 # Token resolution order:
@@ -16,8 +16,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${CANARY_TOKEN_FILE:=${HOME:-/nonexistent}/.config/macprovider/buyer-api-key}"
 : "${CANARY_METRICS_OUT:=${HOME:-/nonexistent}/.local/state/canary-buyer/canary_buyer.prom}"
 : "${CANARY_JSON_OUT:=${HOME:-/nonexistent}/.local/state/canary-buyer/artifacts}"
+: "${CANARY_DISABLE_FILE:=${HOME:-/nonexistent}/.local/state/canary-buyer/DISABLED}"
 # Optional: export CANARY_PUSHGATEWAY=http://host:9091 to push instead of/along
-# with the textfile.
+# with the textfile. A scheduled unit should also set CANARY_ENABLE_FILE; its
+# absence keeps the shipped schedule fail-closed until the production gate is
+# approved.
+
+if [[ -e "$CANARY_DISABLE_FILE" ]]; then
+  echo "canary: class=emergency_disabled sentinel=$CANARY_DISABLE_FILE; no requests issued" >&2
+  exit 0
+fi
+if [[ -n "${CANARY_ENABLE_FILE:-}" && ! -e "$CANARY_ENABLE_FILE" ]]; then
+  echo "canary: class=not_enabled gate=$CANARY_ENABLE_FILE; no requests issued" >&2
+  exit 0
+fi
 
 if [[ -z "${MACPROVIDER_BUYER_TOKEN:-}" && -n "${CREDENTIALS_DIRECTORY:-}" && -r "$CREDENTIALS_DIRECTORY/buyer_token" ]]; then
   MACPROVIDER_BUYER_TOKEN="$(tr -d '[:space:]' < "$CREDENTIALS_DIRECTORY/buyer_token")"
@@ -26,6 +38,10 @@ fi
 if [[ -z "${CANARY_HEARTBEAT_URL:-}" && -n "${CREDENTIALS_DIRECTORY:-}" && -r "$CREDENTIALS_DIRECTORY/heartbeat_url" ]]; then
   CANARY_HEARTBEAT_URL="$(tr -d '\r\n' < "$CREDENTIALS_DIRECTORY/heartbeat_url")"
   export CANARY_HEARTBEAT_URL
+fi
+if [[ -z "${CANARY_OPERATOR_TOKEN:-}" && -n "${CREDENTIALS_DIRECTORY:-}" && -r "$CREDENTIALS_DIRECTORY/operator_token" ]]; then
+  CANARY_OPERATOR_TOKEN="$(tr -d '[:space:]' < "$CREDENTIALS_DIRECTORY/operator_token")"
+  export CANARY_OPERATOR_TOKEN
 fi
 
 if [[ -z "${MACPROVIDER_BUYER_TOKEN:-}" ]]; then
@@ -54,21 +70,9 @@ if [[ -z "$CURL_BIN" ]]; then
   exit 2
 fi
 
-DEGRADED_RETRIES="${CANARY_DEGRADED_RETRIES:-0}"
-RETRY_DELAY_SECONDS="${CANARY_RETRY_DELAY_SECONDS:-15}"
 PROBE_TIMEOUT_SECONDS="${CANARY_PROBE_TIMEOUT_SECONDS:-}"
-if [[ ! "$DEGRADED_RETRIES" =~ ^[0-3]$ ]]; then
-  echo "canary: CANARY_DEGRADED_RETRIES must be an integer in 0...3 without leading zeros" >&2
-  exit 2
-fi
-if [[ ! "$RETRY_DELAY_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]]; then
-  echo "canary: CANARY_RETRY_DELAY_SECONDS must be an integer in 0...300 without leading zeros" >&2
-  exit 2
-fi
-DEGRADED_RETRIES=$((10#$DEGRADED_RETRIES))
-RETRY_DELAY_SECONDS=$((10#$RETRY_DELAY_SECONDS))
-if (( RETRY_DELAY_SECONDS > 300 )); then
-  echo "canary: CANARY_RETRY_DELAY_SECONDS must be an integer in 0...300 without leading zeros" >&2
+if [[ -n "${CANARY_DEGRADED_RETRIES:-}" && "${CANARY_DEGRADED_RETRIES}" != "0" ]]; then
+  echo "canary: class=configuration_error CANARY_DEGRADED_RETRIES is disabled; degraded probes must not amplify load" >&2
   exit 2
 fi
 if [[ -n "$PROBE_TIMEOUT_SECONDS" ]]; then
@@ -117,34 +121,27 @@ if [[ -n "${CANARY_HEARTBEAT_URL:-}" ]]; then
     echo "canary: CANARY_HEARTBEAT_URL must be https (set CANARY_ALLOW_INSECURE=1 to allow http)" >&2
     exit 2
   fi
-  attempt=0
-  while :; do
-    if "${probe_command[@]}"; then
-      heartbeat_protocols='=https'
-      if [[ "${CANARY_ALLOW_INSECURE:-}" == "1" ]]; then
-        heartbeat_protocols='=http,https'
-      fi
-      if ! heartbeat_status="$("$CURL_BIN" -q --proto "$heartbeat_protocols" --max-redirs 0 \
-          -sS -o /dev/null -w '%{http_code}' -m 10 "$CANARY_HEARTBEAT_URL" 2>/dev/null)"; then
-        echo "canary: heartbeat ping failed after a healthy probe" >&2
-        exit 3
-      fi
-      if [[ ! "$heartbeat_status" =~ ^2[0-9][0-9]$ ]]; then
-        echo "canary: heartbeat returned HTTP $heartbeat_status after a healthy probe" >&2
-        exit 3
-      fi
-      exit 0
-    else
-      rc=$?
-    fi
-    if (( attempt >= DEGRADED_RETRIES )); then
-      echo "canary: probe exited $rc; heartbeat NOT pinged (dead-man switch will fire)" >&2
-      exit "$rc"
-    fi
-    attempt=$((attempt + 1))
-    echo "canary: probe exited $rc; retrying full probe in ${RETRY_DELAY_SECONDS}s ($attempt/$DEGRADED_RETRIES)" >&2
-    sleep "$RETRY_DELAY_SECONDS"
-  done
+  if "${probe_command[@]}"; then
+    :
+  else
+    rc=$?
+    echo "canary: class=probe_failed exit=$rc; no retry; heartbeat NOT pinged" >&2
+    exit "$rc"
+  fi
+  heartbeat_protocols='=https'
+  if [[ "${CANARY_ALLOW_INSECURE:-}" == "1" ]]; then
+    heartbeat_protocols='=http,https'
+  fi
+  if ! heartbeat_status="$("$CURL_BIN" -q --proto "$heartbeat_protocols" --max-redirs 0 \
+      -sS -o /dev/null -w '%{http_code}' -m 10 "$CANARY_HEARTBEAT_URL" 2>/dev/null)"; then
+    echo "canary: class=heartbeat_delivery_failed ping failed after a healthy probe" >&2
+    exit 3
+  fi
+  if [[ ! "$heartbeat_status" =~ ^2[0-9][0-9]$ ]]; then
+    echo "canary: class=heartbeat_delivery_failed HTTP $heartbeat_status after a healthy probe" >&2
+    exit 3
+  fi
+  exit 0
 fi
 
 exec "${probe_command[@]}"

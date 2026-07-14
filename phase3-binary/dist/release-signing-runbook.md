@@ -202,6 +202,95 @@ the Malibu project has no package dependency or independent updater, and
 XcodeGen 2.45.4 is installed only from its fixed release archive after SHA-256
 verification.
 
+### Protected non-public acceptance candidates
+
+Issue #585 hardware acceptance may need the final signed and notarized
+compatibility set before its source branch is merged or a release tag exists.
+Use `acceptance_candidate=true` only for that purpose. The mode is fail closed:
+it also requires `candidate=true` and `prerelease=true`, and both release jobs
+must observe the dispatch SHA as the fresh head of the exact selected branch.
+
+The selected branch must be explicitly allowed by the `production-release`
+environment alongside `main` for the duration of the acceptance run. Wildcard
+or unrelated branch policies are rejected. The same independent reviewer,
+self-review prevention, and disabled admin bypass remain mandatory. Normal
+production verification continues to require that `main` is the environment's
+only allowed branch, so remove the temporary exact branch policy before any
+production release.
+
+```bash
+export ACCEPTANCE_BRANCH=fix/585-provider-lifecycle-option2
+export TAG=vX.Y.Z
+git fetch origin "$ACCEPTANCE_BRANCH"
+export ACCEPTANCE_COMMIT="$(git rev-parse "origin/$ACCEPTANCE_BRANCH")"
+test "$(git ls-remote origin "refs/heads/$ACCEPTANCE_BRANCH" | awk '{print $1}')" = \
+  "$ACCEPTANCE_COMMIT"
+gh workflow run release.yml --repo Augustas11/macprovider \
+  --ref "$ACCEPTANCE_BRANCH" \
+  -f version="$TAG" -f prerelease=true -f candidate=true \
+  -f acceptance_candidate=true
+```
+
+Approve the `production-release` job only after independently reviewing the
+captured branch and SHA. The protected job signs, notarizes, and verifies the
+same complete compatibility artifact index, checksums, and provenance as a
+production release. It then uploads `acceptance-candidate-$ACCEPTANCE_COMMIT`
+as a one-day Actions artifact. It does not create or patch a GitHub release,
+publish assets, create a tag, or deploy Pearl. Branch-head drift before the
+final upload invalidates the run; dispatch a new run instead of reusing its
+artifacts.
+
+Consume the candidate only from a checkout at the captured commit. Download
+the private artifact into a fresh user-owned directory, verify the complete
+signed release set before extracting any executable content, and then use the
+verified tarball's installer with an exact version pin:
+
+```bash
+test "$(git rev-parse HEAD)" = "$ACCEPTANCE_COMMIT"
+export ACCEPTANCE_RUN_ID="$(
+  gh run list --repo Augustas11/macprovider --workflow release.yml \
+    --branch "$ACCEPTANCE_BRANCH" --event workflow_dispatch \
+    --json databaseId,headSha,conclusion \
+    --jq ".[] | select(.headSha == \"$ACCEPTANCE_COMMIT\" and .conclusion == \"success\") | .databaseId" \
+    | head -n 1
+)"
+test -n "$ACCEPTANCE_RUN_ID"
+mkdir -p "$HOME/Library/Caches"
+export ACCEPTANCE_ASSET_DIR="$(
+  mktemp -d "$HOME/Library/Caches/macprovider-acceptance.XXXXXX"
+)"
+chmod 700 "$ACCEPTANCE_ASSET_DIR"
+gh run download "$ACCEPTANCE_RUN_ID" --repo Augustas11/macprovider \
+  --name "acceptance-candidate-$ACCEPTANCE_COMMIT" \
+  --dir "$ACCEPTANCE_ASSET_DIR"
+chmod -R go-w "$ACCEPTANCE_ASSET_DIR"
+
+release_assets=()
+while IFS= read -r release_asset; do
+  test -n "$release_asset" && release_assets+=("$ACCEPTANCE_ASSET_DIR/$release_asset")
+done < "$ACCEPTANCE_ASSET_DIR/release-assets.txt"
+bash scripts/verify-release-checksums.sh \
+  "$ACCEPTANCE_ASSET_DIR/checksums.txt" \
+  "$ACCEPTANCE_ASSET_DIR/checksums.txt.sig" \
+  "$ACCEPTANCE_ASSET_DIR/release-provenance.json" \
+  Augustas11/macprovider "$TAG" "$ACCEPTANCE_COMMIT" \
+  "${release_assets[@]}"
+
+bootstrap_dir="$(mktemp -d "$HOME/Library/Caches/macprovider-bootstrap.XXXXXX")"
+tar -xzf "$ACCEPTANCE_ASSET_DIR/macprovider-cli-${TAG}-darwin-arm64.tar.gz" \
+  -C "$bootstrap_dir" compatibility-set-local/install.sh
+MACPROVIDER_VERSION="$TAG" \
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$ACCEPTANCE_ASSET_DIR" \
+  bash "$bootstrap_dir/compatibility-set-local/install.sh"
+```
+
+`MACPROVIDER_ACCEPTANCE_ASSET_DIR` never falls back to GitHub Releases. It
+requires `MACPROVIDER_VERSION`, rejects symlinked or writable asset paths and
+hard-linked files, forbids a checksum-public-key override, and verifies the
+ordinary embedded P-256 checksum signature and payload hashes before staging
+the package or tarball. Delete both temporary directories after the hardware
+run; the GitHub artifact expires automatically after one day.
+
 ### 8. Build the candidate, cut the release tag, and verify
 
 Merge the release commit to `main`, then dispatch a candidate from the freshly
@@ -217,7 +306,8 @@ git fetch origin main
 export RELEASE_COMMIT="$(git rev-parse origin/main)"
 test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$RELEASE_COMMIT"
 gh workflow run release.yml --repo Augustas11/macprovider --ref main \
-  -f version="$TAG" -f prerelease=false -f candidate=true
+  -f version="$TAG" -f prerelease=false -f candidate=true \
+  -f acceptance_candidate=false
 ```
 
 Wait until the unsigned `build` job succeeds and `sign_publish` is waiting for
@@ -233,7 +323,9 @@ git push origin "refs/tags/$TAG"
 test "$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')" = "$RELEASE_COMMIT"
 ```
 
-Only then approve `sign_publish` as the required environment reviewer. If
+Only then approve `sign_publish` as the required environment reviewer. This
+tag-before-approval rule applies to normal production mode; acceptance mode is
+the separately bounded non-public path above. If
 `origin/main` advanced **before the tag was created**, the build failed, the tag
 already targets different bytes, or the artifact expired, leave the protected
 job unapproved and start a new candidate from the new reviewed tip. After the
@@ -265,6 +357,10 @@ is 1-15 minutes for notarization. The workflow:
     numeric API transition from draft to public
 13. Re-fetches the published numeric release and requires GitHub immutability
     before recording the numeric release publication evidence
+
+Steps 11-13 execute only in normal production mode. Acceptance mode instead
+revalidates the selected branch and protected environment, re-verifies the
+signed checksums, and uploads the one-day private Actions artifact.
 
 If any draft verification or final gate fails, the workflow does not make the
 release public. Inspect or delete the retained

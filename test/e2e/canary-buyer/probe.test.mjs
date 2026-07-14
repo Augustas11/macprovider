@@ -24,6 +24,24 @@ test('healthy buyer run passes the deploy gate', () => {
   assert.deepEqual(degradedReasons({ up: 1, models: [healthyModel()] }), []);
 });
 
+test('scheduled liveness requires only one bounded serviceability sample', () => {
+  const model = healthyModel({
+    ttft_ms: { p95: 500, n: 1 },
+    decode_tps: { p50: null, n: 0 },
+    cached_prompt_ratio: null,
+    outcomes: { '2xx': 1 },
+  });
+  assert.deepEqual(degradedReasons({ mode: 'liveness', up: 1, models: [model] }), []);
+});
+
+test('explicit safety abort classification always fails the run', () => {
+  const run = {
+    mode: 'liveness', up: 1, models: [healthyModel({ ttft_ms: { p95: 500, n: 1 } })],
+    result: { outcome: 'aborted', failure_class: 'heartbeat_regression' },
+  };
+  assert.deepEqual(degradedReasons(run), ['canary:heartbeat_regression']);
+});
+
 test('availability and empty-pool failures are explicit', () => {
   assert.deepEqual(degradedReasons({ up: 0, models: [] }), ['gateway_down']);
   assert.deepEqual(degradedReasons({ up: 1, models: [] }), ['no_models_probed']);
@@ -126,4 +144,17 @@ test('malformed and oversized sample configuration fails before probing', () => 
     assert.equal(result.status, 1, `${name}=${value}`);
     assert.match(result.stderr, /must be an integer between/);
   }
+});
+
+test('qualification refuses to start without isolation and safety observers', () => {
+  const env = {
+    ...process.env,
+    MACPROVIDER_BUYER_TOKEN: 'mp_test_token_not_secret',
+  };
+  const result = spawnSync(process.execPath, [
+    fileURLToPath(new URL('./probe.mjs', import.meta.url)),
+    '--mode', 'qualification',
+  ], { encoding: 'utf8', env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /qualification requires --capacity-isolated/);
 });

@@ -11,12 +11,22 @@ environment_name="${2:-production-release}"
 release_tagger_id="${3:-28995904}"
 release_reviewer_id="${4:-285575208}"
 release_reviewer_login="${5:-antfleet-ops}"
+posture_mode="${6:---production}"
+source_ref="${7:-refs/heads/main}"
 
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "repository must be OWNER/REPO"
 [[ "$environment_name" =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid environment name"
 [[ "$release_tagger_id" =~ ^[1-9][0-9]*$ ]] || die "release tagger id must be numeric"
 [[ "$release_reviewer_id" =~ ^[1-9][0-9]*$ ]] || die "release reviewer id must be numeric"
 [[ "$release_reviewer_login" =~ ^[A-Za-z0-9-]+$ ]] || die "release reviewer login is invalid"
+[[ "$posture_mode" == "--production" || "$posture_mode" == "--acceptance-candidate" ]] ||
+  die "posture mode must be --production or --acceptance-candidate"
+[[ "$source_ref" == refs/heads/* ]] || die "release source must be a branch ref"
+source_branch="${source_ref#refs/heads/}"
+git check-ref-format --branch "$source_branch" >/dev/null 2>&1 || die "release source branch is invalid"
+if [[ "$posture_mode" == "--production" && "$source_ref" != "refs/heads/main" ]]; then
+  die "production release posture requires refs/heads/main"
+fi
 [[ -n "${GH_TOKEN:-}" ]] || die "GH_TOKEN with Administration:read and Actions:read is required"
 
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/release-posture.XXXXXX")"
@@ -36,7 +46,8 @@ gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
   "repos/$repo/rulesets?targets=tag&per_page=100" >"$work/rulesets.json" ||
   die "tag rulesets are unavailable"
 
-python3 - "$work" "$environment_name" "$release_reviewer_id" "$release_reviewer_login" <<'PY'
+python3 - "$work" "$environment_name" "$release_reviewer_id" "$release_reviewer_login" \
+  "$posture_mode" "$source_branch" <<'PY'
 import json
 import pathlib
 import sys
@@ -45,6 +56,8 @@ root = pathlib.Path(sys.argv[1])
 environment_name = sys.argv[2]
 release_reviewer_id = int(sys.argv[3])
 release_reviewer_login = sys.argv[4]
+posture_mode = sys.argv[5]
+source_branch = sys.argv[6]
 
 immutable = json.loads((root / "immutable.json").read_text())
 if immutable.get("enabled") is not True:
@@ -88,13 +101,26 @@ if (
     raise SystemExit(f"{environment_name} must use custom deployment branch policies")
 
 policies = json.loads((root / "environment-policies.json").read_text()).get("branch_policies")
-if not isinstance(policies, list) or len(policies) != 1 or not all(
+if not isinstance(policies, list) or not all(
     isinstance(policy, dict)
-    and policy.get("name") == "main"
+    and isinstance(policy.get("name"), str)
     and policy.get("type") in (None, "branch")
     for policy in policies
 ):
-    raise SystemExit(f"{environment_name} must allow only the main branch")
+    raise SystemExit(f"{environment_name} branch policies are invalid")
+policy_names = [policy["name"] for policy in policies]
+if len(policy_names) != len(set(policy_names)):
+    raise SystemExit(f"{environment_name} branch policies contain duplicates")
+if posture_mode == "--production":
+    if policy_names != ["main"]:
+        raise SystemExit(f"{environment_name} must allow only the main branch for production")
+else:
+    expected = {"main", source_branch}
+    if set(policy_names) != expected or len(policy_names) != len(expected):
+        raise SystemExit(
+            f"{environment_name} must allow exactly main and the selected "
+            f"acceptance-candidate branch {source_branch}"
+        )
 
 rulesets = json.loads((root / "rulesets.json").read_text())
 if not isinstance(rulesets, list):
@@ -145,4 +171,5 @@ done <"$work/active-ruleset-ids"
 [[ "$matched" == 1 ]] ||
   die "no active v* tag ruleset restricts create, update, and delete with only the designated tagger bypass"
 
-printf '[verify-github-release-posture] ok: immutable releases, protected environment, and tag ruleset verified\n'
+printf '[verify-github-release-posture] ok: %s posture, protected environment, immutable releases, and tag ruleset verified for %s\n' \
+  "$posture_mode" "$source_ref"
