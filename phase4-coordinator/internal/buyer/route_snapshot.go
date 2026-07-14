@@ -62,11 +62,15 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	pendingDeadline := settlementCfg.PendingDeadlineSeconds
 	if pendingDeadline <= 0 {
 		// Fail-open to the SPEC-022 default (300s) rather than fail-closed.
-		// Fail-closing emits route_snapshot_failed pre-dispatch, which the
-		// gateway currently settles on estimate (charging the buyer for a
-		// request with no provider invocation). Fail-open to 300 is the
-		// safe choice until the gateway treats route_snapshot_failed as a
-		// pre-dispatch no-charge — tracked as a carried follow-up.
+		// Fail-closing emits route_snapshot_failed pre-dispatch. As of item
+		// 18 the gateway treats a genuine first-attempt route_snapshot_failed
+		// as no-charge (coordinatorPreDispatchNoChargeError refunds the
+		// reservation and passes the body through verbatim — no provider was
+		// invoked), so the buyer-charge concern that once made fail-open
+		// load-bearing is resolved for that case. Fail-open to 300 is still
+		// the better default here: it lets the request proceed on the SPEC-022
+		// default deadline instead of failing outright on an unvalidated
+		// in-memory deadline of 0.
 		// Validated YAML config already rejects deadline 0 (config.Validate
 		// enforces 1..900); this fallback only guards an unvalidated
 		// in-memory caller, where fail-open is benign.
@@ -155,6 +159,11 @@ func stringPtrOrNil(value string) *string {
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
 	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
 	rec.logBuyerFailure(http.StatusInternalServerError, "Could not durably record route snapshot")
+	// The item-18 positive no-prior-dispatch marker is stamped centrally by
+	// noPriorDispatchResponseWriter at WriteHeader time (based on the ledger-exact
+	// rec.providerCredited signal). route_snapshot_failed is pre-dispatch — no
+	// provider relayed this attempt — so the marker is present here iff no
+	// provider was billably credited earlier in this request.
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
@@ -166,6 +175,18 @@ const (
 	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	// settlementNoPriorDispatchHeader is the item-18 POSITIVE no-charge marker,
+	// stamped centrally by noPriorDispatchResponseWriter on any terminal
+	// response written while no provider has been billably credited for this
+	// request (ledger-exact rec.providerCredited, plus dispatchedThisAttempt for
+	// the current terminal). The gateway refunds a route_snapshot_failed / treats
+	// a retried no_provider 503 as cold ONLY when this marker is present, so an
+	// unmarked response (a legacy/rolled-back coordinator, or one that followed a
+	// billed provider dispatch) settles on the estimate instead of wrongly
+	// refunding. Known limitation (documented, carried): on the write-before-bill
+	// streaming/WS paths the marker is decided from the outward wire status, which
+	// can render a non-billable 503 as 502 — see SPEC-006 §17.7.
+	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
 )
 
 var settlementOutcomeHeaderNames = []string{

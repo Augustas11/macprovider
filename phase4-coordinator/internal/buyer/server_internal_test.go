@@ -12,6 +12,63 @@ import (
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
+// TestNoPriorDispatchResponseWriterMarks pins the coordinator half of the
+// item-18 fix: the central noPriorDispatchResponseWriter stamps the POSITIVE
+// X-MacProvider-Settlement-No-Prior-Dispatch marker on the first response write
+// IFF no provider has been (or is about to be) billably credited for this
+// request. The signal is derived from two ledger-exact recorder fields plus the
+// write status, NOT a request-log ordinal:
+//   - providerCredited: any prior attempt persisted a billable (non-503) row.
+//   - dispatchedThisAttempt && status != 503: the CURRENT terminal attempt
+//     dispatched a provider and its terminal status is billable (recordRow bills
+//     iff status != 503), so its own billing row — recorded AFTER this write on
+//     the WS paths — must not be erased by a marker.
+//
+// The cases below map to the real coordinator terminal responses: a pre-dispatch
+// route_snapshot_failed 500 and a cold no_provider 503 stay MARKED (refundable);
+// a single provider_failed 502, a failover-exhaustion 503 after a billed attempt,
+// and a streaming 200 stay UNMARKED (billed); a dispatched-but-queue-full 503
+// stays MARKED (dispatched but not billed).
+func TestNoPriorDispatchResponseWriterMarks(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		credited   bool
+		dispatched bool
+		status     int  // WriteHeader status; ignored when viaWrite
+		viaWrite   bool // exercise Write() (implicit 200) instead of WriteHeader()
+		wantMarker bool
+	}{
+		{name: "route_snapshot_failed_pre_dispatch", credited: false, dispatched: false, status: http.StatusInternalServerError, wantMarker: true},
+		{name: "cold_no_provider_503", credited: false, dispatched: false, status: http.StatusServiceUnavailable, wantMarker: true},
+		{name: "single_provider_failed_502", credited: false, dispatched: true, status: http.StatusBadGateway, wantMarker: false},
+		{name: "dispatched_queue_full_503_not_billed", credited: false, dispatched: true, status: http.StatusServiceUnavailable, wantMarker: true},
+		{name: "failover_exhaustion_503_after_billed", credited: true, dispatched: false, status: http.StatusServiceUnavailable, wantMarker: false},
+		{name: "credited_and_dispatched_502", credited: true, dispatched: true, status: http.StatusBadGateway, wantMarker: false},
+		{name: "streaming_200_dispatched", credited: false, dispatched: true, viaWrite: true, wantMarker: false},
+		{name: "streaming_200_no_dispatch_defensive", credited: false, dispatched: false, viaWrite: true, wantMarker: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := httptest.NewRecorder()
+			rec := &billingRecorder{providerCredited: tc.credited, dispatchedThisAttempt: tc.dispatched}
+			w := &noPriorDispatchResponseWriter{ResponseWriter: inner, rec: rec}
+			if tc.viaWrite {
+				if _, err := w.Write([]byte("data: {}\n\n")); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			} else {
+				writeError(w, tc.status, "route_snapshot_failed", "boom")
+			}
+			got := inner.Header().Get(settlementNoPriorDispatchHeader)
+			if tc.wantMarker && got == "" {
+				t.Fatalf("credited=%v dispatched=%v status=%d: marker must be SET (nothing billable credited)", tc.credited, tc.dispatched, tc.status)
+			}
+			if !tc.wantMarker && got != "" {
+				t.Fatalf("credited=%v dispatched=%v status=%d: marker must be WITHHELD (a provider was/will be credited), got %q", tc.credited, tc.dispatched, tc.status, got)
+			}
+		})
+	}
+}
+
 func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *testing.T) {
 	prompt, _, completion := tokenPointersFromUsageObject(json.RawMessage(`{"prompt_tokens":-1,"completion_tokens":10}`))
 	if prompt == nil || *prompt != -1 || completion == nil || *completion != 10 {

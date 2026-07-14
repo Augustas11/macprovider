@@ -1763,6 +1763,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
+	// Item 18: centrally stamp the positive no-prior-dispatch marker on any
+	// terminal response written while no provider has been billably credited
+	// for this request (rec.providerCredited false, and — for the current
+	// terminal attempt whose billing row lands after its write on the WS paths
+	// — dispatchedThisAttempt with a non-503 terminal). Wrapped after the
+	// recorder so mark() reads the live billing state at write time; outermost
+	// so it covers every downstream write path.
+	w = &noPriorDispatchResponseWriter{ResponseWriter: w, rec: rec}
 	if !contentEncodingSupported(r.Header.Values("Content-Encoding")) {
 		msg := "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10."
 		rec.logBuyerFailure(http.StatusUnsupportedMediaType, msg)
@@ -1988,6 +1996,9 @@ func (s *Server) forwardStreamSequence(
 			if settlementMetadata != nil {
 				declareInternalSettlementOutcomeTrailers(w.Header(), rec)
 			}
+			// Route snapshot durably recorded; dispatching to the provider now
+			// (item 18 no-charge marker: any non-503 terminal from here bills).
+			rec.markProviderDispatched()
 			wsTunneled := state.provider.IsWSTunneled()
 			var tr transportResult
 			var nativeResult wsForwardResult
@@ -2191,6 +2202,9 @@ func (s *Server) forwardWSNonStreamSequence(
 				}
 				return nil
 			}
+			// Route snapshot durably recorded; we are now dispatching to the
+			// provider. Any non-503 terminal from here bills (item 18).
+			rec.markProviderDispatched()
 			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, false, s.attemptTimeout(r), logSuccess, settlementMetadata, state, rec.attemptN)
 			tr := classifyWSResult(result, attempt)
 			return dispatchedAttempt{
@@ -2383,6 +2397,9 @@ func (s *Server) forwardHTTPSequence(
 				writeRouteSnapshotError(w, rec, err)
 				return dispatchedAttempt{}, false
 			}
+			// Route snapshot durably recorded; dispatching to the provider now
+			// (item 18 no-charge marker: any non-503 terminal from here bills).
+			rec.markProviderDispatched()
 			upstreamURL := state.provider.EndpointURL + "/v1/chat/completions"
 			attemptCtx := r.Context()
 			cancelAttempt := func() {}

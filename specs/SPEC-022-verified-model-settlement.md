@@ -956,14 +956,43 @@ audit (2026-07). Neither is new or worsened by that change; both are carried
 as documented follow-ups rather than blocking it.
 
 - **(A) Gateway settles `route_snapshot_failed` on estimate instead of
-  no-charge.** When the coordinator fails to persist a route snapshot
-  pre-dispatch (e.g. `route_snapshot_failed`), no provider invocation occurs,
-  but the gateway currently reads the absent settlement-finality headers as
-  legacy and settles the reservation on the estimated prompt-token count —
-  i.e. it can debit the buyer for a request that never reached a provider.
-  The gateway SHOULD instead treat a pre-dispatch `route_snapshot_failed` as
-  a no-charge refund. This is pre-existing gateway error-classification
-  behavior, independent of the pending-deadline change; carried as a
+  no-charge. — RESOLVED 2026-07-14 (runbook item 18; SPEC-006 v0.9.10 § 17.7).**
+  When the coordinator fails to persist a route snapshot pre-dispatch (e.g.
+  `route_snapshot_failed`), no provider invocation occurs, but the gateway
+  previously read the absent settlement-finality headers as legacy and settled
+  the reservation on the estimated prompt-token count — debiting the buyer for
+  a request that never reached a provider. The gateway now treats a
+  `route_snapshot_failed` (500, code `route_snapshot_failed`, no finality
+  header) as a **no-charge refund + verbatim passthrough**
+  (`coordinatorPreDispatchNoChargeError` in
+  `phase5-gateway/internal/router/chat_proxy.go`) — but **only** when the
+  coordinator sets the POSITIVE `X-MacProvider-Settlement-No-Prior-Dispatch`
+  marker and the gateway saw no prior provider-billed retry. The coordinator
+  stamps that marker centrally (`noPriorDispatchResponseWriter`) on any terminal
+  response written while no provider has been **billably credited** for the
+  request. "Credited" is ledger-exact, from two recorder signals: `providerCredited`
+  (set inside `recordRow` when a provider-bound billable row persists —
+  `providerAssignedID != "" AND status != 503`) and `dispatchedThisAttempt &&
+  terminalStatus != 503` (the current terminal attempt, whose billing row lands
+  after its write on the WS paths). This supersedes the earlier `attemptN == 0`
+  source, which over-counted non-billed 503 rows (over-charge) and incremented
+  after the terminal WS write (under-charge); an admission failure, a same-attempt
+  re-route, or a queue-full 503 records no billable credit and correctly stays
+  marked. The positive-marker design makes a gateway-first deploy /
+  coordinator rollback safe — an unmarked response settles on the estimate.
+  Two unmarked/settled cases preserve provider work credited in `observe` mode:
+  (1) coordinator-internal failover (marker withheld once a provider is
+  credited); (2) gateway retry of an unmarked earlier response — a provider-
+  dispatched `provider_*` 502 or a `no_provider` 503 from failover exhaustion
+  after a billed attempt (`priorProviderDispatch`); a cold marked 502/503 does
+  not poison the refund. **Deploy the coordinator before the gateway; roll back
+  in reverse.** **Carried limitation:** on the coordinator's write-before-bill
+  streaming / WS-tunneled terminal paths the marker is decided from the outward
+  wire status, so a non-billable `503` rendered as `502` can be left unmarked and
+  a subsequent `route_snapshot_failed` settled instead of refunded. This is the
+  SAME outcome as pre-item-18 (route_snapshot_failed was always settled), so the
+  edge is pre-existing and not worsened; a fully ledger-exact marker on these
+  paths (canonical billing status, or terminal-billing-before-write) is a tracked
   follow-up.
 - **(B) `route_snapshot_policy_version` marks default-cutover, not
   runtime-reconfiguration.** The policy version literal (`spec022-prereq-v0`

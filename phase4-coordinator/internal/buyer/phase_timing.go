@@ -131,6 +131,76 @@ func (w *phaseTimingResponseWriter) inject() {
 	})
 }
 
+// noPriorDispatchResponseWriter centrally stamps the item-18 POSITIVE
+// no-charge marker (settlementNoPriorDispatchHeader) on the FIRST response
+// write iff NO provider has been (or is about to be) billably credited for
+// this request. It derives that from the ledger-exact recorder signals rather
+// than a request-log ordinal:
+//
+//   - rec.providerCredited — true once ANY provider-bound billable row has
+//     durably persisted this request (set inside recordRow, status != 503).
+//     Failover-hit attempts bill via onFailoverHit BEFORE the next attempt's
+//     write, so this covers every attempt EXCEPT the current terminal one,
+//     whose own billing row is recorded after its terminal HTTP write on the
+//     WS paths.
+//   - rec.dispatchedThisAttempt && code != 503 — covers that current terminal
+//     attempt: a dispatched attempt whose terminal write is non-503 WILL be
+//     billed (recordRow bills iff status != 503), so it must be left unmarked.
+//     A dispatched attempt that terminates 503 (queue-full / relay-unavailable)
+//     is NOT billed, so it stays eligible for the marker.
+//
+// Stamping at the first write — the moment the header is committed — means one
+// wrapper covers every terminal response path: a genuine no-provider error
+// (route_snapshot_failed 500, cold no_provider 503) carries the marker, while
+// any response following (or constituting) a billed provider attempt is left
+// unmarked so the gateway settles-on-estimate rather than refunds. On a
+// streaming 200 the attempt was dispatched and non-503, so the marker is
+// absent; the gateway ignores the marker on 200 regardless.
+type noPriorDispatchResponseWriter struct {
+	http.ResponseWriter
+	rec  *billingRecorder
+	once sync.Once
+}
+
+func (w *noPriorDispatchResponseWriter) WriteHeader(code int) {
+	w.mark(code)
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *noPriorDispatchResponseWriter) Write(b []byte) (int, error) {
+	// A Write with no prior WriteHeader is an implicit 200 (net/http default).
+	w.mark(http.StatusOK)
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *noPriorDispatchResponseWriter) Flush() {
+	w.mark(http.StatusOK)
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *noPriorDispatchResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *noPriorDispatchResponseWriter) mark(code int) {
+	w.once.Do(func() {
+		if w.rec == nil {
+			return
+		}
+		// Any billed prior attempt, or a billable current terminal attempt,
+		// means the response must NOT carry the no-charge marker.
+		if w.rec.providerCredited {
+			return
+		}
+		if w.rec.dispatchedThisAttempt && code != http.StatusServiceUnavailable {
+			return
+		}
+		w.Header().Set(settlementNoPriorDispatchHeader, "1")
+	})
+}
+
 func writePhaseTimingHeaders(h http.Header, state *forwardState, now time.Time) {
 	if state == nil {
 		return

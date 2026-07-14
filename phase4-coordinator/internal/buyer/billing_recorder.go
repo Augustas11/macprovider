@@ -81,6 +81,33 @@ type billingRecorder struct {
 	// this was billingAttemptN, incremented via deferred closure on
 	// every successful provider-bound record.
 	attemptN int
+	// providerCredited is the LEDGER-EXACT "a provider has been billably
+	// credited in this request" signal that drives the item-18 no-charge
+	// marker (see noPriorDispatchResponseWriter). It is set true INSIDE
+	// recordRow at the exact point a provider-bound billing/settlement row
+	// is durably persisted with a billable status (providerAssignedID != ""
+	// AND status != 503) — never on a 503/no_provider/queue-full row (those
+	// bypass billing at recordRow's `status != http.StatusServiceUnavailable`
+	// gate) and never on a buyer/routing row (providerAssignedID == ""). It
+	// is monotonic within a request: once a credit lands it stays true, so a
+	// later terminal write (e.g. failover-exhaustion 503, or a retried
+	// route_snapshot_failed observed by the gateway) is correctly treated as
+	// following a billed attempt. This replaces the R5 attemptN==0 marker
+	// source, which over-counted (incremented on non-billed 503 rows) and
+	// under-covered (incremented AFTER the terminal write on WS paths).
+	providerCredited bool
+	// dispatchedThisAttempt is the per-attempt companion to providerCredited.
+	// It answers "did the CURRENT attempt dispatch to a provider before it
+	// produced its terminal response?" — needed because a single attempt's
+	// own billing row is recorded AFTER its terminal HTTP write on the WS
+	// paths (handleNonRetryableTerminal runs post-write), so providerCredited
+	// is not yet set when the marker is stamped. It is reset to false at the
+	// top of every forwardWithFailover loop iteration (beginDispatchAttempt)
+	// and set true immediately before the provider relay (markProviderDispatched).
+	// The marker wrapper combines it with the write status: a dispatched
+	// attempt that writes a non-503 terminal WILL be billed (recordRow bills
+	// iff status != 503), so it must not carry the no-charge marker.
+	dispatchedThisAttempt bool
 	// routeSnapshotAttemptN is the pre-dispatch provider-dispatch
 	// ordinal used by settlement_route_snapshots. It advances at the
 	// dispatch boundary, not at request_log write time, so streaming
@@ -151,6 +178,22 @@ func (b *billingRecorder) setPromptTokenUpperBound(tokens int64) {
 		tokens = 0
 	}
 	b.promptTokenUpperBound = &tokens
+}
+
+// beginDispatchAttempt clears the per-attempt dispatched flag at the start
+// of every forwardWithFailover iteration. providerCredited is deliberately
+// NOT reset — it accumulates billed credits across the whole request.
+func (b *billingRecorder) beginDispatchAttempt() {
+	b.dispatchedThisAttempt = false
+}
+
+// markProviderDispatched records that the current attempt is about to relay
+// to a selected provider. Called immediately before the provider relay in
+// each transport's dispatch callback, i.e. AFTER a successful route-snapshot
+// write — so a pre-dispatch failure (route_snapshot_failed) leaves the flag
+// false and the response carries the item-18 no-charge marker.
+func (b *billingRecorder) markProviderDispatched() {
+	b.dispatchedThisAttempt = true
 }
 
 // setRequestID updates the requestID field after idempotency-key
@@ -290,6 +333,12 @@ func (b *billingRecorder) recordRow(
 				return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
 			}
 		}
+		// A provider-bound, billable (status != 503) row is now durably
+		// persisted — the provider has been credited. Mark BEFORE the
+		// settlement-output bookkeeping so a settlement-persist hiccup still
+		// leaves the ledger-exact "credited" signal set (conservative vs
+		// under-charge: the gateway settles rather than erasing real credit).
+		b.providerCredited = true
 		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
@@ -306,6 +355,10 @@ func (b *billingRecorder) recordRow(
 		return err
 	}
 	if billingStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
+		// Same ledger-exact credit signal as the hot-path branch: a
+		// provider-bound billable row has persisted (reqLog.Insert above
+		// succeeded) and settlement is being recorded now.
+		b.providerCredited = true
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		billingInput := billing.HotPathInput{

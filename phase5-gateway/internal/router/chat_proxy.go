@@ -48,13 +48,23 @@ type usageSubject struct {
 }
 
 const (
-	settlementOutcomeHeader           = "X-MacProvider-Settlement-Outcome"
-	settlementReceiptResultHeader     = "X-MacProvider-Settlement-Receipt-Result"
-	settlementReasonHeader            = "X-MacProvider-Settlement-Reason"
-	settlementClosedHeader            = "X-MacProvider-Settlement-Closed"
-	settlementModeHeader              = "X-MacProvider-Settlement-Mode"
-	settlementPolicyVersionHeader     = "X-MacProvider-Settlement-Policy-Version"
-	settlementPendingUntilHeader      = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	settlementOutcomeHeader       = "X-MacProvider-Settlement-Outcome"
+	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
+	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
+	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
+	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
+	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
+	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	// settlementNoPriorDispatchHeader mirrors the coordinator constant of the
+	// same name (separate Go module, intentionally duplicated). The coordinator
+	// sets it on a route_snapshot_failed ONLY when it is the genuine first
+	// route-snapshot attempt of the request (no prior provider dispatch); item
+	// 18 refunds the reservation ONLY when this POSITIVE marker is present, so
+	// an unmarked legacy/rolled-back-coordinator response settles on the
+	// estimate. Keep in sync with
+	// phase4-coordinator/internal/buyer/route_snapshot.go (deploy coordinator
+	// first, roll back in reverse).
+	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
 	// settlementPolicyVersion is the current coordinator route-snapshot
 	// policy version (see billing.RouteSnapshotPolicyVersion). It was
 	// bumped v0 -> v1 when the settlement pending-deadline default moved
@@ -386,7 +396,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
 	timing.markCoordinatorStart(s.now())
-	resp, retryExhausted, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
+	resp, retryExhausted, priorProviderDispatch, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
 	if err != nil {
 		if structuredStreaming && errors.Is(upCtx.Err(), context.DeadlineExceeded) {
 			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
@@ -408,13 +418,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, cancelUpstream, upCtx, structuredStreaming, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, cancelUpstream, upCtx, structuredStreaming, window, timing)
 		return
 	}
-	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, window)
+	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, window)
 }
 
-func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, accountID string, buildUpReq func() (*http.Request, error)) (*http.Response, bool, error) {
+func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, accountID string, buildUpReq func() (*http.Request, error)) (*http.Response, bool, bool, error) {
 	maxAttempts := 1
 	if s.cfg.Retry503.Enabled {
 		maxAttempts = s.cfg.Retry503.MaxAttempts
@@ -423,20 +433,30 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		maxAttempts = 1
 	}
 	totalBackoffMS := int64(0)
+	// priorProviderDispatch records whether an EARLIER attempt in this retry
+	// loop returned a provider-dispatched (502-class) response that we then
+	// retried. Item 18: a retried provider_error/failed/disconnected 502 can
+	// have billed a prompt credit on the coordinator side (observe settlement
+	// mode synthesizes prompt tokens for a dispatched-but-failed attempt), so
+	// a subsequent terminal route_snapshot_failed MUST NOT be refunded as
+	// "no provider ran" — that would erase real provider work the coordinator
+	// already credited (verified realizable trace, security lane). A retried
+	// 503 no_provider_available does NOT set this: no provider was dispatched.
+	priorProviderDispatch := false
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := upCtx.Err(); err != nil {
-			return nil, false, err
+			return nil, false, priorProviderDispatch, err
 		}
 		upReq, err := buildUpReq()
 		if err != nil {
-			return nil, false, err
+			return nil, false, priorProviderDispatch, err
 		}
 		resp, err := s.client.Do(upReq)
 		if err != nil {
-			return nil, false, err
+			return nil, false, priorProviderDispatch, err
 		}
 		if !s.cfg.Retry503.Enabled || maxAttempts == 1 {
-			return resp, false, nil
+			return resp, false, priorProviderDispatch, nil
 		}
 		if resp.StatusCode != http.StatusServiceUnavailable && resp.StatusCode != http.StatusBadGateway {
 			if attempt > 1 && resp.StatusCode == http.StatusOK {
@@ -447,7 +467,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 					"total_backoff_ms", totalBackoffMS,
 				)
 			}
-			return resp, false, nil
+			return resp, false, priorProviderDispatch, nil
 		}
 		body, readErr := readCoordRetryBody(resp.Body)
 		_ = resp.Body.Close()
@@ -464,7 +484,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		}
 		resp.ContentLength = int64(len(body))
 		if readErr != nil || !isCoordinatorChatRetryEligible(resp.StatusCode, body) {
-			return resp, false, nil
+			return resp, false, priorProviderDispatch, nil
 		}
 		if attempt == maxAttempts {
 			s.retry503Metrics.recordExhausted(totalBackoffMS)
@@ -474,17 +494,32 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 				"total_backoff_ms", totalBackoffMS,
 				"status", resp.StatusCode,
 			)
-			return resp, true, nil
+			return resp, true, priorProviderDispatch, nil
+		}
+		// About to retry to a further attempt. If THIS (soon-to-be-discarded)
+		// response followed a billed provider dispatch, remember it so a later
+		// terminal route_snapshot_failed is not wrongly refunded. The
+		// coordinator stamps X-MacProvider-Settlement-No-Prior-Dispatch on any
+		// response written while no provider has been billably credited yet
+		// (ledger-exact providerCredited, plus the current terminal attempt's
+		// dispatch), so the marker's ABSENCE is the "a provider was already
+		// credited this request" signal — covering both a provider-dispatched 502
+		// and a failover-exhaustion no_provider 503 after a billed attempt. A
+		// marked response (genuine cold-start 502/503) leaves the flag clear. A
+		// legacy coordinator emits no marker, so the gateway conservatively
+		// settles — deploy the coordinator before the gateway.
+		if strings.TrimSpace(resp.Header.Get(settlementNoPriorDispatchHeader)) == "" {
+			priorProviderDispatch = true
 		}
 		if err := upCtx.Err(); err != nil {
-			return resp, false, nil
+			return resp, false, priorProviderDispatch, nil
 		}
 		backoff := coord503RetryBackoff(attempt, s.cfg.Retry503)
 		select {
 		case <-time.After(backoff):
 			totalBackoffMS += backoff.Milliseconds()
 			if err := upCtx.Err(); err != nil {
-				return resp, false, nil
+				return resp, false, priorProviderDispatch, nil
 			}
 			retryRate := s.chatStartLimits.allow(accountID, s.cfg.Quotas.AccountRequestRatePerSecond, s.now())
 			if !retryRate.Admitted {
@@ -494,7 +529,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 					"limit_rps", retryRate.Limit,
 					"retry_after_s", retryRate.RetryAfterSeconds,
 				)
-				return resp, false, nil
+				return resp, false, priorProviderDispatch, nil
 			}
 			slog.Info("gateway coord retry",
 				"request_id", requestID(r),
@@ -505,10 +540,10 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			)
 			_ = resp.Body.Close()
 		case <-upCtx.Done():
-			return resp, false, nil
+			return resp, false, priorProviderDispatch, nil
 		}
 	}
-	return nil, false, upCtx.Err()
+	return nil, false, priorProviderDispatch, upCtx.Err()
 }
 
 func coord503RetryBackoff(attempt int, cfg config.Retry503Config) time.Duration {
@@ -572,7 +607,7 @@ func (b *coord503PrefixErrBody) Read(p []byte) (int, error) {
 
 func (b *coord503PrefixErrBody) Close() error { return nil }
 
-func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted bool, window string) {
+func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, window string) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -612,6 +647,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if coordinatorIdempotencyError(resp.StatusCode, body) {
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		return
+	}
+	if !priorProviderDispatch && coordinatorPreDispatchNoChargeError(resp.StatusCode, body, resp.Header) {
 		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 		return
 	}
@@ -681,7 +720,7 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted bool, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -718,6 +757,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+			return
+		}
+		if !priorProviderDispatch && coordinatorPreDispatchNoChargeError(resp.StatusCode, body, resp.Header) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
@@ -1347,6 +1390,53 @@ func coordinatorIdempotencyError(status int, body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// coordinatorPreDispatchNoChargeError detects a coordinator 5xx emitted
+// BEFORE any provider was dispatched, where no inference ran and the buyer
+// must not be charged. The one case today is route_snapshot_failed — the
+// SPEC-022 durable route-snapshot write failing: the coordinator
+// (internal/buyer/route_snapshot.go) writes it via plain writeError with a
+// 500 and NO settlement finality headers, i.e. no provider was invoked.
+//
+// Without this the gateway's generic upstream-error path settles the
+// reservation on the prompt estimate — shouldRefundLegacyPreStreamProvider502
+// only refunds 502s — debiting the buyer for a request that never reached a
+// provider. Routing it through
+// passThroughNoProviderCoordinatorError refunds the reservation, writes a
+// 0-token refunded audit row, and passes the coordinator body through
+// verbatim — identical to the 404 / idempotency / tier-2-policy no-provider
+// cases. Applies to both streaming and non-streaming buyer requests.
+//
+// Gated on the absence of settlement finality headers so that if a future
+// coordinator ever attaches finality to this code, the finality-policy path
+// handles it instead.
+//
+// Two independent proofs are required before refunding, because a
+// route_snapshot_failed can be terminal AFTER real provider work that observe
+// settlement mode credits:
+//   - the coordinator's POSITIVE X-MacProvider-Settlement-No-Prior-Dispatch
+//     marker, present ONLY when this is the genuine first route-snapshot
+//     attempt of the request (no coordinator-internal prior dispatch). Its
+//     ABSENCE — a legacy/rolled-back coordinator, or an internal-failover
+//     response — disqualifies the refund; and
+//   - the caller's `!priorProviderDispatch` gate, which covers a
+//     route_snapshot_failed the gateway reached only AFTER retrying a prior
+//     provider-dispatched 502 across separate coordinator requests.
+//
+// Requiring the positive marker (rather than the absence of a negative one)
+// makes a gateway-first deploy / coordinator rollback safe: no marker →
+// settle-on-estimate, never a wrongful refund. This predicate certifies the
+// response shape + the coordinator marker; the caller certifies no cross-retry
+// dispatch.
+func coordinatorPreDispatchNoChargeError(status int, body []byte, h http.Header) bool {
+	if status != http.StatusInternalServerError || hasAnySettlementFinalityHeader(h) {
+		return false
+	}
+	if strings.TrimSpace(h.Get(settlementNoPriorDispatchHeader)) == "" {
+		return false
+	}
+	return openAIErrorCode(body) == "route_snapshot_failed"
 }
 
 func coordinatorValidationError(status int, body []byte) bool {
