@@ -62,15 +62,17 @@ for value in (
     if value not in build:
         raise SystemExit(f"candidate binary version check is incomplete: {value}")
 for value in (
-    'package_resolution_args=()',
+    'package_resolution_args=(archive)',
     'if [ -f Package.resolved ]; then',
-    'package_resolution_args=(-onlyUsePackageVersionsFromResolvedFile)',
+    'package_resolution_args+=(-onlyUsePackageVersionsFromResolvedFile)',
     '"${package_resolution_args[@]}"',
 ):
     if value not in build:
         raise SystemExit(f"candidate Malibu dependency handling is incomplete: {value}")
 if re.search(r'^\s*cp Package\.resolved ', build, re.MULTILINE) and 'if [ -f Package.resolved ]; then' not in build:
     raise SystemExit("candidate Malibu build requires a removed optional lockfile")
+if re.search(r'^\s*archive\s*\\$', build, re.MULTILINE):
+    raise SystemExit("candidate Malibu build can expand an empty array under macOS Bash 3.2")
 if "retention-days: 1" not in protected or "actions/upload-artifact@ea165f8d" not in protected:
     raise SystemExit("private acceptance artifact is not short-lived and action-pinned")
 for secret in (
@@ -128,6 +130,16 @@ for index, line in enumerate(lines):
     if any("${{" in row for row in block):
         raise SystemExit("GitHub expression is interpolated directly into a shell block")
 PY
+
+# macOS runners still invoke Bash 3.2, where expanding an initialized empty
+# array under `set -u` fails as an unbound variable. Keep the workflow's array
+# non-empty in both dependency-free and resolved-package modes.
+bash -u -c 'args=(archive); printf "%s\n" "${args[@]}"' > "$work/malibu-args-without-lockfile"
+grep -Fxq archive "$work/malibu-args-without-lockfile"
+bash -u -c 'args=(archive); args+=(-onlyUsePackageVersionsFromResolvedFile); printf "%s\n" "${args[@]}"' \
+  > "$work/malibu-args-with-lockfile"
+printf '%s\n' archive -onlyUsePackageVersionsFromResolvedFile > "$work/expected-malibu-args"
+cmp -s "$work/expected-malibu-args" "$work/malibu-args-with-lockfile"
 
 mkdir "$work/assets"
 tag=v1.8.33
