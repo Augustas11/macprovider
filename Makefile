@@ -55,6 +55,7 @@ test-dist:
 	bash scripts/test-release-tag-target.sh
 	bash scripts/test-release-security-posture.sh
 	bash scripts/test-acceptance-candidate-security.sh
+	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-compatibility-artifact-index.sh
 	bash scripts/test-release-toolchain.sh
 	bash scripts/test-release-publication-provenance.sh
