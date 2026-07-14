@@ -48,6 +48,63 @@ func TestStreamingStructuredOutputSSEErrorCarriesRequestAndSettlement(t *testing
 	}
 }
 
+// TestStreamingSSEErrorHonorsProviderRetryableOverride is the streaming
+// counterpart to the non-streaming writeProviderStructuredOutputError override
+// (runbook item 20 / SPEC-019 §5): a provider-supplied end.Retryable on a
+// synthesized terminal SSE error must reach the buyer, and must agree with the
+// non-streaming transport for the same (code, override) pair. A nil override
+// leaves the static spec018Retryable default untouched.
+func TestStreamingSSEErrorHonorsProviderRetryableOverride(t *testing.T) {
+	tr := func(b bool) *bool { return &b }
+	cases := []struct {
+		name     string
+		code     string
+		override *bool
+		want     bool
+	}{
+		// nil override → static default is preserved for both directions.
+		{"nil_default_true", "malformed_json_response", nil, spec018Retryable("malformed_json_response")},
+		{"nil_default_false", "response_byte_cap_exceeded", nil, spec018Retryable("response_byte_cap_exceeded")},
+		// override flips a code whose static default is the opposite value.
+		{"override_false_over_true_default", "malformed_json_response", tr(false), false},
+		{"override_true_over_false_default", "response_byte_cap_exceeded", tr(true), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Streaming SSE synthesis.
+			sse := httptest.NewRecorder()
+			writeSSEErrorWithRetryable(sse, "detail", tc.code, tc.override, "req-1")
+			var sseEnv struct {
+				Error struct {
+					Retryable bool `json:"retryable"`
+				} `json:"error"`
+			}
+			line := strings.TrimPrefix(strings.Split(sse.Body.String(), "\n\n")[0], "data: ")
+			if err := json.Unmarshal([]byte(line), &sseEnv); err != nil {
+				t.Fatalf("decode SSE envelope: %v body=%s", err, sse.Body.String())
+			}
+			if sseEnv.Error.Retryable != tc.want {
+				t.Fatalf("streaming retryable=%v, want %v (code=%s override=%v)", sseEnv.Error.Retryable, tc.want, tc.code, tc.override)
+			}
+
+			// Non-streaming JSON envelope must agree for the same inputs.
+			js := httptest.NewRecorder()
+			writeProviderStructuredOutputError(js, http.StatusBadGateway, tc.code, "detail", tc.override)
+			var jsEnv struct {
+				Error struct {
+					Retryable bool `json:"retryable"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(js.Body.Bytes(), &jsEnv); err != nil {
+				t.Fatalf("decode JSON envelope: %v body=%s", err, js.Body.String())
+			}
+			if jsEnv.Error.Retryable != sseEnv.Error.Retryable {
+				t.Fatalf("transport divergence: streaming=%v non-streaming=%v (code=%s override=%v)", sseEnv.Error.Retryable, jsEnv.Error.Retryable, tc.code, tc.override)
+			}
+		})
+	}
+}
+
 func TestStreamingStructuredOutputTerminalSSEErrorDetected(t *testing.T) {
 	line := []byte(`data: {"error":{"code":"malformed_json_response"}}` + "\n")
 	if code := terminalSSEErrorCodeFromLine(line); code != "malformed_json_response" {

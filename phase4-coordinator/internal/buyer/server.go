@@ -3236,7 +3236,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			if end.Status != "complete" && end.Status != "cancelled" {
 				if isSpec019ProviderDetailCode(end.Status) {
-					writeSSEError(w, endErrorMessage(end), end.Status, requestID)
+					// SPEC-019 §5: honor the provider-supplied end.Retryable
+					// override on the synthesized SSE error, mirroring the
+					// non-streaming writeProviderStructuredOutputError path.
+					writeSSEErrorWithRetryable(w, endErrorMessage(end), end.Status, end.Retryable, requestID)
 				} else {
 					writeSSEError(w, "Provider failed during streaming", "provider_error")
 				}
@@ -7193,9 +7196,30 @@ func wsEndHTTPStatus(status string) int {
 }
 
 func writeSSEError(w http.ResponseWriter, message, code string, requestID ...string) {
-	id := any(nil)
-	if len(requestID) > 0 && strings.TrimSpace(requestID[0]) != "" {
+	id := ""
+	if len(requestID) > 0 {
 		id = requestID[0]
+	}
+	writeSSEErrorWithRetryable(w, message, code, nil, id)
+}
+
+// writeSSEErrorWithRetryable is writeSSEError with an explicit provider-supplied
+// retryable override (SPEC-019 §5). When the coordinator SYNTHESIZES a terminal
+// SSE error from a parsed inference_response_end frame (structured-output detail
+// codes), the provider may have stamped end.Retryable to override the static
+// spec018Retryable(code) default — the non-streaming path already honors it via
+// writeProviderStructuredOutputError, so the streaming path MUST too or the two
+// transports disagree on a money-path signal for the same terminal outcome.
+// Pass override=nil for the common case (coordinator-detected faults with no
+// provider verdict), which keeps the static default.
+func writeSSEErrorWithRetryable(w http.ResponseWriter, message, code string, retryableOverride *bool, requestID string) {
+	id := any(nil)
+	if strings.TrimSpace(requestID) != "" {
+		id = requestID
+	}
+	retryable := spec018Retryable(code)
+	if retryableOverride != nil {
+		retryable = *retryableOverride
 	}
 	settlementRan := code == "malformed_json_response" ||
 		code == "json_schema_validation_failed" ||
@@ -7207,7 +7231,7 @@ func writeSSEError(w http.ResponseWriter, message, code string, requestID ...str
 			"type":           spec018ErrorType(code, "server_error"),
 			"param":          nil,
 			"code":           code,
-			"retryable":      spec018Retryable(code),
+			"retryable":      retryable,
 			"request_id":     id,
 			"inference_ran":  true,
 			"settlement_ran": settlementRan,
