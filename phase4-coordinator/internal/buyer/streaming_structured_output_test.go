@@ -50,7 +50,7 @@ func TestStreamingStructuredOutputSSEErrorCarriesRequestAndSettlement(t *testing
 
 // TestStreamingSSEErrorHonorsProviderRetryableOverride is the streaming
 // counterpart to the non-streaming writeProviderStructuredOutputError override
-// (runbook item 20 / SPEC-019 §5): a provider-supplied end.Retryable on a
+// (runbook item 20 / SPEC-019 §8): a provider-supplied end.Retryable on a
 // synthesized terminal SSE error must reach the buyer, and must agree with the
 // non-streaming transport for the same (code, override) pair. A nil override
 // leaves the static spec018Retryable default untouched. This exercises the

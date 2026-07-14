@@ -1,6 +1,6 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.5 (2026-07-14, item 20 — streaming SSE retryable-override symmetry made explicit in §5)
+**Version:** 0.2.5 (2026-07-14, item 20 — streaming SSE retryable-override symmetry made explicit in §8)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
 **Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 is a normative clarification of the existing §8 "preserve retryability" requirement — the coordinator streaming SSE writer MUST honor the provider `end.Retryable` override, matching the non-streaming path (runbook item 20; codex 3-lane 0 C/H/M).
 

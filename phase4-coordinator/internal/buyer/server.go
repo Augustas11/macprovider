@@ -7239,7 +7239,7 @@ func writeSSEError(w http.ResponseWriter, message, code string, requestID ...str
 }
 
 // writeSSEErrorWithRetryable is writeSSEError with an explicit provider-supplied
-// retryable override (SPEC-019 §5). When the coordinator SYNTHESIZES a terminal
+// retryable override (SPEC-019 §8). When the coordinator SYNTHESIZES a terminal
 // SSE error from a parsed inference_response_end frame (structured-output detail
 // codes), the provider may have stamped end.Retryable to override the static
 // spec018Retryable(code) default — the non-streaming path already honors it via
