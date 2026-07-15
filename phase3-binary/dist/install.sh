@@ -186,6 +186,89 @@ validate_port_value() {
   fi
 }
 
+# Replace a provider executable through a fresh inode in the target directory.
+# Copying directly over a path that macOS has already executed can retain a
+# stale AMFI/code-signing cache for that vnode and make the newly installed,
+# otherwise-valid binary die with SIGKILL. Keeping the temporary file beside
+# the target also makes the final rename atomic.
+atomic_replace_provider_binary() {
+  local source="$1"
+  local target="$2"
+  local rc=0
+  python3 - "$source" "$target" <<'PY' 2>/dev/null || rc=$?
+import os
+import stat
+import sys
+import tempfile
+
+source, target = sys.argv[1:]
+target_directory = os.path.dirname(target) or "."
+temporary_fd = -1
+temporary = ""
+replaced = False
+
+try:
+    source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        source_info = os.fstat(source_fd)
+        if not stat.S_ISREG(source_info.st_mode):
+            raise RuntimeError("provider_binary_source_not_regular")
+        temporary_fd, temporary = tempfile.mkstemp(
+            prefix=".macprovider-cli.install.",
+            dir=target_directory,
+        )
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(temporary_fd, chunk[offset:])
+                if written <= 0:
+                    raise RuntimeError("provider_binary_write_failed")
+                offset += written
+        os.fchmod(temporary_fd, 0o755)
+        os.fsync(temporary_fd)
+    finally:
+        os.close(source_fd)
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+            temporary_fd = -1
+
+    if os.path.isdir(target):
+        raise RuntimeError("provider_binary_target_is_directory")
+    os.replace(temporary, target)
+    temporary = ""
+    replaced = True
+    directory_fd = os.open(target_directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except Exception:
+    if replaced:
+        raise SystemExit(10)
+    raise
+finally:
+    if temporary_fd >= 0:
+        os.close(temporary_fd)
+    if temporary:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+PY
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$rc" -eq 10 ]; then
+    log "binary activation: replacement occurred but directory durability could not be confirmed for $target; transaction rollback remains armed" >&2
+    return 10
+  fi
+  log "binary activation: durable atomic replacement failed for $target; the prior target was left in place" >&2
+  return 1
+}
+
 # Retry macprovider-cli up to two additional times if the first
 # post-install invocation is SIGKILL'd by the kernel with a CODESIGNING
 # "Invalid Page" / "Taskgated Invalid Signature" verdict. Two failure
@@ -206,15 +289,15 @@ validate_port_value() {
 #     binary's `codesign --verify --deep --strict` passed cleanly and
 #     the SAME binary content ran fine when copied to a different
 #     path. The AMFI kernel cache had a stuck rejection tied to the
-#     specific inode that `installer -pkg` created. The fix is to
-#     `rm` the file (releasing the inode) and `cp` the binary back
-#     in from a tempfile, which gives it a new inode and forces AMFI
-#     to re-evaluate. See PR #339 for the reproduction and root cause.
+#     specific inode that `installer -pkg` created. The fix is to stage
+#     identical bytes beside the target and atomically rename the fresh inode
+#     into place, which forces AMFI to re-evaluate without a missing-path gap.
+#     See PR #339 for the reproduction and root cause.
 #
 # The helper's escalation ladder for bash rc 137:
 #   attempt 1: run
 #     └── 137 → log + sleep 2 + attempt 2 (FLAVOR 1 fix)
-#         └── 137 → log + inode-refresh via cp/rm/cp + attempt 3
+#         └── 137 → log + atomic fresh-inode replacement + attempt 3
 #             │           (FLAVOR 2 fix)
 #             └── 137 → log "genuine signature failure" + return 137
 # Any non-137 rc anywhere in the ladder returns immediately.
@@ -245,32 +328,17 @@ run_macprovider_cli_with_amfi_retry() {
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
-  log "macprovider-cli was SIGKILL'd again on the 2s retry; the AMFI cache may be pinned to the pkg-installer inode. Refreshing the binary inode via cp/rm/cp and retrying once more." >&2
-  local tmp
-  tmp="$(mktemp -t macprovider-cli-inode-refresh 2>/dev/null || mktemp)"
-  if [ -z "$tmp" ]; then
-    log "inode refresh: mktemp failed; leaving the original binary in place." >&2
+  log "macprovider-cli was SIGKILL'd again on the 2s retry; the AMFI cache may be pinned to the pkg-installer inode. Refreshing the binary inode via an atomic same-directory replacement and retrying once more." >&2
+  local replacement_rc=0
+  atomic_replace_provider_binary "$cli_path" "$cli_path" || replacement_rc=$?
+  if [ "$replacement_rc" -ne 0 ]; then
+    if [ "$replacement_rc" -eq 10 ]; then
+      log "inode refresh: replacement occurred but directory durability was unconfirmed; transaction recovery remains armed." >&2
+      return "$rc"
+    fi
+    log "inode refresh: atomic same-bytes replacement failed; leaving the original binary in place." >&2
     return "$rc"
   fi
-  if ! cp "$cli_path" "$tmp" 2>/dev/null; then
-    log "inode refresh: cp to $tmp failed; leaving the original binary in place." >&2
-    rm -f "$tmp"
-    return "$rc"
-  fi
-  if ! rm -f "$cli_path"; then
-    log "inode refresh: rm of $cli_path failed; the binary is still there but the inode was not refreshed." >&2
-    rm -f "$tmp"
-    return "$rc"
-  fi
-  if ! cp "$tmp" "$cli_path"; then
-    log "inode refresh: cp-back of $tmp -> $cli_path failed; the binary at $cli_path is now missing. Restore from $tmp and chmod it executable." >&2
-    return "$rc"
-  fi
-  if ! chmod +x "$cli_path"; then
-    log "inode refresh: chmod +x on $cli_path failed; the binary is present but may not be executable." >&2
-    return "$rc"
-  fi
-  rm -f "$tmp"
   rc=0
   "$cli_path" "$@" || rc=$?
   if [ "$rc" -eq 137 ]; then
@@ -3631,8 +3699,8 @@ install_binary() {
   # Prior v1.2.1 install separated them and Metal failed with
   # "library not found" at runtime.
   real_binary="$INSTALL_DIR/macprovider-cli"
-  cp "$staging_dir/macprovider-cli" "$real_binary"
-  chmod +x "$real_binary" 2>/dev/null || true
+  atomic_replace_provider_binary "$staging_dir/macprovider-cli" "$real_binary" \
+    || die 5 "could not atomically activate the verified provider binary"
 
   # Metal resources live alongside the real binary (where mlx-swift looks).
   rm -f "$INSTALL_DIR/mlx.metallib"
@@ -5566,8 +5634,10 @@ if response.get("assigned_id") != assigned_id:
     raise SystemExit(1)
 if emergency_raw == "1":
     # Coordinator buyer-serving admission for the exact connected session is
-    # the authority for this deliberately legacy-only recovery path; do not
-    # make rollback depend on optional local status fields across prior builds.
+    # the authority for this deliberately legacy-only recovery path. A legacy
+    # coordinator exposing only provider/state cannot prove this boundary, so
+    # rollback stays armed until a bridge-capable coordinator supplies the
+    # session-bound evidence.
     if local.get("provider_id") != provider_id:
         raise SystemExit(1)
     if response.get("provider_id") != provider_id or response.get("buyer_serving") is not True:
@@ -6008,7 +6078,7 @@ main() {
     EMERGENCY_STAGED_CONFIG_SHA256="$(shasum -a 256 "$STAGED_CONFIG_PATH" | awk '{print $1}')"
     EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256="$(config_without_provider_token_sha256 "$STAGED_CONFIG_PATH")"
     log "Emergency rollback: restoring the verified pre-upgrade config and model while disabling provider autoupdate."
-    log "The signed prior release will commit only after exact legacy_bridge buyer admission."
+    log "The signed prior release will commit only after session-bound legacy_bridge buyer admission."
   else
     log "Validating signed catalog and stored recommendation with the staged release while the current provider remains available."
     if ! use_fresh_recommendation_if_available; then
@@ -6085,7 +6155,8 @@ main() {
 
   # Keep rollback armed until coordinator admission proves the selected mode:
   # exact current/previous catalog identity for normal upgrades, or exact
-  # buyer-serving legacy_bridge for an explicit signed emergency downgrade.
+  # session-bound buyer-serving legacy_bridge proof for an explicit signed
+  # emergency downgrade.
   log "Waiting up to 30s for exact coordinator admission and buyer-serving readiness."
   if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
     if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
