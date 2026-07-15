@@ -16,20 +16,24 @@ import (
 // The 0-based index of that argument is DERIVED from each function's real
 // signature at test time (the parameter named "code") — never hand-maintained —
 // so a signature change or a mis-typed index cannot silently drift the guard past
-// a writer's codes (the first cut of this guard hand-indexed writeSpec019PreflightError
-// wrong and skipped every preflight code).
+// a writer's codes.
 //
 // The set covers the buyer-facing error WRITERS and the retryability CLASSIFIER
-// (gatewayRetryable): an inline error envelope that computes its `retryable` field
-// via gatewayRetryable("literal_code") — instead of routing through a writer, as
-// writeStructuredOutputTimeoutSSE does — is still caught, because that classifier
-// call carries the code literal.
+// (gatewayRetryable). Inline error envelopes (e.g. writeStructuredOutputTimeoutSSE)
+// are ALSO scanned directly by the composite-literal pass, so the emitted `"code"`
+// field is checked even when it is decoupled from the classifier argument.
 var gatewayErrorEmitters = map[string]bool{
 	"writeError":                 true,
 	"writeSSEError":              true,
 	"writeSpec019PreflightError": true,
 	"gatewayRetryable":           true,
 }
+
+// gatewayAllowAbsentEmitters lists registered emitters that may legitimately have
+// no FuncDecl in the current source. The gateway has none today (every emitter is
+// declared in this package); the map exists so assertEmittersResolve stays
+// symmetric with the coordinator guard.
+var gatewayAllowAbsentEmitters = map[string]bool{}
 
 // parsePackageFiles parses every non-test .go file in the current package dir.
 func parsePackageFiles(t *testing.T) (*token.FileSet, []*ast.File) {
@@ -57,10 +61,21 @@ func parsePackageFiles(t *testing.T) (*token.FileSet, []*ast.File) {
 	return fset, files
 }
 
+// funcDeclNames returns the set of top-level (non-method) function names in files.
+func funcDeclNames(files []*ast.File) map[string]bool {
+	names := map[string]bool{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+				names[fn.Name.Name] = true
+			}
+		}
+	}
+	return names
+}
+
 // deriveCodeArgIndices returns, for each emitter name whose FuncDecl is present
-// in files, the flattened 0-based index of its parameter named "code". A change
-// to any emitter's signature is reflected automatically — the guard never trusts
-// a hand-written index.
+// in files, the flattened 0-based index of its parameter named "code".
 func deriveCodeArgIndices(files []*ast.File, emitters map[string]bool) map[string]int {
 	idx := map[string]int{}
 	for _, file := range files {
@@ -71,7 +86,7 @@ func deriveCodeArgIndices(files []*ast.File, emitters map[string]bool) map[strin
 			}
 			pos := 0
 			for _, field := range fn.Type.Params.List {
-				if len(field.Names) == 0 { // unnamed parameter
+				if len(field.Names) == 0 {
 					pos++
 					continue
 				}
@@ -87,10 +102,29 @@ func deriveCodeArgIndices(files []*ast.File, emitters map[string]bool) map[strin
 	return idx
 }
 
+// unresolvedEmitters returns a problem message for any registered emitter that IS
+// declared in source but did not resolve a `code` parameter (renamed
+// function/param — the fail-open case), or that matches no declaration and is not
+// an allowed forward reference (typo). Empty result means every emitter is
+// accounted for.
+func unresolvedEmitters(emitters, allowAbsent, declared map[string]bool, codeIdx map[string]int) []string {
+	var problems []string
+	for name := range emitters {
+		_, resolved := codeIdx[name]
+		switch {
+		case resolved:
+		case declared[name]:
+			problems = append(problems, "emitter "+name+" is declared but no `code` parameter was found — was the parameter renamed? the guard would silently skip its codes")
+		case allowAbsent[name]:
+		default:
+			problems = append(problems, "emitter "+name+" resolved no code index and is not a declared function or an allowed forward reference — check the registry name for a typo")
+		}
+	}
+	return problems
+}
+
 // inspectFilesForLiteralCodes walks every call in files to a name in codeIdx and
-// records the STRING-LITERAL argument at that name's code index. A code passed as
-// a variable/selector/call (the gateway concurrencyErrCode) is not a literal at
-// the call site and is skipped — the AST cannot resolve its runtime value.
+// records the STRING-LITERAL argument at that name's code index.
 func inspectFilesForLiteralCodes(files []*ast.File, fset *token.FileSet, codeIdx map[string]int) map[string]token.Position {
 	found := map[string]token.Position{}
 	for _, file := range files {
@@ -124,30 +158,115 @@ func inspectFilesForLiteralCodes(files []*ast.File, fset *token.FileSet, codeIdx
 	return found
 }
 
+// inspectFilesForEnvelopeCodeLiterals catches inline error envelopes — a map
+// composite literal carrying BOTH a string-literal `"code"` field AND a
+// `"retryable"` key (the buyer-facing classified-envelope shape, e.g.
+// writeStructuredOutputTimeoutSSE). It checks the EMITTED `"code"` value
+// directly, so a code decoupled from any classifier call is still caught. The
+// `"retryable"` sibling requirement excludes operator/explorer maps that carry a
+// literal `"code"` but no retryable field.
+func inspectFilesForEnvelopeCodeLiterals(files []*ast.File, fset *token.FileSet) map[string]token.Position {
+	found := map[string]token.Position{}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			var codeLit *ast.BasicLit
+			hasRetryable := false
+			for _, elt := range cl.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.BasicLit)
+				if !ok || key.Kind != token.STRING {
+					continue
+				}
+				keyName, err := strconv.Unquote(key.Value)
+				if err != nil {
+					continue
+				}
+				switch keyName {
+				case "retryable":
+					hasRetryable = true
+				case "code":
+					if v, ok := kv.Value.(*ast.BasicLit); ok && v.Kind == token.STRING {
+						codeLit = v
+					}
+				}
+			}
+			if hasRetryable && codeLit != nil {
+				if code, err := strconv.Unquote(codeLit.Value); err == nil {
+					if _, seen := found[code]; !seen {
+						found[code] = fset.Position(codeLit.Pos())
+					}
+				}
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// stringAssignLiterals returns every string-literal value assigned to the named
+// variable (`=` or `:=`) across files. Used to pin a finite variable-routed value
+// set (e.g. concurrencyErrCode) directly from source, so a new assignment is
+// covered automatically rather than needing a hand-maintained mirror slice.
+func stringAssignLiterals(files []*ast.File, varName string) []string {
+	var out []string
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for i, lhs := range as.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name != varName || i >= len(as.Rhs) {
+					continue
+				}
+				if lit, ok := as.Rhs[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if s, err := strconv.Unquote(lit.Value); err == nil {
+						out = append(out, s)
+					}
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
 // TestGatewayEmittedLiteralCodesAreClassified is the AST/registration-based
-// completeness guard (runbook item 21). It parses this package's source at test
-// time, derives each error-writer / classifier's `code` argument index from its
-// real signature, extracts every STRING-LITERAL code argument, and asserts each
-// is triaged into EXACTLY one of gatewayRetryableByCode / gatewayPermanentCodes —
-// so a new `writeError(w, status, typ, "new_code", msg)` (or an inline envelope
-// built with gatewayRetryable("new"), e.g. writeStructuredOutputTimeoutSSE) fails
-// CI merely by existing, with no edit to any hand-curated list. It also
-// cross-checks that gatewayEmittedErrorCodes has not gone stale by omitting a
-// literal that appears in source (the round-3 failure mode gatewayEmittedErrorCodes
-// "almost" fell into).
+// completeness guard (runbook item 21). It parses this package's source, derives
+// each error-writer / classifier's `code` argument index from its real signature,
+// extracts every STRING-LITERAL code argument (at emitter call sites AND in inline
+// `code`+`retryable` envelopes), and asserts each is triaged into EXACTLY one of
+// gatewayRetryableByCode / gatewayPermanentCodes — so a new emitted literal code
+// fails CI merely by existing. It also cross-checks gatewayEmittedErrorCodes for
+// staleness and asserts every registered emitter still resolves.
 //
 // Residual (documented, SPEC-006 §5.2 "Known carried items" (5)): the 429
 // concurrency code reaches writeError through the `concurrencyErrCode` variable
-// and is not a literal at the call site; it remains covered by
-// gatewayEmittedErrorCodes + TestGatewayErrorCodeCompleteness, and its finite
-// value set is pinned by TestGatewayConcurrencyCodesClassifiedAndInventoried.
+// and is not a literal at the call site; its finite value set is pinned directly
+// from the assignments by TestGatewayConcurrencyCodesClassifiedAndInventoried.
 func TestGatewayEmittedLiteralCodesAreClassified(t *testing.T) {
 	fset, files := parsePackageFiles(t)
 	codeIdx := deriveCodeArgIndices(files, gatewayErrorEmitters)
+	for _, p := range unresolvedEmitters(gatewayErrorEmitters, gatewayAllowAbsentEmitters, funcDeclNames(files), codeIdx) {
+		t.Error(p)
+	}
 	if len(codeIdx) == 0 {
 		t.Fatal("derived no emitter code-arg indices — gatewayErrorEmitters names are wrong")
 	}
 	literals := inspectFilesForLiteralCodes(files, fset, codeIdx)
+	for code, pos := range inspectFilesForEnvelopeCodeLiterals(files, fset) {
+		if _, ok := literals[code]; !ok {
+			literals[code] = pos
+		}
+	}
 	if len(literals) == 0 {
 		t.Fatal("AST scan found no literal error codes — emitter set or derivation is broken")
 	}
@@ -170,16 +289,21 @@ func TestGatewayEmittedLiteralCodesAreClassified(t *testing.T) {
 	}
 }
 
-// TestGatewayConcurrencyCodesClassifiedAndInventoried pins the finite value set
-// of the concurrencyErrCode variable (account_concurrency_exceeded /
-// demo_concurrency_exceeded), which reaches writeError as a variable and so is
-// invisible to the literal AST guard.
+// TestGatewayConcurrencyCodesClassifiedAndInventoried pins the finite value set of
+// the concurrencyErrCode variable (read DIRECTLY from its assignments, so a new
+// assignment is covered automatically), which reaches writeError as a variable
+// and so is invisible to the literal AST guard.
 func TestGatewayConcurrencyCodesClassifiedAndInventoried(t *testing.T) {
+	_, files := parsePackageFiles(t)
+	codes := stringAssignLiterals(files, "concurrencyErrCode")
+	if len(codes) == 0 {
+		t.Fatal("extracted no concurrencyErrCode assignments — variable renamed?")
+	}
 	inventory := make(map[string]bool, len(gatewayEmittedErrorCodes))
 	for _, c := range gatewayEmittedErrorCodes {
 		inventory[c] = true
 	}
-	for _, code := range []string{"account_concurrency_exceeded", "demo_concurrency_exceeded"} {
+	for _, code := range codes {
 		_, inR := gatewayRetryableByCode[code]
 		_, inP := gatewayPermanentCodes[code]
 		if !inR && !inP {
@@ -191,11 +315,11 @@ func TestGatewayConcurrencyCodesClassifiedAndInventoried(t *testing.T) {
 	}
 }
 
-// TestGatewayErrorCodeGuardDerivesAndExtracts is the mechanism test: it runs the
-// derivation + extraction over a synthetic snippet that DEFINES emitter
-// signatures (so the index is derived, not assumed) and calls them, proving a new
-// writer literal, a preflight literal, and an inline classifier literal are all
-// caught while a variable arg is ignored.
+// TestGatewayErrorCodeGuardDerivesAndExtracts is the mechanism test: it runs
+// derivation + extraction over a synthetic snippet that DEFINES the emitter
+// signatures (so indices are derived, e.g. writeSpec019PreflightError=2 which the
+// R1 bug had at 1) and exercises writer / preflight / inline-classifier /
+// inline-envelope / variable-arg cases.
 func TestGatewayErrorCodeGuardDerivesAndExtracts(t *testing.T) {
 	const src = `package router
 func writeError(w, status, typ, code, message string) {}
@@ -205,6 +329,7 @@ func caller(w, x string) {
 	writeError(w, x, "api_error", "new_writer_literal", "boom")
 	writeSpec019PreflightError(w, x, "new_preflight_literal", "boom", "p")
 	gatewayRetryable("new_inline_classifier_literal")
+	_ = map[string]any{"code": "new_envelope_literal", "retryable": false}
 	writeError(w, x, "api_error", concurrencyErrCode, "variable code must be ignored")
 }`
 	fset := token.NewFileSet()
@@ -224,19 +349,15 @@ func caller(w, x string) {
 		t.Errorf("derived gatewayRetryable code index = %d, want 0", codeIdx["gatewayRetryable"])
 	}
 	found := inspectFilesForLiteralCodes(files, fset, codeIdx)
-	for _, want := range []string{"new_writer_literal", "new_preflight_literal", "new_inline_classifier_literal"} {
+	for code, pos := range inspectFilesForEnvelopeCodeLiterals(files, fset) {
+		found[code] = pos
+	}
+	for _, want := range []string{"new_writer_literal", "new_preflight_literal", "new_inline_classifier_literal", "new_envelope_literal"} {
 		if _, ok := found[want]; !ok {
 			t.Errorf("guard did not extract %q — a new unclassified code would slip through", want)
 		}
 	}
-	if len(found) != 3 {
-		t.Errorf("expected exactly 3 literal codes (variable arg must be skipped), got %d: %v", len(found), found)
-	}
-	for code := range found {
-		_, inR := gatewayRetryableByCode[code]
-		_, inP := gatewayPermanentCodes[code]
-		if inR || inP {
-			t.Errorf("synthetic code %q unexpectedly classified", code)
-		}
+	if len(found) != 4 {
+		t.Errorf("expected exactly 4 literal codes (variable arg must be skipped), got %d: %v", len(found), found)
 	}
 }
