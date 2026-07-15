@@ -50,6 +50,9 @@ Environment=CANARY_DISABLE_FILE=/var/lib/macprovider-canary-buyer/DISABLED
 # coordinator explicitly classifies legacy_bridge. All fleet, routing,
 # connection, and heartbeat invariants remain mandatory.
 Environment=CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS=1
+# A short-lived, exact-fleet root authorization may exist only while the Pearl
+# updater proves restoration of a pre-contract backend. Absence is the default.
+Environment=CANARY_LEGACY_ROLLBACK_AUTHORIZATION_FILE=/run/macprovider-canary-buyer/legacy-rollback.json
 # Production must never silently degrade back to journal-only monitoring.
 Environment=CANARY_REQUIRE_HEARTBEAT=1
 # Scheduled liveness is one 8-token request/model with a worst-case global cap;

@@ -16,6 +16,7 @@ import {
   safetyObservationReasons,
   shouldRunRecovery,
   streamOne,
+  validateLegacyRollbackAuthorization,
 } from './probe.mjs';
 import { gatewaySnapshot, poolzSnapshot, providerSignalSnapshot } from './safety.mjs';
 
@@ -330,6 +331,68 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
     assert.ok(safetyObservationReasons(initial, rejected, expectedFleet, {
       allowLegacyBridgeProviderSignals: true,
     }).includes('provider-a:provider_signal_missing'), `${field}=${value} must fail closed`);
+  }
+});
+
+test('legacy rollback authorization is exact, expiring, and limited to unclassified prior rows', () => {
+  const now = Date.parse('2026-07-15T07:00:00Z');
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+  ];
+  const document = {
+    schema_version: 1,
+    kind: 'legacy_rollback',
+    authority: 'issue-585-integration-r4',
+    transaction_id: 'a'.repeat(64),
+    expires_at: new Date(now + 300_000).toISOString(),
+    providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
+  };
+  const authorized = validateLegacyRollbackAuthorization(document, expectedFleet, now);
+  assert.equal(authorized.get('provider-a').binary_version, '1.8.30');
+
+  const gateway = gatewaySnapshot({
+    status: 'up', degraded: false, coordinator: { status: 'up', checked_at: new Date(now).toISOString() },
+    pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+    models: expectedFleet.map(({ model_id }) => ({
+      id: model_id, provider_count: 1, ready_provider_count: 1, slots_free: 1,
+      available: true, availability: 'available', degraded: false,
+    })),
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id, assigned_id: `session-${index}`, model_id, state: 'ready', routing_eligible: true,
+    binary_version: '1.8.30', connected_at: new Date(now - 60_000).toISOString(),
+    last_heartbeat_at: new Date(now - 1_000).toISOString(),
+  })) }, now);
+  const observation = {
+    gateway,
+    operator_pool: operatorPool,
+    providers: operatorPool.map((row) => row.safety_telemetry),
+  };
+  assert.deepEqual(safetyObservationReasons(observation, observation, expectedFleet, {
+    legacyRollbackProviders: authorized,
+  }), []);
+
+  for (const [field, value] of [
+    ['catalog_admission_mode', 'legacy_bridge'],
+    ['catalog_admission_mode', 'current'],
+    ['binary_version', '1.8.31'],
+    ['model_id', 'wrong-model'],
+  ]) {
+    const rejected = structuredClone(observation);
+    rejected.operator_pool[0][field] = value;
+    assert.ok(safetyObservationReasons(observation, rejected, expectedFleet, {
+      legacyRollbackProviders: authorized,
+    }).includes('provider-a:provider_signal_missing'));
+  }
+
+  for (const invalid of [
+    { ...document, expires_at: new Date(now).toISOString() },
+    { ...document, expires_at: new Date(now + (16 * 60_000)).toISOString() },
+    { ...document, authority: 'issue-585-integration-r3' },
+    { ...document, providers: document.providers.slice(1) },
+  ]) {
+    assert.throws(() => validateLegacyRollbackAuthorization(invalid, expectedFleet, now));
   }
 });
 
