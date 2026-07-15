@@ -74,7 +74,7 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-585-integration-r4';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-585-integration-r5';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
@@ -1533,8 +1533,16 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
   };
 }
 
-function preconditionReasons(observed, expectedFleet, legacyRollbackProviders) {
-  return safetyObservationReasons(observed, observed, expectedFleet, { legacyRollbackProviders });
+export function preconditionReasons(
+  observed,
+  expectedFleet,
+  legacyRollbackProviders,
+  allowLegacyBridgeProviderSignals = false,
+) {
+  return safetyObservationReasons(observed, observed, expectedFleet, {
+    legacyRollbackProviders,
+    allowLegacyBridgeProviderSignals,
+  });
 }
 
 async function emitRun(run) {
@@ -1667,7 +1675,12 @@ async function main() {
     return;
   }
   const control = createControl(initial, baselines, expectedFleet, budget, legacyRollbackProviders);
-  const preReasons = preconditionReasons(initial, expectedFleet, legacyRollbackProviders);
+  const preReasons = preconditionReasons(
+    initial,
+    expectedFleet,
+    legacyRollbackProviders,
+    CONFIG.allowLegacyBridgeProviderSignals,
+  );
   if (preReasons.length) {
     const isolationFailure = CONFIG.mode === 'qualification'
       && preReasons.some((reason) => /isolation_|isolated_provider_/.test(reason));

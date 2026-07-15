@@ -12,6 +12,7 @@ import {
   observerFailureClass,
   outcomeBucket,
   pollPostRequestRecovery,
+  preconditionReasons,
   recoveryCadenceReasons,
   recoverySoakObservationReasons,
   safetyObservationReasons,
@@ -318,6 +319,9 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     allowLegacyBridgeProviderSignals: true,
   }), []);
+  assert.deepEqual(preconditionReasons(initial, expectedFleet, null, true), []);
+  assert.ok(preconditionReasons(initial, expectedFleet, null)
+    .includes('provider-a:provider_signal_missing'));
 
   for (const [field, value] of [
     ['catalog_admission_mode', 'current'],
@@ -344,7 +348,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-585-integration-r4',
+    authority: 'issue-585-integration-r5',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
