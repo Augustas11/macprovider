@@ -1069,9 +1069,11 @@ function isLegacyBridgeProviderSignalSubstitute(row, expected) {
     && /^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(row?.binary_version || '');
 }
 
-function isLegacyRollbackProviderSignalSubstitute(row, expected, authorizedProviders) {
+function isLegacyRollbackProviderSignalSubstitute(row, expected, authorizedProviders, nowMs) {
   const authorization = authorizedProviders?.get(expected.provider_id);
   return authorization?.model_id === expected.model_id
+    && Number.isFinite(authorization?.expires_at_ms)
+    && nowMs < authorization.expires_at_ms
     && row?.provider_id === expected.provider_id
     && typeof row?.assigned_id === 'string'
     && row.assigned_id.length > 0
@@ -1118,7 +1120,11 @@ export function validateLegacyRollbackAuthorization(document, expectedFleet, now
     if (!expected || expected.model_id !== row.model_id) {
       throw new Error('legacy rollback authorization provider identity is invalid');
     }
-    authorized.set(row.provider_id, { model_id: row.model_id, binary_version: row.binary_version });
+    authorized.set(row.provider_id, {
+      model_id: row.model_id,
+      binary_version: row.binary_version,
+      expires_at_ms: expiresAtMs,
+    });
   }
   return authorized;
 }
@@ -1150,6 +1156,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   cachedGatewayModelID = '',
   allowLegacyBridgeProviderSignals = false,
   legacyRollbackProviders = null,
+  nowMs = Date.now(),
 } = {}) {
   const qualification = CONFIG.mode === 'qualification';
   const activeProviderID = activeModelID
@@ -1238,7 +1245,12 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
         if (allowLegacyBridgeProviderSignals && isLegacyBridgeProviderSignalSubstitute(poolRow, expected)) {
           continue;
         }
-        if (isLegacyRollbackProviderSignalSubstitute(poolRow, expected, legacyRollbackProviders)) {
+        if (isLegacyRollbackProviderSignalSubstitute(
+          poolRow,
+          expected,
+          legacyRollbackProviders,
+          nowMs,
+        )) {
           continue;
         }
         reasons.push(`${expected.provider_id}:provider_signal_missing`);

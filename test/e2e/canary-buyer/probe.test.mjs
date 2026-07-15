@@ -371,7 +371,17 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   };
   assert.deepEqual(safetyObservationReasons(observation, observation, expectedFleet, {
     legacyRollbackProviders: authorized,
+    nowMs: now,
   }), []);
+
+  assert.deepEqual(safetyObservationReasons(observation, observation, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now + 299_999,
+  }), []);
+  assert.ok(safetyObservationReasons(observation, observation, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now + 300_000,
+  }).includes('provider-a:provider_signal_missing'));
 
   for (const [field, value] of [
     ['assigned_id', null],
@@ -388,6 +398,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     rejected.operator_pool[0][field] = value;
     assert.ok(safetyObservationReasons(observation, rejected, expectedFleet, {
       legacyRollbackProviders: authorized,
+      nowMs: now,
     }).includes('provider-a:provider_signal_missing'));
   }
 
