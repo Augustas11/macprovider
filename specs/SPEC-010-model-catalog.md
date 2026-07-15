@@ -864,19 +864,17 @@ default serializations. §3.3 specifies the one place
 >
 > **Cross-spec reconciliation (RESOLVED 2026-07-15, runbook item 22):**
 > R-3.3.4 above is `MUST` and is authoritative on this question (the more
-> specific rule, and the one matching shipped behavior — #555). The two
-> sibling specs, which previously
-> diverged, now cross-reference it explicitly: SPEC-002 R-3.X.6
-> (§ "R-3.X.6") was strengthened from `MAY` to `MUST` (SPEC-002 v1.5.4);
-> and SPEC-006 §17.2 now states that a provider's "seen" list is the union
-> of its served `model_id` and its declared `supported_models`, so a
-> declared-but-cold model is *known* and returns `503 no_provider_available`
-> via §17.3, not `404 model_not_found` (SPEC-006 v0.9.12). The
-> reconciliation changes no dispatch outcome — R-3.4.1 and SPEC-002
-> R-3.X.6's "MUST NOT change dispatch outcomes" both still hold; only the
-> buyer error code for a declared-but-cold request is affected (404→503),
-> which was already the shipped behavior (#555). No SPEC-010 normative
-> text changed in this reconciliation.
+> specific rule, matching shipped behavior — #555). The two sibling specs,
+> which previously diverged, now cross-reference it: SPEC-002 R-3.X.6 was
+> strengthened from `MAY` to `MUST` (SPEC-002 v1.5.4); SPEC-006 §17.2 now
+> names declared `supported_models` alongside "served or recently seen" in
+> the "known" list, so a declared-but-cold model is *known* and returns
+> `503 no_provider_available` via §17.3, not `404 model_not_found`
+> (SPEC-006 v0.9.12). The reconciliation changes no dispatch outcome —
+> R-3.4.1 and SPEC-002 R-3.X.6's "MUST NOT change dispatch outcomes" both
+> still hold; only the buyer error code for a declared-but-cold request on
+> default routing is affected (404→503), which was already the shipped
+> behavior (#555). No SPEC-010 normative text changed.
 
 ### 3.4 Router: candidate filter (semantically unchanged in v1.0)
 

@@ -4,7 +4,7 @@
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
 
 **Change log v1.5.4 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
-- R-3.X.6 strengthened from `MAY` to `MUST`: the coordinator MUST populate the `seenModels` index from the union of `Provider.ModelID` and every `Provider.SupportedModels` entry, reconciling with SPEC-010 v1.5 R-3.3.4 (authoritative — the more specific rule, matching shipped behavior; #555). No dispatch-outcome change (the "MUST NOT change dispatch outcomes" invariant is retained); the only buyer-visible effect is SPEC-010 R-3.3.4's error-code substitution for a declared-but-cold model (404 `model_not_found` → 503 `no_provider_available`). Paired with SPEC-006 §17.2's "seen = served ∪ declared" clarification. Docs-only; no coordinator behavior change.
+- R-3.X.6 strengthened from `MAY` to `MUST`: the coordinator MUST union declared `Provider.SupportedModels` into `seenModels`, reconciling with SPEC-010 v1.5 R-3.3.4 (authoritative — the more specific rule, matching shipped behavior; #555). No dispatch-outcome change; the only buyer-visible effect is SPEC-010 R-3.3.4's error-code substitution for a declared-but-cold model on default routing (404 `model_not_found` → 503 `no_provider_available`). §7.2 "404 vs 503 split" + the HTTP-status 404 row now name declared `supported_models` alongside served/seen as "known". Paired with SPEC-006 §17.2. Docs-only; no coordinator behavior change.
 
 **Change log v1.5.3 (2026-07-06, issue #374 — bounded coordinator slot queue):**
 - **Bounded zero-slot queue.** Non-pinned requests MAY enter a
@@ -821,20 +821,16 @@ on an initial-stage frame, no SPEC-010 retention entry is created.
 
 R-3.X.6 The coordinator MUST populate the internal `seenModels` index
 from the union of `Provider.ModelID` and every entry in
-`Provider.SupportedModels` per SPEC-010 v1.5 R-3.3.4 and R-3.4.1.
-SPEC-010 v1.5 R-3.3.4 is **authoritative** on this question — it is the
-more specific rule and the one matching shipped behavior (#555) — and is
-already implemented on both the registration and heartbeat sites. This
-MUST NOT change dispatch outcomes: a request still requires an otherwise
-eligible currently loaded provider, and §5 routing/dispatch results remain
-unchanged under all defaults. Buyer HTTP is byte-identical for legacy
-single-`model_id` providers (L-1). The **only** buyer-visible change is the
-SPEC-010 R-3.3.4 error-code substitution for a declared-but-cold model —
-`404 model_not_found` → `503 no_provider_available` (retryable) — which
-appears only when a provider opts in by advertising a multi-entry
-`supported_models`; it is an error-code change, not a routing change. (v1.5.4: strengthened from `MAY` to `MUST` to reconcile
-with SPEC-010 R-3.3.4 and shipped behavior; see also SPEC-006 §17.2.
-Runbook item 22.)
+`Provider.SupportedModels` per SPEC-010 v1.5 R-3.3.4 and R-3.4.1
+(SPEC-010 R-3.3.4 is authoritative on this question — the more specific
+rule, matching shipped behavior; #555). This MUST NOT change dispatch
+outcomes: a request still requires an otherwise eligible currently loaded
+provider, and §5 routing/dispatch results remain unchanged. The only
+buyer-visible effect is the SPEC-010 R-3.3.4 error-code substitution for a
+declared-but-cold model on default (unpinned) routing — `404
+model_not_found` → `503 no_provider_available` (retryable) — an error-code
+change, not a routing change. (v1.5.4: strengthened from `MAY` to `MUST`
+to reconcile with SPEC-010 R-3.3.4; runbook item 22.)
 
 ### Tier 2 hook points summary
 
@@ -1653,15 +1649,11 @@ Visible retry policies (e.g. coordinator-managed retry with explicit
 or SPEC-006 (public API), where buyer expectations differ.
 
 **FR-B8. Return HTTP 503 with descriptive body if no provider available.**
-See FR-B4 for the response shape. 503 applies only to a **known** model
-(one that cleared Gate 1 — see "Model resolution" in the HTTP-status
-section; an unknown model is `404 model_not_found`, not 503). Additional
-503 scenarios:
+See FR-B4 for the response shape. Additional 503 scenarios:
 - All providers for the requested model are `busy`, `degraded`,
   `draining`, or `unavailable`.
 - All providers rejected the preflight check.
-- The requested model is known (served, declared, seen, or a configured
-  model class) but not currently served by any eligible loaded provider.
+- The requested model is not served by any provider.
 
 **FR-B9. Log every buyer request.**
 Every buyer request is logged to the `request_log` table in SQLite:
@@ -2712,7 +2704,7 @@ inline so this spec is self-contained for build session use; if SPEC-001
 
 | Field | Type | Constraints |
 |---|---|---|
-| `model` | string | Must be a `model_id` known to the pool — "known" = served or declared (`supported_models`) by a connected provider (R-3.X.6 / SPEC-010 R-3.3.4), OR in the process-lifetime seen history, OR resolving to a configured model class (SPEC-004 FR-SR-9); see "Model resolution" below. 404 `model_not_found` only if known by none of those; 503 `no_provider_available` if known (including declared-but-cold) but no eligible loaded provider. |
+| `model` | string | Must match a `model_id` known to the pool. 404 `model_not_found` if absent from pool history; 503 `no_provider_available` if known but no provider eligible. |
 | `messages` | array | Non-empty. Per-message validation below. |
 
 **Optional fields:**
@@ -2770,7 +2762,7 @@ Validation order:
 | 3 | Field types and ranges | 400 `invalid_request` |
 | 4 | Per-message role and content validation | 400 `invalid_request` |
 | 5 | Tool/tool_call shape validation | 400 `invalid_tools` |
-| 6 | Model known (any of the "Model resolution" branches (a)–(d) below) | 404 `model_not_found` |
+| 6 | Model exists in pool | 404 `model_not_found` |
 | 7 | Provider available (routing) | 503 `no_provider_available` |
 | 8 | Preflight (if applicable) | 503 `preflight_rejected` |
 
@@ -2826,45 +2818,24 @@ the same value space — the stable `provider_id`.)
 |---|---|---|
 | 400 | Missing/invalid fields, malformed tools, n>1 | `invalid_request` or `invalid_tools` |
 | 401 | Invalid buyer auth (future, not enforced in v1) | `invalid_auth` |
-| 404 | `model_id` is known by none of: served/declared by a connected provider, present in the process-lifetime seen history, or resolving to a configured model class — model unknown to the pool (R-3.X.6 / SPEC-010 R-3.3.4 / SPEC-004 FR-SR-9; see "Model resolution" below — a hard-pin mismatch on an otherwise-known model is also 404) | `model_not_found` |
+| 404 | No connected provider serves or declares (`supported_models`) this `model_id`, and it has not been seen this process lifetime — model unknown to the pool (R-3.X.6 / SPEC-010 R-3.3.4; see "404 vs 503 split" below) | `model_not_found` |
 | 429 | Rate limit exceeded (future, not enforced in v1) | `rate_limit_exceeded` |
 | 502 | Selected provider returned an error or disconnected mid-request | `provider_error` |
 | 503 | Model is known to the pool but no eligible provider is currently available (all matching providers busy/degraded/draining/unavailable, or all failed preflight) | `no_provider_available` |
 | 504 | Provider did not respond within timeout | `provider_timeout` |
 
-**Model resolution — 404 vs 503 vs dispatch (clarified):** two ordered
-gates decide the outcome.
-
-*Gate 1 — universal "known" gate* (`internal/buyer/server.go`, all
-requests): a `model_id` is **known** if ANY of (a) served (`model_id`) by
-a currently-connected provider; (b) declared in `supported_models` by a
-currently-connected provider (R-3.X.6 / SPEC-010 R-3.3.4); (c) present in
-the retained process-lifetime seen-model history (§ 7.2 accumulator, kept
-after the provider disconnects); or (d) resolving to a configured model
-class (SPEC-004 FR-SR-9). If the model is known by NONE of (a)–(d),
-return `404 model_not_found` ("No provider has advertised model …"). This
-is the gate the seen/declared union changed (a declared-but-cold or
-lifetime-seen model is now known, so it clears Gate 1 instead of 404ing).
-
-*Gate 2 — routing, for a request that cleared Gate 1:*
-- **Hard-pinned request** whose pinned provider does not serve the
-  requested model (nor a class member) → `404 model_not_found` ("Pinned
-  provider serves different model", `validatePinnedProviderForRequest`).
-  This pin-mismatch 404 fires only AFTER Gate 1, i.e. only for an
-  otherwise-known/class-resolved model — an unknown pinned model already
-  took the Gate-1 404 above.
-- **Otherwise** → normal selection. If an eligible currently-loaded
-  provider serves the model (branch a) or a class member (branch d),
-  dispatch → `200`. If the model is known but no eligible loaded provider
-  can take it → `503 no_provider_available` (retryable; FR-B8 / FR-SR-9).
-
-So a **declared-but-cold** (b) or **lifetime-seen-only** (c) model is
-never warm on any provider, so it always lands on the `503` (its only
-change vs pre-SPEC-010 is `404`→`503`); a **class** (d) model routes to a
-warm class member (`200`) or `503` if none; a **served** (a) model
-dispatches (`200`) or `503`. Declaring or having-seen a model never causes
-it to be dispatched to a provider not serving it — dispatch still matches
-a warm `model_id` / class member.
+**404 vs 503 split (clarified):**
+- **404 `model_not_found`** — the requested `model_id` is not in the
+  union of served `model_id` **and declared `supported_models`** fields
+  across all currently-connected providers (R-3.X.6 / SPEC-010 R-3.3.4),
+  AND has not been seen in any provider's hello/heartbeat history during
+  this coordinator process lifetime. A model a connected provider
+  *declares* in `supported_models` but has not warmed is NOT 404 — it is
+  known, so it takes the 503 below.
+- **503 `no_provider_available`** — the `model_id` is recognized
+  (some provider serves, has recently served, **or declares it in
+  `supported_models`**), but no currently-eligible provider can take the
+  request right now. Retry-friendly.
 
 This split matters because buyers should treat 404 as a misconfiguration
 ("pick a different model") and 503 as transient backoff ("retry soon").
