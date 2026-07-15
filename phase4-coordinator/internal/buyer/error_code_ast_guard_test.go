@@ -11,48 +11,45 @@ import (
 	"testing"
 )
 
-// coordinatorErrorEmitters maps each buyer-facing error-writer function in this
-// package to the 0-based index of its `code` string parameter. It is the
-// registry the AST completeness guard (TestCoordinatorEmittedLiteralCodesAreClassified)
-// walks the package source for.
+// coordinatorErrorEmitters is the SET of functions whose `code` string argument
+// must carry a code explicitly classified in spec018RetryableByCode. The 0-based
+// index of that argument is DERIVED from each function's real signature at test
+// time (the parameter named "code") — never hand-maintained — so a signature
+// change or a mis-typed index cannot silently drift the guard past a writer's
+// codes (the first cut of this guard hand-indexed a writer wrong and skipped its
+// codes entirely).
 //
-//	writeError(w, status, code, message)                              -> 2
-//	writeErrorWithParam(w, status, code, message, param)              -> 2
-//	writeErrorTyped(w, status, typ, code, message)                    -> 3
-//	writeErrorTypedParam(w, status, typ, code, message, param)        -> 3
-//	writeSSEError(w, message, code, requestID...)                     -> 2
-//	writeSSEErrorWithRetryable(w, message, code, override, requestID) -> 2
-//	writeProviderStructuredOutputError(w, status, code, message, ret) -> 2
+// The set covers the buyer-facing error WRITERS and the retryability CLASSIFIER
+// (spec018Retryable): an inline error envelope that computes its `retryable`
+// field via spec018Retryable("literal_code") — instead of routing through a
+// writer — is still caught, because that classifier call carries the code
+// literal. (The gateway's writeStructuredOutputTimeoutSSE is the pattern this
+// closes on that side; the coordinator has no such inline emitter today, but the
+// classifier registration future-proofs it symmetrically.)
 //
-// writeRouteError(w, *routeError) carries no code argument — its code travels
-// inside the struct as a variable and is therefore covered by the hand-curated
-// coordinatorEmittedErrorCodes inventory, not this AST guard.
-var coordinatorErrorEmitters = map[string]int{
-	"writeError":                         2,
-	"writeErrorWithParam":                2,
-	"writeErrorTyped":                    3,
-	"writeErrorTypedParam":               3,
-	"writeSSEError":                      2,
-	"writeSSEErrorWithRetryable":         2,
-	"writeProviderStructuredOutputError": 2,
+// writeSSEErrorWithRetryable is added by item 20 (#594) and is absent on
+// origin/main until it merges; the name simply resolves to no FuncDecl and no
+// calls here, and auto-covers once #594 lands.
+var coordinatorErrorEmitters = map[string]bool{
+	"writeError":                         true,
+	"writeErrorWithParam":                true,
+	"writeErrorTyped":                    true,
+	"writeErrorTypedParam":               true,
+	"writeSSEError":                      true,
+	"writeSSEErrorWithRetryable":         true,
+	"writeProviderStructuredOutputError": true,
+	"spec018Retryable":                   true,
 }
 
-// collectLiteralEmittedCodes parses every non-test .go file in the current
-// package directory and returns the set of STRING-LITERAL code arguments passed
-// to any function in emitters (keyed by the code-argument index). A code passed
-// as a variable/selector/call (e.g. a validation-helper return, routeError.code,
-// a tier-2 blockReason) is not a literal at the call site and is deliberately
-// skipped — the AST cannot resolve its runtime value; those remain on the
-// hand-curated inventory.
-func collectLiteralEmittedCodes(t *testing.T, emitters map[string]int) map[string]token.Position {
+// parsePackageFiles parses every non-test .go file in the current package dir.
+func parsePackageFiles(t *testing.T) (*token.FileSet, []*ast.File) {
 	t.Helper()
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
-	found := map[string]token.Position{}
-	parsedAny := false
+	var files []*ast.File
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -62,107 +59,112 @@ func collectLiteralEmittedCodes(t *testing.T, emitters map[string]int) map[strin
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		parsedAny = true
-		inspectFileForLiteralCodes(file, fset, emitters, found)
+		files = append(files, file)
 	}
-	if !parsedAny {
+	if len(files) == 0 {
 		t.Fatal("no non-test .go files parsed — is the test running from the package directory?")
+	}
+	return fset, files
+}
+
+// deriveCodeArgIndices returns, for each emitter name whose FuncDecl is present
+// in files, the flattened 0-based index of its parameter named "code". A change
+// to any emitter's signature is reflected automatically — the guard never trusts
+// a hand-written index. Emitters with no FuncDecl in this package (e.g. an
+// item-20 forward reference) simply do not appear in the result.
+func deriveCodeArgIndices(files []*ast.File, emitters map[string]bool) map[string]int {
+	idx := map[string]int{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !emitters[fn.Name.Name] || fn.Type.Params == nil {
+				continue
+			}
+			pos := 0
+			for _, field := range fn.Type.Params.List {
+				if len(field.Names) == 0 { // unnamed parameter
+					pos++
+					continue
+				}
+				for _, name := range field.Names {
+					if name.Name == "code" {
+						idx[fn.Name.Name] = pos
+					}
+					pos++
+				}
+			}
+		}
+	}
+	return idx
+}
+
+// inspectFilesForLiteralCodes walks every call in files to a name in codeIdx and
+// records the STRING-LITERAL argument at that name's code index. A code passed as
+// a variable/selector/call (validation-helper returns, routeError.code, tier-2
+// blockReason, end.Status) is not a literal at the call site and is skipped — the
+// AST cannot resolve its runtime value.
+func inspectFilesForLiteralCodes(files []*ast.File, fset *token.FileSet, codeIdx map[string]int) map[string]token.Position {
+	found := map[string]token.Position{}
+	for _, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := call.Fun.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			idx, ok := codeIdx[ident.Name]
+			if !ok || idx >= len(call.Args) {
+				return true
+			}
+			lit, ok := call.Args[idx].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			code, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			if _, seen := found[code]; !seen {
+				found[code] = fset.Position(lit.Pos())
+			}
+			return true
+		})
 	}
 	return found
 }
 
-// inspectFileForLiteralCodes is the AST-walk core, factored out so the guard's
-// extraction can be exercised against a synthetic snippet (see
-// TestErrorCodeASTGuardCatchesNewLiteral) as well as the real package source.
-func inspectFileForLiteralCodes(file *ast.File, fset *token.FileSet, emitters map[string]int, found map[string]token.Position) {
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		ident, ok := call.Fun.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		idx, ok := emitters[ident.Name]
-		if !ok || idx >= len(call.Args) {
-			return true
-		}
-		lit, ok := call.Args[idx].(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			return true // variable/selector-routed code — covered by the hand-curated inventory
-		}
-		code, err := strconv.Unquote(lit.Value)
-		if err != nil {
-			return true
-		}
-		if _, seen := found[code]; !seen {
-			found[code] = fset.Position(lit.Pos())
-		}
-		return true
-	})
-}
-
-// TestErrorCodeASTGuardCatchesNewLiteral proves the guard's extraction actually
-// fires: a synthetic writeError call with a brand-new literal code is discovered
-// by the same inspection the real guard uses, so an unclassified new code WOULD
-// fail TestCoordinatorEmittedLiteralCodesAreClassified. Without this, the guard
-// passing on clean source would not distinguish "correctly classified" from
-// "the AST walk silently matched nothing".
-func TestErrorCodeASTGuardCatchesNewLiteral(t *testing.T) {
-	const src = `package buyer
-func f(w any) {
-	writeError(w, 500, "totally_new_unclassified_code", "boom")
-	writeSSEError(w, "msg", "another_new_sse_code")
-	writeError(w, 500, someVar, "variable code must be ignored")
-}`
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "synthetic.go", src, 0)
-	if err != nil {
-		t.Fatalf("parse synthetic source: %v", err)
-	}
-	found := map[string]token.Position{}
-	inspectFileForLiteralCodes(file, fset, coordinatorErrorEmitters, found)
-	if _, ok := found["totally_new_unclassified_code"]; !ok {
-		t.Error("guard did not extract the literal code from writeError — a new unclassified code would slip through")
-	}
-	if _, ok := found["another_new_sse_code"]; !ok {
-		t.Error("guard did not extract the literal code from writeSSEError")
-	}
-	if len(found) != 2 {
-		t.Errorf("expected exactly 2 literal codes (variable arg must be skipped), got %d: %v", len(found), found)
-	}
-	// Confirm these synthetic codes are indeed unclassified, so the real guard
-	// would report them.
-	for code := range found {
-		if _, ok := spec018RetryableByCode[code]; ok {
-			t.Errorf("synthetic code %q unexpectedly exists in spec018RetryableByCode", code)
-		}
-	}
-}
-
 // TestCoordinatorEmittedLiteralCodesAreClassified is the AST/registration-based
-// completeness guard (runbook item 21) that makes the "a new emitted code fails
-// CI" claim literally true for the common case. It parses this package's source
-// at test time and asserts every STRING-LITERAL `code` argument at an
-// error-writer call site (coordinatorErrorEmitters) has an explicit
-// spec018RetryableByCode entry — so a brand-new `writeError(w, status,
-// "new_code", msg)` fails CI merely by existing, with no edit to any hand-curated
-// list. It also cross-checks that the hand-curated coordinatorEmittedErrorCodes
-// inventory has not gone stale by omitting a literal that appears in source
-// (the exact round-3 failure mode that let 3 codes ship unclassified).
+// completeness guard (runbook item 21). It parses this package's source at test
+// time, derives each error-writer / classifier's `code` argument index from its
+// real signature, extracts every STRING-LITERAL code argument, and asserts each
+// has an explicit spec018RetryableByCode entry — so a new `writeError(w, status,
+// "new_code", msg)` (or an inline envelope built with spec018Retryable("new"))
+// fails CI merely by existing, with no edit to any hand-curated list. It also
+// cross-checks that coordinatorEmittedErrorCodes has not gone stale by omitting a
+// literal that appears in source (the round-3 failure mode that let 3 codes ship
+// unclassified).
 //
 // Residual (documented, SPEC-006 §5.2 "Known carried items" (5)): codes that
-// reach an emitter through a variable — validation-helper `(status, code, msg)`
-// returns, `routeError.code` via writeRouteError, tier-2 `blockReason` — are not
-// literals at the call site and cannot be resolved by static AST inspection.
-// Those remain covered by coordinatorEmittedErrorCodes +
-// TestCoordinatorErrorCodeCompleteness. This guard closes the far larger
-// direct-literal surface, which is how virtually every new code is introduced.
+// reach an emitter through a VARIABLE — validation-helper (status, code, msg)
+// returns, routeError.code via writeRouteError, tier-2 blockReason, and the
+// provider-supplied end.Status forwarded to writeSSEError /
+// writeProviderStructuredOutputError — are not literals at the call site and
+// cannot be statically resolved. Those remain covered by
+// coordinatorEmittedErrorCodes + TestCoordinatorErrorCodeCompleteness, and the
+// finite provider-detail allowlist is pinned by
+// TestSpec019ProviderDetailCodesClassifiedAndInventoried below.
 func TestCoordinatorEmittedLiteralCodesAreClassified(t *testing.T) {
-	literals := collectLiteralEmittedCodes(t, coordinatorErrorEmitters)
+	fset, files := parsePackageFiles(t)
+	codeIdx := deriveCodeArgIndices(files, coordinatorErrorEmitters)
+	if len(codeIdx) == 0 {
+		t.Fatal("derived no emitter code-arg indices — coordinatorErrorEmitters names are wrong")
+	}
+	literals := inspectFilesForLiteralCodes(files, fset, codeIdx)
 	if len(literals) == 0 {
-		t.Fatal("AST scan found no literal error codes — coordinatorErrorEmitters names or indices are wrong")
+		t.Fatal("AST scan found no literal error codes — emitter set or derivation is broken")
 	}
 	inventory := make(map[string]bool, len(coordinatorEmittedErrorCodes))
 	for _, c := range coordinatorEmittedErrorCodes {
@@ -174,6 +176,84 @@ func TestCoordinatorEmittedLiteralCodesAreClassified(t *testing.T) {
 		}
 		if !inventory[code] {
 			t.Errorf("emitted literal code %q (%s) is missing from coordinatorEmittedErrorCodes — the hand-curated inventory went stale", code, pos)
+		}
+	}
+}
+
+// TestSpec019ProviderDetailCodesClassifiedAndInventoried pins the finite
+// provider-detail terminal allowlist (isSpec019ProviderDetailCode), which reaches
+// writeSSEError / writeProviderStructuredOutputError through the variable
+// end.Status and so is invisible to the literal AST guard. If a future member is
+// added to that allowlist it must be classified and inventoried, or this fails.
+func TestSpec019ProviderDetailCodesClassifiedAndInventoried(t *testing.T) {
+	detail := []string{
+		"malformed_json_response",
+		"json_schema_validation_failed",
+		"response_byte_cap_exceeded",
+		"provider_timeout",
+	}
+	inventory := make(map[string]bool, len(coordinatorEmittedErrorCodes))
+	for _, c := range coordinatorEmittedErrorCodes {
+		inventory[c] = true
+	}
+	for _, code := range detail {
+		if !isSpec019ProviderDetailCode(code) {
+			t.Errorf("provider-detail allowlist drift: %q is no longer isSpec019ProviderDetailCode — reconcile this pinned list", code)
+		}
+		if _, ok := spec018RetryableByCode[code]; !ok {
+			t.Errorf("provider-detail code %q has no spec018RetryableByCode entry", code)
+		}
+		if !inventory[code] {
+			t.Errorf("provider-detail code %q missing from coordinatorEmittedErrorCodes", code)
+		}
+	}
+}
+
+// TestCoordinatorErrorCodeGuardDerivesAndExtracts is the mechanism test: it runs
+// the derivation + extraction over a synthetic snippet that DEFINES emitter
+// signatures (so the index is derived, not assumed) and calls them, proving a new
+// literal code is caught, a classifier literal is caught, and a variable arg is
+// ignored. Without this, the real guard passing on clean source would not
+// distinguish "correctly classified" from "the walk silently matched nothing".
+func TestCoordinatorErrorCodeGuardDerivesAndExtracts(t *testing.T) {
+	const src = `package buyer
+func writeError(w, status, code, message string) {}
+func writeErrorTyped(w, status, typ, code, message string) {}
+func spec018Retryable(code string) bool { return false }
+func caller(w, x string) {
+	writeError(w, x, "new_writer_literal", "boom")
+	writeErrorTyped(w, x, "api_error", "new_typed_literal", "boom")
+	spec018Retryable("new_inline_classifier_literal")
+	writeError(w, x, someVar, "variable code must be ignored")
+}`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	files := []*ast.File{file}
+	codeIdx := deriveCodeArgIndices(files, coordinatorErrorEmitters)
+	if codeIdx["writeError"] != 2 {
+		t.Errorf("derived writeError code index = %d, want 2", codeIdx["writeError"])
+	}
+	if codeIdx["writeErrorTyped"] != 3 {
+		t.Errorf("derived writeErrorTyped code index = %d, want 3", codeIdx["writeErrorTyped"])
+	}
+	if codeIdx["spec018Retryable"] != 0 {
+		t.Errorf("derived spec018Retryable code index = %d, want 0", codeIdx["spec018Retryable"])
+	}
+	found := inspectFilesForLiteralCodes(files, fset, codeIdx)
+	for _, want := range []string{"new_writer_literal", "new_typed_literal", "new_inline_classifier_literal"} {
+		if _, ok := found[want]; !ok {
+			t.Errorf("guard did not extract %q — a new unclassified code would slip through", want)
+		}
+	}
+	if len(found) != 3 {
+		t.Errorf("expected exactly 3 literal codes (variable arg must be skipped), got %d: %v", len(found), found)
+	}
+	for code := range found {
+		if _, ok := spec018RetryableByCode[code]; ok {
+			t.Errorf("synthetic code %q unexpectedly exists in spec018RetryableByCode", code)
 		}
 	}
 }
