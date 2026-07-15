@@ -2400,6 +2400,87 @@ class PearlUpdaterTests(unittest.TestCase):
         with self.assertRaisesRegex(updater_module.UpdateError, "queued systemd job"):
             self.updater.assert_unit_quiescent("canary-buyer.timer")
 
+    def test_failed_unit_is_reset_and_rechecked_quiescent(self):
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["systemctl", "show"],
+                    0,
+                    stdout="ActiveState=failed\nSubState=failed\nJob=\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    ["systemctl", "reset-failed"], 0, stdout="", stderr=""
+                ),
+                subprocess.CompletedProcess(
+                    ["systemctl", "show"],
+                    0,
+                    stdout="ActiveState=inactive\nSubState=dead\nJob=\n",
+                    stderr="",
+                ),
+            ]
+        )
+
+        self.updater.assert_unit_quiescent("stats-billing-mirror.service")
+
+        self.assertEqual(
+            self.updater.run_command.call_args_list,
+            [
+                mock.call(
+                    [
+                        "systemctl",
+                        "show",
+                        "--property=ActiveState",
+                        "--property=SubState",
+                        "--property=Job",
+                        "stats-billing-mirror.service",
+                    ],
+                    check=False,
+                    timeout=10,
+                ),
+                mock.call(
+                    ["systemctl", "reset-failed", "stats-billing-mirror.service"],
+                    check=False,
+                    timeout=10,
+                ),
+                mock.call(
+                    [
+                        "systemctl",
+                        "show",
+                        "--property=ActiveState",
+                        "--property=SubState",
+                        "--property=Job",
+                        "stats-billing-mirror.service",
+                    ],
+                    check=False,
+                    timeout=10,
+                ),
+            ],
+        )
+
+    def test_failed_unit_reset_failure_is_not_quiescent(self):
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["systemctl", "show"],
+                    0,
+                    stdout="ActiveState=failed\nSubState=failed\nJob=\n",
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    ["systemctl", "reset-failed"],
+                    1,
+                    stdout="",
+                    stderr="reset denied",
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError, "could not normalize.*reset denied"
+        ):
+            self.updater.assert_unit_quiescent("stats-billing-mirror.service")
+
     def test_rollback_aborts_before_mutation_when_quiescence_is_unprovable(self):
         self.updater.transaction = self.root / "transaction"
         self.updater.validate_transaction = mock.Mock()

@@ -2776,29 +2776,44 @@ class Updater:
         raise UpdateError(f"could not determine systemd active state for {unit}")
 
     def assert_unit_quiescent(self, unit: str) -> None:
-        result = self.run_command(
-            [
-                "systemctl",
-                "show",
-                "--property=ActiveState",
-                "--property=SubState",
-                "--property=Job",
-                unit,
-            ],
-            check=False,
-            timeout=10,
-        )
-        properties: dict[str, str] = {}
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                properties[key] = value
-        if result.returncode != 0:
-            raise UpdateError(f"could not prove {unit} quiescent")
+        def state() -> dict[str, str]:
+            result = self.run_command(
+                [
+                    "systemctl",
+                    "show",
+                    "--property=ActiveState",
+                    "--property=SubState",
+                    "--property=Job",
+                    unit,
+                ],
+                check=False,
+                timeout=10,
+            )
+            properties: dict[str, str] = {}
+            for line in result.stdout.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    properties[key] = value
+            if result.returncode != 0:
+                raise UpdateError(f"could not prove {unit} quiescent")
+            if properties.get("Job", "") not in ("", "0"):
+                raise UpdateError(f"{unit} still has a queued systemd job")
+            return properties
+
+        properties = state()
+        if properties.get("ActiveState") == "failed":
+            reset = self.run_command(
+                ["systemctl", "reset-failed", unit],
+                check=False,
+                timeout=10,
+            )
+            if reset.returncode != 0:
+                raise UpdateError(
+                    f"could not normalize {unit} failed state: {reset.stderr.strip()}"
+                )
+            properties = state()
         if properties.get("ActiveState") != "inactive":
             raise UpdateError(f"{unit} is not inactive")
-        if properties.get("Job", "") not in ("", "0"):
-            raise UpdateError(f"{unit} still has a queued systemd job")
 
     def systemctl(self, action: str, unit: str) -> None:
         self._journal_transition(
