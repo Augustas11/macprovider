@@ -14,6 +14,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/gobwas/ws/wsutil"
 )
@@ -70,6 +71,11 @@ func TestLegacyBearerEnrollsDurableAdmissionIdentityBeforeExemptionFallback(t *t
 		response.IdentityAdmissionKeyRole != "current" ||
 		response.AdmissionIdentityPubkey != base64.StdEncoding.EncodeToString(pubkey) {
 		t.Fatalf("first admission response=%+v", response)
+	}
+	// Runbook item 23: the v2 auth_response propagates the admission verdict.
+	// This connect carries a valid Bearer, so auth_state is bearer_validated.
+	if response.AuthState != string(pool.AuthBearerValidated) {
+		t.Fatalf("v2 auth_response auth_state = %q, want %q (bearer-validated admission)", response.AuthState, pool.AuthBearerValidated)
 	}
 	_ = conn.Close()
 	first.HTTP.Close()

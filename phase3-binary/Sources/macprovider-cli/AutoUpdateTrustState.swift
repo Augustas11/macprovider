@@ -121,9 +121,13 @@ struct AutoUpdateTrustState: Sendable {
         if let rawAuthState = payload["auth_state"] {
             if let authState = rawAuthState as? String, !authState.isEmpty {
                 switch authState {
-                case "bearer_validated", "self_minted", "self_minted_verified":
-                    // Known non-duplicate admission verdicts — the verdict pipeline
-                    // still applies its own tier/token/attestation guards.
+                case "bearer_validated", "self_minted":
+                    // The closed wire domain of ack auth_state (SPEC-001 §6.5.1):
+                    // known non-duplicate verdicts — the verdict pipeline still
+                    // applies its own tier/token/attestation guards. (Reserved
+                    // states like self_minted_verified are NOT in the emitted
+                    // domain; if one ever appears it takes the fail-closed default
+                    // below until a coordinated SPEC-001/003/020 bump defines it.)
                     bearerlessDuplicate = false
                 case "bearerless_duplicate", "mint_failed":
                     // Race-loser holds the notify-only floor. mint_failed does not
