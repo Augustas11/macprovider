@@ -1865,13 +1865,22 @@ def owner_is_live(owner):
     owner_pid = owner.get("pid")
     owner_start = owner.get("process_start_us")
     owner_boot = owner.get("boot_session")
+    # WIRE-TYPE BOUNDS (Finding 1, R5 CODE-M) on the ordinary-liveness path too:
+    # owner.pid is Swift Int32 and process_start_us is Swift Int64, so a value
+    # outside the type range could never have been decoded by the Swift store.
+    # Bound them BEFORE pid_alive/process_start_epoch_seconds do arithmetic or
+    # syscalls: os.kill(pid, 0) raises OverflowError (uncaught by pid_alive) for
+    # a pid beyond C int range, so an Int32-overflow pid would otherwise crash
+    # the reconciler instead of failing toward removal. Any out-of-range value
+    # returns False here -> the dead-owner path (and then the structural mirror)
+    # -> removal, never a preserve or a crash.
     if (
         not isinstance(owner_pid, int)
         or isinstance(owner_pid, bool)
-        or owner_pid <= 0
+        or not (1 <= owner_pid <= 2**31 - 1)
         or not isinstance(owner_start, int)
         or isinstance(owner_start, bool)
-        or owner_start <= 0
+        or not (1 <= owner_start <= 2**63 - 1)
         or not isinstance(owner_boot, str)
         or not owner_boot
     ):
@@ -1934,39 +1943,93 @@ def record_matches_swift_structure(record):
         return False
 
     # --- primitive helpers mirroring the Swift validators ---
+    #
+    # WIRE-TYPE BOUNDS (Finding 1, R5 CODE-M). Swift's JSONDecoder decodes each
+    # numeric field into an EXACT fixed-width integer type; a JSON number that
+    # does not fit that type makes the decode FAIL, so inspect() rejects the
+    # record and -- if the shell had preserved it -- the restored CLI's fallback
+    # (which only re-acquires on handoffNotPrepared) leaves the provider in a
+    # restart loop. Preserving such a record is therefore the harmful outcome.
+    # So EVERY numeric wire field is bounded to its exact Swift type here,
+    # BEFORE any arithmetic, and is required to be a JSON integer (not a float,
+    # string, or bool -- Python's bool is an int subclass, hence the explicit
+    # bool rejection in is_int). These bounds are exactly-as-strict as Swift for
+    # the range check and strictly-stricter nowhere it matters:
+    #   owner.pid                    -> Swift Int32 -> [1, 2**31 - 1]
+    #   process_start_us             -> Swift Int64 -> [1, 2**63 - 1]
+    #   issued/expires_wall_ms       -> Swift Int64 -> [.., 2**63 - 1]
+    #   issued/expires_monotonic_ns  -> Swift Int64 -> [.., 2**63 - 1]
+    #   startup_lease_duration_ms    -> Swift Int64 -> [1, 2**63 - 1]
+    # (`version` fields are Swift Int but the shell already pins them to the
+    # exact schema constant 1, which is inside every integer type's range, so no
+    # separate Int64 bound is needed for them.)
+    INT32_MAX = 2**31 - 1  # Swift Int32.max
+    INT64_MAX = 2**63 - 1  # Swift Int64.max
+
     def is_int(value):
+        # A JSON integer that is not a bool (Python bool subclasses int; Swift's
+        # JSONDecoder rejects `true`/`false` for an integer field).
         return isinstance(value, int) and not isinstance(value, bool)
 
-    def printable_scalar(text):
-        # validateOperationID / validateHandoffIdentity: every unicode scalar
-        # must be >= 0x20 and NOT in 0x7f...0x9f (C0/C1 control exclusion).
+    def is_int32(value):
+        # Fits Swift Int32 (owner.pid). Any value outside [-2**31, 2**31 - 1]
+        # overflows Int32 and fails JSONDecoder; callers additionally require
+        # the store-specific positivity bound (pid > 0).
+        return is_int(value) and -(INT32_MAX + 1) <= value <= INT32_MAX
+
+    def is_int64(value):
+        # Fits Swift Int64 (all timestamp/duration/process-start fields). Any
+        # value outside [-2**63, 2**63 - 1] overflows Int64 and fails
+        # JSONDecoder; callers additionally require the store-specific lower
+        # bound (> 0 or >= 0).
+        return is_int(value) and -(INT64_MAX + 1) <= value <= INT64_MAX
+
+    def ascii_identity_scalar(text):
+        # STRICTLY-STRICTER-THAN-FOUNDATION identity rule (Finding 2, R5 CODE-M).
+        # Swift trims operation_id / provider_id / service_identity with
+        # Foundation's trimmingCharacters(.whitespacesAndNewlines), whose scalar
+        # set (e.g. U+200B ZERO WIDTH SPACE and other format/whitespace scalars)
+        # is NOT identical to Python str.strip(); mirroring the trim with
+        # str.strip() lets a U+200B-prefixed identity pass the shell yet fail the
+        # Swift store's own trimmed == value guard -> a false preserve ->
+        # restart loop. Rather than reproduce Foundation's trim set, we require
+        # EVERY scalar to be printable ASCII in 0x21..0x7e: no whitespace of any
+        # kind anywhere (so trivially trim-stable under BOTH Python and
+        # Foundation semantics), and no control/format scalars. The Swift store
+        # only ever WRITES such values for these three fields -- operation ids
+        # like "serve:<uuid>" / "install-rollback:<id>" / "provider-restart-N",
+        # launchd-label service identities, and config provider ids -- so any
+        # value outside this set cannot have been emitted by the store, and its
+        # removal self-heals via fresh acquisition (bounded availability delay,
+        # never a restart loop). The one theoretical false-removal is a
+        # deliberately non-ASCII provider_id, which declines the exemption
+        # (bounded availability delay), never a restart loop.
         for char in text:
             code = ord(char)
-            if code < 0x20 or 0x7F <= code <= 0x9F:
+            if code < 0x21 or code > 0x7E:
                 return False
         return True
 
     def valid_operation_id(value):
-        # validateOperationID: trimmed == value, non-empty, utf8 <= 128,
-        # printable per printable_scalar.
+        # validateOperationID, made strictly-stricter: str, non-empty, utf8
+        # <= 128, and every scalar printable ASCII 0x21..0x7e (subsumes Swift's
+        # trimmed == value and >= 0x20 && not-C1 checks; see
+        # ascii_identity_scalar).
         if not isinstance(value, str):
-            return False
-        if value != value.strip():
             return False
         if not value or len(value.encode("utf-8")) > 128:
             return False
-        return printable_scalar(value)
+        return ascii_identity_scalar(value)
 
     def valid_handoff_identity(value, *, forbid_slash):
-        # validateHandoffIdentity: trimmed == value, non-empty, utf8 <= 256,
-        # printable; service_identity additionally must not contain "/".
+        # validateHandoffIdentity, made strictly-stricter: str, non-empty, utf8
+        # <= 256, every scalar printable ASCII 0x21..0x7e; service_identity
+        # additionally must not contain "/" (kept from Swift).
         if not isinstance(value, str):
-            return False
-        if value != value.strip():
             return False
         if not value or len(value.encode("utf-8")) > 256:
             return False
-        if not printable_scalar(value):
+        if not ascii_identity_scalar(value):
             return False
         if forbid_slash and "/" in value:
             return False
@@ -1989,10 +2052,46 @@ def record_matches_swift_structure(record):
         )
 
     def valid_target_path(value):
-        # validateTargetExecutablePath: absolute, standardized (no "." / ".."
-        # / trailing-slash / duplicate-slash artifacts), no NUL byte, utf8
-        # within MAXPATHLEN*4 (1024*4). os.path.normpath reproduces Foundation's
-        # standardizedFileURL path normalization for absolute paths.
+        # validateTargetExecutablePath, made STRICTLY-STRICTER-THAN-BOTH-
+        # NORMALIZERS (Finding 2, R6 remaining-surface item 2). Swift rejects
+        # unless `path == URL(fileURLWithPath: path).standardizedFileURL.path`;
+        # the previous shell mirror used `os.path.normpath(value) == value`.
+        # Neither normalizer is a substring of the other (normpath collapses
+        # "a/b/../c" -> "a/c" and strips trailing "/", while Foundation's
+        # standardizedFileURL applies its own URL-path rules), so a path that is
+        # its-own-normpath but NOT its-own-standardizedFileURL (or vice versa)
+        # produces a false PRESERVE -> shell keeps a path Swift rejects ->
+        # restart loop, the exact defect class this round eliminates. Rather
+        # than reproduce EITHER normalizer, we require conservative component
+        # rules that are at-least-as-strict as BOTH: an absolute path made of
+        # non-empty components, none of which is "." or "..", with no trailing
+        # slash. Every rejection below is a path the Swift store never emits for
+        # target_executable_path -- the store persists an already-standardized
+        # absolute executable path resolved from the running process
+        # (executablePath(pid) / standardizedFileURL.path), which by
+        # construction is absolute, has no empty / "." / ".." components, and no
+        # trailing slash -- so any value we reject is corruption or forgery, and
+        # its removal self-heals via fresh acquisition (bounded availability
+        # delay, never a restart loop). Non-ASCII bytes are permitted: a
+        # non-ASCII home directory yields a legitimate non-ASCII executable
+        # path, and none of these component rules inspect byte class.
+        #
+        # AT-LEAST-AS-STRICT PROOF. A value V passing these rules is a "/"-led
+        # sequence of one-or-more components c1/.../cn where each ci is
+        # non-empty and ci not in {".", ".."} and V does not end in "/".
+        #   * V is its own os.path.normpath: normpath only mutates a path by
+        #     collapsing duplicate/leading-internal slashes (excluded: no empty
+        #     component => no "//"), removing "." components (excluded), resolving
+        #     ".." against a prior component (excluded), or stripping a trailing
+        #     "/" (excluded). With none of its rewrite triggers present,
+        #     normpath(V) == V. So V passes the OLD normpath mirror.
+        #   * V is its own URL(fileURLWithPath: V).standardizedFileURL.path:
+        #     standardizedFileURL resolves "." and ".." components and collapses
+        #     empty path segments; with none present and V absolute, the
+        #     standardized path equals V. So V passes the Swift guard.
+        # Thus {V : passes new rule} is a subset of both {V : normpath(V)==V}
+        # and {V : standardizedFileURL(V)==V}: the new rule is at-least-as-strict
+        # than BOTH, with no semantic mirroring of either normalizer remaining.
         if not isinstance(value, str):
             return False
         if not value.startswith("/"):
@@ -2001,7 +2100,20 @@ def record_matches_swift_structure(record):
             return False
         if len(value.encode("utf-8")) > 1024 * 4:
             return False
-        return os.path.normpath(value) == value
+        if value.endswith("/"):
+            # Trailing slash (including the bare-root "/" case, which is anyway
+            # never a plausible executable path). normpath strips it and
+            # standardizedFileURL drops it -> both would rewrite V, so V is not
+            # its own normal form under either.
+            return False
+        # value[1:] is the component sequence after the leading "/"; splitting on
+        # "/" yields each component. An empty component means "//" (a duplicate
+        # slash); "." / ".." are the relative components both normalizers
+        # rewrite.
+        for component in value[1:].split("/"):
+            if component == "" or component == "." or component == "..":
+                return False
+        return True
 
     def valid_sha256(value):
         # validatedSHA256: exactly 64 bytes of lowercase hex.
@@ -2036,9 +2148,12 @@ def record_matches_swift_structure(record):
     owner_pid = owner.get("pid")
     owner_start = owner.get("process_start_us")
     owner_boot = owner.get("boot_session")
-    if not is_int(owner_pid) or owner_pid <= 0:
+    # owner.pid is Swift Int32: bound to [1, 2**31 - 1] BEFORE any use. A pid of
+    # 2**31 passes an unbounded positivity check but overflows Int32 in
+    # JSONDecoder -> false preserve. process_start_us is Swift Int64.
+    if not is_int32(owner_pid) or owner_pid <= 0:
         return False
-    if not is_int(owner_start) or owner_start <= 0:
+    if not is_int64(owner_start) or owner_start <= 0:
         return False
     if not isinstance(owner_boot, str) or not owner_boot:
         return False
@@ -2049,13 +2164,16 @@ def record_matches_swift_structure(record):
     record_expires_wall = record.get("expires_wall_ms")
     record_issued_mono = record.get("issued_monotonic_ns")
     record_expires_mono = record.get("expires_monotonic_ns")
+    # All four are Swift Int64: bound to [.., 2**63 - 1] BEFORE the duration
+    # algebra below (a value of 2**63 overflows Int64 in JSONDecoder ->
+    # false preserve). The store-specific lower bounds follow.
     for value in (
         record_issued_wall,
         record_expires_wall,
         record_issued_mono,
         record_expires_mono,
     ):
-        if not is_int(value):
+        if not is_int64(value):
             return False
     if record_issued_wall <= 0 or record_issued_mono < 0:
         return False
@@ -2107,6 +2225,8 @@ def record_matches_swift_structure(record):
     handoff_issued_mono = handoff.get("issued_monotonic_ns")
     handoff_expires_mono = handoff.get("expires_monotonic_ns")
     handoff_lease_duration = handoff.get("startup_lease_duration_ms")
+    # All five are Swift Int64: bound to [.., 2**63 - 1] BEFORE the duration
+    # algebra below. The store-specific lower bounds follow.
     for value in (
         handoff_issued_wall,
         handoff_expires_wall,
@@ -2114,7 +2234,7 @@ def record_matches_swift_structure(record):
         handoff_expires_mono,
         handoff_lease_duration,
     ):
-        if not is_int(value):
+        if not is_int64(value):
             return False
     if handoff_issued_wall <= 0 or handoff_issued_mono < 0:
         return False

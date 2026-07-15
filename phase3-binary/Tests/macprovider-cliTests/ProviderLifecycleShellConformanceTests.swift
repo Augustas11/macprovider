@@ -358,6 +358,285 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         }
     }
 
+    // MARK: - Lease: wire-type parity closures (R5 CODE MEDIUM, Findings 1 & 2)
+
+    /// Auditor reproduction 1 (Finding 1): owner.pid decodes as Swift Int32. A
+    /// JSON pid of 2147483648 (Int32.max + 1) passes an unbounded positivity
+    /// mirror yet FAILS JSONDecoder, so the store's inspect() cannot yield a
+    /// valid record. If the shell reconciler had preserved it, the restored CLI
+    /// would inspect() it as malformed, its fallback only re-acquires on
+    /// handoffNotPrepared, and the provider would restart-loop. The reconciler
+    /// must therefore REMOVE the file (fail toward removal), after which the real
+    /// store self-heals by acquiring a fresh lease. The record otherwise carries
+    /// a live prepared handoff + dead owner, so the ONLY thing that could have
+    /// preserved it is the exemption -- which the Int32 bound now declines.
+    func testShellReconcilerRemovesInt32OverflowPidPreparedHandoffThenStoreAcquiresFresh() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        guard let boot = LeaseHandoffHarness.realBootSession() else {
+            throw XCTSkip("kern.bootsessionuuid unavailable")
+        }
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+        let record = Self.preparedHandoffRecordJSON(
+            boot: boot,
+            wallNow: wallNow,
+            monoNow: monoNow,
+            operationID: "provider-restart-int32-overflow",
+            serviceIdentity: LeaseHandoffHarness.serviceIdentity,
+            // Int32.max + 1: an unbounded positivity check would accept this pid,
+            // but Swift's JSONDecoder overflows Int32 and the decode fails.
+            ownerPID: 2_147_483_648,
+            ownerProcessStartUS: 1
+        )
+        let recordData = try JSONSerialization.data(
+            withJSONObject: record,
+            options: [.sortedKeys]
+        )
+        try (recordData + Data([0x0a])).write(to: leaseURL)
+
+        // Sanity: the real store does NOT consider this a valid record (the
+        // Int32 pid overflows JSONDecoder -> malformed), so the shell must not
+        // rely on "Swift revalidates".
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider an Int32-overflow pid record valid")
+        }
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "an Int32-overflow pid prepared-handoff record must be removed"
+        )
+
+        // Self-healing: the real store can now acquire a fresh lease.
+        let freshStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        let fresh = try freshStore.acquire(
+            kind: .startup,
+            operationID: "serve:after-int32-removal",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertNil(fresh.startupHandoff)
+        guard case .valid = freshStore.inspect() else {
+            return XCTFail("freshly acquired lease must inspect as valid")
+        }
+    }
+
+    /// Auditor reproduction 2 (Finding 2): operation_id is trimmed by Swift with
+    /// Foundation's trimmingCharacters(.whitespacesAndNewlines), whose scalar set
+    /// includes U+200B (ZERO WIDTH SPACE) while Python str.strip does NOT strip
+    /// it. A U+200B-prefixed operation id therefore fails the store's
+    /// `trimmed == value` guard (inspect() rejects it) but would PASS a shell
+    /// str.strip mirror -> false preserve -> restart loop. The strictly-stricter
+    /// printable-ASCII identity rule rejects it, so the reconciler must REMOVE the
+    /// file and the store then self-heals. The U+200B is on BOTH record and
+    /// handoff operation_id (Swift requires equality) so the id-validity is the
+    /// sole rejection cause.
+    func testShellReconcilerRemovesZeroWidthSpaceOperationIDPreparedHandoffThenStoreAcquiresFresh() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        guard let boot = LeaseHandoffHarness.realBootSession() else {
+            throw XCTSkip("kern.bootsessionuuid unavailable")
+        }
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+        // U+200B ZERO WIDTH SPACE prefix. Foundation trims it; Python str.strip
+        // does not; the printable-ASCII rule rejects any non-0x21..0x7e scalar.
+        let zwspOperationID = "\u{200B}provider-restart-zwsp"
+        let record = Self.preparedHandoffRecordJSON(
+            boot: boot,
+            wallNow: wallNow,
+            monoNow: monoNow,
+            operationID: zwspOperationID,
+            serviceIdentity: LeaseHandoffHarness.serviceIdentity,
+            ownerPID: 999_999,
+            ownerProcessStartUS: 1
+        )
+        let recordData = try JSONSerialization.data(
+            withJSONObject: record,
+            options: [.sortedKeys]
+        )
+        try (recordData + Data([0x0a])).write(to: leaseURL)
+
+        // Sanity: the real store does NOT consider this valid (Foundation trims
+        // the U+200B so operationID != trimmed -> invalid operation_id).
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider a U+200B-prefixed operation id valid")
+        }
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a U+200B-prefixed operation-id prepared-handoff record must be removed"
+        )
+
+        // Self-healing: the real store can now acquire a fresh lease.
+        let freshStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        let fresh = try freshStore.acquire(
+            kind: .startup,
+            operationID: "serve:after-zwsp-removal",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertNil(fresh.startupHandoff)
+        guard case .valid = freshStore.inspect() else {
+            return XCTFail("freshly acquired lease must inspect as valid")
+        }
+    }
+
+    /// R6 remaining-surface item 2: a store-shaped prepared handoff whose
+    /// `target_executable_path` carries a ".." component
+    /// ("/Users/a/../macprovider/macprovider-cli"). Swift's
+    /// validateTargetExecutablePath rejects any path where
+    /// `path != URL(fileURLWithPath: path).standardizedFileURL.path`, and
+    /// standardizedFileURL resolves the ".." away -- so the real store's
+    /// inspect() cannot yield a valid record. The previous shell mirror used
+    /// os.path.normpath == value; the R6 closure replaces it with conservative
+    /// component rules (no empty / "." / ".." component, no trailing slash), so
+    /// the shell REMOVES the file regardless of any normalizer coincidence. If
+    /// the shell had PRESERVED it, the restored CLI would inspect() it as
+    /// malformed and restart-loop. After removal the real store self-heals via
+    /// a fresh acquire(). The store never emits a ".."-containing
+    /// target_executable_path (it persists an already-standardized
+    /// executablePath(pid)), so this record is corruption/forgery.
+    func testShellReconcilerRemovesNonStandardizedTargetPathPreparedHandoffThenStoreAcquiresFresh() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        guard let boot = LeaseHandoffHarness.realBootSession() else {
+            throw XCTSkip("kern.bootsessionuuid unavailable")
+        }
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+        // A ".."-containing absolute path: its own os.path.normpath would collapse
+        // it, and Foundation's standardizedFileURL resolves the "..". The
+        // conservative shell rule rejects any ".." component outright.
+        let dotDotTargetPath = "/Users/a/../macprovider/macprovider-cli"
+        let record = Self.preparedHandoffRecordJSON(
+            boot: boot,
+            wallNow: wallNow,
+            monoNow: monoNow,
+            operationID: "provider-restart-target-dotdot",
+            serviceIdentity: LeaseHandoffHarness.serviceIdentity,
+            ownerPID: 999_999,
+            ownerProcessStartUS: 1,
+            targetExecutablePath: dotDotTargetPath
+        )
+        let recordData = try JSONSerialization.data(
+            withJSONObject: record,
+            options: [.sortedKeys]
+        )
+        try (recordData + Data([0x0a])).write(to: leaseURL)
+
+        // Sanity: the real store does NOT consider this valid -- standardizedFileURL
+        // resolves the ".." so path != standardized -> invalid target_executable_path.
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider a '..'-component target path valid")
+        }
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a '..'-component target-path prepared-handoff record must be removed"
+        )
+
+        // Self-healing: the real store can now acquire a fresh lease.
+        let freshStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        let fresh = try freshStore.acquire(
+            kind: .startup,
+            operationID: "serve:after-target-path-removal",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertNil(fresh.startupHandoff)
+        guard case .valid = freshStore.inspect() else {
+            return XCTFail("freshly acquired lease must inspect as valid")
+        }
+    }
+
+    /// Builds a store-READABLE-shaped MAINTENANCE lease record carrying a live
+    /// `.prepared` startup handoff and a dead owner, so the ONLY preservation
+    /// path is the exemption. Callers inject a single boundary-violating field
+    /// (an Int32-overflow pid, a non-ASCII operation id, or a non-standardized
+    /// target_executable_path) to prove the mirror declines the exemption.
+    /// Windows are real-clock-derived so the exemption is declined for the
+    /// injected reason, not a stale/expired window.
+    private static func preparedHandoffRecordJSON(
+        boot: String,
+        wallNow: Int64,
+        monoNow: Int64,
+        operationID: String,
+        serviceIdentity: String,
+        ownerPID: Int64,
+        ownerProcessStartUS: Int64,
+        targetExecutablePath: String = LeaseHandoffHarness.targetPath
+    ) -> [String: Any] {
+        let recordIssuedWall = wallNow - 5 * 60 * 1_000
+        let recordExpiresWall = wallNow + 15 * 60 * 1_000
+        let recordIssuedMono = monoNow - 5 * 60 * 1_000_000_000
+        let recordExpiresMono = monoNow + 15 * 60 * 1_000_000_000
+        let handoffIssuedWall = wallNow - 60 * 1_000
+        let handoffExpiresWall = wallNow + 4 * 60 * 1_000
+        let handoffIssuedMono = monoNow - 60 * 1_000_000_000
+        let handoffExpiresMono = monoNow + 4 * 60 * 1_000_000_000
+
+        let handoff: [String: Any] = [
+            "version": 1,
+            "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "state": "prepared",
+            "operation_id": operationID,
+            "provider_id": "provider-a",
+            "service_identity": serviceIdentity,
+            "boot_session": boot,
+            "target_executable_path": targetExecutablePath,
+            "target_executable_sha256": LeaseHandoffHarness.targetSHA256,
+            "issued_wall_ms": handoffIssuedWall,
+            "expires_wall_ms": handoffExpiresWall,
+            "issued_monotonic_ns": handoffIssuedMono,
+            "expires_monotonic_ns": handoffExpiresMono,
+            "startup_lease_duration_ms": 5 * 60 * 1_000,
+        ]
+        return [
+            "version": 1,
+            "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "operation_id": operationID,
+            "kind": "maintenance",
+            "owner": [
+                "pid": ownerPID,
+                "process_start_us": ownerProcessStartUS,
+                "boot_session": boot,
+            ] as [String: Any],
+            "issued_wall_ms": recordIssuedWall,
+            "expires_wall_ms": recordExpiresWall,
+            "issued_monotonic_ns": recordIssuedMono,
+            "expires_monotonic_ns": recordExpiresMono,
+            "startup_handoff": handoff,
+        ]
+    }
+
     // MARK: - State: shell translation writes -> Swift store reads (Defect 3)
 
     /// A stale updater-written snapshot must translate into an installer-owned

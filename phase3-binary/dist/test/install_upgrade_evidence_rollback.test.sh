@@ -188,14 +188,48 @@ PY
 write_prepared_handoff_lease_record() {
   out_path="$1"; operation_id="$2"; owner_pid="$3"; expiry="${4:-valid}"
   record_kind="${5:-maintenance}"
+  # Optional wire-shape overrides (env, so the positional signature stays
+  # backward-compatible for the existing A-05.4/.5/.6/.7 callers). These build
+  # a store-READABLE-shaped record whose numeric wire types overflow the Swift
+  # Codable field or whose identity fields carry a non-ASCII/whitespace scalar
+  # Foundation would trim but Python str.strip would not -- both cases Swift's
+  # JSONDecoder/validate rejects, so the reconciler MUST decline the exemption
+  # and REMOVE the record (R5 CODE-M Findings 1 and 2):
+  #   PREPARED_OVERRIDE_OWNER_PID          -> owner.pid (e.g. 2147483648 = Int32 overflow)
+  #   PREPARED_OVERRIDE_PROCESS_START_US   -> owner.process_start_us (e.g. 2**63 = Int64 overflow)
+  #   PREPARED_OVERRIDE_HANDOFF_OPERATION  -> handoff.operation_id (record.operation_id stays $2)
+  #   PREPARED_OVERRIDE_SERVICE_IDENTITY   -> handoff.service_identity (e.g. interior space)
+  #   PREPARED_OVERRIDE_TARGET_PATH        -> handoff.target_executable_path (e.g. a
+  #                                           ".."-containing path Swift's
+  #                                           standardizedFileURL guard rejects)
+  PREPARED_OVERRIDE_OWNER_PID="${PREPARED_OVERRIDE_OWNER_PID:-}" \
+  PREPARED_OVERRIDE_PROCESS_START_US="${PREPARED_OVERRIDE_PROCESS_START_US:-}" \
+  PREPARED_OVERRIDE_HANDOFF_OPERATION="${PREPARED_OVERRIDE_HANDOFF_OPERATION:-}" \
+  PREPARED_OVERRIDE_SERVICE_IDENTITY="${PREPARED_OVERRIDE_SERVICE_IDENTITY:-}" \
+  PREPARED_OVERRIDE_TARGET_PATH="${PREPARED_OVERRIDE_TARGET_PATH:-}" \
   python3 - "$out_path" "$operation_id" "$owner_pid" "$expiry" "$record_kind" <<'PY'
 import json
+import os
 import subprocess
 import sys
 import time
 
 out_path, operation_id, owner_pid_text, expiry, record_kind = sys.argv[1:]
 owner_pid = int(owner_pid_text)
+override_owner_pid = os.environ.get("PREPARED_OVERRIDE_OWNER_PID", "")
+if override_owner_pid:
+    owner_pid = int(override_owner_pid)
+override_process_start_us = os.environ.get("PREPARED_OVERRIDE_PROCESS_START_US", "")
+process_start_us = int(override_process_start_us) if override_process_start_us else 1
+override_handoff_operation = os.environ.get("PREPARED_OVERRIDE_HANDOFF_OPERATION", "")
+handoff_operation_id = override_handoff_operation or operation_id
+override_service_identity = os.environ.get("PREPARED_OVERRIDE_SERVICE_IDENTITY", "")
+service_identity = override_service_identity or "live.streamvc.macprovider"
+override_target_path = os.environ.get("PREPARED_OVERRIDE_TARGET_PATH", "")
+target_executable_path = (
+    override_target_path
+    or "/Applications/MacProvider.app/Contents/MacOS/macprovider-cli"
+)
 
 
 def boot_session():
@@ -239,11 +273,11 @@ handoff = {
     "version": 1,
     "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     "state": "prepared",
-    "operation_id": operation_id,
+    "operation_id": handoff_operation_id,
     "provider_id": "provider-a",
-    "service_identity": "live.streamvc.macprovider",
+    "service_identity": service_identity,
     "boot_session": boot,
-    "target_executable_path": "/Applications/MacProvider.app/Contents/MacOS/macprovider-cli",
+    "target_executable_path": target_executable_path,
     "target_executable_sha256": "a" * 64,
     "issued_wall_ms": handoff_issued_wall,
     "expires_wall_ms": handoff_expires_wall,
@@ -265,8 +299,9 @@ record = {
         # A dead pid: the preparer has exited. process_start_us is a fixed
         # non-live marker so the owner-liveness path would reject it -- proving
         # preservation here comes solely from the prepared-handoff exemption.
+        # Both are override-able (env) to exercise the Int32/Int64 wire bounds.
         "pid": owner_pid,
-        "process_start_us": 1,
+        "process_start_us": process_start_us,
         "boot_session": boot,
     },
     "issued_wall_ms": record_issued_wall,
@@ -1571,6 +1606,104 @@ root="$TMP/lease_prepared_handoff_invalid_kind"
 [ "$(cat "$root/rc")" -eq 9 ]
 if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
   echo "structurally invalid prepared-handoff lease (kind startup) survived rollback" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# A-05.8 .. A-05.11: R5 CODE-M parity-class closures. Each fixture is a
+# store-READABLE-shaped record with a live prepared handoff and a dead owner --
+# so the ONLY reason to preserve it would be the exemption -- but a single wire
+# field is set to a value the real Swift store can never emit and its
+# JSONDecoder/validate would reject. Preserving any of these would restart-loop
+# the provider, so record_matches_swift_structure MUST decline the exemption and
+# the reconciler MUST REMOVE the file.
+# ---------------------------------------------------------------------------
+
+# (A-05.8) owner.pid = 2147483648 (2**31): passes an unbounded positivity check
+# but overflows Swift Int32 in JSONDecoder -> REMOVED (Finding 1).
+lease_fixture="$TMP/lease_prepared_handoff_pid_int32_overflow.json"
+PREPARED_OVERRIDE_OWNER_PID=2147483648 \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-4" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_pid_int32_overflow "" "" "" self-test
+root="$TMP/lease_prepared_handoff_pid_int32_overflow"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with Int32-overflow pid survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.9) owner.process_start_us = 2**63: overflows Swift Int64 in JSONDecoder
+# -> REMOVED (Finding 1).
+lease_fixture="$TMP/lease_prepared_handoff_process_start_int64_overflow.json"
+PREPARED_OVERRIDE_PROCESS_START_US=9223372036854775808 \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-5" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_process_start_int64_overflow "" "" "" self-test
+root="$TMP/lease_prepared_handoff_process_start_int64_overflow"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with Int64-overflow process_start_us survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.10) operation_id prefixed with U+200B (ZERO WIDTH SPACE): Foundation's
+# trimmingCharacters(.whitespacesAndNewlines) strips it so Swift's
+# trimmed == value guard fails, but Python str.strip does NOT strip it -- a
+# str.strip mirror would false-preserve. The strictly-stricter ASCII rule
+# rejects it -> REMOVED (Finding 2). The U+200B is on BOTH record and handoff
+# operation_id (via $2) so the record is otherwise well-formed and the ASCII
+# rule is the sole rejection cause.
+lease_fixture="$TMP/lease_prepared_handoff_zwsp_operation.json"
+write_prepared_handoff_lease_record "$lease_fixture" $'​provider-restart-6' 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_zwsp_operation "" "" "" self-test
+root="$TMP/lease_prepared_handoff_zwsp_operation"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with U+200B-prefixed operation_id survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.11) service_identity with an interior space: any whitespace scalar is
+# rejected by the ASCII 0x21..0x7e rule (whitespace of any kind anywhere fails)
+# -> REMOVED (Finding 2). The Swift store only ever writes launchd-label service
+# identities, which never contain a space.
+lease_fixture="$TMP/lease_prepared_handoff_service_identity_space.json"
+PREPARED_OVERRIDE_SERVICE_IDENTITY="live.streamvc macprovider" \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-7" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_service_identity_space "" "" "" self-test
+root="$TMP/lease_prepared_handoff_service_identity_space"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with interior-space service_identity survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.12) target_executable_path containing a ".." component
+# ("/Applications/MacProvider.app/Contents/MacOS/../MacOS/macprovider-cli"):
+# Swift's validateTargetExecutablePath rejects any path where
+# path != URL(fileURLWithPath: path).standardizedFileURL.path, and
+# standardizedFileURL resolves the ".." away. The previous shell mirror used
+# os.path.normpath == value, which ALSO happens to reject a ".." here -- but the
+# whole point of the R6 remaining-surface closure is that the shell rule is now
+# conservative component rules (no ".." component anywhere), not a normalizer
+# mirror. A store never emits a ".."-containing target_executable_path (it
+# persists an already-standardized executablePath(pid)), so this is corruption:
+# the reconciler MUST decline the exemption and REMOVE the file (removal
+# self-heals via fresh acquisition, never a restart loop). This case also
+# mutation-guards the new rule: allowing ".." components would false-PRESERVE
+# and fail this test.
+lease_fixture="$TMP/lease_prepared_handoff_target_path_dotdot.json"
+PREPARED_OVERRIDE_TARGET_PATH="/Applications/MacProvider.app/Contents/MacOS/../MacOS/macprovider-cli" \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-8" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_target_path_dotdot "" "" "" self-test
+root="$TMP/lease_prepared_handoff_target_path_dotdot"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with '..'-component target_executable_path survived rollback" >&2
   exit 1
 fi
 
