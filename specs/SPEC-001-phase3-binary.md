@@ -1685,6 +1685,15 @@ SPEC-003 FR-C9.3's `assigned_provider_token`. A v1.5 binary connected
 to a v1.4 coordinator sees absent optionals and behaves exactly as it
 does today.
 
+The same ack object (and the v2 `auth_response`) MAY also carry an OPTIONAL
+`auth_state` string — the coordinator's admission verdict (`bearer_validated`
+/ `self_minted` / `bearerless_duplicate` / `mint_failed`), `omitempty`. Its
+semantics, emission, and client use are owned by **SPEC-020 v0.1.7** (runbook
+item 23): the CLI reads it authoritatively for the autoupdate trust floor so a
+bearerless-duplicate race-loser is client-enforceable notify-only. SPEC-001
+notes only that the field rides these frames; an omitting coordinator triggers
+the client's legacy inference (unchanged behavior).
+
 #### Capacity heartbeat (P->C) — sent every `heartbeat_interval_s`
 ```json
 {

@@ -65,6 +65,14 @@ type HelloAck struct {
 	AssignedProviderToken         string `json:"assigned_provider_token,omitempty"`
 	PairOT                        string `json:"pair_ot,omitempty"`
 	ClaimURL                      string `json:"claim_url,omitempty"`
+	// SPEC-020 v0.1.6 / SPEC-003 (runbook item 23) — the coordinator's own
+	// admission verdict (pool.AuthState: bearer_validated / self_minted /
+	// bearerless_duplicate / mint_failed). Propagated so the provider can
+	// enforce the SPEC-020 trust-table floor client-side (e.g. a
+	// bearerless_duplicate race-loser stays notify-only) instead of inferring
+	// it heuristically. Omitted (empty) by a coordinator with no token issuer,
+	// in which case the client falls back to its inference.
+	AuthState                     string `json:"auth_state,omitempty"`
 	CatalogCompatible             bool   `json:"catalog_compatible,omitempty"`
 	CatalogReleaseID              string `json:"catalog_release_id,omitempty"`
 	CatalogPolicyVersion          string `json:"catalog_policy_version,omitempty"`
@@ -163,6 +171,11 @@ type AuthResponse struct {
 	AssignedProviderToken               string `json:"assigned_provider_token,omitempty"`
 	PairOT                              string `json:"pair_ot,omitempty"`
 	ClaimURL                            string `json:"claim_url,omitempty"`
+	// SPEC-020 v0.1.6 / SPEC-003 (runbook item 23) — coordinator admission
+	// verdict (pool.AuthState); see the HelloAck.AuthState note. Propagated so
+	// the provider enforces the SPEC-020 trust-table floor client-side rather
+	// than inferring it. Omitted by a coordinator with no token issuer.
+	AuthState                           string `json:"auth_state,omitempty"`
 	CatalogCompatible                   bool   `json:"catalog_compatible,omitempty"`
 	CatalogReleaseID                    string `json:"catalog_release_id,omitempty"`
 	CatalogPolicyVersion                string `json:"catalog_policy_version,omitempty"`

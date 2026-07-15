@@ -99,6 +99,23 @@ struct AutoUpdateTrustState: Sendable {
         let tier = payload["tier"] as? String
         let attestationStatus = (((payload["tier2_session"] as? [String: Any])?["attestation"] as? [String: Any])?["status"] as? String)
         let tokenConfigured = providerToken?.isEmpty == false || (payload["assigned_provider_token"] as? String)?.isEmpty == false
+        // Runbook item 23 / SPEC-020 v0.1.6: prefer the coordinator's EXPLICIT
+        // admission verdict (`auth_state`) over the client-side heuristic. The
+        // coordinator now propagates its verdict (bearer_validated / self_minted /
+        // bearerless_duplicate / mint_failed) on the accept ack, so a
+        // bearerless_duplicate race-loser is client-enforceable rather than
+        // inferred. A legacy coordinator omits `auth_state` (empty) — fall back
+        // to the pre-existing inference so behavior is unchanged against old
+        // coordinators. The client uses this only to hold a MORE restrictive
+        // floor (bearerless_duplicate → notify-only); it never relaxes the
+        // verdict based on a coordinator claim.
+        let explicitAuthState = (payload["auth_state"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let bearerlessDuplicate: Bool
+        if let authState = explicitAuthState {
+            bearerlessDuplicate = authState == "bearerless_duplicate"
+        } else {
+            bearerlessDuplicate = tokenConfigured && providerToken == nil && !assignedProviderTokenAdopted
+        }
         return AutoUpdateTrustState(
             v2Accepted: isV2,
             tier: tier,
@@ -107,7 +124,7 @@ struct AutoUpdateTrustState: Sendable {
             attestationSatisfied: attestationStatus == nil || attestationStatus == "attested" || attestationStatus == "not_required",
             tokenConfigured: tokenConfigured,
             tokenValidated: !tokenConfigured || providerToken?.isEmpty == false || assignedProviderTokenAdopted,
-            bearerlessDuplicate: tokenConfigured && providerToken == nil && !assignedProviderTokenAdopted,
+            bearerlessDuplicate: bearerlessDuplicate,
             connected: true,
             acceptProvisional: acceptProvisional
         )

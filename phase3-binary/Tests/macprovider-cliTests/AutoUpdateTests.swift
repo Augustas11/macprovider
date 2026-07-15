@@ -1501,6 +1501,114 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(state.verdict, .attestationFailed)
     }
 
+    // Runbook item 23 / SPEC-020: closes the tokenless race-loser residual. In
+    // that corner the admitted bearerless-duplicate session is TOKENLESS (no held
+    // token, no assigned_provider_token in the ack), so the pre-existing heuristic
+    // computes tokenConfigured=false → bearerlessDuplicate=false and can wrongly
+    // reach .eligible. The coordinator now sends auth_state=bearerless_duplicate,
+    // which is authoritative → the notify-only floor is client-enforceable.
+    func testFromCoordinatorPayloadExplicitBearerlessDuplicateClosesTokenlessResidual() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "provisional",
+            "auth_state": "bearerless_duplicate", // no assigned_provider_token — tokenless racer
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: nil, // tokenless — heuristic alone yields tokenConfigured=false => NOT flagged
+            assignedProviderTokenAdopted: false,
+            acceptProvisional: true
+        )
+        XCTAssertFalse(state.tokenConfigured) // confirms the heuristic could not flag it
+        XCTAssertTrue(state.bearerlessDuplicate) // explicit verdict does
+        XCTAssertEqual(state.verdict, .bearerlessDuplicate)
+        XCTAssertFalse(state.isEligible)
+    }
+
+    // The explicit verdict also SUPPRESSES a heuristic false-positive: an
+    // assigned_provider_token in the payload with no held token would make the
+    // inference say bearerless, but auth_state=bearer_validated is authoritative.
+    func testFromCoordinatorPayloadExplicitBearerValidatedOverridesHeuristic() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "provisional",
+            "assigned_provider_token": "minted-xyz", // makes tokenConfigured true
+            "auth_state": "bearer_validated",
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: nil, // heuristic: tokenConfigured && nil token && !adopted => bearerless
+            assignedProviderTokenAdopted: false,
+            acceptProvisional: true
+        )
+        // The explicit verdict suppresses the heuristic's bearerless false
+        // positive. (tokenValidated is a separate, unchanged dimension: with an
+        // unadopted assigned token and no held token the verdict is tokenRejected,
+        // not bearerlessDuplicate — the override worked. Item 23 only makes the
+        // restrictive bearerless floor authoritative; it does not relax token
+        // validation on a coordinator claim.)
+        XCTAssertFalse(state.bearerlessDuplicate)
+        XCTAssertNotEqual(state.verdict, .bearerlessDuplicate)
+        XCTAssertEqual(state.verdict, .tokenRejected)
+    }
+
+    // Legacy coordinator (no auth_state) must fall back to the pre-existing
+    // heuristic so behavior is unchanged against old coordinators.
+    func testFromCoordinatorPayloadLegacyNoAuthStateFallsBackToHeuristic() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "provisional",
+            "assigned_provider_token": "minted-xyz", // tokenConfigured true, no auth_state
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: nil,
+            assignedProviderTokenAdopted: false,
+            acceptProvisional: true
+        )
+        XCTAssertTrue(state.bearerlessDuplicate) // heuristic preserved for legacy
+        XCTAssertEqual(state.verdict, .bearerlessDuplicate)
+    }
+
     // Config loader must accept the flag from both YAML flat key,
     // YAML nested `autoupdate.accept_provisional`, and the env var.
     func testConfigLoaderReadsAcceptProvisionalFromYAMLFlatAndNestedAndEnv() throws {

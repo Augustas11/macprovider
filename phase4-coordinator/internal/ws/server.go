@@ -1054,6 +1054,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		AssignedProviderToken:     assignedProviderToken,
 		PairOT:                    pairOT,
 		ClaimURL:                  claimURL,
+		AuthState:                 string(authState),
 	}
 	s.populateCatalogHelloAck(&ack)
 	s.populateCompatibilityHelloAck(&ack, hello.CompatibilitySetID)
@@ -1555,6 +1556,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		AssignedProviderToken:     assignedProviderToken,
 		PairOT:                    pairOT,
 		ClaimURL:                  claimURL,
+		AuthState:                 string(authState),
 		IdentityAdmissionMode:     identityProof.AdmissionMode,
 		IdentityAdmissionKeyRole:  identityProof.VerifiedKeyRole,
 		IdentityGeneration:        identityProof.Generation,
