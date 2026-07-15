@@ -4,7 +4,7 @@
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
 
 **Change log v1.5.4 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
-- R-3.X.6 strengthened from `MAY` to `MUST`: the coordinator MUST populate the `seenModels` index from the union of `Provider.ModelID` and every `Provider.SupportedModels` entry, reconciling with SPEC-010 v1.5 R-3.3.4 (authoritative — the more specific, later-locked rule) and the shipped behavior (#555). No dispatch-outcome change (the "MUST NOT change dispatch outcomes" invariant is retained); the only buyer-visible effect is SPEC-010 R-3.3.4's error-code substitution for a declared-but-cold model (404 `model_not_found` → 503 `no_provider_available`). Paired with SPEC-006 §17.2's "seen = served ∪ declared" clarification. Docs-only; no coordinator behavior change.
+- R-3.X.6 strengthened from `MAY` to `MUST`: the coordinator MUST populate the `seenModels` index from the union of `Provider.ModelID` and every `Provider.SupportedModels` entry, reconciling with SPEC-010 v1.5 R-3.3.4 (authoritative — the more specific rule, matching shipped behavior; #555). No dispatch-outcome change (the "MUST NOT change dispatch outcomes" invariant is retained); the only buyer-visible effect is SPEC-010 R-3.3.4's error-code substitution for a declared-but-cold model (404 `model_not_found` → 503 `no_provider_available`). Paired with SPEC-006 §17.2's "seen = served ∪ declared" clarification. Docs-only; no coordinator behavior change.
 
 **Change log v1.5.3 (2026-07-06, issue #374 — bounded coordinator slot queue):**
 - **Bounded zero-slot queue.** Non-pinned requests MAY enter a
@@ -2766,7 +2766,7 @@ Validation order:
 | 3 | Field types and ranges | 400 `invalid_request` |
 | 4 | Per-message role and content validation | 400 `invalid_request` |
 | 5 | Tool/tool_call shape validation | 400 `invalid_tools` |
-| 6 | Model exists in pool | 404 `model_not_found` |
+| 6 | Model known (any of the "404 vs 503 split" branches (a)–(d) below) | 404 `model_not_found` |
 | 7 | Provider available (routing) | 503 `no_provider_available` |
 | 8 | Preflight (if applicable) | 503 `preflight_rejected` |
 
@@ -2828,8 +2828,13 @@ the same value space — the stable `provider_id`.)
 | 503 | Model is known to the pool but no eligible provider is currently available (all matching providers busy/degraded/draining/unavailable, or all failed preflight) | `no_provider_available` |
 | 504 | Provider did not respond within timeout | `provider_timeout` |
 
-**404 vs 503 split (clarified):**
-- **404 `model_not_found`** — the requested `model_id` is **known** by
+**404 vs 503 split (clarified):** this split governs **default (unpinned)
+routing**. A hard-pinned request whose pinned provider serves a *different*
+model returns `404 model_not_found` ("Pinned provider serves different
+model", `validatePinnedProviderForRequest`) regardless of whether the
+model is otherwise known — that pin-mismatch 404 is a separate path and is
+unaffected by the seen/declared union.
+- **404 `model_not_found`** — (default routing) the requested `model_id` is **known** by
   NONE of these: (a) served (`model_id`) by a currently-connected
   provider; (b) declared in `supported_models` by a currently-connected
   provider (R-3.X.6 / SPEC-010 R-3.3.4); (c) present in the retained
