@@ -40,7 +40,10 @@ Environment=CANARY_NODE_BIN=/usr/bin/node
 Environment=CANARY_METRICS_OUT=/var/lib/macprovider-canary-buyer/canary_buyer.prom
 Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts
 # The shipped schedule remains inert until reviewed approval creates this gate.
-Environment=CANARY_ENABLE_FILE=/etc/macprovider/canary-buyer.enabled
+# Keep the root-owned rollout authorization outside the root:macprovider 0750
+# credential directory. DynamicUser can traverse this dedicated 0755 control
+# directory but cannot create, replace, or remove the root-owned gate.
+Environment=CANARY_ENABLE_FILE=/etc/macprovider-canary-buyer/enabled
 Environment=CANARY_DISABLE_FILE=/var/lib/macprovider-canary-buyer/DISABLED
 # Production must never silently degrade back to journal-only monitoring.
 Environment=CANARY_REQUIRE_HEARTBEAT=1

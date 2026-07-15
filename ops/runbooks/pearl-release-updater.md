@@ -78,7 +78,7 @@ expected-fleet document, absent reviewed enable gate, active emergency-disable
 sentinel, unexpected unit drop-in, stale systemd fragment, or changed
 three-minute canary budget. The one allowed canary drop-in is the updater's
 exact root-owned transaction gate installed below.
-Leave `/etc/macprovider/canary-buyer.enabled` absent until Issue #584's
+Leave `/etc/macprovider-canary-buyer/enabled` absent until Issue #584's
 real-hardware, recovery, and operating-day evidence has reviewed sign-off.
 The updater intentionally refuses even `--plan` until that gate is present;
 creating it authorizes the redesigned liveness probe as a rollout gate, not the
@@ -116,6 +116,8 @@ printf '%s\n' "$CANARY_BUYER_TOKEN" | sudo tee /etc/macprovider/canary-buyer.tok
 printf '%s\n' "$CANARY_HEARTBEAT_URL" | sudo tee /etc/macprovider/canary-buyer.heartbeat >/dev/null
 printf '%s\n' "$CANARY_OPERATOR_TOKEN" | sudo tee /etc/macprovider/canary-buyer.operator-token >/dev/null
 sudo rm -f /etc/macprovider/canary-buyer.env
+sudo install -d -o root -g root -m 0755 \
+  /etc/macprovider-canary-buyer
 sudo systemctl daemon-reload
 sudo systemctl disable --now canary-buyer.timer
 ```
@@ -125,7 +127,7 @@ manual rollout serving checks but still does not enable the timer:
 
 ```bash
 sudo install -o root -g root -m 0644 /dev/null \
-  /etc/macprovider/canary-buyer.enabled
+  /etc/macprovider-canary-buyer/enabled
 ```
 
 Create a separate root-only Better Stack Uptime API credential. This token is
@@ -227,7 +229,7 @@ sudo test -s /etc/macprovider/canary-buyer.token
 sudo test -s /etc/macprovider/canary-buyer.heartbeat
 sudo test -s /etc/macprovider/canary-buyer.operator-token
 sudo test -s /etc/macprovider/canary-buyer.expected-fleet.json
-sudo test -f /etc/macprovider/canary-buyer.enabled
+sudo test -f /etc/macprovider-canary-buyer/enabled
 sudo test ! -e /var/lib/macprovider-canary-buyer/DISABLED
 sudo test ! -e /etc/macprovider/canary-buyer.env
 systemctl show --property=LoadCredential canary-buyer.service

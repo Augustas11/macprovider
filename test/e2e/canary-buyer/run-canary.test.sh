@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SERVICE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/canary-buyer.service"
+grep -q '^DynamicUser=true$' "$SERVICE_FILE"
+grep -q '^ProtectSystem=strict$' "$SERVICE_FILE"
+grep -q '^Environment=CANARY_ENABLE_FILE=/etc/macprovider-canary-buyer/enabled$' "$SERVICE_FILE"
+if grep -q '^Environment=CANARY_ENABLE_FILE=/etc/macprovider/' "$SERVICE_FILE"; then
+  echo "canary service enable gate must not live beneath the non-traversable credential directory" >&2
+  exit 1
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
