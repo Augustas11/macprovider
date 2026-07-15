@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.3 (2026-07-06, bounded coordinator slot queue — issue #374)
+**Version:** 1.5.4 (2026-07-15, R-3.X.6 `seenModels` union MAY→MUST — cross-spec 404 reconciliation, runbook item 22)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.4 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
+- R-3.X.6 strengthened from `MAY` to `MUST`: the coordinator MUST populate the `seenModels` index from the union of `Provider.ModelID` and every `Provider.SupportedModels` entry, reconciling with SPEC-010 v1.5 R-3.3.4 (authoritative — the more specific, later-locked rule) and the shipped behavior (#555). No dispatch-outcome change (the "MUST NOT change dispatch outcomes" invariant is retained); the only buyer-visible effect is SPEC-010 R-3.3.4's error-code substitution for a declared-but-cold model (404 `model_not_found` → 503 `no_provider_available`). Paired with SPEC-006 §17.2's "seen = served ∪ declared" clarification. Docs-only; no coordinator behavior change.
 
 **Change log v1.5.3 (2026-07-06, issue #374 — bounded coordinator slot queue):**
 - **Bounded zero-slot queue.** Non-pinned requests MAY enter a
@@ -816,12 +819,20 @@ generated auth-attempt ID. The L-1 baseline rule from SPEC-010 v1.5
 R-3.1.10 clause 1 remains binding: if neither SPEC-010 field is present
 on an initial-stage frame, no SPEC-010 retention entry is created.
 
-R-3.X.6 The coordinator MAY populate the internal `seenModels` index
+R-3.X.6 The coordinator MUST populate the internal `seenModels` index
 from the union of `Provider.ModelID` and every entry in
-`Provider.SupportedModels` per SPEC-010 v1.5 R-3.3.4 and R-3.4.1, but
-v1.3.5 MUST NOT change dispatch outcomes. A request still requires an
-otherwise eligible currently loaded provider; buyer HTTP behavior and
-§5 routing results remain unchanged under all defaults.
+`Provider.SupportedModels` per SPEC-010 v1.5 R-3.3.4 and R-3.4.1.
+SPEC-010 v1.5 R-3.3.4 is **authoritative** on this question — it is the
+more specific, later-locked rule — and is already implemented on both the
+registration and heartbeat sites (#555). This MUST NOT change dispatch
+outcomes: a request still requires an otherwise eligible currently loaded
+provider; buyer HTTP behavior and §5 routing results remain unchanged
+under all defaults. The only buyer-visible effect is the SPEC-010 R-3.3.4
+error-code substitution for a declared-but-cold model — `404
+model_not_found` → `503 no_provider_available` (retryable) — not a
+routing change. (v1.5.4: strengthened from `MAY` to `MUST` to reconcile
+with SPEC-010 R-3.3.4 and shipped behavior; see also SPEC-006 §17.2.
+Runbook item 22.)
 
 ### Tier 2 hook points summary
 
@@ -2695,7 +2706,7 @@ inline so this spec is self-contained for build session use; if SPEC-001
 
 | Field | Type | Constraints |
 |---|---|---|
-| `model` | string | Must match a `model_id` known to the pool. 404 `model_not_found` if absent from pool history; 503 `no_provider_available` if known but no provider eligible. |
+| `model` | string | Must match a `model_id` known to the pool — where "known" is the union of every connected provider's served `model_id` and its declared `supported_models` (R-3.X.6 / SPEC-010 R-3.3.4), plus the seen-model history. 404 `model_not_found` only if the model is neither served, declared, nor seen; 503 `no_provider_available` if known (including declared-but-cold) but no provider eligible. |
 | `messages` | array | Non-empty. Per-message validation below. |
 
 **Optional fields:**
@@ -2809,7 +2820,7 @@ the same value space — the stable `provider_id`.)
 |---|---|---|
 | 400 | Missing/invalid fields, malformed tools, n>1 | `invalid_request` or `invalid_tools` |
 | 401 | Invalid buyer auth (future, not enforced in v1) | `invalid_auth` |
-| 404 | No connected provider has ever advertised this `model_id` (model unknown to the pool) | `model_not_found` |
+| 404 | No connected provider serves, declares (`supported_models`), or has seen this `model_id` — model unknown to the pool (R-3.X.6 / SPEC-010 R-3.3.4) | `model_not_found` |
 | 429 | Rate limit exceeded (future, not enforced in v1) | `rate_limit_exceeded` |
 | 502 | Selected provider returned an error or disconnected mid-request | `provider_error` |
 | 503 | Model is known to the pool but no eligible provider is currently available (all matching providers busy/degraded/draining/unavailable, or all failed preflight) | `no_provider_available` |
@@ -2817,12 +2828,18 @@ the same value space — the stable `provider_id`.)
 
 **404 vs 503 split (clarified):**
 - **404 `model_not_found`** — the requested `model_id` is not in the
-  union of `model_id` fields across all currently-connected providers
+  union of served `model_id` **and declared `supported_models`** fields
+  across all currently-connected providers (R-3.X.6 / SPEC-010 R-3.3.4),
   AND has not been seen in any provider's hello/heartbeat history during
-  this coordinator process lifetime.
+  this coordinator process lifetime. A model that a connected provider
+  *declares* in `supported_models` but has not warmed is NOT 404 — it is
+  known.
 - **503 `no_provider_available`** — the `model_id` is recognized
-  (some provider serves or has recently served it), but no currently-
-  eligible provider can take the request right now. Retry-friendly.
+  (some connected provider serves, has recently served, **or declares it
+  in `supported_models`**), but no currently-eligible provider can take
+  the request right now. Retry-friendly. This is the code a
+  declared-but-cold model receives (SPEC-010 R-3.3.4's 404→503
+  substitution).
 
 This split matters because buyers should treat 404 as a misconfiguration
 ("pick a different model") and 503 as transient backoff ("retry soon").

@@ -862,21 +862,20 @@ default serializations. §3.3 specifies the one place
 > `TestChatCompletionsDeclaredModelBeyondSeenIndexCapsReturns503`
 > (`internal/buyer/server_test.go`).
 >
-> **Cross-spec inconsistency, carried (not resolved here):** R-3.3.4
-> above is `MUST`; SPEC-002 v1.3.5 R-3.X.6 (`specs/SPEC-002-coordinator.md:819`)
-> calls the identical `seenModels` union `MAY` (optional); SPEC-006
-> §17.2 (`specs/SPEC-006-buyer-api.md:2807`) defines the 404 condition
-> as "not in any provider's served or recently seen model list"
-> without an explicit reference to declared-but-cold models. This
-> implementation follows SPEC-010 v1.5 R-3.3.4's `MUST` (the more
-> specific, later-locked rule on this exact question), and does not
-> change any dispatch outcome — R-3.4.1 and SPEC-002 R-3.X.6's "MUST
-> NOT change dispatch outcomes" both still hold; only the buyer error
-> code for declared-but-cold requests changes (404→503). SPEC-002 and
-> SPEC-006 are both large LOCKED specs and are intentionally NOT
-> amended by this change; a future pass should reconcile SPEC-002
-> R-3.X.6's `MAY` and SPEC-006 §17.2's "served or recently seen"
-> wording to cross-reference SPEC-010 R-3.3.4 explicitly.
+> **Cross-spec reconciliation (RESOLVED 2026-07-15, runbook item 22):**
+> R-3.3.4 above is `MUST` and is authoritative on this question (the more
+> specific, later-locked rule). The two sibling specs, which previously
+> diverged, now cross-reference it explicitly: SPEC-002 R-3.X.6
+> (§ "R-3.X.6") was strengthened from `MAY` to `MUST` (SPEC-002 v1.5.4);
+> and SPEC-006 §17.2 now states that a provider's "seen" list is the union
+> of its served `model_id` and its declared `supported_models`, so a
+> declared-but-cold model is *known* and returns `503 no_provider_available`
+> via §17.3, not `404 model_not_found` (SPEC-006 v0.9.12). The
+> reconciliation changes no dispatch outcome — R-3.4.1 and SPEC-002
+> R-3.X.6's "MUST NOT change dispatch outcomes" both still hold; only the
+> buyer error code for a declared-but-cold request is affected (404→503),
+> which was already the shipped behavior (#555). No SPEC-010 normative
+> text changed in this reconciliation.
 
 ### 3.4 Router: candidate filter (semantically unchanged in v1.0)
 
