@@ -74,7 +74,7 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-585-integration-r5';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-585-integration-r6';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
@@ -1105,6 +1105,7 @@ function recoveryProviderSignals(
   expectedFleet,
   authorizedProviders,
   nowMs,
+  allowLegacyBridgeProviderSignals = false,
 ) {
   const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
   const operatorPool = Array.isArray(observation?.operator_pool) ? observation.operator_pool : [];
@@ -1113,7 +1114,12 @@ function recoveryProviderSignals(
     if (hasDirectProviderSignal(signal)) return true;
     const poolRow = operatorPool[index];
     const expected = expectedByID.get(poolRow?.provider_id);
-    return !(expected
+    const exactReadyLegacyBridge = expected
+      && allowLegacyBridgeProviderSignals
+      && poolRow?.state === 'ready'
+      && poolRow?.routing_eligible === true
+      && isLegacyBridgeProviderSignalSubstitute(poolRow, expected);
+    const exactReadyLegacyRollback = expected
       && poolRow?.state === 'ready'
       && isLegacyRollbackProviderSignalSubstitute(
         poolRow,
@@ -1121,7 +1127,8 @@ function recoveryProviderSignals(
         authorizedProviders,
         nowMs,
         '',
-      ));
+      );
+    return !(exactReadyLegacyBridge || exactReadyLegacyRollback);
   });
 }
 
@@ -1133,6 +1140,10 @@ export function recoverySoakObservationReasons(
   options = {},
   nowMs = Date.now(),
 ) {
+  const {
+    allowLegacyBridgeProviderSignals = false,
+    ...soakOptions
+  } = options;
   return recoverySoakReasons({
     gatewayInitial: initial.gateway,
     gatewaySamples: samples.map((sample) => sample.gateway),
@@ -1145,6 +1156,7 @@ export function recoverySoakObservationReasons(
       expectedFleet,
       legacyRollbackProviders,
       nowMs,
+      allowLegacyBridgeProviderSignals,
     ),
     providerSamples: samples.map(
       (sample) => recoveryProviderSignals(
@@ -1152,9 +1164,10 @@ export function recoverySoakObservationReasons(
         expectedFleet,
         legacyRollbackProviders,
         nowMs,
+        allowLegacyBridgeProviderSignals,
       ),
     ),
-  }, options);
+  }, soakOptions);
 }
 
 export function validateLegacyRollbackAuthorization(document, expectedFleet, nowMs = Date.now()) {
@@ -1737,18 +1750,20 @@ async function main() {
       expectedFleet,
       legacyRollbackProviders,
       {
-      minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
-      maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
-      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
-      maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
-      maxMemoryFraction: CONFIG.maxMemoryFraction,
-      requireNominalThermal: CONFIG.mode === 'qualification',
+        minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+        maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
+        maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+        maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+        maxMemoryFraction: CONFIG.maxMemoryFraction,
+        requireNominalThermal: CONFIG.mode === 'qualification',
+        allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
       },
     ));
     const finalRecovery = recoverySamples.at(-1);
     if (finalRecovery) {
       recoveryReasons.push(...safetyObservationReasons(initial, finalRecovery, expectedFleet, {
         requireHeartbeatAdvance: true,
+        allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
         legacyRollbackProviders,
       }).map((reason) => `recovery_final:${reason}`));
     }

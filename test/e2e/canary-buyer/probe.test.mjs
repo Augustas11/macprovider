@@ -323,6 +323,37 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
   assert.ok(preconditionReasons(initial, expectedFleet, null)
     .includes('provider-a:provider_signal_missing'));
 
+  const recoveryOne = structuredClone(initial);
+  const recoveryTwo = structuredClone(initial);
+  for (const [index, sample] of [recoveryOne, recoveryTwo].entries()) {
+    for (const row of sample.operator_pool) {
+      row.last_heartbeat_at_ms += (index + 1) * 30_000;
+      row.last_activity_at_ms += (index + 1) * 30_000;
+      row.heartbeat_age_ms = 0;
+      row.activity_age_ms = 0;
+    }
+  }
+  assert.deepEqual(recoverySoakObservationReasons(
+    initial,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    null,
+    {
+      minReadyProviders: 2,
+      maxHeartbeatAgeMs: 90_000,
+      allowLegacyBridgeProviderSignals: true,
+    },
+    now,
+  ), []);
+  assert.ok(recoverySoakObservationReasons(
+    initial,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    null,
+    { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 },
+    now,
+  ).some((reason) => reason.includes('telemetry_')));
+
   for (const [field, value] of [
     ['catalog_admission_mode', 'current'],
     ['catalog_admission_mode', 'previous'],
@@ -348,7 +379,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-585-integration-r5',
+    authority: 'issue-585-integration-r6',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
