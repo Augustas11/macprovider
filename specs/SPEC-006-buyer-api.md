@@ -308,7 +308,7 @@ SPEC-006 MAY add stricter public gateway limits before forwarding, including `ma
 
 SPEC-002 defines the Phase 4 coordinator.
 
-SPEC-006 layers on top of SPEC-002. The base relationship was established in SPEC-002 v1.1.5; the current SPEC-006 v0.9.6 depends on SPEC-002 v1.5.3 (bounded slot queue plus the account-scoped reconciliation key lineage — see header `Depends on` line and §6 forward-header rule).
+SPEC-006 layers on top of SPEC-002. The base relationship was established in SPEC-002 v1.1.5; the current SPEC-006 v0.9.12 depends on SPEC-002 v1.5.4 (bounded slot queue plus the account-scoped reconciliation key lineage, and the R-3.X.6 `seenModels` union — see header `Depends on` line and §6 forward-header rule).
 
 SPEC-006 MUST preserve SPEC-002's router-only charter.
 
@@ -374,7 +374,7 @@ SPEC-006 MUST NOT create buyer-visible payout, earning, donation, or payment pro
 
 SPEC-001 and SPEC-002 are locked and unchanged during SPEC-006-only implementation and fix passes.
 
-SPEC-006 layers on top of the SPEC-002 coordinator. (Current dependency: SPEC-002 v1.5.3; base relationship established in v1.1.5 — see §1.5 and the document header `Depends on` line.)
+SPEC-006 layers on top of the SPEC-002 coordinator. (Current dependency: SPEC-002 v1.5.4; base relationship established in v1.1.5 — see §1.5 and the document header `Depends on` line.)
 
 Cross-spec dependencies are read-only references.
 
@@ -556,7 +556,7 @@ The metric MUST be reportable as a 7-day rolling distribution with median (p50) 
 
 ### 2.12 Failure modes
 
-- `404` -- model unknown (model not in any provider's served **or declared** model list — see § 17.2: "seen" is the union of served `model_id` and declared `supported_models`, per SPEC-010 R-3.3.4).
+- `404` -- model unknown to the coordinator (not served/declared by a connected provider, not in the seen history, and not a configured model class — see § 17.2 for the full "known" definition).
 - `503` -- model known but no provider available (pool empty or all busy; a declared-but-cold model is *known*, so it is 503 here, not 404).
 - `502` -- selected provider failed mid-request.
 - `504` -- provider exceeded timeout.
@@ -2861,9 +2861,9 @@ A coordinator-issued `500` with `code: "route_snapshot_failed"` (a SPEC-022 pre-
 
 ### 17.2 Model unknown
 
-If a model is not in any provider's served or recently seen model list, return 404.
+If a model is not **known** to the coordinator — by none of the branches (a)–(d) defined just below — return 404.
 
-**(v0.9.12 clarification — cross-spec reconciliation, runbook item 22:)** a provider's "seen" model list is the **union** of its served `model_id` and every model it declared in `supported_models` (SPEC-010 v1.5 R-3.3.4, which is **authoritative** on this question; SPEC-002 v1.5.4 R-3.X.6 mirrors it as a coordinator `MUST`). Consequently a model that some currently-connected provider **declared supported but has not warmed** is **known**, and falls through to § 17.3's `503 no_provider_available` (retryable), NOT 404. `404 model_not_found` is reserved for a model that **no** connected provider serves *or* declares. This is already the shipped coordinator behavior (`ModelKnown()` unions declared `supported_models`; #555) and changes no dispatch outcome — only the error code a declared-but-cold request receives (404 → 503).
+**(v0.9.12 clarification — cross-spec reconciliation, runbook item 22:)** a provider's "seen" model list is the **union** of its served `model_id` and every model it declared in `supported_models` (SPEC-010 v1.5 R-3.3.4, which is **authoritative** on this question; SPEC-002 v1.5.4 R-3.X.6 mirrors it as a coordinator `MUST`). A model is **known** if ANY of: (a) a currently-connected provider serves it (`model_id`); (b) a currently-connected provider declares it in `supported_models`; (c) it is in the coordinator's retained process-lifetime seen-model history (seeded from served ∪ declared, kept after the provider disconnects — SPEC-002 § 7.2); or (d) it resolves to a configured model class (SPEC-004 FR-SR-9). Consequently a model that some connected provider **declared supported but has not warmed** is known, and falls through to § 17.3's `503 no_provider_available` (retryable), NOT 404. `404 model_not_found` is reserved for a model that satisfies **none** of (a)–(d). This is already the shipped coordinator behavior — the buyer 404 gate is `!ModelKnown(model) && resolveModelClass(model) == nil`, and `ModelKnown()` unions declared `supported_models` (#555) — and it changes no dispatch outcome, only the error code a declared-but-cold request receives (404 → 503).
 
 Code:
 
@@ -2873,7 +2873,7 @@ model_not_found
 
 ### 17.3 Model unavailable
 
-If a model is known — served by, OR declared in `supported_models` by, some currently-connected provider (§ 17.2 / SPEC-010 R-3.3.4) — but no provider slot is available after any allowed bounded pre-dispatch slot queue expires, return 503.
+If a model is known — per § 17.2's branches (a)–(d): served by, declared in `supported_models` by, or recently seen from any provider (retained for the coordinator process lifetime), or resolving to a configured model class (§ 17.2 / SPEC-010 R-3.3.4 / SPEC-004 FR-SR-9) — but no otherwise-eligible currently-loaded provider can take it after any allowed bounded pre-dispatch slot queue expires, return 503. (Declared-but-cold and lifetime-seen-only models are known, so they land here, not on § 17.2's 404; dispatch still matches a warm `model_id`, so declaring or having-seen a model never causes it to be dispatched to a provider that is not serving it.)
 
 Code:
 

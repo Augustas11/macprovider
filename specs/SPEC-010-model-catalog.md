@@ -864,7 +864,8 @@ default serializations. §3.3 specifies the one place
 >
 > **Cross-spec reconciliation (RESOLVED 2026-07-15, runbook item 22):**
 > R-3.3.4 above is `MUST` and is authoritative on this question (the more
-> specific, later-locked rule). The two sibling specs, which previously
+> specific rule, and the one matching shipped behavior — #555). The two
+> sibling specs, which previously
 > diverged, now cross-reference it explicitly: SPEC-002 R-3.X.6
 > (§ "R-3.X.6") was strengthened from `MAY` to `MUST` (SPEC-002 v1.5.4);
 > and SPEC-006 §17.2 now states that a provider's "seen" list is the union
