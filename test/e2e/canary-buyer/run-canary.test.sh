@@ -87,17 +87,22 @@ export CANARY_TIMEOUT_BIN="$TMP/timeout-pass"
 if env -u MACPROVIDER_BUYER_TOKEN CANARY_ENABLE_FILE="$TMP/missing-enable" \
     CANARY_NODE_BIN="$TMP/node-controlled" CANARY_CURL_BIN="$TMP/curl-ok" \
     "$HERE/run-canary.sh" >/dev/null 2>"$TMP/not-enabled.err"; then
-  :
-else
-  echo "missing enable gate should skip safely" >&2
+  echo "missing enable gate must return the distinct no-load status" >&2
   exit 1
+else
+  test "$?" = 21
 fi
 grep -q 'class=not_enabled' "$TMP/not-enabled.err"
 test ! -e "$CANARY_TEST_ATTEMPTS"
 
 : >"$CANARY_DISABLE_FILE"
-CANARY_NODE_BIN="$TMP/node-controlled" CANARY_CURL_BIN="$TMP/curl-ok" \
-  "$HERE/run-canary.sh" >/dev/null 2>"$TMP/disabled.err"
+if CANARY_NODE_BIN="$TMP/node-controlled" CANARY_CURL_BIN="$TMP/curl-ok" \
+    "$HERE/run-canary.sh" >/dev/null 2>"$TMP/disabled.err"; then
+  echo "emergency disable must return the distinct no-load status" >&2
+  exit 1
+else
+  test "$?" = 20
+fi
 grep -q 'class=emergency_disabled' "$TMP/disabled.err"
 test ! -e "$CANARY_TEST_ATTEMPTS"
 rm "$CANARY_DISABLE_FILE"

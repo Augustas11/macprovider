@@ -94,7 +94,7 @@ test-dist:
 	bash phase3-binary/dist/test/watchdog_health_scope.test.sh
 	bash phase3-binary/dist/test/watchdog_rollback_paths.test.sh
 	bash ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh
-	node --test test/e2e/canary-buyer/probe.test.mjs
+	node --test test/e2e/canary-buyer/probe.test.mjs test/e2e/canary-buyer/safety.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh
 
 vet: vet-coordinator vet-gateway vet-integration

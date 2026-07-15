@@ -54,6 +54,10 @@ Environment=CANARY_PROBE_TIMEOUT_SECONDS=120
 Environment=CANARY_TIMEOUT_BIN=/usr/bin/timeout
 # This unit is never a performance or rollout qualification surface.
 ExecStart=/bin/bash /opt/macprovider-canary-buyer/run-canary.sh --mode liveness --fail-on-degraded
+# Preserve the fail-closed wrapper classifications in ExecMainStatus while
+# allowing operators to distinguish a deliberate no-load state from a crash.
+# Rollout tooling must require ExecMainStatus=0; 20/21 are never serving proof.
+SuccessExitStatus=20 21
 TimeoutStartSec=3min
 # Hardening — the probe only needs outbound https + its own state dir.
 NoNewPrivileges=true

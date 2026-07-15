@@ -49,11 +49,11 @@ validate_user_file() {
 
 if [[ -e "$CANARY_DISABLE_FILE" ]]; then
   echo "canary: class=emergency_disabled sentinel=$CANARY_DISABLE_FILE; no requests issued" >&2
-  exit 0
+  exit 20
 fi
 if [[ -n "${CANARY_ENABLE_FILE:-}" && ! -e "$CANARY_ENABLE_FILE" ]]; then
   echo "canary: class=not_enabled gate=$CANARY_ENABLE_FILE; no requests issued" >&2
-  exit 0
+  exit 21
 fi
 
 if [[ -z "${MACPROVIDER_BUYER_TOKEN:-}" && -n "${CREDENTIALS_DIRECTORY:-}" && -r "$CREDENTIALS_DIRECTORY/buyer_token" ]]; then

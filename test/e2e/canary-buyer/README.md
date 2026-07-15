@@ -13,7 +13,11 @@ The canary has two deliberately separate modes:
 
 The shipped systemd and launchd schedules are fail-closed. They issue no network
 requests until an operator creates the configured enable-gate file after the
-Issue #584 production re-enable criteria are approved.
+Issue #584 production re-enable criteria are approved. The wrapper returns
+status `20` for the emergency-disable sentinel and `21` for a missing enable
+gate. The systemd unit records those deliberate no-load states as successful
+unit outcomes for alert hygiene, but rollout/recovery tooling requires the
+original `ExecMainStatus=0`; neither skip status is serving evidence.
 
 ## Emergency disable — one command
 
