@@ -449,6 +449,15 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     { legacyRollbackProviders: authorized, nowMs: now },
   ).includes('provider-a:provider_signal_missing'));
 
+  const replacementSession = structuredClone(observation);
+  replacementSession.operator_pool[0].assigned_id = 'replacement-session';
+  assert.ok(safetyObservationReasons(
+    observation,
+    replacementSession,
+    expectedFleet,
+    { legacyRollbackProviders: authorized, nowMs: now },
+  ).includes('provider-a:session_changed'));
+
   for (const [field, value] of [
     ['assigned_id', null],
     ['assigned_id', ''],

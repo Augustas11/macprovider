@@ -219,6 +219,9 @@ export function poolzInvariantReasons(initial, current, {
     if (!stateAllowed || !routingAllowed) {
       reasons.push(`${id}:state_${observed.state || 'missing'}_not_ready`);
     }
+    if (expected.assigned_id && observed.assigned_id !== expected.assigned_id) {
+      reasons.push(`${id}:session_changed`);
+    }
     if (expected.connected_at_ms != null && observed.connected_at_ms !== expected.connected_at_ms) {
       reasons.push(`${id}:connection_changed`);
     }
