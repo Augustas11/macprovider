@@ -64,15 +64,23 @@ import sys
 
 (out_path, state, reason, writer, operation_id, sequence, operator_paused,
  transition_id) = sys.argv[1:]
-event = {
-    "sequence": int(sequence),
-    "transition_id": transition_id,
-    "transition_at": "2026-07-15T17:00:00.000Z",
-    "state": state,
-    "reason_code": reason,
-    "writer": writer,
-    "operation_id": operation_id,
-}
+
+
+def journal(kind):
+    # Distinct significant-event sub-records per journal so rollback translation
+    # can be shown to PRESERVE last_restart/last_rejection/last_watchdog and to
+    # REPLACE last_update (Defect 3). Mirrors the Swift SignificantEvent shape.
+    return {
+        "sequence": int(sequence),
+        "transition_id": transition_id,
+        "transition_at": "2026-07-15T17:00:00.000Z",
+        "state": state,
+        "reason_code": "%s_%s" % (reason, kind),
+        "writer": writer,
+        "operation_id": "%s-%s" % (operation_id, kind),
+    }
+
+
 record = {
     "version": 1,
     "sequence": int(sequence),
@@ -87,9 +95,80 @@ record = {
     "model_id": "qwen3-coder-30b-a3b-instruct",
     "operation_id": operation_id,
     "operator_paused": operator_paused == "true",
-    "last_update": event,
-    "last_restart": event,
-    "last_rejection": event,
+    "last_update": journal("update"),
+    "last_restart": journal("restart"),
+    "last_rejection": journal("rejection"),
+    "last_watchdog": journal("watchdog"),
+}
+with open(out_path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+# Emit a lifecycle LEASE record in the EXACT nested wire schema the Swift
+# ProviderLifecycleLeaseStore serializes (JSONEncoder(.sortedKeys)): the owner
+# is nested under `owner` (owner.pid / owner.process_start_us /
+# owner.boot_session), NOT a flat owner_pid. The reconciler decodes this real
+# shape (Defect 1). When a pid is given, owner.process_start_us and
+# owner.boot_session are derived from that live process's ACTUAL start second
+# and the current boot session, so the reconciler's second-resolution liveness
+# check (see owner_is_live in install.sh) can confirm the owner is live. This is
+# a generated conformance artifact; the paired Swift test
+# (ProviderLifecycleShellConformanceTests) proves this shape byte-decodes
+# through the real store.
+write_lease_record() {
+  out_path="$1"; operation_id="$2"; kind="$3"; owner_pid="$4"
+  python3 - "$out_path" "$operation_id" "$kind" "$owner_pid" <<'PY'
+import json
+import subprocess
+import sys
+import time
+
+out_path, operation_id, kind, owner_pid_text = sys.argv[1:]
+owner_pid = int(owner_pid_text)
+
+
+def process_start_us(pid):
+    if pid <= 0:
+        return 1
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    raw = result.stdout.strip() if result.returncode == 0 else ""
+    if not raw:
+        # A dead/unknown pid: emit a fixed non-live start marker.
+        return 1
+    return int(time.mktime(time.strptime(raw))) * 1_000_000
+
+
+def boot_session():
+    result = subprocess.run(
+        ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    return value or "00000000-0000-0000-0000-000000000000"
+
+
+record = {
+    "version": 1,
+    "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "operation_id": operation_id,
+    "kind": kind,
+    "owner": {
+        "pid": owner_pid,
+        "process_start_us": process_start_us(owner_pid),
+        "boot_session": boot_session(),
+    },
+    "issued_wall_ms": 1_784_016_000_000,
+    "expires_wall_ms": 1_784_016_900_000,
+    "issued_monotonic_ns": 500_000_000_000,
+    "expires_monotonic_ns": 500_900_000_000_000,
 }
 with open(out_path, "w", encoding="utf-8") as handle:
     handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
@@ -1017,6 +1096,43 @@ require(tid == tid.lower() and len(tid) == 36, "fresh lowercase uuid transition 
 require(tid != "33333333-3333-4333-8333-333333333333", "new transition id")
 require(record.get("previous_transition_id") == "33333333-3333-4333-8333-333333333333",
         "previous_transition_id chains snapshot")
+
+# Defect 3: the journal fields Malibu displays must survive the translation. The
+# snapshot (updater, sequence 55) carried four distinct journals. Rollback is an
+# installer-written update-state transition, so the Swift constructor REPLACES
+# last_update with this transition and PRESERVES last_restart/last_rejection/
+# last_watchdog unchanged. Require every one.
+snap_restart = {
+    "sequence": 55,
+    "transition_id": "33333333-3333-4333-8333-333333333333",
+    "transition_at": "2026-07-15T17:00:00.000Z",
+    "state": "update_in_progress",
+    "reason_code": "update_admission_pending_restart",
+    "writer": "updater",
+    "operation_id": "updater-dead-op-9999-restart",
+}
+snap_rejection = dict(snap_restart)
+snap_rejection["reason_code"] = "update_admission_pending_rejection"
+snap_rejection["operation_id"] = "updater-dead-op-9999-rejection"
+snap_watchdog = dict(snap_restart)
+snap_watchdog["reason_code"] = "update_admission_pending_watchdog"
+snap_watchdog["operation_id"] = "updater-dead-op-9999-watchdog"
+require(record.get("last_restart") == snap_restart, "last_restart preserved from snapshot")
+require(record.get("last_rejection") == snap_rejection, "last_rejection preserved from snapshot")
+require(record.get("last_watchdog") == snap_watchdog, "last_watchdog preserved from snapshot")
+# last_update is refreshed to THIS installer rollback transition, not the
+# snapshot's updater journal.
+lu = record.get("last_update")
+require(isinstance(lu, dict), "last_update present")
+require(lu.get("writer") == "installer", "last_update refreshed to installer writer")
+require(lu.get("state") == "rollback_in_progress", "last_update state is rollback_in_progress")
+require(lu.get("reason_code") == "install_rollback_restored_translated",
+        "last_update reserved reason code")
+require(lu.get("operation_id") == record["operation_id"], "last_update carries the fresh op id")
+require(lu.get("sequence") == record["sequence"], "last_update sequence matches transition")
+require(lu.get("transition_id") == record["transition_id"], "last_update transition id matches")
+require(lu.get("transition_at") == record["transition_at"], "last_update transition_at matches")
+require(lu != snap_restart, "last_update is not the stale updater journal")
 PY
 
 # A-01(b): a serve-written snapshot restores byte-exact (serve can always leave
@@ -1031,6 +1147,45 @@ write_full_schema_record "$root/expected-serve.json" \
 serve_restored_hash="$(shasum -a 256 "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" | awk '{print $1}')"
 [ "$serve_restored_hash" = "$(shasum -a 256 "$root/expected-serve.json" | awk '{print $1}')" ]
 [ -z "$(recovery_dir "$root")" ]
+
+# ---------------------------------------------------------------------------
+# S-M2 (Defect 2): the snapshot must prove the DESTINATION holds every captured
+# byte before it publishes had=1. A short write to the destination (injected via
+# LIFECYCLE_SNAPSHOT_FAULT=short-write) must abort with the snapshot failure
+# code (70) and must NOT leave a had=1 meta file, so a truncated snapshot can
+# never be published or later restored.
+snap_root="$TMP/snapshot_short_write"
+snap_lc_dir="$snap_root/lifecycle"
+mkdir -p "$snap_lc_dir"
+chmod 700 "$snap_root" "$snap_lc_dir"
+write_full_schema_record "$snap_lc_dir/state-v1.json" \
+  serving install_committed installer serve-op-0001 41 false \
+  '55555555-5555-4555-8555-555555555555'
+chmod 600 "$snap_lc_dir/state-v1.json"
+: > "$snap_lc_dir/.state-v1.json.lock"
+chmod 600 "$snap_lc_dir/.state-v1.json.lock"
+snap_meta="$snap_root/snapshot-meta"
+snap_dest="$snap_root/staged-state-v1.json"
+set +e
+(
+  set -euo pipefail
+  # Only the snapshot function is needed; source the extracted install functions.
+  . "$TMP/functions.sh"
+  LIFECYCLE_SNAPSHOT_FAULT=short-write \
+    stage_lifecycle_snapshot \
+      "$snap_lc_dir/state-v1.json" "$snap_lc_dir/.state-v1.json.lock" \
+      "$snap_dest" "$snap_meta"
+)
+snap_rc=$?
+set -e
+[ "$snap_rc" -eq 70 ] || {
+  echo "short-write snapshot did not abort with code 70 (rc=$snap_rc)" >&2
+  exit 1
+}
+if [ -f "$snap_meta" ] && grep -qx 'had=1' "$snap_meta" 2>/dev/null; then
+  echo "short-write snapshot published had=1 despite a truncated destination" >&2
+  exit 1
+fi
 
 # A-01(c): a durable operator pause set DURING the transaction (live file
 # operator_paused true while the snapshot was unpaused) survives rollback. The
@@ -1164,8 +1319,15 @@ grep -F '"state":"serving"' "$root/home/Library/Application Support/macprovider/
 # A-05: lease reconciliation after rollback. The lock files are synchronization
 # primitives and must remain byte-stable; only lease.json is reconciled.
 # ---------------------------------------------------------------------------
+# All lease fixtures below use the REAL nested Swift wire schema
+# (owner.pid / owner.process_start_us / owner.boot_session) authored by
+# write_lease_record, proving the reconciler decodes what the Swift store
+# actually writes (Defect 1), not a flat owner_pid it never emits.
+
 # (A-05.1) A stale lease from the rolled-back install operation is removed.
-MUTATION_LEASE_JSON='{"operation_id":"install:test-'"$$"'","owner_pid":999999,"kind":"maintenance"}' \
+lease_fixture="$TMP/lease_stale_operation.json"
+write_lease_record "$lease_fixture" "install:test-$$" maintenance 999999
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
   run_case lease_stale_operation "" "" "" self-test
 root="$TMP/lease_stale_operation"
 [ "$(cat "$root/rc")" -eq 9 ]
@@ -1177,7 +1339,9 @@ fi
 
 # (A-05.2) A dead-owner lease (foreign operation but the PID is not alive) is
 # removed.
-MUTATION_LEASE_JSON='{"operation_id":"someone-else","owner_pid":999999,"kind":"startup"}' \
+lease_fixture="$TMP/lease_dead_owner.json"
+write_lease_record "$lease_fixture" someone-else startup 999999
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
   run_case lease_dead_owner "" "" "" self-test
 root="$TMP/lease_dead_owner"
 [ "$(cat "$root/rc")" -eq 9 ]
@@ -1187,14 +1351,15 @@ if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json
 fi
 
 # (A-05.3) A live foreign-owner lease (not part of this transaction) is
-# preserved. The lock files are never mutated byte-wise.
+# preserved. The owner block carries the live pid's real start second and the
+# current boot session so the second-resolution liveness check confirms it. The
+# lock files are never mutated byte-wise.
 lease_live_root="$TMP/lease_live_foreign"
 sleep 300 &
 foreign_pid=$!
-# Pre-create the lock files so we can hash them before and after and prove they
-# are never rewritten by the reconciler.
-mutation_lease="{\"operation_id\":\"unrelated-live\",\"owner_pid\":$foreign_pid,\"kind\":\"startup\"}"
-MUTATION_LEASE_JSON="$mutation_lease" \
+lease_fixture="$TMP/lease_live_foreign.json"
+write_lease_record "$lease_fixture" unrelated-live startup "$foreign_pid"
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
   run_case lease_live_foreign "" "" "" self-test
 root="$TMP/lease_live_foreign"
 [ "$(cat "$root/rc")" -eq 9 ]

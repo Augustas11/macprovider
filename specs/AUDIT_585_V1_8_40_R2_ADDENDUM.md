@@ -1,4 +1,33 @@
-# AUDIT ADDENDUM — Issue #585 v1.8.40 — Round 2
+# AUDIT ADDENDUM — Issue #585 v1.8.40 — Rounds 2 and 3
+
+## Round 3 (read this section when auditing R3)
+
+R2 converged on three distinct defects (each found independently by two
+lanes). All three were fixed, plus the root-cause seam:
+
+| R2 defect | Fix |
+|---|---|
+| Lease reconciliation read flat `owner_pid`; Swift emits nested `owner.{pid,process_start_us,boot_session}` — live foreign leases deleted (CODE-M1 / ARCH-H1) | Decoder now reads the real nested schema; preservation requires pid alive AND boot_session match AND process-start identity (second-resolution via `ps lstart` — documented strictly-coarser-never-laxer deviation from Swift's microsecond check; unverifiable identity => NOT preservable, fail-toward-single-writer). Fixtures regenerated in the exact nested schema with live-derived identity. |
+| Single unchecked `os.write` on snapshot destination (CODE-M2 / SEC-M1) | `write_all` loop rejecting non-progress; staged file reopened O_NOFOLLOW; inode/type/owner/nlink/mode/size revalidated; byte-compare vs captured payload before `had=1`; `LIFECYCLE_SNAPSHOT_FAULT=short-write` injection test asserting abort code 70 pre-publication. |
+| Translation dropped `last_restart`/`last_rejection`/`last_update`/`last_watchdog` journals Malibu displays (CODE-M3 / ARCH-M1) | Translation starts from `dict(base)`, replaces only transition-owned fields, preserves restart/rejection/watchdog journals, refreshes `last_update` with the installer-written event (mirroring the Swift constructor: `rollback_in_progress` is an update state). Assertions require every journal field. |
+| Root-cause seam: no shell<->Swift conformance test | New `ProviderLifecycleShellConformanceTests.swift`: extracts and executes the ACTUAL install.sh functions via bash from XCTest — (1) real `ProviderLifecycleLeaseStore` output consumed by the shell decoder (preserved when foreign-live, removed when rollback-bound); (2) shell-emitted translated record consumed by real `ProviderLifecycleStateStore.inspect()` (valid, journals correct, serve restart permitted). |
+| ARCH-L Entry 160 wording | Expiry clarified as procedural (decision log + release review), not runtime-enforced. |
+| ARCH-L absent-parent lock | Double-read of the absent parent before publishing `had=0`; residual race documented in-code, bounded by the installer transaction lock. |
+
+R3 mutation evidence: reverting the nested decode, skipping the destination
+byte-compare, or dropping journal preservation each breaks the corresponding
+test (exit 1). Verification at R3 commit: swift test 1,364/0 (exit 0, includes
+3 new conformance tests), full dist sweep 12/12, `make test-dist` green,
+whitespace clean.
+
+Remaining documented LOWs (ship in PR body): candidate-state-v1.json persists
+between candidate runs (uninstall removes it); second-resolution lease
+identity (fail-open only toward preserving a foreign lease, never spurious
+deletion); absent-parent double-read residual race.
+
+---
+
+# Original Round-2 addendum below
 
 Read this together with your lane's base prompt
 (`AUDIT_585_V1_8_40_{CODE,SECURITY,ARCHITECT}_PROMPT.md`). The diff under

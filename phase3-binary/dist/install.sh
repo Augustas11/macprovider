@@ -938,6 +938,7 @@ stage_lifecycle_snapshot() {
   lock_path="$2"
   destination_path="$3"
   meta_path="$4"
+  LIFECYCLE_SNAPSHOT_FAULT="${LIFECYCLE_SNAPSHOT_FAULT:-}" \
   python3 - "$state_path" "$lock_path" "$destination_path" "$meta_path" <<'PY'
 import errno
 import fcntl
@@ -951,6 +952,10 @@ state_path, lock_path, destination_path, meta_path = sys.argv[1:]
 uid = os.getuid()
 MAX_STATE_BYTES = 1024 * 1024
 LOCK_TIMEOUT_SECONDS = 10.0
+# Fault-injection hook (tests only). "short-write" forces os.write to report a
+# single truncated byte count so the write loop's short-write handling and the
+# staged-file byte-compare abort BEFORE had=1 is published.
+FAULT = os.environ.get("LIFECYCLE_SNAPSHOT_FAULT", "")
 
 
 def fail(message):
@@ -965,10 +970,41 @@ def lstat_or_none(path):
         return None
 
 
+def write_all(fd, payload):
+    # Persist every byte: os.write may write fewer than requested, so loop until
+    # the whole payload lands and reject any zero/negative progress rather than
+    # trusting a single call (which could silently truncate the snapshot).
+    total = 0
+    forced_short = FAULT == "short-write"
+    while total < len(payload):
+        chunk = payload[total:]
+        if forced_short and total == 0 and len(chunk) > 1:
+            # Simulate a kernel short write of a single byte on the first call.
+            written = os.write(fd, chunk[:1])
+        else:
+            written = os.write(fd, chunk)
+        if written <= 0:
+            fail("lifecycle_snapshot_write_no_progress")
+        total += written
+        if forced_short:
+            # Stop after the injected short write so the destination is left
+            # truncated; the post-write byte-compare must then abort.
+            break
+    return total
+
+
 parent = os.path.dirname(state_path)
 parent_st = lstat_or_none(parent)
 if parent_st is None:
-    # No lifecycle directory means an incumbent that predates the contract.
+    # No lifecycle directory: an incumbent that predates the lifecycle contract.
+    # There is nothing to lock (the store's lock lives inside this directory),
+    # so re-read the parent to confirm it is STILL absent before publishing
+    # had=0. Residual race: a concurrent CLI could create the directory and a
+    # state file in the window between this double-read and the installer's
+    # subsequent mutation; that is out of scope for a byte snapshot with no lock
+    # to hold and is bounded by the installer transaction lock taken elsewhere.
+    if lstat_or_none(parent) is not None:
+        fail("lifecycle_parent_appeared_during_snapshot")
     with open(meta_path, "w", encoding="utf-8") as handle:
         handle.write("had=0\n")
     raise SystemExit(0)
@@ -1059,11 +1095,48 @@ try:
         )
     finally:
         os.umask(previous_umask)
+    dest_dev = None
+    dest_ino = None
     try:
-        os.write(dest_fd, payload)
+        dest_desc = os.fstat(dest_fd)
+        dest_dev, dest_ino = dest_desc.st_dev, dest_desc.st_ino
+        write_all(dest_fd, payload)
         os.fsync(dest_fd)
     finally:
         os.close(dest_fd)
+
+    # Prove the DESTINATION now holds exactly the captured payload before
+    # publishing had=1. Reopen the staged file with O_NOFOLLOW, confirm it is
+    # the same owned regular inode we just created (not a swapped/planted
+    # target), revalidate type/link-count/mode/size, and byte-compare its
+    # contents against the payload. Any mismatch (e.g. a short write) aborts
+    # BEFORE the meta file is written, so no truncated snapshot is ever
+    # published or later restored.
+    verify_fd = os.open(destination_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        verify_desc = os.fstat(verify_fd)
+        if (verify_desc.st_dev, verify_desc.st_ino) != (dest_dev, dest_ino):
+            fail("lifecycle_snapshot_dest_raced")
+        if not stat.S_ISREG(verify_desc.st_mode):
+            fail("lifecycle_snapshot_dest_not_regular")
+        if verify_desc.st_uid != uid:
+            fail("lifecycle_snapshot_dest_not_owned")
+        if verify_desc.st_nlink != 1:
+            fail("lifecycle_snapshot_dest_hardlinked")
+        if stat.S_IMODE(verify_desc.st_mode) != 0o600:
+            fail("lifecycle_snapshot_dest_mode:%o" % stat.S_IMODE(verify_desc.st_mode))
+        if verify_desc.st_size != len(payload):
+            fail("lifecycle_snapshot_dest_size:%d" % verify_desc.st_size)
+        staged = b""
+        while len(staged) <= MAX_STATE_BYTES:
+            chunk = os.read(verify_fd, 65536)
+            if not chunk:
+                break
+            staged += chunk
+    finally:
+        os.close(verify_fd)
+    if staged != payload:
+        fail("lifecycle_snapshot_dest_byte_mismatch")
 
     # Re-verify the source has not changed underneath the copy (lstat again +
     # byte compare) while still holding the lock.
@@ -1528,6 +1601,18 @@ try:
             # rollback_in_progress record. serve is always permitted to leave an
             # installer-written maintenance state, so a restored lifecycle-aware
             # CLI cannot be fenced on a dead updater operation.
+            # Start from the FULL snapshot record and replace only the
+            # transition-owned fields. The Swift ProviderLifecycleStateRecord
+            # constructor carries the last_restart / last_rejection /
+            # last_watchdog journals forward on every transition and only
+            # refreshes the journal whose trigger this transition matches. For
+            # an installer-written rollback_in_progress transition (writer
+            # installer, state rollback_in_progress, which is an update state),
+            # the constructor mints a NEW last_update event from this transition
+            # and preserves last_restart / last_rejection / last_watchdog. We
+            # mirror that exactly so Malibu (InstalledProviderMonitor) keeps
+            # displaying the restart/rejection/watchdog history and observes the
+            # installer's rollback summary in last_update.
             base = dict(snapshot_record)
             snap_seq = base.get("sequence")
             snap_seq = snap_seq if isinstance(snap_seq, int) and not isinstance(snap_seq, bool) else 0
@@ -1539,26 +1624,49 @@ try:
             fresh_operation_id = install_operation_id or ("install-rollback:%d" % os.getpid())
             if not fresh_operation_id.startswith("install-rollback:"):
                 fresh_operation_id = "install-rollback:%s" % fresh_operation_id
-            translated = {
-                "version": base.get("version") if isinstance(base.get("version"), int) else SCHEMA_VERSION,
+
+            translated = dict(base)
+            translated["version"] = (
+                base.get("version") if isinstance(base.get("version"), int)
+                and not isinstance(base.get("version"), bool) else SCHEMA_VERSION
+            )
+            translated["sequence"] = next_sequence
+            translated["transition_id"] = transition_id
+            translated["transition_at"] = transition_at
+            translated["state"] = "rollback_in_progress"
+            translated["reason_code"] = RESERVED_TRANSLATION_REASON
+            translated["authority"] = AUTHORITY
+            translated["writer"] = "installer"
+            translated["operation_id"] = fresh_operation_id
+            # Durable operator pause survives the rollback even if the
+            # incumbent snapshot was taken before it was set.
+            translated["operator_paused"] = bool(snapshot_paused or current_paused)
+            # Chain to the snapshot's transition; drop a non-chaining value.
+            if isinstance(previous_transition_id, str) and previous_transition_id:
+                translated["previous_transition_id"] = previous_transition_id
+            else:
+                translated.pop("previous_transition_id", None)
+
+            # SignificantEvent for this installer maintenance transition. Mirrors
+            # ProviderLifecycleStateRecord.SignificantEvent: sequence,
+            # transition_id, transition_at, state, reason_code, writer,
+            # compatibility_set_id (nil-omitted), operation_id.
+            update_event = {
                 "sequence": next_sequence,
                 "transition_id": transition_id,
                 "transition_at": transition_at,
                 "state": "rollback_in_progress",
                 "reason_code": RESERVED_TRANSLATION_REASON,
-                "authority": AUTHORITY,
                 "writer": "installer",
                 "operation_id": fresh_operation_id,
-                # Durable operator pause survives the rollback even if the
-                # incumbent snapshot was taken before it was set.
-                "operator_paused": bool(snapshot_paused or current_paused),
             }
-            if isinstance(previous_transition_id, str) and previous_transition_id:
-                translated["previous_transition_id"] = previous_transition_id
-            for optional in ("provider_id", "model_id", "compatibility_set_id"):
-                value = base.get(optional)
-                if isinstance(value, str) and value:
-                    translated[optional] = value
+            compat = base.get("compatibility_set_id")
+            if isinstance(compat, str) and compat:
+                update_event["compatibility_set_id"] = compat
+            # rollback_in_progress is an update state, so the constructor refreshes
+            # last_update to this transition; the other journals carry forward
+            # unchanged from the snapshot (already copied by dict(base)).
+            translated["last_update"] = update_event
             target_bytes = encode_record(translated)
         elif snapshot_record is not None and (current_paused and not snapshot_paused):
             # Byte-exact restore would otherwise drop a durable operator pause
@@ -1626,6 +1734,7 @@ import fcntl
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 
@@ -1661,6 +1770,98 @@ def pid_alive(pid):
         return True
     except OSError:
         return False
+
+
+def boot_session():
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    if value:
+        return value
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def process_start_epoch_seconds(pid):
+    # The Swift store persists owner.process_start_us at microsecond precision
+    # (proc_pidinfo: pbi_start_tvsec*1e6 + pbi_start_tvusec). Shell has no
+    # equivalent primitive; `ps -o lstart=` resolves start time only to the
+    # whole second. We therefore compare at SECOND precision (the lease's
+    # process_start_us truncated to seconds vs the live pid's start second).
+    # This is strictly coarser than -- and never preserves anything Swift's
+    # exact check would delete: a reused pid that started in a different second
+    # is still rejected. See owner_is_live() for the fail-toward-single-writer
+    # decision when start time is unverifiable.
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    try:
+        return int(time.mktime(time.strptime(raw)))
+    except (ValueError, OverflowError):
+        return None
+
+
+def owner_is_live(owner):
+    # A live foreign owner is preserved only when EVERY identity check the
+    # Swift store applies (validationFailure / .ownerProcessMissingOrReused)
+    # can be reproduced and passes: pid alive, boot_session unchanged, and the
+    # owner's process-start identity confirmed. Because shell cannot read the
+    # microsecond process-start the Swift store records, an unverifiable
+    # process-start (owner missing it, or ps not resolving the live pid's start)
+    # is treated as NOT preservable: fail toward single-writer so a stale or
+    # reused-pid lease from the failed transaction is cleared rather than
+    # protected. This is stricter than -- never laxer than -- the Swift check.
+    if not isinstance(owner, dict):
+        return False
+    owner_pid = owner.get("pid")
+    owner_start = owner.get("process_start_us")
+    owner_boot = owner.get("boot_session")
+    if (
+        not isinstance(owner_pid, int)
+        or isinstance(owner_pid, bool)
+        or owner_pid <= 0
+        or not isinstance(owner_start, int)
+        or isinstance(owner_start, bool)
+        or owner_start <= 0
+        or not isinstance(owner_boot, str)
+        or not owner_boot
+    ):
+        return False
+    if not pid_alive(owner_pid):
+        return False
+    current_boot = boot_session()
+    if not current_boot or owner_boot != current_boot:
+        # A boot-session mismatch (or unknown current boot) means the pid is a
+        # post-reboot coincidence, not the original owner: treat as dead.
+        return False
+    live_start_seconds = process_start_epoch_seconds(owner_pid)
+    if live_start_seconds is None:
+        # Unverifiable process-start identity: fail toward single-writer.
+        return False
+    return live_start_seconds == owner_start // 1_000_000
 
 
 lock_fd = None
@@ -1724,14 +1925,19 @@ try:
         # process; clear it so a restored CLI can mint a fresh lease.
         remove = True
     else:
+        # The Swift ProviderLifecycleLeaseStore persists the owner NESTED under
+        # `owner` (owner.pid / owner.process_start_us / owner.boot_session), not
+        # a flat owner_pid. Decode the real wire schema so a production live
+        # lease is not misread as dead. A missing/malformed owner object is a
+        # malformed record: clear it (matches remove-behavior for non-dict).
         lease_operation = record.get("operation_id")
-        owner_pid = record.get("owner_pid")
+        owner = record.get("owner")
         belongs_to_rollback = bool(
             install_operation_id
             and isinstance(lease_operation, str)
             and lease_operation == install_operation_id
         )
-        if belongs_to_rollback or not pid_alive(owner_pid):
+        if belongs_to_rollback or not owner_is_live(owner):
             remove = True
 
     if remove:
