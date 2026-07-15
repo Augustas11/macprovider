@@ -347,9 +347,13 @@ func TestSpec019ProviderDetailCodesClassifiedAndInventoried(t *testing.T) {
 func TestUnresolvedEmittersDetectsFailOpen(t *testing.T) {
 	emitters := map[string]bool{"present": true, "renamed": true, "typo": true, "forwardRef": true, "staleExempt": true}
 	allowAbsent := map[string]bool{"forwardRef": true, "staleExempt": true}
-	// "typo"/"forwardRef" not declared; "staleExempt" IS declared (exemption now stale).
+	// "typo"/"forwardRef" not declared; "renamed"/"staleExempt" ARE declared.
 	declared := map[string]bool{"present": true, "renamed": true, "staleExempt": true}
-	codeIdx := map[string]int{"present": 2} // "renamed"/"staleExempt" declared but code param not resolved
+	// "staleExempt" RESOLVES a code param — so only the stale-exemption branch can
+	// flag it (without that branch it would hit `case resolved` and pass); this
+	// isolates the branch instead of letting the generic declared-but-unresolved
+	// branch flag it for the wrong reason. "renamed" is declared but unresolved.
+	codeIdx := map[string]int{"present": 2, "staleExempt": 2}
 
 	problems := unresolvedEmitters(emitters, allowAbsent, declared, codeIdx)
 	got := strings.Join(problems, "\n")
@@ -359,8 +363,8 @@ func TestUnresolvedEmittersDetectsFailOpen(t *testing.T) {
 	if !strings.Contains(got, "typo") {
 		t.Errorf("undeclared non-forward-ref emitter not flagged: %q", got)
 	}
-	if !strings.Contains(got, "staleExempt") {
-		t.Errorf("stale allow-absent exemption (now declared) not flagged: %q", got)
+	if !strings.Contains(got, "staleExempt is on the allow-absent list but is now declared") {
+		t.Errorf("stale allow-absent exemption (declared + resolved) not flagged by the stale-exemption branch: %q", got)
 	}
 	if strings.Contains(got, "present") {
 		t.Errorf("resolved emitter wrongly flagged: %q", got)
