@@ -97,8 +97,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-585-integration-r4"
-CANARY_AUTHORITY_COMMIT = "0eb6cb30dc99de471a670fa951077777aa34a042"
+CANARY_AUTHORITY_VERSION = "issue-585-integration-r5"
+CANARY_AUTHORITY_COMMIT = "6eef9519a26b7687d8e8e48b4439b3a117a39521"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -116,7 +116,7 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "b72c31edb1e0841a1f6f55815f1ab27b2c9b7df5e78ea50a6cbc0d8107cdf154",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "d4c1fa881093bdd129c2368a4f9c0eca60c10c4af307ce492e11647e7bb56143",
     Path("/opt/macprovider-canary-buyer/safety.mjs"): "65c07f1c8e111bc402e5e22f6a1871d66186bb6f618175a8f2aafebfa7ab743c",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
