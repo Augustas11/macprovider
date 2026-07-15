@@ -177,6 +177,21 @@ final class AutotuneCommandTests: XCTestCase {
         ]))
     }
 
+    func testTrustBlockedFreshnessMapsToDedicatedExitCodeAndSortedDiagnostic() throws {
+        let failure = try XCTUnwrap(AutotuneCommand.recommendationFreshnessFailure(
+            for: .trustBlocked(
+                nil,
+                [.demandRankUpdateRequired, .candidateCatalogUpdateRequired]
+            )
+        ))
+
+        XCTAssertEqual(failure.exitCode, ExitCode(12))
+        XCTAssertEqual(
+            failure.diagnostic,
+            "catalog_trust_blocked: candidate_catalog_update_required, demand_rank_update_required\n"
+        )
+    }
+
     func testRequiredHardwareEvidenceRequiresRecommend() {
         XCTAssertThrowsError(try AutotuneCommand.parse(["--require-hardware-evidence"]))
     }

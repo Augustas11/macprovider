@@ -922,12 +922,46 @@ struct AutotuneCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("hardware_evidence_unavailable: \(reason)\n".utf8))
                 throw ExitCode(11)
             }
+        case .missing, .stale, .trustBlocked:
+            guard let failure = Self.recommendationFreshnessFailure(for: status) else {
+                preconditionFailure("non-fresh recommendation status must have a failure mapping")
+            }
+            FileHandle.standardError.write(Data(failure.diagnostic.utf8))
+            throw failure.exitCode
+        }
+    }
+
+    struct RecommendationFreshnessFailure: Equatable {
+        let diagnostic: String
+        let exitCode: ExitCode
+    }
+
+    static func recommendationFreshnessFailure(
+        for status: RecommendationFreshnessChecker.Status
+    ) -> RecommendationFreshnessFailure? {
+        switch status {
+        case .fresh:
+            return nil
         case .missing:
-            FileHandle.standardError.write(Data("recommendation_stale: missing stored recommendation\n".utf8))
-            throw ExitCode(10)
+            return RecommendationFreshnessFailure(
+                diagnostic: "recommendation_stale: missing stored recommendation\n",
+                exitCode: ExitCode(10)
+            )
         case .stale(let generatedAt):
-            FileHandle.standardError.write(Data("recommendation_stale: inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))\n".utf8))
-            throw ExitCode(10)
+            return RecommendationFreshnessFailure(
+                diagnostic: "recommendation_stale: inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))\n",
+                exitCode: ExitCode(10)
+            )
+        case .trustBlocked(_, let warnings):
+            let failures = warnings
+                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+                .map(\.rawValue)
+                .sorted()
+                .joined(separator: ", ")
+            return RecommendationFreshnessFailure(
+                diagnostic: "catalog_trust_blocked: \(failures)\n",
+                exitCode: ExitCode(12)
+            )
         }
     }
 

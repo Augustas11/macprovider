@@ -63,6 +63,7 @@ STAGED_CONFIG_PATH=""
 STAGED_PROVIDER_ID_PATH=""
 AUTOTUNE_BENCHMARK_PORT=""
 MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
+LIFECYCLE_STAGED_CLI_TRUSTED=0
 LAUNCHD_INSTALLED=0
 WATCHDOG_INSTALLED=0
 MANUAL_PID=""
@@ -101,11 +102,16 @@ die() {
 }
 
 record_lifecycle_state() {
-  lifecycle_state="$1"
-  lifecycle_reason="$2"
+  local lifecycle_state="$1"
+  local lifecycle_reason="$2"
+  local lifecycle_cli="$BINARY_PATH"
   [ "$DRY_RUN" -eq 0 ] || return 0
-  [ -x "$BINARY_PATH" ] || return 1
-  lifecycle_args=(
+  if [ "${LIFECYCLE_STAGED_CLI_TRUSTED:-0}" -eq 1 ] \
+    && [ -x "${MACPROVIDER_CLI_EXECUTABLE:-}" ]; then
+    lifecycle_cli="$MACPROVIDER_CLI_EXECUTABLE"
+  fi
+  [ -x "$lifecycle_cli" ] || return 1
+  local lifecycle_args=(
     lifecycle-state transition
     --state "$lifecycle_state"
     --reason-code "$lifecycle_reason"
@@ -114,7 +120,7 @@ record_lifecycle_state() {
   )
   [ -z "${provider_id:-}" ] || lifecycle_args+=(--provider-id "$provider_id")
   [ -z "${model:-}" ] || lifecycle_args+=(--model-id "$model")
-  if "$BINARY_PATH" "${lifecycle_args[@]}" >/dev/null; then
+  if "$lifecycle_cli" "${lifecycle_args[@]}" >/dev/null; then
     return 0
   fi
   if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
@@ -5986,6 +5992,7 @@ main() {
   stage_release_payload
   validate_acceptance_staged_identity
   clear_quarantine "$staging_dir"
+  LIFECYCLE_STAGED_CLI_TRUSTED=1
   prepare_staged_config
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
     [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] \
