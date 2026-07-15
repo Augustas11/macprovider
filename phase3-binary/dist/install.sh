@@ -37,6 +37,15 @@ MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
 # part of the install transaction so a rollback to a legacy incumbent restores
 # the exact prior contents (or prior absence) instead of stranding a stale state.
 LIFECYCLE_STATE_PATH="$MANIFEST_DIR/lifecycle/state-v1.json"
+# The CLI serializes the lifecycle store behind sibling lock files. The install
+# transaction acquires the same locks around both snapshot and restore so a
+# concurrent operator pause or lease mutation cannot be lost or clobbered, and
+# it reconciles the operation-bound lease after a rollback. The lock files
+# themselves are synchronization primitives and are never snapshotted, moved,
+# or deleted.
+LIFECYCLE_LEASE_PATH="$MANIFEST_DIR/lifecycle/lease.json"
+LIFECYCLE_STATE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.state-v1.json.lock"
+LIFECYCLE_LEASE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.lease.json.lock"
 EXISTING_INSTALL_WAS_PRESENT=0
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
@@ -914,6 +923,185 @@ stage_install_tx_path() {
   install_tx_path_matches "$source_path" "$copied_path" "$path_kind"
 }
 
+# Snapshot the CLI-owned lifecycle-state file into the recovery staging area
+# with the same posture the real store enforces, holding the store's lock file
+# so a concurrent operator transition cannot be lost. The snapshot follows no
+# symlinks, validates ownership/type/nlink/mode/size, copies with umask 077
+# into a freshly created 0600 destination, and re-verifies the source after the
+# copy (lstat again + byte compare). It writes `had=1` to the meta file when a
+# state file was snapshotted (restore reads the snapshot record directly under
+# the lock). Exit non-zero (before any live mutation) on violation or lock
+# timeout. Absence of the state file is a normal, non-fatal outcome reported as
+# had=0.
+stage_lifecycle_snapshot() {
+  state_path="$1"
+  lock_path="$2"
+  destination_path="$3"
+  meta_path="$4"
+  python3 - "$state_path" "$lock_path" "$destination_path" "$meta_path" <<'PY'
+import errno
+import fcntl
+import json
+import os
+import stat
+import sys
+import time
+
+state_path, lock_path, destination_path, meta_path = sys.argv[1:]
+uid = os.getuid()
+MAX_STATE_BYTES = 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 10.0
+
+
+def fail(message):
+    sys.stderr.write("lifecycle_snapshot_failed:%s\n" % message)
+    raise SystemExit(70)
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+parent = os.path.dirname(state_path)
+parent_st = lstat_or_none(parent)
+if parent_st is None:
+    # No lifecycle directory means an incumbent that predates the contract.
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        handle.write("had=0\n")
+    raise SystemExit(0)
+if stat.S_ISLNK(parent_st.st_mode):
+    fail("lifecycle_parent_symlink")
+if not stat.S_ISDIR(parent_st.st_mode):
+    fail("lifecycle_parent_not_directory")
+if parent_st.st_uid != uid:
+    fail("lifecycle_parent_not_owned")
+if stat.S_IMODE(parent_st.st_mode) != 0o700:
+    fail("lifecycle_parent_mode:%o" % stat.S_IMODE(parent_st.st_mode))
+
+# Acquire the store's lock (O_NOFOLLOW, owned, non-symlink, 0600) with a bounded
+# timeout so a concurrent CLI transition serializes against the snapshot.
+lock_st = lstat_or_none(lock_path)
+if lock_st is not None and stat.S_ISLNK(lock_st.st_mode):
+    fail("lifecycle_lock_symlink")
+lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    lock_desc = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(lock_desc.st_mode)
+        or lock_desc.st_uid != uid
+        or lock_desc.st_nlink != 1
+        or stat.S_IMODE(lock_desc.st_mode) & 0o077
+    ):
+        fail("lifecycle_lock_invalid")
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            if time.monotonic() >= deadline:
+                fail("lifecycle_lock_contended")
+            time.sleep(0.05)
+
+    st = lstat_or_none(state_path)
+    if st is None:
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            handle.write("had=0\n")
+        raise SystemExit(0)
+    if stat.S_ISLNK(st.st_mode):
+        fail("lifecycle_state_symlink")
+    if not stat.S_ISREG(st.st_mode):
+        fail("lifecycle_state_not_regular")
+    if st.st_uid != uid:
+        fail("lifecycle_state_not_owned")
+    if st.st_nlink != 1:
+        fail("lifecycle_state_hardlinked")
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        fail("lifecycle_state_mode:%o" % stat.S_IMODE(st.st_mode))
+    if st.st_size > MAX_STATE_BYTES:
+        fail("lifecycle_state_oversized:%d" % st.st_size)
+
+    # Read the exact bytes through an O_NOFOLLOW descriptor and confirm the
+    # descriptor still refers to the lstat'd inode (defeats a swap between the
+    # lstat and open).
+    src_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        src_desc = os.fstat(src_fd)
+        if (src_desc.st_dev, src_desc.st_ino) != (st.st_dev, st.st_ino):
+            fail("lifecycle_state_raced")
+        if not stat.S_ISREG(src_desc.st_mode) or src_desc.st_uid != uid or src_desc.st_nlink != 1:
+            fail("lifecycle_state_desc_invalid")
+        payload = b""
+        while len(payload) <= MAX_STATE_BYTES:
+            chunk = os.read(src_fd, 65536)
+            if not chunk:
+                break
+            payload += chunk
+        if len(payload) > MAX_STATE_BYTES:
+            fail("lifecycle_state_oversized_read")
+    finally:
+        os.close(src_fd)
+
+    # Write the snapshot into a freshly created 0600 destination with umask 077.
+    # A pre-existing destination is refused (O_EXCL) so the snapshot cannot land
+    # on an attacker-planted target.
+    previous_umask = os.umask(0o077)
+    try:
+        dest_fd = os.open(
+            destination_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    finally:
+        os.umask(previous_umask)
+    try:
+        os.write(dest_fd, payload)
+        os.fsync(dest_fd)
+    finally:
+        os.close(dest_fd)
+
+    # Re-verify the source has not changed underneath the copy (lstat again +
+    # byte compare) while still holding the lock.
+    reverify = lstat_or_none(state_path)
+    if reverify is None:
+        fail("lifecycle_state_vanished")
+    if (
+        stat.S_ISLNK(reverify.st_mode)
+        or (reverify.st_dev, reverify.st_ino) != (st.st_dev, st.st_ino)
+        or reverify.st_size != st.st_size
+    ):
+        fail("lifecycle_state_changed_during_copy")
+    recheck_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        recheck_desc = os.fstat(recheck_fd)
+        if (recheck_desc.st_dev, recheck_desc.st_ino) != (st.st_dev, st.st_ino):
+            fail("lifecycle_state_raced_recheck")
+        recheck = b""
+        while len(recheck) <= MAX_STATE_BYTES:
+            chunk = os.read(recheck_fd, 65536)
+            if not chunk:
+                break
+            recheck += chunk
+    finally:
+        os.close(recheck_fd)
+    if recheck != payload:
+        fail("lifecycle_state_byte_mismatch")
+
+    # The snapshot's writer/pause posture is not threaded through the meta file:
+    # restore_lifecycle_state re-reads it from the snapshot and the live file
+    # under the lock so no snapshot-time value can go stale.
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        handle.write("had=1\n")
+finally:
+    os.close(lock_fd)
+PY
+}
+
 write_install_recovery_artifacts() {
   recovery_dir="$1"
   state_path="$recovery_dir/state.sh"
@@ -931,6 +1119,10 @@ write_install_recovery_artifacts() {
     printf 'REC_WATCHDOG_LABEL=%q\n' "$WATCHDOG_LABEL"
     printf 'REC_MANIFEST_PATH=%q\n' "$MANIFEST_PATH"
     printf 'REC_LIFECYCLE_STATE_PATH=%q\n' "$LIFECYCLE_STATE_PATH"
+    printf 'REC_LIFECYCLE_LEASE_PATH=%q\n' "$LIFECYCLE_LEASE_PATH"
+    printf 'REC_LIFECYCLE_STATE_LOCK_PATH=%q\n' "$LIFECYCLE_STATE_LOCK_PATH"
+    printf 'REC_LIFECYCLE_LEASE_LOCK_PATH=%q\n' "$LIFECYCLE_LEASE_LOCK_PATH"
+    printf 'REC_LIFECYCLE_INSTALL_OPERATION_ID=%q\n' "${LIFECYCLE_INSTALL_OPERATION_ID:-}"
     printf 'REC_LOG_DIR=%q\n' "$LOG_DIR"
     printf 'REC_INSTALL_RECOVERY_LABEL=%q\n' "$INSTALL_RECOVERY_LABEL"
     printf 'REC_INSTALL_RECOVERY_PLIST_PATH=%q\n' "$INSTALL_RECOVERY_PLIST_PATH"
@@ -1148,6 +1340,422 @@ swap_restore() {
     mv "$candidate_path" "$destination_path" || return 1
   fi
 }
+# Restore the lifecycle-state file coherently instead of a raw byte swap:
+#   * hold the store's lock across read + swap so a concurrent operator pause is
+#     not lost (A-01);
+#   * re-read the CURRENT live record first and preserve a durable operator
+#     pause the snapshot did not have (A-01.2);
+#   * translate an updater-written snapshot into an installer-owned
+#     rollback_in_progress record so a restored lifecycle-aware CLI cannot be
+#     permanently fenced on a dead operation (A-01.3); installer/serve/opaque
+#     snapshots restore byte-exact, absence restores as removal (A-01);
+#   * after the final rename/removal, verify the final file (byte compare vs the
+#     intended record, regular type, mode) or verified absence, then fsync the
+#     restored file and its parent directory before reporting success (S-M3).
+# The RECOVERY_LIFECYCLE_FAULT hook lets fault-injection tests interrupt between
+# the move-aside and the move-in without changing the production path.
+restore_lifecycle_state() {
+  RECOVERY_LIFECYCLE_FAULT="${RECOVERY_LIFECYCLE_FAULT:-}" \
+  python3 - \
+    "$REC_LIFECYCLE_STATE_PATH" \
+    "${REC_LIFECYCLE_STATE_LOCK_PATH:-}" \
+    "$RECOVERY_DIR/lifecycle-state-v1.json" \
+    "$FAILED_CURRENT_DIR/lifecycle-state-v1.json" \
+    "${REC_HAD_LIFECYCLE_STATE:-0}" \
+    "${REC_LIFECYCLE_INSTALL_OPERATION_ID:-}" \
+    <<'PY'
+import errno
+import fcntl
+import json
+import os
+import stat
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+
+(state_path, lock_path, snapshot_path, aside_path, had_text,
+ install_operation_id) = sys.argv[1:]
+had_snapshot = had_text == "1"
+fault = os.environ.get("RECOVERY_LIFECYCLE_FAULT", "")
+uid = os.getuid()
+MAX_STATE_BYTES = 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 10.0
+AUTHORITY = "macprovider_cli"
+SCHEMA_VERSION = 1
+RESERVED_TRANSLATION_REASON = "install_rollback_restored_translated"
+
+
+def fail(message):
+    sys.stderr.write("lifecycle_restore_failed:%s\n" % message)
+    raise SystemExit(1)
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def read_bytes_nofollow(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        data = b""
+        while len(data) <= MAX_STATE_BYTES:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > MAX_STATE_BYTES:
+            fail("lifecycle_state_oversized")
+        return data
+    finally:
+        os.close(fd)
+
+
+def parse_record(data):
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def encode_record(record):
+    # Match the store's JSONEncoder(.sortedKeys): compact, alphabetically
+    # sorted keys, UTF-8, no trailing newline.
+    return (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def atomic_write(path, data):
+    parent = os.path.dirname(path)
+    temporary = os.path.join(
+        parent, ".%s.recover-tmp-%s" % (os.path.basename(path), uuid.uuid4().hex)
+    )
+    previous_umask = os.umask(0o077)
+    try:
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    finally:
+        os.umask(previous_umask)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    os.replace(temporary, path)
+
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+# Acquire the store lock (bounded, fail closed) when a lock path is known.
+lock_fd = None
+if lock_path:
+    lock_st = lstat_or_none(lock_path)
+    if lock_st is not None and stat.S_ISLNK(lock_st.st_mode):
+        fail("lifecycle_lock_symlink")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    lock_desc = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(lock_desc.st_mode)
+        or lock_desc.st_uid != uid
+        or lock_desc.st_nlink != 1
+        or stat.S_IMODE(lock_desc.st_mode) & 0o077
+    ):
+        os.close(lock_fd)
+        fail("lifecycle_lock_invalid")
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                os.close(lock_fd)
+                raise
+            if time.monotonic() >= deadline:
+                os.close(lock_fd)
+                fail("lifecycle_lock_contended")
+            time.sleep(0.05)
+
+try:
+    # Read the CURRENT live record under the lock for pause reconciliation and
+    # to advance sequence past whatever the failed transaction wrote.
+    current_st = lstat_or_none(state_path)
+    current_record = None
+    current_sequence = 0
+    current_paused = False
+    if current_st is not None and not stat.S_ISLNK(current_st.st_mode) and stat.S_ISREG(current_st.st_mode):
+        current_bytes = read_bytes_nofollow(state_path)
+        current_record = parse_record(current_bytes)
+        if current_record is not None:
+            raw_seq = current_record.get("sequence")
+            if isinstance(raw_seq, int) and not isinstance(raw_seq, bool) and raw_seq > 0:
+                current_sequence = raw_seq
+            if current_record.get("operator_paused") is True:
+                current_paused = True
+
+    snapshot_bytes = None
+    snapshot_record = None
+    if had_snapshot:
+        snap_st = lstat_or_none(snapshot_path)
+        if snap_st is None or stat.S_ISLNK(snap_st.st_mode) or not stat.S_ISREG(snap_st.st_mode):
+            fail("lifecycle_snapshot_missing")
+        snapshot_bytes = read_bytes_nofollow(snapshot_path)
+        snapshot_record = parse_record(snapshot_bytes)
+
+    # Decide the exact bytes (or absence) to become durable.
+    remove_state = not had_snapshot
+    target_bytes = None
+    if had_snapshot:
+        snapshot_paused = bool(
+            snapshot_record is not None and snapshot_record.get("operator_paused") is True
+        )
+        snapshot_writer = snapshot_record.get("writer") if snapshot_record is not None else None
+        if snapshot_writer == "updater":
+            # Translating a maintenance-owned record into an installer-owned
+            # rollback_in_progress record. serve is always permitted to leave an
+            # installer-written maintenance state, so a restored lifecycle-aware
+            # CLI cannot be fenced on a dead updater operation.
+            base = dict(snapshot_record)
+            snap_seq = base.get("sequence")
+            snap_seq = snap_seq if isinstance(snap_seq, int) and not isinstance(snap_seq, bool) else 0
+            next_sequence = max(snap_seq, current_sequence) + 1
+            transition_id = str(uuid.uuid4()).lower()
+            previous_transition_id = base.get("transition_id")
+            transition_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") \
+                + "%03dZ" % (datetime.now(timezone.utc).microsecond // 1000)
+            fresh_operation_id = install_operation_id or ("install-rollback:%d" % os.getpid())
+            if not fresh_operation_id.startswith("install-rollback:"):
+                fresh_operation_id = "install-rollback:%s" % fresh_operation_id
+            translated = {
+                "version": base.get("version") if isinstance(base.get("version"), int) else SCHEMA_VERSION,
+                "sequence": next_sequence,
+                "transition_id": transition_id,
+                "transition_at": transition_at,
+                "state": "rollback_in_progress",
+                "reason_code": RESERVED_TRANSLATION_REASON,
+                "authority": AUTHORITY,
+                "writer": "installer",
+                "operation_id": fresh_operation_id,
+                # Durable operator pause survives the rollback even if the
+                # incumbent snapshot was taken before it was set.
+                "operator_paused": bool(snapshot_paused or current_paused),
+            }
+            if isinstance(previous_transition_id, str) and previous_transition_id:
+                translated["previous_transition_id"] = previous_transition_id
+            for optional in ("provider_id", "model_id", "compatibility_set_id"):
+                value = base.get(optional)
+                if isinstance(value, str) and value:
+                    translated[optional] = value
+            target_bytes = encode_record(translated)
+        elif snapshot_record is not None and (current_paused and not snapshot_paused):
+            # Byte-exact restore would otherwise drop a durable operator pause
+            # set during the transaction; preserve it on the restored record.
+            reconciled = dict(snapshot_record)
+            reconciled["operator_paused"] = True
+            target_bytes = encode_record(reconciled)
+        else:
+            # Installer-written, serve-written, or opaque snapshot with no pause
+            # to reconcile: restore byte-exact as today.
+            target_bytes = snapshot_bytes
+
+    # Move the current live file aside (durable failed-install evidence), then
+    # honor an injected interruption before the move-in, then write the intended
+    # record atomically. The lock is held across the whole critical section.
+    if current_st is not None:
+        os.replace(state_path, aside_path)
+    if fault == "between-aside-and-move-in":
+        fail("lifecycle_restore_interrupted_between_aside_and_move_in")
+    if remove_state:
+        # Absence restore: nothing to write.
+        pass
+    else:
+        atomic_write(state_path, target_bytes)
+    fsync_dir(os.path.dirname(state_path))
+    if fault == "post-swap-verify-failure":
+        # Simulate a post-swap durability/verification defect.
+        fail("lifecycle_restore_post_swap_verification_forced")
+
+    # Verify the FINAL durable outcome before reporting success (S-M3).
+    final_st = lstat_or_none(state_path)
+    if remove_state:
+        if final_st is not None:
+            fail("lifecycle_restore_absence_not_durable")
+    else:
+        if final_st is None:
+            fail("lifecycle_restore_final_missing")
+        if stat.S_ISLNK(final_st.st_mode) or not stat.S_ISREG(final_st.st_mode):
+            fail("lifecycle_restore_final_not_regular")
+        if stat.S_IMODE(final_st.st_mode) != 0o600:
+            fail("lifecycle_restore_final_mode:%o" % stat.S_IMODE(final_st.st_mode))
+        final_bytes = read_bytes_nofollow(state_path)
+        if final_bytes != target_bytes:
+            fail("lifecycle_restore_final_byte_mismatch")
+finally:
+    if lock_fd is not None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+PY
+}
+# Reconcile the operation-bound lease after the state restore, under the lease
+# lock (A-05): remove lease.json when it belongs to the rolled-back install
+# operation or its owner PID is dead; preserve it when a live foreign process
+# owns it. The lock files themselves are never snapshotted, moved, or deleted.
+reconcile_lifecycle_lease() {
+  python3 - \
+    "${REC_LIFECYCLE_LEASE_PATH:-}" \
+    "${REC_LIFECYCLE_LEASE_LOCK_PATH:-}" \
+    "${REC_LIFECYCLE_INSTALL_OPERATION_ID:-}" \
+    <<'PY'
+import errno
+import fcntl
+import json
+import os
+import stat
+import sys
+import time
+
+lease_path, lock_path, install_operation_id = sys.argv[1:]
+if not lease_path:
+    raise SystemExit(0)
+uid = os.getuid()
+MAX_LEASE_BYTES = 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 10.0
+
+
+def fail(message):
+    sys.stderr.write("lifecycle_lease_reconcile_failed:%s\n" % message)
+    raise SystemExit(1)
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def pid_alive(pid):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+lock_fd = None
+if lock_path:
+    lock_st = lstat_or_none(lock_path)
+    if lock_st is not None and stat.S_ISLNK(lock_st.st_mode):
+        fail("lifecycle_lease_lock_symlink")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    lock_desc = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(lock_desc.st_mode)
+        or lock_desc.st_uid != uid
+        or lock_desc.st_nlink != 1
+        or stat.S_IMODE(lock_desc.st_mode) & 0o077
+    ):
+        os.close(lock_fd)
+        fail("lifecycle_lease_lock_invalid")
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                os.close(lock_fd)
+                raise
+            if time.monotonic() >= deadline:
+                os.close(lock_fd)
+                fail("lifecycle_lease_lock_contended")
+            time.sleep(0.05)
+
+try:
+    lease_st = lstat_or_none(lease_path)
+    if lease_st is None:
+        # No lease to reconcile.
+        raise SystemExit(0)
+    if stat.S_ISLNK(lease_st.st_mode) or not stat.S_ISREG(lease_st.st_mode):
+        fail("lifecycle_lease_not_regular")
+    if lease_st.st_uid != uid:
+        fail("lifecycle_lease_not_owned")
+    if lease_st.st_size > MAX_LEASE_BYTES:
+        fail("lifecycle_lease_oversized")
+    fd = os.open(lease_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        raw = b""
+        while len(raw) <= MAX_LEASE_BYTES:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(fd)
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        record = None
+
+    remove = False
+    if not isinstance(record, dict):
+        # A malformed lease from the failed transaction is not a live protected
+        # process; clear it so a restored CLI can mint a fresh lease.
+        remove = True
+    else:
+        lease_operation = record.get("operation_id")
+        owner_pid = record.get("owner_pid")
+        belongs_to_rollback = bool(
+            install_operation_id
+            and isinstance(lease_operation, str)
+            and lease_operation == install_operation_id
+        )
+        if belongs_to_rollback or not pid_alive(owner_pid):
+            remove = True
+
+    if remove:
+        try:
+            os.unlink(lease_path)
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(lease_path)
+        dir_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        # Assert the removal is durable.
+        if lstat_or_none(lease_path) is not None:
+            fail("lifecycle_lease_removal_not_durable")
+finally:
+    if lock_fd is not None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+PY
+}
 recovery_failed() {
   recovery_log "$1"
   recovery_log "Recovery data was preserved. Retry exactly: bash '$RECOVERY_DIR/recover.sh'"
@@ -1330,7 +1938,6 @@ PLIST_CANDIDATE="${REC_PLIST_PATH}.macprovider-restore.$$"
 WATCHDOG_DIR_CANDIDATE="${REC_WATCHDOG_DIR}.macprovider-restore.$$"
 WATCHDOG_PLIST_CANDIDATE="${REC_WATCHDOG_PLIST_PATH}.macprovider-restore.$$"
 MANIFEST_CANDIDATE="${REC_MANIFEST_PATH}.macprovider-restore.$$"
-LIFECYCLE_STATE_CANDIDATE="${REC_LIFECYCLE_STATE_PATH}.macprovider-restore.$$"
 FAILED_CURRENT_DIR="$RECOVERY_DIR/failed-current/$RUN_ID"
 
 # Prove every requested restore can be copied byte-for-byte before touching the
@@ -1362,9 +1969,9 @@ fi
 if [ "$REC_HAD_MANIFEST" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/install-manifest.json" "$MANIFEST_CANDIDATE" file || recovery_failed "could not stage and verify the previous install manifest"
 fi
-if [ "${REC_HAD_LIFECYCLE_STATE:-0}" -eq 1 ]; then
-  stage_restore "$RECOVERY_DIR/lifecycle-state-v1.json" "$LIFECYCLE_STATE_CANDIDATE" file || recovery_failed "could not stage and verify the previous lifecycle state"
-fi
+# The lifecycle-state file is not pre-staged as a plain byte candidate: it is
+# restored under the store's lock by restore_lifecycle_state (translate/pause
+# reconcile/atomic write/verify/fsync), reading the snapshot directly.
 
 mkdir -p "$FAILED_CURRENT_DIR" || recovery_failed "could not create durable failed-install storage"
 chmod 700 "$RECOVERY_DIR/failed-current" "$FAILED_CURRENT_DIR" || recovery_failed "could not secure durable failed-install storage"
@@ -1398,11 +2005,18 @@ swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDAT
 swap_restore install-manifest.json "$REC_MANIFEST_PATH" "$MANIFEST_CANDIDATE" "$REC_HAD_MANIFEST" || recovery_failed "could not restore the previous install manifest"
 # The lifecycle-state file is restored last so the transactional intermediate
 # state (rollback_in_progress) authored before recovery began stays observable
-# for the whole rollback, and the exact prior contents (or prior absence) are
-# the final durable outcome. This is what a legacy incumbent that predates the
-# lifecycle contract cannot do for itself; restoring absence when none was
-# captured never leaves a newer-contract state behind.
-swap_restore lifecycle-state-v1.json "$REC_LIFECYCLE_STATE_PATH" "$LIFECYCLE_STATE_CANDIDATE" "${REC_HAD_LIFECYCLE_STATE:-0}" || recovery_failed "could not restore the previous lifecycle state"
+# for the whole rollback, and the reconciled prior contents (or prior absence)
+# are the final durable outcome. restore_lifecycle_state holds the store's lock
+# across the read + swap, preserves a durable operator pause set during the
+# transaction, translates an updater-written snapshot into an installer-owned
+# record so a restored lifecycle-aware CLI cannot be fenced on a dead operation,
+# verifies the final file/absence, and fsyncs the file and its parent directory
+# before recovery can report success.
+restore_lifecycle_state || recovery_failed "could not restore the previous lifecycle state"
+# Reconcile the operation-bound lease so a stale/dead-owner lease from the
+# failed transaction cannot survive rollback while a live foreign owner is
+# preserved. The lock files themselves are never touched.
+reconcile_lifecycle_lease || recovery_failed "could not reconcile the lifecycle lease after rollback"
 
 if [ "$REC_SERVICE_WAS_DISABLED" -eq 1 ]; then
   launchctl disable "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 || recovery_failed "could not restore the disabled provider service state"
@@ -1968,11 +2582,20 @@ begin_install_transaction() {
       || die 70 "could not stage and verify the previous install manifest; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_MANIFEST=1
   fi
-  if [ -f "$LIFECYCLE_STATE_PATH" ]; then
-    stage_install_tx_path "$LIFECYCLE_STATE_PATH" "$recovery_staging/lifecycle-state-v1.json" file \
-      || die 70 "could not stage and verify the previous lifecycle state; current install was not changed (partial recovery data: $recovery_staging)"
+  # The lifecycle-state file is snapshotted under the store's lock with strict
+  # symlink/owner/type/nlink/mode/size validation (S-M2). Absence is recorded as
+  # had=0 and restored as absence. The writer/pause posture used for restore-time
+  # translation and pause reconciliation (A-01) is re-read directly from the
+  # snapshot and the live file under the lock at restore time, so no snapshot-time
+  # capture is threaded through here.
+  lifecycle_snapshot_meta="$recovery_staging/.lifecycle-snapshot-meta"
+  stage_lifecycle_snapshot "$LIFECYCLE_STATE_PATH" "$LIFECYCLE_STATE_LOCK_PATH" \
+    "$recovery_staging/lifecycle-state-v1.json" "$lifecycle_snapshot_meta" \
+    || die 70 "could not safely snapshot the previous lifecycle state; current install was not changed (partial recovery data: $recovery_staging)"
+  if grep -qx 'had=1' "$lifecycle_snapshot_meta" 2>/dev/null; then
     INSTALL_TX_HAD_LIFECYCLE_STATE=1
   fi
+  rm -f "$lifecycle_snapshot_meta"
   if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
   fi

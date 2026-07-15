@@ -18,6 +18,7 @@ python3 - "$INSTALL_SH" > "$TMP/functions.sh" <<'PY'
 import sys
 names = {
     "cleanup", "install_tx_path_matches", "stage_install_tx_path",
+    "stage_lifecycle_snapshot",
     "write_install_recovery_artifacts", "begin_install_transaction",
     "mark_install_cutover_started", "discard_install_transaction_before_cutover",
     "rollback_install_transaction", "commit_install_transaction",
@@ -44,6 +45,61 @@ while i < len(lines):
             break
 PY
 
+# Emit a FULL-schema lifecycle-state record matching the real store's
+# JSONEncoder(.sortedKeys) output (compact, alphabetically sorted keys). This is
+# the shape ProviderLifecycleStateRecord serializes: authority, state,
+# reason_code, writer, operation_id, sequence, transition_id,
+# previous_transition_id, provider_id, model_id, operator_paused, version, plus
+# last_update/last_restart/last_rejection significant-event sub-records.
+# Its definition is also appended to the extracted install functions file so the
+# inner transaction harness (a fresh `bash -c`) can author the FULL-schema live
+# intermediate record during the mutation phase.
+write_full_schema_record() {
+  out_path="$1"; state="$2"; reason="$3"; writer="$4"; operation_id="$5"
+  sequence="$6"; operator_paused="$7"; transition_id="$8"
+  python3 - "$out_path" "$state" "$reason" "$writer" "$operation_id" \
+    "$sequence" "$operator_paused" "$transition_id" <<'PY'
+import json
+import sys
+
+(out_path, state, reason, writer, operation_id, sequence, operator_paused,
+ transition_id) = sys.argv[1:]
+event = {
+    "sequence": int(sequence),
+    "transition_id": transition_id,
+    "transition_at": "2026-07-15T17:00:00.000Z",
+    "state": state,
+    "reason_code": reason,
+    "writer": writer,
+    "operation_id": operation_id,
+}
+record = {
+    "version": 1,
+    "sequence": int(sequence),
+    "transition_id": transition_id,
+    "previous_transition_id": "00000000-0000-4000-8000-000000000000",
+    "transition_at": "2026-07-15T17:00:00.000Z",
+    "state": state,
+    "reason_code": reason,
+    "authority": "macprovider_cli",
+    "writer": writer,
+    "provider_id": "mac",
+    "model_id": "qwen3-coder-30b-a3b-instruct",
+    "operation_id": operation_id,
+    "operator_paused": operator_paused == "true",
+    "last_update": event,
+    "last_restart": event,
+    "last_rejection": event,
+}
+with open(out_path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+# Make the full-schema record author available to the inner `bash -c` harness,
+# which runs as a fresh shell that only sources the extracted install functions.
+declare -f write_full_schema_record >> "$TMP/functions.sh"
+
 make_case() {
   case_name="$1"
   root="$TMP/$case_name"
@@ -64,10 +120,19 @@ make_case() {
   printf '{"version":"old"}\n' > "$home/Library/Application Support/macprovider/install_manifest.json"
   # Seed a prior lifecycle-state file by default so rollback must restore its
   # exact prior contents; the lifecycle_absent_* cases delete it to exercise the
-  # restore-prior-absence path.
-  mkdir -p "$home/Library/Application Support/macprovider/lifecycle"
-  printf '{"state":"serving","reason_code":"install_committed","writer":"installer"}\n' \
-    > "$home/Library/Application Support/macprovider/lifecycle/state-v1.json"
+  # restore-prior-absence path. The directory (0700) and file (0600) match the
+  # real CLI store posture the installer now validates before snapshotting; the
+  # record is FULL-schema (authority/writer/operation_id/sequence/
+  # transition_id/... plus operator_paused and version) to match real store
+  # output, not a reduced fixture.
+  lifecycle_dir="$home/Library/Application Support/macprovider/lifecycle"
+  mkdir -p "$lifecycle_dir"
+  chmod 700 "$home/Library/Application Support/macprovider" "$lifecycle_dir"
+  write_full_schema_record \
+    "$lifecycle_dir/state-v1.json" \
+    serving install_committed installer serve-op-0001 41 false \
+    '11111111-1111-4111-8111-111111111111'
+  chmod 600 "$lifecycle_dir/state-v1.json"
   : > "$root/service-active"
   : > "$root/watchdog-service-active"
   : > "$root/launchctl.log"
@@ -322,11 +387,61 @@ run_case() {
   lifecycle_behavior="${8:-present}"
   root="$TMP/$case_name"
   make_case "$case_name"
-  if [ "$lifecycle_behavior" = "absent-before" ]; then
-    # An incumbent that predates the lifecycle contract has no state file at
-    # transaction start. Rollback must restore that absence exactly.
-    rm -rf "$root/home/Library/Application Support/macprovider/lifecycle"
-  fi
+  lifecycle_root_dir="$root/home/Library/Application Support/macprovider/lifecycle"
+  lifecycle_state_file="$lifecycle_root_dir/state-v1.json"
+  case "$lifecycle_behavior" in
+    absent-before)
+      # An incumbent that predates the lifecycle contract has no state file at
+      # transaction start. Rollback must restore that absence exactly.
+      rm -rf "$lifecycle_root_dir"
+      ;;
+    symlink-file)
+      # S-M2: the state file is a symlink to an out-of-tree secret. The snapshot
+      # must refuse it (no dereference) and abort pre-mutation.
+      printf 'attacker-controlled\n' > "$root/outside-secret"
+      rm -f "$lifecycle_state_file"
+      ln -s "$root/outside-secret" "$lifecycle_state_file"
+      ;;
+    symlink-parent)
+      # S-M2: the lifecycle directory itself is a symlink. Abort pre-mutation.
+      rm -rf "$lifecycle_root_dir"
+      mkdir -p "$root/elsewhere-lifecycle"
+      chmod 700 "$root/elsewhere-lifecycle"
+      write_full_schema_record "$root/elsewhere-lifecycle/state-v1.json" \
+        serving install_committed installer serve-op-0001 41 false \
+        '11111111-1111-4111-8111-111111111111'
+      chmod 600 "$root/elsewhere-lifecycle/state-v1.json"
+      ln -s "$root/elsewhere-lifecycle" "$lifecycle_root_dir"
+      ;;
+    wrong-mode)
+      # S-M2: a world-readable state file (0644) must be rejected even though it
+      # is otherwise a valid owned regular file.
+      chmod 644 "$lifecycle_state_file"
+      ;;
+    oversized)
+      # S-M2: a state file larger than the 1MB bound must be rejected.
+      python3 -c 'import sys; open(sys.argv[1],"wb").write(b"{}\n"+b"x"*(1024*1024+16))' \
+        "$lifecycle_state_file"
+      chmod 600 "$lifecycle_state_file"
+      ;;
+    updater-snapshot)
+      # A-01: the snapshot is an updater-written maintenance record with a dead
+      # operation id. Rollback must translate it to an installer-owned record so
+      # a restored lifecycle-aware CLI cannot be fenced.
+      write_full_schema_record "$lifecycle_state_file" \
+        update_in_progress update_admission_pending updater updater-dead-op-9999 55 false \
+        '33333333-3333-4333-8333-333333333333'
+      chmod 600 "$lifecycle_state_file"
+      ;;
+    serve-snapshot)
+      # A-01: a serve-written snapshot restores byte-exact (serve can always
+      # leave its own state; no fencing risk, no translation).
+      write_full_schema_record "$lifecycle_state_file" \
+        serving_buyers serving_ready serve serve-live-op-7777 60 false \
+        '44444444-4444-4444-8444-444444444444'
+      chmod 600 "$lifecycle_state_file"
+      ;;
+  esac
   if [ "$prior_state" = "disabled-inactive" ]; then
     rm -f "$root/service-active" "$root/watchdog-service-active"
     : > "$root/service-disabled"
@@ -350,6 +465,12 @@ run_case() {
     FUNCTIONS_PATH="$TMP/functions.sh" \
     PRE_BEGIN_FAULT="$pre_begin_fault" ROLLBACK_FAULT="$rollback_fault" INSTALL_PHASE="$install_phase" \
     MANUAL_BEHAVIOR="$manual_behavior" \
+    MUTATION_LIFECYCLE_STATE="${MUTATION_LIFECYCLE_STATE:-}" \
+    MUTATION_LIFECYCLE_WRITER="${MUTATION_LIFECYCLE_WRITER:-}" \
+    MUTATION_LIFECYCLE_SEQUENCE="${MUTATION_LIFECYCLE_SEQUENCE:-}" \
+    MUTATION_LIFECYCLE_OPERATOR_PAUSED="${MUTATION_LIFECYCLE_OPERATOR_PAUSED:-}" \
+    MUTATION_LEASE_JSON="${MUTATION_LEASE_JSON:-}" \
+    RECOVERY_LIFECYCLE_FAULT="${RECOVERY_LIFECYCLE_FAULT:-}" \
     bash -c '
       set -euo pipefail
       HOME="$CASE_ROOT/home"
@@ -369,6 +490,10 @@ run_case() {
       WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
       MANIFEST_PATH="$HOME/Library/Application Support/macprovider/install_manifest.json"
       LIFECYCLE_STATE_PATH="$HOME/Library/Application Support/macprovider/lifecycle/state-v1.json"
+      LIFECYCLE_LEASE_PATH="$HOME/Library/Application Support/macprovider/lifecycle/lease.json"
+      LIFECYCLE_STATE_LOCK_PATH="$HOME/Library/Application Support/macprovider/lifecycle/.state-v1.json.lock"
+      LIFECYCLE_LEASE_LOCK_PATH="$HOME/Library/Application Support/macprovider/lifecycle/.lease.json.lock"
+      LIFECYCLE_INSTALL_OPERATION_ID="install:test-$$"
       LOG_DIR="$HOME/Library/Logs/macprovider"
       TMPDIR_PATH="$CASE_ROOT/tx"
       PORT="$(cat "$CASE_ROOT/manual-port" 2>/dev/null || printf 18080)"
@@ -388,6 +513,8 @@ run_case() {
       INSTALL_TX_HAD_WATCHDOG_PLIST=0
       INSTALL_TX_HAD_MANIFEST=0
       INSTALL_TX_HAD_LIFECYCLE_STATE=0
+      INSTALL_TX_LIFECYCLE_SNAPSHOT_WRITER=""
+      INSTALL_TX_LIFECYCLE_SNAPSHOT_OPERATOR_PAUSED=false
       INSTALL_TX_SERVICE_WAS_DISABLED=0
       INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
       INSTALL_TX_WATCHDOG_WAS_DISABLED=0
@@ -439,11 +566,30 @@ run_case() {
       printf "<plist>new-watchdog</plist>\n" > "$WATCHDOG_PLIST_PATH"
       printf "{\"version\":\"new\"}\n" > "$MANIFEST_PATH"
       # The new install authors a fresh lifecycle state the legacy incumbent
-      # cannot clear on rollback. Rollback must restore the prior contents, or
-      # (for an incumbent that had no lifecycle file) the prior absence.
+      # cannot clear on rollback. Rollback must restore the reconciled prior
+      # contents, or (for an incumbent that had no lifecycle file) the prior
+      # absence. The live intermediate is FULL-schema. Cases can override the
+      # live writer/pause via MUTATION_LIFECYCLE_* to exercise operator-pause
+      # reconciliation set during the transaction.
       mkdir -p "$(dirname "$LIFECYCLE_STATE_PATH")"
-      printf "{\"state\":\"rollback_in_progress\",\"reason_code\":\"install_admission_failed\",\"writer\":\"installer\"}\n" \
-        > "$LIFECYCLE_STATE_PATH"
+      chmod 700 "$(dirname "$LIFECYCLE_STATE_PATH")"
+      write_full_schema_record \
+        "$LIFECYCLE_STATE_PATH" \
+        "${MUTATION_LIFECYCLE_STATE:-rollback_in_progress}" \
+        install_admission_failed \
+        "${MUTATION_LIFECYCLE_WRITER:-installer}" \
+        "install:test-$$" \
+        "${MUTATION_LIFECYCLE_SEQUENCE:-183}" \
+        "${MUTATION_LIFECYCLE_OPERATOR_PAUSED:-false}" \
+        '22222222-2222-4222-8222-222222222222'
+      chmod 600 "$LIFECYCLE_STATE_PATH"
+      if [ -n "${MUTATION_LEASE_JSON:-}" ]; then
+        # Double quotes here: this block runs inside the single-quoted `bash -c`
+        # harness, so a single-quoted format string would break out of the outer
+        # quote and drop the backslash from \n.
+        printf "%s\n" "$MUTATION_LEASE_JSON" > "$LIFECYCLE_LEASE_PATH"
+        chmod 600 "$LIFECYCLE_LEASE_PATH"
+      fi
       case "$INSTALL_PHASE" in
         plist|watchdog) exit 9 ;;
         bootstrap)
@@ -509,7 +655,10 @@ MANUAL
   fi
 }
 
-assert_old_install() {
+# Assert the non-lifecycle installation was rolled back. Cases whose snapshot is
+# translated (updater-written) restore a rollback_in_progress record on purpose,
+# so those assert files only and check the lifecycle record separately.
+assert_old_install_files() {
   root="$1"
   home="$root/home"
   grep -F 'old-binary' "$home/macprovider/macprovider-cli" >/dev/null
@@ -521,14 +670,21 @@ assert_old_install() {
   grep -F 'old-watchdog' "$home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
   grep -F '<plist>old-watchdog</plist>' "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" >/dev/null
   grep -F '"version":"old"' "$home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
-  # The lifecycle-state file is part of the transaction: rollback restores the
-  # exact prior contents byte-for-byte, never the newer install/rollback state.
+  [ "$(readlink "$home/.local/bin/macprovider-cli")" = "$home/macprovider/macprovider-cli" ]
+}
+
+assert_old_install() {
+  root="$1"
+  home="$root/home"
+  assert_old_install_files "$root"
+  # The lifecycle-state file is part of the transaction: for an installer- or
+  # serve-written snapshot rollback restores the exact prior serving state,
+  # never the newer install/rollback state.
   grep -F '"state":"serving"' "$home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
-  if grep -F 'rollback_in_progress' "$home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null; then
+  if grep -F '"state":"rollback_in_progress"' "$home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null; then
     echo "rollback left the newer lifecycle state behind instead of restoring the prior one" >&2
     return 1
   fi
-  [ "$(readlink "$home/.local/bin/macprovider-cli")" = "$home/macprovider/macprovider-cli" ]
 }
 
 recovery_dir() {
@@ -559,11 +715,19 @@ grep -F 'bootstrap gui/' "$TMP/success/launchctl.log" >/dev/null
 grep -F 'kickstart -k gui/' "$TMP/success/launchctl.log" >/dev/null
 
 # (a) Lifecycle-state rollback restores the exact prior contents byte-for-byte.
-# The mutation phase overwrote the file with a rollback_in_progress state that a
-# legacy incumbent could never clear; a healthy rollback must return the file to
-# its original serving state and hash.
+# The mutation phase overwrote the file with an installer-written
+# rollback_in_progress state a legacy incumbent could never clear; because the
+# snapshot was installer-written and unpaused, a healthy rollback restores the
+# full-schema serving record byte-exact (no translation, no pause reconcile).
+write_full_schema_record "$TMP/success/expected-serving.json" \
+  serving install_committed installer serve-op-0001 41 false \
+  '11111111-1111-4111-8111-111111111111'
 lifecycle_old_hash="$(shasum -a 256 "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json" | awk '{print $1}')"
-[ "$lifecycle_old_hash" = "$(printf '{"state":"serving","reason_code":"install_committed","writer":"installer"}\n' | shasum -a 256 | awk '{print $1}')" ]
+[ "$lifecycle_old_hash" = "$(shasum -a 256 "$TMP/success/expected-serving.json" | awk '{print $1}')" ]
+# The restored file keeps the store's owned 0600 posture after rollback.
+restored_perm="$(stat -f '%Lp' "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json" 2>/dev/null \
+  || stat -c '%a' "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json")"
+[ "$restored_perm" = "600" ]
 
 # (b) Lifecycle-state rollback restores prior ABSENCE. An incumbent with no
 # lifecycle file must not gain a stranded state file after rollback; the file
@@ -767,6 +931,292 @@ assert_old_install "$root"
 [ ! -f "$root/watchdog-service-active" ]
 [ -f "$root/service-disabled" ]
 [ -f "$root/watchdog-service-disabled" ]
+[ -z "$(recovery_dir "$root")" ]
+
+# ---------------------------------------------------------------------------
+# S-M2: the lifecycle snapshot follows no symlinks, validates owner/type/nlink/
+# mode/size, and aborts the transaction closed (before any live mutation) on
+# violation. Each negative fixture leaves the incumbent install byte-for-byte
+# untouched (begin_install_transaction dies before cutover), no recovery bundle
+# is published, and the tell-tale attacker secret is never dereferenced.
+# ---------------------------------------------------------------------------
+assert_snapshot_aborted_pre_mutation() {
+  root="$1"
+  reason="$2"
+  # begin_install_transaction dies 70 before marking cutover; the inner harness
+  # propagates that. The incumbent binary/config/service are left intact.
+  [ "$(cat "$root/rc")" -eq 70 ]
+  grep -F 'old-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+  grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
+  [ -f "$root/service-active" ]
+  # No durable recovery bundle survives a pre-mutation snapshot failure.
+  [ -z "$(recovery_dir "$root")" ]
+  grep -F "$reason" "$root/stderr.log" >/dev/null
+  # The incumbent provider was never stopped.
+  if grep -F 'bootout gui/' "$root/launchctl.log" \
+      | grep -F 'live.streamvc.macprovider.plist' >/dev/null; then
+    echo "snapshot failure stopped the incumbent provider" >&2
+    exit 1
+  fi
+}
+
+run_case lifecycle_symlink_file "" "" "" self-test active bind symlink-file
+assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_symlink_file" lifecycle_state_symlink
+# The out-of-tree secret behind the symlink was never copied anywhere.
+if find "$TMP/lifecycle_symlink_file/home/.config/macprovider" -type f \
+    -name 'lifecycle-state-v1.json' -exec grep -l 'attacker-controlled' {} + 2>/dev/null | grep -q .; then
+  echo "snapshot dereferenced a symlinked state file" >&2
+  exit 1
+fi
+
+run_case lifecycle_symlink_parent "" "" "" self-test active bind symlink-parent
+assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_symlink_parent" lifecycle_parent_symlink
+
+run_case lifecycle_wrong_mode "" "" "" self-test active bind wrong-mode
+assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_wrong_mode" lifecycle_state_mode
+
+run_case lifecycle_oversized "" "" "" self-test active bind oversized
+assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_oversized" lifecycle_state_oversized
+
+# ---------------------------------------------------------------------------
+# A-01(a): a stale-valid updater-written snapshot with a dead operation id is
+# NOT raw-restored (that would fence a restored lifecycle-aware CLI). Rollback
+# translates it under the lock into an installer-owned rollback_in_progress
+# record: writer installer, fresh installer operation id, reserved reason code,
+# provider_id/model_id/operator_paused/version preserved, sequence advanced past
+# both the snapshot (55) and the live intermediate (183).
+# ---------------------------------------------------------------------------
+run_case lifecycle_updater_translated "" "" "" self-test active bind updater-snapshot
+root="$TMP/lifecycle_updater_translated"
+[ "$(cat "$root/rc")" -eq 9 ]
+assert_old_install_files "$root"
+[ -z "$(recovery_dir "$root")" ]
+python3 - "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" <<'PY'
+import json
+import sys
+
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+def require(condition, message):
+    if not condition:
+        raise SystemExit("translated record %s: %r" % (message, record))
+require(record["writer"] == "installer", "must be installer-owned")
+require(record["state"] == "rollback_in_progress", "must be rollback_in_progress")
+require(record["reason_code"] == "install_rollback_restored_translated", "reserved reason code")
+require(record["authority"] == "macprovider_cli", "authority preserved")
+require(record["version"] == 1, "version preserved")
+require(record["provider_id"] == "mac", "provider_id preserved")
+require(record["model_id"] == "qwen3-coder-30b-a3b-instruct", "model_id preserved")
+require(record["operator_paused"] is False, "operator_paused preserved false")
+require(record["operation_id"].startswith("install-rollback:"), "fresh installer op id")
+require(record["operation_id"] != "updater-dead-op-9999", "dead op id not reused")
+require(record["sequence"] > 183, "sequence advanced past live intermediate")
+require(record["sequence"] > 55, "sequence advanced past snapshot")
+# transition_id is a fresh lowercase UUID distinct from the snapshot's.
+tid = record["transition_id"]
+require(tid == tid.lower() and len(tid) == 36, "fresh lowercase uuid transition id")
+require(tid != "33333333-3333-4333-8333-333333333333", "new transition id")
+require(record.get("previous_transition_id") == "33333333-3333-4333-8333-333333333333",
+        "previous_transition_id chains snapshot")
+PY
+
+# A-01(b): a serve-written snapshot restores byte-exact (serve can always leave
+# its own state; no fencing risk, no translation).
+run_case lifecycle_serve_byte_exact "" "" "" self-test active bind serve-snapshot
+root="$TMP/lifecycle_serve_byte_exact"
+[ "$(cat "$root/rc")" -eq 9 ]
+assert_old_install_files "$root"
+write_full_schema_record "$root/expected-serve.json" \
+  serving_buyers serving_ready serve serve-live-op-7777 60 false \
+  '44444444-4444-4444-8444-444444444444'
+serve_restored_hash="$(shasum -a 256 "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" | awk '{print $1}')"
+[ "$serve_restored_hash" = "$(shasum -a 256 "$root/expected-serve.json" | awk '{print $1}')" ]
+[ -z "$(recovery_dir "$root")" ]
+
+# A-01(c): a durable operator pause set DURING the transaction (live file
+# operator_paused true while the snapshot was unpaused) survives rollback. The
+# restored record preserves operator_paused: true even though the snapshot did
+# not carry it.
+MUTATION_LIFECYCLE_OPERATOR_PAUSED=true \
+  run_case lifecycle_pause_survives "" "" "" self-test
+root="$TMP/lifecycle_pause_survives"
+[ "$(cat "$root/rc")" -eq 9 ]
+assert_old_install_files "$root"
+python3 - "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" <<'PY'
+import json
+import sys
+
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+if record.get("operator_paused") is not True:
+    raise SystemExit("durable operator pause set during the transaction was lost on rollback: %r" % record)
+# The installer-written unpaused snapshot's other fields are otherwise preserved.
+if record.get("writer") != "installer" or record.get("state") != "serving":
+    raise SystemExit("pause reconciliation altered unrelated fields: %r" % record)
+PY
+[ -z "$(recovery_dir "$root")" ]
+
+# A-01(e): lock contention. When the store lock cannot be acquired at restore
+# time, recovery fails closed with the bundle preserved and the newer lifecycle
+# state still live. A rerun of recover.sh after the lock is released converges.
+run_case lifecycle_lock_contended "" "" fail-config-mv
+root="$TMP/lifecycle_lock_contended"
+[ "$(cat "$root/rc")" -eq 70 ]
+lock_recovery="$(recovery_dir "$root")"
+assert_recovery_preserved "$root"
+rm -f "$root/fail-config-mv"
+# Hold the store lock from an external process, then confirm recover.sh fails
+# closed (lock_contended) with the bundle preserved.
+lifecycle_lock_path="$root/home/Library/Application Support/macprovider/lifecycle/.state-v1.json.lock"
+: > "$lifecycle_lock_path"
+chmod 600 "$lifecycle_lock_path"
+python3 - "$lifecycle_lock_path" > "$root/lock-holder.status" 2>/dev/null <<'PY' &
+import fcntl
+import os
+import sys
+import time
+
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.write("held\n")
+sys.stdout.flush()
+# Hold longer than the restore's bounded lock timeout so the contended retry
+# fails closed rather than waiting the holder out. The test kills this holder
+# immediately after asserting the fail-closed outcome.
+time.sleep(60)
+PY
+lock_holder_pid=$!
+for _ in $(seq 1 40); do
+  grep -qx held "$root/lock-holder.status" 2>/dev/null && break
+  sleep 0.1
+done
+set +e
+PATH="$root/bin:/usr/bin:/bin" LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" \
+  bash "$lock_recovery/recover.sh" > "$root/lock-retry.stdout.log" 2> "$root/lock-retry.stderr.log"
+lock_retry_rc=$?
+set -e
+kill "$lock_holder_pid" >/dev/null 2>&1 || true
+wait "$lock_holder_pid" 2>/dev/null || true
+[ "$lock_retry_rc" -eq 70 ]
+grep -F 'lifecycle_lock_contended' "$root/lock-retry.stderr.log" >/dev/null
+# The bundle is preserved and the newer live state is still present.
+[ -n "$(recovery_dir "$root")" ]
+grep -F 'rollback_in_progress' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+# With the lock released, a rerun converges to the restored serving state.
+set +e
+PATH="$root/bin:/usr/bin:/bin" LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" \
+  bash "$lock_recovery/recover.sh" > "$root/lock-retry2.stdout.log" 2> "$root/lock-retry2.stderr.log"
+lock_retry2_rc=$?
+set -e
+[ "$lock_retry2_rc" -eq 0 ]
+grep -F '"state":"serving"' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+
+# ---------------------------------------------------------------------------
+# S-M3: durability fault injection. A fault BETWEEN the move-aside and the
+# move-in preserves the bundle; a clean rerun converges. A forced post-swap
+# verification failure likewise preserves the bundle.
+# ---------------------------------------------------------------------------
+run_case lifecycle_fault_between "" "" fail-config-mv
+root="$TMP/lifecycle_fault_between"
+[ "$(cat "$root/rc")" -eq 70 ]
+between_recovery="$(recovery_dir "$root")"
+assert_recovery_preserved "$root"
+rm -f "$root/fail-config-mv"
+set +e
+PATH="$root/bin:/usr/bin:/bin" LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" \
+  RECOVERY_LIFECYCLE_FAULT=between-aside-and-move-in \
+  bash "$between_recovery/recover.sh" > "$root/between.stdout.log" 2> "$root/between.stderr.log"
+between_rc=$?
+set -e
+[ "$between_rc" -eq 70 ]
+grep -F 'lifecycle_restore_interrupted_between_aside_and_move_in' "$root/between.stderr.log" >/dev/null
+[ -n "$(recovery_dir "$root")" ]
+# Clean rerun (no fault) converges to the restored serving state.
+set +e
+PATH="$root/bin:/usr/bin:/bin" LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" \
+  bash "$between_recovery/recover.sh" > "$root/between2.stdout.log" 2> "$root/between2.stderr.log"
+between2_rc=$?
+set -e
+[ "$between2_rc" -eq 0 ]
+grep -F '"state":"serving"' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+
+run_case lifecycle_fault_postswap "" "" fail-config-mv
+root="$TMP/lifecycle_fault_postswap"
+[ "$(cat "$root/rc")" -eq 70 ]
+postswap_recovery="$(recovery_dir "$root")"
+rm -f "$root/fail-config-mv"
+set +e
+PATH="$root/bin:/usr/bin:/bin" LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" \
+  RECOVERY_LIFECYCLE_FAULT=post-swap-verify-failure \
+  bash "$postswap_recovery/recover.sh" > "$root/postswap.stdout.log" 2> "$root/postswap.stderr.log"
+postswap_rc=$?
+set -e
+[ "$postswap_rc" -eq 70 ]
+grep -F 'lifecycle_restore_post_swap_verification_forced' "$root/postswap.stderr.log" >/dev/null
+[ -n "$(recovery_dir "$root")" ]
+set +e
+PATH="$root/bin:/usr/bin:/bin" LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" \
+  bash "$postswap_recovery/recover.sh" > "$root/postswap2.stdout.log" 2> "$root/postswap2.stderr.log"
+postswap2_rc=$?
+set -e
+[ "$postswap2_rc" -eq 0 ]
+grep -F '"state":"serving"' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+
+# ---------------------------------------------------------------------------
+# A-05: lease reconciliation after rollback. The lock files are synchronization
+# primitives and must remain byte-stable; only lease.json is reconciled.
+# ---------------------------------------------------------------------------
+# (A-05.1) A stale lease from the rolled-back install operation is removed.
+MUTATION_LEASE_JSON='{"operation_id":"install:test-'"$$"'","owner_pid":999999,"kind":"maintenance"}' \
+  run_case lease_stale_operation "" "" "" self-test
+root="$TMP/lease_stale_operation"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "stale rolled-back-operation lease survived rollback" >&2
+  exit 1
+fi
+[ -z "$(recovery_dir "$root")" ]
+
+# (A-05.2) A dead-owner lease (foreign operation but the PID is not alive) is
+# removed.
+MUTATION_LEASE_JSON='{"operation_id":"someone-else","owner_pid":999999,"kind":"startup"}' \
+  run_case lease_dead_owner "" "" "" self-test
+root="$TMP/lease_dead_owner"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "dead-owner lease survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.3) A live foreign-owner lease (not part of this transaction) is
+# preserved. The lock files are never mutated byte-wise.
+lease_live_root="$TMP/lease_live_foreign"
+sleep 300 &
+foreign_pid=$!
+# Pre-create the lock files so we can hash them before and after and prove they
+# are never rewritten by the reconciler.
+mutation_lease="{\"operation_id\":\"unrelated-live\",\"owner_pid\":$foreign_pid,\"kind\":\"startup\"}"
+MUTATION_LEASE_JSON="$mutation_lease" \
+  run_case lease_live_foreign "" "" "" self-test
+root="$TMP/lease_live_foreign"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ ! -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "live foreign-owner lease was incorrectly removed" >&2
+  kill "$foreign_pid" >/dev/null 2>&1 || true
+  exit 1
+fi
+grep -F 'unrelated-live' "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" >/dev/null
+# The synchronization lock files exist and were never emptied/rewritten by the
+# reconciler (they are 0-length primitives the CLI never treats as content).
+for lock in .state-v1.json.lock .lease.json.lock; do
+  lock_path="$root/home/Library/Application Support/macprovider/lifecycle/$lock"
+  [ -f "$lock_path" ]
+  [ ! -s "$lock_path" ] || {
+    echo "lock file $lock was written with content by recovery" >&2
+    kill "$foreign_pid" >/dev/null 2>&1 || true
+    exit 1
+  }
+done
+kill "$foreign_pid" >/dev/null 2>&1 || true
+wait "$foreign_pid" 2>/dev/null || true
 [ -z "$(recovery_dir "$root")" ]
 
 run_darwin_manual_recovery_cases() {

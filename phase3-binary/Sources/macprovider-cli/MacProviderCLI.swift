@@ -669,6 +669,21 @@ struct ServeCommand: AsyncParsableCommand {
         return await measure()
     }
 
+    /// Route the serve command's lifecycle store by mode. Autotune candidates
+    /// persist to the candidate-scoped store so they never overwrite the
+    /// incumbent's Malibu-visible `state-v1.json` (ARCHITECT finding); the
+    /// incumbent (non-candidate) path is unchanged. Pure and side-effect free so
+    /// it can be unit-tested with an injected home directory.
+    static func lifecycleStateStore(
+        autotuneCandidate: Bool,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> ProviderLifecycleStateStore {
+        let url = autotuneCandidate
+            ? ProviderLifecycleStateStore.candidateURL(homeDirectory: homeDirectory)
+            : ProviderLifecycleStateStore.defaultURL(homeDirectory: homeDirectory)
+        return ProviderLifecycleStateStore(url: url)
+    }
+
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -713,7 +728,15 @@ struct ServeCommand: AsyncParsableCommand {
         // dependencies so direct callers retain the same validation contract.
         try Self.runSupportedModelsPreflight(&resolved)
 
-        let lifecycleStateStore = ProviderLifecycleStateStore()
+        // Autotune candidates (`--autotune-candidate`, always with `--no-join`)
+        // share the incumbent's lifecycle directory but persist to a distinct
+        // candidate-scoped store so a successful candidate reaching
+        // `degraded_serving` never overwrites the installed incumbent's
+        // Malibu-visible `state-v1.json` (ARCHITECT finding). The transition
+        // graph is still enforced against the candidate's own history; only the
+        // persistence file changes. Incumbent serve is untouched: same path,
+        // schema, and fields.
+        let lifecycleStateStore = Self.lifecycleStateStore(autotuneCandidate: autotuneCandidate)
         let lifecycleLeaseStore = ProviderLifecycleLeaseStore()
         let existingLifecycle: ProviderLifecycleStateRecord?
         let operatorPausedInitially: Bool

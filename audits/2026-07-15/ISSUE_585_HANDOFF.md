@@ -1,5 +1,15 @@
 # Issue #585 implementation and rollout handoff
 
+> **HISTORICAL SNAPSHOT — superseded later the same day (2026-07-15).**
+> This document describes the repository and host state at commit `71eb927a`
+> (v1.8.39 source) BEFORE the v1.8.40 Phase-1 work on branch
+> `fix/585-malibu-bootstrap-bridge`. In particular, the statements that
+> v1.8.40 is uncommitted, that the real-model candidate test was skipped,
+> that the lifecycle transition fix is unverified, and that lifecycle
+> rollback restoration is unimplemented are NO LONGER TRUE on this branch.
+> The operative release gate is `RELEASE_GATE_V1_8_40.md` in this directory,
+> which preserves and supersedes the "Proposed no-release proof gate" below.
+
 **Date:** 2026-07-15  
 **Status:** Work stopped at the user's request. No further release, deployment, installer run, or live mutation is authorized by this handoff.  
 **Audience:** Claude/Fable or the next engineer investigating whether the intended end state is achievable without another release-first loop.

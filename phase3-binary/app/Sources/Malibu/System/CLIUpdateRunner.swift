@@ -1,11 +1,12 @@
 import Foundation
 
 enum CLIUpdateRunner {
-    // Legacy repair pins exactly the CLI version this app shipped as. Re-arm
-    // per release by bumping this to the released app bundle version; a
-    // mismatch with the running bundle disarms the bridge by design (see the
-    // exact-match interlock in `strategy(...)`), so the app can only ever
-    // pin-install the CLI it was built to ship.
+    // Legacy repair pins exactly the CLI version this app shipped as. The
+    // 1.8.40 arming is a cohort-bound recovery exception (Decision Entry 160)
+    // for the stranded 1.8.30/1.8.32/1.8.39 test cohort. Later releases MUST
+    // leave this constant unchanged — the exact-match interlock in
+    // `strategy(...)` then disarms the bridge automatically — unless a new
+    // decision entry authorizes re-arming with release-specific proof.
     static let legacyBootstrapTarget = "1.8.40"
 
     enum Strategy: Equatable {

@@ -358,6 +358,170 @@ final class ProviderLifecycleStateTests: XCTestCase {
         }
     }
 
+    // MARK: - Decision Entry 158 pair-validation (v1.8.40 loading_model exits)
+
+    /// Entry 158 legalizes `loading_model -> degraded_serving` ONLY for the
+    /// serve writer. `operator_command` is separately authorized to enter
+    /// `degraded_serving`, so before the (predecessor, target, writer) tuple
+    /// check it could ride the new predecessor edge. It MUST be rejected.
+    func testOperatorCommandCannotDegradeFromLoadingModel() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        try driveToLoadingModel(store, operationID: "serve:entry158-deg")
+
+        XCTAssertThrowsError(try store.transition(
+            to: .degradedServing,
+            reasonCode: "operator_command_illegal_degrade",
+            writer: .operatorCommand,
+            operationID: "operator:entry158-deg"
+        )) { error in
+            XCTAssertEqual(
+                error as? ProviderLifecycleStateError,
+                .invalidTransition(from: "loading_model", to: "degraded_serving")
+            )
+        }
+    }
+
+    /// Entry 158 legalizes `loading_model -> paused_by_operator` ONLY through
+    /// the operator_command writer convention. `installer` is separately
+    /// authorized to enter `paused_by_operator`, so it could otherwise ride the
+    /// new predecessor edge. It MUST be rejected.
+    func testInstallerCannotPauseFromLoadingModel() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        try driveToLoadingModel(store, operationID: "serve:entry158-pause")
+
+        XCTAssertThrowsError(try store.transition(
+            to: .pausedByOperator,
+            reasonCode: "installer_illegal_pause",
+            writer: .installer,
+            operationID: "installer:entry158-pause"
+        )) { error in
+            XCTAssertEqual(
+                error as? ProviderLifecycleStateError,
+                .invalidTransition(from: "loading_model", to: "paused_by_operator")
+            )
+        }
+    }
+
+    /// The Entry-158 legal combinations remain green: serve degrades and
+    /// operator_command pauses directly from loading_model.
+    func testEntry158LegalLoadingModelExitsRemainAllowed() throws {
+        let degradeFixture = try Fixture()
+        let degradeStore = ProviderLifecycleStateStore(url: degradeFixture.recordURL)
+        let loadingBeforeDegrade = try driveToLoadingModel(degradeStore, operationID: "serve:entry158-ok-deg")
+        let degraded = try degradeStore.transition(
+            to: .degradedServing,
+            reasonCode: "local_http_ready_join_disabled",
+            writer: .serve,
+            operationID: "serve:entry158-ok-deg"
+        )
+        XCTAssertEqual(degraded.previousTransitionID, loadingBeforeDegrade.transitionID)
+        XCTAssertEqual(degraded.writer, .serve)
+
+        let pauseFixture = try Fixture()
+        let pauseStore = ProviderLifecycleStateStore(url: pauseFixture.recordURL)
+        let loadingBeforePause = try driveToLoadingModel(pauseStore, operationID: "serve:entry158-ok-pause")
+        let paused = try pauseStore.transition(
+            to: .pausedByOperator,
+            reasonCode: "operator_pause_restored_after_startup",
+            writer: .operatorCommand,
+            operationID: "serve:entry158-ok-pause"
+        )
+        XCTAssertEqual(paused.previousTransitionID, loadingBeforePause.transitionID)
+        XCTAssertEqual(paused.writer, .operatorCommand)
+    }
+
+    @discardableResult
+    private func driveToLoadingModel(
+        _ store: ProviderLifecycleStateStore,
+        operationID: String
+    ) throws -> ProviderLifecycleStateRecord {
+        _ = try store.transition(
+            to: .startingProvider,
+            reasonCode: "serve_invoked",
+            writer: .serve,
+            operationID: operationID
+        )
+        _ = try store.transition(
+            to: .importingCredentials,
+            reasonCode: "resolving_cli_keychain_custody",
+            writer: .serve,
+            operationID: operationID
+        )
+        _ = try store.transition(
+            to: .validatingCatalog,
+            reasonCode: "startup_preflight",
+            writer: .serve,
+            operationID: operationID
+        )
+        return try store.transition(
+            to: .loadingModel,
+            reasonCode: "catalog_preflight_passed",
+            writer: .serve,
+            operationID: operationID
+        )
+    }
+
+    // MARK: - Candidate-scoped store routing (ARCHITECT finding)
+
+    /// The candidate store MUST resolve to a distinct file
+    /// (`candidate-state-v1.json`) in the SAME lifecycle directory as the
+    /// incumbent's `state-v1.json`, so a candidate never overwrites the
+    /// incumbent's Malibu-visible state. Injected home directory keeps this
+    /// isolated from the live install (homeDirectoryForCurrentUser ignores
+    /// $HOME, so we pass the directory explicitly).
+    func testCandidateAndIncumbentStorePathsAreDistinctSiblings() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lifecycle-home-\(UUID().uuidString)", isDirectory: true)
+        let incumbentURL = ProviderLifecycleStateStore.defaultURL(homeDirectory: home)
+        let candidateURL = ProviderLifecycleStateStore.candidateURL(homeDirectory: home)
+
+        XCTAssertEqual(incumbentURL.lastPathComponent, "state-v1.json")
+        XCTAssertEqual(candidateURL.lastPathComponent, "candidate-state-v1.json")
+        XCTAssertNotEqual(incumbentURL, candidateURL)
+        XCTAssertEqual(
+            incumbentURL.deletingLastPathComponent(),
+            candidateURL.deletingLastPathComponent(),
+            "candidate store must share the incumbent's lifecycle directory"
+        )
+    }
+
+    /// Candidate mode changes ONLY the persistence file: the full transition
+    /// graph is still a release gate. A candidate-scoped store rejects an
+    /// illegal transition exactly as the incumbent store would.
+    func testCandidateStoreStillEnforcesTransitionGraph() throws {
+        let fixture = try Fixture()
+        let candidateURL = fixture.recordURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("candidate-state-v1.json")
+        let store = ProviderLifecycleStateStore(url: candidateURL)
+
+        // A valid startup chain writes to the candidate file.
+        _ = try store.transition(
+            to: .startingProvider,
+            reasonCode: "serve_invoked",
+            writer: .serve,
+            operationID: "candidate:one"
+        )
+        // An out-of-graph jump (starting_provider -> serving_buyers) is still
+        // rejected in candidate mode — the graph is unchanged.
+        XCTAssertThrowsError(try store.transition(
+            to: .servingBuyers,
+            reasonCode: "illegal_candidate_jump",
+            writer: .serve,
+            operationID: "candidate:one"
+        )) { error in
+            XCTAssertEqual(
+                error as? ProviderLifecycleStateError,
+                .invalidTransition(from: "starting_provider", to: "serving_buyers")
+            )
+        }
+        // The write landed on the candidate file, not on state-v1.json.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: candidateURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.recordURL.path))
+    }
+
     func testMalformedRecordFailsClosed() throws {
         let fixture = try Fixture()
         try FileManager.default.createDirectory(
