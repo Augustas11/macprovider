@@ -1644,6 +1644,43 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertFalse(state.isEligible)
     }
 
+    // A PRESENT-but-malformed auth_state (empty string, NSNull, number, bool,
+    // object) must FAIL CLOSED — it must not fall through to the legacy heuristic
+    // (which, tokenless, would reach .eligible). Only an ABSENT key uses the
+    // heuristic. Each malformed value below is a tokenless v2 provisional session
+    // that the heuristic alone would let become eligible.
+    func testFromCoordinatorPayloadMalformedAuthStateFailsClosed() throws {
+        let malformed: [Any] = ["", NSNull(), 123, true, ["k": "v"], [1, 2, 3]]
+        for badValue in malformed {
+            let payload: [String: Any] = [
+                "type": "auth_response",
+                "status": "accepted",
+                "tier": "provisional",
+                "auth_state": badValue,
+            ]
+            let session = try Tier2ProviderSession(
+                providerID: "provider-test",
+                assignedID: "assigned-test",
+                selectedAEAD: Tier2ProviderSession.aeadSuite,
+                keyID: "kid-test",
+                c2pKey: Data(repeating: 0x11, count: 32),
+                p2cKey: Data(repeating: 0x22, count: 32),
+                c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+                p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+            )
+            let state = AutoUpdateTrustState.fromCoordinatorPayload(
+                payload,
+                isV2: true,
+                session: session,
+                providerToken: nil,
+                assignedProviderTokenAdopted: false,
+                acceptProvisional: true
+            )
+            XCTAssertTrue(state.bearerlessDuplicate, "malformed auth_state \(badValue) must fail closed")
+            XCTAssertEqual(state.verdict, .bearerlessDuplicate, "malformed auth_state \(badValue) must be notify-only")
+        }
+    }
+
     // Config loader must accept the flag from both YAML flat key,
     // YAML nested `autoupdate.accept_provisional`, and the env var.
     func testConfigLoaderReadsAcceptProvisionalFromYAMLFlatAndNestedAndEnv() throws {

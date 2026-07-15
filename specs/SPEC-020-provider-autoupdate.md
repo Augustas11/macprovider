@@ -12,7 +12,7 @@ the bearerless-duplicate notify-only row is client-enforceable.
 
 ## Goal
 
-SPEC-020 v0.1.6 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.7 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -102,9 +102,10 @@ issuer-less coordinator deployment, where `s.issuer == nil` and
 state before any token logic runs
 (`phase4-coordinator/internal/ws/server.go:810-811`) — an explicit operator
 deployment choice, not an attack corner; and (b) the tokenless race-loser
-corner described immediately below, which is a residual gap. The production
-`mac` provider holds a validated `provider_token` and reaches `.eligible` via
-the bearer-validated path.
+corner described immediately below, which WAS a residual gap and is RESOLVED in
+v0.1.7 (the coordinator now propagates `auth_state` so the notify-only floor is
+client-enforceable). The production `mac` provider holds a validated
+`provider_token` and reaches `.eligible` via the bearer-validated path.
 
 **Tokenless race-loser corner (RESOLVED v0.1.7, runbook item 23).** The
 bearerless-duplicate notify-only row is now a client-enforceable guarantee. When

@@ -110,29 +110,37 @@ struct AutoUpdateTrustState: Sendable {
         // coordinators. The client uses this only to hold a MORE restrictive
         // floor (bearerless_duplicate → notify-only); it never relaxes the
         // verdict based on a coordinator claim.
-        let explicitAuthState = (payload["auth_state"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        // Distinguish the key being ABSENT (legacy coordinator → heuristic
+        // fallback, behavior unchanged) from the key being PRESENT-but-malformed
+        // (empty, non-string null/number/object, or an unrecognized string). The
+        // coordinator uses omitempty, so a legitimately "no verdict" ack omits the
+        // key entirely; any present value that is not a recognized non-empty
+        // string is anomalous and MUST fail closed to the notify-only floor rather
+        // than fall through to the heuristic (which could reach .eligible).
         let bearerlessDuplicate: Bool
-        if let authState = explicitAuthState {
-            switch authState {
-            case "bearer_validated", "self_minted", "self_minted_verified":
-                // Known non-duplicate admission verdicts — the verdict pipeline
-                // still applies its own tier/token/attestation guards.
-                bearerlessDuplicate = false
-            case "bearerless_duplicate", "mint_failed":
-                // Race-loser holds the notify-only floor. mint_failed does not
-                // normally ride an ack (the coordinator closes the connection),
-                // but if ever seen it is treated as notify-only, defensively.
-                bearerlessDuplicate = true
-            default:
-                // Unknown/unexpected auth_state (enum evolution, malformed): FAIL
-                // CLOSED to the restrictive notify-only floor rather than silently
-                // becoming eligible. A newer trusted state an old binary does not
-                // recognize is at worst held notify-only (safe), never wrongly
-                // auto-updated. This is the security floor the propagation exists
-                // to enforce — an unrecognized value must not relax it.
+        if let rawAuthState = payload["auth_state"] {
+            if let authState = rawAuthState as? String, !authState.isEmpty {
+                switch authState {
+                case "bearer_validated", "self_minted", "self_minted_verified":
+                    // Known non-duplicate admission verdicts — the verdict pipeline
+                    // still applies its own tier/token/attestation guards.
+                    bearerlessDuplicate = false
+                case "bearerless_duplicate", "mint_failed":
+                    // Race-loser holds the notify-only floor. mint_failed does not
+                    // normally ride an ack (the coordinator closes the connection),
+                    // but if ever seen it is treated as notify-only, defensively.
+                    bearerlessDuplicate = true
+                default:
+                    // Unrecognized string (enum evolution) — FAIL CLOSED.
+                    bearerlessDuplicate = true
+                }
+            } else {
+                // Present but empty / non-string (NSNull, number, bool, object):
+                // malformed — FAIL CLOSED to the notify-only floor.
                 bearerlessDuplicate = true
             }
         } else {
+            // Key absent → legacy coordinator; use the pre-existing inference.
             bearerlessDuplicate = tokenConfigured && providerToken == nil && !assignedProviderTokenAdopted
         }
         return AutoUpdateTrustState(
