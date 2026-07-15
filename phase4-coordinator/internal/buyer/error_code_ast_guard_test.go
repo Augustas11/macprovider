@@ -123,6 +123,13 @@ func unresolvedEmitters(emitters, allowAbsent, declared map[string]bool, codeIdx
 	for name := range emitters {
 		_, resolved := codeIdx[name]
 		switch {
+		case allowAbsent[name] && declared[name]:
+			// The transitional forward-reference exemption is now STALE: the
+			// function exists in this package. Force its removal from the
+			// allow-absent list, otherwise a later deletion of the function
+			// would be silently masked by the exemption, reopening the
+			// skipped-emitter escape.
+			problems = append(problems, "emitter "+name+" is on the allow-absent list but is now declared in this package — remove the stale transitional exemption so a future deletion cannot be masked")
 		case resolved:
 			// ok
 		case declared[name]:
@@ -338,10 +345,11 @@ func TestSpec019ProviderDetailCodesClassifiedAndInventoried(t *testing.T) {
 // matches no declaration, are both flagged — while a genuine forward reference
 // (declared nowhere, on the allow-absent list) is not.
 func TestUnresolvedEmittersDetectsFailOpen(t *testing.T) {
-	emitters := map[string]bool{"present": true, "renamed": true, "typo": true, "forwardRef": true}
-	allowAbsent := map[string]bool{"forwardRef": true}
-	declared := map[string]bool{"present": true, "renamed": true} // "typo"/"forwardRef" not declared
-	codeIdx := map[string]int{"present": 2}                        // "renamed" declared but code param not found
+	emitters := map[string]bool{"present": true, "renamed": true, "typo": true, "forwardRef": true, "staleExempt": true}
+	allowAbsent := map[string]bool{"forwardRef": true, "staleExempt": true}
+	// "typo"/"forwardRef" not declared; "staleExempt" IS declared (exemption now stale).
+	declared := map[string]bool{"present": true, "renamed": true, "staleExempt": true}
+	codeIdx := map[string]int{"present": 2} // "renamed"/"staleExempt" declared but code param not resolved
 
 	problems := unresolvedEmitters(emitters, allowAbsent, declared, codeIdx)
 	got := strings.Join(problems, "\n")
@@ -351,14 +359,17 @@ func TestUnresolvedEmittersDetectsFailOpen(t *testing.T) {
 	if !strings.Contains(got, "typo") {
 		t.Errorf("undeclared non-forward-ref emitter not flagged: %q", got)
 	}
+	if !strings.Contains(got, "staleExempt") {
+		t.Errorf("stale allow-absent exemption (now declared) not flagged: %q", got)
+	}
 	if strings.Contains(got, "present") {
 		t.Errorf("resolved emitter wrongly flagged: %q", got)
 	}
 	if strings.Contains(got, "forwardRef") {
 		t.Errorf("allowed forward reference wrongly flagged: %q", got)
 	}
-	if len(problems) != 2 {
-		t.Errorf("expected exactly 2 problems (renamed + typo), got %d: %v", len(problems), problems)
+	if len(problems) != 3 {
+		t.Errorf("expected exactly 3 problems (renamed + typo + staleExempt), got %d: %v", len(problems), problems)
 	}
 }
 
@@ -407,5 +418,13 @@ func caller(w, x string) {
 	}
 	if len(found) != 4 {
 		t.Errorf("expected exactly 4 literal codes (variable arg must be skipped), got %d: %v", len(found), found)
+	}
+	// The extracted synthetic codes must be genuinely unclassified, so the real
+	// guard's classification loop WOULD fire on them — proving extraction plus
+	// the check together catch a new code, not just that extraction runs.
+	for code := range found {
+		if _, ok := spec018RetryableByCode[code]; ok {
+			t.Errorf("synthetic code %q unexpectedly exists in spec018RetryableByCode — pick a code the real guard would reject", code)
+		}
 	}
 }

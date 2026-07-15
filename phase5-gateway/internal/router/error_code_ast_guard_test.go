@@ -112,6 +112,8 @@ func unresolvedEmitters(emitters, allowAbsent, declared map[string]bool, codeIdx
 	for name := range emitters {
 		_, resolved := codeIdx[name]
 		switch {
+		case allowAbsent[name] && declared[name]:
+			problems = append(problems, "emitter "+name+" is on the allow-absent list but is now declared in this package — remove the stale transitional exemption so a future deletion cannot be masked")
 		case resolved:
 		case declared[name]:
 			problems = append(problems, "emitter "+name+" is declared but no `code` parameter was found — was the parameter renamed? the guard would silently skip its codes")
@@ -359,5 +361,14 @@ func caller(w, x string) {
 	}
 	if len(found) != 4 {
 		t.Errorf("expected exactly 4 literal codes (variable arg must be skipped), got %d: %v", len(found), found)
+	}
+	// The extracted synthetic codes must be genuinely unclassified, so the real
+	// guard's classification loop WOULD fire on them.
+	for code := range found {
+		_, inR := gatewayRetryableByCode[code]
+		_, inP := gatewayPermanentCodes[code]
+		if inR || inP {
+			t.Errorf("synthetic code %q unexpectedly classified — pick a code the real guard would reject", code)
+		}
 	}
 }
