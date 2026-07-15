@@ -94,6 +94,15 @@ if "--private-key \"$release_private_key\"" not in signer or "--public-key \"$re
     raise SystemExit("inner compatibility manifest is not main-owned and production-key verified")
 if "pearl-release.json.sig" not in signer or "-sign \"$private_key\"" not in signer:
     raise SystemExit("acceptance-only Pearl metadata is not separately signed")
+if 'tar -czf "$provider_asset" -C "$cli_work" .' in signer:
+    raise SystemExit("acceptance signer can emit an ambiguous provider archive root")
+for value in (
+    "provider_archive_members=(",
+    'tar -czf "$provider_asset" -C "$cli_work" "${provider_archive_members[@]}"',
+    'validate-archive --input "$provider_asset" --forbid-links',
+):
+    if value not in signer:
+        raise SystemExit(f"acceptance signer final provider archive validation is incomplete: {value}")
 if '"$output_dir/release-assets.txt"' not in signer:
     raise SystemExit("acceptance signer does not export the verifier asset selector")
 if signer.find('release_assets+=("$output_dir/release-provenance.json")') > signer.find('"$output_dir/release-assets.txt"'):
