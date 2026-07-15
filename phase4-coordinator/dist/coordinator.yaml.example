@@ -341,7 +341,7 @@ malibu_emission:
 # version, closing WS with CloseVersionTooOld. Use for security fixes
 # that must not be optional. Leave unset for advisory releases.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.34"
+  latest_binary_version: "1.8.35"
   # required_binary_version: "1.7.0"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that

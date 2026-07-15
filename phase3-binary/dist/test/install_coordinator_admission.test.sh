@@ -212,6 +212,13 @@ if run_wait "$TMP/coordinator.json" "$TMP/local.json" 1; then
   exit 1
 fi
 
+printf '%s\n' '{"provider_id":"provider-test","tier":"pinned","state":"ready"}' \
+  > "$TMP/sparse-legacy-coordinator.json"
+if run_wait "$TMP/sparse-legacy-coordinator.json" "$TMP/legacy-local.json" 1; then
+  echo "emergency rollback accepted sparse legacy coordinator readiness without exact session-bound buyer admission" >&2
+  exit 1
+fi
+
 python3 - "$INSTALL_SH" <<'PY'
 import sys
 text = open(sys.argv[1], encoding="utf-8").read()
@@ -230,6 +237,8 @@ if 'emergency rollback requires MACPROVIDER_VERSION' not in text:
     raise SystemExit("emergency rollback is not pinned to an explicit signed release tag")
 if 'catalog_admission_mode") != "legacy_bridge"' not in text:
     raise SystemExit("emergency rollback is not gated on legacy_bridge buyer admission")
+if 'response.get("assigned_id") != assigned_id' not in text or 'response.get("buyer_serving") is not True' not in text:
+    raise SystemExit("emergency rollback is not bound to the exact buyer-serving coordinator session")
 
 commit_start = text.index("commit_install_transaction() {")
 commit_end = text.index("\n}\n\nrun()", commit_start)
