@@ -62,6 +62,12 @@ make_case() {
   printf 'old-watchdog\n' > "$home/.local/share/macprovider-watchdog/macprovider-health-monitor"
   printf '<plist>old-watchdog</plist>\n' > "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
   printf '{"version":"old"}\n' > "$home/Library/Application Support/macprovider/install_manifest.json"
+  # Seed a prior lifecycle-state file by default so rollback must restore its
+  # exact prior contents; the lifecycle_absent_* cases delete it to exercise the
+  # restore-prior-absence path.
+  mkdir -p "$home/Library/Application Support/macprovider/lifecycle"
+  printf '{"state":"serving","reason_code":"install_committed","writer":"installer"}\n' \
+    > "$home/Library/Application Support/macprovider/lifecycle/state-v1.json"
   : > "$root/service-active"
   : > "$root/watchdog-service-active"
   : > "$root/launchctl.log"
@@ -313,8 +319,14 @@ run_case() {
   install_phase="${5:-mutation}"
   prior_state="${6:-active}"
   manual_behavior="${7:-bind}"
+  lifecycle_behavior="${8:-present}"
   root="$TMP/$case_name"
   make_case "$case_name"
+  if [ "$lifecycle_behavior" = "absent-before" ]; then
+    # An incumbent that predates the lifecycle contract has no state file at
+    # transaction start. Rollback must restore that absence exactly.
+    rm -rf "$root/home/Library/Application Support/macprovider/lifecycle"
+  fi
   if [ "$prior_state" = "disabled-inactive" ]; then
     rm -f "$root/service-active" "$root/watchdog-service-active"
     : > "$root/service-disabled"
@@ -356,6 +368,7 @@ run_case() {
       WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
       WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
       MANIFEST_PATH="$HOME/Library/Application Support/macprovider/install_manifest.json"
+      LIFECYCLE_STATE_PATH="$HOME/Library/Application Support/macprovider/lifecycle/state-v1.json"
       LOG_DIR="$HOME/Library/Logs/macprovider"
       TMPDIR_PATH="$CASE_ROOT/tx"
       PORT="$(cat "$CASE_ROOT/manual-port" 2>/dev/null || printf 18080)"
@@ -374,6 +387,7 @@ run_case() {
       INSTALL_TX_HAD_WATCHDOG_DIR=0
       INSTALL_TX_HAD_WATCHDOG_PLIST=0
       INSTALL_TX_HAD_MANIFEST=0
+      INSTALL_TX_HAD_LIFECYCLE_STATE=0
       INSTALL_TX_SERVICE_WAS_DISABLED=0
       INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
       INSTALL_TX_WATCHDOG_WAS_DISABLED=0
@@ -424,6 +438,12 @@ run_case() {
       printf "new-watchdog\n" > "$WATCHDOG_DIR/macprovider-health-monitor"
       printf "<plist>new-watchdog</plist>\n" > "$WATCHDOG_PLIST_PATH"
       printf "{\"version\":\"new\"}\n" > "$MANIFEST_PATH"
+      # The new install authors a fresh lifecycle state the legacy incumbent
+      # cannot clear on rollback. Rollback must restore the prior contents, or
+      # (for an incumbent that had no lifecycle file) the prior absence.
+      mkdir -p "$(dirname "$LIFECYCLE_STATE_PATH")"
+      printf "{\"state\":\"rollback_in_progress\",\"reason_code\":\"install_admission_failed\",\"writer\":\"installer\"}\n" \
+        > "$LIFECYCLE_STATE_PATH"
       case "$INSTALL_PHASE" in
         plist|watchdog) exit 9 ;;
         bootstrap)
@@ -467,6 +487,10 @@ MANUAL
           commit_install_transaction
           exit 0
           ;;
+        commit-clean)
+          commit_install_transaction
+          exit 0
+          ;;
       esac
       case "$ROLLBACK_FAULT" in
         fail-restore-cp|fail-config-mv) : > "$CASE_ROOT/$ROLLBACK_FAULT" ;;
@@ -497,6 +521,13 @@ assert_old_install() {
   grep -F 'old-watchdog' "$home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
   grep -F '<plist>old-watchdog</plist>' "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" >/dev/null
   grep -F '"version":"old"' "$home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
+  # The lifecycle-state file is part of the transaction: rollback restores the
+  # exact prior contents byte-for-byte, never the newer install/rollback state.
+  grep -F '"state":"serving"' "$home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+  if grep -F 'rollback_in_progress' "$home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null; then
+    echo "rollback left the newer lifecycle state behind instead of restoring the prior one" >&2
+    return 1
+  fi
   [ "$(readlink "$home/.local/bin/macprovider-cli")" = "$home/macprovider/macprovider-cli" ]
 }
 
@@ -526,6 +557,73 @@ assert_old_install "$TMP/success"
 [ -z "$(recovery_dir "$TMP/success")" ]
 grep -F 'bootstrap gui/' "$TMP/success/launchctl.log" >/dev/null
 grep -F 'kickstart -k gui/' "$TMP/success/launchctl.log" >/dev/null
+
+# (a) Lifecycle-state rollback restores the exact prior contents byte-for-byte.
+# The mutation phase overwrote the file with a rollback_in_progress state that a
+# legacy incumbent could never clear; a healthy rollback must return the file to
+# its original serving state and hash.
+lifecycle_old_hash="$(shasum -a 256 "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json" | awk '{print $1}')"
+[ "$lifecycle_old_hash" = "$(printf '{"state":"serving","reason_code":"install_committed","writer":"installer"}\n' | shasum -a 256 | awk '{print $1}')" ]
+
+# (b) Lifecycle-state rollback restores prior ABSENCE. An incumbent with no
+# lifecycle file must not gain a stranded state file after rollback; the file
+# (and no leftover restore/candidate siblings) must be gone.
+run_case lifecycle_absent_restore "" "" "" self-test active bind absent-before
+root="$TMP/lifecycle_absent_restore"
+[ "$(cat "$root/rc")" -eq 9 ]
+grep -F 'old-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" ]; then
+  echo "rollback stranded a lifecycle-state file where the incumbent had none" >&2
+  exit 1
+fi
+if compgen -G "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json.macprovider-restore.*" >/dev/null; then
+  echo "rollback left a lifecycle restore candidate behind" >&2
+  exit 1
+fi
+[ -z "$(recovery_dir "$root")" ]
+
+# (c) An interrupted rollback that is completed by re-running the recovery
+# script (the same path the armed LaunchAgent and orphan scan use) must still
+# restore the lifecycle contents. A rename fault aborts the first rollback with
+# the durable bundle preserved and the newer lifecycle state still live; a
+# fault-free rerun of recover.sh must converge to the prior serving state.
+run_case lifecycle_interrupted_recovery "" "" fail-config-mv
+root="$TMP/lifecycle_interrupted_recovery"
+[ "$(cat "$root/rc")" -eq 70 ]
+grep -F 'rollback_in_progress' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+assert_recovery_preserved "$root"
+lifecycle_recovery="$(recovery_dir "$root")"
+rm -f "$root/fail-config-mv"
+set +e
+PATH="$root/bin:/usr/bin:/bin" LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" \
+  bash "$lifecycle_recovery/recover.sh" > "$root/lifecycle-retry.stdout.log" 2> "$root/lifecycle-retry.stderr.log"
+lifecycle_retry_rc=$?
+set -e
+[ "$lifecycle_retry_rc" -eq 0 ]
+grep -F '"state":"serving"' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+if grep -F 'rollback_in_progress' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null; then
+  echo "resumed recovery left the newer lifecycle state behind" >&2
+  exit 1
+fi
+grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
+
+# (d) Forward-success: on commit the lifecycle file keeps the new-install state
+# and the snapshot is discarded with the retired recovery bundle. Rollback must
+# not fire.
+run_case lifecycle_forward_success "" "" "" commit-clean
+root="$TMP/lifecycle_forward_success"
+[ "$(cat "$root/rc")" -eq 0 ]
+grep -F 'rollback_in_progress' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null
+if grep -F '"state":"serving"' "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" >/dev/null; then
+  echo "forward-success incorrectly reverted the lifecycle state to the prior snapshot" >&2
+  exit 1
+fi
+[ -z "$(recovery_dir "$root")" ]
+if compgen -G "$root/home/.config/macprovider/install-recovery-*.committed.*" >/dev/null; then
+  echo "clean commit did not retire the recovery bundle carrying the lifecycle snapshot" >&2
+  exit 1
+fi
 
 # A failed artifact prefetch exits before the durable cutover marker. Cleanup
 # may restore the suspended watchdog, but it must never boot out, replace, or

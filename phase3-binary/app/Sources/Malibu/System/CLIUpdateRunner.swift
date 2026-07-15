@@ -1,7 +1,12 @@
 import Foundation
 
 enum CLIUpdateRunner {
-    static let legacyBootstrapTarget = "1.8.39"
+    // Legacy repair pins exactly the CLI version this app shipped as. Re-arm
+    // per release by bumping this to the released app bundle version; a
+    // mismatch with the running bundle disarms the bridge by design (see the
+    // exact-match interlock in `strategy(...)`), so the app can only ever
+    // pin-install the CLI it was built to ship.
+    static let legacyBootstrapTarget = "1.8.40"
 
     enum Strategy: Equatable {
         case installedCompatibilityCLI

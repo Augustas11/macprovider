@@ -31,6 +31,12 @@ LIVE_CONFIG_PATH="$CONFIG_PATH"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
 MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
+# The provider lifecycle-state file is authored by the CLI (ProviderLifecycleState
+# .defaultURL). Because it can be left in a transactional intermediate state such
+# as rollback_in_progress that only a lifecycle-aware CLI can clear, it must be
+# part of the install transaction so a rollback to a legacy incumbent restores
+# the exact prior contents (or prior absence) instead of stranding a stale state.
+LIFECYCLE_STATE_PATH="$MANIFEST_DIR/lifecycle/state-v1.json"
 EXISTING_INSTALL_WAS_PRESENT=0
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
@@ -83,6 +89,7 @@ INSTALL_TX_HAD_PLIST=0
 INSTALL_TX_HAD_WATCHDOG_DIR=0
 INSTALL_TX_HAD_WATCHDOG_PLIST=0
 INSTALL_TX_HAD_MANIFEST=0
+INSTALL_TX_HAD_LIFECYCLE_STATE=0
 INSTALL_TX_SERVICE_WAS_DISABLED=0
 INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
 INSTALL_TX_WATCHDOG_WAS_DISABLED=0
@@ -923,6 +930,7 @@ write_install_recovery_artifacts() {
     printf 'REC_WATCHDOG_PLIST_PATH=%q\n' "$WATCHDOG_PLIST_PATH"
     printf 'REC_WATCHDOG_LABEL=%q\n' "$WATCHDOG_LABEL"
     printf 'REC_MANIFEST_PATH=%q\n' "$MANIFEST_PATH"
+    printf 'REC_LIFECYCLE_STATE_PATH=%q\n' "$LIFECYCLE_STATE_PATH"
     printf 'REC_LOG_DIR=%q\n' "$LOG_DIR"
     printf 'REC_INSTALL_RECOVERY_LABEL=%q\n' "$INSTALL_RECOVERY_LABEL"
     printf 'REC_INSTALL_RECOVERY_PLIST_PATH=%q\n' "$INSTALL_RECOVERY_PLIST_PATH"
@@ -942,6 +950,7 @@ write_install_recovery_artifacts() {
     printf 'REC_HAD_WATCHDOG_DIR=%q\n' "$INSTALL_TX_HAD_WATCHDOG_DIR"
     printf 'REC_HAD_WATCHDOG_PLIST=%q\n' "$INSTALL_TX_HAD_WATCHDOG_PLIST"
     printf 'REC_HAD_MANIFEST=%q\n' "$INSTALL_TX_HAD_MANIFEST"
+    printf 'REC_HAD_LIFECYCLE_STATE=%q\n' "$INSTALL_TX_HAD_LIFECYCLE_STATE"
     printf 'REC_SERVICE_WAS_ACTIVE=%q\n' "$INSTALL_TX_SERVICE_WAS_ACTIVE"
     printf 'REC_SERVICE_WAS_DISABLED=%q\n' "$INSTALL_TX_SERVICE_WAS_DISABLED"
     printf 'REC_WATCHDOG_WAS_ACTIVE=%q\n' "$INSTALL_TX_WATCHDOG_WAS_ACTIVE"
@@ -1321,6 +1330,7 @@ PLIST_CANDIDATE="${REC_PLIST_PATH}.macprovider-restore.$$"
 WATCHDOG_DIR_CANDIDATE="${REC_WATCHDOG_DIR}.macprovider-restore.$$"
 WATCHDOG_PLIST_CANDIDATE="${REC_WATCHDOG_PLIST_PATH}.macprovider-restore.$$"
 MANIFEST_CANDIDATE="${REC_MANIFEST_PATH}.macprovider-restore.$$"
+LIFECYCLE_STATE_CANDIDATE="${REC_LIFECYCLE_STATE_PATH}.macprovider-restore.$$"
 FAILED_CURRENT_DIR="$RECOVERY_DIR/failed-current/$RUN_ID"
 
 # Prove every requested restore can be copied byte-for-byte before touching the
@@ -1351,6 +1361,9 @@ if [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ]; then
 fi
 if [ "$REC_HAD_MANIFEST" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/install-manifest.json" "$MANIFEST_CANDIDATE" file || recovery_failed "could not stage and verify the previous install manifest"
+fi
+if [ "${REC_HAD_LIFECYCLE_STATE:-0}" -eq 1 ]; then
+  stage_restore "$RECOVERY_DIR/lifecycle-state-v1.json" "$LIFECYCLE_STATE_CANDIDATE" file || recovery_failed "could not stage and verify the previous lifecycle state"
 fi
 
 mkdir -p "$FAILED_CURRENT_DIR" || recovery_failed "could not create durable failed-install storage"
@@ -1383,6 +1396,13 @@ swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"
 swap_restore install-manifest.json "$REC_MANIFEST_PATH" "$MANIFEST_CANDIDATE" "$REC_HAD_MANIFEST" || recovery_failed "could not restore the previous install manifest"
+# The lifecycle-state file is restored last so the transactional intermediate
+# state (rollback_in_progress) authored before recovery began stays observable
+# for the whole rollback, and the exact prior contents (or prior absence) are
+# the final durable outcome. This is what a legacy incumbent that predates the
+# lifecycle contract cannot do for itself; restoring absence when none was
+# captured never leaves a newer-contract state behind.
+swap_restore lifecycle-state-v1.json "$REC_LIFECYCLE_STATE_PATH" "$LIFECYCLE_STATE_CANDIDATE" "${REC_HAD_LIFECYCLE_STATE:-0}" || recovery_failed "could not restore the previous lifecycle state"
 
 if [ "$REC_SERVICE_WAS_DISABLED" -eq 1 ]; then
   launchctl disable "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 || recovery_failed "could not restore the disabled provider service state"
@@ -1947,6 +1967,11 @@ begin_install_transaction() {
     stage_install_tx_path "$MANIFEST_PATH" "$recovery_staging/install-manifest.json" file \
       || die 70 "could not stage and verify the previous install manifest; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_MANIFEST=1
+  fi
+  if [ -f "$LIFECYCLE_STATE_PATH" ]; then
+    stage_install_tx_path "$LIFECYCLE_STATE_PATH" "$recovery_staging/lifecycle-state-v1.json" file \
+      || die 70 "could not stage and verify the previous lifecycle state; current install was not changed (partial recovery data: $recovery_staging)"
+    INSTALL_TX_HAD_LIFECYCLE_STATE=1
   fi
   if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
