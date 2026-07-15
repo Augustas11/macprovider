@@ -1798,10 +1798,23 @@ def process_start_epoch_seconds(pid):
     # equivalent primitive; `ps -o lstart=` resolves start time only to the
     # whole second. We therefore compare at SECOND precision (the lease's
     # process_start_us truncated to seconds vs the live pid's start second).
-    # This is strictly coarser than -- and never preserves anything Swift's
-    # exact check would delete: a reused pid that started in a different second
-    # is still rejected. See owner_is_live() for the fail-toward-single-writer
-    # decision when start time is unverifiable.
+    #
+    # SECOND-precision identity is FAIL-OPEN toward preserving a foreign lease
+    # within the same second and same boot session: if a pid is reused and the
+    # replacement process happens to start in the SAME whole second as the
+    # original owner, this coarse check treats it as the same owner and
+    # preserves the lease -- a case Swift's exact-microsecond identity would
+    # reject. This is a deliberate, bounded fail-open, NOT a correctness gap:
+    # preservation here only defers the decision. The Swift ProviderLifecycle-
+    # LeaseStore re-validates with exact microsecond process-start identity
+    # downstream (validationFailure -> .ownerProcessMissingOrReused) and will
+    # replace the same-second-reused lease at its next acquire/inspect. The
+    # only consequence of a same-second false-preserve is a bounded
+    # availability delay (the restored CLI mints its fresh lease one store
+    # cycle later), never spurious deletion of a lease Swift would keep. A
+    # reused pid that started in a DIFFERENT second is still rejected here.
+    # See owner_is_live() for the fail-toward-single-writer decision when start
+    # time is entirely unverifiable.
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
@@ -1831,9 +1844,21 @@ def owner_is_live(owner):
     # owner's process-start identity confirmed. Because shell cannot read the
     # microsecond process-start the Swift store records, an unverifiable
     # process-start (owner missing it, or ps not resolving the live pid's start)
-    # is treated as NOT preservable: fail toward single-writer so a stale or
-    # reused-pid lease from the failed transaction is cleared rather than
-    # protected. This is stricter than -- never laxer than -- the Swift check.
+    # is treated as NOT preservable: fail toward single-writer so a stale lease
+    # from the failed transaction is cleared rather than protected.
+    #
+    # This check is NOT strictly stricter than the Swift check in one bounded
+    # respect: same-second pid reuse (see process_start_epoch_seconds). When a
+    # reused pid's replacement process started in the same whole second as the
+    # original owner, the second-precision compare below returns True even
+    # though Swift's exact-microsecond compare would return
+    # .ownerProcessMissingOrReused. The reconciler therefore fails OPEN toward
+    # preserving such a foreign lease. That is safe: the Swift store re-runs the
+    # exact-microsecond identity check downstream and replaces the lease, so the
+    # worst case is a bounded availability delay, never spurious deletion of a
+    # lease Swift would keep. In every OTHER respect (dead pid, boot-session
+    # change, different-second start, unverifiable start) this check is at least
+    # as strict as Swift's.
     if not isinstance(owner, dict):
         return False
     owner_pid = owner.get("pid")
@@ -1862,6 +1887,115 @@ def owner_is_live(owner):
         # Unverifiable process-start identity: fail toward single-writer.
         return False
     return live_start_seconds == owner_start // 1_000_000
+
+
+def wall_milliseconds():
+    # Mirror ProviderLifecycleLeaseEnvironment.live.wallMilliseconds:
+    # floor(Date().timeIntervalSince1970 * 1000).
+    return int(time.time() * 1_000)
+
+
+def monotonic_nanoseconds():
+    # Mirror ProviderLifecycleLeaseEnvironment.live.monotonicNanoseconds:
+    # clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW). Python's CLOCK_MONOTONIC_RAW
+    # reads the identical Darwin kernel clock (nanoseconds since boot), so the
+    # cross-process monotonic comparison is faithful -- it is only meaningful
+    # because the prepared-handoff exemption below also requires the lease's
+    # boot_session to match the current boot, which is precisely what keeps the
+    # monotonic base comparable across the maintenance owner's process and this
+    # reconciler process. If this platform lacks CLOCK_MONOTONIC_RAW, return
+    # None so the caller declines the monotonic-dependent exemption (the lease
+    # then follows the ordinary owner-liveness path -> removal, never a false
+    # preserve).
+    clock_id = getattr(time, "CLOCK_MONOTONIC_RAW", None)
+    if clock_id is None:
+        return None
+    try:
+        return int(time.clock_gettime_ns(clock_id))
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def prepared_handoff_preserves(record):
+    # Mirror the prepared-handoff validity exception in the Swift store's
+    # validationFailure (ProviderLifecycleLease.swift, `if let handoff =
+    # record.startupHandoff, handoff.state == .prepared`). The store
+    # INTENTIONALLY exempts an unexpired prepared startup handoff from the
+    # owner process-start liveness check so launchd can adopt the handoff AFTER
+    # the maintenance process that prepared it has exited. A rollback-bound
+    # lease is handled by the caller (belongs_to_rollback) and is NOT routed
+    # here, so this only ever preserves a foreign lease whose operation is
+    # unrelated to the rolled-back transaction.
+    #
+    # The exemption requires, exactly as Swift does before reaching line 895:
+    #   * a structurally sane record and handoff (we check the fields the
+    #     window comparison depends on; the Swift store re-validates full
+    #     structure via validateRecordStructure downstream before adopting);
+    #   * state == "prepared";
+    #   * boot_session matches the current boot for BOTH record.owner and the
+    #     handoff (Swift enforces handoff.bootSession == record.owner.bootSession
+    #     structurally, and validationFailure guards record.owner.bootSession
+    #     against the live boot);
+    #   * wall-clock: now >= issued and now < expires for BOTH record and
+    #     handoff;
+    #   * monotonic: now >= issued and now < expires for BOTH record and
+    #     handoff (same-boot comparable via the boot_session match above).
+    # Any missing/malformed field or an expired/before-issue window means the
+    # exemption does NOT apply and the lease follows the ordinary path.
+    if not isinstance(record, dict):
+        return False
+    handoff = record.get("startup_handoff")
+    if not isinstance(handoff, dict):
+        return False
+    if handoff.get("state") != "prepared":
+        return False
+    owner = record.get("owner")
+    if not isinstance(owner, dict):
+        return False
+    owner_boot = owner.get("boot_session")
+    handoff_boot = handoff.get("boot_session")
+    if (
+        not isinstance(owner_boot, str)
+        or not owner_boot
+        or not isinstance(handoff_boot, str)
+        or not handoff_boot
+    ):
+        return False
+    current_boot = boot_session()
+    if not current_boot or owner_boot != current_boot or handoff_boot != current_boot:
+        return False
+
+    def valid_window(container):
+        issued_wall = container.get("issued_wall_ms")
+        expires_wall = container.get("expires_wall_ms")
+        issued_mono = container.get("issued_monotonic_ns")
+        expires_mono = container.get("expires_monotonic_ns")
+        for value in (issued_wall, expires_wall, issued_mono, expires_mono):
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+        return (issued_wall, expires_wall, issued_mono, expires_mono)
+
+    record_window = valid_window(record)
+    handoff_window = valid_window(handoff)
+    if record_window is None or handoff_window is None:
+        return False
+
+    wall_now = wall_milliseconds()
+    monotonic_now = monotonic_nanoseconds()
+    if monotonic_now is None:
+        # Cannot reproduce Swift's monotonic comparison on this platform: do
+        # not grant the exemption. The lease falls back to owner-liveness.
+        return False
+
+    for issued_wall, expires_wall, issued_mono, expires_mono in (
+        record_window,
+        handoff_window,
+    ):
+        if wall_now < issued_wall or wall_now >= expires_wall:
+            return False
+        if monotonic_now < issued_mono or monotonic_now >= expires_mono:
+            return False
+    return True
 
 
 lock_fd = None
@@ -1937,7 +2071,30 @@ try:
             and isinstance(lease_operation, str)
             and lease_operation == install_operation_id
         )
-        if belongs_to_rollback or not owner_is_live(owner):
+        if belongs_to_rollback:
+            # A lease minted by the rolled-back transaction is removed
+            # regardless of any prepared handoff it carries: the operation it
+            # authorizes is being undone, so its handoff (and the
+            # operation/service/path/hash authorization inside it) must not
+            # survive the rollback.
+            remove = True
+        elif owner_is_live(owner):
+            # Ordinary live foreign owner: preserved.
+            remove = False
+        elif prepared_handoff_preserves(record):
+            # The Swift store intentionally exempts an unexpired `.prepared`
+            # startup handoff from the owner process-start liveness check so
+            # launchd can adopt it AFTER the maintenance process that prepared
+            # it has exited (see prepared_handoff_preserves / validationFailure
+            # in ProviderLifecycleLease.swift). Mirror that cross-process
+            # semantics: a foreign lease carrying a structurally valid,
+            # unexpired prepared handoff on the current boot session is
+            # PRESERVED even though its owner process is gone, so the
+            # operation/service/path/hash authorization it carries survives for
+            # the launchd adopter.
+            remove = False
+        else:
+            # Dead owner, no valid prepared handoff: clear it.
             remove = True
 
     if remove:

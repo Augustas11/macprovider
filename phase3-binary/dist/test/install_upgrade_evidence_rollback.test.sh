@@ -175,6 +175,106 @@ with open(out_path, "w", encoding="utf-8") as handle:
 PY
 }
 
+# Emit a MAINTENANCE lease carrying a `.prepared` startup handoff, in the exact
+# nested Swift wire schema. The wall/monotonic issue/expire windows are computed
+# from the REAL current clocks (the same CLOCK_MONOTONIC_RAW the reconciler and
+# the Swift .live environment read) so the reconciler's prepared-handoff
+# exemption -- which mirrors validationFailure's `handoff.state == .prepared`
+# branch and requires now to fall inside both the record and handoff windows --
+# is exercised against a genuinely live window. The owner pid is passed dead on
+# purpose: the whole point of the exemption is that a valid prepared handoff
+# survives even though the preparer process has exited. `expiry` selects a valid
+# (future) or already-expired handoff window.
+write_prepared_handoff_lease_record() {
+  out_path="$1"; operation_id="$2"; owner_pid="$3"; expiry="${4:-valid}"
+  python3 - "$out_path" "$operation_id" "$owner_pid" "$expiry" <<'PY'
+import json
+import subprocess
+import sys
+import time
+
+out_path, operation_id, owner_pid_text, expiry = sys.argv[1:]
+owner_pid = int(owner_pid_text)
+
+
+def boot_session():
+    result = subprocess.run(
+        ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    return value or "00000000-0000-0000-0000-000000000000"
+
+
+boot = boot_session()
+wall_now = int(time.time() * 1_000)
+mono_now = int(time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))
+
+# Record window: opened 5 minutes ago, closes 15 minutes from now (a
+# maintenance lease, well inside its own bounds right now).
+record_issued_wall = wall_now - 5 * 60 * 1_000
+record_expires_wall = wall_now + 15 * 60 * 1_000
+record_issued_mono = mono_now - 5 * 60 * 1_000_000_000
+record_expires_mono = mono_now + 15 * 60 * 1_000_000_000
+
+if expiry == "expired":
+    # Handoff issued 10 minutes ago and already expired 1 minute ago: the
+    # exemption must NOT apply, so the dead owner path removes the lease.
+    handoff_issued_wall = wall_now - 10 * 60 * 1_000
+    handoff_expires_wall = wall_now - 60 * 1_000
+    handoff_issued_mono = mono_now - 10 * 60 * 1_000_000_000
+    handoff_expires_mono = mono_now - 60 * 1_000_000_000
+else:
+    # A live prepared handoff window that currently brackets `now` and stays
+    # inside the record window (Swift requires handoff.expires <= record.expires).
+    handoff_issued_wall = wall_now - 60 * 1_000
+    handoff_expires_wall = wall_now + 4 * 60 * 1_000
+    handoff_issued_mono = mono_now - 60 * 1_000_000_000
+    handoff_expires_mono = mono_now + 4 * 60 * 1_000_000_000
+
+handoff = {
+    "version": 1,
+    "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "state": "prepared",
+    "operation_id": operation_id,
+    "provider_id": "provider-a",
+    "service_identity": "live.streamvc.macprovider",
+    "boot_session": boot,
+    "target_executable_path": "/Applications/MacProvider.app/Contents/MacOS/macprovider-cli",
+    "target_executable_sha256": "a" * 64,
+    "issued_wall_ms": handoff_issued_wall,
+    "expires_wall_ms": handoff_expires_wall,
+    "issued_monotonic_ns": handoff_issued_mono,
+    "expires_monotonic_ns": handoff_expires_mono,
+    "startup_lease_duration_ms": 5 * 60 * 1_000,
+}
+
+record = {
+    "version": 1,
+    "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "operation_id": operation_id,
+    "kind": "maintenance",
+    "owner": {
+        # A dead pid: the preparer has exited. process_start_us is a fixed
+        # non-live marker so the owner-liveness path would reject it -- proving
+        # preservation here comes solely from the prepared-handoff exemption.
+        "pid": owner_pid,
+        "process_start_us": 1,
+        "boot_session": boot,
+    },
+    "issued_wall_ms": record_issued_wall,
+    "expires_wall_ms": record_expires_wall,
+    "issued_monotonic_ns": record_issued_mono,
+    "expires_monotonic_ns": record_expires_mono,
+    "startup_handoff": handoff,
+}
+with open(out_path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
 # Make the full-schema record author available to the inner `bash -c` harness,
 # which runs as a fresh shell that only sources the extracted install functions.
 declare -f write_full_schema_record >> "$TMP/functions.sh"
@@ -549,6 +649,7 @@ run_case() {
     MUTATION_LIFECYCLE_SEQUENCE="${MUTATION_LIFECYCLE_SEQUENCE:-}" \
     MUTATION_LIFECYCLE_OPERATOR_PAUSED="${MUTATION_LIFECYCLE_OPERATOR_PAUSED:-}" \
     MUTATION_LEASE_JSON="${MUTATION_LEASE_JSON:-}" \
+    MUTATION_LEASE_OPERATION_ID="${MUTATION_LEASE_OPERATION_ID:-}" \
     RECOVERY_LIFECYCLE_FAULT="${RECOVERY_LIFECYCLE_FAULT:-}" \
     bash -c '
       set -euo pipefail
@@ -572,7 +673,13 @@ run_case() {
       LIFECYCLE_LEASE_PATH="$HOME/Library/Application Support/macprovider/lifecycle/lease.json"
       LIFECYCLE_STATE_LOCK_PATH="$HOME/Library/Application Support/macprovider/lifecycle/.state-v1.json.lock"
       LIFECYCLE_LEASE_LOCK_PATH="$HOME/Library/Application Support/macprovider/lifecycle/.lease.json.lock"
-      LIFECYCLE_INSTALL_OPERATION_ID="install:test-$$"
+      # The special parameter for this bash -c subprocess PID differs from the
+      # parent test shell PID. Cases that need the reconciler to actually MATCH a
+      # lease operation_id (belongs_to_rollback) must pin a deterministic
+      # operation id shared with the fixture via MUTATION_LEASE_OPERATION_ID;
+      # otherwise fall back to the historical per-subprocess default (correct for
+      # dead-owner cases that never rely on the operation match).
+      LIFECYCLE_INSTALL_OPERATION_ID="${MUTATION_LEASE_OPERATION_ID:-install:test-$$}"
       LOG_DIR="$HOME/Library/Logs/macprovider"
       TMPDIR_PATH="$CASE_ROOT/tx"
       PORT="$(cat "$CASE_ROOT/manual-port" 2>/dev/null || printf 18080)"
@@ -1383,6 +1490,64 @@ done
 kill "$foreign_pid" >/dev/null 2>&1 || true
 wait "$foreign_pid" 2>/dev/null || true
 [ -z "$(recovery_dir "$root")" ]
+
+# ---------------------------------------------------------------------------
+# A-05.4 / A-05.5 / A-05.6: the prepared-handoff exemption. The Swift lease
+# store intentionally exempts an unexpired `.prepared` startup handoff from the
+# owner process-start liveness check so launchd can adopt it AFTER the
+# maintenance process that prepared it has exited (validationFailure ->
+# `handoff.state == .prepared` in ProviderLifecycleLease.swift). The reconciler
+# must mirror that: a foreign lease carrying a structurally valid, unexpired
+# prepared handoff on the current boot session survives rollback even though its
+# owner is dead; an expired handoff does not; and a rollback-bound lease is
+# removed regardless of any handoff it carries.
+# ---------------------------------------------------------------------------
+
+# (A-05.4) Valid prepared handoff + dead owner + foreign operation -> PRESERVED.
+lease_fixture="$TMP/lease_prepared_handoff_valid.json"
+write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-1" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_valid "" "" "" self-test
+root="$TMP/lease_prepared_handoff_valid"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ ! -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "valid prepared-handoff lease with dead owner was incorrectly removed" >&2
+  exit 1
+fi
+grep -F '"state":"prepared"' "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" >/dev/null
+grep -F 'provider-restart-1' "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" >/dev/null
+
+# (A-05.5) Expired prepared handoff + dead owner + foreign operation -> REMOVED.
+lease_fixture="$TMP/lease_prepared_handoff_expired.json"
+write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-2" 999999 expired
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_expired "" "" "" self-test
+root="$TMP/lease_prepared_handoff_expired"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "expired prepared-handoff lease with dead owner survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.6) Valid prepared handoff BUT operation is the rolled-back transaction
+# -> REMOVED. The rollback is undoing exactly this operation, so its handoff
+# authorization must not survive even though the handoff window is live. The
+# fixture and the harness share ONE deterministic operation id
+# (MUTATION_LEASE_OPERATION_ID) so belongs_to_rollback actually matches -- a
+# `$$`-derived id would differ between the parent shell and the `bash -c`
+# harness and never match, silently downgrading this to a non-rollback case.
+rollback_op="install:test-prepared-handoff-rollback"
+lease_fixture="$TMP/lease_prepared_handoff_rollback.json"
+write_prepared_handoff_lease_record "$lease_fixture" "$rollback_op" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+MUTATION_LEASE_OPERATION_ID="$rollback_op" \
+  run_case lease_prepared_handoff_rollback "" "" "" self-test
+root="$TMP/lease_prepared_handoff_rollback"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "rollback-bound prepared-handoff lease survived rollback" >&2
+  exit 1
+fi
 
 run_darwin_manual_recovery_cases() {
 # A non-launchd provider holding the configured port is a real protected

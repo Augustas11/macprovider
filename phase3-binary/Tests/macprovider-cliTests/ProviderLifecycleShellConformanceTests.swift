@@ -97,6 +97,150 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         )
     }
 
+    // MARK: - Lease: prepared-handoff exemption parity (R3 CODE MEDIUM)
+
+    /// The real lease store INTENTIONALLY exempts an unexpired `.prepared`
+    /// startup handoff from the owner process-start liveness check so launchd can
+    /// adopt the handoff AFTER the maintenance process that prepared it has
+    /// exited (validationFailure -> `handoff.state == .prepared` in
+    /// ProviderLifecycleLease.swift). The shell reconciler in install.sh must
+    /// mirror that cross-process exemption: a foreign lease carrying a valid
+    /// prepared handoff on the current boot session must SURVIVE rollback even
+    /// though its owner process is gone.
+    ///
+    /// This test drives the REAL store to prepare a handoff, simulates the
+    /// preparer process exiting (its process-start becomes unresolvable while
+    /// clocks and boot session stay live/real), runs the ACTUAL shell reconciler
+    /// against the store-written file, asserts the file survives byte-for-byte,
+    /// and then proves the real store can still ADOPT the untouched handoff --
+    /// i.e. the reconciler preserved a genuinely adoptable durable handoff.
+    func testShellReconcilerPreservesPreparedHandoffAfterPreparerExitsThenStoreAdopts() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        // A controllable environment with REAL wall/monotonic clocks and the REAL
+        // boot session (so the shell reconciler, which reads the same OS clocks
+        // and `kern.bootsessionuuid`, agrees on validity), but a scriptable owner
+        // identity so we can be the maintenance preparer, then simulate its exit,
+        // then become the launchd adopter.
+        let harness = LeaseHandoffHarness()
+        let store = ProviderLifecycleLeaseStore(url: leaseURL, environment: harness.environment)
+
+        // 1. Acquire a maintenance lease as a live preparer, then prepare a
+        //    durable startup handoff (mirrors ProviderLifecycleLeaseTests'
+        //    prepareHandoff fixture, but through the real store on a real path).
+        let maintenance = try store.acquire(
+            kind: .maintenance,
+            operationID: "provider-restart-conformance",
+            duration: 10 * 60
+        )
+        let prepared = try store.prepareStartupHandoff(
+            maintenanceLeaseID: maintenance.leaseID,
+            operationID: maintenance.operationID,
+            providerID: "provider-a",
+            serviceIdentity: LeaseHandoffHarness.serviceIdentity,
+            targetExecutablePath: LeaseHandoffHarness.targetPath,
+            targetExecutableSHA256: LeaseHandoffHarness.targetSHA256,
+            handoffDuration: 4 * 60,
+            startupLeaseDuration: 5 * 60
+        )
+        XCTAssertEqual(prepared.startupHandoff?.state, .prepared)
+
+        // The exact bytes the store wrote: the reconciler must not mutate them.
+        let bytesBeforeReconcile = try Data(contentsOf: leaseURL)
+
+        // 2. Simulate the preparer process exiting: its pid is no longer alive and
+        //    its process-start is unresolvable. The record's owner still names
+        //    that (now-dead) pid, so an owner-liveness-only reconciler would
+        //    delete it. Clocks and boot session remain real and unchanged.
+        harness.simulatePreparerExit()
+
+        // 3. Run the ACTUAL shell reconciler with an UNRELATED install operation
+        //    id (this is a foreign lease, not the rolled-back transaction).
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+
+        // 4. The valid prepared handoff must be PRESERVED, byte-for-byte.
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a valid prepared handoff with a dead owner must survive rollback"
+        )
+        let bytesAfterReconcile = try Data(contentsOf: leaseURL)
+        XCTAssertEqual(
+            bytesAfterReconcile,
+            bytesBeforeReconcile,
+            "the reconciler must not rewrite a preserved prepared-handoff lease"
+        )
+
+        // 5. Prove the preserved handoff is still genuinely adoptable: the
+        //    launchd service comes up (a fresh live pid running the exact target
+        //    executable) and the REAL store adopts the untouched durable handoff.
+        harness.transitionToLaunchdService()
+        let startup = try store.adoptStartupHandoff(
+            operationID: "provider-restart-conformance",
+            providerID: "provider-a",
+            serviceIdentity: LeaseHandoffHarness.serviceIdentity
+        )
+        XCTAssertEqual(startup.kind, .startup)
+        XCTAssertEqual(startup.startupHandoff?.state, .adopted)
+        XCTAssertEqual(startup.startupHandoff?.handoffID, prepared.startupHandoff?.handoffID)
+        XCTAssertEqual(startup.owner.pid, harness.launchdServicePID)
+    }
+
+    /// The exemption must NOT rescue an EXPIRED handoff: once the prepared
+    /// window has closed, a dead-owner lease follows the ordinary removal path,
+    /// exactly as the store's validationFailure returns `.wallExpired` /
+    /// `.monotonicExpired` for the same record.
+    func testShellReconcilerRemovesExpiredPreparedHandoffWithDeadOwner() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        let harness = LeaseHandoffHarness()
+        let store = ProviderLifecycleLeaseStore(url: leaseURL, environment: harness.environment)
+
+        let maintenance = try store.acquire(
+            kind: .maintenance,
+            operationID: "provider-restart-conformance-expired",
+            duration: 10 * 60
+        )
+        _ = try store.prepareStartupHandoff(
+            maintenanceLeaseID: maintenance.leaseID,
+            operationID: maintenance.operationID,
+            providerID: "provider-a",
+            serviceIdentity: LeaseHandoffHarness.serviceIdentity,
+            targetExecutablePath: LeaseHandoffHarness.targetPath,
+            targetExecutableSHA256: LeaseHandoffHarness.targetSHA256,
+            // A short window we will step past before reconciling.
+            handoffDuration: 2,
+            startupLeaseDuration: 5 * 60
+        )
+
+        // The preparer exits and enough real time passes that the handoff window
+        // is now closed. The store agrees the record is invalid-or-expired.
+        harness.simulatePreparerExit()
+        Thread.sleep(forTimeInterval: 2.2)
+        if case .valid = store.inspect() {
+            XCTFail("store should not still consider the expired handoff valid")
+        }
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "an expired prepared handoff with a dead owner must be removed"
+        )
+    }
+
     // MARK: - State: shell translation writes -> Swift store reads (Defect 3)
 
     /// A stale updater-written snapshot must translate into an installer-owned
@@ -311,5 +455,106 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         XCTAssertEqual(chmod(directory.path, 0o700), 0)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
         return directory
+    }
+}
+
+/// A lease environment that reads the REAL OS wall/monotonic clocks and the REAL
+/// boot session -- so a cross-process shell reconciler observing the same OS
+/// agrees on validity -- while scripting the owner identity so a test can be the
+/// maintenance preparer, simulate its exit, then become the launchd adopter.
+///
+/// The clock and boot sources are byte-for-byte the same primitives as
+/// ProviderLifecycleLeaseEnvironment.live (Date-based wall milliseconds,
+/// CLOCK_MONOTONIC_RAW nanoseconds, `kern.bootsessionuuid`), which is exactly
+/// what makes the prepared-handoff window the store writes comparable to the
+/// window the install.sh reconciler reads.
+private final class LeaseHandoffHarness: @unchecked Sendable {
+    static let targetPath = "/Applications/MacProvider.app/Contents/MacOS/macprovider-cli"
+    static let targetSHA256 = String(repeating: "a", count: 64)
+    static let serviceIdentity = "live.streamvc.macprovider"
+
+    // A pid that is guaranteed NOT to be alive on the host, so the shell
+    // reconciler's owner-liveness check fails and preservation can only come
+    // from the prepared-handoff exemption.
+    let preparerPID: pid_t = 999_999
+    let launchdServicePID: pid_t = 999_998
+
+    private let lock = NSLock()
+    private var pid: pid_t
+    private var starts: [pid_t: Int64]
+    private var launchdPIDs: [String: pid_t] = [:]
+    private var executablePaths: [pid_t: String] = [:]
+
+    init() {
+        pid = preparerPID
+        starts = [preparerPID: 100_000_123, launchdServicePID: 100_000_456]
+    }
+
+    /// The preparer process exits: its pid is no longer running and its
+    /// process-start is unresolvable, while everything else stays live/real.
+    func simulatePreparerExit() {
+        lock.lock()
+        starts[preparerPID] = nil
+        lock.unlock()
+    }
+
+    /// The launchd service comes up running the exact target executable, and the
+    /// current owner identity becomes that service (the adopter).
+    func transitionToLaunchdService() {
+        lock.lock()
+        pid = launchdServicePID
+        launchdPIDs[LeaseHandoffHarness.serviceIdentity] = launchdServicePID
+        executablePaths[launchdServicePID] = LeaseHandoffHarness.targetPath
+        lock.unlock()
+    }
+
+    var environment: ProviderLifecycleLeaseEnvironment {
+        ProviderLifecycleLeaseEnvironment(
+            wallMilliseconds: {
+                Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+            },
+            monotonicNanoseconds: {
+                let value = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+                return value > UInt64(Int64.max) ? Int64.max : Int64(value)
+            },
+            bootSession: { LeaseHandoffHarness.realBootSession() },
+            processStartMicroseconds: { [weak self] pid in
+                guard let self = self else { return nil }
+                self.lock.lock(); defer { self.lock.unlock() }
+                return self.starts[pid] ?? nil
+            },
+            processID: { [weak self] in self?.currentPID() ?? -1 },
+            launchdServiceProcessID: { [weak self] service in
+                guard let self = self else { return nil }
+                self.lock.lock(); defer { self.lock.unlock() }
+                return self.launchdPIDs[service]
+            },
+            executablePath: { [weak self] pid in
+                guard let self = self else { return nil }
+                self.lock.lock(); defer { self.lock.unlock() }
+                return self.executablePaths[pid]
+            },
+            executableSHA256: { path in
+                path == LeaseHandoffHarness.targetPath ? LeaseHandoffHarness.targetSHA256 : nil
+            }
+        )
+    }
+
+    private func currentPID() -> pid_t {
+        lock.lock(); defer { lock.unlock() }
+        return pid
+    }
+
+    private static func realBootSession() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1 else {
+            return nil
+        }
+        var bytes = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else {
+            return nil
+        }
+        let value = String(cString: bytes).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 }
