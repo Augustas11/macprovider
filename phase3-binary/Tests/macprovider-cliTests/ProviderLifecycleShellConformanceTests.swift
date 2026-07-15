@@ -241,6 +241,123 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         )
     }
 
+    /// A record that is store-READABLE (valid JSON in the real wire schema) but
+    /// STRUCTURALLY INVALID per Swift's validateStartupHandoffStructure must NOT
+    /// be preserved by the shell reconciler's prepared-handoff exemption. The
+    /// auditor's example is `kind: "startup"` carrying a `.prepared` startup
+    /// handoff: Swift only permits `.maintenance` to carry a prepared handoff, so
+    /// its inspect() would reject this as `.invalidField("startup_handoff_state")`.
+    /// If the shell PRESERVED it, the restored CLI would inspect() it as invalid,
+    /// its fallback only re-acquires on `handoffNotPrepared`, and the provider
+    /// would restart-loop. This test writes that record with a dead owner, runs
+    /// the ACTUAL shell reconciler (which must REMOVE the file via
+    /// record_matches_swift_structure), then proves the real
+    /// ProviderLifecycleLeaseStore self-heals by acquiring a fresh lease.
+    func testShellReconcilerRemovesStructurallyInvalidPreparedHandoffThenStoreAcquiresFresh() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        // Build the invalid record with REAL clocks + boot session so the ONLY
+        // reason the exemption is declined is the structural (kind) invariant --
+        // not a stale window or a boot mismatch.
+        guard let boot = LeaseHandoffHarness.realBootSession() else {
+            throw XCTSkip("kern.bootsessionuuid unavailable")
+        }
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+
+        // Record window: opened 5m ago, closes 15m out (well inside its bounds).
+        let recordIssuedWall = wallNow - 5 * 60 * 1_000
+        let recordExpiresWall = wallNow + 15 * 60 * 1_000
+        let recordIssuedMono = monoNow - 5 * 60 * 1_000_000_000
+        let recordExpiresMono = monoNow + 15 * 60 * 1_000_000_000
+        // Live handoff window that brackets now and stays inside the record window.
+        let handoffIssuedWall = wallNow - 60 * 1_000
+        let handoffExpiresWall = wallNow + 4 * 60 * 1_000
+        let handoffIssuedMono = monoNow - 60 * 1_000_000_000
+        let handoffExpiresMono = monoNow + 4 * 60 * 1_000_000_000
+
+        let handoff: [String: Any] = [
+            "version": 1,
+            "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "state": "prepared",
+            "operation_id": "provider-restart-invalid-kind",
+            "provider_id": "provider-a",
+            "service_identity": LeaseHandoffHarness.serviceIdentity,
+            "boot_session": boot,
+            "target_executable_path": LeaseHandoffHarness.targetPath,
+            "target_executable_sha256": LeaseHandoffHarness.targetSHA256,
+            "issued_wall_ms": handoffIssuedWall,
+            "expires_wall_ms": handoffExpiresWall,
+            "issued_monotonic_ns": handoffIssuedMono,
+            "expires_monotonic_ns": handoffExpiresMono,
+            "startup_lease_duration_ms": 5 * 60 * 1_000,
+        ]
+        let record: [String: Any] = [
+            "version": 1,
+            "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "operation_id": "provider-restart-invalid-kind",
+            // The invalid invariant: Swift permits ONLY maintenance to carry a
+            // prepared handoff. "startup" here is store-readable but rejected.
+            "kind": "startup",
+            "owner": [
+                // A dead pid: the preparer has exited.
+                "pid": 999_999,
+                "process_start_us": 1,
+                "boot_session": boot,
+            ] as [String: Any],
+            "issued_wall_ms": recordIssuedWall,
+            "expires_wall_ms": recordExpiresWall,
+            "issued_monotonic_ns": recordIssuedMono,
+            "expires_monotonic_ns": recordExpiresMono,
+            "startup_handoff": handoff,
+        ]
+        let recordData = try JSONSerialization.data(
+            withJSONObject: record,
+            options: [.sortedKeys]
+        )
+        try (recordData + Data([0x0a])).write(to: leaseURL)
+
+        // Sanity: the record is genuinely store-READABLE JSON (it decodes into a
+        // ProviderLifecycleLeaseRecord) yet Swift's own store does NOT consider
+        // it valid -- proving the shell must not rely on "Swift revalidates".
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider a kind-startup prepared handoff valid")
+        }
+
+        // Run the ACTUAL shell reconciler with an UNRELATED install operation id.
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+
+        // The structurally invalid record must be REMOVED (the self-healing path).
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a structurally invalid prepared-handoff record must be removed"
+        )
+
+        // Prove self-healing: with the invalid record gone, the REAL store can
+        // acquire a fresh lease (which it could not have done atop the invalid
+        // file if the shell had preserved it -- the CLI's fallback only
+        // re-acquires on handoffNotPrepared).
+        let freshStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        let fresh = try freshStore.acquire(
+            kind: .startup,
+            operationID: "serve:after-structural-removal",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertNil(fresh.startupHandoff)
+        guard case .valid = freshStore.inspect() else {
+            return XCTFail("freshly acquired lease must inspect as valid")
+        }
+    }
+
     // MARK: - State: shell translation writes -> Swift store reads (Defect 3)
 
     /// A stale updater-written snapshot must translate into an installer-owned
@@ -545,7 +662,7 @@ private final class LeaseHandoffHarness: @unchecked Sendable {
         return pid
     }
 
-    private static func realBootSession() -> String? {
+    static func realBootSession() -> String? {
         var size = 0
         guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1 else {
             return nil

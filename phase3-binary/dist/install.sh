@@ -1807,8 +1807,9 @@ def process_start_epoch_seconds(pid):
     # reject. This is a deliberate, bounded fail-open, NOT a correctness gap:
     # preservation here only defers the decision. The Swift ProviderLifecycle-
     # LeaseStore re-validates with exact microsecond process-start identity
-    # downstream (validationFailure -> .ownerProcessMissingOrReused) and will
-    # replace the same-second-reused lease at its next acquire/inspect. The
+    # downstream (validationFailure -> .ownerProcessMissingOrReused): inspect()
+    # is read-only and merely reports the same-second-reused lease as
+    # invalid/expired, while the next acquire() is what actually replaces it. The
     # only consequence of a same-second false-preserve is a bounded
     # availability delay (the restored CLI mints its fresh lease one store
     # cycle later), never spurious deletion of a lease Swift would keep. A
@@ -1916,6 +1917,231 @@ def monotonic_nanoseconds():
         return None
 
 
+def record_matches_swift_structure(record):
+    # Mirror EVERY invariant the Swift store's validateRecordStructure /
+    # validateStartupHandoffStructure enforce (ProviderLifecycleLease.swift,
+    # validationFailure runs validateRecordStructure FIRST, before the prepared-
+    # handoff exemption at line 895). This must run BEFORE the exemption checks
+    # below, because a record the shell PRESERVES but Swift would reject as
+    # .invalidField is the harmful outcome: inspect() later rejects it, the
+    # restored CLI's fallback only re-acquires on handoffNotPrepared, and the
+    # provider restart-loops. Directionality is fail-toward-removal: anything
+    # this mirror cannot positively verify returns False so the lease follows
+    # the ordinary owner-liveness path (-> removal for a dead owner), never a
+    # false preserve. Scope is a lease record carrying a `.prepared` handoff;
+    # the caller has already confirmed startup_handoff.state == "prepared".
+    if not isinstance(record, dict):
+        return False
+
+    # --- primitive helpers mirroring the Swift validators ---
+    def is_int(value):
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    def printable_scalar(text):
+        # validateOperationID / validateHandoffIdentity: every unicode scalar
+        # must be >= 0x20 and NOT in 0x7f...0x9f (C0/C1 control exclusion).
+        for char in text:
+            code = ord(char)
+            if code < 0x20 or 0x7F <= code <= 0x9F:
+                return False
+        return True
+
+    def valid_operation_id(value):
+        # validateOperationID: trimmed == value, non-empty, utf8 <= 128,
+        # printable per printable_scalar.
+        if not isinstance(value, str):
+            return False
+        if value != value.strip():
+            return False
+        if not value or len(value.encode("utf-8")) > 128:
+            return False
+        return printable_scalar(value)
+
+    def valid_handoff_identity(value, *, forbid_slash):
+        # validateHandoffIdentity: trimmed == value, non-empty, utf8 <= 256,
+        # printable; service_identity additionally must not contain "/".
+        if not isinstance(value, str):
+            return False
+        if value != value.strip():
+            return False
+        if not value or len(value.encode("utf-8")) > 256:
+            return False
+        if not printable_scalar(value):
+            return False
+        if forbid_slash and "/" in value:
+            return False
+        return True
+
+    def valid_uuid(value):
+        # UUID(uuidString:) accepts the canonical 8-4-4-4-12 hex form. Reject
+        # anything else so a malformed lease_id/handoff_id is not preserved.
+        if not isinstance(value, str):
+            return False
+        parts = value.split("-")
+        if len(parts) != 5:
+            return False
+        if [len(part) for part in parts] != [8, 4, 4, 4, 12]:
+            return False
+        return all(
+            char in "0123456789abcdefABCDEF"
+            for part in parts
+            for char in part
+        )
+
+    def valid_target_path(value):
+        # validateTargetExecutablePath: absolute, standardized (no "." / ".."
+        # / trailing-slash / duplicate-slash artifacts), no NUL byte, utf8
+        # within MAXPATHLEN*4 (1024*4). os.path.normpath reproduces Foundation's
+        # standardizedFileURL path normalization for absolute paths.
+        if not isinstance(value, str):
+            return False
+        if not value.startswith("/"):
+            return False
+        if "\x00" in value:
+            return False
+        if len(value.encode("utf-8")) > 1024 * 4:
+            return False
+        return os.path.normpath(value) == value
+
+    def valid_sha256(value):
+        # validatedSHA256: exactly 64 bytes of lowercase hex.
+        if not isinstance(value, str):
+            return False
+        if len(value.encode("utf-8")) != 64:
+            return False
+        return all(char in "0123456789abcdef" for char in value)
+
+    def duration_ok(issued, expires, *, max_ms):
+        # Mirror the shared duration algebra: no overflow (Python ints are
+        # unbounded, so overflow can't occur -- this is inherently at least as
+        # strict as Swift's Int64 overflow guard), 0 < wallDuration <= max_ms,
+        # and monotonicDuration == wallDuration * 1_000_000. Returns the wall
+        # duration on success, or None on failure.
+        wall_duration = expires - issued
+        if wall_duration <= 0 or wall_duration > max_ms:
+            return None
+        return wall_duration
+
+    # --- record-level structure (validateRecordStructure) ---
+    if record.get("version") != 1:
+        return False
+    if not valid_uuid(record.get("lease_id")):
+        return False
+    if not valid_operation_id(record.get("operation_id")):
+        return False
+
+    owner = record.get("owner")
+    if not isinstance(owner, dict):
+        return False
+    owner_pid = owner.get("pid")
+    owner_start = owner.get("process_start_us")
+    owner_boot = owner.get("boot_session")
+    if not is_int(owner_pid) or owner_pid <= 0:
+        return False
+    if not is_int(owner_start) or owner_start <= 0:
+        return False
+    if not isinstance(owner_boot, str) or not owner_boot:
+        return False
+    if len(owner_boot.encode("utf-8")) > 256:
+        return False
+
+    record_issued_wall = record.get("issued_wall_ms")
+    record_expires_wall = record.get("expires_wall_ms")
+    record_issued_mono = record.get("issued_monotonic_ns")
+    record_expires_mono = record.get("expires_monotonic_ns")
+    for value in (
+        record_issued_wall,
+        record_expires_wall,
+        record_issued_mono,
+        record_expires_mono,
+    ):
+        if not is_int(value):
+            return False
+    if record_issued_wall <= 0 or record_issued_mono < 0:
+        return False
+
+    # Only kind "maintenance" can carry a prepared handoff (Swift's prepared
+    # branch: `record.kind == .maintenance`). Reject any other kind here so a
+    # `kind: "startup"` record carrying a prepared handoff -- which Swift's
+    # inspect() rejects as .invalidField("startup_handoff_state") -- is NOT
+    # preserved by the shell.
+    if record.get("kind") != "maintenance":
+        return False
+    record_max_ms = 20 * 60 * 1_000  # maintenance kind maximumDurationMilliseconds
+    record_wall_duration = duration_ok(
+        record_issued_wall, record_expires_wall, max_ms=record_max_ms
+    )
+    if record_wall_duration is None:
+        return False
+    if record_expires_mono - record_issued_mono != record_wall_duration * 1_000_000:
+        return False
+
+    # --- handoff-level structure (validateStartupHandoffStructure) ---
+    handoff = record.get("startup_handoff")
+    if not isinstance(handoff, dict):
+        return False
+    if handoff.get("version") != 1:
+        return False
+    if not valid_uuid(handoff.get("handoff_id")):
+        return False
+    # Operation-identity equality between record and handoff (Swift requires
+    # handoff.operationID == record.operationID and handoff.bootSession ==
+    # record.owner.bootSession).
+    if handoff.get("operation_id") != record.get("operation_id"):
+        return False
+    if handoff.get("boot_session") != owner_boot:
+        return False
+    if not valid_operation_id(handoff.get("operation_id")):
+        return False
+    if not valid_handoff_identity(handoff.get("provider_id"), forbid_slash=False):
+        return False
+    if not valid_handoff_identity(handoff.get("service_identity"), forbid_slash=True):
+        return False
+    if not valid_target_path(handoff.get("target_executable_path")):
+        return False
+    if not valid_sha256(handoff.get("target_executable_sha256")):
+        return False
+
+    handoff_issued_wall = handoff.get("issued_wall_ms")
+    handoff_expires_wall = handoff.get("expires_wall_ms")
+    handoff_issued_mono = handoff.get("issued_monotonic_ns")
+    handoff_expires_mono = handoff.get("expires_monotonic_ns")
+    handoff_lease_duration = handoff.get("startup_lease_duration_ms")
+    for value in (
+        handoff_issued_wall,
+        handoff_expires_wall,
+        handoff_issued_mono,
+        handoff_expires_mono,
+        handoff_lease_duration,
+    ):
+        if not is_int(value):
+            return False
+    if handoff_issued_wall <= 0 or handoff_issued_mono < 0:
+        return False
+    handoff_max_ms = 5 * 60 * 1_000  # ProviderLifecycleStartupHandoff.maximumDurationMilliseconds
+    handoff_wall_duration = duration_ok(
+        handoff_issued_wall, handoff_expires_wall, max_ms=handoff_max_ms
+    )
+    if handoff_wall_duration is None:
+        return False
+    if handoff_expires_mono - handoff_issued_mono != handoff_wall_duration * 1_000_000:
+        return False
+    startup_max_ms = 30 * 60 * 1_000  # startup kind maximumDurationMilliseconds
+    if handoff_lease_duration <= 0 or handoff_lease_duration > startup_max_ms:
+        return False
+
+    # Prepared-state containment: the handoff window must close within the
+    # record window (Swift's prepared branch requires handoff.expires* <=
+    # record.expires*). The state == "prepared" and kind == "maintenance"
+    # invariants are already enforced above (caller + kind check).
+    if handoff_expires_wall > record_expires_wall:
+        return False
+    if handoff_expires_mono > record_expires_mono:
+        return False
+
+    return True
+
+
 def prepared_handoff_preserves(record):
     # Mirror the prepared-handoff validity exception in the Swift store's
     # validationFailure (ProviderLifecycleLease.swift, `if let handoff =
@@ -1928,9 +2154,11 @@ def prepared_handoff_preserves(record):
     # unrelated to the rolled-back transaction.
     #
     # The exemption requires, exactly as Swift does before reaching line 895:
-    #   * a structurally sane record and handoff (we check the fields the
-    #     window comparison depends on; the Swift store re-validates full
-    #     structure via validateRecordStructure downstream before adopting);
+    #   * a record that passes the FULL Swift structural validation
+    #     (validateRecordStructure / validateStartupHandoffStructure), checked
+    #     first via record_matches_swift_structure -- a record the shell
+    #     preserves but Swift's inspect() would reject as .invalidField would
+    #     restart-loop the provider, so anything unverifiable is declined here;
     #   * state == "prepared";
     #   * boot_session matches the current boot for BOTH record.owner and the
     #     handoff (Swift enforces handoff.bootSession == record.owner.bootSession
@@ -1948,6 +2176,13 @@ def prepared_handoff_preserves(record):
     if not isinstance(handoff, dict):
         return False
     if handoff.get("state") != "prepared":
+        return False
+    # FULL Swift structural validation FIRST: a record the shell preserves but
+    # Swift's inspect() would reject as .invalidField restart-loops the
+    # provider. record_matches_swift_structure fails toward removal on anything
+    # it cannot positively verify, so it must gate the exemption before the
+    # boot/window checks below.
+    if not record_matches_swift_structure(record):
         return False
     owner = record.get("owner")
     if not isinstance(owner, dict):

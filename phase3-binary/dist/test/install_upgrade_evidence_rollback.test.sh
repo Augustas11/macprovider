@@ -187,13 +187,14 @@ PY
 # (future) or already-expired handoff window.
 write_prepared_handoff_lease_record() {
   out_path="$1"; operation_id="$2"; owner_pid="$3"; expiry="${4:-valid}"
-  python3 - "$out_path" "$operation_id" "$owner_pid" "$expiry" <<'PY'
+  record_kind="${5:-maintenance}"
+  python3 - "$out_path" "$operation_id" "$owner_pid" "$expiry" "$record_kind" <<'PY'
 import json
 import subprocess
 import sys
 import time
 
-out_path, operation_id, owner_pid_text, expiry = sys.argv[1:]
+out_path, operation_id, owner_pid_text, expiry, record_kind = sys.argv[1:]
 owner_pid = int(owner_pid_text)
 
 
@@ -255,7 +256,11 @@ record = {
     "version": 1,
     "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     "operation_id": operation_id,
-    "kind": "maintenance",
+    # Default "maintenance" is the only kind Swift permits to carry a prepared
+    # handoff. Tests pass "startup" to build a record that is store-READABLE but
+    # structurally invalid per Swift's validateStartupHandoffStructure, so the
+    # reconciler must decline the exemption and REMOVE it.
+    "kind": record_kind,
     "owner": {
         # A dead pid: the preparer has exited. process_start_us is a fixed
         # non-live marker so the owner-liveness path would reject it -- proving
@@ -1461,7 +1466,6 @@ fi
 # preserved. The owner block carries the live pid's real start second and the
 # current boot session so the second-resolution liveness check confirms it. The
 # lock files are never mutated byte-wise.
-lease_live_root="$TMP/lease_live_foreign"
 sleep 300 &
 foreign_pid=$!
 lease_fixture="$TMP/lease_live_foreign.json"
@@ -1546,6 +1550,27 @@ root="$TMP/lease_prepared_handoff_rollback"
 [ "$(cat "$root/rc")" -eq 9 ]
 if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
   echo "rollback-bound prepared-handoff lease survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.7) Store-READABLE but STRUCTURALLY INVALID prepared handoff + dead owner
+# + foreign operation -> REMOVED. The auditor's example: kind "startup" carrying
+# a `.prepared` startup handoff. The JSON parses (it round-trips through json),
+# but Swift's validateStartupHandoffStructure rejects state=="prepared" unless
+# record.kind == .maintenance -> .invalidField("startup_handoff_state"). If the
+# reconciler PRESERVED this record, the restored CLI's inspect() would later
+# reject it as .invalidField, its fallback only re-acquires on
+# handoffNotPrepared, and the provider would restart-loop. The reconciler must
+# therefore DECLINE the exemption (record_matches_swift_structure returns False)
+# and REMOVE the record so a fresh lease can be minted.
+lease_fixture="$TMP/lease_prepared_handoff_invalid_kind.json"
+write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-3" 999999 valid startup
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_invalid_kind "" "" "" self-test
+root="$TMP/lease_prepared_handoff_invalid_kind"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "structurally invalid prepared-handoff lease (kind startup) survived rollback" >&2
   exit 1
 fi
 
