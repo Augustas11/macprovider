@@ -7,15 +7,21 @@ guard="$root/scripts/verify-github-release-posture.sh"
 input_guard="$root/scripts/validate-release-inputs.sh"
 checksums_guard="$root/scripts/verify-release-checksums.sh"
 xcodegen_installer="$root/scripts/install-pinned-xcodegen.sh"
+sparkle_generator="$root/scripts/generate-malibu-appcast.sh"
+legacy_sparkle_key="$root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-python3 - "$workflow" <<'PY'
+python3 - "$workflow" "$root/phase3-binary/app/project.yml" \
+  "$root/phase3-binary/app/Sources/Malibu/Info.plist" <<'PY'
 import pathlib
 import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+current_app = "\n".join(
+    pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[2:]
+)
 if "\n  push:" in text or "refs/tags/" in text:
     raise SystemExit("release workflow must not execute from a tag-push ref")
 if "\n  workflow_dispatch:" not in text:
@@ -64,8 +70,39 @@ if publish.find("Verify Malibu release cryptographic bindings") > publish.find("
     raise SystemExit("Apple verification must run before draft release creation")
 if "scripts/verify-malibu-release-artifacts.sh" not in publish:
     raise SystemExit("publish job must verify Apple signatures and notarization")
-if "Sparkle" in publish or "appcast" in publish:
-    raise SystemExit("release workflow must not retain a second app-owned update authority")
+for forbidden in ("Sparkle", "SUFeedURL", "SUPublicEDKey"):
+    if forbidden in current_app:
+        raise SystemExit(f"current Malibu app retains legacy update authority: {forbidden}")
+if re.search(r"^packages:\s*", current_app, re.MULTILINE):
+    raise SystemExit("current Malibu app must remain dependency-free")
+if publish.count("Generate one-time Malibu 1.8.32 bootstrap bridge") != 1:
+    raise SystemExit("release workflow must contain exactly one named bootstrap generator")
+if publish.count("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") != 1:
+    raise SystemExit("release workflow must contain exactly one named bootstrap publisher")
+bridge = publish.split("- name: Generate one-time Malibu 1.8.32 bootstrap bridge", 1)[1].split(
+    "\n      - name:", 1
+)[0]
+pearl_bridge = publish.split(
+    "- name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 1
+)[1].split("\n      - name:", 1)[0]
+if "if: needs.build.outputs.tag == 'v1.8.39'" not in bridge:
+    raise SystemExit("legacy appcast generation is not frozen to v1.8.39")
+if "SPARKLE_EDDSA_PRIVATE_KEY" not in bridge or "verify-malibu-sparkle-signature.py" not in bridge:
+    raise SystemExit("legacy appcast lacks protected signing or frozen-key verification")
+if "if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'" not in pearl_bridge:
+    raise SystemExit("Pearl bridge publication is not frozen to stable v1.8.39")
+for requirement in (
+    "publish-malibu-latest-dmg.sh",
+    "publication-manifest.json",
+    "compatibility-artifact-index.json",
+    "checksums.txt.sig",
+):
+    if requirement not in pearl_bridge:
+        raise SystemExit(f"Pearl bootstrap publication omits {requirement}")
+if publish.find("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") < publish.find(
+    "cmp final-draft-manifest.json publication-manifest.json"
+):
+    raise SystemExit("Pearl bridge must publish only after immutable GitHub publication")
 team_requirement = (
     '-R="identifier \\"live.streamvc.macprovider.cli\\" and anchor apple generic '
     'and certificate leaf[subject.OU] = \\"$APPLE_NOTARY_TEAM_ID\\""'
@@ -130,6 +167,11 @@ if (
     or 'release_assets+=("$compatibility_artifact_index")' not in prepare
 ):
     raise SystemExit("exact compatibility artifact index must bind Pearl metadata before provenance")
+appcast_position = prepare.find('release_assets+=("$appcast_asset")')
+if appcast_position < 0 or appcast_position > provenance_position:
+    raise SystemExit("v1.8.39 appcast must enter signed provenance and checksums")
+if 'if [ "$tag" = v1.8.39 ]' not in prepare or 'legacy appcast must exist only for v1.8.39' not in prepare:
+    raise SystemExit("release assets do not fail closed outside the one-time bridge tag")
 for requirement in (
     "provider_cli=$tar_asset",
     "malibu_app=$app_dmg_asset",
@@ -199,6 +241,10 @@ if "actions/checkout v6.0.3" not in build:
     raise SystemExit("checkout provenance comment differs from the pinned action commit")
 if "Clean Apple signing material after notarization" not in publish:
     raise SystemExit("Apple keychain and private material must be deleted after notarization")
+if publish.find("Clean Apple signing material after notarization") > publish.find(
+    "Generate one-time Malibu 1.8.32 bootstrap bridge"
+):
+    raise SystemExit("Apple private material must be removed before third-party Sparkle tools run")
 create = publish.split("- name: Create verified draft GitHub release", 1)[1].split("\n      - name:", 1)[0]
 verify_draft = publish.split("- name: Verify draft release assets by numeric ID", 1)[1].split("\n      - name:", 1)[0]
 make_public = publish.split("- name: Publish only the revalidated numeric draft", 1)[1].split("\n      - name:", 1)[0]
@@ -253,14 +299,24 @@ for requirement in (
         raise SystemExit(f"post-publication release-state verification is missing: {requirement}")
 PY
 
-python3 - "$xcodegen_installer" <<'PY'
+python3 - "$xcodegen_installer" "$sparkle_generator" "$legacy_sparkle_key" <<'PY'
 import pathlib
 import sys
 
 xcodegen = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+sparkle = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+legacy_key = pathlib.Path(sys.argv[3]).read_text(encoding="ascii")
 xcodegen_digest = "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"
 if xcodegen_digest not in xcodegen or xcodegen.find("shasum -a 256") > xcodegen.find("unzip -q"):
     raise SystemExit("XcodeGen artifact must be digest-pinned before extraction")
+sparkle_digest = "50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b"
+if sparkle_digest not in sparkle or sparkle.find("shasum -a 256") > sparkle.find("tar -xJf"):
+    raise SystemExit("legacy Sparkle tools must be digest-pinned before extraction")
+if 'bridge_tag="v1.8.39"' not in sparkle or "SPARKLE_VERSION" in sparkle:
+    raise SystemExit("legacy appcast generator is not frozen to one tag and tool version")
+key_lines = [line.strip() for line in legacy_key.splitlines() if line.strip() and not line.startswith("#")]
+if key_lines != ["JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="]:
+    raise SystemExit("legacy public key differs from the SUPublicEDKey shipped in Malibu v1.8.32")
 PY
 
 marker="$work/input-command-executed"

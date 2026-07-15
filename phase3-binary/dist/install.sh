@@ -2850,8 +2850,8 @@ validate_macprovider_version_tag() {
   case "$tag" in
     *[[:space:]]*|*[[:cntrl:]]*) die 7 "MACPROVIDER_VERSION must not contain whitespace or control characters" ;;
   esac
-  if ! [[ "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
-    die 7 "MACPROVIDER_VERSION must look like vMAJOR.MINOR.PATCH"
+  if ! [[ "$tag" =~ ^v(0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})$ ]]; then
+    die 7 "MACPROVIDER_VERSION must be a canonical vMAJOR.MINOR.PATCH with bounded numeric components"
   fi
   if ! version_at_least "$tag" "$MACPROVIDER_MIN_SUPPORTED_VERSION"; then
     die 7 "MACPROVIDER_VERSION $tag is below supported rollback floor $MACPROVIDER_MIN_SUPPORTED_VERSION"
@@ -5873,6 +5873,24 @@ validate_acceptance_upgrade_target() {
   fi
 }
 
+validate_non_emergency_pinned_target() {
+  local target="$1"
+  local installed_version installed_tag
+  [ -n "${MACPROVIDER_VERSION:-}" ] || return 0
+  [ -x "$BINARY_PATH" ] || return 0
+  [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && return 0
+
+  installed_version="$("$BINARY_PATH" --version 2>/dev/null | tr -d '\r\n')"
+  case "$installed_version" in
+    v*) installed_tag="$installed_version" ;;
+    *) installed_tag="v$installed_version" ;;
+  esac
+  validate_macprovider_version_tag "$installed_tag"
+  if [ "$installed_tag" != "$target" ] && version_at_least "$installed_tag" "$target"; then
+    die 7 "pinned install target $target must not downgrade installed $installed_tag"
+  fi
+}
+
 validate_acceptance_staged_identity() {
   [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 0
   manifest="$staging_dir/compatibility-set.json"
@@ -6172,6 +6190,9 @@ main() {
   fi
 
   tag="$(resolve_release_tag)"
+  # The install lock is already held here, so this check closes the race between
+  # Malibu's observed snapshot and the version actually present at mutation time.
+  validate_non_emergency_pinned_target "$tag"
   validate_acceptance_upgrade_target "$tag"
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
     validate_emergency_target "$tag"

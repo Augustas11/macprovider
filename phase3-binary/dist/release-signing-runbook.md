@@ -190,6 +190,9 @@ select the `production-release` environment and add these environment secrets:
 | `APPLE_NOTARY_TEAM_ID` | The Team ID from step 5 |
 | `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` | P-256 private key matching the public key embedded in `phase3-binary/dist/install.sh` |
 | `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM` | Dedicated P-256 private key matching `security/acceptance-candidate-signing-public.pem`; provision with `scripts/provision-acceptance-signing-key.sh` |
+| `SPARKLE_EDDSA_PRIVATE_KEY` | Base64 Ed25519 seed matching `scripts/dist/malibu-v1.8.32-sparkle-public-key`; used only to generate the frozen stable `v1.8.39` bootstrap appcast |
+| `MALIBU_DOWNLOAD_SSH_KEY` | Complete OpenSSH private-key contents for the root Pearl publication account; the workflow writes it to a mode-0600 temporary file |
+| `MALIBU_DOWNLOAD_VPS_HOST` | Pearl publication IPv4 address (`159.223.165.194` unless the host is deliberately migrated) |
 | `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read access |
 
 Do not duplicate release secrets at repository scope. The unsigned `build` job
@@ -541,13 +544,68 @@ without `xattr -d`.
 
 ## Publication recovery
 
-GitHub's immutable numeric release is the sole release publication. There is no
-second appcast or Pearl-hosted `latest.dmg` authority to repair. If protected
-publication stops before the draft-to-public transition, inspect or delete the
-numeric draft and rerun from the same reviewed tag. Never regenerate checksums,
-replace a public asset, or construct a partial compatibility set. Installed
-providers consume the signed index and checksums and reject an incomplete or
-drifting member set before mutation.
+GitHub's immutable numeric release remains the release authority. One narrow
+exception exists for the Malibu 1.8.32 installed cohort: stable `v1.8.39`
+includes `appcast.xml`, signed with the existing Sparkle EdDSA secret and
+verified against `scripts/dist/malibu-v1.8.32-sparkle-public-key`. Only after
+the numeric GitHub release is immutable does the protected workflow atomically
+publish that exact appcast and `Malibu-v1.8.39.dmg` to Pearl. The workflow then
+downloads `appcast.xml`, `latest.dmg`, and the versioned DMG over HTTPS and
+requires their hashes and EdDSA signature to match the immutable release.
+
+This is a bootstrap bridge, not a restored update subsystem. Malibu 1.8.39 has
+no Sparkle package, `SUFeedURL`, or `SUPublicEDKey`; later app updates are owned
+by the signed CLI compatibility transaction. The generator, verifier, remote
+installer, workflow conditions, and regression tests all reject tags other
+than `v1.8.39`.
+
+If publication stops before draft-to-public transition, inspect or delete the
+numeric draft and rerun from the same reviewed tag. If GitHub is immutable but
+Pearl publication fails, the release workflow cannot be rerun from its first
+step: `gh release create` must not replace the existing immutable release. Keep
+the immutable assets unchanged, diagnose the pinned-SSH or public-byte failure,
+then run the bounded recovery helper from a new clean detached worktree at the
+exact release commit:
+
+```bash
+export REPO=Augustas11/macprovider
+export TAG=v1.8.39
+export GH_TOKEN="$(gh auth token -u Augustas11)"
+export RELEASE_ID="$(
+  gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+    "repos/$REPO/releases/tags/$TAG" --jq .id
+)"
+export RELEASE_COMMIT="$(
+  gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+    "repos/$REPO/releases/$RELEASE_ID" --jq .target_commitish
+)"
+[[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+[[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+
+git fetch origin main
+export RECOVERY_WORKTREE=../macprovider-v1839-publication-recovery
+test ! -e "$RECOVERY_WORKTREE"
+git worktree add --detach "$RECOVERY_WORKTREE" "$RELEASE_COMMIT"
+cd "$RECOVERY_WORKTREE"
+
+MALIBU_DOWNLOAD_VPS_HOST=159.223.165.194 \
+MALIBU_DOWNLOAD_SSH_KEY="$HOME/.ssh/pearl_operator_ed25519" \
+  bash scripts/recover-malibu-publication.sh "$RELEASE_ID"
+```
+
+For local recovery, `MALIBU_DOWNLOAD_SSH_KEY` is a path to a regular private-key
+file; the Actions environment secret with the same name stores the key contents.
+`GH_TOKEN` needs only repository contents read access. The helper accepts no tag,
+commit, or asset-ID overrides: it requires the immutable stable `v1.8.39` numeric
+release, discovers the six required uploaded assets by exact name (including
+`compatibility-artifact-index.json`), revalidates their numeric identities after
+download, verifies the clean checkout and protected remote tag, reconstructs the
+publication manifest through `capture-release-publication.py`, and invokes the
+same signed-set verifier and atomic Pearl publisher as the protected workflow.
+
+The command is idempotent for the same immutable publication. Never regenerate
+checksums, replace a public asset, pass hand-copied asset IDs, or construct a
+partial compatibility set.
 
 ## Related
 

@@ -5,6 +5,7 @@ import Foundation
 enum CLIInstallRunner {
     enum Error: Swift.Error, LocalizedError {
         case installScriptNotFound
+        case invalidPinnedVersion(String)
         case nonZeroExit(Int32)
         case launchFailed(String)
 
@@ -12,6 +13,8 @@ enum CLIInstallRunner {
             switch self {
             case .installScriptNotFound:
                 return "The bundled macprovider installer script was not found."
+            case let .invalidPinnedVersion(version):
+                return "Provider install version pin is invalid: \(version)."
             case let .nonZeroExit(code):
                 return "Provider install failed (exit \(code)). See the log above for details."
             case let .launchFailed(message):
@@ -22,10 +25,19 @@ enum CLIInstallRunner {
 
     /// Invokes `install.sh` with `MACPROVIDER_NO_PROMPT=1`. Delivers stdout/stderr
     /// lines to `onLogLine` on the main actor.
-    static func run(onLogLine: @escaping @MainActor (String) -> Void) async throws {
+    static func run(
+        pinnedVersion: String? = nil,
+        onLogLine: @escaping @Sendable @MainActor (String) -> Void
+    ) async throws {
         let scriptURL = try resolveInstallScriptURL()
         let runnableURL = try materializeRunnableScript(from: scriptURL)
+        defer { try? FileManager.default.removeItem(at: runnableURL) }
         let installPort = resolveInstallPort()
+        let environment = try installerEnvironment(
+            parentEnvironment: ProcessInfo.processInfo.environment,
+            installPort: installPort,
+            pinnedVersion: pinnedVersion
+        )
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
         }
@@ -39,15 +51,6 @@ enum CLIInstallRunner {
                 process.standardOutput = stdout
                 process.standardError = stderr
 
-                var environment = ProcessInfo.processInfo.environment
-                environment["MACPROVIDER_NO_PROMPT"] = "1"
-                environment["HOME"] = NSHomeDirectory()
-                if let installPort {
-                    environment["MACPROVIDER_PORT"] = String(installPort)
-                }
-                if environment["PATH"]?.isEmpty != false {
-                    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-                }
                 process.environment = environment
 
                 let emit: (Pipe) -> Void = { pipe in
@@ -84,6 +87,39 @@ enum CLIInstallRunner {
         // uncommitted and triggers rollback. A healthy local process may be
         // the restored previous release, so it cannot prove this install won.
         throw Error.nonZeroExit(exitCode)
+    }
+
+    static func installerEnvironment(
+        parentEnvironment: [String: String],
+        installPort: Int?,
+        pinnedVersion: String?
+    ) throws -> [String: String] {
+        // Deliberately do not inherit the parent environment. install.sh has
+        // authority-changing knobs for repositories, public keys, acceptance
+        // candidates, emergency rollback, paths, and launchd. Malibu supplies
+        // only the values this invocation owns, and never forwards parent
+        // tokens or dynamic-loader/shell configuration.
+        _ = parentEnvironment
+        var explicit = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": NSHomeDirectory(),
+            "TMPDIR": "/tmp",
+            "LC_ALL": "C",
+            "MACPROVIDER_NO_PROMPT": "1",
+        ]
+        if let installPort {
+            explicit["MACPROVIDER_PORT"] = String(installPort)
+        }
+        if let pinnedVersion {
+            guard let normalized = ProviderCLIVersion.strictNormalize(pinnedVersion) else {
+                throw Error.invalidPinnedVersion(pinnedVersion)
+            }
+            explicit["MACPROVIDER_VERSION"] = "v\(normalized)"
+        }
+        return try ProcessEnvironmentSanitizer.sanitized(
+            from: [:],
+            extraEnvironment: explicit
+        )
     }
 
     /// Reports whether an already-installed provider is locally healthy. This

@@ -54,6 +54,8 @@ test-dist:
 	bash scripts/test-coordinator-advertised-version-test.sh
 	bash scripts/test-release-tag-target.sh
 	bash scripts/test-release-security-posture.sh
+	bash scripts/test-malibu-bootstrap-bridge.sh
+	bash scripts/test-recover-malibu-publication.sh
 	bash scripts/test-acceptance-candidate-security.sh
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-release-toolchain.sh

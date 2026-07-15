@@ -336,6 +336,24 @@ jobs:
         working-directory: phase3-binary
         run: swift test --parallel
 
+      - name: Install reviewed XcodeGen artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
+
+      - name: Run Malibu app tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd phase3-binary/app
+          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          xcodebuild test \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Debug \
+            -destination 'platform=macOS'
+
       - name: Verify macOS upgrade rollback and manual process recovery
         run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
 

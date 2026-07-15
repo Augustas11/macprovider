@@ -13,6 +13,7 @@ tag=v1.2.3
 commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf 'cli archive\n' > "$work/phase3-binary-m4-${tag}.tar.gz"
 printf 'dmg payload\n' > "$work/Malibu-${tag}.dmg"
+printf 'legacy bootstrap appcast\n' > "$work/appcast.xml"
 printf 'compatibility artifact index\n' > "$work/compatibility-artifact-index.json"
 printf 'coordinator payload\n' > "$work/coordinator-linux-amd64"
 printf 'coordinator cli payload\n' > "$work/coordinator-cli-linux-amd64"
@@ -27,13 +28,14 @@ EOF
 python3 "$build" "$tag" "$commit" Augustas11/macprovider false \
   "$work/release-toolchain.json" "$work/release-provenance.json" \
   "$work/phase3-binary-m4-${tag}.tar.gz" "$work/Malibu-${tag}.dmg" \
+  "$work/appcast.xml" \
   "$work/compatibility-artifact-index.json" \
   "$work/coordinator-linux-amd64" "$work/coordinator-cli-linux-amd64" \
   "$work/gateway-linux-amd64" "$work/pearl-release.json" "$work/pearl-release.json.sig"
 (
   cd "$work"
   shasum -a 256 \
-    "phase3-binary-m4-${tag}.tar.gz" "Malibu-${tag}.dmg" compatibility-artifact-index.json \
+    "phase3-binary-m4-${tag}.tar.gz" "Malibu-${tag}.dmg" appcast.xml compatibility-artifact-index.json \
     coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64 \
     pearl-release.json pearl-release.json.sig release-provenance.json \
     > checksums.txt
@@ -50,6 +52,7 @@ root, tag, commit = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 names = [
     f"phase3-binary-m4-{tag}.tar.gz",
     f"Malibu-{tag}.dmg",
+    "appcast.xml",
     "compatibility-artifact-index.json",
     "coordinator-linux-amd64",
     "coordinator-cli-linux-amd64",
@@ -81,6 +84,7 @@ PY
 local_assets=(
   "$work/phase3-binary-m4-${tag}.tar.gz"
   "$work/Malibu-${tag}.dmg"
+  "$work/appcast.xml"
   "$work/compatibility-artifact-index.json"
   "$work/coordinator-linux-amd64"
   "$work/coordinator-cli-linux-amd64"
@@ -158,6 +162,7 @@ fi
 grep -q 'numeric release is still a draft' "$work/draft.out"
 
 python3 - "$work/publication-manifest.json" <<'PY'
+import hashlib
 import json
 import pathlib
 import re
@@ -170,9 +175,16 @@ assert manifest["title"] == "macprovider-cli v1.2.3"
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["body_sha256"])
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["publication_id"])
 assert manifest["assets"]["Malibu-v1.2.3.dmg"]["id"] == 502
-assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 503
-assert manifest["assets"]["coordinator-linux-amd64"]["id"] == 504
-assert manifest["assets"]["pearl-release.json.sig"]["id"] == 508
+assert manifest["assets"]["appcast.xml"]["id"] == 503
+assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 504
+assert manifest["assets"]["coordinator-linux-amd64"]["id"] == 505
+assert manifest["assets"]["pearl-release.json.sig"]["id"] == 509
+expected_publication = hashlib.sha256(json.dumps({
+    "appcast_sha256": manifest["assets"]["appcast.xml"]["sha256"],
+    "compatibility_artifact_index_sha256": manifest["assets"]["compatibility-artifact-index.json"]["sha256"],
+    "dmg_sha256": manifest["assets"]["Malibu-v1.2.3.dmg"]["sha256"],
+}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+assert manifest["publication_id"] == expected_publication
 PY
 
 for field in name body; do
