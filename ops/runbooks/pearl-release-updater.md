@@ -72,7 +72,7 @@ First deploy the #585 integration revision of #584's redesigned canary buyer
 exactly as reviewed, including its root-only `LoadCredential` files, safety
 observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
-`issue-585-integration-r2` at source commit `44d8baeb54c830a7afbdeb505ddfbd7a7bb0e681`;
+`issue-585-integration-r3` at source commit `8a168ea15a31f37e75f1ec03fb77476569bffa3d`;
 `--plan` fails on any SHA drift, missing credential, invalid two-provider
 expected-fleet document, absent reviewed enable gate, active emergency-disable
 sentinel, unexpected unit drop-in, stale systemd fragment, or changed
@@ -212,7 +212,7 @@ later lost.
 
 ```bash
 ~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
-KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.31
+KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.36
 ```
 
    Keep the prior provider live. The verifier proves the signed checksum
@@ -235,9 +235,19 @@ sudo test ! -e /etc/macprovider/canary-buyer.env
 systemctl show --property=LoadCredential canary-buyer.service
 ```
 
-   The result must be exactly `Result=success` and `ExecMainStatus=0`;
-   classified no-load statuses `20`/`21` and heartbeat delivery failure
-   (exit `3`) are rollout failures, not warnings.
+   A fleet already emitting direct v2 telemetry must return exactly
+   `Result=success` and `ExecMainStatus=0`. A legacy v1.8.30 fleet behind the
+   pre-bridge coordinator must instead fail closed with status `1` and only the
+   exact expected providers' `provider_signal_missing` reasons. That failure is
+   required evidence that the old coordinator cannot authorize the substitute;
+   it is not serving proof. After the updater activates the reviewed bridge,
+   the new coordinator may classify those same exact ID/model/version rows
+   `legacy_bridge`; r3 accepts that classification only as a substitute for the
+   missing direct signal while retaining every pool, routing, connection, and
+   heartbeat invariant. The updater requires that post-activation run to exit
+   `0` before it emits `provider_install_ready`. Any other reason, classified
+   no-load status `20`/`21`, or heartbeat delivery failure (exit `3`) aborts the
+   rollout.
 3. Before apply, preserve a protected `/poolz` snapshot containing every exact
    provider ID and admission/routing state plus `summary.ready` and
    `summary.free_slots`. Record an operator-approved ready-provider floor of at
@@ -287,7 +297,7 @@ sudo tail -Fn0 /var/lib/macprovider-pearl-updater/audit.jsonl | \
 
 ```bash
 curl -fsSL https://get.streamvc.live/install.sh | \
-  MACPROVIDER_VERSION=v1.8.31 MACPROVIDER_NO_PROMPT=1 bash
+  MACPROVIDER_VERSION=v1.8.36 MACPROVIDER_NO_PROMPT=1 bash
 ```
 
    The installer commits only after the bridge coordinator reports that exact

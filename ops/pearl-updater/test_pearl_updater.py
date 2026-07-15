@@ -1686,10 +1686,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 updater_module.sha256_file(source),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r2")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r3")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "44d8baeb54c830a7afbdeb505ddfbd7a7bb0e681",
+            "8a168ea15a31f37e75f1ec03fb77476569bffa3d",
         )
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_FILE_MODES,
