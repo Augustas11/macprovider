@@ -1,0 +1,50 @@
+{
+  "$id": "https://streamvc.live/schemas/updater-rollback-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "activation_checkpoints": {
+      "const": [
+        "owned_resources_removed",
+        "owned_resources_activated",
+        "watchdog_script_activated",
+        "provider_plist_activated",
+        "watchdog_plist_activated",
+        "binary_activated",
+        "malibu_app_activated"
+      ]
+    },
+    "metadata_version": {
+      "const": 1
+    },
+    "protocol": {
+      "const": "macprovider.compatibility-set-transaction.v1"
+    },
+    "rollback_order": {
+      "const": [
+        "release_resources",
+        "catalog",
+        "updater_rollback",
+        "watchdog",
+        "launchd",
+        "malibu_app",
+        "provider_cli"
+      ]
+    },
+    "rollback_scope": {
+      "const": "all_activated_local_members"
+    },
+    "schema_version": {
+      "const": "macprovider.compatibility-set-rollback-plan.v1"
+    }
+  },
+  "required": [
+    "activation_checkpoints",
+    "metadata_version",
+    "protocol",
+    "rollback_order",
+    "rollback_scope",
+    "schema_version"
+  ],
+  "type": "object"
+}

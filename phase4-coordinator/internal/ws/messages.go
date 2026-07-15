@@ -1,12 +1,14 @@
 package ws
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -35,6 +37,7 @@ type Hello struct {
 	CandidateCatalogSHA256 string          `json:"catalog_candidate_sha256,omitempty"`
 	CatalogSignerKeyID     string          `json:"catalog_signer_key_id,omitempty"`
 	CandidateRowIdentity   string          `json:"catalog_row_identity,omitempty"`
+	CompatibilitySetID     string          `json:"compatibility_set_id,omitempty"`
 	CredentialBootstrap    bool            `json:"credential_bootstrap,omitempty"`
 }
 
@@ -59,48 +62,57 @@ type HelloAck struct {
 	// the top-level `provider_token` YAML key (FR-C9.3) so the next
 	// reconnect carries Bearer. Note: top-level, NOT nested under
 	// `auth:` — codex audit on PR #44 caught the prior spec/code drift.
-	AssignedProviderToken  string `json:"assigned_provider_token,omitempty"`
-	PairOT                 string `json:"pair_ot,omitempty"`
-	ClaimURL               string `json:"claim_url,omitempty"`
-	CatalogCompatible      bool   `json:"catalog_compatible,omitempty"`
-	CatalogReleaseID       string `json:"catalog_release_id,omitempty"`
-	CatalogPolicyVersion   string `json:"catalog_policy_version,omitempty"`
-	CandidateCatalogSHA256 string `json:"catalog_candidate_sha256,omitempty"`
-	CatalogSignerKeyID     string `json:"catalog_signer_key_id,omitempty"`
+	AssignedProviderToken         string `json:"assigned_provider_token,omitempty"`
+	PairOT                        string `json:"pair_ot,omitempty"`
+	ClaimURL                      string `json:"claim_url,omitempty"`
+	CatalogCompatible             bool   `json:"catalog_compatible,omitempty"`
+	CatalogReleaseID              string `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion          string `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256        string `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID            string `json:"catalog_signer_key_id,omitempty"`
+	CompatibilityPolicy           string `json:"compatibility_policy,omitempty"`
+	AcceptedCompatibilitySetID    string `json:"accepted_compatibility_set_id,omitempty"`
+	RecommendedCompatibilitySetID string `json:"recommended_compatibility_set_id,omitempty"`
 }
 
 type AuthRequest struct {
-	Type                     string          `json:"type"`
-	Version                  int             `json:"version"`
-	Stage                    string          `json:"stage"`
-	AuthAttemptID            string          `json:"auth_attempt_id,omitempty"`
-	ProviderID               string          `json:"provider_id"`
-	Hostname                 string          `json:"hostname,omitempty"`
-	ModelID                  string          `json:"model_id,omitempty"`
-	ModelHash                string          `json:"model_hash,omitempty"`
-	ModelParamsB             float64         `json:"model_params_b,omitempty"`
-	RAMGB                    int             `json:"ram_gb,omitempty"`
-	MaxContextTokens         int             `json:"max_context_tokens,omitempty"`
-	MaxConcurrency           int             `json:"max_concurrency,omitempty"`
-	ThroughputTPSEstimate    float64         `json:"throughput_tps_estimate,omitempty"`
-	ModelLoadTimeMs          int64           `json:"model_load_time_ms,omitempty"`
-	BinaryVersion            string          `json:"binary_version,omitempty"`
-	EndpointURL              *string         `json:"endpoint_url,omitempty"`
-	ProviderECDHPublicKey    string          `json:"provider_ecdh_public_key,omitempty"`
-	ProviderReceiptPublicKey string          `json:"provider_receipt_public_key,omitempty"`
-	ProviderReceiptPubkey    []byte          `json:"-"`
-	Tier2Capabilities        Tier2Caps       `json:"tier2_capabilities,omitempty"`
-	AttestationToken         json.RawMessage `json:"attestation_token,omitempty"`
-	IdentitySignature        string          `json:"identity_signature,omitempty"`
-	IdentityTranscriptSHA256 string          `json:"identity_signature_transcript_sha256,omitempty"`
-	SupportedModels          []string        `json:"supported_models,omitempty"`
-	PublishesSupportedModels bool            `json:"publishes_supported_models,omitempty"`
-	CatalogReleaseID         string          `json:"catalog_release_id,omitempty"`
-	CatalogPolicyVersion     string          `json:"catalog_policy_version,omitempty"`
-	CandidateCatalogSHA256   string          `json:"catalog_candidate_sha256,omitempty"`
-	CatalogSignerKeyID       string          `json:"catalog_signer_key_id,omitempty"`
-	CandidateRowIdentity     string          `json:"catalog_row_identity,omitempty"`
-	CredentialBootstrap      bool            `json:"credential_bootstrap,omitempty"`
+	Type                           string          `json:"type"`
+	Version                        int             `json:"version"`
+	Stage                          string          `json:"stage"`
+	AuthAttemptID                  string          `json:"auth_attempt_id,omitempty"`
+	ProviderID                     string          `json:"provider_id"`
+	Hostname                       string          `json:"hostname,omitempty"`
+	ModelID                        string          `json:"model_id,omitempty"`
+	ModelHash                      string          `json:"model_hash,omitempty"`
+	ModelParamsB                   float64         `json:"model_params_b,omitempty"`
+	RAMGB                          int             `json:"ram_gb,omitempty"`
+	MaxContextTokens               int             `json:"max_context_tokens,omitempty"`
+	MaxConcurrency                 int             `json:"max_concurrency,omitempty"`
+	ThroughputTPSEstimate          float64         `json:"throughput_tps_estimate,omitempty"`
+	ModelLoadTimeMs                int64           `json:"model_load_time_ms,omitempty"`
+	BinaryVersion                  string          `json:"binary_version,omitempty"`
+	EndpointURL                    *string         `json:"endpoint_url,omitempty"`
+	ProviderECDHPublicKey          string          `json:"provider_ecdh_public_key,omitempty"`
+	ProviderReceiptPublicKey       string          `json:"provider_receipt_public_key,omitempty"`
+	ProviderReceiptPubkey          []byte          `json:"-"`
+	ProviderAdmissionPublicKey     string          `json:"provider_admission_public_key,omitempty"`
+	ProviderAdmissionPubkey        []byte          `json:"-"`
+	ProviderAdmissionNextPublicKey string          `json:"provider_admission_next_public_key,omitempty"`
+	ProviderAdmissionNextPubkey    []byte          `json:"-"`
+	ProviderAdmissionRecovery      bool            `json:"provider_admission_recovery,omitempty"`
+	Tier2Capabilities              Tier2Caps       `json:"tier2_capabilities,omitempty"`
+	AttestationToken               json.RawMessage `json:"attestation_token,omitempty"`
+	IdentitySignature              string          `json:"identity_signature,omitempty"`
+	IdentityTranscriptSHA256       string          `json:"identity_signature_transcript_sha256,omitempty"`
+	SupportedModels                []string        `json:"supported_models,omitempty"`
+	PublishesSupportedModels       bool            `json:"publishes_supported_models,omitempty"`
+	CatalogReleaseID               string          `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion           string          `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256         string          `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID             string          `json:"catalog_signer_key_id,omitempty"`
+	CandidateRowIdentity           string          `json:"catalog_row_identity,omitempty"`
+	CompatibilitySetID             string          `json:"compatibility_set_id,omitempty"`
+	CredentialBootstrap            bool            `json:"credential_bootstrap,omitempty"`
 }
 
 type Spec010Presence struct {
@@ -117,18 +129,20 @@ type Tier2Caps struct {
 }
 
 type AuthChallenge struct {
-	Type                     string   `json:"type"`
-	Version                  int      `json:"version"`
-	AuthAttemptID            string   `json:"auth_attempt_id"`
-	AssignedID               string   `json:"assigned_id"`
-	AttestationChallenge     string   `json:"attestation_challenge"`
-	AttestationFormats       []string `json:"attestation_formats"`
-	CoordinatorECDHPublicKey string   `json:"coordinator_ecdh_public_key"`
-	SelectedAEADSuite        string   `json:"selected_aead_suite"`
-	SelectedAEAD             string   `json:"selected_aead,omitempty"`
-	KeyID                    string   `json:"key_id,omitempty"`
-	ExpiresAt                string   `json:"expires_at"`
-	BootstrapIdentityPubkey  string   `json:"bootstrap_identity_public_key,omitempty"`
+	Type                        string   `json:"type"`
+	Version                     int      `json:"version"`
+	AuthAttemptID               string   `json:"auth_attempt_id"`
+	AssignedID                  string   `json:"assigned_id"`
+	AttestationChallenge        string   `json:"attestation_challenge"`
+	AttestationFormats          []string `json:"attestation_formats"`
+	CoordinatorECDHPublicKey    string   `json:"coordinator_ecdh_public_key"`
+	SelectedAEADSuite           string   `json:"selected_aead_suite"`
+	SelectedAEAD                string   `json:"selected_aead,omitempty"`
+	KeyID                       string   `json:"key_id,omitempty"`
+	ExpiresAt                   string   `json:"expires_at"`
+	BootstrapIdentityPubkey     string   `json:"bootstrap_identity_public_key,omitempty"`
+	AdmissionIdentityPubkey     string   `json:"admission_identity_public_key,omitempty"`
+	AdmissionIdentityGeneration int      `json:"admission_identity_generation,omitempty"`
 }
 
 type AuthResponse struct {
@@ -146,14 +160,22 @@ type AuthResponse struct {
 	// SPEC-003 v0.8 FR-C9.2 — populated only on proof-stage acceptance
 	// when a tokenless provisional provider was just self-minted on this
 	// connect. Never present on rejection-shaped responses.
-	AssignedProviderToken  string `json:"assigned_provider_token,omitempty"`
-	PairOT                 string `json:"pair_ot,omitempty"`
-	ClaimURL               string `json:"claim_url,omitempty"`
-	CatalogCompatible      bool   `json:"catalog_compatible,omitempty"`
-	CatalogReleaseID       string `json:"catalog_release_id,omitempty"`
-	CatalogPolicyVersion   string `json:"catalog_policy_version,omitempty"`
-	CandidateCatalogSHA256 string `json:"catalog_candidate_sha256,omitempty"`
-	CatalogSignerKeyID     string `json:"catalog_signer_key_id,omitempty"`
+	AssignedProviderToken               string `json:"assigned_provider_token,omitempty"`
+	PairOT                              string `json:"pair_ot,omitempty"`
+	ClaimURL                            string `json:"claim_url,omitempty"`
+	CatalogCompatible                   bool   `json:"catalog_compatible,omitempty"`
+	CatalogReleaseID                    string `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion                string `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256              string `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID                  string `json:"catalog_signer_key_id,omitempty"`
+	IdentityAdmissionMode               string `json:"identity_admission_mode,omitempty"`
+	IdentityAdmissionKeyRole            string `json:"identity_admission_key_role,omitempty"`
+	IdentityGeneration                  int    `json:"identity_generation,omitempty"`
+	AdmissionIdentityPubkey             string `json:"admission_identity_public_key,omitempty"`
+	AdmissionIdentityPreviousValidUntil string `json:"admission_identity_previous_valid_until,omitempty"`
+	CompatibilityPolicy                 string `json:"compatibility_policy,omitempty"`
+	AcceptedCompatibilitySetID          string `json:"accepted_compatibility_set_id,omitempty"`
+	RecommendedCompatibilitySetID       string `json:"recommended_compatibility_set_id,omitempty"`
 }
 
 type OwnershipEvent struct {
@@ -249,23 +271,24 @@ type AuthModelHashSession struct {
 }
 
 type Heartbeat struct {
-	Type                    string           `json:"type"`
-	Status                  string           `json:"status"`
-	ModelID                 string           `json:"model_id"`
-	ModelParamsB            float64          `json:"model_params_b"`
-	RAMGB                   int              `json:"ram_gb"`
-	MaxContextTokens        int              `json:"max_context_tokens"`
-	MaxConcurrency          int              `json:"max_concurrency"`
-	SlotsFree               int              `json:"slots_free"`
-	SlotsTotal              int              `json:"slots_total"`
-	ThroughputTPSEstimate   float64          `json:"throughput_tps_estimate"`
-	RequestsServedSinceLast int              `json:"requests_served_since_last"`
-	AvgLatencyMSSinceLast   float64          `json:"avg_latency_ms_since_last"`
-	ThroughputTPSSinceLast  float64          `json:"throughput_tps_since_last"`
-	ModelHash               string           `json:"model_hash,omitempty"`
-	Loading                 bool             `json:"loading,omitempty"`
-	LastAutoupdateEvent     json.RawMessage  `json:"last_autoupdate_event,omitempty"`
-	HardwareSummary         *HardwareSummary `json:"hardware_summary,omitempty"`
+	Type                    string                        `json:"type"`
+	Status                  string                        `json:"status"`
+	ModelID                 string                        `json:"model_id"`
+	ModelParamsB            float64                       `json:"model_params_b"`
+	RAMGB                   int                           `json:"ram_gb"`
+	MaxContextTokens        int                           `json:"max_context_tokens"`
+	MaxConcurrency          int                           `json:"max_concurrency"`
+	SlotsFree               int                           `json:"slots_free"`
+	SlotsTotal              int                           `json:"slots_total"`
+	ThroughputTPSEstimate   float64                       `json:"throughput_tps_estimate"`
+	RequestsServedSinceLast int                           `json:"requests_served_since_last"`
+	AvgLatencyMSSinceLast   float64                       `json:"avg_latency_ms_since_last"`
+	ThroughputTPSSinceLast  float64                       `json:"throughput_tps_since_last"`
+	ModelHash               string                        `json:"model_hash,omitempty"`
+	Loading                 bool                          `json:"loading,omitempty"`
+	LastAutoupdateEvent     json.RawMessage               `json:"last_autoupdate_event,omitempty"`
+	HardwareSummary         *HardwareSummary              `json:"hardware_summary,omitempty"`
+	SafetyTelemetry         *pool.ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
 }
 
 type HeartbeatPresence struct {
@@ -520,6 +543,7 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if field, err := parseCatalogAdmissionMetadata(raw, &h.CatalogReleaseID, &h.CatalogPolicyVersion, &h.CandidateCatalogSHA256, &h.CatalogSignerKeyID, &h.CandidateRowIdentity); err != nil {
 		return Hello{}, field, err
 	}
+	parseOptionalCompatibilitySetID(raw, &h.CompatibilitySetID)
 	return h, "", nil
 }
 
@@ -644,6 +668,11 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 			return AuthRequest{}, Spec010Presence{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
 		}
 	}
+	if v, ok := raw["provider_admission_recovery"]; ok {
+		if string(v) == "null" || json.Unmarshal(v, &req.ProviderAdmissionRecovery) != nil {
+			return AuthRequest{}, Spec010Presence{}, "provider_admission_recovery", fmt.Errorf("provider_admission_recovery must be a bool")
+		}
+	}
 	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
@@ -659,6 +688,32 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 			return AuthRequest{}, Spec010Presence{}, "provider_receipt_public_key", fmt.Errorf("provider_receipt_public_key must decode to 32 bytes")
 		}
 		req.ProviderReceiptPubkey = append([]byte(nil), pubkey...)
+	}
+	if v, ok := raw["provider_admission_public_key"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ProviderAdmissionPublicKey); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "provider_admission_public_key", err
+		}
+		pubkey, err := base64.StdEncoding.DecodeString(req.ProviderAdmissionPublicKey)
+		if err != nil {
+			return AuthRequest{}, Spec010Presence{}, "provider_admission_public_key", err
+		}
+		if len(pubkey) != ed25519.PublicKeySize {
+			return AuthRequest{}, Spec010Presence{}, "provider_admission_public_key", fmt.Errorf("provider_admission_public_key must decode to %d bytes", ed25519.PublicKeySize)
+		}
+		req.ProviderAdmissionPubkey = append([]byte(nil), pubkey...)
+	}
+	if v, ok := raw["provider_admission_next_public_key"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ProviderAdmissionNextPublicKey); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "provider_admission_next_public_key", err
+		}
+		pubkey, err := base64.StdEncoding.DecodeString(req.ProviderAdmissionNextPublicKey)
+		if err != nil {
+			return AuthRequest{}, Spec010Presence{}, "provider_admission_next_public_key", err
+		}
+		if len(pubkey) != ed25519.PublicKeySize {
+			return AuthRequest{}, Spec010Presence{}, "provider_admission_next_public_key", fmt.Errorf("provider_admission_next_public_key must decode to %d bytes", ed25519.PublicKeySize)
+		}
+		req.ProviderAdmissionNextPubkey = append([]byte(nil), pubkey...)
 	}
 	capsRaw, ok := raw["tier2_capabilities"]
 	if !ok {
@@ -724,6 +779,7 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if field, err := parseCatalogAdmissionMetadata(raw, &req.CatalogReleaseID, &req.CatalogPolicyVersion, &req.CandidateCatalogSHA256, &req.CatalogSignerKeyID, &req.CandidateRowIdentity); err != nil {
 		return AuthRequest{}, presence, field, err
 	}
+	parseOptionalCompatibilitySetID(raw, &req.CompatibilitySetID)
 	return req, presence, "", nil
 }
 
@@ -812,7 +868,24 @@ func (r AuthRequest) Hello() Hello {
 		CandidateCatalogSHA256: r.CandidateCatalogSHA256,
 		CatalogSignerKeyID:     r.CatalogSignerKeyID,
 		CandidateRowIdentity:   r.CandidateRowIdentity,
+		CompatibilitySetID:     r.CompatibilitySetID,
 		CredentialBootstrap:    r.CredentialBootstrap,
+	}
+}
+
+// parseOptionalCompatibilitySetID extracts the field without changing legacy
+// parsing behavior when the coordinator policy is unconfigured. Configured
+// admission performs the required syntax and length validation in Server,
+// where missing, non-string, malformed, and unaccepted IDs receive stable
+// policy-specific rejection codes.
+func parseOptionalCompatibilitySetID(raw map[string]json.RawMessage, out *string) {
+	value, ok := raw["compatibility_set_id"]
+	if !ok || string(value) == "null" {
+		return
+	}
+	var parsed string
+	if json.Unmarshal(value, &parsed) == nil {
+		*out = parsed
 	}
 }
 
@@ -878,6 +951,15 @@ func containsControlChar(s string) bool {
 		}
 	}
 	return false
+}
+
+func isLowerHex(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return s != ""
 }
 
 func requireInt(raw map[string]json.RawMessage, field string, out *int) *fieldError {
@@ -1020,6 +1102,86 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 				hb.HardwareSummary = &summary
 			}
 		}
+	}
+	if v, ok := raw["safety_telemetry"]; ok && string(v) != "null" {
+		var telemetryRaw map[string]json.RawMessage
+		if err := json.Unmarshal(v, &telemetryRaw); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry", err
+		}
+		for _, required := range []string{
+			"schema_version", "provider_id", "model_id", "model_loaded", "runtime_state",
+			"hardware_tier", "requests_in_flight", "requests_queued", "memory_rss_mb",
+			"memory_capacity_mb", "memory_pressure", "thermal_state", "thermally_throttled",
+			"restart_count", "uptime_s", "coordinator_connected", "observation_id",
+			"observed_at", "valid_for_ms",
+		} {
+			if value, exists := telemetryRaw[required]; !exists || string(value) == "null" {
+				return Heartbeat{}, presence, "safety_telemetry." + required, fmt.Errorf("missing safety telemetry field %s", required)
+			}
+		}
+		var schemaVersion int
+		if err := json.Unmarshal(telemetryRaw["schema_version"], &schemaVersion); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry.schema_version", err
+		}
+		if schemaVersion == 2 {
+			for _, required := range []string{
+				"coordinator_session_id", "cpu_utilization_pct", "gpu_utilization_pct", "gpu_utilization_scope", "power_source",
+				"binary_version", "compatibility_set_id", "model_hash",
+			} {
+				if _, exists := telemetryRaw[required]; !exists {
+					return Heartbeat{}, presence, "safety_telemetry." + required, fmt.Errorf("missing safety telemetry field %s", required)
+				}
+			}
+		}
+		var telemetry pool.ProviderSafetyTelemetry
+		if err := json.Unmarshal(v, &telemetry); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry", err
+		}
+		if (telemetry.SchemaVersion != 1 && telemetry.SchemaVersion != 2) || telemetry.ProviderID == "" || telemetry.ModelID != hb.ModelID ||
+			telemetry.RuntimeState != hb.Status || telemetry.HardwareTier == "" ||
+			len(telemetry.ProviderID) > 256 || len(telemetry.ModelID) > maxHandshakeModelIDBytes ||
+			len(telemetry.HardwareTier) > 128 || len(telemetry.ObservationID) > 128 || len(telemetry.ObservedAt) > 64 ||
+			containsControlChar(telemetry.ProviderID) || containsControlChar(telemetry.ModelID) ||
+			containsControlChar(telemetry.HardwareTier) || containsControlChar(telemetry.ObservationID) ||
+			telemetry.RequestsInFlight < 0 || telemetry.RequestsQueued < 0 ||
+			telemetry.MemoryRSSMB < 0 || telemetry.MemoryCapacityMB < 1 ||
+			telemetry.RestartCount < 0 || telemetry.UptimeS < 0 ||
+			telemetry.ObservationID == "" ||
+			telemetry.ValidForMS < 1 || telemetry.ValidForMS > 300_000 {
+			return Heartbeat{}, presence, "safety_telemetry", fmt.Errorf("invalid safety telemetry")
+		}
+		if telemetry.SchemaVersion == 2 {
+			if telemetry.CoordinatorSessionID == "" || telemetry.GPUUtilizationScope != "host" ||
+				telemetry.BinaryVersion == "" || telemetry.CompatibilitySetID == "" ||
+				telemetry.ModelHash == "" || len(telemetry.CoordinatorSessionID) > 256 ||
+				len(telemetry.BinaryVersion) > maxHandshakeBinaryVersionBytes || len(telemetry.CompatibilitySetID) > 1024 ||
+				len(telemetry.ModelHash) != 64 || containsControlChar(telemetry.CoordinatorSessionID) ||
+				containsControlChar(telemetry.BinaryVersion) || containsControlChar(telemetry.CompatibilitySetID) ||
+				!isLowerHex(telemetry.ModelHash) {
+				return Heartbeat{}, presence, "safety_telemetry", fmt.Errorf("invalid version 2 safety telemetry identity")
+			}
+			for field, value := range map[string]*float64{
+				"cpu_utilization_pct": telemetry.CPUUtilizationPct,
+				"gpu_utilization_pct": telemetry.GPUUtilizationPct,
+			} {
+				if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 || *value > 100) {
+					return Heartbeat{}, presence, "safety_telemetry." + field, fmt.Errorf("invalid utilization")
+				}
+			}
+			if telemetry.PowerSource != "external" && telemetry.PowerSource != "battery" && telemetry.PowerSource != "unknown" {
+				return Heartbeat{}, presence, "safety_telemetry.power_source", fmt.Errorf("invalid power source")
+			}
+		}
+		if telemetry.MemoryPressure != "normal" && telemetry.MemoryPressure != "warning" && telemetry.MemoryPressure != "critical" {
+			return Heartbeat{}, presence, "safety_telemetry.memory_pressure", fmt.Errorf("invalid memory pressure")
+		}
+		if telemetry.ThermalState != "nominal" && telemetry.ThermalState != "fair" && telemetry.ThermalState != "serious" && telemetry.ThermalState != "critical" {
+			return Heartbeat{}, presence, "safety_telemetry.thermal_state", fmt.Errorf("invalid thermal state")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, telemetry.ObservedAt); err != nil {
+			return Heartbeat{}, presence, "safety_telemetry.observed_at", err
+		}
+		hb.SafetyTelemetry = &telemetry
 	}
 	return hb, presence, "", nil
 }

@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 const (
 	maxProviderAuthPolicyTTL        = 30 * 24 * time.Hour
 	breakGlassProviderAuthPolicyTTL = 7 * 24 * time.Hour
+	maxAdmissionIdentityRecoveryTTL = 24 * time.Hour
 )
 
 var (
@@ -380,6 +383,258 @@ func (s *Server) handleProviderAuthPolicyExemptApprove(w http.ResponseWriter, r 
 		"status":           "committed",
 		"signature_exempt": true,
 	})
+}
+
+func (s *Server) handleAdmissionIdentityRecoveryRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.providerAuthPolicyDualControlAvailable() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "two distinct operator keys are required", "code": "dual_control_unavailable"}})
+		return
+	}
+	requestedBy, ok := s.authorizedProviderAuthPolicyOperator(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "unauthorized", "code": "invalid_operator_token"}})
+		return
+	}
+	if s.admissionIdentityRecoveryAdmin == nil {
+		writeAuthPolicyError(w, errAuthPolicyAdminUnavailable)
+		return
+	}
+	var body struct {
+		ProviderID               string `json:"provider_id"`
+		CandidatePublicKeySHA256 string `json:"candidate_public_key_sha256"`
+		RequestedBy              string `json:"requested_by"`
+		RequestedUntil           string `json:"requested_until"`
+		Reason                   string `json:"reason"`
+		IncidentID               string `json:"incident_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid json", "code": "invalid_request"}})
+		return
+	}
+	body.ProviderID = strings.TrimSpace(body.ProviderID)
+	body.CandidatePublicKeySHA256 = strings.ToLower(strings.TrimSpace(body.CandidatePublicKeySHA256))
+	body.RequestedBy = strings.TrimSpace(body.RequestedBy)
+	body.Reason = strings.TrimSpace(body.Reason)
+	body.IncidentID = strings.TrimSpace(body.IncidentID)
+	if body.RequestedBy != "" && body.RequestedBy != requestedBy {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{"message": "requested_by must match authenticated operator", "code": "operator_actor_mismatch"}})
+		return
+	}
+	requestedUntil, err := time.Parse(time.RFC3339, strings.TrimSpace(body.RequestedUntil))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "requested_until must be RFC3339", "code": "invalid_request"}})
+		return
+	}
+	requestedUntil = requestedUntil.UTC()
+	selection := s.durableIdentitySignatureSelection(r.Context(), AuthRequest{ProviderID: body.ProviderID})
+	if !selection.Found || selection.Blocked || len(selection.ActivePubkey) == 0 {
+		writeAuthPolicyError(w, errPendingExemptionNotFound)
+		return
+	}
+	currentDigest := sha256.Sum256(selection.ActivePubkey)
+	expectedCurrentPublicKeySHA256 := hex.EncodeToString(currentDigest[:])
+	if err := s.validateAdmissionIdentityRecoveryRequest(
+		r, body.ProviderID, body.CandidatePublicKeySHA256,
+		expectedCurrentPublicKeySHA256, selection.Generation,
+		requestedBy, requestedUntil, body.Reason, body.IncidentID,
+	); err != nil {
+		writeAuthPolicyError(w, err)
+		return
+	}
+	pendingID := s.newUUID()
+	if _, err := uuid.Parse(pendingID); err != nil {
+		writeAuthPolicyError(w, errors.New("generated pending_id is invalid"))
+		return
+	}
+	authorization := AdmissionIdentityRecoveryAuthorization{
+		PendingID:                      pendingID,
+		ProviderID:                     body.ProviderID,
+		CandidatePublicKeySHA256:       body.CandidatePublicKeySHA256,
+		ExpectedCurrentPublicKeySHA256: expectedCurrentPublicKeySHA256,
+		ExpectedGeneration:             selection.Generation,
+		RequestedBy:                    requestedBy,
+		RequestedUntil:                 requestedUntil,
+		Reason:                         body.Reason,
+		IncidentID:                     body.IncidentID,
+	}
+	canonical, err := s.admissionIdentityRecoveryAdmin.RequestAdmissionIdentityRecovery(r.Context(), authorization, s.now())
+	if err != nil {
+		writeAuthPolicyError(w, err)
+		return
+	}
+	authorization = canonical
+	s.log.Warn().
+		Str("admin_action", "admission_identity_recovery_requested").
+		Str("provider_id", authorization.ProviderID).
+		Str("pending_id", authorization.PendingID).
+		Str("actor", requestedBy).
+		Str("candidate_public_key_sha256", authorization.CandidatePublicKeySHA256).
+		Str("expected_current_public_key_sha256", authorization.ExpectedCurrentPublicKeySHA256).
+		Int("expected_generation", authorization.ExpectedGeneration).
+		Str("incident_id", authorization.IncidentID).
+		Time("requested_until", authorization.RequestedUntil).
+		Msg("admission identity recovery requested")
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"pending_id":                         authorization.PendingID,
+		"provider_id":                        authorization.ProviderID,
+		"candidate_public_key_sha256":        authorization.CandidatePublicKeySHA256,
+		"expected_current_public_key_sha256": authorization.ExpectedCurrentPublicKeySHA256,
+		"expected_generation":                authorization.ExpectedGeneration,
+		"requested_by":                       authorization.RequestedBy,
+		"requested_until":                    authorization.RequestedUntil.Format(time.RFC3339),
+		"incident_id":                        authorization.IncidentID,
+		"status":                             "pending",
+	})
+}
+
+func (s *Server) handleAdmissionIdentityRecoveryApprove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.providerAuthPolicyDualControlAvailable() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "two distinct operator keys are required", "code": "dual_control_unavailable"}})
+		return
+	}
+	approvedBy, ok := s.authorizedProviderAuthPolicyOperator(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "unauthorized", "code": "invalid_operator_token"}})
+		return
+	}
+	if s.admissionIdentityRecoveryAdmin == nil {
+		writeAuthPolicyError(w, errAuthPolicyAdminUnavailable)
+		return
+	}
+	pendingID := strings.TrimPrefix(r.URL.Path, "/admin/provider-admission-identity/recover/")
+	pendingID = strings.TrimSuffix(pendingID, "/approve")
+	if pendingID == "" || !strings.HasSuffix(r.URL.Path, "/approve") {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "admin path not found", "code": "not_found"}})
+		return
+	}
+	if _, err := uuid.Parse(pendingID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "pending_id must be UUID", "code": "invalid_request"}})
+		return
+	}
+	var body struct {
+		ApprovedBy string `json:"approved_by"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid json", "code": "invalid_request"}})
+		return
+	}
+	body.ApprovedBy = strings.TrimSpace(body.ApprovedBy)
+	if body.ApprovedBy != "" && body.ApprovedBy != approvedBy {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{"message": "approved_by must match authenticated operator", "code": "operator_actor_mismatch"}})
+		return
+	}
+	authorization, err := s.admissionIdentityRecoveryAdmin.ApproveAdmissionIdentityRecovery(r.Context(), pendingID, approvedBy, s.now())
+	if err != nil {
+		writeAuthPolicyError(w, err)
+		return
+	}
+	s.log.Warn().
+		Str("admin_action", "admission_identity_recovery_approved").
+		Str("provider_id", authorization.ProviderID).
+		Str("pending_id", authorization.PendingID).
+		Str("actor", approvedBy).
+		Str("requested_by", authorization.RequestedBy).
+		Str("candidate_public_key_sha256", authorization.CandidatePublicKeySHA256).
+		Str("expected_current_public_key_sha256", authorization.ExpectedCurrentPublicKeySHA256).
+		Int("expected_generation", authorization.ExpectedGeneration).
+		Str("incident_id", authorization.IncidentID).
+		Time("requested_until", authorization.RequestedUntil).
+		Msg("admission identity recovery approved")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pending_id":                         authorization.PendingID,
+		"provider_id":                        authorization.ProviderID,
+		"candidate_public_key_sha256":        authorization.CandidatePublicKeySHA256,
+		"expected_current_public_key_sha256": authorization.ExpectedCurrentPublicKeySHA256,
+		"expected_generation":                authorization.ExpectedGeneration,
+		"requested_by":                       authorization.RequestedBy,
+		"approved_by":                        authorization.ApprovedBy,
+		"requested_until":                    authorization.RequestedUntil.Format(time.RFC3339),
+		"incident_id":                        authorization.IncidentID,
+		"status":                             "approved",
+		"one_shot":                           true,
+	})
+}
+
+func (s *Server) validateAdmissionIdentityRecoveryRequest(
+	r *http.Request,
+	providerID, candidateDigest, currentDigest string,
+	expectedGeneration int,
+	requestedBy string,
+	requestedUntil time.Time,
+	reason, incidentID string,
+) error {
+	if providerID == "" || !s.providerIDExistsForAuthPolicy(r, providerID) {
+		return errPendingExemptionNotFound
+	}
+	if !validSHA256Hex(candidateDigest) || !validSHA256Hex(currentDigest) {
+		return errors.New("public key digests must be lowercase SHA-256 hex")
+	}
+	if candidateDigest == currentDigest {
+		return errors.New("candidate key must differ from expected current key")
+	}
+	if expectedGeneration < 1 {
+		return errors.New("expected_generation must be positive")
+	}
+	if !validOperatorActor(requestedBy) {
+		return errors.New("requested_by must use operator:<admin_id>")
+	}
+	if reason == "" {
+		return errors.New("reason is required")
+	}
+	if incidentID == "" {
+		return errors.New("incident_id is required")
+	}
+	now := s.now()
+	if !requestedUntil.After(now) {
+		return errors.New("requested_until must be in the future")
+	}
+	if requestedUntil.Sub(now) > maxAdmissionIdentityRecoveryTTL {
+		return errors.New("requested_until exceeds 24 hour ceiling")
+	}
+	return nil
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) providerAuthPolicyDualControlAvailable() bool {
+	if len(s.cfg.Auth.OperatorKeys) < 2 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(s.cfg.Auth.OperatorKeys))
+	for actor, secret := range s.cfg.Auth.OperatorKeys {
+		if !validOperatorActor(normalizedOperatorActor(actor)) {
+			return false
+		}
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			return false
+		}
+		if _, exists := seen[secret]; exists {
+			return false
+		}
+		seen[secret] = struct{}{}
+	}
+	return true
 }
 
 func (s *Server) validateProviderAuthPolicyRequest(r *http.Request, providerID, requestedBy string, requestedUntil time.Time, reason, incidentID string) error {

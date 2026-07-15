@@ -7,8 +7,8 @@ import Foundation
 // AUDIT R2 CODE H1 fix: the read loop no longer runs on the actor. Previously
 // `Task { await self.readLoop(...) }` was actor-isolated, so a blocking
 // `Darwin.read` held the actor and starved every other call (`send`, `close`).
-// The typical failure was Quit-and-Uninstall — the shutdown_request send would
-// queue behind the blocked read, and NSApp.terminate never fired.
+// The typical failure was launchd handoff — the bootstrap-child shutdown frame
+// would queue behind the blocked read and the handoff could not complete.
 //
 // The new design: reads happen on a detached background task that yields
 // decoded frames directly through the actor-independent

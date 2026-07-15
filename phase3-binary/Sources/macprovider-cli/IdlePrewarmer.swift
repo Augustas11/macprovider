@@ -44,6 +44,14 @@ enum PowerSourceState: Sendable, Equatable {
     case unknown
 
     var isBatteryOnly: Bool { self == .battery }
+
+    var wireValue: String {
+        switch self {
+        case .battery: "battery"
+        case .external: "external"
+        case .unknown: "unknown"
+        }
+    }
 }
 
 protocol PowerSourceReporting: Sendable {
@@ -52,10 +60,12 @@ protocol PowerSourceReporting: Sendable {
 
 struct SystemPowerSourceReporter: PowerSourceReporting {
     func currentPowerSourceState() -> PowerSourceState {
-        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef],
-              !sources.isEmpty
-        else {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return .unknown }
+        if let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String? {
+            if type == kIOPMBatteryPowerKey { return .battery }
+            if type == kIOPMACPowerKey || type == kIOPMUPSPowerKey { return .external }
+        }
+        guard let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else {
             return .unknown
         }
         var sawExternal = false

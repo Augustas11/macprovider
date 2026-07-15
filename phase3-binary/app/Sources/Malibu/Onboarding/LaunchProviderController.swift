@@ -15,7 +15,7 @@ final class LaunchProviderController: ObservableObject {
         case idle
         case runningCLIInstall
         case startingAgent
-        case importingProviderIdentity
+        case importingProviderCredential
         case live(model: String, tier: TrustTier)
         case failed(stage: String, retryable: Bool, message: String)
     }
@@ -171,7 +171,7 @@ final class LaunchProviderController: ObservableObject {
                 throw launchdMonitorUnavailableError(message: message)
             }
             if let pendingImportError {
-                stage = .importingProviderIdentity
+                stage = .importingProviderCredential
                 do {
                     try await retryPendingImportAfterProviderStart(initialError: pendingImportError)
                 } catch {
@@ -382,11 +382,19 @@ struct StartupState: Equatable {
     static func applyMigrationDecision(
         _ decision: MigrationDecision,
         paths: ProviderPaths = .current,
-        now: Date = Date()
+        now: Date = Date(),
+        importCredentialIntoCLI: (@Sendable (URL) async throws -> Void)? = nil
     ) async throws -> MigrationResult {
         switch decision {
         case .importExisting:
-            try await ProviderConfig.importExistingCLIConfig(paths: paths)
+            if let importCredentialIntoCLI {
+                try await ProviderConfig.importExistingCLIConfig(
+                    paths: paths,
+                    importCredentialIntoCLI: importCredentialIntoCLI
+                )
+            } else {
+                try await ProviderConfig.importExistingCLIConfig(paths: paths)
+            }
             let state = await StartupState.detect(paths: paths)
             return MigrationResult(route: state.route(), backupPath: nil)
         case .startFresh:

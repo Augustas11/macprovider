@@ -25,10 +25,13 @@
  *     --json-out ./artifacts \
  *     --pushgateway http://localhost:9091
  *
- * Config (env, all optional except a token):
- *   MACPROVIDER_BUYER_TOKEN | MALIBU_API_KEY   buyer bearer token (required)
+ * Config (env; safety inputs are required and fail closed):
+ *   MACPROVIDER_BUYER_TOKEN | MALIBU_API_KEY   buyer bearer token (liveness)
  *   CANARY_BASE            gateway base URL (default https://api.streamvc.live)
- *   CANARY_MODELS         comma list of model ids (default: all from /v1/status)
+ *   CANARY_MODELS         exact expected model ids (qualification: exactly one)
+ *   CANARY_POOLZ_URL      authenticated coordinator /poolz URL
+ *   CANARY_OPERATOR_TOKEN operator bearer token
+ *   CANARY_EXPECTED_FLEET_FILE exact provider/model inventory JSON
  *   CANARY_TTFT_SAMPLES   short-request samples per model (default 12)
  *   CANARY_TPS_SAMPLES    longer-request samples per model (default 3)
  *   CANARY_TPS_MAX_TOKENS decode window for TPS samples (default 128)
@@ -39,8 +42,25 @@
 import net from 'node:net';
 import dns from 'node:dns/promises';
 import { webcrypto } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import {
+  RunBudget,
+  expectedFleetReasons,
+  findBaseline,
+  gatewayInvariantReasons,
+  gatewaySnapshot,
+  performanceRegressionReasons,
+  poolzInvariantReasons,
+  poolzSnapshot,
+  providerSignalReasons,
+  providerSignalSnapshot,
+  responseIdentityReasons,
+  recoverySoakReasons,
+  qualificationIsolationReasons,
+  validateBaselineDocument,
+  validateExpectedFleetDocument,
+} from './safety.mjs';
 
 // `crypto` is a global on Node 20+ / browsers, but NOT on Node 18 (where it's
 // gated behind a flag). Fall back to node:crypto's webcrypto so the probe runs
@@ -48,16 +68,29 @@ import { fileURLToPath } from 'node:url';
 const crypto = globalThis.crypto ?? webcrypto;
 
 const args = parseArgs(process.argv.slice(2));
+const selectedMode = args.mode || env('CANARY_MODE') || 'liveness';
+const isQualification = selectedMode === 'qualification';
+const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
+const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
+const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
+const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
 
 const CONFIG = {
+  mode: selectedMode,
   base: (env('CANARY_BASE') || 'https://api.streamvc.live').replace(/\/$/, ''),
+  isolatedProviderBase: env('CANARY_ISOLATED_PROVIDER_BASE').replace(/\/$/, ''),
+  isolatedProviderID: env('CANARY_ISOLATED_PROVIDER_ID'),
   token: env('MACPROVIDER_BUYER_TOKEN') || env('MALIBU_API_KEY') || '',
+  operatorToken: env('CANARY_OPERATOR_TOKEN') || '',
+  poolzURL: env('CANARY_POOLZ_URL'),
+  baselineFile: env('CANARY_BASELINE_FILE'),
+  expectedFleetFile: env('CANARY_EXPECTED_FLEET_FILE'),
   models: (env('CANARY_MODELS') || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-  ttftSamples: intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20),
-  tpsSamples: intEnv('CANARY_TPS_SAMPLES', 3, 1, 10),
+  ttftSamples: isQualification ? configuredTTFTSamples : 1,
+  tpsSamples: isQualification ? configuredTPSSamples : 0,
   tpsMaxTokens: intEnv('CANARY_TPS_MAX_TOKENS', 128, 1, 512),
   intervalMs: intEnv('CANARY_INTERVAL_MS', 1500, 1, 10000),
   reqTimeoutMs: intEnv('CANARY_REQ_TIMEOUT_MS', 45000, 1000, 120000),
@@ -65,12 +98,28 @@ const CONFIG = {
   maxTtftP95Ms: numberEnv('CANARY_MAX_TTFT_P95_MS', 7000),
   minDecodeTpsP50: numberEnv('CANARY_MIN_DECODE_TPS_P50', 15),
   minCachedPromptRatio: numberEnv('CANARY_MIN_CACHED_PROMPT_RATIO', 0.1),
+  minReadyProviders: intEnv('CANARY_MIN_READY_PROVIDERS', 2, 1, 100),
+  expectedProviderCount: 2,
+  maxRequestsPerProvider: intEnv('CANARY_MAX_REQUESTS_PER_PROVIDER', isQualification ? 17 : 4, 1, 100),
+  maxCompletionTokensPerProvider: intEnv('CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER', isQualification ? 512 : 32, 1, 4096),
+  maxRunDurationMs: intEnv('CANARY_MAX_RUN_DURATION_MS', isQualification ? 300000 : 90000, 10000, 900000),
+  recoverySoakSeconds: intEnv('CANARY_RECOVERY_SOAK_SECONDS', isQualification ? 60 : 45, 2, 300),
+  recoveryPollMs: intEnv('CANARY_RECOVERY_POLL_MS', 7000, 6000, 30000),
+  safetyPollMs: intEnv('CANARY_SAFETY_POLL_MS', 2000, 500, 5000),
+  safetyObserverTimeoutMs: intEnv('CANARY_SAFETY_OBSERVER_TIMEOUT_MS', 5000, 1000, 10000),
+  maxHeartbeatAgeMs: intEnv('CANARY_MAX_HEARTBEAT_AGE_MS', 90000, 1000, 300000),
+  maxMemoryGrowthMB: intEnv('CANARY_MAX_MEMORY_GROWTH_MB', 512, 1, 65536),
+  maxMemoryFraction: numberEnv('CANARY_MAX_MEMORY_FRACTION', 0.9),
   metricsOut: args['metrics-out'] || env('CANARY_METRICS_OUT') || '',
   jsonOut: args['json-out'] || env('CANARY_JSON_OUT') || '',
   pushgateway: args['pushgateway'] || env('CANARY_PUSHGATEWAY') || '',
   pushJob: args['push-job'] || env('CANARY_PUSH_JOB') || 'canary_buyer',
+  disableFile: env('CANARY_DISABLE_FILE'),
   failOnDegraded: 'fail-on-degraded' in args,
 };
+CONFIG.postRequestRecoveryMs = GATEWAY_STATUS_CACHE_TTL_MS
+  + CONFIG.safetyPollMs
+  + CONFIG.safetyObserverTimeoutMs;
 
 function env(k) {
   return process.env[k] && process.env[k].length ? process.env[k] : '';
@@ -127,14 +176,15 @@ function redact(text) {
   // (harness buyer keys are mp_ + 20+ chars). A pathologically short token would
   // otherwise corrupt legitimate output by matching common substrings. The
   // Bearer-pattern scrub below still catches the credential regardless.
-  if (CONFIG.token && CONFIG.token.length >= 8) s = s.split(CONFIG.token).join('***');
+  for (const secret of [CONFIG.token, CONFIG.operatorToken]) {
+    if (secret && secret.length >= 8) s = s.split(secret).join('***');
+  }
   return s.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ***');
 }
 
-// Validate a URL we are about to send the buyer token to. Require https and
-// reject private/loopback/link-local hosts so a bad env/plist/CLI value can't
-// exfiltrate the token or perform local-network SSRF. CANARY_ALLOW_INSECURE=1
-// opts into http/localhost for local testing against a mock gateway.
+// Credential-bearing URLs are always HTTPS and public. Local provider
+// qualification has a separate, unauthenticated URL validator below so opting
+// into loopback HTTP can never weaken buyer/operator-token transport policy.
 function parseSafeUrl(raw, label) {
   let u;
   try {
@@ -142,13 +192,26 @@ function parseSafeUrl(raw, label) {
   } catch {
     throw new Error(`${label} is not a valid URL`);
   }
-  const insecure = env('CANARY_ALLOW_INSECURE') === '1';
-  if (u.protocol !== 'https:' && !(insecure && u.protocol === 'http:')) {
-    throw new Error(`${label} must be https (set CANARY_ALLOW_INSECURE=1 to allow http for local testing)`);
+  if (u.protocol !== 'https:') {
+    throw new Error(`${label} must be https`);
   }
-  if (!insecure && isPrivateHostname(u.hostname)) {
-    throw new Error(`${label} points at a private/loopback host (set CANARY_ALLOW_INSECURE=1 to allow)`);
+  if (isPrivateHostname(u.hostname)) {
+    throw new Error(`${label} points at a private/loopback host`);
   }
+  return u;
+}
+
+function parseProviderLocalUrl(raw, label) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`${label} is not a valid URL`);
+  }
+  if (u.protocol === 'http:' && env('CANARY_ALLOW_INSECURE_PROVIDER_OBSERVER') !== '1') {
+    throw new Error(`${label} requires CANARY_ALLOW_INSECURE_PROVIDER_OBSERVER=1 for local HTTP`);
+  }
+  if (!['http:', 'https:'].includes(u.protocol)) throw new Error(`${label} must be http or https`);
   return u;
 }
 
@@ -159,7 +222,6 @@ function parseSafeUrl(raw, label) {
 // residual risk for this operator-run internal tool; `redirect: 'manual'` on the
 // token-bearing requests closes the redirect-based variant.
 async function assertResolvesPublic(u, label) {
-  if (env('CANARY_ALLOW_INSECURE') === '1') return;
   const host = u.hostname.replace(/^\[|\]$/g, '');
   if (net.isIP(host)) return; // literal IP already screened by isPrivateHostname
   let addrs;
@@ -172,6 +234,23 @@ async function assertResolvesPublic(u, label) {
     if (isPrivateIp(address)) {
       throw new Error(`${label} host ${host} resolves to a private address`);
     }
+  }
+}
+
+async function assertResolvesLocal(u, label) {
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(host)) {
+    if (!isPrivateIp(host)) throw new Error(`${label} must resolve only to loopback/private addresses`);
+    return;
+  }
+  let addrs;
+  try {
+    addrs = await dns.lookup(host, { all: true });
+  } catch {
+    throw new Error(`${label} host ${host} does not resolve`);
+  }
+  if (!addrs.length || addrs.some(({ address }) => !isPrivateIp(address))) {
+    throw new Error(`${label} must resolve only to loopback/private addresses`);
   }
 }
 
@@ -223,8 +302,32 @@ function isPrivateIp4(ip) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function getStatus() {
-  const ctl = AbortSignal.timeout(CONFIG.reqTimeoutMs);
+function sleepInterruptibly(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function deadlineTimeoutMs(budget, capMs = CONFIG.reqTimeoutMs) {
+  const remaining = budget.remainingDurationMs();
+  if (remaining < 1) throw new Error(budget.timeReason() || 'hard_deadline_exhausted');
+  return Math.max(1, Math.min(capMs, remaining));
+}
+
+async function getStatus(budget, timeoutMs = CONFIG.reqTimeoutMs) {
+  const ctl = AbortSignal.timeout(deadlineTimeoutMs(budget, timeoutMs));
   const r = await fetch(`${CONFIG.base}/v1/status`, {
     headers: authHeaders({ Accept: 'application/json' }),
     redirect: 'manual',
@@ -235,16 +338,57 @@ async function getStatus() {
   return JSON.parse(text);
 }
 
+async function getJSON(url, budget, { authorization = '', label = url, timeoutMs = CONFIG.reqTimeoutMs } = {}) {
+  const headers = { Accept: 'application/json' };
+  if (authorization) headers.Authorization = `Bearer ${authorization}`;
+  const r = await fetch(url, {
+    headers,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(deadlineTimeoutMs(budget, timeoutMs)),
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(redact(`${label} HTTP ${r.status}: ${text.slice(0, 200)}`));
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${label} returned invalid JSON`);
+  }
+}
+
+async function observeSafety(budget, timeoutMs = CONFIG.reqTimeoutMs) {
+  const observedAtMs = Date.now();
+  const gatewayRaw = await getStatus(budget, timeoutMs);
+  const gateway = gatewaySnapshot(gatewayRaw);
+  const rawPool = await getJSON(CONFIG.poolzURL, budget, {
+    authorization: CONFIG.operatorToken,
+    label: 'CANARY_POOLZ_URL',
+    timeoutMs,
+  });
+  const operatorPool = poolzSnapshot(rawPool, observedAtMs);
+  const providers = [];
+  if (CONFIG.mode === 'qualification') {
+    const url = `${CONFIG.isolatedProviderBase}/v1/status`;
+    const raw = await getJSON(url, budget, { label: 'isolated provider status', timeoutMs });
+    providers.push(providerSignalSnapshot(raw, url, observedAtMs));
+  } else {
+    providers.push(...operatorPool.map((row) => row.safety_telemetry));
+  }
+  return { observed_at: new Date(observedAtMs).toISOString(), gateway, operator_pool: operatorPool, providers };
+}
+
 /**
  * Stream one chat completion, measuring TTFT and decode-window timing.
  * Never throws on HTTP/stream errors — returns {ok:false, status, error} so
  * the caller can record failures as metrics (recording failures is the point).
  */
-async function streamOne({ model, messages, conversationId, maxTokens }) {
-  const headers = authHeaders({
+export async function streamOne({
+  model, messages, conversationId, maxTokens, timeoutMs = CONFIG.reqTimeoutMs, abortSignal = null,
+}) {
+  const headers = {
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
-  });
+  };
+  if (CONFIG.mode === 'liveness') Object.assign(headers, authHeaders());
   if (conversationId) headers['X-MacProvider-Conversation'] = conversationId;
 
   const start = now();
@@ -254,10 +398,25 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
   let usage = null;
   let requestId = '';
   let provider = '';
+  let responseModel = '';
   let streamError = null;
+  let sawDone = false;
+  let safetyAborted = false;
+  let timedOut = false;
+  const requestController = new AbortController();
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    requestController.abort();
+  }, timeoutMs);
+  const abortForSafety = () => {
+    safetyAborted = true;
+    requestController.abort();
+  };
+  abortSignal?.addEventListener('abort', abortForSafety, { once: true });
 
   try {
-    const r = await fetch(`${CONFIG.base}/v1/chat/completions`, {
+    const requestBase = CONFIG.mode === 'qualification' ? CONFIG.isolatedProviderBase : CONFIG.base;
+    const r = await fetch(`${requestBase}/v1/chat/completions`, {
       method: 'POST',
       headers,
       // include_usage requests the final usage chunk in the stream — without it
@@ -271,7 +430,7 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
         stream_options: { include_usage: true },
       }),
       redirect: 'manual',
-      signal: AbortSignal.timeout(CONFIG.reqTimeoutMs),
+      signal: requestController.signal,
     });
     requestId = r.headers.get('x-request-id') || '';
     provider = r.headers.get('x-provider-id') || r.headers.get('x-macprovider-provider') || '';
@@ -303,7 +462,11 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
           for (const line of frame.split(/\r?\n/)) {
             if (!line.startsWith('data:')) continue;
             const payload = line.slice(5).trim();
-            if (!payload || payload === '[DONE]') continue;
+            if (!payload) continue;
+            if (payload === '[DONE]') {
+              sawDone = true;
+              continue;
+            }
             let obj;
             try {
               obj = JSON.parse(payload);
@@ -313,6 +476,12 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
             // A terminal error frame means the completion failed even if content
             // already streamed — don't count it as a healthy sample.
             if (obj?.error) streamError = obj.error;
+            if (typeof obj?.model === 'string' && obj.model) {
+              if (responseModel && obj.model !== responseModel) {
+                streamError = { message: `response model changed from ${responseModel} to ${obj.model}` };
+              }
+              responseModel = obj.model;
+            }
             const delta = obj?.choices?.[0]?.delta?.content;
             if (delta) {
               if (!firstTokenAt) firstTokenAt = now();
@@ -331,10 +500,11 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
       }
     }
   } catch (e) {
-    // Distinguish a request timeout (AbortError from AbortSignal.timeout) from
-    // other connect/DNS/TLS/reset failures so the outcome buckets stay honest.
-    const kind = e && e.name === 'TimeoutError' ? 'timeout' : 'network_error';
+    const kind = safetyAborted ? 'safety_abort' : (timedOut ? 'timeout' : 'network_error');
     return { ok: false, status: 0, kind, error: redact(`${kind}: ${e.message || e}`), requestId, provider };
+  } finally {
+    clearTimeout(timeout);
+    abortSignal?.removeEventListener('abort', abortForSafety);
   }
 
   const end = now();
@@ -346,12 +516,25 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
       error: redact(`stream error frame: ${JSON.stringify(streamError).slice(0, 200)}`),
       requestId,
       provider,
+      responseModel,
+      usage,
+    };
+  }
+  if (!sawDone) {
+    return {
+      ok: false,
+      status: 200,
+      kind: 'stream_error',
+      error: 'stream ended without terminal [DONE]',
+      requestId,
+      provider,
+      responseModel,
       usage,
     };
   }
   if (!firstTokenAt) {
     // 2xx but no content token ever arrived (e.g. empty completion / mid-stream abort).
-    return { ok: false, status: 200, error: 'no content token', requestId, provider, usage };
+    return { ok: false, status: 200, error: 'no content token', requestId, provider, responseModel, usage };
   }
   const ttftMs = firstTokenAt - start;
   const decodeMs = Math.max(0, lastTokenAt - firstTokenAt);
@@ -373,10 +556,11 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
     usage,
     requestId,
     provider,
+    responseModel,
   };
 }
 
-async function sampleModel(model) {
+async function sampleModel(model, control) {
   const res = {
     model,
     ttftMs: [],
@@ -388,6 +572,7 @@ async function sampleModel(model) {
     cachedPromptTokens: null,
     promptTokens: null,
     provider: '',
+    requests: [],
   };
 
   // Metric collection is per sample class: only the short-request loop feeds the
@@ -395,11 +580,25 @@ async function sampleModel(model) {
   // them would contaminate TTFT percentiles with long-generation requests and
   // TPS with 8-token noise. `collect` selects which array (if any) this request
   // contributes to; every request still contributes to outcome counts.
-  const record = (r, collect = {}) => {
+  const record = (r, collect = {}, maxTokens = null) => {
     res.samples++;
     if (r.provider && !res.provider) res.provider = r.provider;
     const bucket = outcomeBucket(r);
     res.outcomes[bucket] = (res.outcomes[bucket] || 0) + 1;
+    res.requests.push({
+      sequence: res.samples,
+      outcome: bucket,
+      status: r.status,
+      provider: r.provider || null,
+      response_model: r.responseModel || null,
+      request_id: r.requestId || null,
+      max_completion_tokens: maxTokens,
+      ttft_ms: r.ttftMs ?? null,
+      decode_ms: r.decodeMs ?? null,
+      total_ms: r.totalMs ?? null,
+      decode_tps: r.decodeTps ?? null,
+      completion_tokens: numOrNull(r.usage?.completion_tokens),
+    });
     if (r.ok) {
       if (collect.ttft) res.ttftMs.push(r.ttftMs);
       if (collect.tps && r.decodeTps != null) res.decodeTps.push(r.decodeTps);
@@ -408,30 +607,64 @@ async function sampleModel(model) {
     }
   };
 
-  // 1. TTFT distribution — many short requests, fresh conversation each.
-  for (let i = 0; i < CONFIG.ttftSamples; i++) {
+  const runRequest = async ({ messages, conversationId, maxTokens, collect = {}, sampleClass }) => {
+    if (!(await control.beforeRequest(maxTokens))) return null;
+    const requestAbort = new AbortController();
+    const monitorStop = new AbortController();
+    const monitor = control.monitorDuringRequest(requestAbort, monitorStop.signal, model);
     const r = await streamOne({
       model,
+      messages,
+      conversationId,
+      maxTokens,
+      timeoutMs: control.requestTimeoutMs(),
+      abortSignal: requestAbort.signal,
+    });
+    monitorStop.abort();
+    await monitor;
+    record(r, collect, maxTokens);
+    await control.afterRequest(model, r, maxTokens, sampleClass);
+    return r;
+  };
+
+  // 1. TTFT distribution — many short requests, fresh conversation each.
+  for (let i = 0; i < CONFIG.ttftSamples; i++) {
+    const r = await runRequest({
       conversationId: randUUID(),
       messages: [{ role: 'user', content: 'Say: ready.' }],
       maxTokens: 8,
+      collect: { ttft: true },
+      sampleClass: 'ttft',
     });
-    record(r, { ttft: true });
-    if (i < CONFIG.ttftSamples - 1) await sleep(CONFIG.intervalMs);
+    if (!r || control.failed()) break;
+    if (i < CONFIG.ttftSamples - 1 && !(await control.sleep(CONFIG.intervalMs, 'ttft_interval'))) break;
+  }
+
+  // Scheduled liveness intentionally stops after one 8-token request per
+  // model. Performance, decode, and cache work is qualification-only.
+  if (CONFIG.mode === 'liveness' || control.failed()) {
+    res.serviceable = (res.outcomes['2xx'] || 0) > 0 ? 1 : 0;
+    return res;
   }
 
   // 2. Sustained decode TPS — fewer, longer requests.
   for (let i = 0; i < CONFIG.tpsSamples; i++) {
-    await sleep(CONFIG.intervalMs);
-    const r = await streamOne({
-      model,
+    if (!(await control.sleep(CONFIG.intervalMs, 'tps_interval'))) break;
+    const r = await runRequest({
       conversationId: randUUID(),
       messages: [
         { role: 'user', content: 'Count from 1 to 100, one number per line.' },
       ],
       maxTokens: CONFIG.tpsMaxTokens,
+      collect: { tps: true },
+      sampleClass: 'tps',
     });
-    record(r, { tps: true });
+    if (!r || control.failed()) break;
+  }
+
+  if (control.failed()) {
+    res.serviceable = (res.outcomes['2xx'] || 0) > 0 ? 1 : 0;
+    return res;
   }
 
   // 3. Sticky KV-cache reuse — two turns, same conversation tag, sharing a
@@ -439,20 +672,24 @@ async function sampleModel(model) {
   // prefix-cache granularity, otherwise turn-2 cached_prompt_tokens is always 0
   // and the metric can't distinguish "working" from "reuse collapsed". A live
   // measurement (2026-07-09, ~3.9k-token prefix) saw ~64% turn-2 reuse.
-  await sleep(CONFIG.intervalMs);
+  if (!(await control.sleep(CONFIG.intervalMs, 'cache_interval'))) {
+    res.serviceable = (res.outcomes['2xx'] || 0) > 0 ? 1 : 0;
+    return res;
+  }
   const conv = randUUID();
   const prefix = stickyPrefix(CONFIG.stickyPrefixLines);
-  const t1 = await streamOne({
-    model,
+  const t1 = await runRequest({
     conversationId: conv,
     messages: [{ role: 'user', content: `${prefix}\n\nReply with exactly: pong` }],
     maxTokens: 16,
+    sampleClass: 'cache',
   });
-  record(t1);
-  if (t1.ok) {
-    await sleep(CONFIG.intervalMs);
-    const t2 = await streamOne({
-      model,
+  if (t1?.ok && !control.failed()) {
+    if (!(await control.sleep(CONFIG.intervalMs, 'cache_interval'))) {
+      res.serviceable = (res.outcomes['2xx'] || 0) > 0 ? 1 : 0;
+      return res;
+    }
+    const t2 = await runRequest({
       conversationId: conv,
       messages: [
         { role: 'user', content: `${prefix}\n\nReply with exactly: pong` },
@@ -460,9 +697,9 @@ async function sampleModel(model) {
         { role: 'user', content: 'Reply with exactly: ping' },
       ],
       maxTokens: 16,
+      sampleClass: 'cache',
     });
-    record(t2);
-    if (t2.ok && t2.usage) {
+    if (t2?.ok && t2.usage) {
       const cached = numOrNull(t2.usage.cached_prompt_tokens);
       const prompt = numOrNull(t2.usage.prompt_tokens);
       res.cachedPromptTokens = cached;
@@ -471,6 +708,7 @@ async function sampleModel(model) {
         res.cachedRatio = cached / prompt;
       }
     }
+    control.checkCacheMeasurement(model, res.cachedRatio);
   }
 
   // Serviceable iff any request across all classes produced a token (a 2xx
@@ -480,15 +718,35 @@ async function sampleModel(model) {
   return res;
 }
 
-// Buckets: 2xx | 502 | 5xx | timeout | network_error | stream_error | empty | other
-function outcomeBucket(r) {
+// Buckets: 2xx | authentication_error | 502 | 5xx | timeout | network_error | stream_error | empty | other
+export function outcomeBucket(r) {
   if (r.ok) return '2xx';
   if (r.kind) return r.kind; // timeout | network_error | stream_error
   if (r.status === 0) return 'network_error';
   if (r.status === 502) return '502';
+  if (r.status === 401 || r.status === 403) return 'authentication_error';
   if (r.status === 200) return 'empty';
   if (r.status >= 500) return '5xx';
   return 'other';
+}
+
+export function shouldRunRecovery(attemptedRequests) {
+  return Number.isSafeInteger(attemptedRequests) && attemptedRequests > 0;
+}
+
+export function recoveryCadenceReasons(
+  soakSeconds,
+  pollMs,
+  heartbeatCadenceMs = PRODUCTION_HEARTBEAT_CADENCE_MS,
+) {
+  const reasons = [];
+  if (pollMs >= heartbeatCadenceMs) reasons.push('recovery_poll_not_faster_than_heartbeat');
+  if ((soakSeconds * 1000) < (pollMs * 2)) reasons.push('recovery_soak_cannot_fit_two_observations');
+  const recoverySampleSpanMs = (Math.floor((soakSeconds * 1000) / pollMs) - 1) * pollMs;
+  if (recoverySampleSpanMs < heartbeatCadenceMs) {
+    reasons.push('recovery_soak_cannot_observe_heartbeat_advance');
+  }
+  return reasons;
 }
 
 function numOrNull(v) {
@@ -523,15 +781,19 @@ function mean(arr) {
 
 // ── metrics emission ────────────────────────────────────────────────────────
 
-function buildRun(status, modelResults, runStartUnix) {
+function buildRun(status, modelResults, runStartUnix, details = {}) {
   return {
-    schema_version: 1,
+    schema_version: 2,
     probe: 'canary_buyer',
+    mode: CONFIG.mode,
     run_at: new Date(runStartUnix * 1000).toISOString(),
     base: CONFIG.base,
-    up: status ? 1 : 0,
+    up: status && status.status !== 'down' ? 1 : 0,
     pool: status?.pool || null,
-    coordinator_status: status?.coordinator?.status || null,
+    coordinator_status: status?.coordinator?.status || status?.coordinator_status || null,
+    result: details.result || { outcome: 'healthy', failure_class: null, reasons: [], phase: 'complete', aborted: false },
+    budget: details.budget || null,
+    safety: details.safety || null,
     models: modelResults.map((m) => ({
       model: m.model,
       serviceable: m.serviceable,
@@ -553,6 +815,7 @@ function buildRun(status, modelResults, runStartUnix) {
       prompt_tokens: m.promptTokens,
       provider: m.provider,
       first_error: m.firstError || null,
+      requests: m.requests,
     })),
   };
 }
@@ -578,6 +841,9 @@ function toProm(run) {
 
   h('macprovider_canary_run_timestamp_seconds', 'Unix time of this probe run.', 'gauge');
   L.push(`macprovider_canary_run_timestamp_seconds ${Math.floor(ts / 1000)}`);
+
+  h('macprovider_canary_result', 'Canary outcome by mode and failure class (1 for this run).', 'gauge');
+  L.push(`macprovider_canary_result{${lbl({ mode: run.mode || 'legacy', outcome: run.result?.outcome || 'unknown', failure_class: run.result?.failure_class || 'none' })}} 1`);
 
   if (run.pool) {
     h('macprovider_canary_pool_providers', 'Providers by pool state from /v1/status.', 'gauge');
@@ -631,6 +897,8 @@ function round(v, d = 2) {
  * not ping the heartbeat.
  */
 export function degradedReasons(run, thresholds = {}) {
+  const livenessOnly = run?.mode === 'liveness';
+  const baselineQualified = run?.mode === 'qualification';
   const limits = {
     maxTtftP95Ms: thresholds.maxTtftP95Ms ?? 7000,
     minDecodeTpsP50: thresholds.minDecodeTpsP50 ?? 15,
@@ -639,6 +907,9 @@ export function degradedReasons(run, thresholds = {}) {
     minTpsSamples: thresholds.tpsSamples ?? 3,
   };
   const reasons = [];
+  if (run?.result?.outcome && run.result.outcome !== 'healthy') {
+    reasons.push(`canary:${run.result.failure_class || 'failed'}`);
+  }
   if (!run || run.up !== 1) reasons.push('gateway_down');
 
   for (const model of run?.models || []) {
@@ -665,16 +936,17 @@ export function degradedReasons(run, thresholds = {}) {
     }
     if (!model.ttft_ms || model.ttft_ms.n < 1 || model.ttft_ms.p95 == null) {
       reasons.push(`${id}:ttft_signal_missing`);
-    } else if (model.ttft_ms.n < limits.minTtftSamples) {
+    } else if (!livenessOnly && model.ttft_ms.n < limits.minTtftSamples) {
       reasons.push(`${id}:ttft_samples_${model.ttft_ms.n}_lt_${limits.minTtftSamples}`);
-    } else if (model.ttft_ms.p95 > limits.maxTtftP95Ms) {
+    } else if (!livenessOnly && !baselineQualified && model.ttft_ms.p95 > limits.maxTtftP95Ms) {
       reasons.push(`${id}:ttft_p95_${round(model.ttft_ms.p95)}ms_gt_${limits.maxTtftP95Ms}ms`);
     }
+    if (livenessOnly) continue;
     if (!model.decode_tps || model.decode_tps.n < 1 || model.decode_tps.p50 == null) {
       reasons.push(`${id}:decode_tps_signal_missing`);
     } else if (model.decode_tps.n < limits.minTpsSamples) {
       reasons.push(`${id}:decode_tps_samples_${model.decode_tps.n}_lt_${limits.minTpsSamples}`);
-    } else if (model.decode_tps.p50 < limits.minDecodeTpsP50) {
+    } else if (!baselineQualified && model.decode_tps.p50 < limits.minDecodeTpsP50) {
       reasons.push(`${id}:decode_tps_p50_${round(model.decode_tps.p50)}_lt_${limits.minDecodeTpsP50}`);
     }
     if (model.cached_prompt_ratio == null) {
@@ -703,65 +975,377 @@ async function pushMetrics(text) {
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
-async function main() {
-  if (!CONFIG.token) {
-    console.error('FAIL: set MACPROVIDER_BUYER_TOKEN or MALIBU_API_KEY');
-    process.exit(2);
-  }
+async function loadBaselines() {
+  if (!CONFIG.baselineFile) return [];
+  const fs = await import('node:fs/promises');
+  let parsed;
   try {
-    const baseUrl = parseSafeUrl(`${CONFIG.base}/v1/status`, 'CANARY_BASE');
-    await assertResolvesPublic(baseUrl, 'CANARY_BASE');
-    if (CONFIG.pushgateway) {
-      const pgUrl = parseSafeUrl(CONFIG.pushgateway, 'CANARY_PUSHGATEWAY');
-      await assertResolvesPublic(pgUrl, 'CANARY_PUSHGATEWAY');
+    parsed = JSON.parse(await fs.readFile(CONFIG.baselineFile, 'utf8'));
+  } catch (error) {
+    throw new Error(`cannot read CANARY_BASELINE_FILE: ${error.message || error}`);
+  }
+  return validateBaselineDocument(parsed);
+}
+
+async function loadExpectedFleet() {
+  const fs = await import('node:fs/promises');
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(CONFIG.expectedFleetFile, 'utf8'));
+  } catch (error) {
+    throw new Error(`cannot read CANARY_EXPECTED_FLEET_FILE: ${error.message || error}`);
+  }
+  return validateExpectedFleetDocument(parsed, {
+    expectedProviderCount: CONFIG.expectedProviderCount,
+    requireUniqueModels: true,
+  });
+}
+
+function classifySignalReasons(reasons) {
+  const joined = reasons.join(' ');
+  if (/thermal/.test(joined)) return 'thermal_regression';
+  if (/memory/.test(joined)) return 'memory_regression';
+  if (/heartbeat|activity|connection_changed|provider_disappeared|coordinator_disconnected/.test(joined)) {
+    return 'heartbeat_regression';
+  }
+  return 'provider_state_regression';
+}
+
+export function observerFailureClass(error, timeReason = null) {
+  if (timeReason) return 'budget_exhausted';
+  return /\bHTTP (?:401|403)\b/.test(String(error))
+    ? 'authentication_failure'
+    : 'safety_observer_failure';
+}
+
+export async function pollPostRequestRecovery({
+  observe,
+  strictReasons,
+  transientReasons,
+  maxWaitMs,
+  pollMs,
+  now = Date.now,
+  wait = sleep,
+}) {
+  const deadline = now() + maxWaitMs;
+  while (true) {
+    const observed = await observe();
+    const strict = strictReasons(observed);
+    if (!strict.length) return { observed, reasons: [], timedOut: false };
+    if (transientReasons(observed).length) {
+      return { observed, reasons: strict, timedOut: false };
     }
-  } catch (e) {
-    console.error(`FAIL: ${redact(e.message)}`);
-    process.exit(2);
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      return {
+        observed,
+        reasons: ['post_request_heartbeat_recovery_timeout', ...strict],
+        timedOut: true,
+      };
+    }
+    await wait(Math.min(pollMs, remainingMs));
   }
-  const runStartUnix = Math.floor(realUnix());
+}
 
-  let status = null;
-  try {
-    status = await getStatus();
-  } catch (e) {
-    console.error(`WARN: /v1/status failed: ${redact(e.message)}`);
-  }
+function expectedPoolRows(poolRows, expectedFleet) {
+  const ids = new Set(expectedFleet.map((row) => row.provider_id));
+  return poolRows.filter((row) => ids.has(row.provider_id));
+}
 
-  let models = CONFIG.models;
-  if (!models.length) {
-    models = (status?.models || []).map((m) => m.id).filter(Boolean);
-  }
-  if (!models.length) {
-    console.error('WARN: no models to probe (status unreachable and CANARY_MODELS unset)');
-  }
+export function safetyObservationReasons(initial, observed, expectedFleet, {
+  requireHeartbeatAdvance = false,
+  activeModelID = '',
+  cachedGatewayModelID = '',
+} = {}) {
+  const qualification = CONFIG.mode === 'qualification';
+  const activeProviderID = activeModelID
+    ? (qualification
+      ? CONFIG.isolatedProviderID
+      : expectedFleet.find((row) => row.model_id === activeModelID)?.provider_id || '')
+    : '';
+  const activePoolRow = activeProviderID
+    ? (observed.operator_pool || []).find((row) => row.provider_id === activeProviderID)
+    : null;
+  const activeAggregateLossAllowed = Boolean(activePoolRow
+    && activePoolRow.state === 'busy'
+    && activePoolRow.routing_eligible === false);
+  const activeProviderSignal = activeProviderID
+    ? (observed.providers || []).find((provider) => provider.provider_id === activeProviderID)
+    : null;
+  const recoveredDirectSignals = Boolean(activePoolRow
+    && activePoolRow.state === 'ready'
+    && activePoolRow.routing_eligible === true
+    && activeProviderSignal?.status === 'ready'
+    && activeProviderSignal.requests_in_flight === 0
+    && activeProviderSignal.requests_queued === 0);
+  const gatewayAllowanceModelID = activeAggregateLossAllowed
+    ? activeModelID
+    : (recoveredDirectSignals ? cachedGatewayModelID : '');
+  const reasons = gatewayInvariantReasons(initial.gateway, observed.gateway, {
+    minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+    maxDrainingProviders: qualification ? 1 : 0,
+    activeModelID: qualification ? '' : gatewayAllowanceModelID,
+  });
+  if (!observed.operator_pool) return [...new Set([...reasons, 'operator_pool_signal_missing'])];
 
-  const results = [];
-  for (const model of models) {
-    process.stderr.write(redact(`probing ${model} ...\n`));
-    const r = await sampleModel(model);
-    results.push(r);
-    const t = r.ttftMs.length ? `ttft_p50=${percentile(r.ttftMs, 50)}ms p95=${percentile(r.ttftMs, 95)}ms` : 'ttft=none';
-    const tps = r.decodeTps.length ? `tps_p50=${round(percentile(r.decodeTps, 50))}` : 'tps=none';
-    const cache = r.cachedRatio != null ? `cache=${round(r.cachedRatio, 3)}` : 'cache=n/a';
-    // redact: a hostile gateway could plant the token in a server-controlled
-    // field (model id, provider id, error) that lands in this progress line.
-    console.error(
-      redact(
-        `  ${model}: serviceable=${r.serviceable} ${t} ${tps} ${cache} outcomes=${JSON.stringify(r.outcomes)}${r.firstError ? ` firstErr="${r.firstError}"` : ''}`
-      )
-    );
-  }
+  reasons.push(...expectedFleetReasons(observed.operator_pool, expectedFleet, {
+    allowedExtraProviderIDs: qualification ? [CONFIG.isolatedProviderID] : [],
+    maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+    activeProviderID: qualification ? '' : activeProviderID,
+  }));
+  const initialExpected = expectedPoolRows(initial.operator_pool || [], expectedFleet);
+  const currentExpected = expectedPoolRows(observed.operator_pool, expectedFleet);
+  reasons.push(...poolzInvariantReasons(initialExpected, currentExpected, {
+    maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+    requireHeartbeatAdvance,
+    activeProviderID: qualification ? '' : activeProviderID,
+  }));
 
-  const run = buildRun(status, results, runStartUnix);
-  // Redact every serialized sink, not just error text: any server-controlled
-  // string (model/provider id, coordinator status) could carry the token.
+  if (qualification) {
+    reasons.push(...qualificationIsolationReasons(observed.operator_pool, {
+      targetProviderID: CONFIG.isolatedProviderID,
+      targetModel: CONFIG.models[0],
+      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+      initialPoolRows: initial.operator_pool,
+      requireHeartbeatAdvance,
+      localProviderSignal: observed.providers[0] || null,
+      allowBusy: Boolean(activeProviderID),
+    }));
+    if (observed.providers.length !== 1) reasons.push(`isolated_provider_signal_count_${observed.providers.length}_ne_1`);
+    const current = observed.providers[0];
+    const before = initial.providers[0];
+    if (current) {
+      reasons.push(...providerSignalReasons(before || current, current, {
+        maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+        maxMemoryFraction: CONFIG.maxMemoryFraction,
+        maxRequestsInFlight: activeProviderID === current.provider_id ? 1 : 0,
+        allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
+        requireObservationAdvance: requireHeartbeatAdvance,
+        requireNominalThermal: true,
+      }));
+      if (current.provider_id !== CONFIG.isolatedProviderID) {
+        reasons.push(`isolated_provider_id_${current.provider_id || 'missing'}_ne_${CONFIG.isolatedProviderID}`);
+      }
+      if (current.model_id !== CONFIG.models[0]) {
+        reasons.push(`isolated_provider_model_${current.model_id || 'missing'}_ne_${CONFIG.models[0]}`);
+      }
+    }
+  } else {
+    if (observed.providers.length !== expectedFleet.length) {
+      reasons.push(`provider_signal_count_${observed.providers.length}_ne_${expectedFleet.length}`);
+    }
+    const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
+    const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
+    for (const expected of expectedFleet) {
+      const current = currentByID.get(expected.provider_id);
+      if (!current) {
+        reasons.push(`${expected.provider_id}:provider_signal_missing`);
+        continue;
+      }
+      const before = initialByID.get(expected.provider_id) || current;
+      reasons.push(...providerSignalReasons(before, current, {
+        maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+        maxMemoryFraction: CONFIG.maxMemoryFraction,
+        maxRequestsInFlight: activeProviderID === current.provider_id ? 1 : 0,
+        allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
+        requireObservationAdvance: requireHeartbeatAdvance,
+      }));
+      if (current.model_id !== expected.model_id) {
+        reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
+      }
+    }
+  }
+  return [...new Set(reasons)];
+}
+
+function createControl(initial, baselines, expectedFleet, budget) {
+  let failure = null;
+  const observations = [initial];
+
+  const fail = (failureClass, reasons, phase) => {
+    if (failure) return;
+    failure = {
+      outcome: 'aborted',
+      failure_class: failureClass,
+      reasons: [...new Set(reasons)],
+      phase,
+      aborted: true,
+    };
+  };
+
+  const observationReasons = (observed, options) => safetyObservationReasons(initial, observed, expectedFleet, options);
+
+  const observeAndCheck = async (phase, {
+    timeoutMs = CONFIG.reqTimeoutMs,
+    activeModelID = '',
+  } = {}) => {
+    if (failure) return null;
+    try {
+      const observed = await observeSafety(budget, timeoutMs);
+      observations.push(observed);
+      const reasons = observationReasons(observed, { activeModelID });
+      if (reasons.length) fail(classifySignalReasons(reasons), reasons, phase);
+      return observed;
+    } catch (error) {
+      const timeReason = budget.timeReason();
+      const message = redact(error.message || String(error));
+      fail(observerFailureClass(message, timeReason), [timeReason || message], phase);
+      return null;
+    }
+  };
+
+  const observeAfterRequest = async (model) => {
+    const phase = `after_request_${budget.requests}`;
+    try {
+      const result = await pollPostRequestRecovery({
+        observe: async () => {
+          const observed = await observeSafety(budget, CONFIG.safetyObserverTimeoutMs);
+          observations.push(observed);
+          return observed;
+        },
+        strictReasons: (observed) => observationReasons(observed, {}),
+        transientReasons: (observed) => observationReasons(observed, {
+          activeModelID: model,
+          cachedGatewayModelID: model,
+        }),
+        maxWaitMs: Math.min(CONFIG.postRequestRecoveryMs, budget.remainingDurationMs()),
+        pollMs: CONFIG.safetyPollMs,
+      });
+      if (result.reasons.length) {
+        const timeReason = budget.timeReason();
+        fail(timeReason ? 'budget_exhausted' : classifySignalReasons(result.reasons),
+          timeReason ? [timeReason] : result.reasons, phase);
+      }
+    } catch (error) {
+      const timeReason = budget.timeReason();
+      const message = redact(error.message || String(error));
+      fail(observerFailureClass(message, timeReason), [timeReason || message], phase);
+    }
+  };
+
+  return {
+    async beforeRequest(maxTokens) {
+      if (CONFIG.disableFile && existsSync(CONFIG.disableFile)) {
+        fail('emergency_disabled', ['disable_sentinel_present'], 'before_request');
+        return false;
+      }
+      await observeAndCheck(`before_request_${budget.requests + 1}`);
+      if (failure) return false;
+      const reason = budget.reserve(maxTokens);
+      if (reason) {
+        fail('budget_exhausted', [reason], 'before_request');
+        return false;
+      }
+      return true;
+    },
+    async afterRequest(model, result, maxTokens, sampleClass) {
+      budget.recordProvider(result.provider, maxTokens);
+      if (!result.ok) {
+        const timeReason = budget.timeReason();
+        if (timeReason) {
+          fail('budget_exhausted', [timeReason], `request_${budget.requests}`);
+          return;
+        }
+        const bucket = outcomeBucket(result);
+        fail(bucket === 'authentication_error' ? 'authentication_failure' : 'request_failure',
+          [`${model}:${bucket}`], `request_${budget.requests}`);
+        return;
+      }
+      const identityReasons = responseIdentityReasons(result, model, expectedFleet, {
+        expectedProviderID: CONFIG.mode === 'qualification' ? CONFIG.isolatedProviderID : '',
+      });
+      if (identityReasons.length) {
+        fail(CONFIG.mode === 'qualification' ? 'isolation_unproven' : 'response_identity_unproven',
+          identityReasons, `request_${budget.requests}`);
+        return;
+      }
+      if (CONFIG.mode === 'qualification') {
+        const signal = initial.providers[0] || {};
+        const baseline = findBaseline(baselines, model, result.provider, signal.hardware_tier || '', {
+          compatibilitySetID: signal.compatibility_set_id || '',
+          binaryVersion: signal.binary_version || '',
+          modelHash: signal.model_hash || '',
+          powerSource: signal.power_source || '',
+          thermalCondition: signal.thermal_state || '',
+        });
+        const reasons = performanceRegressionReasons(result, baseline, sampleClass);
+        if (reasons.length) {
+          fail(reasons.includes('baseline_unavailable') ? 'baseline_unavailable' : 'performance_regression',
+            reasons.map((reason) => `${model}:${result.provider || '<unknown>'}:${reason}`),
+            `request_${budget.requests}`);
+          return;
+        }
+      }
+      // The coordinator may retain the final busy/non-routable heartbeat for
+      // one <=5s interval after the stream completes, while the gateway may
+      // retain the active-loss aggregate in its 10s status cache. Permit only
+      // that exact correlated shape while polling through the cache TTL plus
+      // one poll/observer margin, then require a fully strict snapshot before
+      // another request can start.
+      await observeAfterRequest(model);
+    },
+    async monitorDuringRequest(requestAbort, stopSignal, activeModelID) {
+      let sample = 0;
+      while (!stopSignal.aborted && !failure) {
+        if (!(await sleepInterruptibly(CONFIG.safetyPollMs, stopSignal))) return;
+        await observeAndCheck(`during_request_${budget.requests}_${++sample}`, {
+          timeoutMs: CONFIG.safetyObserverTimeoutMs,
+          activeModelID,
+        });
+        if (failure) {
+          requestAbort.abort();
+          return;
+        }
+      }
+    },
+    checkCacheMeasurement(model, ratio) {
+      if (ratio == null) fail('performance_regression', [`${model}:cache_signal_missing`], `request_${budget.requests}`);
+      else if (ratio < CONFIG.minCachedPromptRatio) {
+        fail('performance_regression', [`${model}:cache_ratio_${round(ratio, 4)}_lt_${CONFIG.minCachedPromptRatio}`], `request_${budget.requests}`);
+      }
+    },
+    async sleep(ms, phase) {
+      const remaining = budget.remainingDurationMs();
+      if (remaining <= ms) {
+        if (remaining > 0) await sleep(remaining);
+        fail('budget_exhausted', [budget.timeReason() || 'hard_deadline_exhausted'], phase);
+        return false;
+      }
+      await sleep(ms);
+      return true;
+    },
+    async observeRaw(phase, options = {}) {
+      try {
+        const observed = await observeSafety(budget);
+        observations.push(observed);
+        return { observed, reasons: observationReasons(observed, options), error: null, phase };
+      } catch (error) {
+        return { observed: null, reasons: [], error: redact(error.message || String(error)), phase };
+      }
+    },
+    requestTimeoutMs() {
+      return Math.max(1, Math.min(CONFIG.reqTimeoutMs, budget.remainingDurationMs()));
+    },
+    failed() {
+      return failure != null;
+    },
+    failure() {
+      return failure;
+    },
+    fail,
+    observations,
+    observeAndCheck,
+  };
+}
+
+function preconditionReasons(observed, expectedFleet) {
+  return safetyObservationReasons(observed, observed, expectedFleet);
+}
+
+async function emitRun(run) {
   const prom = redact(toProm(run));
   const runJson = redact(JSON.stringify(run, null, 2));
-
-  // stdout: the JSON run summary (machine-readable). Diagnostics go to stderr.
   console.log(runJson);
-
   if (CONFIG.metricsOut) {
     await writeAtomic(CONFIG.metricsOut, prom);
     console.error(redact(`wrote metrics → ${CONFIG.metricsOut}`));
@@ -777,20 +1361,228 @@ async function main() {
     try {
       await pushMetrics(prom);
       console.error(redact(`pushed metrics → ${CONFIG.pushgateway}`));
-    } catch (e) {
-      console.error(`WARN: pushgateway failed: ${redact(e.message)}`);
+    } catch (error) {
+      console.error(`WARN: pushgateway failed: ${redact(error.message)}`);
     }
   }
+}
 
-  // Exit code policy: 0 by default even on failures (recording is the job, and
-  // launchd should not treat a bad-network run as a probe crash). Opt into a
-  // non-zero exit for CI/alerting with --fail-on-degraded.
-  if (CONFIG.failOnDegraded) {
-    const reasons = degradedReasons(run, CONFIG);
-    if (reasons.length) {
-      console.error(`DEGRADED: ${reasons.join(', ')}`);
-      process.exit(1);
+async function main() {
+  const budget = new RunBudget({
+    maxRequests: CONFIG.maxRequestsPerProvider,
+    maxCompletionTokens: CONFIG.maxCompletionTokensPerProvider,
+    maxDurationMs: CONFIG.maxRunDurationMs,
+  });
+  const runStartUnix = Math.floor(realUnix());
+  if (!['liveness', 'qualification'].includes(CONFIG.mode)) {
+    console.error('FAIL: --mode must be liveness or qualification');
+    process.exitCode = 2;
+    return;
+  }
+  const required = [];
+  if (!CONFIG.poolzURL) required.push('CANARY_POOLZ_URL');
+  if (!CONFIG.operatorToken) required.push('CANARY_OPERATOR_TOKEN');
+  if (!CONFIG.expectedFleetFile) required.push('CANARY_EXPECTED_FLEET_FILE');
+  if (CONFIG.models.length < 1) required.push('explicit CANARY_MODELS values');
+  if (CONFIG.mode === 'liveness' && !CONFIG.token) {
+    required.push('MACPROVIDER_BUYER_TOKEN or MALIBU_API_KEY');
+  }
+  if (CONFIG.mode === 'qualification') {
+    if (CONFIG.models.length !== 1) required.push('exactly one CANARY_MODELS value for qualification');
+    if (!CONFIG.baselineFile) required.push('CANARY_BASELINE_FILE');
+    if (!CONFIG.isolatedProviderBase) required.push('CANARY_ISOLATED_PROVIDER_BASE');
+    if (!CONFIG.isolatedProviderID) required.push('CANARY_ISOLATED_PROVIDER_ID');
+  }
+  if (required.length) {
+    console.error(`FAIL: ${CONFIG.mode} requires ${required.join(', ')}`);
+    process.exitCode = 2;
+    return;
+  }
+  const cadenceReasons = recoveryCadenceReasons(CONFIG.recoverySoakSeconds, CONFIG.recoveryPollMs);
+  if (cadenceReasons.length) {
+    console.error(`FAIL: invalid recovery cadence: ${cadenceReasons.join(', ')}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (CONFIG.maxMemoryFraction <= 0 || CONFIG.maxMemoryFraction > 1) {
+    console.error('FAIL: CANARY_MAX_MEMORY_FRACTION must be greater than 0 and at most 1');
+    process.exitCode = 2;
+    return;
+  }
+  let baselines = [];
+  let expectedFleet = [];
+  try {
+    const baseUrl = parseSafeUrl(`${CONFIG.base}/v1/status`, 'CANARY_BASE');
+    await assertResolvesPublic(baseUrl, 'CANARY_BASE');
+    if (CONFIG.pushgateway) {
+      const pgUrl = parseSafeUrl(CONFIG.pushgateway, 'CANARY_PUSHGATEWAY');
+      await assertResolvesPublic(pgUrl, 'CANARY_PUSHGATEWAY');
     }
+    const poolzUrl = parseSafeUrl(CONFIG.poolzURL, 'CANARY_POOLZ_URL');
+    await assertResolvesPublic(poolzUrl, 'CANARY_POOLZ_URL');
+    if (CONFIG.mode === 'qualification') {
+      const providerUrl = parseProviderLocalUrl(CONFIG.isolatedProviderBase, 'CANARY_ISOLATED_PROVIDER_BASE');
+      await assertResolvesLocal(providerUrl, 'CANARY_ISOLATED_PROVIDER_BASE');
+    }
+    expectedFleet = await loadExpectedFleet();
+    const expectedModels = [...new Set(expectedFleet.map((row) => row.model_id))].sort();
+    const configuredModels = [...new Set(CONFIG.models)].sort();
+    if (configuredModels.length !== CONFIG.models.length) {
+      throw new Error('CANARY_MODELS must not contain duplicates');
+    }
+    if (CONFIG.mode === 'liveness'
+        && (configuredModels.length !== expectedModels.length
+          || configuredModels.some((model, index) => model !== expectedModels[index]))) {
+      throw new Error('CANARY_MODELS must exactly match the model set in CANARY_EXPECTED_FLEET_FILE');
+    }
+    if (CONFIG.mode === 'qualification' && !expectedModels.includes(CONFIG.models[0])) {
+      throw new Error(`CANARY_MODELS value ${CONFIG.models[0]} is absent from CANARY_EXPECTED_FLEET_FILE`);
+    }
+    if (CONFIG.mode === 'qualification') baselines = await loadBaselines();
+  } catch (e) {
+    console.error(`FAIL: ${redact(e.message)}`);
+    process.exitCode = 2;
+    return;
+  }
+  let initial = null;
+  let initialFailure = null;
+  try {
+    initial = await observeSafety(budget);
+  } catch (e) {
+    const timeReason = budget.timeReason();
+    const message = redact(e.message || String(e));
+    initialFailure = {
+      outcome: 'aborted', failure_class: observerFailureClass(message, timeReason),
+      reasons: [timeReason || message], phase: 'precondition', aborted: true,
+    };
+  }
+  if (!initial) {
+    const run = buildRun(null, [], runStartUnix, {
+      result: initialFailure,
+      budget: budget.snapshot(),
+      safety: { initial: null, final: null, observation_count: 0, observation_series: [] },
+    });
+    await emitRun(run);
+    console.error(`ABORTED [${initialFailure.failure_class}]: ${initialFailure.reasons.join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  const control = createControl(initial, baselines, expectedFleet, budget);
+  const preReasons = preconditionReasons(initial, expectedFleet);
+  if (preReasons.length) {
+    const isolationFailure = CONFIG.mode === 'qualification'
+      && preReasons.some((reason) => /isolation_|isolated_provider_/.test(reason));
+    control.fail(isolationFailure ? 'isolation_unproven' : 'precondition_failed', preReasons, 'precondition');
+  }
+  const models = CONFIG.models;
+  const results = [];
+  for (const model of models) {
+    if (control.failed()) break;
+    process.stderr.write(redact(`probing ${model} ...\n`));
+    const r = await sampleModel(model, control);
+    results.push(r);
+    const t = r.ttftMs.length ? `ttft_p50=${percentile(r.ttftMs, 50)}ms p95=${percentile(r.ttftMs, 95)}ms` : 'ttft=none';
+    const tps = r.decodeTps.length ? `tps_p50=${round(percentile(r.decodeTps, 50))}` : 'tps=none';
+    const cache = r.cachedRatio != null ? `cache=${round(r.cachedRatio, 3)}` : 'cache=n/a';
+    // redact: a hostile gateway could plant the token in a server-controlled
+    // field (model id, provider id, error) that lands in this progress line.
+    console.error(
+      redact(
+        `  ${model}: serviceable=${r.serviceable} ${t} ${tps} ${cache} outcomes=${JSON.stringify(r.outcomes)}${r.firstError ? ` firstErr="${r.firstError}"` : ''}`
+      )
+    );
+  }
+  let post = null;
+  const recoverySamples = [];
+  const recoveryRecords = [];
+  let recoveryFailure = null;
+  if (shouldRunRecovery(budget.requests)) {
+    const soakDeadline = Date.now() + (CONFIG.recoverySoakSeconds * 1000);
+    while (soakDeadline - Date.now() >= CONFIG.recoveryPollMs) {
+      const timeReason = budget.timeReason();
+      if (timeReason) {
+        recoveryRecords.push({ observed: null, reasons: [], error: timeReason, phase: 'recovery_soak' });
+        break;
+      }
+      if (!(await control.sleep(CONFIG.recoveryPollMs, 'recovery_soak'))) {
+        recoveryRecords.push({ observed: null, reasons: [], error: budget.timeReason() || 'hard_deadline_exhausted', phase: 'recovery_soak' });
+        break;
+      }
+      const record = await control.observeRaw('recovery_soak');
+      recoveryRecords.push(record);
+      if (record.observed) {
+        post = record.observed;
+        recoverySamples.push(record.observed);
+      }
+    }
+    const expectedInitialPool = expectedPoolRows(initial.operator_pool, expectedFleet);
+    const recoveryReasons = recoveryRecords.flatMap((record) => [
+      ...(record.error ? [`${record.phase}:${record.error}`] : []),
+      ...record.reasons.map((reason) => `${record.phase}:${reason}`),
+    ]);
+    recoveryReasons.push(...recoverySoakReasons({
+      gatewayInitial: initial.gateway,
+      gatewaySamples: recoverySamples.map((sample) => sample.gateway),
+      poolzInitial: expectedInitialPool,
+      poolzSamples: recoverySamples.map((sample) => expectedPoolRows(sample.operator_pool || [], expectedFleet)),
+      providerInitial: initial.providers,
+      providerSamples: recoverySamples.map((sample) => sample.providers),
+    }, {
+      minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+      maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
+      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+      maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+      maxMemoryFraction: CONFIG.maxMemoryFraction,
+      requireNominalThermal: CONFIG.mode === 'qualification',
+    }));
+    const finalRecovery = recoverySamples.at(-1);
+    if (finalRecovery) {
+      recoveryReasons.push(...safetyObservationReasons(initial, finalRecovery, expectedFleet, {
+        requireHeartbeatAdvance: true,
+      }).map((reason) => `recovery_final:${reason}`));
+    }
+    if (recoveryReasons.length) {
+      recoveryFailure = {
+        outcome: 'failed', failure_class: 'recovery_failed',
+        reasons: [...new Set(recoveryReasons)], phase: 'recovery_soak', aborted: false,
+      };
+      if (!control.failed()) control.fail('recovery_failed', recoveryFailure.reasons, 'recovery_soak');
+    }
+  }
+  const result = control.failure() || {
+    outcome: 'healthy', failure_class: null, reasons: [], phase: 'complete', aborted: false,
+  };
+  const run = buildRun(initial.gateway, results, runStartUnix, {
+    result,
+    budget: budget.snapshot(),
+    safety: {
+      initial,
+      final: recoverySamples.at(-1) || post,
+      observation_count: control.observations.length,
+      observation_series: control.observations,
+      recovery_samples: recoverySamples.length,
+      recovery_records: recoveryRecords.map((record) => ({
+        phase: record.phase,
+        error: record.error,
+        reasons: record.reasons,
+        observed_at: record.observed?.observed_at || null,
+      })),
+      recovery_result: recoveryFailure || { outcome: 'healthy', failure_class: null, reasons: [] },
+      qualification_isolation: CONFIG.mode === 'qualification' ? {
+        method: 'direct_local_provider',
+        provider_id: CONFIG.isolatedProviderID,
+        model_id: CONFIG.models[0],
+      } : null,
+    },
+  });
+  await emitRun(run);
+  const reasons = degradedReasons(run, CONFIG);
+  if (result.outcome !== 'healthy') {
+    console.error(`ABORTED [${result.failure_class}]: ${result.reasons.join(', ')}`);
+    process.exitCode = 1;
+  } else if (CONFIG.failOnDegraded && reasons.length) {
+    console.error(`DEGRADED: ${reasons.join(', ')}`);
+    process.exitCode = 1;
   }
 }
 

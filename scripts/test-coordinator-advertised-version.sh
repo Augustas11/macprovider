@@ -7,7 +7,6 @@ app_project_file="$repo_root/phase3-binary/app/project.yml"
 release_builds_file="$repo_root/phase3-binary/app/release-builds.tsv"
 expected_version="${1:-}"
 expected_version="${expected_version#v}"
-appcast_file="${2:-}"
 
 if [[ ! -f "$source_file" ]]; then
   echo "missing CLI version source: $source_file" >&2
@@ -149,64 +148,4 @@ for config_file in "${config_files[@]}"; do
   fi
 done
 
-if [[ -n "$appcast_file" ]]; then
-  if [[ ! -f "$appcast_file" ]]; then
-    echo "missing generated Sparkle appcast: $appcast_file" >&2
-    exit 1
-  fi
-
-  python3 - "$appcast_file" "$binary_version" "$app_build" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-
-appcast_path, expected_version, expected_build = sys.argv[1:]
-sparkle_namespace = "http://www.andymatuschak.org/xml-namespaces/sparkle"
-short_version_element = f"{{{sparkle_namespace}}}shortVersionString"
-build_version_element = f"{{{sparkle_namespace}}}version"
-expected_url = f"https://download.malibu.tech/Malibu-v{expected_version}.dmg"
-
-try:
-    root = ET.parse(appcast_path).getroot()
-except (ET.ParseError, OSError) as exc:
-    raise SystemExit(f"invalid generated Sparkle appcast {appcast_path}: {exc}")
-
-items = root.findall("./channel/item")
-if len(items) != 1:
-    raise SystemExit(
-        f"generated Sparkle appcast {appcast_path} must contain exactly one channel/item (found {len(items)})"
-    )
-item = items[0]
-
-short_versions = item.findall(short_version_element)
-if len(short_versions) != 1 or not short_versions[0].text or short_versions[0].text.strip() != expected_version:
-    actual = [element.text.strip() for element in short_versions if element.text and element.text.strip()]
-    raise SystemExit(
-        f"generated Sparkle appcast {appcast_path} advertises "
-        f"{', '.join(actual) if actual else 'no short version'}; expected {expected_version}"
-    )
-
-build_versions = item.findall(build_version_element)
-if len(build_versions) != 1 or not build_versions[0].text or build_versions[0].text.strip() != expected_build:
-    actual = [element.text.strip() for element in build_versions if element.text and element.text.strip()]
-    raise SystemExit(
-        f"generated Sparkle appcast {appcast_path} advertises build "
-        f"{', '.join(actual) if actual else 'missing'}; expected {expected_build}"
-    )
-
-enclosures = item.findall("enclosure")
-if len(enclosures) != 1:
-    raise SystemExit(
-        f"generated Sparkle appcast {appcast_path} must contain exactly one enclosure (found {len(enclosures)})"
-    )
-actual_url = enclosures[0].get("url", "")
-if actual_url != expected_url:
-    raise SystemExit(
-        f"generated Sparkle appcast {appcast_path} enclosure is {actual_url or 'missing'}; expected {expected_url}"
-    )
-PY
-fi
-
 echo "CLI, Malibu app, and coordinator advertised versions are aligned at $binary_version"
-if [[ -n "$appcast_file" ]]; then
-  echo "Sparkle appcast advertises Malibu $binary_version (build $app_build)"
-fi

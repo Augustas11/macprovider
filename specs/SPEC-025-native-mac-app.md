@@ -1,6 +1,54 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.10 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.13 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.13 (2026-07-14, issue #585 Option 2 completion).** The
+launchd-managed CLI is the sole provider lifecycle, credential, admission-identity,
+state, update, rollback, and uninstall authority. Malibu is a non-secret observer: it
+reads the versioned local HTTP lifecycle contract, reads the same-user owner-only
+control-socket projection for CLI-authenticated earnings, and invokes only the signed
+installed CLI's typed repair/update/uninstall transactions. A legacy App-Keychain
+bearer may be read once as migration input, but is deleted only after fresh CLI custody
+is proven; production Malibu cannot create a provider bearer, register an identity, or
+sign coordinator admission. Sparkle, appcast publication, `latest.dmg`, and independent
+App update ownership are removed. The signed compatibility set binds Malibu.app, the
+CLI, launchd definitions, watchdog, catalog/resources, coordinator admission metadata,
+and rollback plan; target activation commits only after exact target admission and
+buyer-serving readiness, and the prior set remains until its own readiness is proven
+after rollback. Auto-update opt-out applies to the entire set while explicit user update
+remains available. **Every older statement below that assigns credentials, identity,
+or update ownership to Malibu/Sparkle is historical and superseded by v0.13.** Physical
+two-Mac, reboot/logout/locked-Keychain, interruption, #584 canary, and 24-hour soak
+evidence remain rollout gates rather than claims of this repository change.
+
+**Change log v0.12 (2026-07-14, issue #585 versioned-status and recovery slice).**
+Malibu now reads a capability-gated v1 local status contract from the launchd CLI,
+including bounded observation identity, exact service-instance identity, CLI-authored
+lifecycle transitions, and the typed redacted credential condition. It preserves the
+legacy unversioned reader path and suppresses incompatible or unadvertised typed
+fields. When the CLI reports the exact `repair_from_protected_source` action, the
+dashboard may invoke the validated installed CLI's `credentials repair` transaction
+and wait for launchd health; Malibu never writes provider custody itself. The existing
+App-Keychain compatibility bearer remains solely for shipped authenticated earnings
+calls and is not justified by the new status reader; removing it requires replacing
+those calls with a CLI/coordinator-owned versioned earnings surface.
+
+**Change log v0.11 (2026-07-14, issue #585 Option 2 credential-custody
+slice).** The launchd CLI, not Malibu, is now the provider-bearer authority. Malibu
+invokes the installed CLI once to import the credential and a second time to verify
+that a fresh CLI process reads the exact value, but keeps the live YAML source intact.
+A restarted Keychain-backed CLI removes YAML only after coordinator admission.
+Failure preserves the original private config and leaves the setup importable.
+Existing token-bearing migrations retain a temporary App-Keychain compatibility copy
+for shipped Malibu earnings calls; fresh tokenless bootstrap does not expose the CLI
+credential to Malibu. A provider-ID-bound `.cli-credential-custody-v1` marker records
+that the installed CLI freshly verified custody whenever that compatibility copy
+exists. The exact shipped tokenless-YAML/App-only incident state is repaired by first
+restoring its App bearer to private YAML, then running the ordinary installed-CLI
+handoff. Secret snapshot deletion is confirmed before its journal is retired. Removing
+the residual App credential dependency belongs to a later versioned earnings
+replacement in issue #585; the v0.12 status reader alone does not remove it.
+This v0.11 rule supersedes historical v0.4/v0.5 best-effort backup-cleanup notes.
 
 **Change log v0.10 (2026-07-13, R9 audit-loop convergence — code source of truth).** R9
 code/architect caught that the v0.9 watchdog routine/rollback boundary was fixed in §8 +
@@ -46,7 +94,8 @@ architect/code caught remaining app-side twins: §3.3 BSDiff **delta updates mar
 design-intent only** (shipped generator stages one full DMG, `generate-malibu-appcast.sh:67`,
 consistent with §9); §7 receipt/admission Keychain services spelled out in full with
 lifetimes — `com.streamvc.macprovider.receipt-key` (rotatable), `.receipt-key.prev`
-(grace), `.bootstrap-identity-key` (stable admission identity, never rotates), account
+(grace), `.bootstrap-identity-key` (current CLI admission identity; legacy service name),
+`.admission-identity-key.pending`, and `.admission-identity-key.prev`, account
 `<provider_id>` (`ReceiptKeyStore.swift:22-25,58-92`); §4 distribution facts corrected —
 `hdiutil` DMG (not `create-dmg`) and the optional signed App `.pkg` (`tech.malibu.app.installer`)
 is already emitted, not a backlog item (`release.yml:599,616`); §13 backlog narrowed to
@@ -134,8 +183,16 @@ Ship a **click-and-forget provider experience** for non-developer Mac users. Rep
 
 - Non-technical Apple Silicon user goes from `malibu.tech/host` → running provider in **≤ 3 minutes**, zero terminal.
 - Same coordinator behavior, same receipts as the CLI track (the shipped app onboards a **CLI-track** provider via `install.sh` — SPEC-026 §6.1; no separate App-track registration).
-- Auto-update ships silently (Sparkle, the whole `.app`). **Uninstall goal NOT met as shipped (reconciled v0.2):** the "Quit and Uninstall" action is compiled but unreachable, so **drag-to-trash leaves the launchd `macprovider-cli` behind** (§3.4). Zero-leftover is a carried gap.
-- The CLI track coexists via the shared `config.yaml` + `.installed-by-app` marker (§7), with the CLI-owned config routed to the import dialog (SPEC-026 §8). **Caveat (reconciled v0.3):** "unchanged" holds only until an App import — importing strips the `provider_token` from `config.yaml`, leaving the launchd-managed CLI **bearerless on unattended restart** (documented token-custody gap, §7); a pure CLI user who never imports is unaffected.
+- Signed compatibility-set updates are validated, installed, admitted, committed, and
+  rolled back by the launchd CLI as one exact transaction. Malibu can request the
+  transaction but cannot update itself independently. "Quit and Uninstall" invokes the
+  CLI transaction and reports any residue; dragging the app to Trash alone is not the
+  supported uninstall path (§3.4).
+- The CLI track coexists via the shared `config.yaml` + `.installed-by-app` marker (§7),
+  with CLI-owned config routed to the import dialog (SPEC-026 §8). The installed CLI
+  imports and fresh-process-verifies its own Keychain copy. A restarted CLI removes the
+  matching YAML bearer only after coordinator admission and first state publication;
+  Malibu then deletes any legacy App bearer and cannot recreate it.
 
 ### Non-goals (v1)
 
@@ -151,14 +208,14 @@ From reading `phase3-binary/`:
 | Component | Where | What we reuse |
 |---|---|---|
 | Provider daemon | `Sources/macprovider-cli/MacProviderCLI.swift` | Ship the compiled binary inside `Malibu.app/Contents/MacOS/` |
-| Local HTTP | `Sources/macprovider-cli/HTTPServer.swift` on `127.0.0.1:<port>` | **Wrapper's SOLE steady-state channel (reconciled v0.2):** it polls `GET /v1/health` + `GET /v1/status` to monitor the managed CLI (`InstalledProviderMonitor.swift:39-117`). Port read from `config.yaml` (`ProviderConfig.readHTTPPort`). |
-| Control-plane IPC | `Sources/macprovider-cli/ControlSocket.swift` — typed JSON frames on Unix socket | **NOT used in the shipped monitor-only flow (reconciled v0.2).** `ControlSocketClient` / `MalibuAgent.connectControl` compile but have no production call site — legacy/test surface only. The wrapper does not open the control socket (§5.2). |
+| Local HTTP | `Sources/macprovider-cli/HTTPServer.swift` on `127.0.0.1:<port>` | Authoritative versioned lifecycle/status channel. Malibu polls `GET /v1/health` + `GET /v1/status`; unsupported older contracts degrade without false failure. |
+| Control-plane IPC | `Sources/macprovider-cli/ControlSocket.swift` — typed JSON frames on an owner-only Unix socket | Read-only CLI-authenticated earnings/status projection. It never transfers a bearer or lifecycle ownership to Malibu. |
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
-| Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | **Reconciled v0.2:** `install.sh` obtains the token; the wrapper **imports** it from `config.yaml` into the app Keychain via `ProviderConfig.importExistingCLIConfig()` (`ProviderConfig.swift:280-352`), stripping it from `config.yaml`. The wrapper never receives a token from a portal deep-link (that `malibu://` path is removed). |
-| Config | `~/.config/macprovider/config.yaml`, secret in `provider_token` field | **Reconciled v0.2/v0.3:** `install.sh` writes the *initial* `config.yaml` (shared with the CLI track). The wrapper does **not** create it, but on import it **DOES rewrite** the live `config.yaml` to strip the `provider_token` (`ProviderConfig.swift:312`); it reads `provider_id`/model/port and moves the token to Keychain. **Token custody (reconciled v0.3/v0.4 — nuanced, see §7):** the import writes a token-bearing 0600 `config.yaml.import-backup`; its deletion is **best-effort** (delete errors are ignored, and one recovery branch retains it — §7, `ProviderConfig.swift:336,354`), so the backup can persist on disk. The *live* `config.yaml` ends token-free. |
+| Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | The CLI alone obtains, stores, and consumes the bearer. Malibu may read a legacy App item only long enough to migrate it into CLI custody, then deletes it. |
+| Config | `~/.config/macprovider/config.yaml`, initially containing `provider_token` | A restarted CLI removes the exact matching migration source transactionally only after Keychain-backed coordinator admission. The fixed 0600 backup is the handoff snapshot; deletion is confirmed before journal retirement. |
 | Provider service + watchdog LaunchAgents | `install.sh` installs BOTH the KeepAlive **provider service** `live.streamvc.macprovider` (plist `live.streamvc.macprovider.plist` — **this is the evidence the app checks**) and a SEPARATE **companion watchdog** `live.streamvc.macprovider-watchdog` (`StartInterval=60`, `install.sh:47,4264`) that health-observes the daemon; on routine ticks its restart request is a **no-op** (the provider service's `KeepAlive` performs routine restarts), except during auto-update rollback recovery where it force-restarts the provider service (`install.sh:4086,4113`) (reconciled v0.6/v0.8, §8 — the evidence plist is the provider service, NOT the watchdog). Evidence: `install_manifest.json` or the provider-service plist. | **The App track installs and relies on both** (via `install.sh`). `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
 | Portal | `portal.streamvc.live` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
-| Release manifest / checksum | `scripts/sign-catalog.go`, tier2 release scripts | Feeds the same manifest that Sparkle appcast references |
+| Release manifest / checksum | `scripts/sign-catalog.go`, `compatibility-set-manifest.py`, `compatibility-artifact-index.py`, tier2 release scripts | Binds the exact signed provider compatibility set and typed rollback plan. |
 | Signing + notarization pipeline | `.github/workflows/release.yml` "Sign + notarize binary" step + `phase3-binary/dist/release-signing-runbook.md` | Reuse the existing keychain-import / codesign / `notarytool submit --wait` / `stapler` pattern verbatim; extend to sign the `.app` and `.dmg` |
 | Signed `.pkg` delivery container | Same workflow, `pkgbuild` + `productsign` with **Developer ID Installer** cert, identifier `live.streamvc.macprovider.cli`, preinstall blocks direct GUI install | Do **not** confuse with the App-track `.pkg`, which the pipeline **already emits** as an OPTIONAL scriptless flat package, identifier `tech.malibu.app.installer` (reconciled v0.5, `release.yml:616,635,641`) — this CLI one is a delivery container for `install.sh`, not a user-facing installer |
 
@@ -200,14 +257,19 @@ From reading `phase3-binary/`:
      download + **launchd provider-service + watchdog install**; the app only surfaces a progress hint
      by scraping `ps` for the autotune stage (`:110-149`). A non-zero installer exit
      throws (installer rollback semantics).
-   - **Import the token to Keychain** (`importCLIConfigAfterInstall` →
-     `ProviderConfig.importExistingCLIConfig()`, `:128`) — moves `provider_token`
-     out of `config.yaml` into the app Keychain; a not-yet-written token is a
-     **retriable** deferred error (`:126-137`).
+   - **Verify CLI credential custody** (`importCLIConfigAfterInstall` →
+     `ProviderConfig.importExistingCLIConfig()`, `:128`) — for an existing YAML bearer,
+     save/verify the temporary App-Keychain compatibility copy, run installed-CLI
+     credential import, then run a distinct fresh-process verify against one immutable
+     0600 snapshot. Fresh bootstrap is already tokenless and runs verify-only against
+     CLI Keychain. Malibu retains any existing YAML `provider_token`; CLI-owned
+     admission cleanup removes it later. An absent CLI credential or incompatible
+     installed CLI is retriable and preserves rollback state.
    - **Finalize** (`finalizeInstall`, `:165-199`): wait for the launchd provider's
      `GET /v1/health`, retry the Keychain import, then check `appIdentityConfigured`
      — which is actually `ProviderConfig.isConfigured` (config + `.installed-by-app`
-     marker + Keychain **bearer**, `:65`, `ProviderConfig.swift:503-511`), **NOT** the
+     marker + provider ID, plus a matching `.cli-credential-custody-v1` marker when an
+     App compatibility bearer remains, `:65`, `ProviderConfig.swift`), **NOT** the
      app Ed25519 identity (reconciled v0.3) — attach the `MalibuAgent` monitor, then
      `SMAppService.mainApp.register()` the login item and mark
      `.live(…, tier: .provisional)`. The login item is registered **only after** a
@@ -236,54 +298,55 @@ time (60–240 s for the first model) in the background.
   affordance is **not** wired in the monitor-only flow (the control socket is never
   connected, §5.2); model selection is owned by `install.sh` / autotune and the CLI,
   not an in-app `switch_request`.
+- The dashboard also renders the compatible local status-contract version, exact
+  process instance (role/PID/short instance ID), last CLI-authored lifecycle state and
+  reason, and typed credential recovery guidance. A repair button is shown only for
+  `recovery_action=repair_from_protected_source`; it invokes the signature-validated
+  installed CLI, accepts bounded version-1 JSON stdout, discards stderr, and waits for
+  launchd health after success. Locked, permission-denied, conflict, unavailable, and
+  unknown/future contracts never trigger automatic mutation.
 - On login: `SMAppService.mainApp.register()` starts `Malibu.app` in the background.
   No Dock icon. (This registers the **app** as a login item; the **CLI daemon** is
   owned by the launchd **provider service** `live.streamvc.macprovider` (`KeepAlive`)
   that `install.sh` set up — a separate mechanism from the app login item, §8.)
 
-### 3.3 Updates — Sparkle 2.x
+### 3.3 Updates — CLI-owned signed compatibility set
 
-- Appcast at `https://download.malibu.tech/appcast.xml`, EdDSA-signed (reconciled v0.2 to shipped `MalibuUpdateConfiguration.swift:5-10` / `Info.plist:34-39`; v0.1's `updates.malibu.tech` is stale).
-- Model weights live outside `.app` and are never re-downloaded on update. **BSDiff delta updates are design-intent only (reconciled v0.5):** the shipped appcast generator stages a single full `.dmg` with no delta configuration (`generate-malibu-appcast.sh:67`; see §9).
-- **Only the Sparkle whole-`.app` update is wired (reconciled v0.2).** Sparkle
-  (`SPUStandardUpdaterController`, auto-checks daily) updates the `.app` from appcast
-  `https://download.malibu.tech/appcast.xml` (`Malibu-<tag>.dmg`, `SUPublicEDKey`
-  Ed25519 — `MalibuUpdateConfiguration.swift:5-22`), draining the provider via
-  `agent.shutdown(gracefulSeconds: 15)` first (`SparkleUpdaterController.swift:36-38`;
-  in monitor mode there is no child to kill — the drain is a graceful monitoring
-  pause). The menu bar and dashboard expose **only** the Sparkle update check
-  (`MenuBarController.swift:93-95`, `DashboardWindow.swift:81-84`).
-- **The in-app CLI-updater is present but UNWIRED (reconciled v0.2 — carried gap).**
-  `CLIUpdateRunner` (invoke `macprovider-cli update`) and `MalibuAgent.updateCLINow()`
-  exist (`CLIUpdateRunner.swift:30-60`, `MalibuAgent.swift:130-155`) but have **no
-  production caller**; even the unused `.updateCLI` handler maps to Sparkle
-  (`MalibuApp.swift:89-90`). **Reconciled v0.3 — there ARE two live update authorities
-  for separate artifacts:** Sparkle owns `Malibu.app`; the launchd-managed CLI updates
-  ITSELF via its own coordinator-driven `AutoUpdater`, enabled by default
-  (`AutoUpdateTrustState.swift:148`, `CoordinatorClient.swift:2710`) — NOT via the app's
-  (unwired) `CLIUpdateRunner`. The launchd args do not set `managed_by=malibu-app`
-  (`install.sh:3425`), so the app never drives CLI updates.
+- The release artifact index binds one exact version of Malibu.app, macprovider-cli,
+  launchd definitions, watchdog, catalog/resources, coordinator admission metadata,
+  and rollback schema. Every compatibility-set member is hash-bound and release-role
+  checked before mutation.
+- The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
+  dashboard invoke `macprovider-cli update`; they do not download or replace artifacts.
+  Removing the Sparkle dependency, appcast tooling, and feed keys eliminates the prior
+  second update authority.
+- The updater acquires the maintenance lease, persists a phase journal and exact typed
+  rollback plan, stages and validates the target, drains buyer work, installs the whole
+  set, restarts launchd, and commits only after the coordinator admits that exact set
+  and the provider proves buyer-serving readiness. Failure restores the prior exact set,
+  including Malibu.app and launchd/watchdog resources, and retains the rollback material
+  until prior-set admission and buyer-serving readiness are proven.
+- `auto_update_enabled: false` suppresses scheduled mutation of every set member. It
+  does not disable the explicit user action. Model caches remain outside the set unless
+  a signed target explicitly declares a compatible model/catalog migration.
 
 ### 3.4 Uninstall
 
-- Drag `Malibu.app` → Trash. Because `SMAppService` is registered by the app bundle, macOS auto-cleans the launchd registration on next login.
-- **Quit and Uninstall is compiled but UNREACHABLE in the shipped UI (reconciled
-  v0.2 — carried gap).** The teardown handler exists (`MalibuApp.swift:83-95,188-208`)
-  but **no menu item or dashboard control emits it**: the menu bar exposes only plain
-  **Quit** (`MenuBarController.swift:73-116`) and the dashboard has no uninstall control
-  (`DashboardWindow.swift:22-106`). So **drag-to-trash removes only `Malibu.app` and
-  its `SMAppService` login item — the launchd-managed `macprovider-cli` and its
-  `config.yaml` remain.** The v0.1 "zero leftover LaunchAgent" promise does **not**
-  hold as shipped. Wiring the action is a carried follow-up.
-- If/when the action is wired, the handler's teardown does
-  (`MalibuApp.swift:161-208`): drain monitoring via `agent.shutdown(gracefulSeconds:)`;
-  remove the launchd CLI via `macprovider-cli uninstall --yes`
-  (`CLIInstallTeardown.swift:33-34`); `SMAppService.mainApp.unregister()`;
-  `ProviderConfig.wipeAppOwnedState()` (removes `config.yaml` **only if the
-  `.installed-by-app` marker is present**, `ProviderConfig.swift:478-501`, plus the app
-  support dir; it **preserves receipt keys** — not "all `tech.malibu.*`",
-  `KeychainStore.swift:68-85`); delete the app Ed25519 identity key
-  (`ProviderIdentity.deleteFromKeychain`).
+- **Quit and Uninstall…** is a reachable, confirmed menu action. Malibu first invokes
+  the installed CLI's typed `uninstall --yes` transaction, waits for exact launchd job
+  absence, unregisters its login item, removes App-owned configuration/support data,
+  and reports any residue before terminating. Drag-to-trash alone is not the supported
+  provider uninstall because the launchd service intentionally outlives the UI process.
+- Routine uninstall preserves the CLI-Keychain provider bearer and admission identity
+  so reinstall can recover the same provider and billing history. App-owned legacy
+  Keychain items are removed, receipt/admission custody is not silently reset, and model
+  caches remain unless a separate explicit data-reset operation is introduced.
+  Routine CLI uninstall validates the managed label set, stops the watchdog before the
+  provider, then proves both jobs remain absent after the complete stop phase
+  (`launchctl print` service-not-found status 113; every other nonzero status is
+  indeterminate and fails closed). It preserves the provider's CLI-Keychain bearer so a
+  retained principal can reinstall safely; this action is not a full cryptographic
+  identity reset.
 
 The CLI track's `uninstall.sh` is unaffected and remains the developer-facing path.
 
@@ -347,8 +410,7 @@ evidence routes to onboarding, not a reconnect loop (`route()`
 
 ```
 Malibu.app/Contents/
-  Info.plist                       # LSUIElement=true; SUFeedURL / SUPublicEDKey
-                                   # (Sparkle); NO CFBundleURLSchemes (malibu:// removed)
+  Info.plist                       # LSUIElement=true; no update feed or URL scheme
   MacOS/
     Malibu                         # Swift binary (wrapper)
     macprovider-cli                # REQUIRED — signed CLI copied in by release.yml:556; verify-tier2-provider-release.sh:405 rejects a bundle without it
@@ -356,8 +418,6 @@ Malibu.app/Contents/
   Resources/
     install.sh                     # bundled CLI-track installer (mode 755, project.yml:72-75)
     Assets.car
-  Frameworks/
-    Sparkle.framework              # the ONLY embedded framework (reconciled v0.7 — the app target depends only on Sparkle, project.yml:21-24). MLX runs inside the CLI, not the app; mlx.metallib sits beside the executable in MacOS/ (above), not here.
   _CodeSignature/
 ```
 
@@ -366,8 +426,8 @@ Note (reconciled v0.3): the **running** provider is the `macprovider-cli` that
 the release pipeline **REQUIRES** a `macprovider-cli` binary bundled in
 `Contents/MacOS/`: `release.yml:544` copies it in and
 `verify-tier2-provider-release.sh:405` **rejects an App bundle without it** (reconciled
-v0.3 — required, not optional). The bundled copy backs `CLIUpdateRunner` (itself
-unwired, §3.3); the live daemon remains the launchd install. `Info.plist` carries **no**
+v0.3 — required, not optional). The bundled copy is the signed transaction invoker and
+installation source; the live daemon remains the launchd install. `Info.plist` carries **no**
 `malibu://` URL scheme (removed by PR #418; tombstone at `MalibuApp.swift:35-38`).
 
 ### 5.2 IPC: the shipped monitor path is HTTP-poll only
@@ -402,8 +462,9 @@ is only read to defensively release a child left by an *older* build
 `--managed-by malibu-app` / `--enable-warm-swap` argv is not exercised.
 
 What the app actually does around lifecycle:
-- **Attach/monitor:** poll `/v1/health` + `/v1/status`; first-attach every 2 s up to
-  600 s, steady every 15 s (`MalibuAgent.swift:188-226,381-407`). **Reconciled v0.3:**
+- **Attach/monitor:** poll `/v1/health` + the capability-gated `/v1/status`; attach to
+  the owner-only control socket for CLI-authenticated earnings/status projection;
+  first-attach every 2 s up to 600 s, steady every 15 s. **Reconciled v0.13:**
   a locally-ready but non-`buyer_serving` provider (or an undiagnosed connection loss)
   is surfaced as "Reconnecting" (`MalibuAgent.swift:307`); **diagnosed**
   startup/health failures and the first-attach timeout transition to **`.error`**, not
@@ -411,9 +472,9 @@ What the app actually does around lifecycle:
   launchd provider service's `KeepAlive` job (the watchdog is a no-op on routine health
   but force-restarts the provider service during auto-update rollback, §8), not an in-app
   restart loop.
-- **Drain (app quit / Sparkle update):** `agent.shutdown(gracefulSeconds:)` pauses
-  monitoring (`MalibuApp.swift:57-74`, `SparkleUpdaterController.swift:36-38`) — there
-  is no child process to signal.
+- **Quit:** `agent.shutdown(gracefulSeconds:)` stops only Malibu monitoring; it never
+  drains or signals the launchd provider. Update/uninstall drain is owned by the CLI
+  transaction.
 - **Uninstall:** delegate to `macprovider-cli uninstall --yes` (§3.4).
 
 ## 6. Signing & notarization
@@ -440,11 +501,10 @@ This spec **adds** an App-track job to the same workflow (or a separate `release
 | `APPLE_NOTARY_APPLE_ID` | Apple ID for notarytool | Notarizing CLI + `.pkg` |
 | `APPLE_NOTARY_PASSWORD` | App-specific password | Same |
 | `APPLE_NOTARY_TEAM_ID` | Team ID | Same |
-| **`SPARKLE_EDDSA_PRIVATE_KEY`** | New — Sparkle appcast signing (**not** a codesign identity) | This spec adds |
+No App-specific update-signing secret exists. Compatibility metadata is signed through
+the release trust path already used by the provider catalog and artifact index.
 
-Only one new secret needed: the Sparkle EdDSA key.
-
-### 6.2 New CI steps added by this spec
+### 6.2 App and compatibility-set CI steps
 
 > **Reconciled v0.4 — `release.yml` is authoritative.** The shipped pipeline differs in
 > mechanics from the recipe below: it copies the archive product directly rather than
@@ -461,12 +521,16 @@ Runs on the same macOS runner as the existing job, after the CLI binary is signe
 4. Re-sign the whole bundle bottom-up in one pass so the outer signature covers the newly-embedded CLI:
    `codesign --force --options runtime --timestamp --entitlements phase3-binary/app/Malibu.entitlements --sign "$SIGNING_ID" --deep Malibu.app`
 5. `codesign --verify --strict --verbose=2 --deep Malibu.app`
-6. `create-dmg` → `Malibu-<version>.dmg` (Homebrew-published tool; pin version).
+6. `hdiutil` → `Malibu-<version>.dmg`.
 7. `codesign --sign "$SIGNING_ID" --timestamp Malibu-<version>.dmg`.
 8. `xcrun notarytool submit Malibu-<version>.dmg --apple-id $APPLE_NOTARY_APPLE_ID --password $APPLE_NOTARY_PASSWORD --team-id $APPLE_NOTARY_TEAM_ID --wait` (this one **is** staplable — unlike the bare CLI).
 9. `xcrun stapler staple Malibu-<version>.dmg` and `stapler validate`.
-10. Upload to `https://download.malibu.tech/Malibu-<version>.dmg` (immutable, versioned), atomic swap of `latest.dmg` symlink.
-11. `sign_update` (Sparkle CLI) → EdDSA signature; render appcast item; publish `https://download.malibu.tech/appcast.xml` (reconciled v0.2).
+10. Build the exact compatibility-set manifest and typed rollback plan, then place the
+    DMG and every provider runtime/policy artifact in the signed
+    `compatibility-artifact-index.json`.
+11. Publish only immutable versioned GitHub release artifacts; the updater discovers
+    the signed exact set through the coordinator/catalog trust path. There is no mutable
+    `latest.dmg` or appcast authority.
 
 Reuse `cleanup_signing_material` trap from the existing job.
 
@@ -513,41 +577,49 @@ The single biggest risk in this spec is stomping a config that a developer previ
 | Provider daemon config | `~/.config/macprovider/config.yaml` | **Shared** with CLI track |
 | Wrapper preferences (window sizes, opt-ins) | `~/Library/Application Support/Malibu/prefs.json` | App track only |
 | App-track marker | `~/Library/Application Support/Malibu/.installed-by-app` (**empty file**, reconciled v0.2 — not dated; `ProviderConfig.swift:513-518`) | App track only |
+| CLI custody marker | `~/Library/Application Support/Malibu/.cli-credential-custody-v1` containing the exact provider ID | App-local migration evidence that an installed CLI freshly verified custody; never credential authority |
 | Logs (rolling, 100 MB cap) | `~/Library/Logs/malibu/` | Shared, app tags its own lines |
-| `provider_token` | Keychain, service `tech.malibu.provider`, account `<provider_id>` | App track; CLI track keeps YAML |
-| Session receipt / admission keys | Keychain (CLI store), services `com.streamvc.macprovider.receipt-key` (current, rotatable — signs receipts), `com.streamvc.macprovider.receipt-key.prev` (rotation grace), `com.streamvc.macprovider.bootstrap-identity-key` (stable admission identity — **never rotates**; verifies `mp-*` `identity_signature`), all account `<provider_id>` (reconciled v0.5 to `ReceiptKeyStore.swift:22-25,58-92,232-249`) | Unchanged from CLI track (reuses the existing CLI key store) |
+| `provider_token` | Authoritative CLI Keychain service `live.streamvc.macprovider.provider-token.v1`, account `<provider_id>`; private YAML is a degraded transition fallback until admission-gated cleanup | CLI owns runtime credential. A legacy App item is migration input only and is deleted after CLI custody is proven. |
+| Session receipt / admission keys | Keychain (CLI store), services `com.streamvc.macprovider.receipt-key` (current, rotatable — signs receipts), `com.streamvc.macprovider.receipt-key.prev` (receipt rotation grace), `com.streamvc.macprovider.bootstrap-identity-key` (current admission identity; legacy name), `com.streamvc.macprovider.admission-identity-key.pending`, and `.prev`, all account `<provider_id>`. Admission identity rotates/recoveries by SPEC-026 §4.3 without Malibu key custody. | Unchanged from CLI track (reuses the existing CLI key store) |
 
 Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`):
 
 - **On first run of the app:** if `config.yaml` exists AND the `.installed-by-app`
   marker does NOT → route to `.showImportDialog` ("We found a MacProvider config.
   Import it into Malibu?"). On import, `ProviderConfig.importExistingCLIConfig()`
-  reads the YAML's `provider_token`, moves it to the app Keychain (via
-  `KeychainStore`), sets the marker, and keeps the YAML minus the secret
-  (`ProviderConfig.swift:280-352`). Never silent-migrate. (`StartupRouteTests.swift:10-12`.)
+  reads an existing YAML `provider_token`, then runs installed-CLI
+  `credentials import --config` followed
+  by a distinct `credentials verify --config` against one immutable snapshot. A
+  tokenless config normally runs verify-only and requires the provider's CLI-Keychain
+  item. The exact legacy tokenless-YAML/App-Keychain-only state first restores its
+  bearer to private live YAML so launchd retains rollback custody, then follows the
+  token-bearing transaction.
+  After fresh CLI custody is proven, Malibu deletes and verifies deletion of any
+  legacy App bearer. The CLI keeps the live migration source until launchd admission.
+  A missing/old CLI or failed proof preserves the original private YAML. Never
+  silent-migrate.
+  (`StartupRouteTests.swift:10-12`.)
 - **On Quit-and-Uninstall:** `ProviderConfig.wipeAppOwnedState()` deletes
   `config.yaml` **only if the marker is present** (`ProviderConfig.swift:478-501`).
-- **`isConfigured`** = `config.yaml` present AND `.installed-by-app` marker present
-  AND a Keychain token bound to the config's `provider_id` (`ProviderConfig.swift:503-511`).
+- **`isConfigured`** = `config.yaml` present AND `.installed-by-app` marker present,
+  a top-level `provider_id`, and the provider-ID-bound
+  `.cli-credential-custody-v1` marker. Credential readiness is reported by the launchd CLI's
+  redacted `/v1/status.credential` contract, not inferred from Malibu's Keychain.
   **Route precedence (reconciled v0.3):** a *markerless* CLI-owned `config.yaml` takes
   FIRST precedence and routes to `.showImportDialog` — even when the launchd provider is
   healthy (`LaunchProviderController.swift:352`), per the first bullet above; only when
-  the marker IS present but the bearer/config is otherwise incomplete does a failed
-  `isConfigured` route to onboarding, and a fully-absent config also routes to
-  onboarding. **Token custody (reconciled v0.2 — nuanced, not "never
-  on disk"):** the import strips `provider_token` from `config.yaml` and adds a
-  `link_state` key (`ProviderConfig.swift:312-335`), so the *live* `config.yaml` holds
-  no token — **but** the import also writes a token-bearing `config.yaml.import-backup`
-  (0600), so the token IS on disk there. **The backup is not guaranteed transient
-  (reconciled v0.3):** deletion is best-effort — the delete error is ignored
-  (`ProviderConfig.swift:336`), and exceptional recovery paths remove the marker while
-  **retaining** the backup (`ProviderConfig.swift:354`), so a token-bearing 0600 backup
-  can persist. Stripping the token from `config.yaml` also leaves the launchd-managed
-  CLI unable to re-authenticate on restart (it reads the bearer from `config.yaml`;
-  SPEC-026 §6.1 token-custody gap). So the App track is not a clean "token never on
-  disk" win.
+  the marker IS present but the config identity or required custody evidence is
+  incomplete does a failed `isConfigured` route to onboarding, and a fully-absent config also routes to
+  onboarding. **Token custody (reconciled v0.13 — nuanced, not "never
+  on disk"):** the CLI deliberately retains the live YAML `provider_token` as rollback
+  state after staging Keychain custody. A restarted provider reports
+  `migration_pending=true`; only its authenticated coordinator admission and first
+  state update permit locked exact-value removal. The one fixed 0600 backup is also
+  the immutable handoff snapshot. The importer must confirm its deletion before deleting
+  `.import_pending`; a cleanup failure keeps the journal for deterministic recovery. Until
+  launchd admission, the App track therefore makes no "token never on disk" claim.
 - **CLI track never touches** `~/Library/Application Support/Malibu/` or the app's
-  Keychain entries.
+  Keychain entries; it owns only its separate CLI-Keychain service.
 
 ## 8. LaunchAgent — three distinct mechanisms (reconciled v0.2/v0.6)
 
@@ -593,18 +665,18 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
   is by the shared `config.yaml` + `.installed-by-app` marker (§7), not by "only one
   track installs a daemon."
 
-## 9. Sparkle appcast
+## 9. Compatibility-set trust and discovery
 
-> **Reconciled v0.4 to shipped tooling.** The trust anchor is `SUPublicEDKey` in
-> `Info.plist` (`project.yml:61`; verified by `verify-malibu-sparkle-signature.py:54`) —
-> there is **no** `Contents/Resources/appcast-key.pub`. The shipped appcast generator
-> stages a **single full `.dmg`** and configures **neither BSDiff delta updates nor
-> phased rollout** (`generate-malibu-appcast.sh:67`); the delta/phased items below are
-> DESIGN intent, not shipped behavior.
-
-- Public key: `SUPublicEDKey` (Ed25519) in `Info.plist`. Private key lives in a CI secret; rotate quarterly, keeping the previous key valid for one grace release.
-- Appcast entries include: version, min OS, download URL (signed `.dmg`), EdDSA signature, release notes URL. (Phased-rollout percentage and BSDiff deltas are Sparkle-2 features the shipped generator does not yet configure — DESIGN, per banner.)
-- Failure handling: if a download fails its signature check or transfer, keep running the current version and retry on the next check.
+- The compatibility artifact index is the release root for update discovery. It binds
+  immutable GitHub release artifact names, SHA-256 digests, required release roles, the
+  compatibility-set manifest, and rollback-plan schema.
+- The CLI verifies the catalog/release trust chain, artifact-index signature, exact set
+  identity, per-role uniqueness, hashes, Developer ID identity/team where applicable,
+  launchd labels, and target coordinator policy before any drain or replacement.
+- Malibu carries no update public key, feed URL, or independent discovery channel.
+  Failure to verify or fetch any required member leaves the current set running and
+  emits a typed redacted update state. A staged target that cannot prove exact-set
+  admission and buyer-serving readiness is rolled back as a whole.
 
 ## 10. Landing page changes (`malibu.tech/host/`)
 

@@ -1899,7 +1899,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(staleWithDifferentProvider, Optional(Self.date("2026-07-02T00:00:00Z")))
     }
 
-    func testFreshnessIsStaleWhenRemoteCatalogIntegrityFails() async throws {
+    func testFreshnessTrustBlockIsDistinctFromOrdinaryStaleness() async throws {
         let dir = try tempDir()
         let secretURL = dir.appendingPathComponent("secret")
         let secret = Data(repeating: 9, count: 32)
@@ -1915,17 +1915,23 @@ final class AutotuneRecommendTests: XCTestCase {
         """.utf8).write(to: stateURL)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"\(AutotuneStaticInputs.keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        let olderDemand = Data(AutotuneStaticInputs.bakedDemandRankJSON
+            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-07T12:00:00Z")
+            .utf8)
+        let olderCatalog = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON
+            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-07T12:00:00Z")
+            .utf8)
         let staticInputs = AutotuneStaticInputs(
             fetch: { url in
                 if url.path.hasSuffix(".sig") { return sidecar }
                 if url.path.hasSuffix("/demand-rank") {
-                    return Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+                    return olderDemand
                 }
-                if url.path.hasSuffix("/autotune-candidates") { return catalogBytes }
+                if url.path.hasSuffix("/autotune-candidates") { return olderCatalog }
                 throw AutotuneRecommendError.invalidStaticJSON("offline")
             },
-            verifySignature: { _, _ in false },
-            now: { Self.date("2026-07-02T00:00:00Z") }
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-15T00:00:00Z") }
         )
 
         let status = await RecommendationFreshnessChecker(
@@ -1934,10 +1940,30 @@ final class AutotuneRecommendTests: XCTestCase {
             providerID: "provider-a",
             hmacSecretURL: secretURL,
             stateURL: stateURL,
-            now: Self.date("2026-07-02T00:00:00Z")
+            now: Self.date("2026-07-15T00:00:00Z")
         ).status()
 
-        XCTAssertEqual(status, .stale(Self.date("2026-07-02T00:00:00Z")))
+        XCTAssertEqual(
+            status,
+            .trustBlocked(
+                Optional(Self.date("2026-07-02T00:00:00Z")),
+                [.candidateCatalogUpdateRequired, .demandRankUpdateRequired]
+            )
+        )
+
+        let missingStateStatus = await RecommendationFreshnessChecker(
+            staticInputs: staticInputs,
+            fingerprint: fingerprint,
+            providerID: "provider-a",
+            hmacSecretURL: secretURL,
+            stateURL: dir.appendingPathComponent("missing-recommendation.json"),
+            now: Self.date("2026-07-15T00:00:00Z")
+        ).status()
+
+        XCTAssertEqual(
+            missingStateStatus,
+            .trustBlocked(nil, [.candidateCatalogUpdateRequired, .demandRankUpdateRequired])
+        )
     }
 
     // MARK: - Default-tier fallthrough + swap tolerance (v1.7.6 Track A1/A2a)

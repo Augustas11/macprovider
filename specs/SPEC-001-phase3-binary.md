@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.8 (2026-07-13, zero-gap in-band Tier-2 AEAD rekey transport)
+**Version:** 1.8.3 (2026-07-14, CLI admission-identity generations and recovery)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -15,8 +15,59 @@ behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
 
+**Change log v1.8.3 (2026-07-14, issue #585 — admission identity):**
+- The v2 initial frame carries CLI-owned current/pending admission keys and an explicit
+  recovery marker. Challenge/response frames carry the selected key, authoritative
+  generation, active key, and verified-key role.
+- Old-key-signed generation-CAS rotation, seven-day previous-key rollback, response-loss
+  convergence, and dual-control operator recovery are normative in SPEC-026 §4.3.
+- Every durable admission identity rejects v1 bearer-only downgrade, irrespective of
+  provider-ID prefix. `/v1/status` reports local custody, coordinator generation/key role,
+  pending/previous grace, transition error, and the exact redacted recovery action.
+
+**Change log v1.8.2 (2026-07-14, issue #585 — local status and recovery slice):**
+- `/v1/status` now publishes a versioned, capability-gated local contract. Each
+  response identifies the observation, its bounded validity, the stable running
+  service instance, and the last CLI-authored lifecycle transition. Malibu remains a
+  reader/renderer; `macprovider-cli` is the sole lifecycle authority.
+- Provider credential diagnostics now distinguish missing, locked, access-denied,
+  corrupt, conflict, unavailable, and ready custody without emitting token bytes or a
+  token-derived identifier. `credentials status` exposes the same redacted v1
+  contract out of process when the HTTP service cannot start.
+- `credentials repair` is a narrow CLI-owned transaction. It may import a missing
+  item or replace a corrupt item only from an owner-only regular config file
+  whose identity remains unchanged during inspection. Conflict and Keychain
+  access-state failures refuse mutation. Malibu may invoke this command through the
+  validated installed CLI but never writes the Keychain item itself.
+- Admission proof signing is CLI-owned. The dormant Malibu identity-signature bridge,
+  its control-socket frames, and its unsigned timeout fallback are removed; a
+  credentialed provider produces the proof from its durable CLI Keychain admission
+  identity or fails coordinator admission.
+
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §10 OQ-1 (streaming usage chunk client compat) and OQ-2 (tier announcement format) are marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-001.
+
+**Change log v1.8.1 (2026-07-14, issue #585 — Option 2 credential-custody slice):**
+- The launchd-managed `macprovider-cli` becomes the authority for the provider bearer.
+  It stores the bearer in the macOS login Keychain under service
+  `live.streamvc.macprovider.provider-token.v1`, account `<provider_id>`, using the
+  legacy login-Keychain default ACL/designated requirement and non-interactive reads.
+  It deliberately does not claim a Data-Protection-Keychain accessibility class.
+- Existing layered YAML/environment input remains a compatibility source. On startup,
+  an existing CLI-Keychain value wins; otherwise the CLI imports the compatibility
+  value and verifies a readback before use. A matching private YAML value remains only
+  as migration rollback state until that restarted provider proves coordinator
+  admission; the CLI then removes it with an exact compare-and-remove transaction.
+- Adds `credentials import --config` and `credentials verify --config`. Malibu uses two
+  separate installed-CLI invocations against one immutable 0600 snapshot to stage
+  custody, but Malibu never removes the live YAML credential. `/v1/status` gains a
+  redacted `credential` lifecycle object; no token bytes or token-derived identifier
+  are exposed.
+- The release carrying this behavior is `binary_version` **1.8.33** (Malibu build 33).
+- Release signing pins the stable CLI identifier `live.streamvc.macprovider.cli` so the
+  default Keychain ACL is based on a stable designated-requirement identity across
+  signed updates. Real signed vN→vN+1, reboot, login, and locked-Keychain validation is
+  still a rollout gate under issue #585.
 
 **Change log v1.8 (2026-07-13, issue #540 — in-band AEAD rekey):**
 - The release carrying this capability is `binary_version` **1.8.32** (Malibu
@@ -909,6 +960,118 @@ Configuration is loaded in this precedence order (highest wins):
 3. Config file (YAML, default path: `~/.config/macprovider/config.yaml`,
    override with `--config` or `MACPROVIDER_CONFIG`)
 4. Built-in defaults
+
+**Provider-credential exception (v1.8.2).** After the general layering above is
+resolved, a non-empty `provider_id` selects the CLI-owned Keychain item. If that item
+exists, it is authoritative even when the layered config contains a different token.
+If it is absent and a layered `provider_token` exists, the CLI MUST import it and
+verify an exact readback before reporting restart-safe custody. If Keychain access
+fails while a layered token remains available, the process MAY continue from that
+private migration source but MUST report its typed Keychain failure,
+`source=config_fallback`, `restart_safe=false`, and MUST NOT remove that source. A
+differing Keychain/YAML pair MUST use Keychain, report `state=conflict`, and preserve
+YAML for explicit repair. With
+neither an accessible CLI-Keychain item nor a compatibility token, an established
+provider joining the coordinator MUST fail explicitly rather than silently connect
+bearerless. The deliberate exceptions are local/no-join or donor mode and a fresh
+high-entropy `mp-<32hex>` principal using the tokenless first-claim bootstrap protocol.
+
+`macprovider-cli credentials import --config <path>` MUST import the exact
+`provider_id`/top-level `provider_token` pair from the selected file only when the
+Keychain item is absent or already equal. An existing mismatch MUST fail without
+mutation. Both commands return only redacted result metadata.
+`credentials verify --config <path>` MUST load the selected
+file without inherited `MACPROVIDER_*` overrides and compare it with the CLI-Keychain
+value. Running `verify` as a second process is the compatibility transaction's
+fresh-process staging proof. It is not coordinator admission and never authorizes
+Malibu to delete the live migration source.
+
+`macprovider-cli credentials status --config <path>` MUST be non-mutating and emit
+credential contract version 1 with `credential_store`, `operation`, `provider_id`,
+`source`, `condition`, `restart_safe`, `migration_pending`, `recoverable`, and
+`action`. `macprovider-cli credentials repair --config <path>` MUST require an
+owner-owned regular file with mode no broader than 0600, reject symlinks, and verify
+the file's device/inode/size/mtime identity before using its token. Repair MAY add an
+absent item only through the absent-or-equal import primitive and MAY replace an item
+only when the preceding read classified its stored bytes as corrupt. Ready custody is
+verified, while conflict, locked, permission-denied, unavailable, degraded, and
+unconfigured conditions MUST refuse mutation. Every successful mutation requires an
+exact Keychain readback. Neither stdout nor stderr may contain bearer material.
+
+When a process starts with a Keychain credential exactly matching the YAML migration
+source, status MUST set `migration_pending=true`. Only after that process authenticates
+to the coordinator and successfully publishes its first state update may the CLI
+remove the top-level YAML credential. Removal MUST occur under the config lock and
+only when the on-disk value and a fresh Keychain read both exactly match the admitted
+in-memory bearer. Mismatch or I/O failure preserves YAML and the pending state.
+Only the selected YAML file can set `migration_pending`; an environment value or
+`--token-file` may seed Keychain custody but is not an on-disk source for this cleanup.
+Automatic autotune backups MUST omit top-level `provider_token`, and admission cleanup
+MUST redact legacy machine-owned `config.yaml.bak-<unix>-<counter>` snapshots before
+removing the live source. Operator-named archives are outside that automatic cleanup.
+If a current-target autoupdate rollback marker exists, YAML cleanup MUST wait until the
+rollback owner has accepted the same serving proof and finalized the update. The
+coordinator-owned path commits its rollback before cleanup; a `self_update`-owned marker
+remains parent-owned, so the child process retains both rollback state and YAML.
+
+Routine `uninstall` preserves the CLI-Keychain credential because it also preserves the
+provider principal for safe reinstall. It MUST reject unrecognized manifest labels,
+stop the watchdog before the provider, and prove every managed launchd job absent again
+after the complete stop phase before removing an executable or plist. `launchctl print`
+status 0 means still loaded, the documented service-not-found status 113 proves absence,
+and every other result fails closed as indeterminate. Credential destruction requires a
+future explicit full-identity-reset operation; routine uninstall is not that operation.
+
+The local `GET /v1/status` response includes a versioned envelope. Contract v1 has
+`minimum_reader_version=1`, names `macprovider_cli` as `lifecycle_owner`, and advertises
+only fields a reader may trust through these capabilities:
+`buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
+`status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`, and
+`legacy_reader_fallback_v1`. A reader MUST suppress a typed field when its capability
+is absent and MUST suppress all typed fields when the minimum reader exceeds its
+supported version. An absent envelope is the legacy-reader path.
+
+```json
+"local_status_contract": {
+  "version": 1,
+  "minimum_reader_version": 1,
+  "lifecycle_owner": "macprovider_cli",
+  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1"]
+},
+"observation": {
+  "id": "per-response UUID",
+  "observed_at": "RFC 3339 timestamp",
+  "valid_for_ms": 5000
+},
+"service_instance": {
+  "instance_id": "stable process-lifetime UUID",
+  "pid": 1234,
+  "boot_session": "macOS boot-session UUID or null",
+  "started_at": "RFC 3339 timestamp",
+  "role": "serve"
+},
+"lifecycle": {
+  "transition_id": "UUID",
+  "transition_at": "RFC 3339 timestamp",
+  "state": "ready | busy | degraded | unavailable",
+  "reason_code": "machine-readable transition reason",
+  "authority": "macprovider_cli"
+},
+"credential": {
+  "source": "cli_keychain | config_fallback | none",
+  "state": "ready | missing | locked | permission_denied | corrupt | conflict | unavailable | degraded | unconfigured",
+  "restart_safe": true,
+  "migration_pending": false,
+  "recovery_action": "none | retry | unlock_keychain | authorize_keychain | repair_from_protected_source | restore_or_reenroll"
+}
+```
+
+These objects are local diagnostics only and MUST NOT include the bearer, a prefix, a
+hash, or any other stable token-derived value. The service instance identifies a
+process, not a provider principal or credential. Observation IDs change per response;
+service instance IDs remain stable only for that running `serve` process; transition
+IDs change only on a reported lifecycle edge. Older clients MUST tolerate all objects'
+absence.
 
 The config file schema includes at minimum: `port`, `model` (HuggingFace
 model path), `coordinator_url`, `log_format` (`json` or `text`),
@@ -2029,6 +2192,9 @@ The initial-stage frame field table is the SPEC-010 v1.5 §3.1.A table:
 | Endpoint URL | `endpoint_url` | string pointer (nullable) | optional | |
 | Provider ECDH public key | `provider_ecdh_public_key` | string **unpadded base64url** (32-byte x25519) | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2; base64url per SPEC-008, not standard padded base64 |
 | Provider receipt public key | `provider_receipt_public_key` | string standard padded base64 of 32-byte ed25519 public key | optional, ADDED by SPEC-015 v0.1.3 / SPEC-001 v1.6 | parser-optional; initial-stage only; absent means the provider is not receipt-issuing |
+| Provider admission public key | `provider_admission_public_key` | string standard padded base64 of 32-byte Ed25519 public key | optional, SPEC-026 §4.3 | current local key; during explicit recovery, the staged recovery key |
+| Provider next admission public key | `provider_admission_next_public_key` | string standard padded base64 of 32-byte Ed25519 public key | optional, SPEC-026 §4.3 | one idempotently staged rotation candidate; transcript-bound |
+| Admission recovery marker | `provider_admission_recovery` | bool | optional, SPEC-026 §4.3 | true only for operator-authorized lost/App-custody recovery |
 | Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string, response_chunk_plaintext_envelope: bool, in_band_aead_rekey_v1: bool}` | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2; the v1.8 implementation sends all booleans `true` and `aead_suites:["A256GCM"]`. The additive sub-field transport is carried in §6.15.1; SPEC-008 v0.5 owns in-band rekey semantics |
 | Supported models | `supported_models` | array of strings | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.1 through R-3.1.9 and R-3.6.1 through R-3.6.3 |
 | Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.6 and R-3.6.4 |
@@ -2117,6 +2283,8 @@ R-3.1.10.
 | Attestation token | `attestation_token` | JSON raw | conditional per SPEC-008 Tier-2 | |
 | Supported models | `supported_models` | array of strings | optional, ADDED by SPEC-010 v1.5 R-3.1.10 | absent is not a mismatch |
 | Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 R-3.1.10 | absent is not a mismatch |
+| Identity signature | `identity_signature` | string standard base64 of 64-byte Ed25519 signature | conditional, SPEC-026 §4.3 | proves coordinator-selected admission key |
+| Identity transcript hash | `identity_signature_transcript_sha256` | string standard base64 of 32-byte SHA-256 | conditional, SPEC-026 §4.3 | hash of canonical initial frame, including rotation/recovery fields |
 
 R-6.7.5 The coordinator generates `auth_attempt_id` at
 `phase4-coordinator/internal/ws/server.go` (`authAttemptID := "auth-" +
@@ -2146,6 +2314,8 @@ transport owner of last resort (`CoordinatorClient.swift`):
 | Selected AEAD suite | `selected_aead_suite` | string | REQUIRED | e.g. `A256GCM` |
 | Auth attempt ID | `auth_attempt_id` | string | REQUIRED | echoed on the proof frame |
 | Bootstrap identity key | `bootstrap_identity_public_key` | string standard base64 | **conditional** | when present, the binary selects and persists the matching durable receipt-identity signing key for this bootstrap (SPEC-003 credential bootstrap pairing); absent otherwise |
+| Admission identity key | `admission_identity_public_key` | string standard base64 | **conditional** | exact local key the coordinator requires for this proof; recovery challenges the staged recovery key |
+| Admission identity generation | `admission_identity_generation` | positive int | **conditional** | authoritative generation before the proposed transition |
 
 **Accepted `auth_response` (C->P), after the proof-stage frame** — the binary
 requires **all** of:
@@ -2162,6 +2332,11 @@ requires **all** of:
   session whose `auth_response` lacks `catalog_compatible: true` is rejected by
   the binary. This boolean is not named by SPEC-010 (which leaves catalog
   signing out of scope) or SPEC-022; SPEC-001 carries it here.
+- for signed CLI admission, `admission_identity_public_key` (authoritative active
+  key), `identity_generation`, and `identity_admission_key_role` (`current`,
+  `previous`, or `recovery`). The binary commits local Keychain mutation only when
+  these authenticated fields match the staged transaction; previous-key admission is
+  degraded and never overwrites local custody.
 
 A spec-only coordinator MUST emit these fields or the shipped binary fails
 admission.
@@ -2399,8 +2574,8 @@ v0.5 R-3.1.5 and R-3.7.3.
 R-6.9.3a **Full frame inventory (reconciled v1.7).** SPEC-001 owns the
 control-socket **transport** (§6.9.1 wire format, §6.9.4 permissions/
 lifecycle); the `ControlSocketFrame` enum shipped in the binary
-(`ControlSocket.swift`) carries **17** frame `type`s. The five above are the
-SPEC-011 warm-swap set; the remaining twelve were added by later specs and
+(`ControlSocket.swift`) carries **15** frame `type`s. The five above are the
+SPEC-011 warm-swap set; the remaining ten were added by later specs and
 their **semantics are owned by those specs** — SPEC-001 enumerates them here
 for transport completeness but does not re-specify their behavior (the
 cross-referenced spec governs on any conflict). A binary MUST accept/emit
@@ -2423,28 +2598,18 @@ only these `type`s and MUST reject unknown types per §6.9.1.
 | `resume_ack` | serve → app | **SPEC-025** | transport only |
 | `shutdown_request` | app → serve | **SPEC-025** (carries `grace_seconds`) | transport only |
 | `shutdown_ack` | serve → app | **SPEC-025** | transport only |
-| `identity_signature_request` | serve → app | **SPEC-026 §4.3** (fields: `auth_attempt_id`, `provider_id`, `binary_version`, `provider_ecdh_public_key`, `transcript_sha256`) | transport only |
-| `identity_signature_response` | app → serve | **SPEC-026 §4.3** (fields: `accepted`, `identity_signature`, `identity_signature_transcript_sha256`, `reason`) | transport only |
 
-The identity-signature pair (SPEC-026 §4.3) exists because the provider Ed25519
-identity key lives in the Keychain of the expected local peer (Malibu.app), so
-`serve` pushes the auth-transcript to that peer to be signed; the
-receipt-key-rotation and App-track metrics/pause/resume/shutdown frames are the
-App-track control surface (SPEC-015 / SPEC-025). Note the field-name asymmetry:
-the **request** carries `transcript_sha256`, but the **response** echoes it as
-`identity_signature_transcript_sha256` (`ControlSocket.swift`); a spec-literal
-implementation that used `transcript_sha256` on the response would have the
-signature fields silently dropped. None of these twelve alter the §6.9.3
+The receipt-key-rotation and App-track metrics/pause/resume/shutdown frames are the
+App-track control surface (SPEC-015 / SPEC-025). Admission identity signing is not a
+local-control operation: `macprovider-cli` owns the durable admission key and signs
+the coordinator proof directly (SPEC-026 §4.3). None of these ten alter the §6.9.3
 `models`-CLI detection precedence, which keys only on `status_response`.
 
 **Peer authentication is EUID-only.** The control socket authenticates its peer
 by matching effective UID (`ControlSocket.swift`), **not** by verifying it is
-Malibu.app; any same-EUID local process can connect. Signature requests are
-broadcast to all subscribers and the first uncorrelated response completes the
-pending request (`IdentitySignatureBridge.swift`). A same-user process cannot
-forge the Ed25519 signature, but it can observe auth metadata, race a bogus
-rejection (admission DoS), or initiate receipt rotation. Hardening the peer
-check is a carried follow-up, not a v1.7 claim.
+Malibu.app; any same-EUID local process can connect and may initiate receipt
+rotation. Admission proofs and admission-key material never traverse this socket.
+Hardening the receipt-rotation peer check is a carried follow-up.
 
 **Receipt-rotation frame schema owner.** SPEC-015 §7.5 defines reconnect/Keychain
 rotation semantics but **not** the local `rotate_receipt_key_*` request/result
@@ -2476,13 +2641,6 @@ here as owner of last resort:
 - `pause_ack` / `resume_ack` — `{type, accepted: bool}` plus optional
   `reason` (string).
 - `shutdown_request` — `{type, grace_seconds: int}`; `shutdown_ack` — `{type}`.
-
-**`identity_signature_request.binary_version` is a JSON string.** The shipped
-codec (`ControlSocket.swift`) requires `binary_version` as a **string** and
-rejects a JSON number. The SPEC-026 §4.3 example renders it as numeric `2`, which
-is an error in SPEC-026's example — a spec-literal App emitting a number would
-fail to produce the byte-identical JCS auth tuple and break identity signing.
-Implementers MUST send a string (e.g. `"1.8.31"`).
 
 #### 6.9.3. Detection precedence
 

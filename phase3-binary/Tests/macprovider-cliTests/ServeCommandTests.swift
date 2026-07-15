@@ -5,6 +5,54 @@ import XCTest
 @testable import macprovider_cli
 
 final class ServeCommandTests: XCTestCase {
+    func testAdmissionIdentityStartupTopologyClassifiesMarkedPendingKeyAsRecovery() {
+        let current = Data(repeating: 0x11, count: 32)
+        let pending = Data(repeating: 0x22, count: 32)
+
+        XCTAssertEqual(
+            AdmissionIdentityStartupTopology.resolve(
+                currentPublicKey: current,
+                pendingPublicKey: pending,
+                recoveryMarkerPublicKey: pending
+            ),
+            .recoveryPending
+        )
+        XCTAssertEqual(
+            AdmissionIdentityStartupTopology.resolve(
+                currentPublicKey: current,
+                pendingPublicKey: pending,
+                recoveryMarkerPublicKey: nil
+            ),
+            .rotationPending
+        )
+        XCTAssertEqual(
+            AdmissionIdentityStartupTopology.resolve(
+                currentPublicKey: current,
+                pendingPublicKey: pending,
+                recoveryMarkerPublicKey: Data(repeating: 0x33, count: 32)
+            ),
+            .invalidRecoveryMarker
+        )
+        XCTAssertEqual(
+            AdmissionIdentityStartupTopology.resolve(
+                currentPublicKey: pending,
+                pendingPublicKey: pending,
+                recoveryMarkerPublicKey: pending
+            ),
+            .recoveryPending,
+            "a crash after replacing current but before marker cleanup must replay recovery idempotently"
+        )
+        XCTAssertEqual(
+            AdmissionIdentityStartupTopology.resolve(
+                currentPublicKey: pending,
+                pendingPublicKey: nil,
+                recoveryMarkerPublicKey: pending
+            ),
+            .recoveryCommittedCleanup,
+            "a crash after deleting pending but before deleting the marker must finish local cleanup"
+        )
+    }
+
     func testServeCommandRejectsInlineProviderTokenArguments() throws {
         let deprecated = try ServeCommand.parse(["--token", "secret"])
         XCTAssertThrowsError(try ConfigLoader.load(cli: CLIOverrides(providerToken: deprecated.providerToken), environment: [:])) { error in
@@ -93,6 +141,69 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertFalse(factoryInvoked)
     }
 
+    func testEstablishedBootstrapShapedProviderCannotServeWithoutCredential() {
+        var config = AppConfig.defaults()
+        config.providerID = "mp-0123456789abcdef0123456789abcdef"
+        config.providerToken = nil
+
+        XCTAssertThrowsError(try ServeCommand.validateCoordinatorCredential(
+            config: config,
+            credentialStatus: ProviderCredentialStatus(
+                source: .none,
+                state: .missing,
+                restartSafe: false
+            ),
+            noJoin: false
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("credential state is missing"))
+        }
+    }
+
+    func testCoordinatorCredentialPreflightRejectsEveryNonReadyCustodyState() {
+        var config = AppConfig.defaults()
+        config.providerID = "provider-a"
+        config.providerToken = nil
+        let failures: [ProviderCredentialStatus.State] = [
+            .degraded, .conflict, .missing, .locked, .notLoggedIn,
+            .permissionDenied, .corrupt, .keychainFailure, .incompatible, .unavailable,
+        ]
+
+        for state in failures {
+            XCTAssertThrowsError(try ServeCommand.validateCoordinatorCredential(
+                config: config,
+                credentialStatus: ProviderCredentialStatus(
+                    source: .none,
+                    state: state,
+                    restartSafe: false
+                ),
+                noJoin: false
+            ), "state=\(state.rawValue)")
+        }
+    }
+
+    func testCoordinatorCredentialPreflightAllowsExplicitNonJoiningModes() throws {
+        var config = AppConfig.defaults()
+        config.providerID = "provider-a"
+        config.providerToken = nil
+        let missing = ProviderCredentialStatus(
+            source: .none,
+            state: .missing,
+            restartSafe: false
+        )
+
+        XCTAssertNoThrow(try ServeCommand.validateCoordinatorCredential(
+            config: config,
+            credentialStatus: missing,
+            noJoin: true
+        ))
+        config.donorMode = true
+        XCTAssertNoThrow(try ServeCommand.validateCoordinatorCredential(
+            config: config,
+            credentialStatus: missing,
+            noJoin: false
+        ))
+    }
+
     func testSafeOfflineCatalogFallbackRequestsCoordinatorCompatibility() {
         var factoryInvoked = false
 
@@ -173,6 +284,38 @@ final class ServeCommandTests: XCTestCase {
         }
 
         let retryLock = try ProviderServeLock.acquire(providerID: "retry", port: 61_920, directory: lockDirectory)
+        retryLock.release()
+    }
+
+    func testCoordinatorCatalogPreflightFailureIsClassifiedAndReleasesServeLock() async throws {
+        let lockDirectory = try tempDir()
+        let snapshot = try makeSnapshot()
+        var config = AppConfig.defaults()
+        config.providerID = "mac"
+        config.port = 61_921
+        config.model = "test-public-model"
+        config.modelArtifactPath = snapshot.path
+        config.modelArtifactSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+
+        do {
+            _ = try await ServeCommand.runServeStartupPreflights(
+                &config,
+                joiningCoordinator: true,
+                portIsOpen: { _ in false },
+                acquireServeLock: { config in
+                    try ProviderServeLock.acquire(
+                        providerID: config.providerID,
+                        port: config.port,
+                        directory: lockDirectory
+                    )
+                }
+            )
+            XCTFail("missing catalog provenance must fail as catalog-incompatible")
+        } catch {
+            XCTAssertTrue(error is ServeCatalogPreflightError)
+        }
+
+        let retryLock = try ProviderServeLock.acquire(providerID: "retry", port: 61_921, directory: lockDirectory)
         retryLock.release()
     }
 

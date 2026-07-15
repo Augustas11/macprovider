@@ -1,5 +1,6 @@
 import Foundation
 import MacProviderCore
+import Darwin
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
 
@@ -14,6 +15,94 @@ struct ProviderCatalogStatusContext: Sendable {
     let configuredCatalogDigest: String?
 }
 
+struct ProviderAdmissionIdentityStatusContext: Sendable {
+    var source: String
+    var state: String
+    var publicKeySHA256: String?
+    var pendingPublicKeySHA256: String?
+    var previousPublicKeySHA256: String?
+    var previousValidUntil: String?
+    var coordinatorGeneration: Int?
+    var coordinatorPublicKeySHA256: String?
+    var coordinatorKeyRole: String?
+    var transitionError: String?
+    var recoveryAction: String
+
+    init(
+        source: String,
+        state: String,
+        publicKeySHA256: String?,
+        pendingPublicKeySHA256: String? = nil,
+        previousPublicKeySHA256: String? = nil,
+        previousValidUntil: String? = nil,
+        coordinatorGeneration: Int? = nil,
+        coordinatorPublicKeySHA256: String? = nil,
+        coordinatorKeyRole: String? = nil,
+        transitionError: String? = nil,
+        recoveryAction: String = "none"
+    ) {
+        self.source = source
+        self.state = state
+        self.publicKeySHA256 = publicKeySHA256
+        self.pendingPublicKeySHA256 = pendingPublicKeySHA256
+        self.previousPublicKeySHA256 = previousPublicKeySHA256
+        self.previousValidUntil = previousValidUntil
+        self.coordinatorGeneration = coordinatorGeneration
+        self.coordinatorPublicKeySHA256 = coordinatorPublicKeySHA256
+        self.coordinatorKeyRole = coordinatorKeyRole
+        self.transitionError = transitionError
+        self.recoveryAction = recoveryAction
+    }
+}
+
+actor ProviderAdmissionIdentityStatusRuntime {
+    private var value: ProviderAdmissionIdentityStatusContext
+
+    init(_ value: ProviderAdmissionIdentityStatusContext = ProviderAdmissionIdentityStatusContext(
+        source: "none", state: "unconfigured", publicKeySHA256: nil
+    )) {
+        self.value = value
+    }
+
+    func snapshot() -> ProviderAdmissionIdentityStatusContext { value }
+
+    func recordAccepted(
+        coordinatorPublicKeySHA256: String,
+        generation: Int?,
+        keyRole: String?,
+        localState: String? = nil,
+        localSource: String? = nil,
+        localPublicKeySHA256: String? = nil,
+        pendingPublicKeySHA256: String? = nil,
+        previousPublicKeySHA256: String? = nil,
+        previousValidUntil: String? = nil,
+        recoveryAction: String? = nil,
+        replaceLocalKeyState: Bool = false
+    ) {
+        value.coordinatorPublicKeySHA256 = coordinatorPublicKeySHA256
+        value.coordinatorGeneration = generation
+        value.coordinatorKeyRole = keyRole
+        value.transitionError = nil
+        if let localState { value.state = localState }
+        if let localSource { value.source = localSource }
+        if replaceLocalKeyState {
+            value.publicKeySHA256 = localPublicKeySHA256
+            value.pendingPublicKeySHA256 = pendingPublicKeySHA256
+            value.previousPublicKeySHA256 = previousPublicKeySHA256
+            value.previousValidUntil = previousValidUntil
+        } else if let previousValidUntil {
+            value.previousValidUntil = previousValidUntil
+        }
+        if let recoveryAction { value.recoveryAction = recoveryAction }
+    }
+
+    func recordFailure(_ reason: String, recoveryAction: String) {
+        value.state = "recovery_required"
+        value.transitionError = reason
+        value.recoveryAction = recoveryAction
+    }
+}
+
 struct HTTPServer: Sendable {
     let config: AppConfig
     let modelRuntime: ModelRuntime
@@ -22,6 +111,12 @@ struct HTTPServer: Sendable {
     let idlePrewarmer: IdlePrewarmer?
     let catalogModelIDAlias: String?
     let catalogStatus: ProviderCatalogStatusContext
+    let credentialStatusRuntime: ProviderCredentialStatusRuntime
+    let admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime
+    let compatibilitySetManifest: CompatibilitySetManifest?
+    let lifecycleStateStore: ProviderLifecycleStateStore
+    let lifecycleLeaseStore: ProviderLifecycleLeaseStore
+    let onListening: @Sendable () throws -> Void
 
     init(
         config: AppConfig,
@@ -30,7 +125,14 @@ struct HTTPServer: Sendable {
         receiptBuilder: ReceiptBuilder?,
         idlePrewarmer: IdlePrewarmer? = nil,
         catalogModelIDAlias: String? = nil,
-        catalogTrust: ServeCommand.CatalogRuntimeTrust? = nil
+        catalogTrust: ServeCommand.CatalogRuntimeTrust? = nil,
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
+        admissionIdentityStatus: ProviderAdmissionIdentityStatusContext? = nil,
+        admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime? = nil,
+        compatibilitySetManifest: CompatibilitySetManifest? = nil,
+        lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
+        lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
+        onListening: @escaping @Sendable () throws -> Void = {}
     ) {
         self.config = config
         self.modelRuntime = modelRuntime
@@ -38,6 +140,15 @@ struct HTTPServer: Sendable {
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
         self.catalogModelIDAlias = catalogModelIDAlias
+        self.credentialStatusRuntime = credentialStatusRuntime
+        self.admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
+            ?? ProviderAdmissionIdentityStatusRuntime(admissionIdentityStatus ?? ProviderAdmissionIdentityStatusContext(
+                source: "none", state: "unconfigured", publicKeySHA256: nil
+            ))
+        self.compatibilitySetManifest = compatibilitySetManifest
+        self.lifecycleStateStore = lifecycleStateStore
+        self.lifecycleLeaseStore = lifecycleLeaseStore
+        self.onListening = onListening
         self.catalogStatus = ProviderCatalogStatusContext(
             trust: catalogTrust,
             donorMode: config.donorMode,
@@ -73,7 +184,12 @@ struct HTTPServer: Sendable {
                             receiptBuilder: receiptBuilder,
                             idlePrewarmer: idlePrewarmer,
                             catalogModelIDAlias: catalogModelIDAlias,
-                            catalogStatus: catalogStatus
+                            catalogStatus: catalogStatus,
+                            credentialStatusRuntime: credentialStatusRuntime,
+                            admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+                            compatibilitySetManifest: compatibilitySetManifest,
+                            lifecycleStateStore: lifecycleStateStore,
+                            lifecycleLeaseStore: lifecycleLeaseStore
                         )
                     )
                 }
@@ -81,6 +197,12 @@ struct HTTPServer: Sendable {
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
         let channel = try bootstrap.bind(host: "127.0.0.1", port: config.port).wait()
+        do {
+            try onListening()
+        } catch {
+            try? channel.close().wait()
+            throw error
+        }
         print("Listening on http://127.0.0.1:\(config.port)")
         try channel.closeFuture.wait()
     }
@@ -89,6 +211,29 @@ struct HTTPServer: Sendable {
 final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
+
+    static let localStatusContractVersion = 1
+    static let localStatusMinimumReaderVersion = 1
+    static let localStatusCapabilities = [
+        "buyer_serving_authority_v1",
+        "catalog_status_v1",
+        "compatibility_set_v1",
+        "credential_status_v1",
+        "admission_identity_v1",
+        "lifecycle_transition_v1",
+        "persisted_lifecycle_state_v1",
+        "lifecycle_significant_events_v1",
+        "lifecycle_lease_v1",
+        "legacy_reader_fallback_v1",
+        "service_instance_v1",
+        "status_observation_v1",
+        "provider_safety_telemetry_v1",
+        "provider_safety_telemetry_v2",
+    ]
+    static let serviceInstanceID = UUID().uuidString.lowercased()
+    static let serviceStartedAt = Date()
+    static let serviceBootSession = bootSessionUUID()
+    static let statusObservationValidityMS = 5_000
 
     private let modelID: String?
     private let providerID: String?
@@ -101,6 +246,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let idlePrewarmer: IdlePrewarmer?
     private let catalogModelIDAlias: String?
     private let catalogStatus: ProviderCatalogStatusContext?
+    private let credentialStatusRuntime: ProviderCredentialStatusRuntime
+    private let admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime
+    private let compatibilitySetManifest: CompatibilitySetManifest?
+    private let lifecycleStateStore: ProviderLifecycleStateStore
+    private let lifecycleLeaseStore: ProviderLifecycleLeaseStore
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
@@ -116,7 +266,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         receiptBuilder: ReceiptBuilder? = nil,
         idlePrewarmer: IdlePrewarmer? = nil,
         catalogModelIDAlias: String? = nil,
-        catalogStatus: ProviderCatalogStatusContext? = nil
+        catalogStatus: ProviderCatalogStatusContext? = nil,
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
+        admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
+        compatibilitySetManifest: CompatibilitySetManifest? = nil,
+        lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
+        lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore()
     ) {
         self.modelID = modelID
         self.providerID = providerID
@@ -129,6 +284,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.idlePrewarmer = idlePrewarmer
         self.catalogModelIDAlias = catalogModelIDAlias
         self.catalogStatus = catalogStatus
+        self.credentialStatusRuntime = credentialStatusRuntime
+        self.admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
+        self.compatibilitySetManifest = compatibilitySetManifest
+        self.lifecycleStateStore = lifecycleStateStore
+        self.lifecycleLeaseStore = lifecycleLeaseStore
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -247,8 +407,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let providerID = providerID
         let coordinatorURL = coordinatorURL
         let catalogStatus = catalogStatus
-        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus] in
+        let credentialStatusRuntime = credentialStatusRuntime
+        let admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
+        let lifecycleStateStore = lifecycleStateStore
+        let lifecycleLeaseStore = lifecycleLeaseStore
+        let compatibilitySetManifest = compatibilitySetManifest
+        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
             let snapshot = await providerStatus.snapshot()
+            let credentialStatus = await credentialStatusRuntime.snapshot()
+            let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
             async let coordinatorBuyerServing = CoordinatorReadinessClient.fetch(
                 coordinatorURL: coordinatorURL,
                 providerID: providerID,
@@ -267,7 +434,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
 	                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
 	                    catalogStatus: catalogStatus,
-	                    coordinatorBuyerServing: await coordinatorBuyerServing
+	                    coordinatorBuyerServing: await coordinatorBuyerServing,
+	                    credentialStatus: credentialStatus,
+	                    admissionIdentityStatus: admissionIdentityStatus,
+	                    lifecycleStateInspection: lifecycleStateStore.inspect(),
+	                    lifecycleLeaseInspection: lifecycleLeaseStore.inspect(),
+	                    compatibilitySetManifest: compatibilitySetManifest
 	                )
             )
         }
@@ -353,7 +525,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     defer {
                         Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                     }
-                    startedAt = await providerStatus.beginRequest()
+                    guard let admittedAt = await providerStatus.beginRequestIfAccepting() else {
+                        writer.writeAPIError(APIError(
+                            status: 503,
+                            message: "Provider is paused or draining",
+                            type: "server_error",
+                            code: "provider_paused"
+                        ))
+                        return
+                    }
+                    startedAt = admittedAt
                     providerRequestStarted = true
                     await idlePrewarmer?.cancelInflightPrewarm()
                     let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { false })
@@ -647,13 +828,23 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 defer {
                     Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                 }
-                startedAt = await providerStatus.beginRequest()
+                guard let admittedAt = await providerStatus.beginRequestIfAccepting() else {
+                    writer.writeAPIError(APIError(
+                        status: 503,
+                        message: "Provider is paused or draining",
+                        type: "server_error",
+                        code: "provider_paused"
+                    ))
+                    return
+                }
+                startedAt = admittedAt
                 providerRequestStarted = true
                 await idlePrewarmer?.cancelInflightPrewarm()
                 try await modelRuntime.preflight(request, with: handle)
 
                 writer.startSSE(extraHeaders: Self.streamingSettlementHeadHeaders(settlementMetadata: settlementMetadata) + [
                     ("X-MacProvider-Provider-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
+                    ("X-Provider-Id", providerID ?? ""),
                 ])
                 sseStarted = true
                 writer.writeSSEJSON(
@@ -1221,12 +1412,41 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         specDecodeTelemetryMatchesRuntime: Bool = true,
         specDecodeTelemetryRuntimeEligible: Bool = true,
         catalogStatus: ProviderCatalogStatusContext? = nil,
-        coordinatorBuyerServing: Bool? = nil
+        coordinatorBuyerServing: Bool? = nil,
+        credentialStatus: ProviderCredentialStatus = .unconfigured,
+        admissionIdentityStatus: ProviderAdmissionIdentityStatusContext? = nil,
+        lifecycleStateInspection: ProviderLifecycleStateInspection = .missing,
+        lifecycleLeaseInspection: ProviderLifecycleLeaseInspection = .missing,
+        compatibilitySetManifest: CompatibilitySetManifest? = nil
     ) -> [String: Any] {
+        let observedAt = Date()
+        let observationID = UUID().uuidString.lowercased()
         let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
         let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
         var body: [String: Any] = [
             "binary_version": CoordinatorClient.binaryVersion,
+            "compatibility_set_id": jsonNullable(compatibilitySetManifest?.compatibilitySetID),
+            "compatibility_set_sha256": jsonNullable(compatibilitySetManifest?.envelopeSHA256),
+            "local_status_contract": [
+                "version": localStatusContractVersion,
+                "minimum_reader_version": localStatusMinimumReaderVersion,
+                "lifecycle_owner": "macprovider_cli",
+                "capabilities": localStatusCapabilities,
+            ],
+            "observation": [
+                "id": observationID,
+                "observed_at": iso8601(observedAt),
+                "valid_for_ms": statusObservationValidityMS,
+            ],
+            "service_instance": [
+                "instance_id": serviceInstanceID,
+                "pid": Int(getpid()),
+                "boot_session": jsonNullable(serviceBootSession),
+                "started_at": iso8601(serviceStartedAt),
+                "role": "serve",
+            ],
+            "lifecycle": lifecycleStateStatus(lifecycleStateInspection),
+            "lifecycle_lease": lifecycleLeaseStatus(lifecycleLeaseInspection),
             "provider_id": jsonNullable(providerID),
             "status": snapshot.status.rawValue,
             "model": effectiveModelID ?? NSNull(),
@@ -1239,10 +1459,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "input_tokens_all_time": snapshot.inputTokensAllTime,
             "output_tokens_all_time": snapshot.outputTokensAllTime,
             "requests_in_flight": snapshot.requestsInFlight,
+            "requests_queued": snapshot.requestsQueued,
             "active_request_id_count": snapshot.activeRequestIDCount,
             "errors_total": snapshot.errorsTotal,
             "restart_count": snapshot.restartCount,
             "memory_rss_mb": snapshot.memoryRSSMB,
+            "memory_pressure": snapshot.memoryPressure.rawValue,
+            "thermal_state": snapshot.thermalState,
+            "thermally_throttled": snapshot.thermallyThrottled,
             "capacity": [
                 "ram_gb": snapshot.capacity.ramGB,
                 "ram_tier": snapshot.capacity.ramTier,
@@ -1255,7 +1479,40 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "connected": snapshot.coordinatorConnected,
                 "session": jsonNullable(snapshot.coordinatorAssignedID),
                 "tier": jsonNullable(snapshot.coordinatorTier),
+                "identity_admission_mode": jsonNullable(snapshot.coordinatorIdentityAdmissionMode),
                 "recommended_binary_version": jsonNullable(snapshot.recommendedBinaryVersion),
+            ],
+            "safety_telemetry": snapshot.safetyTelemetry(
+                providerID: providerID,
+                modelID: effectiveModelID,
+                modelLoaded: effectiveModelLoaded,
+                binaryVersion: CoordinatorClient.binaryVersion,
+                compatibilitySetID: compatibilitySetManifest?.compatibilitySetID,
+                modelHash: runtimeSnapshot?.modelHash ?? snapshot.modelHash,
+                observationID: observationID,
+                observedAt: iso8601(observedAt),
+                validForMS: statusObservationValidityMS
+            ),
+            "credential": [
+                "source": credentialStatus.source.rawValue,
+                "state": credentialStatus.state.rawValue,
+                "restart_safe": credentialStatus.restartSafe,
+                "migration_pending": credentialStatus.migrationPending,
+                "recovery_action": credentialStatus.recoveryAction.rawValue,
+            ],
+            "admission_identity": [
+                "owner": "macprovider_cli",
+                "source": admissionIdentityStatus?.source ?? "none",
+                "state": admissionIdentityStatus?.state ?? "unconfigured",
+                "public_key_sha256": jsonNullable(admissionIdentityStatus?.publicKeySHA256),
+                "pending_public_key_sha256": jsonNullable(admissionIdentityStatus?.pendingPublicKeySHA256),
+                "previous_public_key_sha256": jsonNullable(admissionIdentityStatus?.previousPublicKeySHA256),
+                "previous_valid_until": jsonNullable(admissionIdentityStatus?.previousValidUntil),
+                "coordinator_generation": admissionIdentityStatus?.coordinatorGeneration.map { $0 as Any } ?? NSNull(),
+                "coordinator_public_key_sha256": jsonNullable(admissionIdentityStatus?.coordinatorPublicKeySHA256),
+                "coordinator_key_role": jsonNullable(admissionIdentityStatus?.coordinatorKeyRole),
+                "transition_error": jsonNullable(admissionIdentityStatus?.transitionError),
+                "recovery_action": admissionIdentityStatus?.recoveryAction ?? "none",
             ],
         ]
         body.merge(specDecodeTelemetryFields(
@@ -1300,6 +1557,159 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         return body
+    }
+
+    private static func lifecycleStateStatus(_ inspection: ProviderLifecycleStateInspection) -> [String: Any] {
+        switch inspection {
+        case .missing:
+            return [
+                "record_state": "missing",
+                "transition_id": NSNull(),
+                "previous_transition_id": NSNull(),
+                "transition_at": NSNull(),
+                "sequence": NSNull(),
+                "state": ProviderLifecycleState.failed.rawValue,
+                "reason_code": "lifecycle_state_missing",
+                "authority": ProviderLifecycleStateRecord.authority,
+                "writer": NSNull(),
+                "provider_id": NSNull(),
+                "model_id": NSNull(),
+                "compatibility_set_id": NSNull(),
+                "operation_id": NSNull(),
+                "operator_paused": false,
+                "last_restart": NSNull(),
+                "last_rejection": NSNull(),
+                "last_update": NSNull(),
+                "last_watchdog": NSNull(),
+            ]
+        case .invalid(let reason):
+            return [
+                "record_state": "invalid",
+                "transition_id": NSNull(),
+                "previous_transition_id": NSNull(),
+                "transition_at": NSNull(),
+                "sequence": NSNull(),
+                "state": ProviderLifecycleState.failed.rawValue,
+                "reason_code": "lifecycle_state_invalid",
+                "authority": ProviderLifecycleStateRecord.authority,
+                "writer": NSNull(),
+                "provider_id": NSNull(),
+                "model_id": NSNull(),
+                "compatibility_set_id": NSNull(),
+                "operation_id": NSNull(),
+                "operator_paused": false,
+                "last_restart": NSNull(),
+                "last_rejection": NSNull(),
+                "last_update": NSNull(),
+                "last_watchdog": NSNull(),
+                "invalid_reason": reason,
+            ]
+        case .valid(let record):
+            return [
+                "record_state": "valid",
+                "version": record.version,
+                "sequence": record.sequence,
+                "transition_id": record.transitionID,
+                "previous_transition_id": jsonNullable(record.previousTransitionID),
+                "transition_at": record.transitionAt,
+                "state": record.state.rawValue,
+                "reason_code": record.reasonCode,
+                "authority": record.authority,
+                "writer": record.writer.rawValue,
+                "provider_id": jsonNullable(record.providerID),
+                "model_id": jsonNullable(record.modelID),
+                "compatibility_set_id": jsonNullable(record.compatibilitySetID),
+                "operation_id": jsonNullable(record.operationID),
+                "operator_paused": record.operatorPauseRequested,
+                "last_restart": lifecycleSignificantEvent(record.lastRestart),
+                "last_rejection": lifecycleSignificantEvent(record.lastRejection),
+                "last_update": lifecycleSignificantEvent(record.lastUpdate),
+                "last_watchdog": lifecycleSignificantEvent(record.lastWatchdog),
+            ]
+        }
+    }
+
+    private static func lifecycleSignificantEvent(
+        _ event: ProviderLifecycleStateRecord.SignificantEvent?
+    ) -> Any {
+        guard let event else { return NSNull() }
+        return [
+            "sequence": event.sequence,
+            "transition_id": event.transitionID,
+            "transition_at": event.transitionAt,
+            "state": event.state.rawValue,
+            "reason_code": event.reasonCode,
+            "writer": event.writer.rawValue,
+            "compatibility_set_id": jsonNullable(event.compatibilitySetID),
+            "operation_id": jsonNullable(event.operationID),
+        ] as [String: Any]
+    }
+
+    private static func lifecycleLeaseStatus(_ inspection: ProviderLifecycleLeaseInspection) -> [String: Any] {
+        switch inspection {
+        case .missing:
+            return [
+                "state": "inactive",
+                "kind": NSNull(),
+                "operation_id": NSNull(),
+                "owner_pid": NSNull(),
+                "expires_wall_ms": NSNull(),
+                "invalid_reason": NSNull(),
+            ]
+        case .valid(let record):
+            return [
+                "state": "active",
+                "kind": record.kind.rawValue,
+                "operation_id": record.operationID,
+                "owner_pid": Int(record.owner.pid),
+                "expires_wall_ms": record.expiresWallMilliseconds,
+                "invalid_reason": NSNull(),
+            ]
+        case .invalidOrExpired(_, let reason):
+            return [
+                "state": "invalid",
+                "kind": NSNull(),
+                "operation_id": NSNull(),
+                "owner_pid": NSNull(),
+                "expires_wall_ms": NSNull(),
+                "invalid_reason": lifecycleLeaseReasonCode(reason),
+            ]
+        }
+    }
+
+    private static func lifecycleLeaseReasonCode(_ reason: ProviderLifecycleLeaseInvalidReason) -> String {
+        switch reason {
+        case .malformedRecord: return "malformed_record"
+        case .unsupportedVersion: return "unsupported_version"
+        case .invalidField: return "invalid_field"
+        case .durationOutOfRange: return "duration_out_of_range"
+        case .wallClockBeforeIssue: return "wall_clock_before_issue"
+        case .monotonicClockBeforeIssue: return "monotonic_clock_before_issue"
+        case .wallExpired: return "wall_expired"
+        case .monotonicExpired: return "monotonic_expired"
+        case .bootSessionChanged: return "boot_session_changed"
+        case .ownerProcessMissingOrReused: return "owner_process_missing_or_reused"
+        case .unsafeStorage: return "unsafe_storage"
+        case .storageFailure: return "storage_failure"
+        }
+    }
+
+    private static func iso8601(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+
+    private static func bootSessionUUID() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0,
+              size > 1 else {
+            return nil
+        }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0 else {
+            return nil
+        }
+        let value = String(cString: buffer).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value.lowercased()
     }
 
     static func specDecodeTelemetryFields(

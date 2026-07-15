@@ -37,6 +37,7 @@ struct AutoUpdater: Sendable {
     let config: AppConfig
     let currentVersion: String
     let providerStatus: ProviderStatus
+    let expectedCompatibilitySetID: String?
     let releasesAPIURL: String?
     let markerStore: AutoUpdateMarkerStore
     let session: URLSession
@@ -47,11 +48,13 @@ struct AutoUpdater: Sendable {
     let currentBinaryURL: @Sendable () -> URL?
     let rollbackObserverAvailable: Availability
     let launchdProviderAvailable: Availability
+    let lifecycleLeaseStore: ProviderLifecycleLeaseStore
 
     init(
         config: AppConfig,
         currentVersion: String,
         providerStatus: ProviderStatus,
+        expectedCompatibilitySetID: String? = nil,
         releasesAPIURL: String? = nil,
         markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         session: URLSession = .shared,
@@ -61,11 +64,13 @@ struct AutoUpdater: Sendable {
         restartLaunchd: @escaping Restart = { try AutoUpdater.restartLaunchdIfInstalled() },
         currentBinaryURL: @escaping @Sendable () -> URL? = { Bundle.main.executableURL },
         rollbackObserverAvailable: @escaping Availability = { AutoUpdater.defaultRollbackObserverAvailable() },
-        launchdProviderAvailable: @escaping Availability = { AutoUpdater.defaultLaunchdProviderAvailable() }
+        launchdProviderAvailable: @escaping Availability = { AutoUpdater.defaultLaunchdProviderAvailable() },
+        lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore()
     ) {
         self.config = config
         self.currentVersion = currentVersion
         self.providerStatus = providerStatus
+        self.expectedCompatibilitySetID = expectedCompatibilitySetID
         self.releasesAPIURL = releasesAPIURL
         self.markerStore = markerStore
         self.session = session
@@ -76,6 +81,7 @@ struct AutoUpdater: Sendable {
         self.currentBinaryURL = currentBinaryURL
         self.rollbackObserverAvailable = rollbackObserverAvailable
         self.launchdProviderAvailable = launchdProviderAvailable
+        self.lifecycleLeaseStore = lifecycleLeaseStore
     }
 
     func handleCoordinatorRecommendation(_ rawRecommended: String) async {
@@ -106,6 +112,13 @@ struct AutoUpdater: Sendable {
         let target = validated.normalized
         await record(updateID: updateID, target: target, phase: .detection, outcome: .inProgress, reason: "recommended_binary_version_detected", attempt: 1)
         let commitTracker = AutoUpdateCommitTracker()
+        var maintenanceLease: ProviderLifecycleLeaseRecord?
+        var startupHandoffPrepared = false
+        defer {
+            if let maintenanceLease, !startupHandoffPrepared {
+                _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
+            }
+        }
 
         guard SelfUpdate.compareSemver(currentVersion, target) == .orderedAscending else {
             await record(updateID: updateID, target: target, phase: .eligibility, outcome: .noop, reason: "target_not_newer", attempt: 1)
@@ -156,6 +169,42 @@ struct AutoUpdater: Sendable {
                 return
             }
             defer { prepared.cleanup() }
+            guard let expectedCompatibilitySetID else {
+                await fail(
+                    updateID: updateID,
+                    target: target,
+                    phase: .eligibility,
+                    failure: .other,
+                    reason: "coordinator_compatibility_target_missing"
+                )
+                return
+            }
+            guard prepared.compatibilityManifest.compatibilitySetID == expectedCompatibilitySetID else {
+                await fail(
+                    updateID: updateID,
+                    target: target,
+                    phase: .eligibility,
+                    failure: .other,
+                    reason: "coordinator_compatibility_target_mismatch"
+                )
+                return
+            }
+            if try markerStore.preflightInstalledMalibuAppReplacement() != nil,
+               prepared.stagedMalibuApp == nil {
+                await fail(
+                    updateID: updateID,
+                    target: target,
+                    phase: .eligibility,
+                    failure: .other,
+                    reason: "signed_malibu_bundle_missing"
+                )
+                return
+            }
+            maintenanceLease = try lifecycleLeaseStore.acquire(
+                kind: .maintenance,
+                operationID: "autoupdate:\(updateID)",
+                duration: TimeInterval(prepared.compatibilityManifest.maintenanceLeaseSeconds)
+            )
             try await ensureEligible(phase: .drain)
             let drained = try await drain(target)
             guard drained else {
@@ -164,16 +213,43 @@ struct AutoUpdater: Sendable {
                 return
             }
             try await ensureEligible(phase: .backup)
-            try await preserveMarkerAndSwap(updateID: updateID, target: target, newBinary: prepared.newBinary, tracker: commitTracker)
+            try await preserveMarkerAndSwap(
+                updateID: updateID,
+                target: target,
+                prepared: prepared,
+                tracker: commitTracker
+            )
             if let signedPolicy = prepared.signedPolicy {
                 try await markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
             }
             await record(updateID: updateID, target: target, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             try await ensureEligible(phase: .restart)
             do {
+                guard let lease = maintenanceLease,
+                      let providerID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !providerID.isEmpty,
+                      let current = currentBinaryURL()
+                else {
+                    throw ProviderLifecycleLeaseError.invalidHandoffField("provider_id")
+                }
+                _ = try lifecycleLeaseStore.prepareStartupHandoff(
+                    maintenanceLeaseID: lease.leaseID,
+                    operationID: "autoupdate:\(updateID)",
+                    providerID: providerID,
+                    serviceIdentity: SelfUpdate.launchdLabel,
+                    targetExecutablePath: current.path,
+                    targetExecutableSHA256: try AutoUpdateMarkerStore.sha256(file: current),
+                    handoffDuration: 60,
+                    startupLeaseDuration: TimeInterval(prepared.compatibilityManifest.readinessTimeoutSeconds)
+                )
+                startupHandoffPrepared = true
                 try restartLaunchd()
             } catch {
                 try? rollbackCommittedSwapAfterRestartFailure(commitTracker)
+                if let maintenanceLease {
+                    _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
+                }
+                startupHandoffPrepared = false
                 await fail(updateID: updateID, target: target, phase: .restart, failure: .other, reason: Self.redactedReason(for: error))
                 return
             }
@@ -187,8 +263,8 @@ struct AutoUpdater: Sendable {
                 var rollbackSafeToClean = !commitTracker.committedSwap
                 if commitTracker.committedSwap {
                     do {
-                        try markerStore.restoreBackup(marker)
-                        rollbackSafeToClean = true
+                        let restored = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
+                        rollbackSafeToClean = restored.transactionState == nil
                     } catch {
                         // Keep the pending marker and both backups durable so
                         // the watchdog can retry a failed in-process restore.
@@ -209,14 +285,23 @@ struct AutoUpdater: Sendable {
         }
     }
 
-    private func preserveMarkerAndSwap(updateID: String, target: String, newBinary: URL, tracker: AutoUpdateCommitTracker) async throws {
+    private func preserveMarkerAndSwap(
+        updateID: String,
+        target: String,
+        prepared: PreparedSelfUpdate,
+        tracker: AutoUpdateCommitTracker
+    ) async throws {
         guard let current = currentBinaryURL() else {
             throw AutoUpdateError.currentBinaryUnknown
         }
         let marker = try markerStore.preserveReleaseRollbackBackup(
             binaryURL: current,
             updateID: updateID,
-            targetVersion: target
+            targetVersion: target,
+            previousVersion: currentVersion,
+            targetCompatibilitySetID: prepared.compatibilityManifest.compatibilitySetID,
+            targetCompatibilitySetSHA256: prepared.compatibilityManifest.envelopeSHA256,
+            readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds
         )
         tracker.marker = marker
         tracker.committedBackup = true
@@ -225,17 +310,21 @@ struct AutoUpdater: Sendable {
             tracker.committedMarker = true
             try await ensureEligible(phase: .swap)
             try markerStore.activateReleasePayload(
-                from: newBinary.deletingLastPathComponent(),
-                newBinary: newBinary,
-                to: current
+                from: prepared.newBinary.deletingLastPathComponent(),
+                newBinary: prepared.newBinary,
+                to: current,
+                stagedMalibuApp: prepared.stagedMalibuApp,
+                rollbackMarker: marker
             )
             tracker.committedSwap = true
         } catch {
             if tracker.committedMarker {
                 do {
-                    try markerStore.restoreBackup(marker)
-                    markerStore.clearPendingAndLock(target: nil)
-                    markerStore.removeRollbackBackups(marker)
+                    let restored = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
+                    if restored.transactionState == nil {
+                        markerStore.clearPendingAndLock(target: nil)
+                        markerStore.removeRollbackBackups(marker)
+                    }
                 } catch {
                     // Leave the durable marker and both snapshots intact so
                     // the independent watchdog can retry the same restore.
@@ -261,9 +350,12 @@ struct AutoUpdater: Sendable {
         guard tracker.committedSwap, let marker = tracker.marker ?? (try? markerStore.readPending()) else {
             return
         }
-        try markerStore.restoreBackup(marker)
-        markerStore.clearPendingAndLock(target: nil)
-        markerStore.removeRollbackBackups(marker)
+        let restored = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
+        try restartLaunchd()
+        if restored.transactionState == nil {
+            markerStore.clearPendingAndLock(target: nil)
+            markerStore.removeRollbackBackups(marker)
+        }
     }
 
     private func ensureEligible(phase: AutoUpdatePhase) async throws {
@@ -346,6 +438,10 @@ struct AutoUpdater: Sendable {
             return "insufficient_disk_space"
         case UpdateError.missingReleaseResource:
             return "release_resource_missing"
+        case UpdateError.compatibilityManifestInvalid:
+            return "compatibility_set_invalid"
+        case UpdateError.compatibilityManifestVersionMismatch:
+            return "compatibility_set_version_mismatch"
         case UpdateError.rollbackUnavailable:
             return "rollback_unavailable"
         case UpdateError.activationFailedRollbackFailed:
@@ -373,7 +469,8 @@ struct AutoUpdater: Sendable {
             return .signature
         case UpdateError.checksumMismatch, UpdateError.checksumMissing:
             return .checksum
-        case UpdateError.unsafeArchiveEntry, UpdateError.missingExtractedBinary:
+        case UpdateError.unsafeArchiveEntry, UpdateError.missingExtractedBinary,
+             UpdateError.compatibilityManifestInvalid, UpdateError.compatibilityManifestVersionMismatch:
             return .archive
         case UpdateError.processFailed:
             return .selfTest
@@ -402,15 +499,18 @@ struct AutoUpdater: Sendable {
     }
 
     static func restartLaunchdIfInstalled() throws {
-        let plist = FileManager.default.homeDirectoryForCurrentUser
+        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let plist = homeDirectory
             .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
         guard FileManager.default.fileExists(atPath: plist.path) else {
             throw AutoUpdateError.other("unsupported_install_topology")
         }
-        let loaded = launchctlServiceLoaded(label: SelfUpdate.launchdLabel)
-        try runProcess(
-            "/bin/launchctl",
-            arguments: SelfUpdate.launchdRestartArguments(serviceLoaded: loaded, plistPath: plist.path)
+        try SelfUpdate.reloadCompatibilityLaunchdJobs(
+            homeDirectory: homeDirectory,
+            serviceLoaded: launchctlServiceLoaded,
+            runLaunchctl: { arguments in
+                try runProcess("/bin/launchctl", arguments: arguments)
+            }
         )
     }
 

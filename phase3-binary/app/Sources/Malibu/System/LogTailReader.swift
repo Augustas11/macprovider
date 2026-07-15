@@ -29,11 +29,19 @@ struct LogTailBuffer: Equatable {
             || lower.contains("token_sha256")
             || lower.contains("token_hash")
             || lower.contains("private_key")
+            || lower.contains("api_key")
+            || lower.contains("client_secret")
+            || lower.contains("password")
+            || lower.contains("set-cookie")
             || lower.contains("signed_payload")
             || lower.contains("payload_to_sign")
             || normalizedIdentifierText.contains("providertoken")
             || normalizedIdentifierText.contains("identitysignature")
             || normalizedIdentifierText.contains("privatekey")
+            || normalizedIdentifierText.contains("apikey")
+            || normalizedIdentifierText.contains("clientsecret")
+            || normalizedIdentifierText.contains("password")
+            || normalizedIdentifierText.contains("setcookie")
             || normalizedIdentifierText.contains("signedpayload")
             || normalizedIdentifierText.contains("payloadtosign")
             || normalizedIdentifierText.contains("tokensha256")
@@ -48,7 +56,9 @@ struct LogTailBuffer: Equatable {
     private static func matchesSecretPattern(_ line: String) -> Bool {
         let patterns = [
             #"(?i)\bbearer\s+[A-Za-z0-9._~+/\-=]{12,}"#,
-            #"(?i)\b(provider|identity|auth|access|refresh)[_-]?token\b\s*[:=]\s*\S+"#
+            #"(?i)\b(provider|identity|auth|access|refresh|session)[_-]?token\b\s*[:=]\s*\S+"#,
+            #"(?i)\b(api[_-]?key|client[_-]?secret|password|cookie)\b\s*[:=]\s*\S+"#,
+            #"(?i)https?://\S+\?\S+"#
         ]
         return patterns.contains { pattern in
             line.range(of: pattern, options: .regularExpression) != nil

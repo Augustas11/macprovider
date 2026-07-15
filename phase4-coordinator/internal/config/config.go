@@ -19,6 +19,13 @@ import (
 
 var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
+const (
+	maxCompatibilitySetIDBytes   = 256
+	maxAcceptedCompatibilitySets = 8
+)
+
+var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}$`)
+
 // ValidateProviderID is the canonical validator for ProviderID across every
 // registration path. Issue #274: WS self-serve registration previously
 // accepted any non-empty / non-control-char string, while configured pinned
@@ -31,6 +38,17 @@ var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 func ValidateProviderID(s string) error {
 	if !providerIDPattern.MatchString(s) {
 		return fmt.Errorf("invalid provider_id %q", s)
+	}
+	return nil
+}
+
+// ValidateCompatibilitySetID applies the signed release-manifest identifier
+// grammar at the coordinator trust boundary. Admission compares the complete
+// identifier exactly; the grammar and byte cap prevent attacker-controlled
+// handshake metadata from becoming an unbounded policy or logging input.
+func ValidateCompatibilitySetID(s string) error {
+	if len([]byte(s)) == 0 || len([]byte(s)) > maxCompatibilitySetIDBytes || !compatibilitySetIDPattern.MatchString(s) {
+		return fmt.Errorf("invalid compatibility_set_id %q", s)
 	}
 	return nil
 }
@@ -93,7 +111,33 @@ type TelemetryDriftConfig struct {
 }
 
 type CoordinatorConfig struct {
-	RequireGatewayContext bool `yaml:"require_gateway_context"`
+	RequireGatewayContext bool                   `yaml:"require_gateway_context"`
+	CompatibilitySet      CompatibilitySetConfig `yaml:"compatibility_set"`
+}
+
+// CompatibilitySetConfig is an exact coordinator admission contract. TargetID
+// is the set providers should converge on; AcceptedIDs includes that target and
+// at least one distinct rollback set so a rollout can be reversed without
+// disabling strict compatibility admission.
+type CompatibilitySetConfig struct {
+	TargetID    string   `yaml:"target_id"`
+	AcceptedIDs []string `yaml:"accepted_ids"`
+}
+
+// Configured distinguishes an explicit strict policy from the legacy
+// unconfigured mode. Partial configurations fail validation.
+func (c CompatibilitySetConfig) Configured() bool {
+	return c.TargetID != "" || len(c.AcceptedIDs) != 0
+}
+
+// Accepts performs the exact, case-sensitive compatibility-set comparison.
+func (c CompatibilitySetConfig) Accepts(id string) bool {
+	for _, accepted := range c.AcceptedIDs {
+		if id == accepted {
+			return true
+		}
+	}
+	return false
 }
 
 // OnboardingConfig gates SPEC-026 App-track `/v1/providers/register`.
@@ -130,10 +174,13 @@ type MalibuEmissionConfig struct {
 // served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates, and
 // their .sig sidecars). Empty paths disable that feed (404).
 type AutotuneFeedsConfig struct {
-	DemandRankPath                  string            `yaml:"demand_rank_path"`
-	DemandRankSigPath               string            `yaml:"demand_rank_sig_path"`
-	AutotuneCandidatesPath          string            `yaml:"autotune_candidates_path"`
-	AutotuneCandidatesSigPath       string            `yaml:"autotune_candidates_sig_path"`
+	DemandRankPath            string `yaml:"demand_rank_path"`
+	DemandRankSigPath         string `yaml:"demand_rank_sig_path"`
+	AutotuneCandidatesPath    string `yaml:"autotune_candidates_path"`
+	AutotuneCandidatesSigPath string `yaml:"autotune_candidates_sig_path"`
+	// EnforceProviderAdmission is the shared strict-mode switch for signed
+	// catalog compatibility and challenge-bound provider identity. Disabling it
+	// opens only the deadline-bounded migration bridge below.
 	EnforceProviderAdmission        bool              `yaml:"enforce_provider_admission"`
 	ProviderAdmissionBridgeDeadline string            `yaml:"provider_admission_bridge_deadline"`
 	PublicKeys                      map[string]string `yaml:"public_keys"`
@@ -1451,6 +1498,9 @@ func (c Config) Validate() error {
 	if c.Coordinator.RequireGatewayContext && c.Auth.GatewayServiceToken == "" && c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.gateway_service_token or auth.operator_key must be set when coordinator.require_gateway_context is true")
 	}
+	if err := c.validateCompatibilitySet(); err != nil {
+		return err
+	}
 	if _, err := c.TrustedProxyPrefixes(); err != nil {
 		return err
 	}
@@ -1725,6 +1775,36 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func (c Config) validateCompatibilitySet() error {
+	policy := c.Coordinator.CompatibilitySet
+	if !policy.Configured() {
+		return nil
+	}
+	if err := ValidateCompatibilitySetID(policy.TargetID); err != nil {
+		return fmt.Errorf("coordinator.compatibility_set.target_id: %w", err)
+	}
+	if len(policy.AcceptedIDs) < 2 {
+		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain the target and at least one rollback set")
+	}
+	if len(policy.AcceptedIDs) > maxAcceptedCompatibilitySets {
+		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain at most %d entries", maxAcceptedCompatibilitySets)
+	}
+	seen := make(map[string]struct{}, len(policy.AcceptedIDs))
+	for i, id := range policy.AcceptedIDs {
+		if err := ValidateCompatibilitySetID(id); err != nil {
+			return fmt.Errorf("coordinator.compatibility_set.accepted_ids[%d]: %w", i, err)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("coordinator.compatibility_set.accepted_ids contains duplicate %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	if _, ok := seen[policy.TargetID]; !ok {
+		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain target_id")
+	}
+	return nil
+}
+
 func (c Config) validateProofOfWeights() error {
 	p := c.ProofOfWeights
 	if p.AutotuneEvidenceTTLDays < 0 {
@@ -1853,6 +1933,10 @@ func (c Config) validateOnboarding() error {
 		return fmt.Errorf("onboarding.coordinator_domain must be lowercase")
 	}
 	if !o.AppTrackRegisterEnabled {
+		// Named operator maps are also used by optional admin routes. Preserve
+		// compatibility for CLI-only deployments with a partially provisioned
+		// map: every dual-control route independently fails closed with
+		// dual_control_unavailable until two distinct actors and secrets exist.
 		return nil
 	}
 	if strings.TrimSpace(o.PostgresDSN) == "" {
@@ -1884,10 +1968,7 @@ func (c Config) validateOnboarding() error {
 			return fmt.Errorf("onboarding.asn_prefixes[%q] must be non-empty", prefix)
 		}
 	}
-	if err := validateOperatorKeyMap(c.Auth.OperatorKeys); err != nil {
-		return err
-	}
-	return nil
+	return validateOperatorKeyMap(c.Auth.OperatorKeys)
 }
 
 func (c Config) validateMalibuEmission() error {
@@ -1921,7 +2002,7 @@ func (c Config) validateMalibuEmission() error {
 
 func validateOperatorKeyMap(keys map[string]string) error {
 	if len(keys) < 2 {
-		return fmt.Errorf("auth.operator_keys must contain at least two operators when onboarding.app_track_register_enabled is true")
+		return fmt.Errorf("auth.operator_keys must contain at least two operators")
 	}
 	seenSecrets := map[string]string{}
 	for actor, secret := range keys {

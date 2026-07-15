@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>live.streamvc.macprovider-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/share/macprovider-watchdog/macprovider-health-monitor</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/macprovider/watchdog.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/macprovider/watchdog.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MACPROVIDER_WATCHDOG_LABEL</key>
+    <string>live.streamvc.macprovider</string>
+    <key>MACPROVIDER_CONFIG_PATH</key>
+    <string>__HOME__/.config/macprovider/config.yaml</string>
+    <key>MACPROVIDER_BINARY_PATH</key>
+    <string>__INSTALL_DIR__/macprovider-cli</string>
+    <key>MACPROVIDER_COORDINATOR_HOST</key>
+    <string>__COORDINATOR_HOST__</string>
+    <key>MACPROVIDER_LOG_DIR</key>
+    <string>__HOME__/Library/Logs/macprovider</string>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

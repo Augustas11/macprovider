@@ -18,6 +18,7 @@ final class ControlMetricsBuilderTests: XCTestCase {
         // A Malibu.app metrics poll lands between two heartbeats.
         _ = await ControlMetricsBuilder.build(
             providerStatus: status,
+            providerEarningsClient: nil,
             malibuAccrualClient: nil,
             providerToken: nil
         )

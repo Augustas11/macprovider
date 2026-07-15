@@ -24,6 +24,44 @@ if hashlib.sha256(path.read_bytes()).hexdigest() != "849e9c9bc53db1fb8e28d3b46ab
 PY
 openssl pkey -pubin -in "$canonical_public_key" -noout >/dev/null
 
+# Candidate-only consumers must embed the same reviewed acceptance key while
+# remaining distinct from the production checksum key.
+python3 - "$repo_root" "$canonical_public_key" <<'PY'
+import pathlib
+import re
+import sys
+import textwrap
+
+root = pathlib.Path(sys.argv[1])
+canonical = pathlib.Path(sys.argv[2]).read_bytes()
+installer = (root / "phase3-binary/dist/install.sh").read_text(encoding="utf-8")
+swift = (root / "phase3-binary/Sources/macprovider-cli/AcceptanceCandidateMetadata.swift").read_text(encoding="utf-8")
+
+def function_pem(name):
+    function = re.search(rf"{name}\(\) \{{(.+?)\n\}}", installer, flags=re.DOTALL)
+    blocks = re.findall(
+        r"-----BEGIN PUBLIC KEY-----\n.+?\n-----END PUBLIC KEY-----",
+        function.group(1) if function else "",
+        flags=re.DOTALL,
+    )
+    if len(blocks) != 1:
+        raise SystemExit(f"{name} must embed exactly one public key")
+    return (blocks[0] + "\n").encode("ascii")
+
+swift_match = re.search(
+    r'static let signingPublicKeyPEM = """\n(?P<body>.*?)\n    """',
+    swift,
+    flags=re.DOTALL,
+)
+if swift_match is None:
+    raise SystemExit("Swift acceptance public key literal is missing")
+swift_pem = (textwrap.dedent(swift_match.group("body")) + "\n").encode("ascii")
+if canonical != function_pem("write_acceptance_public_key") or canonical != swift_pem:
+    raise SystemExit("acceptance public key consumers drifted from the committed key")
+if canonical == function_pem("write_checksum_public_key"):
+    raise SystemExit("acceptance and production signing keys must remain distinct")
+PY
+
 # Exercise the immutable verifier path with an ephemeral test key by copying
 # the reviewed scripts into an isolated mirror. Production has no key override.
 mirror="$work/repo"

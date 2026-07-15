@@ -32,6 +32,283 @@ func bootstrapPrincipal(label string) string {
 	return "mp-" + hex.EncodeToString(sum[:16])
 }
 
+func TestBindAdmissionIdentityPreservesLegacyProviderIDAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bearer, err := store.IssueToken(ctx, "mac", "legacy production provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubkey := bytes.Repeat([]byte{0x91}, 32)
+	if err := store.BindAdmissionIdentity(ctx, "mac", bearer, pubkey, time.Now().UTC()); err != nil {
+		t.Fatalf("bind legacy admission identity: %v", err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, "mac", bearer, pubkey, time.Now().UTC()); err != nil {
+		t.Fatalf("idempotent bind: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stored, ok, err := reopened.LookupAdmissionIdentityPubkey(ctx, "mac")
+	if err != nil || !ok || !bytes.Equal(stored, pubkey) {
+		t.Fatalf("restart-safe identity ok=%v key=%x err=%v", ok, stored, err)
+	}
+	if exists, err := reopened.AdmissionIdentityExists(ctx, "mac"); err != nil || !exists {
+		t.Fatalf("identity exists=%v err=%v", exists, err)
+	}
+}
+
+func TestBindAdmissionIdentityRequiresExactActiveBearerAndNeverReplaces(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, ownerBearer, err := store.IssueToken(ctx, "mac", "legacy owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherBearer, err := store.IssueToken(ctx, "other-mac", "other owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x92}, 32)
+	if err := store.BindAdmissionIdentity(ctx, "mac", otherBearer, key, time.Now().UTC()); !errors.Is(err, auth.ErrAdmissionIdentityBearerMismatch) {
+		t.Fatalf("cross-provider bearer bind err=%v", err)
+	}
+	if exists, _ := store.AdmissionIdentityExists(ctx, "mac"); exists {
+		t.Fatal("cross-provider bearer created durable identity")
+	}
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, key, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	rotated := bytes.Repeat([]byte{0x93}, 32)
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, rotated, time.Now().UTC()); !errors.Is(err, auth.ErrAdmissionIdentityMismatch) {
+		t.Fatalf("unreviewed replacement err=%v", err)
+	}
+	stored, ok, err := store.LookupAdmissionIdentityPubkey(ctx, "mac")
+	if err != nil || !ok || !bytes.Equal(stored, key) {
+		t.Fatalf("replacement mutated key ok=%v key=%x err=%v", ok, stored, err)
+	}
+}
+
+func TestRotateAdmissionIdentityAdvancesGenerationAndSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bearer, err := store.IssueToken(ctx, "mac", "rotation owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := bytes.Repeat([]byte{0x94}, 32)
+	next := bytes.Repeat([]byte{0x95}, 32)
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	if err := store.BindAdmissionIdentity(ctx, "mac", bearer, current, now); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.RotateAdmissionIdentity(ctx, "mac", bearer, current, next, 1, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Generation != 2 || !bytes.Equal(state.CurrentPublicKey, next) ||
+		!bytes.Equal(state.PreviousPublicKey, current) || state.PreviousValidUntil == nil {
+		t.Fatalf("rotated state=%+v", state)
+	}
+	// A retry after the coordinator committed but before the provider received
+	// the response returns the same generation rather than rotating again.
+	replayed, err := store.RotateAdmissionIdentity(ctx, "mac", bearer, current, next, 1, now.Add(2*time.Minute))
+	if err != nil || replayed.Generation != 2 || !bytes.Equal(replayed.CurrentPublicKey, next) {
+		t.Fatalf("idempotent replay state=%+v err=%v", replayed, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored, ok, err := reopened.LookupAdmissionIdentityState(ctx, "mac", now.Add(time.Hour))
+	if err != nil || !ok || restored.Generation != 2 ||
+		!bytes.Equal(restored.CurrentPublicKey, next) || !bytes.Equal(restored.PreviousPublicKey, current) {
+		t.Fatalf("restart state=%+v ok=%v err=%v", restored, ok, err)
+	}
+	afterGrace, ok, err := reopened.LookupAdmissionIdentityState(
+		ctx, "mac", now.Add(time.Minute).Add(auth.AdmissionIdentityPreviousKeyGrace).Add(time.Second),
+	)
+	if err != nil || !ok || len(afterGrace.PreviousPublicKey) != 0 || afterGrace.PreviousValidUntil == nil ||
+		!afterGrace.PreviousValidUntil.Equal(*state.PreviousValidUntil) {
+		t.Fatalf("expired previous state=%+v ok=%v err=%v", afterGrace, ok, err)
+	}
+}
+
+func TestRotateAdmissionIdentityRequiresExactBearerKeyAndGeneration(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, ownerBearer, err := store.IssueToken(ctx, "mac", "rotation owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherBearer, err := store.IssueToken(ctx, "other-mac", "other owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := bytes.Repeat([]byte{0x96}, 32)
+	next := bytes.Repeat([]byte{0x97}, 32)
+	wrong := bytes.Repeat([]byte{0x98}, 32)
+	now := time.Now().UTC()
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, current, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.RotateAdmissionIdentity(ctx, "mac", otherBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityBearerMismatch) {
+		t.Fatalf("cross-provider bearer err=%v", err)
+	}
+	if _, err := store.RotateAdmissionIdentity(ctx, "mac", ownerBearer, wrong, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRotationMismatch) {
+		t.Fatalf("wrong current err=%v", err)
+	}
+	if _, err := store.RotateAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 2, now); !errors.Is(err, auth.ErrAdmissionIdentityRotationMismatch) {
+		t.Fatalf("wrong generation err=%v", err)
+	}
+	state, ok, err := store.LookupAdmissionIdentityState(ctx, "mac", now)
+	if err != nil || !ok || state.Generation != 1 || !bytes.Equal(state.CurrentPublicKey, current) || len(state.PreviousPublicKey) != 0 {
+		t.Fatalf("rejected rotation mutated state=%+v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func TestRecoverAdmissionIdentityRequiresBearerCASAndClearsRollbackKey(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, ownerBearer, err := store.IssueToken(ctx, "mac", "recovery owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherBearer, err := store.IssueToken(ctx, "other-mac", "other owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := bytes.Repeat([]byte{0xa1}, 32)
+	next := bytes.Repeat([]byte{0xa2}, 32)
+	wrong := bytes.Repeat([]byte{0xa3}, 32)
+	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, current, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", otherBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityBearerMismatch) {
+		t.Fatalf("cross-provider recovery err=%v", err)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, wrong, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRecoveryMismatch) {
+		t.Fatalf("wrong-current recovery err=%v", err)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRecoveryMismatch) {
+		t.Fatalf("missing-authority recovery err=%v", err)
+	}
+	authorization := approveRecoveryAuthorization(t, store, "mac", current, next, 1, now)
+
+	state, consumed, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 1, now)
+	if err != nil || state.Generation != 2 || !bytes.Equal(state.CurrentPublicKey, next) || len(state.PreviousPublicKey) != 0 {
+		t.Fatalf("recovered state=%+v err=%v", state, err)
+	}
+	if consumed.PendingID != authorization.PendingID || consumed.ApprovedBy != "operator:bob" {
+		t.Fatalf("consumed authorization=%+v", consumed)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRecoveryMismatch) {
+		t.Fatalf("consumed recovery replay err=%v", err)
+	}
+	stored, ok, err := store.LookupAdmissionIdentityState(ctx, "mac", now.Add(time.Hour))
+	if err != nil || !ok || stored.Generation != 2 || !bytes.Equal(stored.CurrentPublicKey, next) || len(stored.PreviousPublicKey) != 0 {
+		t.Fatalf("stored recovery state=%+v ok=%v err=%v", stored, ok, err)
+	}
+}
+
+func TestRecoverAdmissionIdentityMigratesExternalAuthorityIntoSQLite(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, bearer, err := store.IssueToken(ctx, "mac", "external identity owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalCurrent := bytes.Repeat([]byte{0xb1}, 32)
+	next := bytes.Repeat([]byte{0xb2}, 32)
+	now := time.Now().UTC().Truncate(time.Second)
+	approveRecoveryAuthorization(t, store, "mac", externalCurrent, next, 1, now)
+	state, _, err := store.RecoverAdmissionIdentity(
+		ctx, "mac", bearer, externalCurrent, next, 1, now,
+	)
+	if err != nil || state.Generation != 2 || !bytes.Equal(state.CurrentPublicKey, next) {
+		t.Fatalf("external migration state=%+v err=%v", state, err)
+	}
+	if exists, err := store.AdmissionIdentityExists(ctx, "mac"); err != nil || !exists {
+		t.Fatalf("migrated identity exists=%v err=%v", exists, err)
+	}
+}
+
+func approveRecoveryAuthorization(
+	t *testing.T,
+	store *auth.Store,
+	providerID string,
+	current, candidate []byte,
+	generation int,
+	now time.Time,
+) auth.AdmissionIdentityRecoveryAuthorization {
+	t.Helper()
+	currentDigest := sha256.Sum256(current)
+	candidateDigest := sha256.Sum256(candidate)
+	authorization := auth.AdmissionIdentityRecoveryAuthorization{
+		PendingID:                      "recovery-" + hex.EncodeToString(candidateDigest[:8]),
+		ProviderID:                     providerID,
+		CandidatePublicKeySHA256:       hex.EncodeToString(candidateDigest[:]),
+		ExpectedCurrentPublicKeySHA256: hex.EncodeToString(currentDigest[:]),
+		ExpectedGeneration:             generation,
+		RequestedBy:                    "operator:alice",
+		RequestedUntil:                 now.Add(time.Hour),
+		Reason:                         "test recovery",
+		IncidentID:                     "INC-" + hex.EncodeToString(candidateDigest[:8]),
+	}
+	requested, err := store.RequestAdmissionIdentityRecovery(context.Background(), authorization, now)
+	if err != nil {
+		t.Fatalf("request recovery authorization: %v", err)
+	}
+	if requested.PendingID != authorization.PendingID {
+		t.Fatalf("request recovery pending_id=%q want=%q", requested.PendingID, authorization.PendingID)
+	}
+	approved, err := store.ApproveAdmissionIdentityRecovery(
+		context.Background(), authorization.PendingID, "operator:bob", now,
+	)
+	if err != nil {
+		t.Fatalf("approve recovery authorization: %v", err)
+	}
+	return approved
+}
+
 func TestBootstrapTokenRecoveryRequiresExactUnusedRetainedIdentity(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {

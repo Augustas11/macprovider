@@ -85,6 +85,33 @@ final class StatusCommandTests: XCTestCase {
         XCTAssertTrue(output.contains("Run: macprovider-cli autotune --recommend"), output)
     }
 
+    func testStatusShowsActionableAdmissionIdentityRecoveryContract() {
+        var payload = status(providerID: "provider-a")
+        payload["admission_identity"] = [
+            "source": "cli_keychain_pending",
+            "state": "recovery_pending",
+            "public_key_sha256": String(repeating: "a", count: 64),
+            "pending_public_key_sha256": String(repeating: "a", count: 64),
+            "previous_public_key_sha256": String(repeating: "c", count: 64),
+            "previous_valid_until": "2026-07-21T12:00:00Z",
+            "coordinator_generation": 2,
+            "coordinator_key_role": "previous",
+            "coordinator_public_key_sha256": String(repeating: "b", count: 64),
+            "recovery_action": "obtain_operator_recovery_approval_then_restart",
+        ]
+
+        let output = LocalStatusFormatter.format(
+            payload,
+            configPath: "/tmp/provider config.yaml"
+        )
+
+        XCTAssertTrue(output.contains("State:       recovery_pending"), output)
+        XCTAssertTrue(output.contains(String(repeating: "a", count: 64)), output)
+        XCTAssertTrue(output.contains("Previous until: 2026-07-21T12:00:00Z"), output)
+        XCTAssertTrue(output.contains("POST /admin/provider-admission-identity/recover"), output)
+        XCTAssertTrue(output.contains("--config '/tmp/provider config.yaml' --expected-provider-id 'provider-a' --activate"), output)
+    }
+
     private func makeFixture(prefix: String) throws -> StatusFixture {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

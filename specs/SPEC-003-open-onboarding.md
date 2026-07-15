@@ -1,7 +1,13 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.10.1 (2026-06-26, FR-C9.4 executable runbook gate — `coordinator-cli pre-flip-audit` shipped as the normative gate)
-**Depends on:** SPEC-001 v1.5, SPEC-002 v1.3.5
+**Version:** 0.10.2 (2026-07-14, FR-C9.3 CLI-owned restart-safe credential custody)
+
+**Change log v0.10.2:** Issue #585 Option 2 changes the binary-side
+`assigned_provider_token` commit authority from YAML-only persistence to CLI-owned
+Keychain custody. Newly assigned credentials are never written to YAML. In-memory
+adoption and the authenticated reconnect remain persist-before-adopt. Redacted status
+also exposes conflict and pending-migration state.
+**Depends on:** SPEC-001 v1.8.1, SPEC-002 v1.3.5
 
 **Change log v0.10.1:** Additive patch on v0.10 (no wire-shape changes). Closes issue #82 item 3. The FR-C9.4 flag-flip runbook (text added under v0.8.4) referenced a tracking issue for the `coordinator-cli pre-flip-audit --max-last-used-age=24h` command; the command is now shipped and normatively required. Updates the runbook prose to point at the shipped command rather than a tracking issue. No primitive added; no wire field changed.
 
@@ -543,19 +549,29 @@ The minted token MUST be returned to the binary in BOTH ack frames under the fie
 
 Both ack writes happen AFTER `prepareProviderAdmission` and AFTER `releaseUnauth()`, on the path that also calls `s.tokens.MarkTokenUsed` for already-validated tokens. The mint hook is symmetric: same condition (`s.tokens != nil && !auth.validated`), same call shape, different surrounding struct.
 
-**FR-C9.3. Binary MUST persist atomically with 0600 perms; persist SHOULD NOT block the WS receive loop.**
+**FR-C9.3. Binary MUST commit to CLI-owned restart-safe custody before adoption; persistence SHOULD NOT block the WS receive loop.**
 On receipt of an ack frame carrying `assigned_provider_token`, the phase3-binary MUST:
 
-1. Write the token value to a temporary file in the same directory as the config file, with file mode 0600 set BEFORE writing the secret.
-2. Atomically rename the temp file to the final config file path (`rename(2)` semantics — POSIX-atomic on same-filesystem renames).
-3. Match a **top-level** YAML key only: `provider_token: <value>`. Indented `provider_token:` entries nested under a parent block (e.g. an `auth:` map) MUST be preserved verbatim; the persist routine owns only the top-level key. If multiple top-level `provider_token:` lines exist (from a prior botched write), ALL such lines MUST be collapsed to a single canonical entry with the new value.
-4. **AWAIT the persist completion before adopting the token in memory.** The in-memory token MUST be updated ONLY after the rename(2) returns successfully. v0.8.2 hardening: v0.8.1 adopted in memory FIRST then fired a fire-and-forget persist; the codex security re-audit on PR #44 (MINOR-1) flagged the resulting brick window — a process crash between in-memory adoption and persist flush leaves the coordinator with a valid token row that the binary never persisted, and on next process restart the binary reconnects tokenless and TOFU-rejects. Awaiting closes the window: persist either succeeds (both sides have the token) or fails (neither side has it, current WS session continues with the pre-existing bearer).
+1. Write and exact-readback-verify the token in the CLI-owned Keychain service
+   `live.streamvc.macprovider.provider-token.v1`, account `<provider_id>`. The access
+   MUST be non-interactive so launchd never raises a credential prompt.
+2. **AWAIT the Keychain result before adopting the token in memory.** On success,
+   adopt it and reconnect with `source=cli_keychain,state=ready,restart_safe=true`.
+3. Trigger the authenticated reconnect only after the Keychain commit succeeds. On
+   failure, do not mutate YAML, do not adopt the assigned token, fail the current
+   admission attempt without exposing the token, and allow the coordinator's
+   unused-token recovery policy to settle a later retry.
 
-The persist write SHOULD execute outside the WS receive loop synchronously (e.g. via `Task.detached(...).value` await) so disk I/O cannot stall the runtime even though the receive-handling actor suspends. The intent is "disk I/O does not block other actors / Tasks", not "disk I/O is fire-and-forget."
+The writes SHOULD execute in a detached utility task whose result is awaited, so the
+receive-handling actor suspends without blocking unrelated actors. This is never a
+fire-and-forget write.
 
-On persist failure (disk full, permission denied, parent directory missing) the binary MUST log a JSON-encoded structured-log line with `event=provider_token_persist_failed`, `error=<cause>`, `config_path=<resolved>`, continue serving the current WS session with the previously-configured bearer (or no bearer), and NOT crash. The JSON line MUST be encoded via a JSON encoder, not hand-built string interpolation, so embedded quotes/newlines/backslashes in the error description or path cannot break the JSON envelope.
+Every outcome MUST use JSON-encoded structured events, including
+`provider_token_keychain_persisted` and `provider_token_keychain_persist_failed`.
+Error descriptions and config paths
+MUST be encoded by a JSON serializer; logs and status MUST NOT expose token material.
 
-The persist target is the top-level `provider_token` YAML key (already wired by M1-1 SPEC-001 v1.3.1 § config). If the config file already has a top-level token populated, the new one REPLACES it. Pre-v0.8.1 prose referenced `auth.provider_token` (nested); the correct contract is flat top-level.
+The legacy YAML writer is not a permitted assigned-token commit path after v0.10.2.
 
 **FR-C9.4. TOFU (trust-on-first-use), composed: self-heal-on-NULL + strict-reject-on-USED + race-loss admit-quarantined + pool-registry eviction defense.**
 

@@ -6,7 +6,6 @@ workflow="$root/.github/workflows/release.yml"
 guard="$root/scripts/verify-github-release-posture.sh"
 input_guard="$root/scripts/validate-release-inputs.sh"
 checksums_guard="$root/scripts/verify-release-checksums.sh"
-sparkle_generator="$root/scripts/generate-malibu-appcast.sh"
 xcodegen_installer="$root/scripts/install-pinned-xcodegen.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -44,12 +43,29 @@ if "--allow-absent" in publish:
     raise SystemExit("protected publish job must always require the exact release tag")
 if "unsigned-release-manifest.json" not in build or "unsigned-release-manifest.json" not in publish:
     raise SystemExit("unsigned candidate inputs lack an end-to-end provenance manifest")
+for requirement in ("MACPROVIDER_PROVIDER_ADMISSION_POLICY",):
+    if requirement not in build:
+        raise SystemExit(f"unsigned build omits compatibility-set generation input: {requirement}")
+for requirement in (
+    "scripts/compatibility-set-manifest.py sign",
+    "--require-signature",
+    'cp "$WORK/compatibility-set.json" "$PKG_ROOT/compatibility-set.json"',
+    'cp -R "$WORK/compatibility-set-local" "$PKG_ROOT/compatibility-set-local"',
+    '"$APP/Contents/Resources/compatibility-set.json"',
+    'cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"',
+    'release_assets+=("$compatibility_manifest")',
+    'cmp "$compatibility_manifest" "$compatibility_extract/compatibility-set.json"',
+):
+    if requirement not in publish:
+        raise SystemExit(f"protected publication omits compatibility-set binding: {requirement}")
 if "scripts/verify-github-release-posture.sh" not in publish:
     raise SystemExit("publish job must verify external repository posture")
 if publish.find("Verify Malibu release cryptographic bindings") > publish.find("Create verified draft GitHub release"):
-    raise SystemExit("Apple and Sparkle verification must run before draft release creation")
-if "scripts/verify-malibu-release-artifacts.sh" not in publish or "verify-malibu-sparkle-signature.py" not in publish:
-    raise SystemExit("publish job must verify Apple and Sparkle signatures")
+    raise SystemExit("Apple verification must run before draft release creation")
+if "scripts/verify-malibu-release-artifacts.sh" not in publish:
+    raise SystemExit("publish job must verify Apple signatures and notarization")
+if "Sparkle" in publish or "appcast" in publish:
+    raise SystemExit("release workflow must not retain a second app-owned update authority")
 if '"repos/$GITHUB_REPOSITORY/releases/$release_id"' not in publish:
     raise SystemExit("post-create verification must re-fetch the captured numeric release id")
 if "ensure-release-tag-target" in text or "git push" in text:
@@ -97,9 +113,28 @@ for asset in ("coordinator-linux-amd64", "coordinator-cli-linux-amd64", "gateway
         raise SystemExit(f"Pearl artifact does not cross the reviewed build boundary: {asset}")
 prepare = publish.split("- name: Prepare release assets", 1)[1].split("\n      - name:", 1)[0]
 metadata_position = prepare.find('release_assets+=("$pearl_metadata" "$pearl_metadata_sig")')
+index_position = prepare.find("scripts/compatibility-artifact-index.py build")
 provenance_position = prepare.find("scripts/build-release-provenance.py")
-if metadata_position < 0 or provenance_position < 0 or metadata_position > provenance_position:
-    raise SystemExit("signed Pearl metadata must enter the release set before provenance")
+if (
+    metadata_position < 0
+    or index_position < metadata_position
+    or provenance_position < index_position
+    or 'release_assets+=("$compatibility_artifact_index")' not in prepare
+):
+    raise SystemExit("exact compatibility artifact index must bind Pearl metadata before provenance")
+for requirement in (
+    "provider_cli=$tar_asset",
+    "malibu_app=$app_dmg_asset",
+    "coordinator=$coordinator_asset",
+    "coordinator_cli=$coordinator_cli_asset",
+    "gateway=$gateway_asset",
+    "compatibility_manifest=$compatibility_manifest",
+    "catalog_trusted_keys=trusted-keys.json",
+    "pearl_metadata=$pearl_metadata",
+    "pearl_metadata_signature=$pearl_metadata_sig",
+):
+    if requirement not in prepare:
+        raise SystemExit(f"compatibility artifact index omits required role: {requirement}")
 if "ops/pearl-updater/release-signing-public.pem" not in prepare:
     raise SystemExit("Pearl metadata signature is not checked against the updater trust anchor")
 for asset in (
@@ -154,8 +189,8 @@ if "release-toolchain.json" not in build or "release-toolchain.json" not in publ
     raise SystemExit("verified build toolchain must cross the artifact boundary into publication")
 if "actions/checkout v6.0.3" not in build:
     raise SystemExit("checkout provenance comment differs from the pinned action commit")
-if publish.find("Clean Apple signing material before third-party tools") > publish.find("Generate Sparkle appcast"):
-    raise SystemExit("Apple keychain and private material must be deleted before Sparkle tools run")
+if "Clean Apple signing material after notarization" not in publish:
+    raise SystemExit("Apple keychain and private material must be deleted after notarization")
 create = publish.split("- name: Create verified draft GitHub release", 1)[1].split("\n      - name:", 1)[0]
 verify_draft = publish.split("- name: Verify draft release assets by numeric ID", 1)[1].split("\n      - name:", 1)[0]
 make_public = publish.split("- name: Publish only the revalidated numeric draft", 1)[1].split("\n      - name:", 1)[0]
@@ -208,26 +243,14 @@ for requirement in (
 ):
     if make_public.find(requirement, patch_position) < 0:
         raise SystemExit(f"post-publication release-state verification is missing: {requirement}")
-if "if: needs.build.outputs.prerelease == 'false'" not in publish.split(
-    "- name: Publish Malibu latest.dmg", 1
-)[1].split("\n      - name:", 1)[0]:
-    raise SystemExit("stable Pearl feed publication is not gated to prerelease=false")
 PY
 
-python3 - "$sparkle_generator" "$xcodegen_installer" <<'PY'
+python3 - "$xcodegen_installer" <<'PY'
 import pathlib
 import sys
 
-sparkle = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-xcodegen = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-sparkle_digest = "50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b"
+xcodegen = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 xcodegen_digest = "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"
-if sparkle_digest not in sparkle or sparkle.find("shasum -a 256") > sparkle.find("tar -xJf"):
-    raise SystemExit("Sparkle release tools must be digest-pinned before extraction")
-if sparkle.find("tar -xJf") > sparkle.find('"$generate_appcast"'):
-    raise SystemExit("Sparkle executable ordering is invalid")
-if "SPARKLE_VERSION" in sparkle or "SPARKLE_TOOLS_DIR" in sparkle:
-    raise SystemExit("Sparkle tool version and bytes must not be caller-overridable")
 if xcodegen_digest not in xcodegen or xcodegen.find("shasum -a 256") > xcodegen.find("unzip -q"):
     raise SystemExit("XcodeGen artifact must be digest-pinned before extraction")
 PY
@@ -261,7 +284,6 @@ bash "$input_guard" v1.2.3 false true | grep -Fxq 'v1.2.3 false true'
 mkdir -p "$work/reviewed/scripts" "$work/reviewed/phase3-binary/app"
 cp "$root/scripts/verify-app-build-inputs.sh" "$work/reviewed/scripts/"
 cp "$root/phase3-binary/Package.resolved" "$work/reviewed/phase3-binary/"
-cp "$root/phase3-binary/app/Package.resolved" "$work/reviewed/phase3-binary/app/"
 cp "$root/phase3-binary/app/project.yml" "$work/reviewed/phase3-binary/app/"
 git -C "$work/reviewed" init -q
 git -C "$work/reviewed" config user.name release-test

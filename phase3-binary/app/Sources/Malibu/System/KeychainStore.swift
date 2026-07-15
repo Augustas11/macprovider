@@ -4,6 +4,10 @@ import Security
 enum KeychainStore {
     private static let providerService = "tech.malibu.provider"
 
+    #if DEBUG
+    /// Test-only fixture writer for exercising migration from pre-#585 App
+    /// custody. Release builds can read and delete this legacy service but can
+    /// no longer create provider bearer items.
     static func saveProviderToken(providerID: String, token: String) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.global().async {
@@ -26,6 +30,7 @@ enum KeychainStore {
             }
         }
     }
+    #endif
 
     static func readProviderToken(providerID: String) async -> String? {
         await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in

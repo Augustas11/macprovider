@@ -161,6 +161,15 @@ func main() {
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	compatibilityPolicyMode := "unconfigured"
+	if cfg.Coordinator.CompatibilitySet.Configured() {
+		compatibilityPolicyMode = "configured"
+	}
+	logger.Info().
+		Str("compatibility_policy", compatibilityPolicyMode).
+		Str("recommended_compatibility_set_id", cfg.Coordinator.CompatibilitySet.TargetID).
+		Int("accepted_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.AcceptedIDs)).
+		Msg("provider compatibility-set admission policy initialized")
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)
 		os.Exit(1)
@@ -464,6 +473,11 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
 	wsOpts = append(wsOpts, providerws.WithBootstrapTokenStore(tokenStore))
 	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
+	// Issue #585: request, dual-control approval, one-shot consumption,
+	// admission-key CAS, and recovery audit share the token store's SQLite
+	// transaction boundary. Generic Postgres signature exemptions are never
+	// recovery authority.
+	wsOpts = append(wsOpts, providerws.WithAdmissionIdentityRecoveryAdminStore(tokenStore))
 	if statsPools != nil {
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmRecorder(statsprewarm.NewRecorder(statsPools.Rollup)))
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))

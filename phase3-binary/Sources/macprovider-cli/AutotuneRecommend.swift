@@ -2037,12 +2037,20 @@ struct RecommendationFreshnessChecker {
         case missing
         case fresh
         case stale(Date)
+        case trustBlocked(Date?, Set<AutotuneRecommendWarning>)
     }
 
     func status() async -> Status {
-        guard let stored = try? RecommendationStateStore.read(from: stateURL) else {
-            return .missing
+        let stored = try? RecommendationStateStore.read(from: stateURL)
+        let release = await staticInputs.loadCatalogRelease()
+        let demand = release.demand
+        let catalog = release.candidate
+        let trustWarnings = demand.warnings.union(catalog.warnings)
+        let blockingWarnings = trustWarnings.intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+        if !blockingWarnings.isEmpty {
+            return .trustBlocked(stored?.generatedAt, blockingWarnings)
         }
+        guard let stored else { return .missing }
         let secret: Data
         do {
             secret = try AutotuneHMACSecretStore(path: hmacSecretURL).loadOrCreate()
@@ -2050,14 +2058,7 @@ struct RecommendationFreshnessChecker {
             return .stale(stored.generatedAt)
         }
 
-        let release = await staticInputs.loadCatalogRelease()
-        let demand = release.demand
-        let catalog = release.candidate
         let rateCard = await staticInputs.loadRateCard()
-        let trustWarnings = demand.warnings.union(catalog.warnings)
-        if AutotuneRecommendEngine.paidTrustBlocks(trustWarnings) {
-            return .stale(stored.generatedAt)
-        }
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: providerID)
         let current = LastRecommendationState(
             generatedAt: now,
@@ -2077,10 +2078,14 @@ struct RecommendationFreshnessChecker {
     }
 
     func staleRecommendationSince() async -> Date? {
-        if case let .stale(generatedAt) = await status() {
+        switch await status() {
+        case let .stale(generatedAt):
             return generatedAt
+        case let .trustBlocked(generatedAt, _):
+            return generatedAt
+        case .missing, .fresh:
+            return nil
         }
-        return nil
     }
 }
 

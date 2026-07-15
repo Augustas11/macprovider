@@ -17,14 +17,58 @@ REPO_ROOT=$(cd "$PHASE3_DIR/.." && pwd)
 cd "$PHASE3_DIR"
 
 TAG=${1:-$(git rev-parse --short HEAD)}
+case "$TAG" in
+  v[0-9]*.[0-9]*.[0-9]*) MANIFEST_TAG="$TAG" ;;
+  *)
+    MANIFEST_VERSION=$(sed -n 's/^[[:space:]]*static let binaryVersion = "\([0-9][0-9.]*\)"$/\1/p' \
+      "$PHASE3_DIR/Sources/macprovider-cli/CoordinatorClient.swift" | head -1)
+    [ -n "$MANIFEST_VERSION" ] || {
+      echo "FATAL: could not resolve compatibility-set version" >&2
+      exit 1
+    }
+    MANIFEST_TAG="v$MANIFEST_VERSION"
+    ;;
+esac
 RELEASE_DIR="./build-release"
 OUT_DIR="./dist"
 TARBALL="$OUT_DIR/phase3-binary-m4-${TAG}.tar.gz"
+COMPATIBILITY_SET_MANIFEST="$OUT_DIR/compatibility-set.json"
+LOCAL_COMPATIBILITY_SET_DIR="$OUT_DIR/compatibility-set-local"
+PROVIDER_ADMISSION_POLICY="${MACPROVIDER_PROVIDER_ADMISSION_POLICY:-bridge_required}"
 
 mkdir -p "$OUT_DIR"
 
+rm -rf "$LOCAL_COMPATIBILITY_SET_DIR"
+mkdir -p "$LOCAL_COMPATIBILITY_SET_DIR"
+cp "$PHASE3_DIR/dist/install.sh" "$LOCAL_COMPATIBILITY_SET_DIR/install.sh"
+cp "$REPO_ROOT/ops/macprovider-watchdog/watchdog.sh" "$LOCAL_COMPATIBILITY_SET_DIR/watchdog.sh"
+cp "$PHASE3_DIR/dist/compatibility-set-assets/provider-launch-agent.plist.template" \
+  "$LOCAL_COMPATIBILITY_SET_DIR/provider-launch-agent.plist.template"
+cp "$PHASE3_DIR/dist/compatibility-set-assets/watchdog-launch-agent.plist.template" \
+  "$LOCAL_COMPATIBILITY_SET_DIR/watchdog-launch-agent.plist.template"
+cp "$PHASE3_DIR/dist/compatibility-set-assets/updater-rollback.json" \
+  "$LOCAL_COMPATIBILITY_SET_DIR/updater-rollback.json"
+chmod 0755 "$LOCAL_COMPATIBILITY_SET_DIR/install.sh" "$LOCAL_COMPATIBILITY_SET_DIR/watchdog.sh"
+chmod 0644 "$LOCAL_COMPATIBILITY_SET_DIR"/*.template "$LOCAL_COMPATIBILITY_SET_DIR/updater-rollback.json"
+
 echo "==> Verifying immutable signed catalog release..."
 python3 "$REPO_ROOT/scripts/catalog-release.py" verify
+
+echo "==> Generating deterministic compatibility-set manifest..."
+python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" generate \
+  --tag "$MANIFEST_TAG" \
+  --commit "$(git rev-parse HEAD)" \
+  --repository "Augustas11/macprovider" \
+  --provider-admission-policy "$PROVIDER_ADMISSION_POLICY" \
+  --catalog-directory "$PHASE3_DIR/catalog/autotune" \
+  --catalog-feed-directory "$PHASE3_DIR/dist/static" \
+  --local-artifacts-directory "$LOCAL_COMPATIBILITY_SET_DIR" \
+  --output "$COMPATIBILITY_SET_MANIFEST"
+python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
+  --input "$COMPATIBILITY_SET_MANIFEST" \
+  --expected-tag "$MANIFEST_TAG" \
+  --expected-commit "$(git rev-parse HEAD)" \
+  --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY"
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
 BUILD_LOG="$OUT_DIR/package-build.log"
@@ -84,6 +128,8 @@ if [ -d "$PRODUCTS/swift-nio_NIOPosix.bundle" ]; then
     cp -r "$PRODUCTS/swift-nio_NIOPosix.bundle" "$STAGE_DIR/"
 fi
 cp "$NOTICES_FILE" "$STAGE_DIR/THIRD-PARTY-NOTICES.txt"
+cp "$COMPATIBILITY_SET_MANIFEST" "$STAGE_DIR/compatibility-set.json"
+cp -R "$LOCAL_COMPATIBILITY_SET_DIR" "$STAGE_DIR/compatibility-set-local"
 mkdir -p "$STAGE_DIR/catalog-release"
 cp "$PHASE3_DIR/catalog/autotune/release.json" "$STAGE_DIR/catalog-release/"
 cp "$PHASE3_DIR/catalog/autotune/trusted-keys.json" "$STAGE_DIR/catalog-release/"
@@ -92,10 +138,39 @@ cp "$PHASE3_DIR/dist/static/autotune-candidates.json.sig" "$STAGE_DIR/catalog-re
 cp "$PHASE3_DIR/dist/static/demand-rank.json" "$STAGE_DIR/catalog-release/"
 cp "$PHASE3_DIR/dist/static/demand-rank.json.sig" "$STAGE_DIR/catalog-release/"
 
+python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
+  --input "$STAGE_DIR/compatibility-set.json" \
+  --payload-directory "$STAGE_DIR" \
+  --expected-tag "$MANIFEST_TAG" \
+  --expected-commit "$(git rev-parse HEAD)" \
+  --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY"
+
 echo "==> Packaging tarball: $TARBALL"
 # Include the binary, mlx.metallib, any SwiftPM bundle resources, and
-# THIRD-PARTY-NOTICES.txt, and the verified catalog release evidence.
-tar czf "$TARBALL" -C "$STAGE_DIR" .
+# THIRD-PARTY-NOTICES.txt, the compatibility-set envelope, the hash-bound local
+# launchd/watchdog/install/rollback members, and the verified catalog release
+# evidence. Final container hashes intentionally live in the signed release
+# checksum set rather than the embedded envelope.
+archive_members=(
+  macprovider-cli
+  mlx.metallib
+  THIRD-PARTY-NOTICES.txt
+  compatibility-set.json
+  compatibility-set-local
+  catalog-release
+)
+swiftpm_bundle_count=0
+for swiftpm_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+  if [ -d "$STAGE_DIR/$swiftpm_bundle" ]; then
+    archive_members+=("$swiftpm_bundle")
+    swiftpm_bundle_count=$((swiftpm_bundle_count + 1))
+  fi
+done
+[ "$swiftpm_bundle_count" -gt 0 ] || {
+  echo "FATAL: no SwiftPM resource bundle found in $PRODUCTS" >&2
+  exit 1
+}
+tar czf "$TARBALL" -C "$STAGE_DIR" "${archive_members[@]}"
 
 echo "==> Tarball stats:"
 ls -la "$TARBALL"

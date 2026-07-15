@@ -529,7 +529,10 @@ func TestProviderAuthV2IdentitySignaturePolicyExemptionAcceptsBearerOnly(t *test
 	_, _, providerID := testIdentityKey(t)
 	exemptUntil := time.Now().Add(time.Hour)
 	store := &fakeIdentitySignatureStore{policyOK: true, exemptUntil: &exemptUntil, grantedBy: "migration"}
-	h := newIdentitySignatureHarness(t, providerID, store)
+	h := newIdentitySignatureHarness(t, providerID, store, func(cfg *config.Config) {
+		cfg.AutotuneFeeds.EnforceProviderAdmission = false
+		cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadline = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	})
 	defer h.HTTP.Close()
 	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
 	defer conn.Close()
@@ -538,6 +541,25 @@ func TestProviderAuthV2IdentitySignaturePolicyExemptionAcceptsBearerOnly(t *test
 	response := readAuthResponse(t, conn)
 	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
 		t.Fatalf("auth_response = %+v", response)
+	}
+	if response.IdentityAdmissionMode != "exemption" {
+		t.Fatalf("identity_admission_mode=%q, want exemption", response.IdentityAdmissionMode)
+	}
+}
+
+func TestProviderAuthV2StrictAdmissionRefusesActivePolicyExemption(t *testing.T) {
+	_, _, providerID := testIdentityKey(t)
+	exemptUntil := time.Now().Add(time.Hour)
+	store := &fakeIdentitySignatureStore{policyOK: true, exemptUntil: &exemptUntil, grantedBy: "migration"}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("strict auth_response = %+v", response)
 	}
 }
 
@@ -554,6 +576,9 @@ func TestProviderAuthV2IdentitySignatureValidAppTrackProofAccepts(t *testing.T) 
 	response := readAuthResponse(t, conn)
 	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
 		t.Fatalf("auth_response = %+v", response)
+	}
+	if response.IdentityAdmissionMode != "signature" || response.IdentityGeneration != 1 {
+		t.Fatalf("identity admission=(%q, %d), want signature generation 1", response.IdentityAdmissionMode, response.IdentityGeneration)
 	}
 }
 
@@ -1748,22 +1773,35 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	assertHelloAck(t, conn)
+	assignedID := assertHelloAck(t, conn)
 
 	hb := heartbeat()
 	hb["slots_free"] = 0
 	hb["status"] = "busy"
+	hb["safety_telemetry"] = map[string]any{
+		"schema_version": 2, "provider_id": "m4-anon", "model_id": hb["model_id"], "model_loaded": true,
+		"runtime_state": "busy", "hardware_tier": "16GB", "requests_in_flight": 1, "requests_queued": 0,
+		"memory_rss_mb": 2048, "memory_capacity_mb": 16384, "memory_pressure": "normal",
+		"thermal_state": "nominal", "thermally_throttled": false, "restart_count": 1, "uptime_s": 120,
+		"coordinator_connected": true, "coordinator_session_id": assignedID,
+		"cpu_utilization_pct": 12.5, "gpu_utilization_pct": 18.0, "gpu_utilization_scope": "host", "power_source": "external",
+		"binary_version": "1.8.33", "compatibility_set_id": "set-a",
+		"model_hash":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"observation_id": "observation-a",
+		"observed_at":    "2000-01-01T00:00:00Z", "valid_for_ms": 90000,
+	}
 	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
 	}
 
 	var got struct {
 		Pool []struct {
-			ProviderID string `json:"provider_id"`
-			State      string `json:"state"`
-			SlotsFree  int    `json:"slots_free"`
-			SlotsTotal int    `json:"slots_total"`
-			Endpoint   string `json:"endpoint_url"`
+			ProviderID      string                        `json:"provider_id"`
+			State           string                        `json:"state"`
+			SlotsFree       int                           `json:"slots_free"`
+			SlotsTotal      int                           `json:"slots_total"`
+			Endpoint        string                        `json:"endpoint_url"`
+			SafetyTelemetry *pool.ProviderSafetyTelemetry `json:"safety_telemetry"`
 		} `json:"pool"`
 		Summary struct {
 			TotalProviders int `json:"total_providers"`
@@ -1788,11 +1826,12 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 		}
 		got = struct {
 			Pool []struct {
-				ProviderID string `json:"provider_id"`
-				State      string `json:"state"`
-				SlotsFree  int    `json:"slots_free"`
-				SlotsTotal int    `json:"slots_total"`
-				Endpoint   string `json:"endpoint_url"`
+				ProviderID      string                        `json:"provider_id"`
+				State           string                        `json:"state"`
+				SlotsFree       int                           `json:"slots_free"`
+				SlotsTotal      int                           `json:"slots_total"`
+				Endpoint        string                        `json:"endpoint_url"`
+				SafetyTelemetry *pool.ProviderSafetyTelemetry `json:"safety_telemetry"`
 			} `json:"pool"`
 			Summary struct {
 				TotalProviders int `json:"total_providers"`
@@ -1811,9 +1850,66 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 	if got.Pool[0].Endpoint != "https://m4.streamvc.live" {
 		t.Fatalf("endpoint = %q", got.Pool[0].Endpoint)
 	}
+	if telemetry := got.Pool[0].SafetyTelemetry; telemetry == nil || telemetry.ObservationID != "observation-a" || telemetry.ObservedAt == "2000-01-01T00:00:00Z" {
+		t.Fatalf("safety_telemetry = %+v, want coordinator-stamped observation", telemetry)
+	}
 	if got.Summary.TotalProviders != 1 || got.Summary.Ready != 0 || got.Summary.FreeSlots != 0 {
 		t.Fatalf("summary = %+v", got.Summary)
 	}
+}
+
+func TestHeartbeatRejectsMismatchedSafetyTelemetrySession(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	hb := heartbeat()
+	hb["slots_free"] = 0
+	hb["status"] = "busy"
+	hb["safety_telemetry"] = map[string]any{
+		"schema_version": 2, "provider_id": "m4-anon", "model_id": hb["model_id"], "model_loaded": true,
+		"runtime_state": "busy", "hardware_tier": "16GB", "requests_in_flight": 1, "requests_queued": 0,
+		"memory_rss_mb": 2048, "memory_capacity_mb": 16384, "memory_pressure": "normal",
+		"thermal_state": "nominal", "thermally_throttled": false, "restart_count": 1, "uptime_s": 120,
+		"coordinator_connected": true, "coordinator_session_id": assignedID + "-wrong",
+		"cpu_utilization_pct": 12.5, "gpu_utilization_pct": nil, "gpu_utilization_scope": "host", "power_source": "external",
+		"binary_version": "1.8.33", "compatibility_set_id": "set-a",
+		"model_hash":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"observation_id": "observation-a", "observed_at": "2000-01-01T00:00:00Z", "valid_for_ms": 90000,
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+
+	eventually(t, func() bool {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/poolz", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer test-operator-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("poolz: %v", err)
+		}
+		defer resp.Body.Close()
+		var got struct {
+			Pool []struct {
+				State           string                        `json:"state"`
+				SlotsFree       int                           `json:"slots_free"`
+				SafetyTelemetry *pool.ProviderSafetyTelemetry `json:"safety_telemetry"`
+			} `json:"pool"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("poolz json: %v", err)
+		}
+		return len(got.Pool) == 1 && got.Pool[0].State == "ready" && got.Pool[0].SlotsFree == 1 && got.Pool[0].SafetyTelemetry == nil
+	})
 }
 
 func TestPoolzDefaultOmitsTier2HashFieldsAfterWSAdmission(t *testing.T) {
@@ -3835,11 +3931,14 @@ func testIdentityKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, strin
 	return pub, priv, onboarding.ProviderIDForIdentityPubkey(pub)
 }
 
-func newIdentitySignatureHarness(t *testing.T, providerID string, store providerws.IdentitySignatureStore) providerHarness {
+func newIdentitySignatureHarness(t *testing.T, providerID string, store providerws.IdentitySignatureStore, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
 	return newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithIdentitySignatureStore(store)}, func(cfg *config.Config) {
 		cfg.Providers[0].ProviderID = providerID
 		cfg.Providers[0].EndpointURL = ""
+		for _, opt := range opts {
+			opt(cfg)
+		}
 	})
 }
 

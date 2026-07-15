@@ -1,6 +1,7 @@
-# Runs the canary buyer probe every 30 minutes. See canary-buyer.service.
+# Schedules only the low-impact liveness mode. The service remains inert until
+# /etc/macprovider/canary-buyer.enabled is created after reviewed approval.
 [Unit]
-Description=Run macprovider canary buyer probe every 30 min
+Description=Run low-impact macprovider liveness probe every 30 min
 
 [Timer]
 OnBootSec=3min

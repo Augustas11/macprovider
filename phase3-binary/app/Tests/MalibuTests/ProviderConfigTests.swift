@@ -11,6 +11,37 @@ final class ProviderConfigParserTests: XCTestCase {
     // These tests only touch pure parsing on a temp file, they do not write
     // anything to the real ProviderPaths.current locations.
 
+    func testAutomaticUpdatePolicyDefaultsOnAndHonorsEveryOptOutSurface() {
+        XCTAssertTrue(ProviderConfig.automaticUpdatesEnabled(configContents: nil, environment: [:]))
+        XCTAssertTrue(ProviderConfig.automaticUpdatesEnabled(
+            configContents: "auto_update_enabled: true\n",
+            environment: [:]
+        ))
+        XCTAssertFalse(ProviderConfig.automaticUpdatesEnabled(
+            configContents: "auto_update_enabled: true\nautoupdate:\n  enabled: false\n",
+            environment: [:]
+        ))
+        XCTAssertFalse(ProviderConfig.automaticUpdatesEnabled(
+            configContents: "autoupdate_enabled: false\n",
+            environment: [:]
+        ))
+        XCTAssertFalse(ProviderConfig.automaticUpdatesEnabled(
+            configContents: "auto_update_enabled: true\n",
+            environment: ["MACPROVIDER_AUTOUPDATE": "off"]
+        ))
+    }
+
+    func testAutomaticUpdatePolicyFailsClosedForMalformedPresentValue() {
+        XCTAssertFalse(ProviderConfig.automaticUpdatesEnabled(
+            configContents: "auto_update_enabled: maybe\n",
+            environment: [:]
+        ))
+        XCTAssertFalse(ProviderConfig.automaticUpdatesEnabled(
+            configContents: nil,
+            environment: ["MACPROVIDER_AUTOUPDATE": "maybe"]
+        ))
+    }
+
     func testReadProviderIDHandlesCRLF() throws {
         let tmpDir = try makeTempDir()
         let cfg = tmpDir.appendingPathComponent("config.yaml")
@@ -45,26 +76,184 @@ final class ProviderConfigParserTests: XCTestCase {
         try "provider_id: p_recover\nmodel: test\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
         let backup = paths.configFile.appendingPathExtension("import-backup")
         try "provider_id: p_recover\nprovider_token: secret-token\nmodel: test\n".write(to: backup, atomically: true, encoding: .utf8)
+        try writeImportMarker(
+            paths: paths,
+            providerID: "p_recover",
+            token: "secret-token",
+            backup: backup
+        )
         defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
         defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
-        defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_recover") } }
-
-        do {
-            try await ProviderConfig.importExistingCLIConfig(paths: paths)
-        } catch {
-            throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
-        }
+        let appCredential = LegacyAppCredentialBox()
+        try await ProviderConfig.importExistingCLIConfig(
+            paths: paths,
+            importCredentialIntoCLI: { url in
+                XCTAssertTrue(try String(contentsOf: url).contains("provider_token: secret-token"))
+            },
+            readAppCredential: { _ in await appCredential.read() },
+            deleteAppCredential: { _ in await appCredential.delete() }
+        )
 
         let rewritten = try String(contentsOf: paths.configFile)
         XCTAssertTrue(rewritten.contains("provider_id: p_recover"))
         XCTAssertTrue(rewritten.contains("model: test"))
-        XCTAssertFalse(rewritten.contains("provider_token"))
+        XCTAssertTrue(rewritten.contains("provider_token: secret-token"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ProviderConfig.credentialCustodyMarker(paths: paths).path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
-        XCTAssertEqual(ProviderConfig.readLinkState(paths: paths), .linked)
-        let importedToken = await KeychainStore.readProviderToken(providerID: "p_recover")
-        XCTAssertEqual(importedToken, "secret-token")
+        XCTAssertNil(ProviderConfig.readLinkState(paths: paths))
+        let appToken = await appCredential.read()
+        XCTAssertNil(appToken)
+    }
+
+    func testImportExistingTokenlessConfigVerifiesCLICustodyWithoutAppKeychainCopy() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        let original = "provider_id: p_keychain_only\nmodel: test\n"
+        try original.write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        try await ProviderConfig.importExistingCLIConfig(
+            paths: paths,
+            importCredentialIntoCLI: { snapshot in
+                let contents = try String(contentsOf: snapshot)
+                XCTAssertEqual(contents, original)
+                XCTAssertFalse(contents.contains("provider_token"))
+            }
+        )
+
+        XCTAssertEqual(try String(contentsOf: paths.configFile), original)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ProviderConfig.credentialCustodyMarker(paths: paths).path))
+        let configured = await ProviderConfig.isConfigured(paths: paths)
+        XCTAssertTrue(configured)
+    }
+
+    func testImportRepairsLegacyAppOnlyBearerBeforeLaunchdRestart() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        let original = "provider_id: p_legacy_app_only\nmodel: test\n"
+        try original.write(to: paths.configFile, atomically: true, encoding: .utf8)
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data()))
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let legacy = LegacyAppCredentialBox(token: "legacy-secret")
+
+        try await ProviderConfig.importExistingCLIConfig(
+            paths: paths,
+            importCredentialIntoCLI: { snapshot in
+                let contents = try String(contentsOf: snapshot)
+                XCTAssertTrue(contents.contains("provider_token: legacy-secret"))
+            },
+            readAppCredential: { _ in await legacy.read() },
+            deleteAppCredential: { _ in await legacy.delete() }
+        )
+
+        let retiredCompatibilityToken = await legacy.read()
+        XCTAssertNil(retiredCompatibilityToken)
+        let repaired = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(repaired.contains("provider_token: legacy-secret"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ProviderConfig.credentialCustodyMarker(paths: paths).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.appendingPathExtension("import-backup").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
+    }
+
+    func testImportRetiresDivergentLegacyAppTokenAfterCLICustody() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        let original = "provider_id: p_divergent\nprovider_token: cli-secret\nmodel: test\n"
+        try original.write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let appCredential = LegacyAppCredentialBox(token: "different-app-secret")
+
+        try await ProviderConfig.importExistingCLIConfig(
+            paths: paths,
+            importCredentialIntoCLI: { _ in },
+            readAppCredential: { _ in await appCredential.read() },
+            deleteAppCredential: { _ in await appCredential.delete() }
+        )
+
+        let divergentToken = await appCredential.read()
+        XCTAssertNil(divergentToken)
+        XCTAssertEqual(try String(contentsOf: paths.configFile), original)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ProviderConfig.credentialCustodyMarker(paths: paths).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.appendingPathExtension("import-backup").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
+    }
+
+    func testImportRetryCompletesAfterLegacyAppTokenDeletionFailure() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        let original = "provider_id: p_retry\nprovider_token: retry-secret\nmodel: test\n"
+        try original.write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let appCredential = LegacyAppCredentialBox(token: "retry-secret")
+
+        do {
+            try await ProviderConfig.importExistingCLIConfig(
+                paths: paths,
+                importCredentialIntoCLI: { _ in },
+                readAppCredential: { _ in await appCredential.read() },
+                deleteAppCredential: { _ in
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            )
+            XCTFail("expected simulated deletion failure")
+        } catch {
+            let savedToken = await appCredential.read()
+            XCTAssertEqual(savedToken, "retry-secret")
+        }
+
+        try await ProviderConfig.importExistingCLIConfig(
+            paths: paths,
+            importCredentialIntoCLI: { _ in },
+            readAppCredential: { _ in await appCredential.read() },
+            deleteAppCredential: { _ in await appCredential.delete() }
+        )
+
+        let retryToken = await appCredential.read()
+        XCTAssertNil(retryToken)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ProviderConfig.credentialCustodyMarker(paths: paths).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.appendingPathExtension("import-backup").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
+    }
+
+    func testImportPreservesPlaintextConfigWhenCLICredentialHandoffFails() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        let original = "provider_id: p_handoff_fail\nprovider_token: secret-token\nmodel: test\n"
+        try original.write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_handoff_fail") } }
+
+        do {
+            try await ProviderConfig.importExistingCLIConfig(
+                paths: paths,
+                importCredentialIntoCLI: { _ in
+                    throw ProviderCredentialHandoffRunner.Error.freshProcessVerificationFailed(9)
+                }
+            )
+            XCTFail("expected handoff failure")
+        } catch ProviderCredentialHandoffRunner.Error.freshProcessVerificationFailed(9) {
+            // Expected: rollback must keep the only launchd-readable credential.
+        } catch {
+            if (error as NSError).domain == NSOSStatusErrorDomain {
+                throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
+            }
+            throw error
+        }
+
+        XCTAssertEqual(try String(contentsOf: paths.configFile), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
+        let rolledBackToken = await KeychainStore.readProviderToken(providerID: "p_handoff_fail")
+        XCTAssertNil(rolledBackToken)
     }
 
     func testStartupRecoveryCompletesVerifiedPendingImport() async throws {
@@ -76,24 +265,20 @@ final class ProviderConfigParserTests: XCTestCase {
         try writeImportMarker(paths: paths, providerID: "p_pending", token: "secret-token", backup: backup)
         defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
         defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
-        defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_pending") } }
 
-        do {
-            try await KeychainStore.saveProviderToken(providerID: "p_pending", token: "secret-token")
-        } catch {
-            throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
-        }
-
+        try await ProviderConfig.recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: { _ in }
+        )
         let state = await StartupState.detect(paths: paths)
 
-        let expectedRoute: StartupRoute = state.launchdInstallEvidenceExists ? .startAgent : .showOnboarding
-        XCTAssertEqual(state.route(), expectedRoute)
+        XCTAssertEqual(state.route(), .showImportDialog)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
-        XCTAssertEqual(ProviderConfig.readLinkState(paths: paths), .linked)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertNil(ProviderConfig.readLinkState(paths: paths))
         let rewritten = try String(contentsOf: paths.configFile)
-        XCTAssertFalse(rewritten.contains("provider_token"))
+        XCTAssertTrue(rewritten.contains("provider_token: secret-token"))
     }
 
     func testStartupRecoveryRestoresBackupWhenKeychainCopyIsMissing() async throws {
@@ -108,7 +293,10 @@ final class ProviderConfigParserTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
         defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_restore") } }
 
-        try await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
+        try await ProviderConfig.recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: { _ in }
+        )
 
         XCTAssertEqual(try String(contentsOf: paths.configFile), backupText)
         XCTAssertEqual(try fileMode(paths.configFile) & 0o777, 0o600)
@@ -117,7 +305,7 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
     }
 
-    func testStartupRecoveryIgnoresMarkerWhenConfigHashDoesNotMatch() async throws {
+    func testStartupRecoveryDiscardsUntrustedBackupWhenConfigHashDoesNotMatch() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()
         let originalText = "provider_id: p_hash\nprovider_token: secret-token\nmodel: test\n"
@@ -141,15 +329,18 @@ final class ProviderConfigParserTests: XCTestCase {
             throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
         }
 
-        try await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
+        try await ProviderConfig.recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: { _ in }
+        )
 
         XCTAssertEqual(try String(contentsOf: paths.configFile), originalText)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
     }
 
-    func testStartupRecoveryIgnoresMarkerWhenBackupPathIsUnexpected() async throws {
+    func testStartupRecoveryDiscardsFixedBackupWhenMarkerPathIsUnexpected() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()
         let originalText = "provider_id: p_backup\nprovider_token: secret-token\nmodel: test\n"
@@ -168,15 +359,18 @@ final class ProviderConfigParserTests: XCTestCase {
             throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
         }
 
-        try await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
+        try await ProviderConfig.recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: { _ in }
+        )
 
         XCTAssertEqual(try String(contentsOf: paths.configFile), originalText)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
     }
 
-    func testStartupRecoveryIgnoresMarkerWhenProviderIDDoesNotMatchConfig() async throws {
+    func testStartupRecoveryDiscardsUntrustedBackupWhenProviderIDDoesNotMatchConfig() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()
         let originalText = "provider_id: p_actual\nprovider_token: secret-token\nmodel: test\n"
@@ -194,12 +388,15 @@ final class ProviderConfigParserTests: XCTestCase {
             throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
         }
 
-        try await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
+        try await ProviderConfig.recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: { _ in }
+        )
 
         XCTAssertEqual(try String(contentsOf: paths.configFile), originalText)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
     }
 
     func testStartupRecoveryDoesNotRestoreBackupWhenOnlyCurrentConfigMatchesMarker() async throws {
@@ -221,12 +418,15 @@ final class ProviderConfigParserTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
         defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_mixed") } }
 
-        try await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
+        try await ProviderConfig.recoverPendingImportIfNeeded(
+            paths: paths,
+            importCredentialIntoCLI: { _ in }
+        )
 
         XCTAssertEqual(try String(contentsOf: paths.configFile), currentText)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
     }
 
     func testWriteAndReadLinkState() throws {
@@ -404,96 +604,6 @@ final class ProviderConfigParserTests: XCTestCase {
         )
     }
 
-    func testSaveProviderIdentityRollsBackWhenTokenSaveFails() async throws {
-        let paths = try makeTempPaths()
-        try paths.ensureDirectories()
-        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
-        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
-
-        do {
-            try await ProviderConfig.saveProviderIdentity(
-                providerID: "p_failed",
-                token: "provider-token",
-                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
-                paths: paths,
-                readToken: { _ in nil },
-                saveToken: { _, _ in
-                    throw NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "keychain failed"])
-                },
-                deleteToken: { _ in }
-            )
-            XCTFail("Expected token save failure")
-        } catch {
-            XCTAssertEqual((error as NSError).localizedDescription, "keychain failed")
-        }
-
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
-    }
-
-    func testSaveProviderIdentityRollsBackWhenMarkerCreateFails() async throws {
-        let paths = try makeTempPaths()
-        try paths.ensureDirectories()
-        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
-        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
-        var savedToken: String?
-
-        do {
-            try await ProviderConfig.saveProviderIdentity(
-                providerID: "p_marker_failed",
-                token: "provider-token",
-                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
-                paths: paths,
-                readToken: { _ in nil },
-                saveToken: { _, token in savedToken = token },
-                deleteToken: { _ in savedToken = nil },
-                createAppMarker: {
-                    throw NSError(domain: "tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "marker failed"])
-                }
-            )
-            XCTFail("Expected marker creation failure")
-        } catch {
-            XCTAssertEqual((error as NSError).localizedDescription, "marker failed")
-        }
-
-        XCTAssertNil(savedToken)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
-    }
-
-    func testSaveProviderIdentityRollsBackWhenVerificationFails() async throws {
-        let paths = try makeTempPaths()
-        try paths.ensureDirectories()
-        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
-        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
-        var savedToken: String?
-
-        do {
-            try await ProviderConfig.saveProviderIdentity(
-                providerID: "p_verify_failed",
-                token: "provider-token",
-                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
-                paths: paths,
-                readToken: { _ in nil },
-                saveToken: { _, token in savedToken = token },
-                deleteToken: { _ in savedToken = nil },
-                createAppMarker: {
-                    _ = FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
-                },
-                verifyConfigured: { false }
-            )
-            XCTFail("Expected verification failure")
-        } catch ProviderConfig.SaveError.savedIdentityNotConfigured {
-            // Expected.
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
-
-        XCTAssertNil(savedToken)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
-    }
-
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-tests-\(UUID().uuidString)", isDirectory: true)
@@ -584,5 +694,23 @@ final class ProviderConfigParserTests: XCTestCase {
         var st = stat()
         XCTAssertEqual(lstat(url.path, &st), 0)
         return st.st_mode
+    }
+}
+
+private actor LegacyAppCredentialBox {
+    private var token: String?
+
+    init(token: String? = nil) {
+        self.token = token
+    }
+
+    func read() -> String? { token }
+
+    func save(_ token: String) {
+        self.token = token
+    }
+
+    func delete() {
+        token = nil
     }
 }

@@ -130,6 +130,20 @@ final class ControlSocketTests: XCTestCase {
         try assertRoundTrip(.metricsResponse(ControlMetricsSnapshot(
             earningsUsdc: 0.42,
             malibuAccrued: 0.14,
+            providerEarnings: ProviderEarningsSummary(
+                walletBound: true,
+                trustTier: "trusted",
+                unpaidLedgerBacklogUSDC: 0.5,
+                unpaidLedgerBacklogMALIBU: 1.5,
+                usdcToday: 0.42,
+                usdcWeek: 2,
+                usdcPending: 0.25,
+                usdcLifetime: 10,
+                malibuToday: 0.14,
+                malibuAllTime: 5,
+                trustCriteriaMet: 4,
+                trustCriteriaRequired: 4
+            ),
             gpuC: 58.5,
             latencyP50Ms: 180,
             uptimeSec: 3600
@@ -138,8 +152,8 @@ final class ControlSocketTests: XCTestCase {
 
     func testEncodeDecodeMetricsResponseOptionalsOmitted() throws {
         let data = try ControlSocketCodec.encode(.metricsResponse(ControlMetricsSnapshot(
-            earningsUsdc: 0,
-            malibuAccrued: 0,
+            earningsUsdc: nil,
+            malibuAccrued: nil,
             gpuC: nil,
             latencyP50Ms: nil,
             uptimeSec: 0
@@ -147,17 +161,20 @@ final class ControlSocketTests: XCTestCase {
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertFalse(text.contains("gpu_c"))
         XCTAssertFalse(text.contains("latency_p50_ms"))
+        XCTAssertFalse(text.contains("earnings_usdc"))
+        XCTAssertFalse(text.contains("malibu_accrued"))
+        XCTAssertFalse(text.contains("provider_earnings"))
         XCTAssertEqual(try ControlSocketCodec.decode(data), .metricsResponse(ControlMetricsSnapshot(
-            earningsUsdc: 0, malibuAccrued: 0, gpuC: nil, latencyP50Ms: nil, uptimeSec: 0
+            earningsUsdc: nil, malibuAccrued: nil, gpuC: nil, latencyP50Ms: nil, uptimeSec: 0
         )))
     }
 
     func testEncodeDecodePauseAndResume() throws {
         try assertRoundTrip(.pauseRequest)
-        try assertRoundTrip(.pauseAck(accepted: false, reason: "not_implemented"))
+        try assertRoundTrip(.pauseAck(accepted: false, reason: "lifecycle_control_unavailable"))
         try assertRoundTrip(.pauseAck(accepted: true, reason: nil))
         try assertRoundTrip(.resumeRequest)
-        try assertRoundTrip(.resumeAck(accepted: false, reason: "not_implemented"))
+        try assertRoundTrip(.resumeAck(accepted: false, reason: "lifecycle_control_unavailable"))
         try assertRoundTrip(.resumeAck(accepted: true, reason: nil))
     }
 
@@ -202,6 +219,42 @@ final class ControlSocketTests: XCTestCase {
 
         XCTAssertEqual(response, .rotateReceiptKeyResult(status: .accepted, error: nil))
         XCTAssertTrue(rotated.get())
+    }
+
+    func testServerExecutesPauseAndResumeLifecycleCallbacks() async throws {
+        let socketPath = try makeSocketPath()
+        let paused = LockedBool()
+        let resumed = LockedBool()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            idleTimeoutSeconds: 0.2,
+            pauseProvider: {
+                paused.set(true)
+                return .accepted
+            },
+            resumeProvider: {
+                resumed.set(true)
+                return .rejected("readiness_unconfirmed")
+            }
+        )
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.pauseRequest)
+        let pauseResponse = try await connection.receive(timeout: 1)
+        XCTAssertEqual(pauseResponse, .pauseAck(accepted: true, reason: nil))
+        try await connection.send(.resumeRequest)
+        let resumeResponse = try await connection.receive(timeout: 1)
+        XCTAssertEqual(
+            resumeResponse,
+            .resumeAck(accepted: false, reason: "readiness_unconfirmed")
+        )
+        await connection.close()
+        await server.stop()
+
+        XCTAssertTrue(paused.get())
+        XCTAssertTrue(resumed.get())
     }
 
     func testServerRejectsReceiptRotationWhenDisabled() async throws {
