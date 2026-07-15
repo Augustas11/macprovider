@@ -62,6 +62,8 @@ staging_dir=""
 STAGED_CONFIG_PATH=""
 STAGED_PROVIDER_ID_PATH=""
 AUTOTUNE_BENCHMARK_PORT=""
+AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+AUTOTUNE_PREFETCH_RECEIPT_PATH=""
 MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
 LIFECYCLE_STAGED_CLI_TRUSTED=0
 LAUNCHD_INSTALLED=0
@@ -842,12 +844,7 @@ restore_existing_provider_if_start_skipped() {
   [ "$SKIP_PROVIDER_START" -eq 1 ] || return 1
   [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 1
   if [ "$CUTOVER_STARTED" -eq 0 ]; then
-    log "No replacement provider will be started; discarding staged files without touching the active provider."
-    if [ "${INSTALL_TX_WATCHDOG_WAS_ACTIVE:-0}" -eq 1 ]; then
-      launchctl bootstrap "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || return 1
-      launchctl kickstart -k "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1 || return 1
-    fi
-    commit_install_transaction || return 1
+    discard_install_transaction_before_cutover || return 1
     log "The active provider release remained online and unchanged."
     return 0
   fi
@@ -861,7 +858,9 @@ cleanup() {
   cleanup_rc=$?
   trap - EXIT
   if [ "$INSTALL_TX_ACTIVE" -eq 1 ] && [ "$INSTALL_TX_COMMITTED" -ne 1 ]; then
-    if ! rollback_install_transaction; then
+    if [ "$CUTOVER_STARTED" -eq 0 ]; then
+      discard_install_transaction_before_cutover || cleanup_rc=70
+    elif ! rollback_install_transaction; then
       cleanup_rc=70
     fi
   fi
@@ -1145,6 +1144,42 @@ recovery_failed() {
   recovery_log "Recovery data was preserved. Retry exactly: bash '$RECOVERY_DIR/recover.sh'"
   exit 70
 }
+
+# Before the durable cutover marker exists, the installer has not touched the
+# provider binary, config, launchd service, or manual process. Only the
+# watchdog may have been suspended while recovery was armed. Recover that
+# guard service without booting out or replacing the healthy incumbent.
+if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-started" ]; then
+  if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
+    if ! launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1; then
+      [ "$REC_HAD_PLIST" -eq 1 ] \
+        || recovery_failed "the prior provider service disappeared before cutover and no launchd plist was preserved"
+      launchctl bootstrap "gui/$REC_UID" "$REC_PLIST_PATH" >/dev/null 2>&1 \
+        || recovery_failed "could not restore the unexpectedly inactive pre-cutover provider service"
+      launchctl kickstart -k "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 \
+        || recovery_failed "could not start the unexpectedly inactive pre-cutover provider service"
+    fi
+    launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 \
+      || recovery_failed "pre-cutover provider service is not active"
+  fi
+  if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+    if ! launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
+      [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] \
+        || recovery_failed "the prior watchdog was active but no launchd plist was preserved"
+      launchctl bootstrap "gui/$REC_UID" "$REC_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+        || recovery_failed "could not restore the pre-cutover watchdog service"
+    fi
+    launchctl kickstart -k "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
+      || recovery_failed "could not start the pre-cutover watchdog service"
+    launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
+      || recovery_failed "pre-cutover watchdog service is not active"
+  fi
+  recovery_log "Cutover never started; incumbent provider files and process were left untouched."
+  exit 0
+fi
+if [ -L "$RECOVERY_DIR/cutover-started" ] || [ ! -f "$RECOVERY_DIR/cutover-started" ]; then
+  recovery_failed "install cutover marker is unsafe"
+fi
 pid_is_live_non_zombie() {
   candidate_pid="$1"
   kill -0 "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -1940,6 +1975,56 @@ begin_install_transaction() {
     launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
       || die 70 "could not suspend the existing watchdog for the protected install transaction"
   fi
+}
+
+mark_install_cutover_started() {
+  [ "$CUTOVER_STARTED" -eq 0 ] || return 0
+  [ "$INSTALL_TX_ACTIVE" -eq 1 ] && [ -n "$INSTALL_TX_BACKUP" ] \
+    || die 70 "install cutover cannot start without durable recovery"
+  assert_install_lock_ownership
+  python3 - "$INSTALL_TX_BACKUP/cutover-started" <<'PY' \
+    || die 70 "could not durably mark install cutover before live provider mutation"
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise RuntimeError("unsafe cutover marker")
+    os.write(fd, b"cutover-started\n")
+    os.fsync(fd)
+finally:
+    os.close(fd)
+directory_fd = os.open(os.path.dirname(path), os.O_RDONLY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+  CUTOVER_STARTED=1
+}
+
+discard_install_transaction_before_cutover() {
+  [ "$CUTOVER_STARTED" -eq 0 ] || return 1
+  log "Discarding staged install files without stopping or replacing the active provider."
+  if ! bash "$INSTALL_TX_BACKUP/recover.sh"; then
+    log "ERROR: pre-cutover cleanup failed; recovery data was preserved at $INSTALL_TX_BACKUP"
+    return 70
+  fi
+  if ! disarm_install_recovery_agent; then
+    log "ERROR: pre-cutover cleanup succeeded but the interrupted-install recovery agent could not be disarmed"
+    return 70
+  fi
+  if ! rm -rf "$INSTALL_TX_BACKUP"; then
+    log "ERROR: pre-cutover cleanup succeeded but recovery data could not be retired: $INSTALL_TX_BACKUP"
+    return 70
+  fi
+  INSTALL_TX_ACTIVE=0
+  log "The incumbent provider was never stopped; only staged update files were discarded."
 }
 
 rollback_install_transaction() {
@@ -3481,6 +3566,19 @@ read_config_artifact_path() {
   ' "$CONFIG_PATH"
 }
 
+read_config_catalog_model_id() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk -F: '
+    /^model_catalog_model_id:/ {
+      value=$0
+      sub(/^model_catalog_model_id:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
 read_config_donor_mode() {
   [ -f "$CONFIG_PATH" ] || return 1
   awk -F: '
@@ -3527,6 +3625,7 @@ ensure_provider_credentials() {
     # later evidence or startup admission fails. The incumbent process remains
     # running until cutover.
     assert_install_lock_ownership
+    mark_install_cutover_started
     mkdir -p "$CONFIG_DIR"
     bootstrap_config_temp="$LIVE_CONFIG_PATH.bootstrap.$$"
     cp "$STAGED_CONFIG_PATH" "$bootstrap_config_temp" \
@@ -3542,7 +3641,6 @@ ensure_provider_credentials() {
       mv "$bootstrap_provider_id_temp" "$LIVE_PROVIDER_ID_PATH" \
         || die 70 "could not publish the bootstrapped provider identity for rollback"
     fi
-    CUTOVER_STARTED=1
   fi
 }
 
@@ -3584,8 +3682,21 @@ run_autotune_recommend_apply() {
   if [ ! -x "${MACPROVIDER_CLI_EXECUTABLE:-$INSTALL_DIR/macprovider-cli}" ]; then
     die 5 "staged macprovider-cli missing before autotune recommendation"
   fi
+  autotune_candidate_args=()
+  upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
+  if [ -n "$upgrade_candidate_model_id" ]; then
+    [ -n "${AUTOTUNE_PREFETCH_RECEIPT_PATH:-}" ] \
+      && [ -f "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
+      && [ ! -L "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
+      || die 6 "upgrade benchmark lacks its private prefetch receipt; the staged release will not acquire artifacts after cutover"
+    autotune_candidate_args=(
+      --candidate-models "$upgrade_candidate_model_id"
+      --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
+    )
+  fi
   log "Running paid-yield recommendation before service start."
   if run_macprovider_cli_with_amfi_retry autotune --recommend --apply \
+    ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
     --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence; then
     recommended_model="$(read_config_model || true)"
     artifact_path="$(read_config_artifact_path || true)"
@@ -3610,6 +3721,7 @@ run_autotune_recommend_apply() {
     if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
       log "Applying donor-mode configuration."
       run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
+        ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
         --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence \
         || die 6 "donor-mode recommendation failed before service start"
       recommended_model="$(read_config_model || true)"
@@ -3633,6 +3745,23 @@ run_autotune_recommend_apply() {
     return 0
   fi
   die 6 "autotune recommendation failed before service start"
+}
+
+prefetch_upgrade_autotune_model() {
+  upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
+  [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 0
+  [ -n "$upgrade_candidate_model_id" ] \
+    || die 6 "stale upgrade recommendation lacks an exact signed-catalog model identity; the active provider was not stopped"
+  AUTOTUNE_PREFETCH_RECEIPT_PATH="$staging_dir/autotune-prefetch-receipt.json"
+  log "Prefetching and verifying the installed model's exact signed artifact while the current provider remains available."
+  run_macprovider_cli_with_amfi_retry autotune --recommend --prefetch \
+    --candidate-models "$upgrade_candidate_model_id" \
+    --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH" \
+    --config "$CONFIG_PATH" --no-submit-hardware-evidence >/dev/null \
+    || die 6 "installed model artifact prefetch failed; the active provider was not stopped"
+  [ -f "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] && [ ! -L "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
+    || die 6 "installed model artifact prefetch did not produce a private receipt; the active provider was not stopped"
+  log "Installed model artifact is locally verified; upgrade benchmarking is limited to $upgrade_candidate_model_id."
 }
 
 use_fresh_recommendation_if_available() {
@@ -6082,8 +6211,12 @@ main() {
   else
     log "Validating signed catalog and stored recommendation with the staged release while the current provider remains available."
     if ! use_fresh_recommendation_if_available; then
+      if [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ]; then
+        AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="$(read_config_catalog_model_id || true)"
+      fi
       write_config "$model" "$provider_id" "$coordinator_url"
       AUTOTUNE_RECOMMENDATION_REQUIRED=1
+      prefetch_upgrade_autotune_model
     fi
   fi
   if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
@@ -6092,6 +6225,7 @@ main() {
       exit 0
     fi
     assert_install_lock_ownership
+    mark_install_cutover_started
     ensure_port_free 1
     install_binary
     activate_staged_config
@@ -6114,8 +6248,8 @@ main() {
     # benchmarks so unified-memory pressure cannot disrupt buyer traffic or
     # corrupt benchmark results through contention.
     assert_install_lock_ownership
+    mark_install_cutover_started
     ensure_port_free 1
-    CUTOVER_STARTED=1
     select_autotune_benchmark_port
     run_autotune_recommend_apply
     if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
@@ -6138,8 +6272,8 @@ main() {
   # freshness evaluation; when benchmarks are required the incumbent is
   # deliberately stopped first to avoid double-loading model weights.
   assert_install_lock_ownership
+  mark_install_cutover_started
   ensure_port_free 1
-  CUTOVER_STARTED=1
   install_binary
   activate_staged_config
   check_path_hint

@@ -212,7 +212,7 @@ later lost.
 
 ```bash
 ~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
-KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.36
+KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.37
 ```
 
    Keep the prior provider live. The verifier proves the signed checksum
@@ -301,7 +301,7 @@ sudo tail -Fn0 /var/lib/macprovider-pearl-updater/audit.jsonl | \
 
 ```bash
 curl -fsSL https://get.streamvc.live/install.sh | \
-  MACPROVIDER_VERSION=v1.8.36 MACPROVIDER_NO_PROMPT=1 bash
+  MACPROVIDER_VERSION=v1.8.37 MACPROVIDER_NO_PROMPT=1 bash
 ```
 
    The installer commits only after the bridge coordinator reports that exact

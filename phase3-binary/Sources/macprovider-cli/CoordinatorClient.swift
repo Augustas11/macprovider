@@ -145,7 +145,7 @@ actor CoordinatorClient {
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
 
-    static let binaryVersion = "1.8.36"
+    static let binaryVersion = "1.8.37"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL

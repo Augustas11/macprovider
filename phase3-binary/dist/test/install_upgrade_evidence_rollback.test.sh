@@ -19,6 +19,7 @@ import sys
 names = {
     "cleanup", "install_tx_path_matches", "stage_install_tx_path",
     "write_install_recovery_artifacts", "begin_install_transaction",
+    "mark_install_cutover_started", "discard_install_transaction_before_cutover",
     "rollback_install_transaction", "commit_install_transaction",
     "arm_install_recovery_agent", "disarm_install_recovery_agent",
     "release_install_lock",
@@ -378,6 +379,7 @@ run_case() {
       INSTALL_TX_WATCHDOG_WAS_DISABLED=0
       INSTALL_TX_ROLLING_BACK=0
       INSTALL_TX_BINARY_KIND="symlink"
+      CUTOVER_STARTED=0
       INSTALL_LOCK_HELD=0
       INSTALL_LOCK_TOKEN="test-lock-token"
       INSTALL_LOCK_HOLDER_PID=""
@@ -390,6 +392,10 @@ run_case() {
       assert_install_lock_ownership() { :; }
       trap cleanup EXIT
       begin_install_transaction
+      if [ "$INSTALL_PHASE" = "pre-cutover" ]; then
+        exit 9
+      fi
+      mark_install_cutover_started
       if [ "$INSTALL_PHASE" = "manual-self-test" ]; then
         ensure_port_free 1
         if [ "$MANUAL_BEHAVIOR" = "never-bind" ]; then
@@ -470,6 +476,9 @@ MANUAL
   case_rc=$?
   set -e
   printf '%s\n' "$case_rc" > "$root/rc"
+  if [ "$case_rc" -eq 1 ]; then
+    cat "$root/stderr.log" >&2
+  fi
   if { [ "$install_phase" = "manual-self-test" ] || [ "$install_phase" = "new-manual-self-test" ]; } \
       && [ "$case_rc" -ne 9 ]; then
     cat "$root/stderr.log" >&2
@@ -517,6 +526,23 @@ assert_old_install "$TMP/success"
 [ -z "$(recovery_dir "$TMP/success")" ]
 grep -F 'bootstrap gui/' "$TMP/success/launchctl.log" >/dev/null
 grep -F 'kickstart -k gui/' "$TMP/success/launchctl.log" >/dev/null
+
+# A failed artifact prefetch exits before the durable cutover marker. Cleanup
+# may restore the suspended watchdog, but it must never boot out, replace, or
+# restart the healthy incumbent provider.
+run_case pre_cutover_prefetch_failure "" "" "" pre-cutover
+[ "$(cat "$TMP/pre_cutover_prefetch_failure/rc")" -eq 9 ]
+assert_old_install "$TMP/pre_cutover_prefetch_failure"
+[ -f "$TMP/pre_cutover_prefetch_failure/service-active" ]
+[ -f "$TMP/pre_cutover_prefetch_failure/watchdog-service-active" ]
+[ -z "$(recovery_dir "$TMP/pre_cutover_prefetch_failure")" ]
+if grep -F 'bootout gui/' "$TMP/pre_cutover_prefetch_failure/launchctl.log" \
+    | grep -F 'live.streamvc.macprovider.plist' >/dev/null; then
+  echo "pre-cutover failure stopped the incumbent provider" >&2
+  exit 1
+fi
+grep -F 'Cutover never started; incumbent provider files and process were left untouched.' \
+  "$TMP/pre_cutover_prefetch_failure/stderr.log" >/dev/null
 
 # A backup copy/disk failure occurs before any replacement or service stop.
 run_case backup_cp_failure "" fail-backup-cp
