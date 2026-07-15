@@ -1067,14 +1067,10 @@ configs are introduced by SPEC-011 (swap_*) and SPEC-012
       timestamps and IDs make it inherently nondeterministic across
       runs.
 - **AC-14** Router behavior under v1.0 defaults is unchanged:
-  buyer request for a genuinely unknown model `Z` — not warm on
-  any provider, not in any provider's `SupportedModels`, not in the
-  retained process-lifetime seen history, and not resolving to a
-  configured model class (i.e. "unknown" by all four branches of the
-  SPEC-006 §17.2 / SPEC-002 R-3.X.6 "known" definition) — returns the
-  same error envelope it would have pre-SPEC-010 (existing `404
-  model_not_found` per SPEC-001 §6.1). A model known only via the
-  seen history or a model class returns `503`, not `404`.
+  buyer request for model `Z` (in no provider's `SupportedModels`
+  and not warm on any provider) returns the same error envelope
+  it would have pre-SPEC-010 (existing `404 model_not_found` per
+  SPEC-001 §6.1).
 - **AC-15** Legacy `hello` frame (not `auth_request`): provider
   on the legacy `hello` handshake sends `supported_models` and
   `publishes_supported_models`. Coordinator MUST apply R-3.1.1
