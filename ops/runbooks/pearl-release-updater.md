@@ -72,7 +72,7 @@ First deploy the #585 integration revision of #584's redesigned canary buyer
 exactly as reviewed, including its root-only `LoadCredential` files, safety
 observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
-`issue-585-integration-r5` at source commit `6eef9519a26b7687d8e8e48b4439b3a117a39521`;
+`issue-585-integration-r6` at source commit `95ea4ab96f8a09cc646b287c1ab6a30bbf2a5ecf`;
 `--plan` fails on any SHA drift, missing credential, invalid two-provider
 expected-fleet document, absent reviewed enable gate, active emergency-disable
 sentinel, unexpected unit drop-in, stale systemd fragment, or changed
