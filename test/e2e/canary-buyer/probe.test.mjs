@@ -374,6 +374,11 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   }), []);
 
   for (const [field, value] of [
+    ['assigned_id', null],
+    ['assigned_id', ''],
+    ['connected_at_ms', null],
+    ['routing_eligible', null],
+    ['routing_eligible', false],
     ['catalog_admission_mode', 'legacy_bridge'],
     ['catalog_admission_mode', 'current'],
     ['binary_version', '1.8.31'],

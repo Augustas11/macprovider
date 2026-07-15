@@ -1073,7 +1073,11 @@ function isLegacyRollbackProviderSignalSubstitute(row, expected, authorizedProvi
   const authorization = authorizedProviders?.get(expected.provider_id);
   return authorization?.model_id === expected.model_id
     && row?.provider_id === expected.provider_id
+    && typeof row?.assigned_id === 'string'
+    && row.assigned_id.length > 0
     && row?.model_id === expected.model_id
+    && Number.isFinite(row?.connected_at_ms)
+    && row?.routing_eligible === true
     && row?.catalog_admission_mode == null
     && row?.binary_version === authorization.binary_version;
 }
