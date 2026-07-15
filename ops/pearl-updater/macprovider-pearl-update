@@ -215,7 +215,7 @@ class Config:
     download_timeout_s: int = 300
     gateway_drain_timeout_s: int = 90
     gateway_drain_steady_s: int = 5
-    provider_recovery_timeout_s: int = 240
+    provider_recovery_timeout_s: int = 900
     service_health_timeout_s: int = 60
     canary_timeout_s: int = 720
     revoked_versions_file: Path = Path("/etc/macprovider/pearl-updater.revoked")
@@ -560,7 +560,7 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         download_timeout_s=bounded_int(values.get("PEARL_UPDATER_DOWNLOAD_TIMEOUT_S", "300"), "download timeout", 30, 1800),
         gateway_drain_timeout_s=bounded_int(values.get("PEARL_UPDATER_GATEWAY_DRAIN_TIMEOUT_S", "90"), "gateway drain timeout", 5, 600),
         gateway_drain_steady_s=bounded_int(values.get("PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S", "5"), "gateway drain steady", 1, 30),
-        provider_recovery_timeout_s=bounded_int(values.get("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S", "240"), "provider recovery timeout", 10, 900),
+        provider_recovery_timeout_s=bounded_int(values.get("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S", "900"), "provider recovery timeout", 10, 900),
         service_health_timeout_s=bounded_int(values.get("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S", "60"), "service health timeout", 5, 300),
         canary_timeout_s=bounded_int(values.get("PEARL_UPDATER_CANARY_TIMEOUT_S", "720"), "canary timeout", 700, 1800),
         revoked_versions_file=Path(values.get("PEARL_UPDATER_REVOKED_VERSIONS_FILE", "/etc/macprovider/pearl-updater.revoked")),
@@ -2666,7 +2666,13 @@ class Updater:
             raise UpdateError(f"health response is not an object: {url}")
         return payload
 
-    def get_authorized_json(self, url: str, token: str) -> dict[str, Any]:
+    def get_authorized_json(
+        self,
+        url: str,
+        token: str,
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
         request = urllib.request.Request(
             url,
             headers={
@@ -2680,7 +2686,14 @@ class Updater:
                 return None
 
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-        with opener.open(request, timeout=self.config.request_timeout_s) as response:
+        effective_timeout_s = (
+            float(self.config.request_timeout_s)
+            if timeout_s is None
+            else min(float(self.config.request_timeout_s), timeout_s)
+        )
+        if effective_timeout_s <= 0:
+            raise UpdateError("authorized canary request deadline expired")
+        with opener.open(request, timeout=effective_timeout_s) as response:
             if response.status != 200 or response.geturl() != url:
                 raise UpdateError("authorized canary request did not return an exact HTTP 200")
             data = response.read(1024 * 1024 + 1)
@@ -2969,21 +2982,54 @@ class Updater:
                     ) from active_error
                 raise cleanup_error
 
-    def wait_for(self, description: str, timeout_s: int, check: Callable[[], bool]) -> None:
+    def _wait_for_deadline(
+        self,
+        description: str,
+        timeout_s: int,
+        check: Callable[[float], bool],
+    ) -> None:
         deadline = time.monotonic() + timeout_s
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                if check():
+                if check(deadline):
+                    if time.monotonic() > deadline:
+                        last_error = UpdateError(f"{description} completed after its deadline")
+                        break
                     self.audit("rollout_check", "success", check=description)
                     return
             except Exception as exc:  # health convergence is retried until deadline
                 last_error = exc
-            self.sleep(2)
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            self.sleep(min(2.0, remaining_s))
         detail = f": {last_error}" if last_error else ""
         with contextlib.suppress(Exception):
             self.audit("rollout_check", "failed", check=description, reason=str(last_error) if last_error else "timeout")
         raise UpdateError(f"timeout waiting for {description}{detail}")
+
+    def wait_for(self, description: str, timeout_s: int, check: Callable[[], bool]) -> None:
+        self._wait_for_deadline(description, timeout_s, lambda _deadline: check())
+
+    def wait_for_with_deadline(
+        self,
+        description: str,
+        timeout_s: int,
+        check: Callable[[float], bool],
+    ) -> None:
+        self._wait_for_deadline(description, timeout_s, check)
+
+    @staticmethod
+    def remaining_deadline_timeout(
+        deadline: float,
+        maximum_s: float,
+        description: str,
+    ) -> float:
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            raise UpdateError(f"{description} deadline expired")
+        return min(maximum_s, remaining_s)
 
     def gateway_reservations(self) -> int:
         if self.gateway_db is None:
@@ -3616,6 +3662,8 @@ class Updater:
         provider_id: str,
         candidate_digest: str,
         candidate_signer: str,
+        *,
+        deadline: float | None = None,
     ) -> str:
         proof_program = _read_trusted_text(
             self.catalog_canary_proof,
@@ -3653,10 +3701,17 @@ class Updater:
             self.config.catalog_canary_ssh_target,
             remote_command,
         ]
+        timeout_s = min(float(self.config.provider_recovery_timeout_s), 300.0)
+        if deadline is not None:
+            timeout_s = self.remaining_deadline_timeout(
+                deadline,
+                timeout_s,
+                "trusted catalog canary Mac proof",
+            )
         result = self.run_command(
             command,
             check=False,
-            timeout=min(self.config.provider_recovery_timeout_s, 300),
+            timeout=timeout_s,
             input_text=proof_program,
         )
         if result.returncode != 0:
@@ -3707,6 +3762,8 @@ class Updater:
         candidate_signer: str,
         row_identity: str,
         assigned_id: str,
+        *,
+        deadline: float | None = None,
     ) -> bool:
         quoted_id = urllib.parse.quote(provider_id, safe="")
         quoted_assigned_id = urllib.parse.quote(assigned_id, safe="")
@@ -3717,7 +3774,19 @@ class Updater:
             + quoted_assigned_id
             + "&details=deployment"
         )
-        status = self.get_authorized_json(url, token)
+        if deadline is None:
+            status = self.get_authorized_json(url, token)
+        else:
+            request_timeout_s = self.remaining_deadline_timeout(
+                deadline,
+                float(self.config.request_timeout_s),
+                "catalog provider admission request",
+            )
+            status = self.get_authorized_json(
+                url,
+                token,
+                timeout_s=request_timeout_s,
+            )
         return (
             status.get("provider_id") == provider_id
             and status.get("assigned_id") == assigned_id
@@ -3736,12 +3805,13 @@ class Updater:
         candidate_digest, candidate_signer = self.catalog_candidate_identity(release)
         verified: dict[str, str] = {}
 
-        def exact_canary_ready() -> bool:
+        def exact_canary_ready(deadline: float) -> bool:
             row_identity, assigned_id = self.prove_catalog_canary_mac(
                 release,
                 provider_id,
                 candidate_digest,
                 candidate_signer,
+                deadline=deadline,
             )
             if not self.catalog_provider_admission_ready(
                 release,
@@ -3751,13 +3821,14 @@ class Updater:
                 candidate_signer,
                 row_identity,
                 assigned_id,
+                deadline=deadline,
             ):
                 return False
             verified["row_identity"] = row_identity
             verified["assigned_id"] = assigned_id
             return True
 
-        self.wait_for(
+        self.wait_for_with_deadline(
             "exact catalog-aware provider proof and admission",
             self.config.provider_recovery_timeout_s,
             exact_canary_ready,

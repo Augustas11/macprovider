@@ -294,6 +294,17 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
     var noJoin = false
 
+    // Internal marker for CandidateProviderRunner. Stage 1 owns warmup and
+    // throughput measurement for these non-joining subprocesses.
+    @Flag(name: .customLong("autotune-candidate"), help: .private)
+    var autotuneCandidate = false
+
+    mutating func validate() throws {
+        guard !autotuneCandidate || noJoin else {
+            throw ValidationError("--autotune-candidate requires --no-join")
+        }
+    }
+
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
         if resolved.supportedModels != nil {
             do {
@@ -650,6 +661,14 @@ struct ServeCommand: AsyncParsableCommand {
         return factory()
     }
 
+    static func startupThroughputEstimate(
+        autotuneCandidate: Bool,
+        measure: () async -> Double
+    ) async -> Double {
+        guard !autotuneCandidate else { return 0 }
+        return await measure()
+    }
+
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -909,7 +928,10 @@ struct ServeCommand: AsyncParsableCommand {
             maxContextOverride: resolved.maxContextOverride,
             maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1
         )
-        let throughputEstimate = await modelRuntime.measureStartupThroughput()
+        let throughputEstimate = await Self.startupThroughputEstimate(
+            autotuneCandidate: autotuneCandidate,
+            measure: { await modelRuntime.measureStartupThroughput() }
+        )
         let thermalGate = ThermalGate()
         // `slots_free` in the log reflects the throttle-driven free-slot
         // ceiling (configured `maxConcurrency` when unthrottled, 0 when

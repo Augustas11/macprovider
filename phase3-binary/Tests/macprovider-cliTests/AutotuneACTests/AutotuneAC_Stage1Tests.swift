@@ -83,7 +83,8 @@ final class AutotuneACStage1Tests: XCTestCase {
         XCTAssertNil(row.recommendationJSON)
     }
 
-    /// AC-7: Every candidate serve argv carries --no-join; SPEC-013 lines 1426-1432.
+    /// AC-7: Every candidate serve argv is isolated from the coordinator and
+    /// explicitly marked as an autotune-owned runtime; SPEC-013 lines 1426-1432.
     func testAC7NoJoinIsSetOnEveryCandidate() throws {
         let models = ["model-a", "model-b", "model-c"]
         let argvByModel = try models.map { model in
@@ -101,6 +102,11 @@ final class AutotuneACStage1Tests: XCTestCase {
             XCTAssertEqual(argv.first, "serve")
             XCTAssertTrue(argv.contains("--no-join"), "spawn argv must contain --no-join: \(argv)")
             XCTAssertEqual(argv.filter { $0 == "--no-join" }.count, 1)
+            XCTAssertTrue(
+                argv.contains("--autotune-candidate"),
+                "spawn argv must mark the private autotune candidate: \(argv)"
+            )
+            XCTAssertEqual(argv.filter { $0 == "--autotune-candidate" }.count, 1)
         }
     }
 

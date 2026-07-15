@@ -212,7 +212,7 @@ later lost.
 
 ```bash
 ~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
-KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.37
+KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.38
 ```
 
    Keep the prior provider live. The verifier proves the signed checksum
@@ -268,7 +268,9 @@ systemctl show --property=LoadCredential canary-buyer.service
 ```text
 PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=bridge_required
 PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT=<operator-approved-floor-at-least-2>
-PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=<seconds-greater-than-provider-recovery-plus-service-health-timeouts>
+PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900
+PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60
+PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200
 ```
 
    The updater rejects a post-rollout local `/healthz.pool_ready` below that
@@ -277,7 +279,22 @@ PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=<seconds-greater-than-provider-recovery
 5. Set `PEARL_UPDATER_ENABLED=1` and keep the config, revocation list, Better
    Stack token, catalog-canary bearer token, and catalog-canary SSH key
    `root:root 0600`.
-6. Run a plan, then start the manual apply in operator terminal A:
+6. Prove the live root-owned config carries the exact outer handoff deadline
+   and bridge safety window before starting the plan. These reads expose no
+   credentials:
+
+```bash
+sudo grep -Fx 'PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900' /etc/macprovider/pearl-updater.conf
+sudo grep -Fx 'PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60' /etc/macprovider/pearl-updater.conf
+sudo grep -Fx 'PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200' /etc/macprovider/pearl-updater.conf
+```
+
+   Any missing line is a fail-closed preflight failure. The 900-second provider
+   recovery timeout is the updater's outer wall-clock handoff deadline; the
+   candidate's internal prewarm and measured-probe timeouts are idle-progress
+   budgets and do not replace or extend that deadline.
+
+7. Run a plan, then start the manual apply in operator terminal A:
 
 ```bash
 sudo /usr/local/sbin/macprovider-pearl-update --plan
@@ -301,7 +318,7 @@ sudo tail -Fn0 /var/lib/macprovider-pearl-updater/audit.jsonl | \
 
 ```bash
 curl -fsSL https://get.streamvc.live/install.sh | \
-  MACPROVIDER_VERSION=v1.8.37 MACPROVIDER_NO_PROMPT=1 bash
+  MACPROVIDER_VERSION=v1.8.38 MACPROVIDER_NO_PROMPT=1 bash
 ```
 
    The installer commits only after the bridge coordinator reports that exact

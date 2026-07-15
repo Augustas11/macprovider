@@ -2378,6 +2378,56 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
+    func testReceiptBoundBenchmarkFailsClosedWhenCandidateIsNotReady() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = artifactSHA
+        request.benchmarks = [:]
+        let prefetched = PrefetchedModelArtifact(
+            modelKey: modelKey,
+            modelID: row.modelID,
+            modelRevision: revision,
+            candidateRowIdentity: try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey)),
+            path: snapshot.path,
+            sha256: artifactSHA
+        )
+        let readinessFailure = "provider readiness timeout before Stage 1 probe: Could not connect to the server"
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .infeasible(reason: readinessFailure, nErr: 1),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        do {
+            _ = try await benchmarker.benchmarks(
+                request: request,
+                targetContext: 4_000,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                port: 18_080,
+                candidateModelIDs: [row.modelID],
+                prefetchedArtifacts: [modelKey: prefetched]
+            )
+            XCTFail("receipt-bound upgrade probes must fail before recommendation state is replaced")
+        } catch AutotuneRecommendError.candidateProbeFailed(let failedModelKey, let reason) {
+            XCTAssertEqual(failedModelKey, modelKey)
+            XCTAssertEqual(reason, "\(readinessFailure) (n_err=1)")
+        }
+    }
+
     func testBenchmarksDiagnosesRowsSkippedByRAMGate() async throws {
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var request = try makeRequest(modelKey: modelKey)

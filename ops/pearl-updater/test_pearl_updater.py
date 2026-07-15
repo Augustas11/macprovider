@@ -121,6 +121,7 @@ class PearlUpdaterTests(unittest.TestCase):
             enabled=True,
             minimum_version=updater_module.SemVer.parse("1.8.26"),
             retry_backoff_s=0,
+            provider_recovery_timeout_s=240,
             revoked_versions_file=self.root / "revoked",
             provider_admission_policy="bridge_required",
             minimum_pool_ready_after_rollout=2,
@@ -1126,16 +1127,19 @@ class PearlUpdaterTests(unittest.TestCase):
         }
         self.updater.get_authorized_json = mock.Mock(return_value=response)
 
-        self.assertTrue(self.updater.catalog_provider_admission_ready(
-            release,
-            "catalog-canary",
-            "t" * 32,
-            digest,
-            signer,
-            row_identity,
-            "session-canary",
-        ))
+        with mock.patch.object(updater_module.time, "monotonic", return_value=100.0):
+            self.assertTrue(self.updater.catalog_provider_admission_ready(
+                release,
+                "catalog-canary",
+                "t" * 32,
+                digest,
+                signer,
+                row_identity,
+                "session-canary",
+                deadline=125.0,
+            ))
         self.assertIn("assigned_id=session-canary", self.updater.get_authorized_json.call_args.args[0])
+        self.assertEqual(self.updater.get_authorized_json.call_args.kwargs["timeout_s"], 25.0)
         response["assigned_id"] = "wrong-session"
         self.assertFalse(self.updater.catalog_provider_admission_ready(
             release,
@@ -1192,12 +1196,17 @@ class PearlUpdaterTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            self.updater.prove_catalog_canary_mac(
-                release, "catalog-canary", digest, signer
-            ),
-            (row_identity, "session-canary"),
-        )
+        with mock.patch.object(updater_module.time, "monotonic", return_value=100.0):
+            self.assertEqual(
+                self.updater.prove_catalog_canary_mac(
+                    release,
+                    "catalog-canary",
+                    digest,
+                    signer,
+                    deadline=125.0,
+                ),
+                (row_identity, "session-canary"),
+            )
         args, kwargs = self.updater.run_command.call_args
         self.assertIn(
             "UserKnownHostsFile=/etc/macprovider/catalog-canary-known-hosts",
@@ -1206,6 +1215,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(args[0][-2], "operator@canary.example")
         self.assertIn("catalog-canary", args[0][-1])
         self.assertIn("running_text_vnode", kwargs["input_text"])
+        self.assertEqual(kwargs["timeout"], 25.0)
 
         proof["files"]["release.json"] = "0" * 64
         self.updater.run_command.return_value = subprocess.CompletedProcess(
@@ -1240,12 +1250,16 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         order = []
         self.updater.prove_catalog_canary_mac = mock.Mock(
-            side_effect=lambda *_args: order.append("mac") or ("b" * 64, "session-canary")
+            side_effect=lambda *_args, **_kwargs: order.append("mac") or ("b" * 64, "session-canary")
         )
         self.updater.catalog_provider_admission_ready = mock.Mock(
-            side_effect=lambda *_args: order.append("pool") or True
+            side_effect=lambda *_args, **_kwargs: order.append("pool") or True
         )
-        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+        self.updater.wait_for_with_deadline = (
+            lambda _description, timeout, check: self.assertTrue(
+                check(updater_module.time.monotonic() + timeout)
+            )
+        )
 
         self.updater.verify_exact_provider_canary(release)
 
@@ -1306,6 +1320,72 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_signer_key_id=self.updater.catalog_candidate_identity(release)[1],
             catalog_row_identity=row_identity,
             assigned_id="session-after-reconnect",
+        )
+
+    def test_exact_provider_canary_cannot_cross_the_outer_handoff_deadline(self):
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            provider_recovery_timeout_s=900,
+        )
+        self.updater.validate_catalog_canary_configuration = mock.Mock(
+            return_value=("catalog-canary", "t" * 32)
+        )
+        clock = [1_000.0]
+        attempt_budgets: list[float] = []
+
+        def unavailable_mac_proof(*_args, deadline: float):
+            remaining_s = deadline - clock[0]
+            attempt_budgets.append(remaining_s)
+            clock[0] += min(300.0, remaining_s)
+            raise updater_module.UpdateError("provider not installed yet")
+
+        self.updater.prove_catalog_canary_mac = mock.Mock(
+            side_effect=unavailable_mac_proof
+        )
+        self.updater.catalog_provider_admission_ready = mock.Mock()
+        self.updater.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        self.updater.audit = mock.Mock()
+
+        with mock.patch.object(
+            updater_module.time,
+            "monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "timeout waiting for exact catalog-aware provider proof and admission",
+            ):
+                self.updater.verify_exact_provider_canary(release)
+
+        self.assertLessEqual(clock[0] - 1_000.0, 900.0)
+        self.assertEqual(attempt_budgets, [900.0, 598.0, 296.0])
+        self.updater.catalog_provider_admission_ready.assert_not_called()
+
+    def test_deadline_wait_rejects_success_completed_after_expiry(self):
+        clock = [100.0]
+
+        def late_success(deadline: float) -> bool:
+            clock[0] = deadline + 1.0
+            return True
+
+        self.updater.audit = mock.Mock()
+        with mock.patch.object(
+            updater_module.time,
+            "monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "completed after its deadline",
+            ):
+                self.updater.wait_for_with_deadline("late success", 10, late_success)
+
+        self.updater.audit.assert_any_call(
+            "rollout_check",
+            "failed",
+            check="late success",
+            reason="late success completed after its deadline",
         )
 
     def test_rollback_stops_gateway_until_exact_coordinator_health_is_restored(self):
@@ -3513,6 +3593,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertFalse(config.allow_provider_drain)
         self.assertEqual(config.canary_timeout_s, 720)
+        self.assertEqual(config.provider_recovery_timeout_s, 900)
         self.assertEqual(config.provider_admission_policy, "")
         self.assertEqual(config.minimum_pool_ready_after_rollout, 0)
         self.assertEqual(config.minimum_bridge_remaining_s, 0)
@@ -3538,6 +3619,19 @@ class PearlUpdaterTests(unittest.TestCase):
             text,
         )
         self.assertNotIn("test -s /etc/macprovider/canary-buyer.env", text)
+        self.assertIn("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900", text)
+        self.assertIn("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60", text)
+        self.assertIn("PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200", text)
+        self.assertIn(
+            "grep -Fx 'PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900'",
+            text,
+        )
+
+        example = SCRIPT.parent / "pearl-updater.conf.example"
+        example_text = example.read_text(encoding="utf-8")
+        self.assertIn("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900", example_text)
+        self.assertIn("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60", example_text)
+        self.assertIn("PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200", example_text)
 
     def test_catalog_runbook_splits_deploy_authority_and_has_executable_bridge_rollback(self):
         runbook = SCRIPT.parent.parent / "runbooks" / "catalog-release-provider-upgrade.md"

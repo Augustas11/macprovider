@@ -8,6 +8,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     case invalidStaticJSON(String)
     case invalidRateCard(String)
     case invalidArtifact(String)
+    case candidateProbeFailed(modelKey: String, reason: String)
     case noHMACSecret
 
     var description: String {
@@ -18,6 +19,8 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
             return "invalid rate card: \(message)"
         case .invalidArtifact(let message):
             return "invalid model artifact: \(message)"
+        case .candidateProbeFailed(let modelKey, let reason):
+            return "candidate probe failed for \(modelKey): \(reason)"
         case .noHMACSecret:
             return "HMAC secret unavailable"
         }
@@ -2822,7 +2825,14 @@ struct AutotuneRecommendationBenchmarker {
                         diagnostics[modelKey] = "feasible but " + flags.joined(separator: ", ")
                     }
                 case .infeasible(let reason, let nErr):
-                    diagnostics[modelKey] = "\(reason) (n_err=\(nErr))"
+                    let diagnostic = "\(reason) (n_err=\(nErr))"
+                    if prefetchedArtifacts != nil {
+                        throw AutotuneRecommendError.candidateProbeFailed(
+                            modelKey: modelKey,
+                            reason: diagnostic
+                        )
+                    }
+                    diagnostics[modelKey] = diagnostic
                 }
             } catch let error as AutotuneRecommendError {
                 if prefetchedArtifacts != nil {
