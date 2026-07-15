@@ -95,9 +95,9 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-524-r1"
-CANARY_AUTHORITY_COMMIT = "a7f271a7ab818cef79543194b5c190c011ce3018"
-CANARY_UNIT_BUDGET_S = 660
+CANARY_AUTHORITY_VERSION = "issue-585-integration-r1"
+CANARY_AUTHORITY_COMMIT = "c4d55fbb3fa3a71be43c42d341f1022b0e823eb3"
+CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
 ROLLBACK_STEPS = (
@@ -114,11 +114,39 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "95f1c8fd38f26e7d3722e0935d9519120d9d5fdafb99ed39d20f1349cd9288fc",
-    Path("/opt/macprovider-canary-buyer/run-canary.sh"): "38ac1c3cd3b8c966e11a3160cef843d5abf26d70bf67a0887eaa235b9cd2f9af",
-    Path("/etc/systemd/system/canary-buyer.service"): "6b9fcf9242e089c972b485e898fe41c66454f4c1eaa7212505010b05f4cc7b98",
-    Path("/etc/systemd/system/canary-buyer.timer"): "520dbf02f8108aee11c5237449a5a6e0f48590d0a739e1025e179d5710abc7f1",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "0a0943f330191917bee3a8c51056d8e9c6a1003b67457bef0945a7a4bdcb4887",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "2ae20298d832f94b1be3a7175d67d882a93243bdf4fa9218db7636d94e79eee4",
+    Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
+    Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "4f923918cc4acde56adcee88a8694eafa83a63e478e4e672b6ab19194cd67458",
+    Path("/etc/systemd/system/canary-buyer.service"): "fe12eccd9fc5b72ce19b7742ccae1117ac7d0d126790a77e450171bfd8c92189",
+    Path("/etc/systemd/system/canary-buyer.timer"): "a008a93f0caa9d4fba416a564935d97b2225dfc87f8d23c8135a5ae7b580c2aa",
 }
+CANARY_AUTHORITY_FILE_MODES = {
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): 0o755,
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): 0o755,
+    Path("/opt/macprovider-canary-buyer/run-canary.sh"): 0o755,
+    Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): 0o755,
+    Path("/etc/systemd/system/canary-buyer.service"): 0o644,
+    Path("/etc/systemd/system/canary-buyer.timer"): 0o644,
+}
+CANARY_BUYER_TOKEN = Path("/etc/macprovider/canary-buyer.token")
+CANARY_HEARTBEAT_URL = Path("/etc/macprovider/canary-buyer.heartbeat")
+CANARY_OPERATOR_TOKEN = Path("/etc/macprovider/canary-buyer.operator-token")
+CANARY_EXPECTED_FLEET = Path("/etc/macprovider/canary-buyer.expected-fleet.json")
+CANARY_EXPECTED_MODELS = frozenset(
+    {
+        "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+        "mlx-community/Llama-3.2-3B-Instruct-4bit",
+    }
+)
+CANARY_AUTHORITY_PRIVATE_FILES = {
+    CANARY_BUYER_TOKEN: "canary buyer token",
+    CANARY_HEARTBEAT_URL: "canary heartbeat URL",
+    CANARY_OPERATOR_TOKEN: "canary operator token",
+    CANARY_EXPECTED_FLEET: "canary expected fleet",
+}
+CANARY_ENABLE_GATE = Path("/etc/macprovider/canary-buyer.enabled")
+CANARY_DISABLE_SENTINEL = Path("/var/lib/macprovider-canary-buyer/DISABLED")
 
 
 class UpdateError(RuntimeError):
@@ -2214,8 +2242,15 @@ class Updater:
 
     def verify_canary_authority(self) -> None:
         unit_paths: dict[str, Path] = {}
+        if set(CANARY_AUTHORITY_FILE_MODES) != set(CANARY_AUTHORITY_FILES):
+            raise UpdateError("canary rollout authority mode manifest is incomplete")
         for path, expected in CANARY_AUTHORITY_FILES.items():
-            self._trusted_regular_file(path, "canary rollout-authority file")
+            info = self._trusted_regular_file(path, "canary rollout-authority file")
+            expected_mode = CANARY_AUTHORITY_FILE_MODES[path]
+            if stat.S_IMODE(info.st_mode) != expected_mode:
+                raise UpdateError(
+                    f"canary rollout authority requires mode {expected_mode:04o} for {path}"
+                )
             actual = sha256_file(path)
             if actual != expected:
                 raise UpdateError(
@@ -2225,6 +2260,80 @@ class Updater:
                 unit_paths[path.name] = path
         if set(unit_paths) != {"canary-buyer.service", "canary-buyer.timer"}:
             raise UpdateError("canary rollout authority omits a required systemd unit")
+
+        for path, description in CANARY_AUTHORITY_PRIVATE_FILES.items():
+            info = self._trusted_regular_file(path, description, private=True)
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                raise UpdateError(f"{description} must be an exact root-owned 0600 file")
+            if info.st_size <= 0 or info.st_size > 64 * 1024:
+                raise UpdateError(f"{description} has an invalid size")
+        for path, description in (
+            (CANARY_BUYER_TOKEN, "canary buyer token"),
+            (CANARY_OPERATOR_TOKEN, "canary operator token"),
+        ):
+            token = _read_trusted_text(
+                path,
+                description,
+                trusted_uid=self.trusted_uid,
+                private=True,
+                limit=64 * 1024,
+            ).strip()
+            if not token or any(character.isspace() for character in token):
+                raise UpdateError(f"{description} is empty or contains whitespace")
+        heartbeat_url = _read_trusted_text(
+            CANARY_HEARTBEAT_URL,
+            "canary heartbeat URL",
+            trusted_uid=self.trusted_uid,
+            private=True,
+            limit=64 * 1024,
+        )
+        if heartbeat_url.endswith("\r\n"):
+            heartbeat_url = heartbeat_url[:-2]
+        elif heartbeat_url.endswith(("\r", "\n")):
+            heartbeat_url = heartbeat_url[:-1]
+        try:
+            heartbeat = urllib.parse.urlsplit(heartbeat_url)
+            heartbeat_port = heartbeat.port
+        except ValueError as exc:
+            raise UpdateError("canary heartbeat URL is invalid") from exc
+        if (
+            not heartbeat_url
+            or any(character.isspace() for character in heartbeat_url)
+            or heartbeat.scheme != "https"
+            or not heartbeat.hostname
+            or heartbeat.username is not None
+            or heartbeat.password is not None
+            or heartbeat.fragment
+            or heartbeat_port is not None and not 1 <= heartbeat_port <= 65535
+        ):
+            raise UpdateError("canary heartbeat URL must be one HTTPS URL without userinfo or fragment")
+        try:
+            expected_fleet = json.loads(
+                _read_trusted_text(
+                    CANARY_EXPECTED_FLEET,
+                    "canary expected fleet",
+                    trusted_uid=self.trusted_uid,
+                    private=True,
+                    limit=64 * 1024,
+                )
+            )
+            providers = expected_fleet["providers"]
+            provider_ids = [row["provider_id"] for row in providers]
+            model_ids = [row["model_id"] for row in providers]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise UpdateError("canary expected fleet is invalid") from exc
+        if (
+            expected_fleet.get("schema_version") != 1
+            or not isinstance(providers, list)
+            or len(providers) != 2
+            or any(not isinstance(value, str) or not value for value in provider_ids + model_ids)
+            or len(set(provider_ids)) != 2
+            or len(set(model_ids)) != 2
+            or set(model_ids) != CANARY_EXPECTED_MODELS
+        ):
+            raise UpdateError(
+                "canary expected fleet must bind exactly two unique providers to the pinned service models"
+            )
 
         loaded: dict[str, dict[str, str]] = {}
         for unit, unit_path in unit_paths.items():
@@ -2272,6 +2381,18 @@ class Updater:
             authority_commit=CANARY_AUTHORITY_COMMIT,
             unit_budget_s=unit_budget,
             updater_timeout_s=self.config.canary_timeout_s,
+        )
+
+    def verify_canary_rollout_readiness(self) -> None:
+        gate = self._trusted_regular_file(CANARY_ENABLE_GATE, "canary reviewed enable gate")
+        if stat.S_IMODE(gate.st_mode) != 0o644 or gate.st_size != 0:
+            raise UpdateError("canary reviewed enable gate must be an empty root-owned 0644 file")
+        if _path_entry_exists(CANARY_DISABLE_SENTINEL):
+            raise UpdateError("canary emergency-disable sentinel blocks rollout")
+        self.audit(
+            "canary_rollout_readiness_verified",
+            "success",
+            authority=CANARY_AUTHORITY_VERSION,
         )
 
     def _deadman_api_token(self) -> str:
@@ -2569,6 +2690,11 @@ class Updater:
 
     def run_canary_gate(self) -> None:
         unit = "canary-buyer.service"
+        # The rollout can run for hours. Revalidate both immutable runtime
+        # authority and the operator kill switches at the execution choke point,
+        # not only during the initial plan/apply preflight.
+        self.verify_canary_authority()
+        self.verify_canary_rollout_readiness()
         self._journal_transition(
             "canary_gate_pending",
             pending_action={"kind": "canary_gate", "unit": unit},
@@ -2602,11 +2728,26 @@ class Updater:
         if result.returncode != 0:
             raise UpdateError(f"canary-buyer final serving gate failed: {result.stderr.strip()}")
         state = self.run_command(
-            ["systemctl", "show", "--property=Result", "--value", unit],
+            [
+                "systemctl",
+                "show",
+                "--property=Result",
+                "--property=ExecMainStatus",
+                unit,
+            ],
             check=False,
             timeout=10,
         )
-        if state.returncode != 0 or state.stdout.strip() != "success":
+        properties: dict[str, str] = {}
+        for line in state.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                properties[key] = value
+        if (
+            state.returncode != 0
+            or properties.get("Result") != "success"
+            or properties.get("ExecMainStatus") != "0"
+        ):
             raise UpdateError("canary-buyer final serving gate did not complete successfully")
         self.audit(
             "canary_serving_gate",
@@ -3549,8 +3690,7 @@ class Updater:
             )
         self.verify_exact_provider_canary(release)
         self.restore_auxiliary_timers()
-        if self.canary_timer_was_active:
-            self.systemctl("start", "canary-buyer.timer")
+        self._restore_canary_timer()
 
     def _transaction_json(self, tx: Path, name: str) -> Any:
         return json.loads(
@@ -3865,9 +4005,40 @@ class Updater:
                 self.systemctl("stop", unit)
                 self.assert_unit_quiescent(unit)
 
+    def _canary_schedule_allowed(self) -> bool:
+        if _path_entry_exists(CANARY_DISABLE_SENTINEL):
+            return False
+        try:
+            gate = self._trusted_regular_file(CANARY_ENABLE_GATE, "canary reviewed enable gate")
+        except UpdateError:
+            return False
+        return stat.S_IMODE(gate.st_mode) == 0o644 and gate.st_size == 0
+
     def _restore_canary_timer(self) -> None:
-        if self.canary_timer_was_active:
-            self.systemctl("start", "canary-buyer.timer")
+        unit = "canary-buyer.timer"
+        schedule_allowed = self._canary_schedule_allowed()
+        if not self.canary_timer_was_active or not schedule_allowed:
+            self.systemctl("stop", unit)
+            self.assert_unit_quiescent(unit)
+            self.audit(
+                "canary_timer_restore",
+                "stopped",
+                previously_active=self.canary_timer_was_active,
+                schedule_allowed=schedule_allowed,
+            )
+            return
+        if not self.service_active(unit):
+            self.systemctl("start", unit)
+        if not self._canary_schedule_allowed():
+            self.systemctl("stop", unit)
+            self.assert_unit_quiescent(unit)
+            self.audit(
+                "canary_timer_restore",
+                "stopped",
+                previously_active=True,
+                schedule_allowed=False,
+                reason="kill switch changed during timer restoration",
+            )
 
     def restore_transaction(self) -> None:
         if self.transaction is None:
@@ -3919,12 +4090,7 @@ class Updater:
         self.restore_auxiliary_services()
         self.prove_serving_recovery(identity)
         self.restore_auxiliary_timers()
-        if self.canary_timer_was_active:
-            if not self.service_active("canary-buyer.timer"):
-                self.systemctl("start", "canary-buyer.timer")
-        else:
-            self.systemctl("stop", "canary-buyer.timer")
-            self.assert_unit_quiescent("canary-buyer.timer")
+        self._restore_canary_timer()
         self._journal_transition("runtime_state_restored")
 
     @staticmethod
@@ -4373,6 +4539,7 @@ def main(argv: list[str]) -> int:
         current, decision = updater.assess_candidate(release)
         config_update = updater.prepare_config_update(release)
         updater.verify_canary_authority()
+        updater.verify_canary_rollout_readiness()
         updater.validate_deadman_configuration()
         updater.validate_catalog_canary_configuration()
         if decision == "already_current" and config_update.previous_version != config_update.next_version:

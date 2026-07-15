@@ -927,6 +927,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_exact_provider_canary = mock.Mock()
         self.updater.restore_auxiliary_services = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
+        self.updater._restore_canary_timer = mock.Mock()
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
         self.updater.verify_rollout(release)
 
@@ -943,6 +944,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_provider_admission_rollout_policy.assert_called_once_with()
         self.updater.verify_exact_catalog_admission.assert_called_once_with(release)
         self.updater.verify_exact_provider_canary.assert_called_once_with(release)
+        self.updater._restore_canary_timer.assert_called_once_with()
 
     def test_bridge_rollout_requires_capacity_and_safe_active_deadline(self):
         deadline = (
@@ -1391,6 +1393,8 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertFalse(self.updater.live_mutation_started)
 
     def test_canary_timeout_cancels_the_systemd_job(self):
+        self.updater.verify_canary_authority = mock.Mock()
+        self.updater.verify_canary_rollout_readiness = mock.Mock()
         self.updater.run_command = mock.Mock(
             side_effect=[
                 updater_module.CommandTimeout("deadline"),
@@ -1421,6 +1425,64 @@ class PearlUpdaterTests(unittest.TestCase):
                     timeout=10,
                 ),
             ],
+        )
+
+    def test_canary_skip_status_cannot_satisfy_serving_gate(self):
+        for status in (20, 21):
+            with self.subTest(status=status):
+                self.updater.verify_canary_authority = mock.Mock()
+                self.updater.verify_canary_rollout_readiness = mock.Mock()
+                self.updater.audit = mock.Mock()
+                self.updater._journal_transition = mock.Mock()
+                self.updater.issue_start_permit = mock.Mock(return_value=None)
+                self.updater.run_command = mock.Mock(
+                    side_effect=[
+                        subprocess.CompletedProcess(
+                            ["systemctl", "start"], 0, stdout="", stderr=""
+                        ),
+                        subprocess.CompletedProcess(
+                            ["systemctl", "show"],
+                            0,
+                            stdout=f"Result=success\nExecMainStatus={status}\n",
+                            stderr="",
+                        ),
+                    ]
+                )
+
+                with self.assertRaisesRegex(
+                    updater_module.UpdateError, "did not complete successfully"
+                ):
+                    self.updater.run_canary_gate()
+
+                self.updater.verify_canary_authority.assert_called_once_with()
+                self.updater.verify_canary_rollout_readiness.assert_called_once_with()
+
+    def test_canary_zero_exec_status_is_required_and_accepted(self):
+        self.updater.verify_canary_authority = mock.Mock()
+        self.updater.verify_canary_rollout_readiness = mock.Mock()
+        self.updater.audit = mock.Mock()
+        self.updater._journal_transition = mock.Mock()
+        self.updater.issue_start_permit = mock.Mock(return_value=None)
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["systemctl", "start"], 0, stdout="", stderr=""
+                ),
+                subprocess.CompletedProcess(
+                    ["systemctl", "show"],
+                    0,
+                    stdout="Result=success\nExecMainStatus=0\n",
+                    stderr="",
+                ),
+            ]
+        )
+
+        self.updater.run_canary_gate()
+
+        self.updater.audit.assert_called_once_with(
+            "canary_serving_gate",
+            "success",
+            authority=updater_module.CANARY_AUTHORITY_VERSION,
         )
 
     def test_rollout_stops_timer_and_inflight_canary_before_drain(self):
@@ -1457,17 +1519,66 @@ class PearlUpdaterTests(unittest.TestCase):
 
     def test_canary_rollout_authority_binds_files_and_loaded_unit(self):
         files = {}
-        for name in ("probe.mjs", "run-canary.sh", "canary-buyer.service", "canary-buyer.timer"):
+        modes = {}
+        paths = {}
+        for name in (
+            "probe.mjs",
+            "safety.mjs",
+            "run-canary.sh",
+            "emergency-disable.sh",
+            "canary-buyer.service",
+            "canary-buyer.timer",
+        ):
             path = self.root / name
             path.write_text(name + "\n")
+            path.chmod(0o644 if name.endswith((".service", ".timer")) else 0o755)
             files[path] = updater_module.sha256_file(path)
+            modes[path] = stat.S_IMODE(path.stat().st_mode)
+            paths[name] = path
+        private_files = {}
+        private_paths = {}
+        private_values = {
+            "buyer-token": "buyer-token-value\n",
+            "heartbeat": "https://heartbeat.invalid/canary-token\n",
+            "operator-token": "operator-token-value\n",
+        }
+        for name, value in private_values.items():
+            path = self.root / name
+            path.write_text(value)
+            path.chmod(0o600)
+            private_files[path] = name
+            private_paths[name] = path
+        expected_fleet = self.root / "expected-fleet.json"
+        expected_fleet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "providers": [
+                        {
+                            "provider_id": "provider-a",
+                            "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+                        },
+                        {
+                            "provider_id": "provider-b",
+                            "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                        },
+                    ],
+                }
+            )
+        )
+        expected_fleet.chmod(0o600)
+        private_files[expected_fleet] = "canary expected fleet"
+        enable_gate = self.root / "canary-buyer.enabled"
+        enable_gate.write_bytes(b"")
+        enable_gate.chmod(0o644)
+        disable_sentinel = self.root / "DISABLED"
         dropin = self.root / "canary-buyer.service.d" / updater_module.TRANSACTION_GATE_DROPIN_NAME
         dropin.parent.mkdir()
         dropin.write_text(updater_module.TRANSACTION_GATE_DROPIN_TEXT)
 
         def show_unit(argv, **_kwargs):
             unit = argv[-1]
-            timeout = "TimeoutStartUSec=11min\n" if unit.endswith(".service") else ""
+            timeout = "TimeoutStartUSec=3min\n" if unit.endswith(".service") else ""
             dropins = str(dropin) if unit.endswith(".service") else ""
             return subprocess.CompletedProcess(
                 argv,
@@ -1485,9 +1596,226 @@ class PearlUpdaterTests(unittest.TestCase):
 
         with (
             mock.patch.object(updater_module, "CANARY_AUTHORITY_FILES", files),
+            mock.patch.object(updater_module, "CANARY_AUTHORITY_FILE_MODES", modes),
+            mock.patch.object(updater_module, "CANARY_AUTHORITY_PRIVATE_FILES", private_files),
+            mock.patch.object(
+                updater_module, "CANARY_BUYER_TOKEN", private_paths["buyer-token"]
+            ),
+            mock.patch.object(
+                updater_module, "CANARY_HEARTBEAT_URL", private_paths["heartbeat"]
+            ),
+            mock.patch.object(
+                updater_module, "CANARY_OPERATOR_TOKEN", private_paths["operator-token"]
+            ),
+            mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
+            mock.patch.object(updater_module, "CANARY_ENABLE_GATE", enable_gate),
+            mock.patch.object(updater_module, "CANARY_DISABLE_SENTINEL", disable_sentinel),
             mock.patch.object(updater_module, "SYSTEMD_ROOT", self.root),
         ):
             self.updater.verify_canary_authority()
+            self.updater.verify_canary_rollout_readiness()
+
+            paths["emergency-disable.sh"].chmod(0o644)
+            with self.assertRaisesRegex(updater_module.UpdateError, "requires mode 0755"):
+                self.updater.verify_canary_authority()
+            paths["emergency-disable.sh"].chmod(0o755)
+
+            private_paths["heartbeat"].chmod(0o400)
+            with self.assertRaisesRegex(updater_module.UpdateError, "exact root-owned 0600"):
+                self.updater.verify_canary_authority()
+            private_paths["heartbeat"].chmod(0o600)
+
+            private_paths["buyer-token"].write_text("  \n")
+            with self.assertRaisesRegex(updater_module.UpdateError, "buyer token.*whitespace"):
+                self.updater.verify_canary_authority()
+            private_paths["buyer-token"].write_text(private_values["buyer-token"])
+
+            private_paths["operator-token"].write_text("operator token\n")
+            with self.assertRaisesRegex(updater_module.UpdateError, "operator token.*whitespace"):
+                self.updater.verify_canary_authority()
+            private_paths["operator-token"].write_text(private_values["operator-token"])
+
+            private_paths["heartbeat"].write_text("http://heartbeat.invalid/token\n")
+            with self.assertRaisesRegex(updater_module.UpdateError, "must be one HTTPS URL"):
+                self.updater.verify_canary_authority()
+            private_paths["heartbeat"].write_text(" https://heartbeat.invalid/token\n")
+            with self.assertRaisesRegex(updater_module.UpdateError, "must be one HTTPS URL"):
+                self.updater.verify_canary_authority()
+            private_paths["heartbeat"].write_text(private_values["heartbeat"])
+
+            expected_fleet.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "providers": [
+                            {"provider_id": "provider-a", "model_id": "model-a"},
+                            {"provider_id": "provider-b", "model_id": "model-b"},
+                        ],
+                    }
+                )
+            )
+            with self.assertRaisesRegex(updater_module.UpdateError, "pinned service models"):
+                self.updater.verify_canary_authority()
+
+    def test_canary_rollout_authority_hashes_match_issue_585_integration_runtime(self):
+        sources = {
+            Path("/opt/macprovider-canary-buyer/probe.mjs"):
+                REPO_ROOT / "test/e2e/canary-buyer/probe.mjs",
+            Path("/opt/macprovider-canary-buyer/safety.mjs"):
+                REPO_ROOT / "test/e2e/canary-buyer/safety.mjs",
+            Path("/opt/macprovider-canary-buyer/run-canary.sh"):
+                REPO_ROOT / "test/e2e/canary-buyer/run-canary.sh",
+            Path("/opt/macprovider-canary-buyer/emergency-disable.sh"):
+                REPO_ROOT / "test/e2e/canary-buyer/emergency-disable.sh",
+            Path("/etc/systemd/system/canary-buyer.service"):
+                REPO_ROOT / "test/e2e/canary-buyer/canary-buyer.service",
+            Path("/etc/systemd/system/canary-buyer.timer"):
+                REPO_ROOT / "test/e2e/canary-buyer/canary-buyer.timer",
+        }
+        self.assertEqual(set(updater_module.CANARY_AUTHORITY_FILES), set(sources))
+        self.assertEqual(set(updater_module.CANARY_AUTHORITY_FILE_MODES), set(sources))
+        for installed, source in sources.items():
+            self.assertEqual(
+                updater_module.CANARY_AUTHORITY_FILES[installed],
+                updater_module.sha256_file(source),
+            )
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r1")
+        self.assertEqual(
+            updater_module.CANARY_AUTHORITY_COMMIT,
+            "c4d55fbb3fa3a71be43c42d341f1022b0e823eb3",
+        )
+        self.assertEqual(
+            updater_module.CANARY_AUTHORITY_FILE_MODES,
+            {
+                Path("/opt/macprovider-canary-buyer/probe.mjs"): 0o755,
+                Path("/opt/macprovider-canary-buyer/safety.mjs"): 0o755,
+                Path("/opt/macprovider-canary-buyer/run-canary.sh"): 0o755,
+                Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): 0o755,
+                Path("/etc/systemd/system/canary-buyer.service"): 0o644,
+                Path("/etc/systemd/system/canary-buyer.timer"): 0o644,
+            },
+        )
+        self.assertEqual(
+            updater_module.CANARY_EXPECTED_MODELS,
+            {
+                "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            },
+        )
+        service_models = "Environment=CANARY_MODELS=" + ",".join(
+            (
+                "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            )
+        )
+        self.assertIn(
+            service_models,
+            (REPO_ROOT / "test/e2e/canary-buyer/canary-buyer.service").read_text(),
+        )
+        self.assertEqual(updater_module.CANARY_UNIT_BUDGET_S, 180)
+
+    def test_canary_rollout_readiness_requires_reviewed_enable_gate(self):
+        files = {}
+        for name in ("canary-buyer.service", "canary-buyer.timer"):
+            path = self.root / name
+            path.write_text(name + "\n")
+            files[path] = updater_module.sha256_file(path)
+        expected_fleet = self.root / "expected-fleet.json"
+        expected_fleet.write_text(
+            '{"schema_version":1,"providers":['
+            '{"provider_id":"a","model_id":"model-a"},'
+            '{"provider_id":"b","model_id":"model-b"}]}'
+        )
+        expected_fleet.chmod(0o600)
+
+        with (
+            mock.patch.object(updater_module, "CANARY_AUTHORITY_FILES", files),
+            mock.patch.object(
+                updater_module,
+                "CANARY_AUTHORITY_PRIVATE_FILES",
+                {expected_fleet: "canary expected fleet"},
+            ),
+            mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
+            mock.patch.object(
+                updater_module,
+                "CANARY_ENABLE_GATE",
+                self.root / "missing-canary-buyer.enabled",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_DISABLE_SENTINEL",
+                self.root / "DISABLED",
+            ),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "canary reviewed enable gate"):
+                self.updater.verify_canary_rollout_readiness()
+
+    def test_canary_rollout_readiness_honors_emergency_disable(self):
+        files = {}
+        for name in ("canary-buyer.service", "canary-buyer.timer"):
+            path = self.root / name
+            path.write_text(name + "\n")
+            files[path] = updater_module.sha256_file(path)
+        expected_fleet = self.root / "expected-fleet.json"
+        expected_fleet.write_text(
+            '{"schema_version":1,"providers":['
+            '{"provider_id":"a","model_id":"model-a"},'
+            '{"provider_id":"b","model_id":"model-b"}]}'
+        )
+        expected_fleet.chmod(0o600)
+        enable_gate = self.root / "canary-buyer.enabled"
+        enable_gate.write_bytes(b"")
+        enable_gate.chmod(0o644)
+        disable_sentinel = self.root / "DISABLED"
+        disable_sentinel.write_bytes(b"")
+
+        with (
+            mock.patch.object(updater_module, "CANARY_AUTHORITY_FILES", files),
+            mock.patch.object(
+                updater_module,
+                "CANARY_AUTHORITY_PRIVATE_FILES",
+                {expected_fleet: "canary expected fleet"},
+            ),
+            mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
+            mock.patch.object(updater_module, "CANARY_ENABLE_GATE", enable_gate),
+            mock.patch.object(updater_module, "CANARY_DISABLE_SENTINEL", disable_sentinel),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "emergency-disable sentinel"):
+                self.updater.verify_canary_rollout_readiness()
+
+    def test_canary_timer_restore_honors_late_kill_switch(self):
+        self.updater.canary_timer_was_active = True
+        self.updater._canary_schedule_allowed = mock.Mock(side_effect=[True, False])
+        self.updater.service_active = mock.Mock(return_value=False)
+        self.updater.systemctl = mock.Mock()
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.audit = mock.Mock()
+
+        self.updater._restore_canary_timer()
+
+        self.assertEqual(
+            self.updater.systemctl.call_args_list,
+            [
+                mock.call("start", "canary-buyer.timer"),
+                mock.call("stop", "canary-buyer.timer"),
+            ],
+        )
+        self.updater.assert_unit_quiescent.assert_called_once_with("canary-buyer.timer")
+
+    def test_canary_timer_restore_never_replays_service_when_disabled(self):
+        self.updater.canary_timer_was_active = True
+        self.updater._canary_schedule_allowed = mock.Mock(return_value=False)
+        self.updater.systemctl = mock.Mock()
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.audit = mock.Mock()
+
+        self.updater._restore_canary_timer()
+
+        self.updater.systemctl.assert_called_once_with("stop", "canary-buyer.timer")
+        self.assertNotIn(
+            mock.call("start", "canary-buyer.service"),
+            self.updater.systemctl.call_args_list,
+        )
 
     def test_deadman_pause_and_prior_state_restoration_are_verified(self):
         token = self.root / "betterstack-token"
@@ -2543,6 +2871,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_provider_admission_rollout_policy = mock.Mock()
         self.updater.verify_exact_catalog_admission = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
+        self.updater._restore_canary_timer = mock.Mock()
         self.updater.validate_catalog_canary_configuration = mock.Mock(
             return_value=("catalog-canary", "t" * 32)
         )
@@ -2707,6 +3036,10 @@ class PearlUpdaterTests(unittest.TestCase):
         text = runbook.read_text(encoding="utf-8")
         self.assertIn("/etc/macprovider/canary-buyer.token", text)
         self.assertIn("/etc/macprovider/canary-buyer.heartbeat", text)
+        self.assertIn("/etc/macprovider/canary-buyer.operator-token", text)
+        self.assertIn("/etc/macprovider/canary-buyer.expected-fleet.json", text)
+        self.assertIn("/etc/macprovider/canary-buyer.enabled", text)
+        self.assertIn("/var/lib/macprovider-canary-buyer/DISABLED", text)
         self.assertIn("test ! -e /etc/macprovider/canary-buyer.env", text)
         self.assertIn(
             "sudo -u macprovider -g macprovider /usr/local/sbin/macprovider-pearl-updater-alert",
