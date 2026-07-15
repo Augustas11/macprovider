@@ -13,6 +13,7 @@ import {
   outcomeBucket,
   pollPostRequestRecovery,
   recoveryCadenceReasons,
+  recoverySoakObservationReasons,
   safetyObservationReasons,
   shouldRunRecovery,
   streamOne,
@@ -382,6 +383,71 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     legacyRollbackProviders: authorized,
     nowMs: now + 300_000,
   }).includes('provider-a:provider_signal_missing'));
+
+  const activeRequest = structuredClone(observation);
+  activeRequest.operator_pool[0].state = 'busy';
+  activeRequest.operator_pool[0].routing_eligible = false;
+  activeRequest.gateway.status = 'degraded';
+  activeRequest.gateway.degraded = true;
+  activeRequest.gateway.pool.total_providers = 1;
+  activeRequest.gateway.pool.ready = 1;
+  activeRequest.gateway.models = activeRequest.gateway.models.filter(
+    (model) => model.id !== 'model-a',
+  );
+  assert.deepEqual(safetyObservationReasons(observation, activeRequest, expectedFleet, {
+    activeModelID: 'model-a',
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }), []);
+  assert.ok(safetyObservationReasons(observation, activeRequest, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }).includes('provider-a:provider_signal_missing'));
+
+  const recoveryOne = structuredClone(observation);
+  const recoveryTwo = structuredClone(observation);
+  for (const [index, sample] of [recoveryOne, recoveryTwo].entries()) {
+    for (const row of sample.operator_pool) {
+      row.last_heartbeat_at_ms += (index + 1) * 30_000;
+      row.last_activity_at_ms += (index + 1) * 30_000;
+      row.heartbeat_age_ms = 0;
+      row.activity_age_ms = 0;
+    }
+  }
+  const soakOptions = { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 };
+  assert.deepEqual(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
+    soakOptions,
+    now,
+  ), []);
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    null,
+    soakOptions,
+    now,
+  ).some((reason) => reason.includes('telemetry_')));
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
+    soakOptions,
+    now + 300_000,
+  ).some((reason) => reason.includes('telemetry_')));
+
+  const malformedDirectSignal = structuredClone(observation);
+  malformedDirectSignal.providers[0].schema_version = 1;
+  assert.ok(safetyObservationReasons(
+    observation,
+    malformedDirectSignal,
+    expectedFleet,
+    { legacyRollbackProviders: authorized, nowMs: now },
+  ).includes('provider-a:provider_signal_missing'));
 
   for (const [field, value] of [
     ['assigned_id', null],

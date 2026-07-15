@@ -1069,8 +1069,18 @@ function isLegacyBridgeProviderSignalSubstitute(row, expected) {
     && /^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(row?.binary_version || '');
 }
 
-function isLegacyRollbackProviderSignalSubstitute(row, expected, authorizedProviders, nowMs) {
+function isLegacyRollbackProviderSignalSubstitute(
+  row,
+  expected,
+  authorizedProviders,
+  nowMs,
+  activeProviderID,
+) {
   const authorization = authorizedProviders?.get(expected.provider_id);
+  const routingAllowed = row?.routing_eligible === true
+    || (row?.provider_id === activeProviderID
+      && row?.state === 'busy'
+      && row?.routing_eligible === false);
   return authorization?.model_id === expected.model_id
     && Number.isFinite(authorization?.expires_at_ms)
     && nowMs < authorization.expires_at_ms
@@ -1079,9 +1089,72 @@ function isLegacyRollbackProviderSignalSubstitute(row, expected, authorizedProvi
     && row.assigned_id.length > 0
     && row?.model_id === expected.model_id
     && Number.isFinite(row?.connected_at_ms)
-    && row?.routing_eligible === true
+    && routingAllowed
     && row?.catalog_admission_mode == null
     && row?.binary_version === authorization.binary_version;
+}
+
+function hasDirectProviderSignal(signal) {
+  return Object.entries(signal || {}).some(
+    ([field, value]) => field !== 'source' && value != null,
+  );
+}
+
+function recoveryProviderSignals(
+  observation,
+  expectedFleet,
+  authorizedProviders,
+  nowMs,
+) {
+  const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
+  const operatorPool = Array.isArray(observation?.operator_pool) ? observation.operator_pool : [];
+  const providers = Array.isArray(observation?.providers) ? observation.providers : [];
+  return providers.filter((signal, index) => {
+    if (hasDirectProviderSignal(signal)) return true;
+    const poolRow = operatorPool[index];
+    const expected = expectedByID.get(poolRow?.provider_id);
+    return !(expected
+      && poolRow?.state === 'ready'
+      && isLegacyRollbackProviderSignalSubstitute(
+        poolRow,
+        expected,
+        authorizedProviders,
+        nowMs,
+        '',
+      ));
+  });
+}
+
+export function recoverySoakObservationReasons(
+  initial,
+  samples,
+  expectedFleet,
+  legacyRollbackProviders,
+  options = {},
+  nowMs = Date.now(),
+) {
+  return recoverySoakReasons({
+    gatewayInitial: initial.gateway,
+    gatewaySamples: samples.map((sample) => sample.gateway),
+    poolzInitial: expectedPoolRows(initial.operator_pool, expectedFleet),
+    poolzSamples: samples.map(
+      (sample) => expectedPoolRows(sample.operator_pool || [], expectedFleet),
+    ),
+    providerInitial: recoveryProviderSignals(
+      initial,
+      expectedFleet,
+      legacyRollbackProviders,
+      nowMs,
+    ),
+    providerSamples: samples.map(
+      (sample) => recoveryProviderSignals(
+        sample,
+        expectedFleet,
+        legacyRollbackProviders,
+        nowMs,
+      ),
+    ),
+  }, options);
 }
 
 export function validateLegacyRollbackAuthorization(document, expectedFleet, nowMs = Date.now()) {
@@ -1242,14 +1315,18 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       const current = currentByID.get(expected.provider_id);
       if (!current) {
         const poolRow = currentPoolByID.get(expected.provider_id);
+        const poolIndex = observed.operator_pool.indexOf(poolRow);
+        const directSignalMissing = poolIndex >= 0
+          && !hasDirectProviderSignal(observed.providers[poolIndex]);
         if (allowLegacyBridgeProviderSignals && isLegacyBridgeProviderSignalSubstitute(poolRow, expected)) {
           continue;
         }
-        if (isLegacyRollbackProviderSignalSubstitute(
+        if (directSignalMissing && isLegacyRollbackProviderSignalSubstitute(
           poolRow,
           expected,
           legacyRollbackProviders,
           nowMs,
+          activeProviderID,
         )) {
           continue;
         }
@@ -1637,26 +1714,24 @@ async function main() {
         recoverySamples.push(record.observed);
       }
     }
-    const expectedInitialPool = expectedPoolRows(initial.operator_pool, expectedFleet);
     const recoveryReasons = recoveryRecords.flatMap((record) => [
       ...(record.error ? [`${record.phase}:${record.error}`] : []),
       ...record.reasons.map((reason) => `${record.phase}:${reason}`),
     ]);
-    recoveryReasons.push(...recoverySoakReasons({
-      gatewayInitial: initial.gateway,
-      gatewaySamples: recoverySamples.map((sample) => sample.gateway),
-      poolzInitial: expectedInitialPool,
-      poolzSamples: recoverySamples.map((sample) => expectedPoolRows(sample.operator_pool || [], expectedFleet)),
-      providerInitial: initial.providers,
-      providerSamples: recoverySamples.map((sample) => sample.providers),
-    }, {
+    recoveryReasons.push(...recoverySoakObservationReasons(
+      initial,
+      recoverySamples,
+      expectedFleet,
+      legacyRollbackProviders,
+      {
       minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
       maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
       maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
       maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
       maxMemoryFraction: CONFIG.maxMemoryFraction,
       requireNominalThermal: CONFIG.mode === 'qualification',
-    }));
+      },
+    ));
     const finalRecovery = recoverySamples.at(-1);
     if (finalRecovery) {
       recoveryReasons.push(...safetyObservationReasons(initial, finalRecovery, expectedFleet, {
