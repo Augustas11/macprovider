@@ -474,6 +474,7 @@ jobs:
             echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
           }
+          "$WORK/macprovider-cli" release-payload-preflight
 
           # Step 3: notarize. notarytool needs a zip or dmg, not a raw
           # binary, so wrap the binary in a transient zip for submission

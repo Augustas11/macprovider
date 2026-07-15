@@ -102,7 +102,15 @@ root = pathlib.Path(sys.argv[1])
 package = (root / "phase3-binary/dist/package.sh").read_text(encoding="utf-8")
 workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 installer = (root / "phase3-binary/dist/install.sh").read_text(encoding="utf-8")
+artifact_checker = (root / "scripts/check-tier2-provider-artifact.sh").read_text(encoding="utf-8")
 for required in (
+    'PACKAGE_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-package.XXXXXX")"',
+    'COMPATIBILITY_SET_MANIFEST="$PACKAGE_WORK_DIR/compatibility-set.json"',
+    'LOCAL_COMPATIBILITY_SET_DIR="$PACKAGE_WORK_DIR/compatibility-set-local"',
+    'trap cleanup EXIT',
+    'BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"',
+    'NOTICES_FILE="$PACKAGE_WORK_DIR/THIRD-PARTY-NOTICES.txt"',
+    'STAGE_DIR="$PACKAGE_WORK_DIR/stage"',
     'cp "$COMPATIBILITY_SET_MANIFEST" "$STAGE_DIR/compatibility-set.json"',
     'cp -R "$LOCAL_COMPATIBILITY_SET_DIR" "$STAGE_DIR/compatibility-set-local"',
     'archive_members=(',
@@ -111,6 +119,9 @@ for required in (
 ):
     assert required in package, required
 assert 'tar czf "$TARBALL" -C "$STAGE_DIR" .' not in package
+assert '"$WORK/macprovider-cli" release-payload-preflight' in workflow
+assert '"$provider_binary" release-payload-preflight' in artifact_checker
+assert 'provider_version_at_least 1 8 39' in artifact_checker
 archive_contract = re.search(
     r'archive_members=\(\n(?P<required>.*?)\n\)\n'
     r'swiftpm_bundle_count=0\n'

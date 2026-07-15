@@ -32,9 +32,15 @@ esac
 RELEASE_DIR="./build-release"
 OUT_DIR="./dist"
 TARBALL="$OUT_DIR/phase3-binary-m4-${TAG}.tar.gz"
-COMPATIBILITY_SET_MANIFEST="$OUT_DIR/compatibility-set.json"
-LOCAL_COMPATIBILITY_SET_DIR="$OUT_DIR/compatibility-set-local"
+PACKAGE_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-package.XXXXXX")"
+COMPATIBILITY_SET_MANIFEST="$PACKAGE_WORK_DIR/compatibility-set.json"
+LOCAL_COMPATIBILITY_SET_DIR="$PACKAGE_WORK_DIR/compatibility-set-local"
 PROVIDER_ADMISSION_POLICY="${MACPROVIDER_PROVIDER_ADMISSION_POLICY:-bridge_required}"
+
+cleanup() {
+  rm -rf "$PACKAGE_WORK_DIR"
+}
+trap cleanup EXIT
 
 mkdir -p "$OUT_DIR"
 
@@ -71,7 +77,7 @@ python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
   --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY"
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
-BUILD_LOG="$OUT_DIR/package-build.log"
+BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"
 if ! xcodebuild -scheme macprovider-cli \
                 -configuration Release \
                 -destination 'platform=macOS,arch=arm64' \
@@ -113,12 +119,12 @@ ls -la "$PRODUCTS/macprovider-cli"
 ls -la "$PRODUCTS/mlx.metallib"
 
 echo "==> Gathering third-party license notices..."
-NOTICES_FILE="$OUT_DIR/THIRD-PARTY-NOTICES.txt"
+NOTICES_FILE="$PACKAGE_WORK_DIR/THIRD-PARTY-NOTICES.txt"
 "$REPO_ROOT/scripts/gather-third-party-notices.sh" "$NOTICES_FILE" "$RELEASE_DIR/SourcePackages/checkouts"
 
 echo "==> Staging tarball contents..."
-STAGE_DIR=$(mktemp -d)
-trap 'rm -rf "$STAGE_DIR"' EXIT
+STAGE_DIR="$PACKAGE_WORK_DIR/stage"
+mkdir -p "$STAGE_DIR"
 cp "$PRODUCTS/macprovider-cli" "$STAGE_DIR/"
 cp "$PRODUCTS/mlx.metallib" "$STAGE_DIR/"
 if [ -d "$PRODUCTS/mlx-swift_Cmlx.bundle" ]; then
