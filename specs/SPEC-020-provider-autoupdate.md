@@ -116,19 +116,22 @@ into the pool only if it registers before any existing session for the same
 `AuthBearerlessDuplicate` connection when an existing session is present
 (`phase4-coordinator/internal/pool/provider.go`), closing the pool-slot-capture
 vector. In the admitted (registers-first) case, the coordinator now propagates
-its admission verdict as an explicit `auth_state` field on the accept ack
-(`hello_ack` / `auth_response` — the coordinator's `pool.AuthState`:
-`bearer_validated` / `self_minted` / `bearerless_duplicate` / `mint_failed`).
+its admission verdict on the accept ack via the OPTIONAL `auth_state` field —
+field shape/domain owned by SPEC-001 §6.5.1, emission by SPEC-003 FR-C9.2a; the
+ack values are `bearer_validated` / `self_minted` / `bearerless_duplicate`
+(`mint_failed` and rejects close the connection and never ride an ack). SPEC-020
+owns only the autoupdate INTERPRETATION of that field, defined here.
 Client-side, `AutoUpdateTrustState.fromCoordinatorPayload` reads `auth_state`
 authoritatively: `auth_state == "bearerless_duplicate"` sets
 `bearerlessDuplicate=true` regardless of the (tokenless) heuristic, so the
-verdict is `.bearerlessDuplicate` (notify-only), not `.eligible`. A coordinator
-that omits `auth_state` (legacy, or no token issuer configured) falls back to the
-pre-existing inference, so behavior against old coordinators is unchanged. The
-client uses `auth_state` only to hold a MORE restrictive floor
-(bearerless_duplicate → notify-only); it never relaxes a verdict on a coordinator
-claim (e.g. `tokenValidated` is unchanged and still requires a genuinely held or
-adopted token). This corner never affected the production `mac` provider, which
+verdict is `.bearerlessDuplicate` (notify-only), not `.eligible`. An
+UNRECOGNIZED non-empty `auth_state` (enum evolution / malformed) is handled
+FAIL-CLOSED — treated as the notify-only floor, never relaxed to `.eligible`. A
+coordinator that omits `auth_state` (legacy, or no token issuer configured) falls
+back to the pre-existing inference, so behavior against old coordinators is
+unchanged. The client uses `auth_state` only to hold a MORE restrictive floor;
+it never relaxes a verdict on a coordinator claim (e.g. `tokenValidated` is
+unchanged and still requires a genuinely held or adopted token). This corner never affected the production `mac` provider, which
 holds a validated `provider_token` and is genuinely bearer-validated.
 
 Implementations MUST store an explicit current `autoupdate_trust_state` field
@@ -1019,18 +1022,20 @@ Deferred to v0.3.0 or later:
 ## Change log
 
 - v0.1.7 (2026-07-15, runbook item 23): Closed the tokenless race-loser residual
-  (the "Tokenless race-loser corner" note above). The coordinator now propagates
-  its admission verdict as an explicit `auth_state` field on the `hello_ack` /
-  `auth_response` accept ack (`pool.AuthState`); the CLI's
-  `AutoUpdateTrustState.fromCoordinatorPayload` reads it authoritatively so a
-  bearerless-duplicate race-loser is client-enforceable notify-only rather than
-  heuristically inferred (and reachably `.eligible`). Legacy coordinators that
-  omit `auth_state` fall back to the prior inference (no behavior change). The
-  client uses the signal only to hold a more-restrictive floor, never to relax a
-  verdict. Coordinator: `internal/ws/messages.go` (+`auth_state` on `HelloAck` /
-  `AuthResponse`), `internal/ws/server.go` (populate at both accept sites).
-  Binary: `AutoUpdateTrustState.swift`. Docs + two-module code; no production
-  behavior change for bearer-validated providers (prod `mac` unaffected).
+  (the "Tokenless race-loser corner" note above). The coordinator propagates its
+  admission verdict via the OPTIONAL `auth_state` ack field — wire shape/domain
+  owned by **SPEC-001 §6.5.1 (v1.8.4)**, emission by **SPEC-003 FR-C9.2a
+  (v0.10.3)**; SPEC-020 v0.1.7 owns only the autoupdate INTERPRETATION here. The
+  CLI's `AutoUpdateTrustState.fromCoordinatorPayload` reads it authoritatively so
+  a bearerless-duplicate race-loser is client-enforceable notify-only rather than
+  heuristically inferred (and reachably `.eligible`); an unrecognized value is
+  FAIL-CLOSED to the notify-only floor. Legacy coordinators that omit `auth_state`
+  fall back to the prior inference (no behavior change). The client uses the
+  signal only to hold a more-restrictive floor, never to relax a verdict.
+  Coordinator: `internal/ws/messages.go` / `internal/ws/server.go` (both accept
+  sites). Binary: `AutoUpdateTrustState.swift`. Two-module code + docs; no
+  production behavior change for bearer-validated providers (prod `mac`
+  unaffected).
 - v0.1.6 (2026-07-11): Bound autoupdate to the complete manifest-backed binary
   plus catalog payload; replaced local-health/WebSocket-rejoin success with the
   coordinator-authoritative exact-provider `buyer_serving:true` and

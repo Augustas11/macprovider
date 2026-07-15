@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.8.3 (2026-07-14, CLI admission-identity generations and recovery)
+**Version:** 1.8.4 (2026-07-15, §6.5.1 `auth_state` admission-verdict ack field — runbook item 23)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,9 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.8.4 (2026-07-15, runbook item 23 — `auth_state` ack field):**
+- §6.5.1 adds the OPTIONAL `auth_state` string on the v1 `hello_ack` and v2 accepted `auth_response` frames — the coordinator's admission verdict (`bearer_validated` / `self_minted` / `bearerless_duplicate`). SPEC-001 owns the field shape/domain; emission is SPEC-003 FR-C9.2a and autoupdate interpretation is SPEC-020 v0.1.7. Additive `omitempty`; pre-v1.8.4 binaries ignore the key.
 
 **Change log v1.8.3 (2026-07-14, issue #585 — admission identity):**
 - The v2 initial frame carries CLI-owned current/pending admission keys and an explicit
@@ -1685,14 +1688,25 @@ SPEC-003 FR-C9.3's `assigned_provider_token`. A v1.5 binary connected
 to a v1.4 coordinator sees absent optionals and behaves exactly as it
 does today.
 
-The same ack object (and the v2 `auth_response`) MAY also carry an OPTIONAL
-`auth_state` string — the coordinator's admission verdict (`bearer_validated`
-/ `self_minted` / `bearerless_duplicate` / `mint_failed`), `omitempty`. Its
-semantics, emission, and client use are owned by **SPEC-020 v0.1.7** (runbook
-item 23): the CLI reads it authoritatively for the autoupdate trust floor so a
-bearerless-duplicate race-loser is client-enforceable notify-only. SPEC-001
-notes only that the field rides these frames; an omitting coordinator triggers
-the client's legacy inference (unchanged behavior).
+##### `auth_state` on `hello_ack` / `auth_response` (NEW in v1.8.4)
+
+The same accept ack object (v1 `hello_ack` and v2 proof-stage-accepted
+`auth_response`) MAY carry an OPTIONAL `auth_state` string field:
+
+| Field | JSON type | Required | Encoding / meaning |
+|---|---|---|---|
+| `auth_state` | string | No (`omitempty`) | The coordinator's admission verdict for the registered session. Domain is the closed set `{"bearer_validated", "self_minted", "bearerless_duplicate"}` (the `pool.AuthState` names). `mint_failed` and the reject paths close the connection and MUST NOT appear on an ack. Absent means the coordinator declined to state a verdict (e.g. no token issuer) and the binary MUST fall back to its own inference. |
+
+Reference coordinator wire struct: the existing `HelloAck` / `AuthResponse` in
+`phase4-coordinator/internal/ws/messages.go`, additive Go field
+`AuthState string \`json:"auth_state,omitempty"\``. SPEC-001 v1.8.4 defines only
+the field name, type, encoding, and domain; the coordinator EMISSION policy is
+owned by SPEC-003 FR-C9.2a and the autoupdate-trust INTERPRETATION (the
+bearerless-duplicate notify-only floor, and fail-closed handling of an
+unrecognized value) by SPEC-020 v0.1.7. Compatibility: pre-v1.8.4 binaries
+ignore the unknown key (same `decodeIfPresent` discipline as
+`assigned_provider_token`); a binary connected to a coordinator that omits the
+field behaves exactly as it does today.
 
 #### Capacity heartbeat (P->C) — sent every `heartbeat_interval_s`
 ```json

@@ -1,6 +1,8 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.10.2 (2026-07-14, FR-C9.3 CLI-owned restart-safe credential custody)
+**Version:** 0.10.3 (2026-07-15, FR-C9.2a `auth_state` admission-verdict ack field — runbook item 23)
+
+**Change log v0.10.3:** Adds **FR-C9.2a**, the coordinator emission policy for the OPTIONAL `auth_state` admission-verdict field on both v1 `hello_ack` and v2 `auth_response` accept frames (`pool.AuthState`: `bearer_validated` / `self_minted` / `bearerless_duplicate`; `mint_failed`/rejects close the connection and never ride an ack; omitted when no token issuer). The field's wire shape/domain is owned by SPEC-001 §6.5.1 and its autoupdate interpretation by SPEC-020 v0.1.7; FR-C9.2a is the sibling of FR-C9.2's existing `assigned_provider_token` ack contract. This propagates the coordinator's own admission verdict so the SPEC-020 bearerless-duplicate notify-only floor is client-enforceable, closing the SPEC-020 tokenless race-loser residual. Additive `omitempty`; a pre-item-23 binary ignores the key and a pre-item-23 coordinator omits it (client falls back to inference) — no behavior change either direction.
 
 **Change log v0.10.2:** Issue #585 Option 2 changes the binary-side
 `assigned_provider_token` commit authority from YAML-only persistence to CLI-owned
@@ -548,6 +550,8 @@ The minted token MUST be returned to the binary in BOTH ack frames under the fie
 - **v2 path:** `AuthResponse` struct in the same file gains the same field. The v2 path writes this on the proof-stage-accepted `auth_response` emission at `server.go:624`. The v2 `auth_challenge` and any rejection-shaped `auth_response` MUST NOT carry the field.
 
 Both ack writes happen AFTER `prepareProviderAdmission` and AFTER `releaseUnauth()`, on the path that also calls `s.tokens.MarkTokenUsed` for already-validated tokens. The mint hook is symmetric: same condition (`s.tokens != nil && !auth.validated`), same call shape, different surrounding struct.
+
+**FR-C9.2a. `auth_state` admission-verdict field on the accept ack (runbook item 23).** The coordinator MUST also stamp its admission verdict on BOTH accept ack frames under the field name `auth_state` (string, OPTIONAL `omitempty`) — the `pool.AuthState` for the registered session: one of `bearer_validated`, `self_minted`, or `bearerless_duplicate`. (`mint_failed` and the reject paths close the connection and therefore never ride an ack; a coordinator with no token issuer omits the field.) `HelloAck` (v1) and `AuthResponse` (v2) each gain `AuthState string \`json:"auth_state,omitempty"\``, written from the value `resolveProvisionalToken` already returns, at the same accept-ack sites as `assigned_provider_token`. The field's on-the-wire shape/domain is owned by SPEC-001 §6.5.1; its autoupdate-trust interpretation (the bearerless-duplicate notify-only floor) is owned by SPEC-020 v0.1.7. This closes the SPEC-020 tokenless race-loser residual: a `bearerless_duplicate` session is now client-enforceable notify-only rather than heuristically inferred. Compatibility: a pre-item-23 binary ignores the unknown key; a pre-item-23 coordinator omits it and the client falls back to its inference — no behavior change either direction.
 
 **FR-C9.3. Binary MUST commit to CLI-owned restart-safe custody before adoption; persistence SHOULD NOT block the WS receive loop.**
 On receipt of an ack frame carrying `assigned_provider_token`, the phase3-binary MUST:

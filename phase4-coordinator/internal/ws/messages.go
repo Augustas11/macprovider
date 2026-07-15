@@ -65,13 +65,15 @@ type HelloAck struct {
 	AssignedProviderToken         string `json:"assigned_provider_token,omitempty"`
 	PairOT                        string `json:"pair_ot,omitempty"`
 	ClaimURL                      string `json:"claim_url,omitempty"`
-	// SPEC-020 v0.1.6 / SPEC-003 (runbook item 23) — the coordinator's own
-	// admission verdict (pool.AuthState: bearer_validated / self_minted /
-	// bearerless_duplicate / mint_failed). Propagated so the provider can
-	// enforce the SPEC-020 trust-table floor client-side (e.g. a
-	// bearerless_duplicate race-loser stays notify-only) instead of inferring
-	// it heuristically. Omitted (empty) by a coordinator with no token issuer,
-	// in which case the client falls back to its inference.
+	// The coordinator's admission verdict on this ACCEPT ack — one of
+	// bearer_validated / self_minted / bearerless_duplicate (pool.AuthState).
+	// mint_failed and the reject paths CLOSE the connection, so they never ride
+	// an ack. Emission owner: SPEC-003 FR-C9.2; field shape: SPEC-001 §6.5.1;
+	// autoupdate interpretation: SPEC-020 v0.1.7 (runbook item 23). Propagated so
+	// the provider enforces the SPEC-020 trust floor client-side (a
+	// bearerless_duplicate race-loser stays notify-only) instead of inferring it.
+	// Omitted (empty) by a coordinator with no token issuer → client falls back
+	// to its inference.
 	AuthState                     string `json:"auth_state,omitempty"`
 	CatalogCompatible             bool   `json:"catalog_compatible,omitempty"`
 	CatalogReleaseID              string `json:"catalog_release_id,omitempty"`
@@ -171,10 +173,10 @@ type AuthResponse struct {
 	AssignedProviderToken               string `json:"assigned_provider_token,omitempty"`
 	PairOT                              string `json:"pair_ot,omitempty"`
 	ClaimURL                            string `json:"claim_url,omitempty"`
-	// SPEC-020 v0.1.6 / SPEC-003 (runbook item 23) — coordinator admission
-	// verdict (pool.AuthState); see the HelloAck.AuthState note. Propagated so
-	// the provider enforces the SPEC-020 trust-table floor client-side rather
-	// than inferring it. Omitted by a coordinator with no token issuer.
+	// Coordinator admission verdict on this ACCEPT ack; see the
+	// HelloAck.AuthState note (emission SPEC-003 FR-C9.2, shape SPEC-001 §6.5.1,
+	// interpretation SPEC-020 v0.1.7). mint_failed / rejects close the
+	// connection and never ride an ack.
 	AuthState                           string `json:"auth_state,omitempty"`
 	CatalogCompatible                   bool   `json:"catalog_compatible,omitempty"`
 	CatalogReleaseID                    string `json:"catalog_release_id,omitempty"`

@@ -1609,6 +1609,41 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(state.verdict, .bearerlessDuplicate)
     }
 
+    // An UNKNOWN/unexpected auth_state (enum evolution, malformed) must FAIL
+    // CLOSED to the notify-only floor, not silently become eligible. Here a
+    // tokenless session (heuristic would say tokenConfigured=false → not
+    // bearerless → eligible) carries an unrecognized auth_state; the switch
+    // holds it notify-only.
+    func testFromCoordinatorPayloadUnknownAuthStateFailsClosed() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "provisional",
+            "auth_state": "some_future_state_v9",
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: nil, // tokenless — heuristic would NOT flag; fail-open risk
+            assignedProviderTokenAdopted: false,
+            acceptProvisional: true
+        )
+        XCTAssertTrue(state.bearerlessDuplicate)
+        XCTAssertEqual(state.verdict, .bearerlessDuplicate)
+        XCTAssertFalse(state.isEligible)
+    }
+
     // Config loader must accept the flag from both YAML flat key,
     // YAML nested `autoupdate.accept_provisional`, and the env var.
     func testConfigLoaderReadsAcceptProvisionalFromYAMLFlatAndNestedAndEnv() throws {

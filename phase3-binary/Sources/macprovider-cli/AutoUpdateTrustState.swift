@@ -99,11 +99,12 @@ struct AutoUpdateTrustState: Sendable {
         let tier = payload["tier"] as? String
         let attestationStatus = (((payload["tier2_session"] as? [String: Any])?["attestation"] as? [String: Any])?["status"] as? String)
         let tokenConfigured = providerToken?.isEmpty == false || (payload["assigned_provider_token"] as? String)?.isEmpty == false
-        // Runbook item 23 / SPEC-020 v0.1.6: prefer the coordinator's EXPLICIT
+        // Runbook item 23 / SPEC-020 v0.1.7: prefer the coordinator's EXPLICIT
         // admission verdict (`auth_state`) over the client-side heuristic. The
-        // coordinator now propagates its verdict (bearer_validated / self_minted /
-        // bearerless_duplicate / mint_failed) on the accept ack, so a
-        // bearerless_duplicate race-loser is client-enforceable rather than
+        // coordinator propagates one of bearer_validated / self_minted /
+        // bearerless_duplicate on the accept ack (mint_failed / rejects close the
+        // connection and never ride an ack — the switch handles it defensively),
+        // so a bearerless_duplicate race-loser is client-enforceable rather than
         // inferred. A legacy coordinator omits `auth_state` (empty) — fall back
         // to the pre-existing inference so behavior is unchanged against old
         // coordinators. The client uses this only to hold a MORE restrictive
@@ -112,7 +113,25 @@ struct AutoUpdateTrustState: Sendable {
         let explicitAuthState = (payload["auth_state"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let bearerlessDuplicate: Bool
         if let authState = explicitAuthState {
-            bearerlessDuplicate = authState == "bearerless_duplicate"
+            switch authState {
+            case "bearer_validated", "self_minted", "self_minted_verified":
+                // Known non-duplicate admission verdicts — the verdict pipeline
+                // still applies its own tier/token/attestation guards.
+                bearerlessDuplicate = false
+            case "bearerless_duplicate", "mint_failed":
+                // Race-loser holds the notify-only floor. mint_failed does not
+                // normally ride an ack (the coordinator closes the connection),
+                // but if ever seen it is treated as notify-only, defensively.
+                bearerlessDuplicate = true
+            default:
+                // Unknown/unexpected auth_state (enum evolution, malformed): FAIL
+                // CLOSED to the restrictive notify-only floor rather than silently
+                // becoming eligible. A newer trusted state an old binary does not
+                // recognize is at worst held notify-only (safe), never wrongly
+                // auto-updated. This is the security floor the propagation exists
+                // to enforce — an unrecognized value must not relax it.
+                bearerlessDuplicate = true
+            }
         } else {
             bearerlessDuplicate = tokenConfigured && providerToken == nil && !assignedProviderTokenAdopted
         }
