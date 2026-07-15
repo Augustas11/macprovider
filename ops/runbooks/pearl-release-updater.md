@@ -30,6 +30,13 @@ moves, or silently reuses the tag. Once tagged, the captured commit may remain
 an ancestor of a newer `origin/main` so unrelated merges during review or
 notarization do not burn the immutable release identity.
 
+The only historical exception is the exact pre-publication v1.8.39 recovery in
+the signing runbook §8.1: its first signed tag belonged to a failed workflow
+that created no GitHub Release or public asset. That old object is lease-deleted
+before a replacement candidate is built, and the replacement tag becomes
+immutable when recreated. This exception cannot apply to an ordinary or
+already-published Pearl release.
+
 The updater pins `Augustas11/macprovider` and the existing release-signing
 P-256 public key in root-owned files. Neither trust anchor can be selected by
 the service environment. It verifies both detached signatures, the signed

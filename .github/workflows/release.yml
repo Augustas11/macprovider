@@ -598,6 +598,7 @@ jobs:
         run: |
           set -euo pipefail
           APP="$RUNNER_TEMP/Malibu.app"
+          tag="${{ needs.build.outputs.tag }}"
 
           if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
             echo "::error::APPLE_DEVELOPER_ID_CERT_P12_BASE64 is required for Malibu.app." >&2
@@ -621,6 +622,15 @@ jobs:
             exit 1
           }
 
+          # Preflight the restored app before any protected-job bundle writes.
+          # Sparkle 2.6.4 also rejects an update when the old bundle has an
+          # EdDSA key and the new bundle removes it. Inject only the frozen
+          # v1.8.32 trust anchor into the one-time v1.8.39 bridge; no feed,
+          # framework, or app-owned updater returns with it.
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py prepare \
+            "$tag" "$APP" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+
           cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"
           chmod 755 "$APP/Contents/MacOS/macprovider-cli"
           [ -f "$WORK/mlx.metallib" ] || {
@@ -630,9 +640,19 @@ jobs:
           cp "$WORK/mlx.metallib" "$APP/Contents/MacOS/mlx.metallib"
           find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' \
             -exec cp -R {} "$APP/Contents/MacOS"/ \;
-          mkdir -p "$APP/Contents/Resources"
           cp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
           cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
+
+          # Re-verify after bundling and before codesign so copied payloads
+          # cannot introduce a symlink or Sparkle runtime into the target.
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py verify \
+            "$APP" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+          MALIBU_LINKS="$(/usr/bin/otool -L "$APP/Contents/MacOS/Malibu")"
+          if printf '%s\n' "$MALIBU_LINKS" | /usr/bin/grep -F Sparkle >/dev/null; then
+            echo "::error::Malibu bridge must not link a Sparkle runtime" >&2
+            exit 1
+          fi
 
           SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
           codesign --force --deep \
@@ -674,7 +694,6 @@ jobs:
           xcrun stapler validate "$APP"
           spctl -a -vvv -t exec "$APP"
 
-          tag="${{ needs.build.outputs.tag }}"
           mkdir -p "phase3-binary/app/dist"
           DIST_DMG="phase3-binary/app/dist/Malibu-${tag}.dmg"
 
@@ -1262,8 +1281,9 @@ jobs:
               cat >> release-notes.md <<EOF
 
           Malibu 1.8.32 installations receive this exact DMG through a one-time,
-          EdDSA-signed compatibility appcast. Malibu 1.8.39 itself contains no
-          Sparkle dependency, feed, or update key; subsequent updates are CLI-owned.
+          EdDSA-signed compatibility appcast. Malibu 1.8.39 contains no Sparkle
+          dependency, runtime, or feed; it retains only the frozen 1.8.32 public
+          key needed for trust continuity. Subsequent updates are CLI-owned.
           EOF
             fi
           elif [ -f "phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then

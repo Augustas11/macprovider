@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 generator="$root/scripts/generate-malibu-appcast.sh"
 signature_verifier="$root/scripts/verify-malibu-sparkle-signature.py"
+trust_anchor_helper="$root/scripts/prepare-malibu-bootstrap-trust-anchor.py"
 set_verifier="$root/scripts/verify-malibu-publication-set.sh"
 publisher="$root/scripts/publish-malibu-latest-dmg.sh"
 installer="$root/scripts/install-malibu-publication.sh"
@@ -21,7 +22,8 @@ for script in "$generator" "$set_verifier" "$publisher" "$installer" "$public_ve
   [[ -f "$script" ]] || fail "missing $script"
   bash -n "$script"
 done
-PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile "$signature_verifier"
+PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile \
+  "$signature_verifier" "$trust_anchor_helper"
 [[ -f "$known_hosts" && -f "$legacy_key" ]] || fail "bridge trust anchors are missing"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/malibu-bootstrap-test.XXXXXX")"
@@ -61,6 +63,127 @@ if python3 "$signature_verifier" v1.8.39 \
 fi
 grep -q 'signature does not verify' "$work/structural.out" ||
   fail "Sparkle item-level version fields did not reach the cryptographic gate"
+
+create_test_app() {
+  local destination="$1"
+  local version="$2"
+  local build="$3"
+  local legacy_key="${4:-}"
+
+  python3 - "$destination" "$version" "$build" "$legacy_key" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+destination = pathlib.Path(sys.argv[1])
+destination.joinpath("Contents", "MacOS").mkdir(parents=True)
+destination.joinpath("Contents", "Resources").mkdir(parents=True)
+destination.joinpath("Contents", "MacOS", "Malibu").write_bytes(b"test executable\n")
+document = {
+    "CFBundleIdentifier": "tech.malibu.app",
+    "CFBundleExecutable": "Malibu",
+    "CFBundleShortVersionString": sys.argv[2],
+    "CFBundleVersion": sys.argv[3],
+}
+if sys.argv[4]:
+    document["SUPublicEDKey"] = sys.argv[4]
+with destination.joinpath("Contents", "Info.plist").open("wb") as output:
+    plistlib.dump(document, output)
+PY
+}
+
+expect_anchor_failure() {
+  local label="$1"
+  local pattern="$2"
+  shift 2
+  if python3 "$trust_anchor_helper" "$@" >"$work/$label.out" 2>&1; then
+    fail "$label unexpectedly succeeded"
+  fi
+  grep -q "$pattern" "$work/$label.out" || fail "$label rejection was unclear"
+}
+
+# The released v1.8.39 target must carry exactly the old client's public key,
+# while source and every later app remain free of Sparkle update authority.
+create_test_app "$work/bridge.app" 1.8.39 39
+python3 "$trust_anchor_helper" prepare v1.8.39 \
+  "$work/bridge.app" "$legacy_key" >/dev/null
+python3 "$trust_anchor_helper" verify \
+  "$work/bridge.app" "$legacy_key" >/dev/null
+python3 - "$work/bridge.app/Contents/Info.plist" "$legacy_key" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+document = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
+values = [
+    line.strip()
+    for line in pathlib.Path(sys.argv[2]).read_text(encoding="ascii").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+assert document["SUPublicEDKey"] == values[0]
+assert sorted(key for key in document if key.startswith("SU")) == ["SUPublicEDKey"]
+PY
+
+create_test_app "$work/later.app" 1.8.40 40
+python3 "$trust_anchor_helper" prepare v1.8.40 \
+  "$work/later.app" "$legacy_key" >/dev/null
+python3 "$trust_anchor_helper" verify \
+  "$work/later.app" "$legacy_key" >/dev/null
+
+create_test_app "$work/missing-anchor.app" 1.8.39 39
+expect_anchor_failure missing-anchor 'must contain only the exact frozen' \
+  verify "$work/missing-anchor.app" "$legacy_key"
+
+frozen_key="$(grep -v '^[[:space:]]*#' "$legacy_key" | sed '/^[[:space:]]*$/d')"
+create_test_app "$work/preexisting.app" 1.8.39 39 "$frozen_key"
+expect_anchor_failure preexisting 'source Malibu app unexpectedly contains' \
+  prepare v1.8.39 "$work/preexisting.app" "$legacy_key"
+
+create_test_app "$work/feed.app" 1.8.39 39
+python3 - "$work/feed.app/Contents/Info.plist" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+document = plistlib.loads(path.read_bytes())
+document["SUFeedURL"] = "https://updates.example.invalid/appcast.xml"
+path.write_bytes(plistlib.dumps(document))
+PY
+expect_anchor_failure feed 'legacy update keys: SUFeedURL' \
+  prepare v1.8.39 "$work/feed.app" "$legacy_key"
+
+create_test_app "$work/sparkle-runtime.app" 1.8.39 39
+mkdir -p "$work/sparkle-runtime.app/Contents/Frameworks/Sparkle.framework"
+expect_anchor_failure sparkle-runtime 'contains Sparkle runtime paths' \
+  prepare v1.8.39 "$work/sparkle-runtime.app" "$legacy_key"
+
+mkdir -p "$work/redirected-macos"
+create_test_app "$work/symlink-macos.app" 1.8.39 39
+rm -rf "$work/symlink-macos.app/Contents/MacOS"
+ln -s "$work/redirected-macos" "$work/symlink-macos.app/Contents/MacOS"
+expect_anchor_failure symlink-macos 'Contents/MacOS must be a non-symlink directory' \
+  prepare v1.8.39 "$work/symlink-macos.app" "$legacy_key"
+
+create_test_app "$work/nested-symlink.app" 1.8.39 39
+ln -s "$work/redirected-macos" \
+  "$work/nested-symlink.app/Contents/Resources/redirect"
+expect_anchor_failure nested-symlink 'contains symlink paths' \
+  prepare v1.8.39 "$work/nested-symlink.app" "$legacy_key"
+
+create_test_app "$work/wrong-build.app" 1.8.39 40
+expect_anchor_failure wrong-build 'requires bundle version/build' \
+  prepare v1.8.39 "$work/wrong-build.app" "$legacy_key"
+
+printf '%s\n%s\n' "$frozen_key" "$frozen_key" > "$work/multiline-key"
+expect_anchor_failure multiline-key 'exactly one non-comment value' \
+  prepare v1.8.39 "$work/missing-anchor.app" "$work/multiline-key"
+printf 'not-base64!\n' > "$work/malformed-key"
+expect_anchor_failure malformed-key 'not canonical base64' \
+  prepare v1.8.39 "$work/missing-anchor.app" "$work/malformed-key"
+ln -s "$legacy_key" "$work/symlink-key"
+expect_anchor_failure symlink-key 'regular non-symlink file' \
+  prepare v1.8.39 "$work/missing-anchor.app" "$work/symlink-key"
 
 grep -q 'StrictHostKeyChecking=yes' "$ssh_helper" || fail "Pearl SSH must fail closed"
 grep -q 'malibu-download-known_hosts' "$ssh_helper" || fail "Pearl SSH host key is not pinned"

@@ -6,8 +6,9 @@
 #   - SPARKLE_EDDSA_PRIVATE_KEY (base64 Ed25519 seed) or SPARKLE_PRIVATE_KEY_FILE
 #   - curl + tar (reviewed Sparkle release tools downloaded on demand)
 #
-# The current Malibu app remains Sparkle-free. This signer is deliberately
-# locked to v1.8.39 so a later release cannot silently revive app-owned updates.
+# The current Malibu app remains free of Sparkle runtime and feeds. Its signed
+# v1.8.39 target retains only the old public trust anchor required by Sparkle's
+# post-extraction policy. This signer is locked to that one bridge tag.
 
 set -euo pipefail
 

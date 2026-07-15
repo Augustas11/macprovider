@@ -136,8 +136,9 @@ gh api --method POST \
 
 Enable immutable releases, then install the active `v*` tag ruleset. GitHub user
 ID `28995904` is the `Augustas11` tagger bypass used only for the deliberate tag
-creation command in step 8; no role, team, deploy key, or GitHub App/Actions
-integration bypass is allowed.
+creation command in step 8 and the frozen v1.8.39 pre-publication recovery in
+step 8.1; no role, team, deploy key, or GitHub App/Actions integration bypass is
+allowed.
 
 ```bash
 gh api --method PUT "repos/$REPO/immutable-releases" \
@@ -460,6 +461,285 @@ is 1-15 minutes for notarization. The workflow:
 13. Re-fetches the published numeric release and requires GitHub immutability
     before recording the numeric release publication evidence
 
+### 8.1 Frozen v1.8.39 pre-publication tag recovery
+
+Release tags remain immutable once any GitHub Release row or public versioned
+asset exists. The sole exception is unpublished signed tag object
+`3aa5b37ac774100902179b21fd3bb35bc8075c4e` (peeled commit
+`2d8b0849efe9bb09803296fb375324daed80220c`) after failed release run
+`29425477660`. That run failed while generating the one-time appcast; its draft,
+public-transition, and Pearl-publication steps were skipped. At authorization
+time there was no v1.8.39 release row, including drafts, no public versioned
+DMG, and no v1.8.39 entry in the public appcast.
+
+This exception is permanently closed if any of those publication conditions
+becomes false and must never be used for another tag. Never force-update the
+remote ref. Preserve the old object under a local recovery ref, delete it only
+with an exact-object lease, build the candidate while the tag is absent, and
+recreate a newly signed annotated tag with an expected-absent lease only after
+the unsigned build succeeds and `production-release` is waiting. If the
+candidate fails, leave v1.8.39 absent and fix/rebuild; do not burn another tag.
+
+First require the fresh replacement commit to have green `ci-required`, prove
+the exact failed/unpublished state, and verify the old tag with the reviewed SSH
+signing fingerprint. The workflow's `production-release` concurrency group is
+the release lease after dispatch.
+
+```bash
+set -euo pipefail
+export REPO=Augustas11/macprovider TAG=v1.8.39 FAILED_RUN=29425477660
+export OLD_TAG_OBJECT=3aa5b37ac774100902179b21fd3bb35bc8075c4e
+export OLD_COMMIT=2d8b0849efe9bb09803296fb375324daed80220c
+GH_TOKEN="$(gh auth token -u Augustas11)"
+test -n "$GH_TOKEN"
+export GH_TOKEN
+
+git fetch origin refs/heads/main:refs/remotes/origin/main \
+  "+refs/tags/$TAG:refs/recovery/$TAG-old"
+NEW_COMMIT="$(git rev-parse origin/main)"
+test "$(git rev-parse HEAD)" = "$NEW_COMMIT"
+test "$NEW_COMMIT" != "$OLD_COMMIT"
+test "$(git rev-parse refs/recovery/$TAG-old)" = "$OLD_TAG_OBJECT"
+test "$(git rev-parse refs/recovery/$TAG-old^{})" = "$OLD_COMMIT"
+git verify-tag "$OLD_TAG_OBJECT" 2>&1 | \
+  grep -F 'SHA256:6DgoKNaOgF5c7NPHTAbNxJ2LT0uuj8U/3zObOOZjRiA'
+git merge-base --is-ancestor "$OLD_COMMIT" "$NEW_COMMIT"
+REMOTE_MAIN_SHA_BEFORE="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+REMOTE_TAG_OBJECT_BEFORE="$(git ls-remote origin refs/tags/$TAG | awk '{print $1}')"
+REMOTE_TAG_COMMIT_BEFORE="$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')"
+test "$REMOTE_MAIN_SHA_BEFORE" = "$NEW_COMMIT"
+test "$REMOTE_TAG_OBJECT_BEFORE" = "$OLD_TAG_OBJECT"
+test "$REMOTE_TAG_COMMIT_BEFORE" = "$OLD_COMMIT"
+RELEASE_IDS_BEFORE="$(gh api --paginate "repos/$REPO/releases?per_page=100" \
+  --jq '.[] | select(.tag_name=="v1.8.39") | .id')"
+test -z "$RELEASE_IDS_BEFORE"
+FAILED_RUN_STATE="$(gh api "repos/$REPO/actions/runs/$FAILED_RUN" \
+  --jq '[.status,.conclusion,.head_sha]|join(" ")')"
+test "$FAILED_RUN_STATE" = "completed failure $OLD_COMMIT"
+gh api "repos/$REPO/actions/runs/$FAILED_RUN/jobs?per_page=100" | jq -e '
+  any(.jobs[].steps[]; .name=="Generate one-time Malibu 1.8.32 bootstrap bridge" and .conclusion=="failure") and
+  any(.jobs[].steps[]; .name=="Create verified draft GitHub release" and .conclusion=="skipped") and
+  any(.jobs[].steps[]; .name=="Publish only the revalidated numeric draft" and .conclusion=="skipped") and
+  any(.jobs[].steps[]; .name=="Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl" and .conclusion=="skipped")'
+ACTIVE_RELEASE_RUNS_BEFORE="$(gh api \
+  "repos/$REPO/actions/workflows/284808728/runs?per_page=100" \
+  --jq '[.workflow_runs[] | select(.status!="completed")] | length')"
+CI_REQUIRED_SUCCESSES="$(gh api \
+  "repos/$REPO/commits/$NEW_COMMIT/check-runs?per_page=100" \
+  --jq '[.check_runs[] | select(.name=="ci-required" and .status=="completed" and .conclusion=="success")] | length')"
+PUBLIC_DMG_STATUS_BEFORE="$(curl -sS -o /dev/null -w '%{http_code}' \
+  https://download.malibu.tech/Malibu-v1.8.39.dmg)"
+test "$ACTIVE_RELEASE_RUNS_BEFORE" = 0
+test "$CI_REQUIRED_SUCCESSES" -ge 1
+test "$PUBLIC_DMG_STATUS_BEFORE" = 404
+PUBLIC_APPCAST_BEFORE="$(curl -fsSL https://download.malibu.tech/appcast.xml)"
+if grep -Fq '<sparkle:shortVersionString>1.8.39</sparkle:shortVersionString>' \
+  <<< "$PUBLIC_APPCAST_BEFORE"; then
+  echo "public appcast already advertises v1.8.39" >&2
+  exit 1
+fi
+GH_TOKEN="$GH_TOKEN" bash scripts/verify-github-release-posture.sh \
+  "$REPO" production-release 28995904
+```
+
+Delete only that exact unpublished object, prove absence, then dispatch the
+candidate with the migration bridge policy. Snapshot matching workflow runs
+before dispatch so the sole new run can be identified without relying on list
+ordering or a mutable "latest" result:
+
+```bash
+RUN_IDS_BEFORE="$(mktemp)"
+RUN_IDS_AFTER="$(mktemp)"
+trap 'rm -f "$RUN_IDS_BEFORE" "$RUN_IDS_AFTER"' EXIT
+gh api "repos/$REPO/actions/workflows/284808728/runs?event=workflow_dispatch&per_page=100" | \
+  jq -r --arg head "$NEW_COMMIT" \
+    '.workflow_runs[] | select(.head_sha==$head and .event=="workflow_dispatch") | .id' | \
+  sort -n > "$RUN_IDS_BEFORE"
+
+# Close the race between the earlier evidence capture and the irreversible
+# deletion. Every network lookup must succeed before its absence assertion.
+git fetch origin refs/heads/main:refs/remotes/origin/main
+test "$(git rev-parse origin/main)" = "$NEW_COMMIT"
+test "$(git rev-parse HEAD)" = "$NEW_COMMIT"
+test "$NEW_COMMIT" != "$OLD_COMMIT"
+REMOTE_MAIN_SHA_BEFORE_DELETE="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+ACTIVE_RELEASE_RUNS_BEFORE_DELETE="$(gh api \
+  "repos/$REPO/actions/workflows/284808728/runs?per_page=100" \
+  --jq '[.workflow_runs[] | select(.status!="completed")] | length')"
+RELEASE_IDS_BEFORE_DELETE="$(gh api --paginate \
+  "repos/$REPO/releases?per_page=100" \
+  --jq '.[] | select(.tag_name=="v1.8.39") | .id')"
+PUBLIC_DMG_STATUS_BEFORE_DELETE="$(curl -sS -o /dev/null -w '%{http_code}' \
+  https://download.malibu.tech/Malibu-v1.8.39.dmg)"
+test "$REMOTE_MAIN_SHA_BEFORE_DELETE" = "$NEW_COMMIT"
+test "$ACTIVE_RELEASE_RUNS_BEFORE_DELETE" = 0
+test -z "$RELEASE_IDS_BEFORE_DELETE"
+test "$PUBLIC_DMG_STATUS_BEFORE_DELETE" = 404
+PUBLIC_APPCAST_BEFORE_DELETE="$(curl -fsSL \
+  https://download.malibu.tech/appcast.xml)"
+if grep -Fq '<sparkle:shortVersionString>1.8.39</sparkle:shortVersionString>' \
+  <<< "$PUBLIC_APPCAST_BEFORE_DELETE"; then
+  echo "public appcast already advertises v1.8.39" >&2
+  exit 1
+fi
+
+git push --force-with-lease="refs/tags/$TAG:$OLD_TAG_OBJECT" \
+  origin ":refs/tags/$TAG"
+REMOTE_TAG_AFTER_DELETE="$(git ls-remote origin refs/tags/$TAG "refs/tags/$TAG^{}")"
+test -z "$REMOTE_TAG_AFTER_DELETE"
+gh workflow run release.yml --repo "$REPO" --ref main \
+  -f version="$TAG" -f prerelease=false -f candidate=true \
+  -f provider_admission_policy=bridge_required
+
+RUN_ID=""
+for attempt in $(seq 1 30); do
+  gh api "repos/$REPO/actions/workflows/284808728/runs?event=workflow_dispatch&per_page=100" | \
+    jq -r --arg head "$NEW_COMMIT" \
+      '.workflow_runs[] | select(.head_sha==$head and .event=="workflow_dispatch") | .id' | \
+    sort -n > "$RUN_IDS_AFTER"
+  NEW_RUN_IDS="$(comm -13 "$RUN_IDS_BEFORE" "$RUN_IDS_AFTER")"
+  NEW_RUN_COUNT="$(printf '%s\n' "$NEW_RUN_IDS" | sed '/^$/d' | wc -l | tr -d ' ')"
+  test "$NEW_RUN_COUNT" -le 1 || {
+    echo "multiple same-commit release runs appeared after dispatch" >&2
+    exit 1
+  }
+  if test "$NEW_RUN_COUNT" -eq 1; then
+    RUN_ID="$NEW_RUN_IDS"
+    break
+  fi
+  sleep 2
+done
+[[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+CAPTURED_RUN_IDENTITY="$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+  --jq '[.id,.head_sha,.event]|join(" ")')"
+test "$CAPTURED_RUN_IDENTITY" = "$RUN_ID $NEW_COMMIT workflow_dispatch"
+```
+
+Poll only that captured run. Do not create the replacement tag until its exact
+unsigned job has succeeded and its exact protected job is waiting on the
+`production-release` deployment whose required reviewer remains
+`antfleet-ops`. A failed build, completed run, missing job, competing run, or
+timeout leaves the tag absent and closes this attempt without consuming the
+replacement tag authority:
+
+```bash
+RUN_READY=false
+for attempt in $(seq 1 240); do
+  RUN_JSON="$(gh api "repos/$REPO/actions/runs/$RUN_ID")"
+  test "$(printf '%s' "$RUN_JSON" | jq -r .id)" = "$RUN_ID"
+  test "$(printf '%s' "$RUN_JSON" | jq -r .head_sha)" = "$NEW_COMMIT"
+  test "$(printf '%s' "$RUN_JSON" | jq -r .event)" = workflow_dispatch
+
+  JOBS_JSON="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100")"
+  BUILD_STATE="$(printf '%s' "$JOBS_JSON" | jq -r '
+    [.jobs[] | select(.name=="Build unsigned release inputs from reviewed main")] |
+    if length==1 then .[0] | [.status, (.conclusion // "")] | @tsv else "invalid" end')"
+  SIGN_STATE="$(printf '%s' "$JOBS_JSON" | jq -r '
+    [.jobs[] | select(.name=="Sign and publish reviewed release")] |
+    if length==1 then .[0] | [.status, (.conclusion // "")] | @tsv else "invalid" end')"
+  if [[ "$BUILD_STATE" == $'completed\t'* && \
+        "$BUILD_STATE" != $'completed\tsuccess' ]]; then
+    echo "captured release run build did not succeed: $BUILD_STATE" >&2
+    exit 1
+  fi
+
+  PENDING_JSON="$(gh api "repos/$REPO/actions/runs/$RUN_ID/pending_deployments")"
+  if [[ "$BUILD_STATE" == $'completed\tsuccess' && \
+        "$SIGN_STATE" == $'waiting\t' ]] && \
+     printf '%s' "$PENDING_JSON" | jq -e '
+       length==1 and
+       .[0].environment.name=="production-release" and
+       any(.[0].reviewers[];
+         .type=="User" and
+         .reviewer.login=="antfleet-ops" and
+         .reviewer.id==285575208)' >/dev/null; then
+    RUN_READY=true
+    break
+  fi
+  test "$(printf '%s' "$RUN_JSON" | jq -r .status)" != completed || {
+    echo "captured release run completed before protected approval wait" >&2
+    exit 1
+  }
+  sleep 10
+done
+test "$RUN_READY" = true
+```
+
+Immediately before tag creation, query the exact run and jobs again, then
+repeat every mutable source and publication-absence gate. Recheck
+`origin/main == $NEW_COMMIT`, require this to be the only active release run,
+and re-run the environment posture guard. Then create the replacement locally,
+bind both old identifiers and the exact replacement run in its signed message,
+and push only with an expected-absent lease:
+
+```bash
+git fetch origin refs/heads/main:refs/remotes/origin/main
+test "$(git rev-parse origin/main)" = "$NEW_COMMIT"
+test "$(git rev-parse HEAD)" = "$NEW_COMMIT"
+test "$NEW_COMMIT" != "$OLD_COMMIT"
+REMOTE_MAIN_SHA_BEFORE_CREATE="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+test "$REMOTE_MAIN_SHA_BEFORE_CREATE" = "$NEW_COMMIT"
+REMOTE_TAG_BEFORE_CREATE="$(git ls-remote origin refs/tags/$TAG "refs/tags/$TAG^{}")"
+test -z "$REMOTE_TAG_BEFORE_CREATE"
+RUN_STATE_BEFORE_CREATE="$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+  --jq '[.id,.head_sha,.event,.status]|join(" ")')"
+test "$RUN_STATE_BEFORE_CREATE" = "$RUN_ID $NEW_COMMIT workflow_dispatch waiting"
+gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" | jq -e '
+  ([.jobs[] | select(
+    .name=="Build unsigned release inputs from reviewed main" and
+    .status=="completed" and .conclusion=="success")] | length)==1 and
+  ([.jobs[] | select(
+    .name=="Sign and publish reviewed release" and
+    .status=="waiting" and .conclusion==null)] | length)==1' >/dev/null
+gh api "repos/$REPO/actions/runs/$RUN_ID/pending_deployments" | jq -e '
+  length==1 and
+  .[0].environment.name=="production-release" and
+  any(.[0].reviewers[];
+    .type=="User" and
+    .reviewer.login=="antfleet-ops" and
+    .reviewer.id==285575208)' >/dev/null
+OTHER_ACTIVE_RELEASE_RUNS="$(gh api \
+  "repos/$REPO/actions/workflows/284808728/runs?per_page=100" | \
+  jq --argjson run "$RUN_ID" \
+    '[.workflow_runs[] | select(.status!="completed" and .id!=$run)] | length')"
+test "$OTHER_ACTIVE_RELEASE_RUNS" = 0
+RELEASE_IDS_BEFORE_CREATE="$(gh api --paginate \
+  "repos/$REPO/releases?per_page=100" \
+  --jq '.[] | select(.tag_name=="v1.8.39") | .id')"
+PUBLIC_DMG_STATUS_BEFORE_CREATE="$(curl -sS -o /dev/null -w '%{http_code}' \
+  https://download.malibu.tech/Malibu-v1.8.39.dmg)"
+test -z "$RELEASE_IDS_BEFORE_CREATE"
+test "$PUBLIC_DMG_STATUS_BEFORE_CREATE" = 404
+PUBLIC_APPCAST_BEFORE_CREATE="$(curl -fsSL \
+  https://download.malibu.tech/appcast.xml)"
+if grep -Fq '<sparkle:shortVersionString>1.8.39</sparkle:shortVersionString>' \
+  <<< "$PUBLIC_APPCAST_BEFORE_CREATE"; then
+  echo "public appcast already advertises v1.8.39" >&2
+  exit 1
+fi
+GH_TOKEN="$GH_TOKEN" bash scripts/verify-github-release-posture.sh \
+  "$REPO" production-release 28995904
+
+git tag -d "$TAG"
+git tag -s "$TAG" "$NEW_COMMIT" -m "macprovider-cli $TAG" \
+  -m "Pre-publication re-anchor after failed run $FAILED_RUN for replacement run $RUN_ID. Prior-tag-object: $OLD_TAG_OBJECT. Prior-tag-commit: $OLD_COMMIT. No GitHub Release or public v1.8.39 asset existed."
+NEW_TAG_OBJECT="$(git rev-parse refs/tags/$TAG)"
+test "$NEW_TAG_OBJECT" != "$OLD_TAG_OBJECT"
+test "$(git rev-parse refs/tags/$TAG^{})" = "$NEW_COMMIT"
+git verify-tag "$NEW_TAG_OBJECT" 2>&1 | \
+  grep -F 'SHA256:6DgoKNaOgF5c7NPHTAbNxJ2LT0uuj8U/3zObOOZjRiA'
+git push --force-with-lease="refs/tags/$TAG:" origin "refs/tags/$TAG"
+REMOTE_NEW_TAG_OBJECT="$(git ls-remote origin refs/tags/$TAG | awk '{print $1}')"
+REMOTE_NEW_TAG_COMMIT="$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')"
+test "$REMOTE_NEW_TAG_OBJECT" = "$NEW_TAG_OBJECT"
+test "$REMOTE_NEW_TAG_COMMIT" = "$NEW_COMMIT"
+```
+
+Only then may `antfleet-ops` approve the waiting environment. The new tag is
+immutable: no second deletion, update, or recovery is permitted. Record its
+object, peeled commit, workflow run, release ID, and public hashes below Entry
+157 in the decision log after publication.
+
 Steps 11-13 execute only in normal production mode. Acceptance mode instead
 revalidates the selected branch and protected environment, re-verifies the
 signed checksums, and uploads the one-day private Actions artifact.
@@ -554,10 +834,16 @@ downloads `appcast.xml`, `latest.dmg`, and the versioned DMG over HTTPS and
 requires their hashes and EdDSA signature to match the immutable release.
 
 This is a bootstrap bridge, not a restored update subsystem. Malibu 1.8.39 has
-no Sparkle package, `SUFeedURL`, or `SUPublicEDKey`; later app updates are owned
-by the signed CLI compatibility transaction. The generator, verifier, remote
-installer, workflow conditions, and regression tests all reject tags other
-than `v1.8.39`.
+no Sparkle package/framework, `SUFeedURL`, automatic-check setting, or updater
+runtime. Its final signed bundle does retain the exact frozen `SUPublicEDKey`
+from Malibu 1.8.32 because Sparkle 2.6.4 rejects a target that removes the old
+key after extraction. The protected workflow injects that inert public trust
+anchor before protected bundle writes, re-verifies the completed bundle before
+codesigning, and requires the exact key with no Sparkle runtime or feed in the
+final DMG. Later app updates are
+owned by the signed CLI compatibility transaction, and every later Malibu build
+must omit the key. The generator, verifier, remote installer, workflow
+conditions, and regression tests all reject bridge tags other than `v1.8.39`.
 
 If publication stops before draft-to-public transition, inspect or delete the
 numeric draft and rerun from the same reviewed tag. If GitHub is immutable but
