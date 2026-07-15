@@ -63,7 +63,7 @@ coordinator is the compatibility cutoff for old binaries.
   custody, but Malibu never removes the live YAML credential. `/v1/status` gains a
   redacted `credential` lifecycle object; no token bytes or token-derived identifier
   are exposed.
-- The release carrying this behavior is `binary_version` **1.8.33** (Malibu build 33).
+- The release carrying this behavior is `binary_version` **1.8.34** (Malibu build 34).
 - Release signing pins the stable CLI identifier `live.streamvc.macprovider.cli` so the
   default Keychain ACL is based on a stable designated-requirement identity across
   signed updates. Real signed vN→vN+1, reboot, login, and locked-Keychain validation is

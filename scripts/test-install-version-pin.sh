@@ -91,7 +91,7 @@ for symbol in latest_release_tag validate_macprovider_version_tag resolve_releas
 done
 
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
-MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.33"
+MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
 GITHUB_REPO="Augustas11/macprovider"
 TMPDIR_PATH=""
 asset_path=""
@@ -346,7 +346,7 @@ rc=0
 report "case11-emergency-keeps-path-allowlist" 5 "$rc"
 
 ################################################################
-# Case 12 — emergency rollback adds the v1.8.33-compatible top-level
+# Case 12 — emergency rollback adds the v1.8.30-compatible top-level
 # opt-out without rewriting any valid nested YAML representation.
 ################################################################
 STAGED_CONFIG_PATH="$workdir/emergency-config.yaml"
@@ -384,7 +384,7 @@ SH
 chmod +x "$BINARY_PATH"
 reset_mocks
 rc=0
-( validate_emergency_target v1.8.33 ) >/dev/null 2>&1 || rc=$?
+( validate_emergency_target v1.8.30 ) >/dev/null 2>&1 || rc=$?
 report "case13-older-target-accepted" 0 "$rc"
 rc=0
 ( validate_emergency_target v1.8.34 ) >/dev/null 2>&1 || rc=$?
@@ -394,12 +394,27 @@ rc=0
 report "case13-newer-target-rejected" 7 "$rc"
 
 rc=0
-( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.33 ) >/dev/null 2>&1 || rc=$?
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.30"}'
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
 report "case13-exact-advertisement-accepted" 0 "$rc"
 MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.29"}'
 rc=0
-( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.33 ) >/dev/null 2>&1 || rc=$?
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
 report "case13-mismatched-advertisement-rejected" 7 "$rc"
+
+reset_mocks
+EMERGENCY_ROLLBACK=1
+MACPROVIDER_VERSION="v1.8.29"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case13-pre-contract-target-rejected" 7 "$rc"
+reset_mocks
+EMERGENCY_ROLLBACK=1
+MACPROVIDER_VERSION="v1.8.30"
+rc=0
+observed_tag="$(resolve_release_tag)" || rc=$?
+report "case13-contract-floor-target-accepted" 0 "$rc"
+report "case13-contract-floor-target-preserved" "v1.8.30" "$observed_tag"
 
 ################################################################
 # Case 14 — emergency rollback consumes the exact inventoried
@@ -437,7 +452,7 @@ rc=0
 report "case14-mismatched-backup-hash-rejected" 7 "$rc"
 
 ################################################################
-# Case 15 — a v1.8.33 emergency activation may remove only the
+# Case 15 — a v1.8.34 emergency activation may remove only the
 # provider_token after admission; all other byte drift is rejected.
 ################################################################
 STAGED_CONFIG_PATH="$workdir/staged-with-token.yaml"
@@ -462,7 +477,7 @@ rc=0
 report "case15-noncredential-drift-rejected" 7 "$rc"
 
 ################################################################
-# Case 16 — failed tokenless v1.8.33 bootstrap identity recovery
+# Case 16 — failed tokenless v1.8.34 bootstrap identity recovery
 # preserves the transaction-restored legacy bearer for an old binary.
 ################################################################
 failed_config="$workdir/failed-tokenless.yaml"

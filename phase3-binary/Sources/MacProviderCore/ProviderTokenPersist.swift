@@ -234,7 +234,7 @@ public enum ProviderTokenPersist {
         }
     }
 
-    /// Redact legacy autotune backups created before v1.8.33. These files are
+    /// Redact legacy autotune backups created before v1.8.34. These files are
     /// machine-owned rollback snapshots (`config.yaml.bak-<unix>-<counter>`),
     /// not credential sources. Operator-named archives and emergency rollback
     /// evidence are deliberately outside this narrow pattern.

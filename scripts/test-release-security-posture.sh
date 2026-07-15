@@ -66,6 +66,14 @@ if "scripts/verify-malibu-release-artifacts.sh" not in publish:
     raise SystemExit("publish job must verify Apple signatures and notarization")
 if "Sparkle" in publish or "appcast" in publish:
     raise SystemExit("release workflow must not retain a second app-owned update authority")
+team_requirement = (
+    '-R="identifier \\"live.streamvc.macprovider.cli\\" and anchor apple generic '
+    'and certificate leaf[subject.OU] = \\"$APPLE_NOTARY_TEAM_ID\\""'
+)
+if publish.count(team_requirement) != 2:
+    raise SystemExit("CLI and bundled CLI must evaluate the exact Team ID requirement semantically")
+if 'grep -F "certificate leaf[subject.OU]' in publish:
+    raise SystemExit("release workflow must not parse codesign requirement display formatting")
 if '"repos/$GITHUB_REPOSITORY/releases/$release_id"' not in publish:
     raise SystemExit("post-create verification must re-fetch the captured numeric release id")
 if "ensure-release-tag-target" in text or "git push" in text:

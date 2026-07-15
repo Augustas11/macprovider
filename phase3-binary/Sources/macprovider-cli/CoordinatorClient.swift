@@ -145,7 +145,7 @@ actor CoordinatorClient {
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
 
-    static let binaryVersion = "1.8.33"
+    static let binaryVersion = "1.8.34"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -2691,7 +2691,7 @@ actor CoordinatorClient {
     private func finalizeAdmissionBoundaryAfterServingProof(successReason: String) async {
         let updateBoundary = await commitPendingAutoupdateAfterServingProof()
         if updateBoundary != .pendingRollback {
-            // A pre-v1.8.33 rollback binary cannot read CLI Keychain. Commit
+            // A pre-v1.8.34 rollback binary cannot read CLI Keychain. Commit
             // the coordinator update transaction before removing its YAML
             // compatibility bearer; failed readiness must leave rollback viable.
             await finalizeLegacyCredentialSourceAfterAdmission()

@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       tag:
-        description: "Candidate semantic version tag, for example v1.8.33"
+        description: "Candidate semantic version tag, for example v1.8.34"
         required: true
         type: string
       provider_admission_policy:

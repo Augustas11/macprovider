@@ -468,7 +468,9 @@ jobs:
             echo "::error::CLI designated requirement lacks the stable release identifier" >&2
             exit 1
           }
-          printf '%s\n' "$CLI_REQUIREMENT" | grep -F "certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" >/dev/null || {
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            "$WORK/macprovider-cli" || {
             echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
           }
@@ -646,7 +648,9 @@ jobs:
             echo "::error::Bundling changed the CLI designated requirement identifier" >&2
             exit 1
           }
-          printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F "certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" >/dev/null || {
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            "$APP/Contents/MacOS/macprovider-cli" || {
             echo "::error::Bundled CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
           }

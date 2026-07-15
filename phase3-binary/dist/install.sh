@@ -11,7 +11,7 @@ set -euo pipefail
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
-MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.33"
+MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -1164,7 +1164,7 @@ if os.path.exists(restored_path):
     for line in restored_text.splitlines():
         if line.startswith("provider_id:"):
             continue
-        # A failed v1.8.33+ bootstrap can be tokenless because its bearer is
+        # A failed v1.8.34+ bootstrap can be tokenless because its bearer is
         # already in CLI Keychain. If transaction rollback restored an older
         # token-bearing config, preserve that compatibility bearer so the old
         # binary remains viable. Only replace it when the failed config itself
