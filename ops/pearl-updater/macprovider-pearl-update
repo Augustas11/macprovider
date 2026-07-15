@@ -47,6 +47,8 @@ STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
 AUDIT_PATH = Path("/var/lib/macprovider-pearl-updater/audit.jsonl")
 LOCK_PATH = Path("/run/lock/macprovider-pearl-updater.lock")
 GATE_STATE_ROOT = Path("/run/macprovider-pearl-updater")
+CANARY_ROLLBACK_CONTROL_ROOT = Path("/run/macprovider-canary-buyer")
+CANARY_ROLLBACK_AUTHORIZATION = CANARY_ROLLBACK_CONTROL_ROOT / "legacy-rollback.json"
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
 INDEPENDENT_ALERT_ENV_PATH = Path("/etc/macprovider/monitor.env")
@@ -95,8 +97,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-585-integration-r3"
-CANARY_AUTHORITY_COMMIT = "8a168ea15a31f37e75f1ec03fb77476569bffa3d"
+CANARY_AUTHORITY_VERSION = "issue-585-integration-r4"
+CANARY_AUTHORITY_COMMIT = "0eb6cb30dc99de471a670fa951077777aa34a042"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -114,11 +116,11 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "f68bbea92c30abeacca586db8ccadc1eb63cb12bb544faff9fb416f36b111f8b",
-    Path("/opt/macprovider-canary-buyer/safety.mjs"): "1c0d2770712363dd630213f101bc87c85073e4b7749349bbf8119611188bf46c",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "b72c31edb1e0841a1f6f55815f1ab27b2c9b7df5e78ea50a6cbc0d8107cdf154",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "65c07f1c8e111bc402e5e22f6a1871d66186bb6f618175a8f2aafebfa7ab743c",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
-    Path("/etc/systemd/system/canary-buyer.service"): "cd9d82f30bea2ba92e9be6205464098f83dd3eabcc0c077a9bb4d2bc3b89d09b",
+    Path("/etc/systemd/system/canary-buyer.service"): "5faf688235623abec1afac4f9fd8d78b660181f1a441c7c042affaa284196b14",
     Path("/etc/systemd/system/canary-buyer.timer"): "039ebf4620f13a429583d8b36b6b0cb765ee588815d5fd0250d92115ba608e0e",
 }
 CANARY_AUTHORITY_FILE_MODES = {
@@ -712,6 +714,7 @@ class Updater:
         isolate_candidate_network: bool = False,
         catalog_verifier: Path = CATALOG_RELEASE_VERIFIER,
         catalog_canary_proof: Path = CATALOG_CANARY_PROOF,
+        canary_rollback_authorization: Path = CANARY_ROLLBACK_AUTHORIZATION,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self.config = config
@@ -734,6 +737,7 @@ class Updater:
         self.isolate_candidate_network = isolate_candidate_network
         self.catalog_verifier = catalog_verifier
         self.catalog_canary_proof = catalog_canary_proof
+        self.canary_rollback_authorization = canary_rollback_authorization
         self.sleep = sleep
         self.transaction: Path | None = None
         self.config_update: ConfigUpdate | None = None
@@ -2307,33 +2311,7 @@ class Updater:
             or heartbeat_port is not None and not 1 <= heartbeat_port <= 65535
         ):
             raise UpdateError("canary heartbeat URL must be one HTTPS URL without userinfo or fragment")
-        try:
-            expected_fleet = json.loads(
-                _read_trusted_text(
-                    CANARY_EXPECTED_FLEET,
-                    "canary expected fleet",
-                    trusted_uid=self.trusted_uid,
-                    private=True,
-                    limit=64 * 1024,
-                )
-            )
-            providers = expected_fleet["providers"]
-            provider_ids = [row["provider_id"] for row in providers]
-            model_ids = [row["model_id"] for row in providers]
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise UpdateError("canary expected fleet is invalid") from exc
-        if (
-            expected_fleet.get("schema_version") != 1
-            or not isinstance(providers, list)
-            or len(providers) != 2
-            or any(not isinstance(value, str) or not value for value in provider_ids + model_ids)
-            or len(set(provider_ids)) != 2
-            or len(set(model_ids)) != 2
-            or set(model_ids) != CANARY_EXPECTED_MODELS
-        ):
-            raise UpdateError(
-                "canary expected fleet must bind exactly two unique providers to the pinned service models"
-            )
+        self._canary_expected_fleet()
 
         loaded: dict[str, dict[str, str]] = {}
         for unit, unit_path in unit_paths.items():
@@ -2383,6 +2361,145 @@ class Updater:
             updater_timeout_s=self.config.canary_timeout_s,
         )
 
+    def _canary_expected_fleet(self) -> list[dict[str, str]]:
+        try:
+            document = json.loads(
+                _read_trusted_text(
+                    CANARY_EXPECTED_FLEET,
+                    "canary expected fleet",
+                    trusted_uid=self.trusted_uid,
+                    private=True,
+                    limit=64 * 1024,
+                )
+            )
+            providers = document["providers"]
+            normalized = [
+                {
+                    "provider_id": row["provider_id"],
+                    "model_id": row["model_id"],
+                }
+                for row in providers
+            ]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise UpdateError("canary expected fleet is invalid") from exc
+        provider_ids = [row["provider_id"] for row in normalized]
+        model_ids = [row["model_id"] for row in normalized]
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_version") != 1
+            or not isinstance(providers, list)
+            or len(providers) != 2
+            or any(not isinstance(row, dict) for row in providers)
+            or any(not isinstance(value, str) or not value for value in provider_ids + model_ids)
+            or len(set(provider_ids)) != 2
+            or len(set(model_ids)) != 2
+            or set(model_ids) != CANARY_EXPECTED_MODELS
+        ):
+            raise UpdateError(
+                "canary expected fleet must bind exactly two unique providers to the pinned service models"
+            )
+        return normalized
+
+    def _legacy_rollback_control_directory(self) -> Path:
+        directory = self.canary_rollback_authorization.parent
+        if not _path_entry_exists(directory):
+            try:
+                directory.mkdir(mode=0o755)
+                os.chown(directory, self.trusted_uid, -1, follow_symlinks=False)
+                os.chmod(directory, 0o755)
+                _fsync_directory(directory.parent)
+            except OSError as exc:
+                raise UpdateError(
+                    f"cannot create legacy rollback authorization directory {directory}: {exc}"
+                ) from exc
+        _trusted_directory(
+            directory,
+            "legacy rollback authorization directory",
+            trusted_uid=self.trusted_uid,
+            mode=0o755,
+        )
+        return directory
+
+    def _remove_legacy_rollback_authorization(self) -> None:
+        path = self.canary_rollback_authorization
+        if not _path_entry_exists(path):
+            return
+        directory = self._legacy_rollback_control_directory()
+        info = self._trusted_regular_file(path, "legacy rollback authorization")
+        if stat.S_IMODE(info.st_mode) != 0o644 or info.st_size < 2 or info.st_size > 4096:
+            raise UpdateError("legacy rollback authorization must be an exact root-owned 0644 control file")
+        path.unlink()
+        _fsync_directory(directory)
+        self.audit("legacy_rollback_authorization", "removed")
+
+    def _write_legacy_rollback_authorization(self, previous_version: str) -> None:
+        if self.journal is None:
+            raise UpdateError("legacy rollback authorization requires an active phase journal")
+        rollback_in_progress = self.journal.get("rollback_in_progress") is True
+        pre_mutation_restore = (
+            self.journal.get("rollback_armed") is False
+            and self.journal.get("live_mutation_started") is False
+            and self.journal.get("success_persisted") is False
+            and set(self.previous_services) == {
+                "macprovider-coordinator.service",
+                "macprovider-gateway.service",
+            }
+            and all(self.previous_services.values())
+        )
+        if rollback_in_progress and self.journal.get("success_persisted") is not False:
+            raise UpdateError("legacy rollback authorization conflicts with persisted rollout success")
+        if not rollback_in_progress and not pre_mutation_restore:
+            raise UpdateError("legacy rollback authorization is outside an active restoration")
+        transaction_id = self.journal.get("transaction_id")
+        if not isinstance(transaction_id, str) or not SHA256_RE.fullmatch(transaction_id):
+            raise UpdateError("legacy rollback authorization transaction identifier is invalid")
+        try:
+            normalized_version = str(SemVer.parse(previous_version))
+            journal_version = str(SemVer.parse(str(self.journal.get("previous_advertised_version", ""))))
+        except UpdateError as exc:
+            raise UpdateError("legacy rollback authorization version is invalid") from exc
+        if normalized_version != journal_version:
+            raise UpdateError("legacy rollback authorization version mismatches the phase journal")
+        fleet = self._canary_expected_fleet()
+        fleet_ids = sorted(row["provider_id"] for row in fleet)
+        if fleet_ids != self.previous_protected_providers:
+            raise UpdateError("legacy rollback authorization fleet mismatches the protected rollout baseline")
+        if self.previous_pool_ready != len(fleet):
+            raise UpdateError("legacy rollback authorization capacity mismatches the protected rollout baseline")
+        directory = self._legacy_rollback_control_directory()
+        self._remove_legacy_rollback_authorization()
+        validity_s = min(max(self.config.canary_timeout_s + 60, 180), 14 * 60)
+        expires_at = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(seconds=validity_s)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        document = {
+            "schema_version": 1,
+            "kind": "legacy_rollback",
+            "authority": CANARY_AUTHORITY_VERSION,
+            "transaction_id": transaction_id,
+            "expires_at": expires_at,
+            "providers": [
+                {**row, "binary_version": normalized_version}
+                for row in fleet
+            ],
+        }
+        _secure_atomic_write(
+            self.canary_rollback_authorization,
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n",
+            mode=0o644,
+            uid=self.trusted_uid,
+            gid=directory.lstat().st_gid,
+        )
+        self.audit(
+            "legacy_rollback_authorization",
+            "created",
+            transaction_id=transaction_id,
+            binary_version=normalized_version,
+            provider_count=len(fleet),
+            expires_at=expires_at,
+        )
+
     def verify_canary_rollout_readiness(self) -> None:
         gate = self._trusted_regular_file(CANARY_ENABLE_GATE, "canary reviewed enable gate")
         _trusted_directory(
@@ -2395,6 +2512,8 @@ class Updater:
             raise UpdateError("canary reviewed enable gate must be an empty root-owned 0644 file")
         if _path_entry_exists(CANARY_DISABLE_SENTINEL):
             raise UpdateError("canary emergency-disable sentinel blocks rollout")
+        if _path_entry_exists(self.canary_rollback_authorization):
+            raise UpdateError("stale legacy rollback authorization blocks rollout")
         self.audit(
             "canary_rollout_readiness_verified",
             "success",
@@ -2618,10 +2737,23 @@ class Updater:
             "expires_at": int(time.time()) + ttl_s,
             "nonce": secrets.token_hex(32),
         }
-        _secure_atomic_write(
-            path,
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n",
-        )
+        try:
+            _secure_atomic_write(
+                path,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n",
+            )
+        except Exception as publish_error:
+            try:
+                if _path_entry_exists(path):
+                    self._trusted_regular_file(path, "updater start permit", private=True)
+                    path.unlink()
+                _fsync_directory(permit_directory)
+            except Exception as cleanup_error:
+                raise UpdateError(
+                    f"start permit publication failed: {publish_error}; "
+                    f"published permit cleanup also failed: {cleanup_error}"
+                ) from publish_error
+            raise
         return path
 
     def revoke_start_permit(self, path: Path | None) -> None:
@@ -2694,73 +2826,133 @@ class Updater:
             pending_action=None,
         )
 
-    def run_canary_gate(self) -> None:
-        unit = "canary-buyer.service"
-        # The rollout can run for hours. Revalidate both immutable runtime
-        # authority and the operator kill switches at the execution choke point,
-        # not only during the initial plan/apply preflight.
-        self.verify_canary_authority()
-        self.verify_canary_rollout_readiness()
-        self._journal_transition(
-            "canary_gate_pending",
-            pending_action={"kind": "canary_gate", "unit": unit},
-        )
-        permit = self.issue_start_permit(unit)
+    def _stop_failed_canary_gate(self, unit: str, failure: str) -> None:
+        journal_error: Exception | None = None
         try:
-            result = self.run_command(
-                ["systemctl", "start", unit],
-                check=False,
-                timeout=self.config.canary_timeout_s,
-            )
-        except CommandTimeout as exc:
             self._journal_transition(
                 "canary_gate_cancel_pending",
                 pending_action={"kind": "systemctl", "action": "stop", "unit": unit},
             )
+        except Exception as exc:
+            journal_error = exc
+        try:
             cleanup = self.run_command(
                 ["systemctl", "stop", unit],
                 check=False,
                 timeout=420,
             )
-            if cleanup.returncode != 0 or self.service_active(unit):
-                raise UpdateError(
-                    "canary-buyer exceeded the updater deadline and its systemd job could not be cancelled"
-                ) from exc
+        except Exception as exc:
+            raise UpdateError(f"{failure}; canary-buyer cancellation failed: {exc}") from exc
+        if cleanup.returncode != 0:
+            raise UpdateError(f"{failure}; canary-buyer cancellation failed: {cleanup.stderr.strip()}")
+        try:
+            self.assert_unit_quiescent(unit)
+        except Exception as exc:
+            raise UpdateError(f"{failure}; canary-buyer did not become quiescent: {exc}") from exc
+        try:
+            self._journal_transition("canary_gate_cancelled", pending_action=None)
+        except Exception as exc:
+            if journal_error is None:
+                journal_error = exc
+            else:
+                journal_error = UpdateError(
+                    f"cancellation intent journal failed: {journal_error}; "
+                    f"cancellation completion journal failed: {exc}"
+                )
+        if journal_error is not None:
             raise UpdateError(
-                "canary-buyer exceeded the updater deadline; its systemd job was cancelled"
-            ) from exc
+                f"{failure}; canary-buyer was quiesced but cancellation journaling failed: {journal_error}"
+            ) from journal_error
+
+    def run_canary_gate(self, *, legacy_rollback_version: str | None = None) -> None:
+        unit = "canary-buyer.service"
+        # The rollout can run for hours. Revalidate both immutable runtime
+        # authority and the operator kill switches at the execution choke point,
+        # not only during the initial plan/apply preflight.
+        if legacy_rollback_version is not None:
+            self._remove_legacy_rollback_authorization()
+        self.verify_canary_authority()
+        self.verify_canary_rollout_readiness()
+        permit: Path | None = None
+        try:
+            if legacy_rollback_version is not None:
+                self._write_legacy_rollback_authorization(legacy_rollback_version)
+            self._journal_transition(
+                "canary_gate_pending",
+                pending_action={"kind": "canary_gate", "unit": unit},
+            )
+            permit = self.issue_start_permit(unit)
+            try:
+                result = self.run_command(
+                    ["systemctl", "start", unit],
+                    check=False,
+                    timeout=self.config.canary_timeout_s,
+                )
+            except CommandTimeout as exc:
+                failure = "canary-buyer exceeded the updater deadline"
+                self._stop_failed_canary_gate(unit, failure)
+                raise UpdateError(f"{failure}; its systemd job was cancelled") from exc
+            if result.returncode != 0:
+                failure = f"canary-buyer final serving gate failed: {result.stderr.strip()}"
+                self._stop_failed_canary_gate(unit, failure)
+                raise UpdateError(failure)
+            try:
+                state = self.run_command(
+                    [
+                        "systemctl",
+                        "show",
+                        "--property=Result",
+                        "--property=ExecMainStatus",
+                        unit,
+                    ],
+                    check=False,
+                    timeout=10,
+                )
+            except Exception as exc:
+                failure = "canary-buyer final serving gate status could not be verified"
+                self._stop_failed_canary_gate(unit, failure)
+                raise UpdateError(failure) from exc
+            properties: dict[str, str] = {}
+            for line in state.stdout.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    properties[key] = value
+            if (
+                state.returncode != 0
+                or properties.get("Result") != "success"
+                or properties.get("ExecMainStatus") != "0"
+            ):
+                failure = "canary-buyer final serving gate did not complete successfully"
+                self._stop_failed_canary_gate(unit, failure)
+                raise UpdateError(failure)
+            self.audit(
+                "canary_serving_gate",
+                "success",
+                authority=CANARY_AUTHORITY_VERSION,
+            )
+            self._journal_transition("canary_gate_complete", pending_action=None)
         finally:
-            self.revoke_start_permit(permit)
-        if result.returncode != 0:
-            raise UpdateError(f"canary-buyer final serving gate failed: {result.stderr.strip()}")
-        state = self.run_command(
-            [
-                "systemctl",
-                "show",
-                "--property=Result",
-                "--property=ExecMainStatus",
-                unit,
-            ],
-            check=False,
-            timeout=10,
-        )
-        properties: dict[str, str] = {}
-        for line in state.stdout.splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                properties[key] = value
-        if (
-            state.returncode != 0
-            or properties.get("Result") != "success"
-            or properties.get("ExecMainStatus") != "0"
-        ):
-            raise UpdateError("canary-buyer final serving gate did not complete successfully")
-        self.audit(
-            "canary_serving_gate",
-            "success",
-            authority=CANARY_AUTHORITY_VERSION,
-        )
-        self._journal_transition("canary_gate_complete", pending_action=None)
+            cleanup_error: Exception | None = None
+            try:
+                self.revoke_start_permit(permit)
+            except Exception as exc:
+                cleanup_error = exc
+            try:
+                self._remove_legacy_rollback_authorization()
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                else:
+                    cleanup_error = UpdateError(
+                        f"start-permit cleanup failed: {cleanup_error}; authorization cleanup failed: {exc}"
+                    )
+            if cleanup_error is not None:
+                active_error = sys.exc_info()[1]
+                if active_error is not None:
+                    raise UpdateError(
+                        f"{active_error}; canary control cleanup also failed: {cleanup_error}"
+                    ) from active_error
+                raise cleanup_error
 
     def wait_for(self, description: str, timeout_s: int, check: Callable[[], bool]) -> None:
         deadline = time.monotonic() + timeout_s
@@ -3567,7 +3759,48 @@ class Updater:
             assigned_id=verified["assigned_id"],
         )
 
-    def prove_serving_recovery(self, identity: RuntimeIdentity) -> None:
+    def protected_provider_fleet_ready(self) -> bool:
+        if not self.previous_protected_providers:
+            return True
+        poolz = self.get_authorized_json(
+            "https://coordinator.streamvc.live/poolz",
+            self.coordinator_operator_token(),
+        )
+        summary = poolz.get("summary")
+        rows = poolz.get("pool")
+        if not isinstance(summary, dict) or not isinstance(rows, list):
+            raise UpdateError("public protected-fleet sample omitted pool or summary")
+        ready = summary.get("ready")
+        required_ready = max(
+            self.config.minimum_pool_ready_after_rollout,
+            self.previous_pool_ready or 0,
+            len(self.previous_protected_providers),
+        )
+        if type(ready) is not int or ready < required_ready:
+            return False
+        current: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise UpdateError("public protected-fleet sample contains an invalid provider row")
+            provider_id = row.get("provider_id")
+            if not isinstance(provider_id, str) or not provider_id:
+                raise UpdateError("public protected-fleet sample contains an invalid provider identity")
+            if provider_id in current:
+                raise UpdateError("public protected-fleet sample contains duplicate provider identities")
+            current[provider_id] = row
+        return all(
+            provider_id in current
+            and current[provider_id].get("state") == "ready"
+            and current[provider_id].get("routing_eligible") is True
+            for provider_id in self.previous_protected_providers
+        )
+
+    def prove_serving_recovery(
+        self,
+        identity: RuntimeIdentity,
+        *,
+        legacy_rollback_version: str | None = None,
+    ) -> None:
         self.wait_for(
             "provider reconnect and warmup",
             self.config.provider_recovery_timeout_s,
@@ -3579,7 +3812,31 @@ class Updater:
             self.config.service_health_timeout_s,
             lambda: self.public_identity_ready(identity),
         )
-        self.run_canary_gate()
+        if self.previous_protected_providers:
+            stable_samples = 0
+
+            def protected_fleet_stable() -> bool:
+                nonlocal stable_samples
+                try:
+                    ready = self.protected_provider_fleet_ready()
+                except Exception:
+                    stable_samples = 0
+                    raise
+                if ready:
+                    stable_samples += 1
+                else:
+                    stable_samples = 0
+                return stable_samples >= 3
+
+            self.wait_for(
+                "three consecutive public protected-fleet samples",
+                self.config.provider_recovery_timeout_s,
+                protected_fleet_stable,
+            )
+        if legacy_rollback_version is None:
+            self.run_canary_gate()
+        else:
+            self.run_canary_gate(legacy_rollback_version=legacy_rollback_version)
 
     def verify_provider_admission_rollout_policy(self) -> None:
         self.validate_provider_admission_policy_config()
@@ -3981,7 +4238,11 @@ class Updater:
 
     def _prove_rollback_serving(self, tx: Path) -> None:
         previous_runtime = self._transaction_json(tx, "previous-runtime.json")
-        self.prove_serving_recovery(RuntimeIdentity(**previous_runtime))
+        identity = RuntimeIdentity(**previous_runtime)
+        self.prove_serving_recovery(
+            identity,
+            legacy_rollback_version=identity.advertised_version,
+        )
 
     def restore_auxiliary_services(self) -> None:
         for unit in ("macprovider-archive-rotate.service", "stats-billing-mirror.service"):
@@ -4100,7 +4361,10 @@ class Updater:
         )
         self.restore_backend_runtime(identity)
         self.restore_auxiliary_services()
-        self.prove_serving_recovery(identity)
+        self.prove_serving_recovery(
+            identity,
+            legacy_rollback_version=identity.advertised_version,
+        )
         self.restore_auxiliary_timers()
         self._restore_canary_timer()
         self._journal_transition("runtime_state_restored")

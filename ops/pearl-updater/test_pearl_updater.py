@@ -144,6 +144,7 @@ class PearlUpdaterTests(unittest.TestCase):
             candidate_gid=os.getegid(),
             catalog_verifier=REPO_ROOT / "scripts/catalog-release.py",
             catalog_canary_proof=SCRIPT.with_name("catalog-canary-proof.py"),
+            canary_rollback_authorization=self.root / "canary-runtime" / "legacy-rollback.json",
             sleep=lambda _: None,
         )
         self.updater.candidate_executions = []
@@ -1349,6 +1350,100 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.updater.run_canary_gate.assert_called_once_with()
 
+    def test_transaction_rollback_serving_proof_authorizes_exact_prior_version(self):
+        transaction = self.root / "rollback-serving-transaction"
+        transaction.mkdir()
+        (transaction / "previous-runtime.json").write_text(
+            json.dumps(
+                {
+                    "coordinator_version": "v1.8.30",
+                    "gateway_version": "v1.8.30",
+                    "advertised_version": "1.8.30",
+                }
+            )
+            + "\n"
+        )
+        (transaction / "previous-runtime.json").chmod(0o600)
+        self.updater.prove_serving_recovery = mock.Mock()
+
+        self.updater._prove_rollback_serving(transaction)
+
+        identity = updater_module.RuntimeIdentity("v1.8.30", "v1.8.30", "1.8.30")
+        self.updater.prove_serving_recovery.assert_called_once_with(
+            identity,
+            legacy_rollback_version="1.8.30",
+        )
+
+    def test_serving_proof_requires_three_consecutive_public_fleet_samples(self):
+        identity = updater_module.RuntimeIdentity("v1.8.36", "v1.8.36", "1.8.36")
+        self.updater.previous_pool_ready = 2
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.gateway_serving_ready = mock.Mock(return_value=True)
+        self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.protected_provider_fleet_ready = mock.Mock(
+            side_effect=[True, True, False, True, True, True]
+        )
+        self.updater.run_canary_gate = mock.Mock()
+
+        self.updater.prove_serving_recovery(identity)
+
+        self.assertEqual(self.updater.protected_provider_fleet_ready.call_count, 6)
+        self.updater.run_canary_gate.assert_called_once_with()
+
+    def test_serving_proof_resets_consecutive_samples_after_sample_error(self):
+        identity = updater_module.RuntimeIdentity("v1.8.36", "v1.8.36", "1.8.36")
+        self.updater.previous_pool_ready = 2
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.gateway_serving_ready = mock.Mock(return_value=True)
+        self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.protected_provider_fleet_ready = mock.Mock(
+            side_effect=[
+                True,
+                True,
+                updater_module.UpdateError("transient public sample failure"),
+                True,
+                True,
+                True,
+            ]
+        )
+        self.updater.run_canary_gate = mock.Mock()
+
+        self.updater.prove_serving_recovery(identity)
+
+        self.assertEqual(self.updater.protected_provider_fleet_ready.call_count, 6)
+        self.updater.run_canary_gate.assert_called_once_with()
+
+    def test_public_protected_fleet_sample_requires_exact_ready_baseline(self):
+        self.updater.previous_pool_ready = 2
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        rows = [
+            {"provider_id": provider_id, "state": "ready", "routing_eligible": True}
+            for provider_id in self.updater.previous_protected_providers
+        ]
+        self.updater.get_authorized_json = mock.Mock(
+            return_value={"summary": {"ready": 2}, "pool": rows}
+        )
+
+        self.assertTrue(self.updater.protected_provider_fleet_ready())
+        self.updater.get_authorized_json.assert_called_once_with(
+            "https://coordinator.streamvc.live/poolz",
+            "operator-token",
+        )
+
+        self.updater.get_authorized_json.return_value = {
+            "summary": {"ready": 1},
+            "pool": rows,
+        }
+        self.assertFalse(self.updater.protected_provider_fleet_ready())
+        self.updater.get_authorized_json.return_value = {
+            "summary": {"ready": 2},
+            "pool": [{**rows[0], "routing_eligible": False}, rows[1]],
+        }
+        self.assertFalse(self.updater.protected_provider_fleet_ready())
+
     def test_snapshot_failure_restores_previously_active_services(self):
         release = self.verify()
         order = []
@@ -1399,7 +1494,12 @@ class PearlUpdaterTests(unittest.TestCase):
             side_effect=[
                 updater_module.CommandTimeout("deadline"),
                 subprocess.CompletedProcess(["systemctl", "stop"], 0, stdout="", stderr=""),
-                subprocess.CompletedProcess(["systemctl", "is-active"], 3, stdout="inactive\n", stderr=""),
+                subprocess.CompletedProcess(
+                    ["systemctl", "show"],
+                    0,
+                    stdout="ActiveState=inactive\nSubState=dead\nJob=\n",
+                    stderr="",
+                ),
             ]
         )
 
@@ -1420,12 +1520,90 @@ class PearlUpdaterTests(unittest.TestCase):
                     timeout=420,
                 ),
                 mock.call(
-                    ["systemctl", "is-active", "--quiet", "canary-buyer.service"],
+                    [
+                        "systemctl",
+                        "show",
+                        "--property=ActiveState",
+                        "--property=SubState",
+                        "--property=Job",
+                        "canary-buyer.service",
+                    ],
                     check=False,
                     timeout=10,
                 ),
             ],
         )
+
+    def test_canary_nonzero_start_is_stopped_and_proven_quiescent(self):
+        self.updater.verify_canary_authority = mock.Mock()
+        self.updater.verify_canary_rollout_readiness = mock.Mock()
+        self.updater._journal_transition = mock.Mock()
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["systemctl", "start"], 1, stdout="", stderr="buyer proof failed"
+                ),
+                subprocess.CompletedProcess(["systemctl", "stop"], 0, stdout="", stderr=""),
+            ]
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "buyer proof failed"):
+            self.updater.run_canary_gate()
+
+        self.updater.assert_unit_quiescent.assert_called_once_with("canary-buyer.service")
+        self.assertEqual(
+            self.updater.run_command.call_args_list[-1],
+            mock.call(
+                ["systemctl", "stop", "canary-buyer.service"],
+                check=False,
+                timeout=420,
+            ),
+        )
+
+    def test_canary_status_failure_is_stopped_and_proven_quiescent(self):
+        self.updater.verify_canary_authority = mock.Mock()
+        self.updater.verify_canary_rollout_readiness = mock.Mock()
+        self.updater._journal_transition = mock.Mock()
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["systemctl", "start"], 0, stdout="", stderr=""
+                ),
+                updater_module.CommandTimeout("status deadline"),
+                subprocess.CompletedProcess(["systemctl", "stop"], 0, stdout="", stderr=""),
+            ]
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "status could not be verified"):
+            self.updater.run_canary_gate()
+
+        self.updater.assert_unit_quiescent.assert_called_once_with("canary-buyer.service")
+
+    def test_canary_cancellation_still_quiesces_when_journaling_fails(self):
+        self.updater._journal_transition = mock.Mock(
+            side_effect=updater_module.UpdateError("journal unavailable")
+        )
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["systemctl", "stop"], 0, stdout="", stderr=""
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "was quiesced.*journaling failed"):
+            self.updater._stop_failed_canary_gate(
+                "canary-buyer.service",
+                "serving gate failed",
+            )
+
+        self.updater.run_command.assert_called_once_with(
+            ["systemctl", "stop", "canary-buyer.service"],
+            check=False,
+            timeout=420,
+        )
+        self.updater.assert_unit_quiescent.assert_called_once_with("canary-buyer.service")
 
     def test_canary_skip_status_cannot_satisfy_serving_gate(self):
         for status in (20, 21):
@@ -1435,6 +1613,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 self.updater.audit = mock.Mock()
                 self.updater._journal_transition = mock.Mock()
                 self.updater.issue_start_permit = mock.Mock(return_value=None)
+                self.updater.assert_unit_quiescent = mock.Mock()
                 self.updater.run_command = mock.Mock(
                     side_effect=[
                         subprocess.CompletedProcess(
@@ -1446,6 +1625,9 @@ class PearlUpdaterTests(unittest.TestCase):
                             stdout=f"Result=success\nExecMainStatus={status}\n",
                             stderr="",
                         ),
+                        subprocess.CompletedProcess(
+                            ["systemctl", "stop"], 0, stdout="", stderr=""
+                        ),
                     ]
                 )
 
@@ -1456,6 +1638,9 @@ class PearlUpdaterTests(unittest.TestCase):
 
                 self.updater.verify_canary_authority.assert_called_once_with()
                 self.updater.verify_canary_rollout_readiness.assert_called_once_with()
+                self.updater.assert_unit_quiescent.assert_called_once_with(
+                    "canary-buyer.service"
+                )
 
     def test_canary_zero_exec_status_is_required_and_accepted(self):
         self.updater.verify_canary_authority = mock.Mock()
@@ -1686,10 +1871,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 updater_module.sha256_file(source),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r3")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r4")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "8a168ea15a31f37e75f1ec03fb77476569bffa3d",
+            "0eb6cb30dc99de471a670fa951077777aa34a042",
         )
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_FILE_MODES,
@@ -1720,6 +1905,194 @@ class PearlUpdaterTests(unittest.TestCase):
             (REPO_ROOT / "test/e2e/canary-buyer/canary-buyer.service").read_text(),
         )
         self.assertEqual(updater_module.CANARY_UNIT_BUDGET_S, 180)
+
+    def test_legacy_rollback_authorization_is_exact_and_removed_after_gate(self):
+        expected_fleet = self.root / "rollback-expected-fleet.json"
+        providers = [
+            {
+                "provider_id": "provider-a",
+                "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            },
+            {
+                "provider_id": "provider-b",
+                "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            },
+        ]
+        expected_fleet.write_text(
+            json.dumps({"schema_version": 1, "providers": providers}) + "\n"
+        )
+        expected_fleet.chmod(0o600)
+        self.updater.previous_services = {
+            "macprovider-coordinator.service": True,
+            "macprovider-gateway.service": True,
+        }
+        self.updater.previous_pool_ready = 2
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.journal = {
+            "transaction_id": "a" * 64,
+            "previous_advertised_version": "1.8.30",
+            "rollback_armed": True,
+            "rollback_in_progress": True,
+            "live_mutation_started": True,
+            "success_persisted": False,
+        }
+        self.updater.verify_canary_authority = mock.Mock()
+        self.updater.verify_canary_rollout_readiness = mock.Mock()
+        self.updater._journal_transition = mock.Mock()
+        self.updater.issue_start_permit = mock.Mock(return_value=None)
+        observed = {}
+
+        def run_canary(argv, **_kwargs):
+            if argv[1] == "start":
+                path = self.updater.canary_rollback_authorization
+                observed["mode"] = stat.S_IMODE(path.stat().st_mode)
+                observed["parent_mode"] = stat.S_IMODE(path.parent.stat().st_mode)
+                observed["document"] = json.loads(path.read_text())
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="Result=success\nExecMainStatus=0\n",
+                stderr="",
+            )
+
+        self.updater.run_command = mock.Mock(side_effect=run_canary)
+        with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
+            self.updater.run_canary_gate(legacy_rollback_version="v1.8.30")
+
+        self.assertFalse(self.updater.canary_rollback_authorization.exists())
+        self.assertEqual(observed["mode"], 0o644)
+        self.assertEqual(observed["parent_mode"], 0o755)
+        self.assertEqual(
+            observed["document"],
+            {
+                "schema_version": 1,
+                "kind": "legacy_rollback",
+                "authority": "issue-585-integration-r4",
+                "transaction_id": "a" * 64,
+                "expires_at": observed["document"]["expires_at"],
+                "providers": [
+                    {**row, "binary_version": "1.8.30"} for row in providers
+                ],
+            },
+        )
+
+    def test_legacy_rollback_authorization_is_removed_after_gate_failure(self):
+        expected_fleet = self.root / "rollback-failure-expected-fleet.json"
+        providers = [
+            {
+                "provider_id": "provider-a",
+                "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            },
+            {
+                "provider_id": "provider-b",
+                "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            },
+        ]
+        expected_fleet.write_text(
+            json.dumps({"schema_version": 1, "providers": providers}) + "\n"
+        )
+        expected_fleet.chmod(0o600)
+        self.updater.previous_services = {
+            "macprovider-coordinator.service": True,
+            "macprovider-gateway.service": True,
+        }
+        self.updater.previous_pool_ready = 2
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.journal = {
+            "transaction_id": "a" * 64,
+            "previous_advertised_version": "1.8.30",
+            "rollback_armed": True,
+            "rollback_in_progress": True,
+            "live_mutation_started": True,
+            "success_persisted": False,
+        }
+        self.updater.verify_canary_authority = mock.Mock()
+        self.updater.verify_canary_rollout_readiness = mock.Mock()
+        self.updater._journal_transition = mock.Mock()
+        self.updater.issue_start_permit = mock.Mock(return_value=None)
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["systemctl", "start"], 1, stdout="", stderr="buyer proof failed"
+                ),
+                subprocess.CompletedProcess(
+                    ["systemctl", "stop"], 0, stdout="", stderr=""
+                ),
+            ]
+        )
+
+        with (
+            mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
+            self.assertRaisesRegex(updater_module.UpdateError, "buyer proof failed"),
+        ):
+            self.updater.run_canary_gate(legacy_rollback_version="1.8.30")
+
+        self.assertFalse(self.updater.canary_rollback_authorization.exists())
+        self.updater.assert_unit_quiescent.assert_called_once_with("canary-buyer.service")
+
+    def test_canary_readiness_rejects_stale_legacy_rollback_authorization(self):
+        control_dir = self.root / "canary-control-stale"
+        control_dir.mkdir(mode=0o755)
+        enable_gate = control_dir / "enabled"
+        enable_gate.write_bytes(b"")
+        enable_gate.chmod(0o644)
+        rollback_dir = self.updater.canary_rollback_authorization.parent
+        rollback_dir.mkdir(mode=0o755)
+        self.updater.canary_rollback_authorization.write_text("{}\n")
+        self.updater.canary_rollback_authorization.chmod(0o644)
+
+        with (
+            mock.patch.object(updater_module, "CANARY_ENABLE_GATE", enable_gate),
+            mock.patch.object(
+                updater_module,
+                "CANARY_DISABLE_SENTINEL",
+                self.root / "no-disable-sentinel",
+            ),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "stale legacy rollback"):
+                self.updater.verify_canary_rollout_readiness()
+
+    def test_legacy_rollback_authorization_rejects_wrong_fleet_or_context(self):
+        expected_fleet = self.root / "rollback-context-fleet.json"
+        expected_fleet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "providers": [
+                        {
+                            "provider_id": "provider-a",
+                            "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+                        },
+                        {
+                            "provider_id": "provider-b",
+                            "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                        },
+                    ],
+                }
+            )
+            + "\n"
+        )
+        expected_fleet.chmod(0o600)
+        self.updater.previous_pool_ready = 2
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.journal = {
+            "transaction_id": "b" * 64,
+            "previous_advertised_version": "1.8.30",
+            "rollback_armed": True,
+            "rollback_in_progress": False,
+            "live_mutation_started": True,
+            "success_persisted": False,
+        }
+
+        with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
+            with self.assertRaisesRegex(updater_module.UpdateError, "outside an active restoration"):
+                self.updater._write_legacy_rollback_authorization("1.8.30")
+            self.updater.journal["rollback_in_progress"] = True
+            self.updater.previous_protected_providers = ["provider-a", "wrong-provider"]
+            with self.assertRaisesRegex(updater_module.UpdateError, "fleet mismatches"):
+                self.updater._write_legacy_rollback_authorization("1.8.30")
 
     def test_canary_rollout_readiness_requires_reviewed_enable_gate(self):
         files = {}
@@ -2758,6 +3131,34 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.assertEqual(orphaned.returncode, 1)
         self.assertIn("no running updater/reconciler", orphaned.stderr)
+
+    def test_start_permit_is_removed_when_directory_sync_fails_after_publish(self):
+        release = self.verify()
+        self.updater._start_journal(release, updater_module.SemVer.parse("1.8.26"))
+        permit = self.updater._permit_path("macprovider-coordinator.service")
+        real_fsync_directory = updater_module._fsync_directory
+        permit_sync_calls = 0
+
+        def fail_first_permit_sync(path):
+            nonlocal permit_sync_calls
+            if path == permit.parent:
+                permit_sync_calls += 1
+                if permit_sync_calls == 1:
+                    raise OSError("simulated directory fsync failure")
+            return real_fsync_directory(path)
+
+        with (
+            mock.patch.object(
+                updater_module,
+                "_fsync_directory",
+                side_effect=fail_first_permit_sync,
+            ),
+            self.assertRaisesRegex(OSError, "simulated directory fsync failure"),
+        ):
+            self.updater.issue_start_permit("macprovider-coordinator.service")
+
+        self.assertEqual(permit_sync_calls, 2)
+        self.assertFalse(permit.exists())
 
     def test_transaction_gate_rejects_permit_from_another_boot(self):
         release = self.verify()
