@@ -95,8 +95,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-585-integration-r1"
-CANARY_AUTHORITY_COMMIT = "c4d55fbb3fa3a71be43c42d341f1022b0e823eb3"
+CANARY_AUTHORITY_VERSION = "issue-585-integration-r2"
+CANARY_AUTHORITY_COMMIT = "44d8baeb54c830a7afbdeb505ddfbd7a7bb0e681"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -117,9 +117,9 @@ CANARY_AUTHORITY_FILES = {
     Path("/opt/macprovider-canary-buyer/probe.mjs"): "0a0943f330191917bee3a8c51056d8e9c6a1003b67457bef0945a7a4bdcb4887",
     Path("/opt/macprovider-canary-buyer/safety.mjs"): "2ae20298d832f94b1be3a7175d67d882a93243bdf4fa9218db7636d94e79eee4",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
-    Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "4f923918cc4acde56adcee88a8694eafa83a63e478e4e672b6ab19194cd67458",
-    Path("/etc/systemd/system/canary-buyer.service"): "fe12eccd9fc5b72ce19b7742ccae1117ac7d0d126790a77e450171bfd8c92189",
-    Path("/etc/systemd/system/canary-buyer.timer"): "a008a93f0caa9d4fba416a564935d97b2225dfc87f8d23c8135a5ae7b580c2aa",
+    Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
+    Path("/etc/systemd/system/canary-buyer.service"): "a57fb137f86d66ad952e72ca481cb886f4f5c8a9989c6cce36f54dc766180a99",
+    Path("/etc/systemd/system/canary-buyer.timer"): "039ebf4620f13a429583d8b36b6b0cb765ee588815d5fd0250d92115ba608e0e",
 }
 CANARY_AUTHORITY_FILE_MODES = {
     Path("/opt/macprovider-canary-buyer/probe.mjs"): 0o755,
@@ -145,7 +145,7 @@ CANARY_AUTHORITY_PRIVATE_FILES = {
     CANARY_OPERATOR_TOKEN: "canary operator token",
     CANARY_EXPECTED_FLEET: "canary expected fleet",
 }
-CANARY_ENABLE_GATE = Path("/etc/macprovider/canary-buyer.enabled")
+CANARY_ENABLE_GATE = Path("/etc/macprovider-canary-buyer/enabled")
 CANARY_DISABLE_SENTINEL = Path("/var/lib/macprovider-canary-buyer/DISABLED")
 
 
@@ -2385,6 +2385,12 @@ class Updater:
 
     def verify_canary_rollout_readiness(self) -> None:
         gate = self._trusted_regular_file(CANARY_ENABLE_GATE, "canary reviewed enable gate")
+        _trusted_directory(
+            CANARY_ENABLE_GATE.parent,
+            "canary control directory",
+            trusted_uid=self.trusted_uid,
+            mode=0o755,
+        )
         if stat.S_IMODE(gate.st_mode) != 0o644 or gate.st_size != 0:
             raise UpdateError("canary reviewed enable gate must be an empty root-owned 0644 file")
         if _path_entry_exists(CANARY_DISABLE_SENTINEL):
@@ -4010,6 +4016,12 @@ class Updater:
             return False
         try:
             gate = self._trusted_regular_file(CANARY_ENABLE_GATE, "canary reviewed enable gate")
+            _trusted_directory(
+                CANARY_ENABLE_GATE.parent,
+                "canary control directory",
+                trusted_uid=self.trusted_uid,
+                mode=0o755,
+            )
         except UpdateError:
             return False
         return stat.S_IMODE(gate.st_mode) == 0o644 and gate.st_size == 0

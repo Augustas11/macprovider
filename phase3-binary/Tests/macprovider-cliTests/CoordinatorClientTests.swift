@@ -3504,10 +3504,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.35")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.35")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.35")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.35")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.36")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.36")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.36")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.36")
     }
 
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {

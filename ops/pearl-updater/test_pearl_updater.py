@@ -1568,7 +1568,9 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         expected_fleet.chmod(0o600)
         private_files[expected_fleet] = "canary expected fleet"
-        enable_gate = self.root / "canary-buyer.enabled"
+        control_dir = self.root / "canary-control"
+        control_dir.mkdir(mode=0o755)
+        enable_gate = control_dir / "enabled"
         enable_gate.write_bytes(b"")
         enable_gate.chmod(0o644)
         disable_sentinel = self.root / "DISABLED"
@@ -1614,6 +1616,11 @@ class PearlUpdaterTests(unittest.TestCase):
         ):
             self.updater.verify_canary_authority()
             self.updater.verify_canary_rollout_readiness()
+
+            control_dir.chmod(0o775)
+            with self.assertRaisesRegex(updater_module.UpdateError, "canary control directory mode"):
+                self.updater.verify_canary_rollout_readiness()
+            control_dir.chmod(0o755)
 
             paths["emergency-disable.sh"].chmod(0o644)
             with self.assertRaisesRegex(updater_module.UpdateError, "requires mode 0755"):
@@ -1679,10 +1686,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 updater_module.sha256_file(source),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r1")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r2")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "c4d55fbb3fa3a71be43c42d341f1022b0e823eb3",
+            "44d8baeb54c830a7afbdeb505ddfbd7a7bb0e681",
         )
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_FILE_MODES,
@@ -1763,7 +1770,9 @@ class PearlUpdaterTests(unittest.TestCase):
             '{"provider_id":"b","model_id":"model-b"}]}'
         )
         expected_fleet.chmod(0o600)
-        enable_gate = self.root / "canary-buyer.enabled"
+        control_dir = self.root / "canary-control"
+        control_dir.mkdir(mode=0o755)
+        enable_gate = control_dir / "enabled"
         enable_gate.write_bytes(b"")
         enable_gate.chmod(0o644)
         disable_sentinel = self.root / "DISABLED"
@@ -3038,7 +3047,8 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("/etc/macprovider/canary-buyer.heartbeat", text)
         self.assertIn("/etc/macprovider/canary-buyer.operator-token", text)
         self.assertIn("/etc/macprovider/canary-buyer.expected-fleet.json", text)
-        self.assertIn("/etc/macprovider/canary-buyer.enabled", text)
+        self.assertIn("/etc/macprovider-canary-buyer/enabled", text)
+        self.assertNotIn("/etc/macprovider/canary-buyer.enabled", text)
         self.assertIn("/var/lib/macprovider-canary-buyer/DISABLED", text)
         self.assertIn("test ! -e /etc/macprovider/canary-buyer.env", text)
         self.assertIn(
