@@ -1329,6 +1329,9 @@ struct ServeCommand: AsyncParsableCommand {
         let lifecycleReadyReason = operatorPausedInitially
             ? "operator_pause_restored_after_startup"
             : (coordinatorClient == nil ? "local_http_ready_join_disabled" : "local_http_ready_awaiting_coordinator")
+        let lifecycleReadyWriter: ProviderLifecycleWriter = operatorPausedInitially
+            ? .operatorCommand
+            : .serve
         let server = HTTPServer(
             config: resolved,
             modelRuntime: modelRuntime,
@@ -1346,7 +1349,7 @@ struct ServeCommand: AsyncParsableCommand {
                 _ = try lifecycleStateStore.transition(
                     to: lifecycleReadyState,
                     reasonCode: lifecycleReadyReason,
-                    writer: .serve,
+                    writer: lifecycleReadyWriter,
                     providerID: lifecycleProviderID,
                     modelID: lifecycleModelID,
                     compatibilitySetID: lifecycleCompatibilitySetID,

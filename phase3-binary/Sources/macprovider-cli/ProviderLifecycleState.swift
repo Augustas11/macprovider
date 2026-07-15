@@ -301,9 +301,9 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         case .loadingModel:
             [.validatingCatalog]
         case .degradedServing:
-            [.pausedByOperator, .locallyReadyConnecting, .servingBuyers, .degradedServing]
+            [.loadingModel, .pausedByOperator, .locallyReadyConnecting, .servingBuyers, .degradedServing]
         case .pausedByOperator:
-            [.installing, .locallyReadyConnecting, .servingBuyers, .degradedServing, .pausedByOperator]
+            [.installing, .loadingModel, .locallyReadyConnecting, .servingBuyers, .degradedServing, .pausedByOperator]
         case .servingBuyers:
             [
                 .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,

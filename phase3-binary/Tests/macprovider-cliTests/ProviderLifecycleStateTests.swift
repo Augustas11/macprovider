@@ -79,6 +79,44 @@ final class ProviderLifecycleStateTests: XCTestCase {
         XCTAssertEqual(replay.sequence, 1)
     }
 
+    func testNonJoiningStartupCanServeLocallyAfterModelLoad() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        _ = try store.transition(
+            to: .startingProvider,
+            reasonCode: "serve_invoked",
+            writer: .serve,
+            operationID: "serve:no-join"
+        )
+        _ = try store.transition(
+            to: .importingCredentials,
+            reasonCode: "resolving_cli_keychain_custody",
+            writer: .serve,
+            operationID: "serve:no-join"
+        )
+        _ = try store.transition(
+            to: .validatingCatalog,
+            reasonCode: "startup_preflight",
+            writer: .serve,
+            operationID: "serve:no-join"
+        )
+        let loading = try store.transition(
+            to: .loadingModel,
+            reasonCode: "catalog_preflight_passed",
+            writer: .serve,
+            operationID: "serve:no-join"
+        )
+        let locallyServing = try store.transition(
+            to: .degradedServing,
+            reasonCode: "local_http_ready_join_disabled",
+            writer: .serve,
+            operationID: "serve:no-join"
+        )
+
+        XCTAssertEqual(locallyServing.previousTransitionID, loading.transitionID)
+        XCTAssertEqual(locallyServing.state, .degradedServing)
+    }
+
     func testOperatorPauseIntentSurvivesIntermediateRestartStatesUntilExplicitResume() throws {
         let fixture = try Fixture()
         let store = ProviderLifecycleStateStore(url: fixture.recordURL)
@@ -126,6 +164,52 @@ final class ProviderLifecycleStateTests: XCTestCase {
         XCTAssertFalse(resumed.operatorPauseRequested)
         XCTAssertEqual(restarting.previousTransitionID, paused.transitionID)
         XCTAssertNotEqual(resumed.previousTransitionID, restarting.transitionID)
+    }
+
+    func testPausedStartupCanRestorePauseAfterModelLoad() throws {
+        let fixture = try Fixture()
+        let store = ProviderLifecycleStateStore(url: fixture.recordURL)
+        _ = try store.transition(
+            to: .pausedByOperator,
+            reasonCode: "operator_pause_confirmed",
+            writer: .operatorCommand,
+            operationID: "pause-1",
+            operatorPaused: true
+        )
+        _ = try store.transition(
+            to: .startingProvider,
+            reasonCode: "serve_invoked",
+            writer: .serve,
+            operationID: "serve:paused"
+        )
+        _ = try store.transition(
+            to: .importingCredentials,
+            reasonCode: "resolving_cli_keychain_custody",
+            writer: .serve,
+            operationID: "serve:paused"
+        )
+        _ = try store.transition(
+            to: .validatingCatalog,
+            reasonCode: "startup_preflight",
+            writer: .serve,
+            operationID: "serve:paused"
+        )
+        let loading = try store.transition(
+            to: .loadingModel,
+            reasonCode: "catalog_preflight_passed",
+            writer: .serve,
+            operationID: "serve:paused"
+        )
+        let paused = try store.transition(
+            to: .pausedByOperator,
+            reasonCode: "operator_pause_restored_after_startup",
+            writer: .operatorCommand,
+            operationID: "serve:paused"
+        )
+
+        XCTAssertEqual(paused.previousTransitionID, loading.transitionID)
+        XCTAssertTrue(paused.operatorPauseRequested)
+        XCTAssertEqual(paused.writer, .operatorCommand)
     }
 
     func testChangedReasonCreatesLinkedTransition() throws {
