@@ -287,6 +287,52 @@ test('active-request safety correlates exact busy pool row, dropped gateway mode
   }), []);
 });
 
+test('liveness substitutes missing v2 signals only for exact legacy-bridge provider rows', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+  ];
+  const gateway = gatewaySnapshot({
+    status: 'up', degraded: false, coordinator: { status: 'up', checked_at: stamp(0) },
+    pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+    models: expectedFleet.map(({ model_id }) => ({
+      id: model_id, provider_count: 1, ready_provider_count: 1, slots_free: 1,
+      available: true, availability: 'available', degraded: false,
+    })),
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id, assigned_id: `session-${index}`, model_id, state: 'ready', routing_eligible: true,
+    binary_version: '1.8.30', catalog_admission_mode: 'legacy_bridge',
+    connected_at: stamp(-60_000), last_heartbeat_at: stamp(-1_000), last_activity_at: stamp(-500),
+  })) }, now);
+  const providers = operatorPool.map((row) => row.safety_telemetry);
+  const initial = { gateway, operator_pool: operatorPool, providers };
+  const observed = structuredClone(initial);
+
+  assert.ok(safetyObservationReasons(initial, observed, expectedFleet)
+    .includes('provider-a:provider_signal_missing'));
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
+    allowLegacyBridgeProviderSignals: true,
+  }), []);
+
+  for (const [field, value] of [
+    ['catalog_admission_mode', 'current'],
+    ['catalog_admission_mode', 'previous'],
+    ['catalog_admission_mode', null],
+    ['binary_version', null],
+    ['binary_version', 'not-semver'],
+    ['model_id', 'wrong-model'],
+  ]) {
+    const rejected = structuredClone(observed);
+    rejected.operator_pool[0][field] = value;
+    assert.ok(safetyObservationReasons(initial, rejected, expectedFleet, {
+      allowLegacyBridgeProviderSignals: true,
+    }).includes('provider-a:provider_signal_missing'), `${field}=${value} must fail closed`);
+  }
+});
+
 test('post-request recovery outlives the gateway active-loss cache window', async () => {
   let nowMs = 0;
   const observe = async () => ({ gatewayCacheActive: nowMs < 10_000 });

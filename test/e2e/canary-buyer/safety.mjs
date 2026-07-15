@@ -181,6 +181,8 @@ export function poolzSnapshot(payload, nowMs = Date.now()) {
       activity_age_ms: ageMs(row?.last_activity_at, nowMs),
       ram_gb: finiteOrNull(row?.ram_gb),
       model_id: stringOrNull(row?.model_id),
+      binary_version: stringOrNull(row?.binary_version),
+      catalog_admission_mode: stringOrNull(row?.catalog_admission_mode),
       slots_free: integerOrNull(row?.slots_free),
       slots_total: integerOrNull(row?.slots_total),
       routing_eligible: row?.routing_eligible !== false,

@@ -115,6 +115,7 @@ const CONFIG = {
   pushgateway: args['pushgateway'] || env('CANARY_PUSHGATEWAY') || '',
   pushJob: args['push-job'] || env('CANARY_PUSH_JOB') || 'canary_buyer',
   disableFile: env('CANARY_DISABLE_FILE'),
+  allowLegacyBridgeProviderSignals: boolEnv('CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS', false),
   failOnDegraded: 'fail-on-degraded' in args,
 };
 CONFIG.postRequestRecoveryMs = GATEWAY_STATUS_CACHE_TTL_MS
@@ -123,6 +124,12 @@ CONFIG.postRequestRecoveryMs = GATEWAY_STATUS_CACHE_TTL_MS
 
 function env(k) {
   return process.env[k] && process.env[k].length ? process.env[k] : '';
+}
+function boolEnv(k, d) {
+  const raw = env(k);
+  if (!raw) return d;
+  if (raw !== '0' && raw !== '1') throw new Error(`${k} must be 0 or 1`);
+  return raw === '1';
 }
 function intEnv(k, d, minimum, maximum) {
   const raw = env(k);
@@ -1052,10 +1059,18 @@ function expectedPoolRows(poolRows, expectedFleet) {
   return poolRows.filter((row) => ids.has(row.provider_id));
 }
 
+function isLegacyBridgeProviderSignalSubstitute(row, expected) {
+  return row?.provider_id === expected.provider_id
+    && row?.model_id === expected.model_id
+    && row?.catalog_admission_mode === 'legacy_bridge'
+    && /^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(row?.binary_version || '');
+}
+
 export function safetyObservationReasons(initial, observed, expectedFleet, {
   requireHeartbeatAdvance = false,
   activeModelID = '',
   cachedGatewayModelID = '',
+  allowLegacyBridgeProviderSignals = false,
 } = {}) {
   const qualification = CONFIG.mode === 'qualification';
   const activeProviderID = activeModelID
@@ -1136,9 +1151,14 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     }
     const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
     const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
+    const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
     for (const expected of expectedFleet) {
       const current = currentByID.get(expected.provider_id);
       if (!current) {
+        const poolRow = currentPoolByID.get(expected.provider_id);
+        if (allowLegacyBridgeProviderSignals && isLegacyBridgeProviderSignalSubstitute(poolRow, expected)) {
+          continue;
+        }
         reasons.push(`${expected.provider_id}:provider_signal_missing`);
         continue;
       }
@@ -1173,7 +1193,10 @@ function createControl(initial, baselines, expectedFleet, budget) {
     };
   };
 
-  const observationReasons = (observed, options) => safetyObservationReasons(initial, observed, expectedFleet, options);
+  const observationReasons = (observed, options) => safetyObservationReasons(initial, observed, expectedFleet, {
+    ...options,
+    allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
+  });
 
   const observeAndCheck = async (phase, {
     timeoutMs = CONFIG.reqTimeoutMs,

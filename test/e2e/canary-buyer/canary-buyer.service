@@ -45,6 +45,11 @@ Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts
 # directory but cannot create, replace, or remove the root-owned gate.
 Environment=CANARY_ENABLE_FILE=/etc/macprovider-canary-buyer/enabled
 Environment=CANARY_DISABLE_FILE=/var/lib/macprovider-canary-buyer/DISABLED
+# During the bounded backend-first bridge only, missing direct v2 provider
+# telemetry may be substituted by an exact protected /poolz row that the new
+# coordinator explicitly classifies legacy_bridge. All fleet, routing,
+# connection, and heartbeat invariants remain mandatory.
+Environment=CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS=1
 # Production must never silently degrade back to journal-only monitoring.
 Environment=CANARY_REQUIRE_HEARTBEAT=1
 # Scheduled liveness is one 8-token request/model with a worst-case global cap;
