@@ -2740,7 +2740,42 @@ if lock_path:
 try:
     lease_st = lstat_or_none(lease_path)
     if lease_st is None:
-        # No lease to reconcile.
+        # No lease to reconcile. This is the ONLY path CI exercises for the
+        # non-gated cases, and it is fully portable (no Darwin primitive touched).
+        raise SystemExit(0)
+
+    # -- NON-DARWIN FAIL-TOWARD-REMOVAL (portability guard) ------------------
+    # Owner-identity evaluation (owner_is_live -> process_start_microseconds,
+    # boot_session) depends on Darwin-only primitives: the sysctl(KERN_PROC_PID)
+    # -> kinfo_proc.p_starttime ABI read via ctypes libc.sysctl, and
+    # `/usr/sbin/sysctl -n kern.bootsessionuuid`. On glibc `libc.sysctl` is
+    # ABSENT (accessing it raises AttributeError, which the syscall wrappers do
+    # NOT catch), so evaluating an EXISTING lease off-Darwin could crash the
+    # reconciler instead of resolving it. Production never runs this installer
+    # off macOS; only Linux CI reaches here, and only when a fixture injects a
+    # lease. Fail toward REMOVAL with a logged reason: removal is always the safe
+    # direction (a restored CLI re-mints a fresh lease one store cycle later),
+    # and it keeps ALL Darwin-only initialization strictly lazy -- no CDLL setup,
+    # no sysctl, no kinfo_proc parsing is ever reached on a non-Darwin platform.
+    if sys.platform != "darwin":
+        sys.stderr.write(
+            "lifecycle_lease_reconcile_removed_non_darwin:platform=%s\n" % sys.platform
+        )
+        try:
+            os.unlink(lease_path)
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(lease_path)
+        try:
+            dir_fd = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+        if lstat_or_none(lease_path) is not None:
+            fail("lifecycle_lease_removal_not_durable")
         raise SystemExit(0)
 
     # -- PRE-PARSE STORAGE GATE (R6 CODE-M3) ---------------------------------

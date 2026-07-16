@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Linux CI diagnostic: this suite is authored for macOS and drives the installer
+# recovery path, some of which is Darwin-only and gated below. Historically a
+# non-Darwin divergence could kill the suite under `set -e` with ZERO output
+# (a silent ~1s death on the ubuntu runner), leaving nothing to debug. Turn on
+# an execution trace ONLY on non-Darwin CI so the exact failing command is
+# always visible; this is a no-op locally and on Darwin (zero behavior change,
+# trace goes to stderr only when both CI=true and the platform is not Darwin).
+if [ "${CI:-}" = "true" ] && [ "$(uname -s)" != "Darwin" ]; then
+  export PS4='+ [${SECONDS}s ${BASH_SOURCE##*/}:${LINENO}] '
+  set -x
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 INSTALL_SH="$REPO_ROOT/phase3-binary/dist/install.sh"
 TMP="$(mktemp -d)"
@@ -1117,9 +1129,18 @@ write_full_schema_record "$TMP/success/expected-serving.json" \
 lifecycle_old_hash="$(shasum -a 256 "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json" | awk '{print $1}')"
 [ "$lifecycle_old_hash" = "$(shasum -a 256 "$TMP/success/expected-serving.json" | awk '{print $1}')" ]
 # The restored file keeps the store's owned 0600 posture after rollback.
+# `stat -f '%Lp'` (BSD/macOS) OR `stat -c '%a'` (GNU/Linux) reads the octal mode.
+# If BOTH fail (e.g. the file is unexpectedly absent because an upstream Linux
+# divergence broke the rollback), the command substitution must NOT trip `set -e`
+# with an empty value and a silent death: capture MISSING and fail loudly so the
+# real problem is visible in the log instead of a zero-output nonzero exit.
 restored_perm="$(stat -f '%Lp' "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json" 2>/dev/null \
-  || stat -c '%a' "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json")"
-[ "$restored_perm" = "600" ]
+  || stat -c '%a' "$TMP/success/home/Library/Application Support/macprovider/lifecycle/state-v1.json" 2>/dev/null \
+  || printf MISSING)"
+if [ "$restored_perm" != "600" ]; then
+  echo "FAIL: restored lifecycle-state file mode is '$restored_perm' (expected 600); file likely absent or wrong-mode after rollback" >&2
+  exit 1
+fi
 
 # (b) Lifecycle-state rollback restores prior ABSENCE. An incumbent with no
 # lifecycle file must not gain a stranded state file after rollback; the file
