@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.11 (2026-07-14, § 5.2 retryability — signup_rate_limited abuse-limit reclassification + streaming SSE retryable-override symmetry — item 20)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.3, SPEC-003 v0.7, SPEC-004 v0.3.2
+**Version:** 0.9.12 (2026-07-15, § 17.2 declared-`supported_models` in "known" — cross-spec 404 reconciliation, runbook item 22)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.12 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
+- § 17.2 clarified: a provider's "seen" model list is the union of its served `model_id` and its declared `supported_models` (SPEC-010 v1.5 R-3.3.4, authoritative; SPEC-002 v1.5.4 R-3.X.6). A declared-but-cold model is therefore *known* → `503 no_provider_available` via § 17.3, not `404 model_not_found`. § 17.3 and § 2.12 name declared models alongside served/seen. Already the shipped coordinator behavior (`ModelKnown()` unions declared `supported_models`; #555); changes no dispatch outcome, only the error code a declared-but-cold request receives. Docs-only. Resolves the SPEC-010 R-3.3.4 carried cross-spec-inconsistency note. **(v0.9.11 is the in-flight item-20 change on PR #594; this v0.9.12 entry sequences after it — merge #594 first.)**
 
 **Change log v0.9.11 (2026-07-14, runbook item 20 — retryability classification + transport symmetry):**
 - § 5.2 abuse-limit exception gains `signup_rate_limited` (gateway): a per-IP daily account-creation cap (`oauth.go createSignupAccount`, `SignupAccountsPerIPPerDay` over a 24h window) that ships **no** `Retry-After`/reset header and sits **outside** the `/v1/chat/completions` 30-RPS account clamp — the same shape as `feedback_rate_limited` / `oauth_state_rate_limited` / `demo_session_rate_limited`. Reclassified from `retryable:true` to `false` (moved from `gatewayRetryableByCode` to `gatewayPermanentCodes`); #548 left it `true` only because the round-3 SECURITY-MEDIUM revert didn't name it. **Buyer-visible envelope change:** the `signup_rate_limited` 429 now carries `retryable:false`. The header-agreement note's "converse does not hold" example was repointed from `signup_rate_limited` to the retryable `502` availability codes (`provider_error` / `upstream_provider_error`), which genuinely carry no `Retry-After` because `setGatewayRetryAfter` attaches one only to `503`/`504` and the fixed-window codes; the note now also records that the capacity-pause codes DO ship `Retry-After: 30` (they are not headerless).
@@ -309,7 +312,7 @@ SPEC-006 MAY add stricter public gateway limits before forwarding, including `ma
 
 SPEC-002 defines the Phase 4 coordinator.
 
-SPEC-006 layers on top of SPEC-002. The base relationship was established in SPEC-002 v1.1.5; the current SPEC-006 v0.9.6 depends on SPEC-002 v1.5.3 (bounded slot queue plus the account-scoped reconciliation key lineage — see header `Depends on` line and §6 forward-header rule).
+SPEC-006 layers on top of SPEC-002. The base relationship was established in SPEC-002 v1.1.5; the current SPEC-006 v0.9.12 depends on SPEC-002 v1.5.4 (bounded slot queue plus the account-scoped reconciliation key lineage — see header `Depends on` line and §6 forward-header rule).
 
 SPEC-006 MUST preserve SPEC-002's router-only charter.
 
@@ -375,7 +378,7 @@ SPEC-006 MUST NOT create buyer-visible payout, earning, donation, or payment pro
 
 SPEC-001 and SPEC-002 are locked and unchanged during SPEC-006-only implementation and fix passes.
 
-SPEC-006 layers on top of the SPEC-002 coordinator. (Current dependency: SPEC-002 v1.5.3; base relationship established in v1.1.5 — see §1.5 and the document header `Depends on` line.)
+SPEC-006 layers on top of the SPEC-002 coordinator. (Current dependency: SPEC-002 v1.5.4; base relationship established in v1.1.5 — see §1.5 and the document header `Depends on` line.)
 
 Cross-spec dependencies are read-only references.
 
@@ -557,8 +560,8 @@ The metric MUST be reportable as a 7-day rolling distribution with median (p50) 
 
 ### 2.12 Failure modes
 
-- `404` -- model unknown (model not in any provider's served list).
-- `503` -- model known but no provider available (pool empty or all busy).
+- `404` -- model unknown (model not in any provider's served, declared `supported_models`, or recently-seen list — see § 17.2).
+- `503` -- model known but no provider available (pool empty or all busy; a declared-but-cold model is *known*, so 503 here, not 404).
 - `502` -- selected provider failed mid-request.
 - `504` -- provider exceeded timeout.
 - `401` -- invalid or missing bearer token.
@@ -2861,7 +2864,7 @@ A coordinator-issued `500` with `code: "route_snapshot_failed"` (a SPEC-022 pre-
 
 ### 17.2 Model unknown
 
-If a model is not in any provider's served or recently seen model list, return 404.
+If a model is not in any provider's served, **declared** (`supported_models`), or recently seen model list, return 404. **(v0.9.12 clarification — runbook item 22:)** a provider's "seen" model list is the union of its served `model_id` and every model it declared in `supported_models` (SPEC-010 v1.5 R-3.3.4, authoritative; SPEC-002 v1.5.4 R-3.X.6). So a model some connected provider **declares supported but has not warmed** is *known* and falls through to § 17.3's `503 no_provider_available` (retryable), not 404 — matching the shipped `ModelKnown()` gate (#555). This changes no dispatch outcome, only the error code a declared-but-cold request receives (404 → 503).
 
 Code:
 
@@ -2871,7 +2874,7 @@ model_not_found
 
 ### 17.3 Model unavailable
 
-If a model is known but no provider slot is available after any allowed bounded pre-dispatch slot queue expires, return 503.
+If a model is known — served, **declared in `supported_models`**, or recently seen (§ 17.2 / SPEC-010 R-3.3.4) — but no provider slot is available after any allowed bounded pre-dispatch slot queue expires, return 503.
 
 Code:
 
