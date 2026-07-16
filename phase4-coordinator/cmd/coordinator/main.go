@@ -920,17 +920,21 @@ func main() {
 		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
-	trustedReferralProxies := mustParseTrustedProxies(cfg, logger)
-	referralValidation := &referralapi.ValidationHandler{
-		Store:         tokenStore,
-		Policy:        referralPolicy,
-		PublicLimiter: referralapi.NewBoundedLimiter(30, time.Minute, 4096),
-		ValidateSlots: make(chan struct{}, 4),
-		SourceIP: func(r *http.Request) string {
-			return onboarding.ClientIP(r, trustedReferralProxies)
-		},
+	var referralValidationHandler http.HandlerFunc
+	if cfg.Referrals.EnablePublicValidation {
+		trustedReferralProxies := mustParseTrustedProxies(cfg, logger)
+		referralValidation := &referralapi.ValidationHandler{
+			Store:         tokenStore,
+			Policy:        referralPolicy,
+			PublicLimiter: referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+			ValidateSlots: make(chan struct{}, 4),
+			SourceIP: func(r *http.Request) string {
+				return onboarding.ClientIP(r, trustedReferralProxies)
+			},
+		}
+		referralValidationHandler = referralValidation.ServeHTTP
 	}
-	buyerHandler = withReferralValidation(buyerHandler, referralValidation.ServeHTTP)
+	buyerHandler = withReferralValidation(buyerHandler, referralValidationHandler)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)

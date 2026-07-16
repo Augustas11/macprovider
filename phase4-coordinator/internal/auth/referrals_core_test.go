@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -181,6 +182,134 @@ func TestReferralReplayForSameProviderDoesNotConsumeCapacityTwice(t *testing.T) 
 	if redemptions != 1 || activeTokens != 1 {
 		t.Fatalf("redemptions=%d active_tokens=%d, want 1/1", redemptions, activeTokens)
 	}
+}
+
+func TestCredentialBootstrapResponseLossKeepsOneReferralRedemption(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := coreReferralPolicy()
+	code := seedCoreReferral(t, store, policy, "seedbootstrapretry")
+	now := time.Now().UTC().Truncate(time.Second)
+	request := BootstrapMintRequest{
+		ProviderID:          "mp-0123456789abcdef0123456789abcdef",
+		ProviderName:        "bootstrap provider",
+		SourceIP:            "192.0.2.80",
+		ReceiptPubkey:       bytes.Repeat([]byte{0x81}, 32),
+		Now:                 now,
+		TTL:                 10 * time.Minute,
+		PerIPLimitPerHour:   8,
+		PerProviderPerHour:  3,
+		GlobalLimitPerHour:  128,
+		UnconfirmedIDMax:    64,
+		OutstandingTokenMax: 64,
+		IdentityRetention:   7 * 24 * time.Hour,
+		ReferralCode:        code,
+		ReferralPolicy:      policy,
+	}
+
+	first, err := store.MintBootstrapToken(ctx, request)
+	if err != nil || first.Replaced || first.ProviderToken == "" {
+		t.Fatalf("first mint=%+v err=%v", first, err)
+	}
+	request.Now = now.Add(time.Second)
+	request.ReferralCode = ""
+	recovered, err := store.MintBootstrapToken(ctx, request)
+	if err != nil || !recovered.Replaced || recovered.ProviderToken == "" || recovered.ProviderToken == first.ProviderToken {
+		t.Fatalf("recovered mint=%+v err=%v", recovered, err)
+	}
+	if _, valid, err := store.ValidateToken(ctx, first.ProviderToken); err != nil || valid {
+		t.Fatalf("lost-response token valid=%v err=%v, want revoked", valid, err)
+	}
+	providerID, valid, err := store.ValidateToken(ctx, recovered.ProviderToken)
+	if err != nil || !valid || providerID != request.ProviderID {
+		t.Fatalf("recovered provider_id=%q valid=%v err=%v", providerID, valid, err)
+	}
+
+	var redemptions, activeTokens int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_redemptions WHERE provider_id = ?`, request.ProviderID).Scan(&redemptions); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM provider_tokens WHERE provider_id = ? AND revoked_at IS NULL`, request.ProviderID).Scan(&activeTokens); err != nil {
+		t.Fatal(err)
+	}
+	if redemptions != 1 || activeTokens != 1 {
+		t.Fatalf("redemptions=%d active_tokens=%d, want 1/1", redemptions, activeTokens)
+	}
+}
+
+func TestCredentialBootstrapReferralRecoveryCannotChangeCodeOrCampaign(t *testing.T) {
+	newRequest := func(providerID string, keyByte byte, now time.Time, code string, policy ReferralPolicy) BootstrapMintRequest {
+		return BootstrapMintRequest{
+			ProviderID: providerID, ProviderName: "bootstrap provider", SourceIP: "192.0.2.81",
+			ReceiptPubkey: bytes.Repeat([]byte{keyByte}, 32), Now: now, TTL: 10 * time.Minute,
+			PerIPLimitPerHour: 8, PerProviderPerHour: 3, GlobalLimitPerHour: 128,
+			UnconfirmedIDMax: 64, OutstandingTokenMax: 64, IdentityRetention: 7 * 24 * time.Hour,
+			ReferralCode: code, ReferralPolicy: policy,
+		}
+	}
+
+	t.Run("different code", func(t *testing.T) {
+		ctx := context.Background()
+		store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		policy := coreReferralPolicy()
+		firstCode := seedCoreReferral(t, store, policy, "seedbootstrapfirst")
+		secondCode := seedCoreReferral(t, store, policy, "seedbootstrapsecond")
+		now := time.Now().UTC().Truncate(time.Second)
+		request := newRequest("mp-1123456789abcdef0123456789abcdef", 0x82, now, firstCode, policy)
+		first, err := store.MintBootstrapToken(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Now = now.Add(time.Second)
+		request.ReferralCode = secondCode
+		if _, err := store.MintBootstrapToken(ctx, request); !errors.Is(err, ErrReferralConflict) {
+			t.Fatalf("different-code recovery err=%v, want conflict", err)
+		}
+		if _, valid, err := store.ValidateToken(ctx, first.ProviderToken); err != nil || !valid {
+			t.Fatalf("original token valid=%v err=%v", valid, err)
+		}
+		var redemptions int
+		if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_redemptions WHERE provider_id = ?`, request.ProviderID).Scan(&redemptions); err != nil {
+			t.Fatal(err)
+		}
+		if redemptions != 1 {
+			t.Fatalf("redemptions=%d, want 1", redemptions)
+		}
+	})
+
+	t.Run("different campaign", func(t *testing.T) {
+		ctx := context.Background()
+		store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		policy := coreReferralPolicy()
+		code := seedCoreReferral(t, store, policy, "seedbootstrapcampaign")
+		now := time.Now().UTC().Truncate(time.Second)
+		request := newRequest("mp-2123456789abcdef0123456789abcdef", 0x83, now, code, policy)
+		first, err := store.MintBootstrapToken(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Now = now.Add(time.Second)
+		request.ReferralCode = ""
+		request.ReferralPolicy.Campaign = "other_campaign"
+		if _, err := store.MintBootstrapToken(ctx, request); !errors.Is(err, ErrReferralRequired) {
+			t.Fatalf("different-campaign recovery err=%v, want required", err)
+		}
+		if _, valid, err := store.ValidateToken(ctx, first.ProviderToken); err != nil || !valid {
+			t.Fatalf("original token valid=%v err=%v", valid, err)
+		}
+	})
 }
 
 func TestConcurrentReferralRedemptionHasOneTokenAndRedemptionWinner(t *testing.T) {

@@ -46,6 +46,13 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 
 func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	disabled := withReferralValidation(base, nil)
+	disabledResponse := httptest.NewRecorder()
+	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if disabledResponse.Code != http.StatusNoContent {
+		t.Fatalf("disabled validation route unexpectedly mounted: status=%d", disabledResponse.Code)
+	}
+
 	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	response := httptest.NewRecorder()
