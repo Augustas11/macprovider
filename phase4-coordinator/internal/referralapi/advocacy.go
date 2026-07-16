@@ -315,6 +315,7 @@ func (h *AdvocacyHandler) writeStatus(w http.ResponseWriter, status auth.Provide
 	}
 	body := map[string]any{
 		"campaign":                  status.Campaign,
+		"join_base_url":             strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/"),
 		"social_state":              status.SocialState,
 		"base_capacity":             status.BaseCapacity,
 		"configured_bonus_capacity": configuredBonusCapacity,

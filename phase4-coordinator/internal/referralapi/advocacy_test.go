@@ -152,6 +152,7 @@ func TestAdvocacyStatusIsReadOnlyAndCannotQualifyProvider(t *testing.T) {
 	handler.HandleStatus(response, bearerRequest(http.MethodGet, "/v1/provider/referrals", ""))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"social_state":"eligible"`) ||
 		!strings.Contains(response.Body.String(), `"base_capacity":1`) ||
+		!strings.Contains(response.Body.String(), `"join_base_url":"https://malibu.tech/j"`) ||
 		!strings.Contains(response.Body.String(), `"invite_url":"https://malibu.tech/j/`+qualified.Code+`"`) {
 		t.Fatalf("qualified status=%d body=%s", response.Code, response.Body.String())
 	}
