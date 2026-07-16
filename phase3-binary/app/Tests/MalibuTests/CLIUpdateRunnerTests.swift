@@ -33,6 +33,17 @@ final class CLIUpdateRunnerTests: XCTestCase {
         )
     }
 
+    func testSupportedCLIIsAcceptedIndependentlyOfMalibuMarketingVersion() throws {
+        XCTAssertEqual(
+            try CLIUpdateRunner.strategy(
+                installedVersion: "1.8.40",
+                compatibilitySetID: "Augustas11/macprovider:v1.8.40@abc123",
+                bundledAppVersion: "1.8.41"
+            ),
+            .installedCompatibilityCLI
+        )
+    }
+
     func testMissingCompatibilityIdentityRepairsThroughPinnedInstaller() throws {
         XCTAssertEqual(
             try CLIUpdateRunner.strategy(
