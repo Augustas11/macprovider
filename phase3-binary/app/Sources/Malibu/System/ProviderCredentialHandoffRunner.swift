@@ -356,6 +356,29 @@ enum ProviderCredentialHandoffRunner {
 
     typealias CommandRunner = @Sendable (URL, [String]) async throws -> Int32
     typealias CapturedCommandRunner = @Sendable (URL, [String]) async throws -> CapturedCommandResult
+    typealias SigningInformationCopier = (
+        SecStaticCode,
+        SecCSFlags,
+        UnsafeMutablePointer<CFDictionary?>
+    ) -> OSStatus
+
+    /// One production seam owns every signing-information read. Team ID and
+    /// code-directory hash are extended signing metadata, so requesting them
+    /// with an empty flag set does not reliably return them on macOS.
+    static func signingInformation(
+        for staticCode: SecStaticCode,
+        copy: SigningInformationCopier = { code, flags, information in
+            SecCodeCopySigningInformation(code, flags, information)
+        }
+    ) throws -> [String: Any] {
+        var information: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard copy(staticCode, flags, &information) == errSecSuccess,
+              let dictionary = information as? [String: Any] else {
+            throw Error.invalidCLI("code signing metadata is unavailable")
+        }
+        return dictionary
+    }
 
     static func credentialStatus(configURL: URL, expectedProviderID: String) async throws -> CredentialSnapshot {
         try await runCredentialCommand(
@@ -884,11 +907,9 @@ enum ProviderCredentialHandoffRunner {
               let currentStaticCode else {
             throw Error.invalidCLI("Malibu static signing identity is unavailable")
         }
-        var signingInfo: CFDictionary?
-        guard SecCodeCopySigningInformation(currentStaticCode, [], &signingInfo) == errSecSuccess,
-              let infoDictionary = signingInfo as? [String: Any],
-              let teamID = infoDictionary[kSecCodeInfoTeamIdentifier as String] as? String,
-              teamID.range(of: #"^[A-Z0-9]+$"#, options: .regularExpression) != nil else {
+        let infoDictionary = try signingInformation(for: currentStaticCode)
+        guard let teamID = infoDictionary[kSecCodeInfoTeamIdentifier as String] as? String,
+              teamID == "YF7XNRJUG4" else {
             throw Error.invalidCLI("Malibu Team ID is unavailable")
         }
 
@@ -908,10 +929,8 @@ enum ProviderCredentialHandoffRunner {
               ) == errSecSuccess else {
             throw Error.invalidCLI("signature, Team ID, or designated identifier mismatch")
         }
-        var installedSigningInfo: CFDictionary?
-        guard SecCodeCopySigningInformation(staticCode, [], &installedSigningInfo) == errSecSuccess,
-              let installedInfo = installedSigningInfo as? [String: Any],
-              let codeDirectoryHash = installedInfo[kSecCodeInfoUnique as String] as? Data,
+        let installedInfo = try signingInformation(for: staticCode)
+        guard let codeDirectoryHash = installedInfo[kSecCodeInfoUnique as String] as? Data,
               !codeDirectoryHash.isEmpty else {
             throw Error.invalidCLI("CLI code-directory identity is unavailable")
         }
@@ -938,10 +957,8 @@ enum ProviderCredentialHandoffRunner {
               let runningStaticCode else {
             throw Error.invalidCLI("running CLI static code identity is unavailable")
         }
-        var signingInfo: CFDictionary?
-        guard SecCodeCopySigningInformation(runningStaticCode, [], &signingInfo) == errSecSuccess,
-              let info = signingInfo as? [String: Any],
-              let codeDirectoryHash = info[kSecCodeInfoUnique as String] as? Data,
+        let info = try signingInformation(for: runningStaticCode)
+        guard let codeDirectoryHash = info[kSecCodeInfoUnique as String] as? Data,
               codeDirectoryHash == expectedIdentity.codeDirectoryHash else {
             throw Error.invalidCLI("running CLI does not match the validated executable")
         }
