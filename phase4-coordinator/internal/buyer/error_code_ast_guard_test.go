@@ -40,9 +40,12 @@ var coordinatorErrorEmitters = map[string]bool{
 // in-flight change adds. Every OTHER registered emitter MUST resolve a `code`
 // parameter, or the guard fails (a renamed function/parameter must not silently
 // drop out of the scan — that recreated the original skipped-emitter defect).
-var coordinatorAllowAbsentEmitters = map[string]bool{
-	"writeSSEErrorWithRetryable": true, // added by item 20 (#594); absent on origin/main until it merges
-}
+// Empty: item 20's writeSSEErrorWithRetryable (#594) has merged and now resolves
+// its own FuncDecl, so its transitional forward-reference exemption was removed
+// (the stale-exemption guard in unresolvedEmitters enforces this cleanup). New
+// entries belong here only while an in-flight change references an emitter whose
+// FuncDecl has not yet landed on origin/main.
+var coordinatorAllowAbsentEmitters = map[string]bool{}
 
 // parsePackageFiles parses every non-test .go file in the current package dir.
 func parsePackageFiles(t *testing.T) (*token.FileSet, []*ast.File) {
