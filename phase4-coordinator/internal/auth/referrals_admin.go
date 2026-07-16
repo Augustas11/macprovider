@@ -41,35 +41,94 @@ func referralAdminSchemaStatements() []string {
 	}
 }
 
-// CreateSeedReferral inserts a new seed issuer and returns the signed invite
-// code. Seed identifiers are immutable; operators must use AdjustSeedReferral
-// for an audited capacity change rather than silently replacing a live seed.
-func (s *Store) CreateSeedReferral(ctx context.Context, policy ReferralPolicy, seedID string, maxUses int, expiresAt *time.Time) (string, error) {
+// SeedReferralCreation is returned for both dry-run and applied creation. The
+// signed code is disclosed only after the issuer and audit event commit.
+type SeedReferralCreation struct {
+	SeedID    string
+	Code      string
+	MaxUses   int
+	ExpiresAt *time.Time
+	Applied   bool
+	Recovered bool
+}
+
+// CreateSeedReferralAudited previews or atomically creates a seed issuer and
+// its append-only operator audit record. Seed identifiers are immutable;
+// operators use AdjustSeedReferral for later capacity changes.
+func (s *Store) CreateSeedReferralAudited(ctx context.Context, policy ReferralPolicy, seedID string, maxUses int, expiresAt *time.Time, apply bool, actor, reason string, now time.Time) (SeedReferralCreation, error) {
 	if err := policy.Validate(); err != nil {
-		return "", err
+		return SeedReferralCreation{}, err
 	}
 	seedID = strings.TrimSpace(seedID)
+	actor = strings.TrimSpace(actor)
+	reason = strings.TrimSpace(reason)
 	if !referralPartPattern.MatchString(seedID) || maxUses <= 0 {
-		return "", fmt.Errorf("seed id and max uses are invalid")
+		return SeedReferralCreation{}, fmt.Errorf("seed id and max uses are invalid")
+	}
+	if apply && (actor == "" || reason == "") {
+		return SeedReferralCreation{}, fmt.Errorf("actor and reason are required to create a seed")
+	}
+	out := SeedReferralCreation{SeedID: seedID, MaxUses: maxUses, ExpiresAt: expiresAt}
+	code, err := EncodeReferralCode(policy, ReferralTypeSeed, policy.CurrentKeyID, seedID)
+	if err != nil {
+		return SeedReferralCreation{}, err
 	}
 	var expiry any
 	if expiresAt != nil {
 		expiry = timeText(expiresAt.UTC())
 	}
-	now := nowString()
-	_, err := s.db.ExecContext(ctx, `
+	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var codeType, keyID string
+		var existingCapacity, existingBonus int
+		var existingExpiry, providerID, revokedAt sql.NullString
+		err := conn.QueryRowContext(ctx, `
+SELECT code_type, key_id, base_capacity, bonus_capacity, expires_at, provider_id, revoked_at
+  FROM referral_issuers
+ WHERE issuer_id = ? AND campaign = ?`,
+			seedID, policy.Campaign,
+		).Scan(&codeType, &keyID, &existingCapacity, &existingBonus, &existingExpiry, &providerID, &revokedAt)
+		switch {
+		case err == nil:
+			expectedExpiry, hasExpiry := expiry.(string)
+			expiryMatches := (!hasExpiry && !existingExpiry.Valid) || (hasExpiry && existingExpiry.Valid && existingExpiry.String == expectedExpiry)
+			if apply && codeType == ReferralTypeSeed && keyID == policy.CurrentKeyID && existingCapacity == maxUses && existingBonus == 0 && expiryMatches && !providerID.Valid && !revokedAt.Valid {
+				out.Recovered = true
+				return nil
+			}
+			return ErrReferralSeedExists
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+		if !apply {
+			return nil
+		}
+		timestamp := timeText(now.UTC())
+		_, err = conn.ExecContext(ctx, `
 INSERT INTO referral_issuers (
     issuer_id, code_type, key_id, campaign, provider_id,
     base_capacity, bonus_capacity, expires_at, created_at, first_serving_at
 ) VALUES (?, 'S', ?, ?, NULL, ?, 0, ?, ?, ?)`,
-		seedID, policy.CurrentKeyID, policy.Campaign, maxUses, expiry, now, now)
-	if isConstraintFailure(err) {
-		return "", ErrReferralSeedExists
-	}
+			seedID, policy.CurrentKeyID, policy.Campaign, maxUses, expiry, timestamp, timestamp)
+		if isConstraintFailure(err) {
+			return ErrReferralSeedExists
+		}
+		if err != nil {
+			return err
+		}
+		detail := fmt.Sprintf("code_type=S base_capacity=%d expires_at=%v", maxUses, expiry)
+		if err := recordReferralAdminAuditTx(ctx, conn, actor, reason, "create_seed", policy.Campaign+"/"+seedID, detail, now); err != nil {
+			return err
+		}
+		out.Applied = true
+		return nil
+	})
 	if err != nil {
-		return "", err
+		return SeedReferralCreation{}, err
 	}
-	return EncodeReferralCode(policy, ReferralTypeSeed, policy.CurrentKeyID, seedID)
+	if out.Applied || out.Recovered {
+		out.Code = code
+	}
+	return out, nil
 }
 
 // SeedReferralAdjustment is returned for both dry-run and applied changes.

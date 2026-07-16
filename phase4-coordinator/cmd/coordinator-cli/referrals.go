@@ -22,7 +22,10 @@ func createSeedReferral(args []string, getenv func(string) string, stdout io.Wri
 	seedID := fs.String("seed-id", "", "opaque seed issuer identifier")
 	maxUses := fs.Int("max-uses", 1, "maximum successful registrations")
 	expiresAt := fs.String("expires-at", "", "optional RFC3339 expiry")
-	setReferralUsage(fs, "create-seed-referral", "coordinator-cli create-seed-referral --db coordinator.db --campaign prebeta --key-id k1 --secret-env MAL_REFERRAL_SECRET --seed-id launch --max-uses 100")
+	apply := fs.Bool("apply", false, "create the seed (default is dry-run preview)")
+	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
+	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
+	setReferralUsage(fs, "create-seed-referral", "coordinator-cli create-seed-referral --db coordinator.db --campaign prebeta --key-id k1 --secret-env MAL_REFERRAL_SECRET --seed-id launch --max-uses 100 --apply --actor ops@malibu --reason 'open cohort'")
 	if err := fs.Parse(args); err != nil {
 		return referralParseError(err)
 	}
@@ -47,14 +50,25 @@ func createSeedReferral(args []string, getenv func(string) string, stdout io.Wri
 		return err
 	}
 	defer store.Close()
-	code, err := store.CreateSeedReferral(context.Background(), policy, strings.TrimSpace(*seedID), *maxUses, expiry)
+	result, err := store.CreateSeedReferralAudited(context.Background(), policy, strings.TrimSpace(*seedID), *maxUses, expiry, *apply, strings.TrimSpace(*actor), strings.TrimSpace(*reason), time.Now().UTC())
 	if errors.Is(err, auth.ErrReferralSeedExists) {
 		return fmt.Errorf("seed %s already exists; use adjust-seed-referral to change its capacity", strings.TrimSpace(*seedID))
 	}
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "referral_code=%s\ncampaign=%s\nseed_id=%s\nmax_uses=%d\nstatus=created\n", code, policy.Campaign, strings.TrimSpace(*seedID), *maxUses)
+	mode := "dry-run"
+	if result.Applied {
+		mode = "applied"
+	} else if result.Recovered {
+		mode = "recovered"
+	}
+	if _, err = fmt.Fprintf(stdout, "mode=%s\ncampaign=%s\nseed_id=%s\nmax_uses=%d\n", mode, policy.Campaign, result.SeedID, result.MaxUses); err != nil {
+		return err
+	}
+	if result.Applied || result.Recovered {
+		_, err = fmt.Fprintf(stdout, "referral_code=%s\n", result.Code)
+	}
 	return err
 }
 

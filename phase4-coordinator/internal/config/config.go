@@ -709,6 +709,7 @@ type AuthConfig struct {
 type ReferralConfig struct {
 	RequireForRegistration  bool              `yaml:"require_for_registration"`
 	EnablePublicValidation  bool              `yaml:"enable_public_validation"`
+	EnableJoinLinks         bool              `yaml:"enable_join_links"`
 	EnableSocialInviteBonus bool              `yaml:"enable_social_invite_bonus"`
 	Campaign                string            `yaml:"campaign"`
 	PolicyVersion           string            `yaml:"policy_version"`
@@ -719,6 +720,7 @@ type ReferralConfig struct {
 	SocialBonusUses         int               `yaml:"social_bonus_uses"`
 	ChallengeTTLS           int               `yaml:"challenge_ttl_s"`
 	JoinBaseURL             string            `yaml:"join_base_url"`
+	JoinDownloadURL         string            `yaml:"join_download_url"`
 	XAPIBearerToken         string            `yaml:"x_api_bearer_token"`
 	RequestAccessURL        string            `yaml:"request_access_url"`
 }
@@ -1849,7 +1851,10 @@ func (c Config) validateCompatibilitySet() error {
 	return nil
 }
 
-var referralConfigPartPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+var (
+	referralConfigPartPattern      = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+	referralDownloadVersionPattern = regexp.MustCompile(`(^|[-_/])v?[0-9]+[.][0-9]+[.][0-9]+([-_.]|$)`)
+)
 
 func (c Config) validateReferrals() error {
 	r := c.Referrals
@@ -1861,7 +1866,25 @@ func (c Config) validateReferrals() error {
 			return fmt.Errorf("referrals.request_access_url must be an absolute https URL without credentials when set")
 		}
 	}
-	if !r.RequireForRegistration && !r.EnablePublicValidation && !r.EnableSocialInviteBonus {
+	if raw := strings.TrimSpace(r.JoinDownloadURL); raw != "" {
+		downloadURL, err := url.Parse(raw)
+		if err != nil || downloadURL == nil {
+			return fmt.Errorf("referrals.join_download_url must be a fixed absolute https URL without credentials, query, fragment, trailing slash, or a moving latest path")
+		}
+		lowerPath := strings.ToLower(downloadURL.Path)
+		if downloadURL.Scheme != "https" || downloadURL.Host == "" || downloadURL.User != nil || downloadURL.RawQuery != "" || downloadURL.Fragment != "" || strings.HasSuffix(downloadURL.Path, "/") || strings.Contains(lowerPath, "latest") || !referralDownloadVersionPattern.MatchString(downloadURL.Path) {
+			return fmt.Errorf("referrals.join_download_url must be a fixed, versioned absolute https URL without credentials, query, fragment, trailing slash, or a moving latest path")
+		}
+	}
+	if r.EnableJoinLinks {
+		if !r.RequireForRegistration {
+			return fmt.Errorf("referrals.enable_join_links requires require_for_registration=true")
+		}
+		if strings.TrimSpace(r.JoinDownloadURL) == "" {
+			return fmt.Errorf("referrals.join_download_url must be set when join links are enabled")
+		}
+	}
+	if !r.RequireForRegistration && !r.EnablePublicValidation && !r.EnableJoinLinks && !r.EnableSocialInviteBonus {
 		return nil
 	}
 	if !referralConfigPartPattern.MatchString(r.Campaign) {

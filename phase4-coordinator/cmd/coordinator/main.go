@@ -920,34 +920,34 @@ func main() {
 		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
-	trustedReferralProxies := mustParseTrustedProxies(cfg, logger)
+	var trustedReferralProxies []netip.Prefix
+	if cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks {
+		trustedReferralProxies = mustParseTrustedProxies(cfg, logger)
+	}
 	var referralValidationHandler http.HandlerFunc
 	if cfg.Referrals.EnablePublicValidation {
-		referralValidation := &referralapi.ValidationHandler{
-			Store:         tokenStore,
-			Policy:        referralPolicy,
-			PublicLimiter: referralapi.NewBoundedLimiter(30, time.Minute, 4096),
-			ValidateSlots: make(chan struct{}, 4),
+		referralValidation := newReferralValidationHandler(tokenStore, referralPolicy, trustedReferralProxies, cfg.Referrals.RequestAccessURL)
+		referralValidationHandler = referralValidation.ServeHTTP
+	}
+	var referralJoinHandler http.HandlerFunc
+	if cfg.Referrals.EnableJoinLinks {
+		referralJoin := &referralapi.JoinHandler{
+			Store:            tokenStore,
+			Policy:           referralPolicy,
+			PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+			ValidateSlots:    make(chan struct{}, 4),
+			RequestAccessURL: cfg.Referrals.RequestAccessURL,
+			DownloadURL:      cfg.Referrals.JoinDownloadURL,
 			SourceIP: func(r *http.Request) string {
 				return onboarding.ClientIP(r, trustedReferralProxies)
 			},
+			ErrorLogger: func(op string, err error) {
+				logger.Error().Err(err).Str("op", op).Msg("referral join failed")
+			},
 		}
-		referralValidationHandler = referralValidation.ServeHTTP
+		referralJoinHandler = referralJoin.ServeHTTP
 	}
-	referralJoin := &referralapi.JoinHandler{
-		Store:            tokenStore,
-		Policy:           referralPolicy,
-		PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
-		ValidateSlots:    make(chan struct{}, 4),
-		RequestAccessURL: cfg.Referrals.RequestAccessURL,
-		SourceIP: func(r *http.Request) string {
-			return onboarding.ClientIP(r, trustedReferralProxies)
-		},
-		ErrorLogger: func(op string, err error) {
-			logger.Error().Err(err).Str("op", op).Msg("referral join failed")
-		},
-	}
-	buyerHandler = withReferralValidation(buyerHandler, referralValidationHandler, referralJoin.ServeHTTP)
+	buyerHandler = withReferralValidation(buyerHandler, referralValidationHandler, referralJoinHandler)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
@@ -1325,20 +1325,32 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	return mux
 }
 
-func withReferralValidation(base http.Handler, validate http.HandlerFunc, join ...http.HandlerFunc) http.Handler {
-	hasJoin := len(join) > 0 && join[0] != nil
-	if validate == nil && !hasJoin {
+func withReferralValidation(base http.Handler, validate, join http.HandlerFunc) http.Handler {
+	if validate == nil && join == nil {
 		return base
 	}
 	mux := http.NewServeMux()
 	if validate != nil {
 		mux.HandleFunc("/v1/referrals/validate", validate)
 	}
-	if hasJoin {
-		mux.HandleFunc("/j/", join[0])
+	if join != nil {
+		mux.HandleFunc("/j/", join)
 	}
 	mux.Handle("/", base)
 	return mux
+}
+
+func newReferralValidationHandler(store referralapi.ValidationStore, policy auth.ReferralPolicy, trustedProxies []netip.Prefix, requestAccessURL string) *referralapi.ValidationHandler {
+	return &referralapi.ValidationHandler{
+		Store:            store,
+		Policy:           policy,
+		PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+		ValidateSlots:    make(chan struct{}, 4),
+		RequestAccessURL: strings.TrimSpace(requestAccessURL),
+		SourceIP: func(r *http.Request) string {
+			return onboarding.ClientIP(r, trustedProxies)
+		},
+	}
 }
 
 // buildEnrollHandler constructs the MDM enrollment handler for POST /v1/enroll.
