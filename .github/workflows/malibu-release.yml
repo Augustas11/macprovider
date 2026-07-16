@@ -663,32 +663,38 @@ jobs:
               "$GITHUB_REPOSITORY" production-release 28995904
           gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/final-draft-by-id.json"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$RUNNER_TEMP/final-draft-by-tag.json"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,isDraft,tagName,targetCommitish,assets > "$RUNNER_TEMP/final-draft-cli.json"
           python3 - "$RUNNER_TEMP/final-draft-by-id.json" \
-            "$RUNNER_TEMP/final-draft-by-tag.json" "$candidate" "$RELEASE_ID" \
+            "$RUNNER_TEMP/final-draft-cli.json" "$candidate" "$RELEASE_ID" \
             "$tag" "$SOURCE_COMMIT" "$APP_VERSION" <<'PY'
           import hashlib
           import json
           import pathlib
           import sys
 
-          by_id_path, by_tag_path, candidate_path, release_id, tag, commit, version = sys.argv[1:]
+          by_id_path, cli_path, candidate_path, release_id, tag, commit, version = sys.argv[1:]
           candidate = pathlib.Path(candidate_path)
           names = [f"Malibu-v{version}.dmg", f"Malibu-v{version}.dmg.sha256", "candidate-manifest.json"]
           expected_digests = {
               name: "sha256:" + hashlib.sha256((candidate / name).read_bytes()).hexdigest()
               for name in names
           }
-          for label, path in (("numeric", by_id_path), ("tag", by_tag_path)):
-              release = json.load(open(path, encoding="utf-8"))
-              if release.get("id") != int(release_id):
+          by_id = json.load(open(by_id_path, encoding="utf-8"))
+          by_cli = json.load(open(cli_path, encoding="utf-8"))
+          releases = (
+              ("numeric", by_id.get("id"), by_id.get("draft"), by_id.get("immutable"),
+               by_id.get("tag_name"), by_id.get("target_commitish"), by_id.get("assets", [])),
+              ("cli", by_cli.get("databaseId"), by_cli.get("isDraft"), None,
+               by_cli.get("tagName"), by_cli.get("targetCommitish"), by_cli.get("assets", [])),
+          )
+          for label, actual_id, draft, immutable, actual_tag, actual_commit, assets in releases:
+              if actual_id != int(release_id):
                   raise SystemExit(f"{label} draft release ID mismatch")
-              if release.get("draft") is not True or release.get("immutable") is True:
+              if draft is not True or immutable is True:
                   raise SystemExit(f"{label} release is not the mutable draft")
-              if release.get("tag_name") != tag or release.get("target_commitish") != commit:
+              if actual_tag != tag or actual_commit != commit:
                   raise SystemExit(f"{label} draft source identity mismatch")
-              assets = release.get("assets", [])
               if {asset.get("name") for asset in assets} != set(names):
                   raise SystemExit(f"{label} draft asset set mismatch")
               for asset in assets:

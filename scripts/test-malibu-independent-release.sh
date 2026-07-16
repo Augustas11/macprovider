@@ -42,6 +42,7 @@ required = (
     'identifier \\"tech.malibu.app\\"',
     'identifier \\"live.streamvc.macprovider.cli\\"',
     'git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main',
+    'final-draft-cli.json',
     'immutable-release-by-id.json',
     'immutable-release-by-tag.json',
     'release.get("immutable") is not True',
@@ -81,6 +82,12 @@ if 'test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_COMMIT"' in publ
     raise SystemExit("publication must accept a tagged candidate still reachable from an advanced main")
 if publish.count('cmp -s "$candidate/$asset"') != 2:
     raise SystemExit("draft and public sidecar bytes must match the accepted candidate")
+make_public = publish.split("- name: Publish only the revalidated draft", 1)[1]
+patch_position = make_public.find("gh api --method PATCH")
+if patch_position < 0:
+    raise SystemExit("verified Malibu draft must be made public by numeric-ID PATCH")
+if 'releases/tags/$tag' in make_public[:patch_position]:
+    raise SystemExit("REST tag lookup cannot discover the Malibu draft release")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must remain commit-pinned")
 
