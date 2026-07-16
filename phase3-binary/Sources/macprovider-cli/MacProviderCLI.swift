@@ -1444,8 +1444,35 @@ struct ServeCommand: AsyncParsableCommand {
                 serviceIdentity: providerLaunchdServiceIdentity
             )
         } catch ProviderLifecycleLeaseError.handoffNotPrepared {
-            // This is the only fallback: every prepared mismatch, expiry, wrong
-            // launchd PID, boot, path, or hash fails closed.
+            // No prepared/adopted handoff to consume: fall back to a fresh
+            // startup lease. acquire() re-validates and refuses to displace a
+            // VALID live foreign owner (throws .alreadyHeld) -- see below.
+            return try store.acquire(
+                kind: .startup,
+                operationID: operationID,
+                duration: duration
+            )
+        } catch ProviderLifecycleLeaseError.leaseNotValid {
+            // The on-disk record IS a matching handoff, but its OWNER identity is
+            // no longer valid (adoptStartupHandoff's adopted branch,
+            // ProviderLifecycleLease.swift ~620, rethrows validationFailure as
+            // leaseNotValid -- e.g. .ownerProcessMissingOrReused after a crash +
+            // launchd restart + PID reuse, or an expired window). That denotes an
+            // invalid/expired/wrong-owner RECORD, not a live conflicting owner, so
+            // it is replaceable. Fall back to fresh acquisition instead of
+            // restart-looping. This is SAFE because acquire() itself re-validates
+            // the record it is about to overwrite (ProviderLifecycleLease.swift
+            // ~432..444): if that record is still a VALID live foreign owner it
+            // throws .alreadyHeld (hard failure, unchanged startup_lease_unavailable
+            // path); it only overwrites when the failure permitsReplacement
+            // (.wallExpired/.monotonicExpired/.bootSessionChanged/
+            // .ownerProcessMissingOrReused, ~1279..1293), and it rethrows
+            // leaseNotValid for non-replaceable structural failures. So this
+            // fallback cannot bypass the valid-live-owner guard. Every error kind
+            // meaning "another live valid owner holds this" (.alreadyHeld,
+            // .compareAndSwapFailed, .currentOwnerUnavailable, .handoffMismatch,
+            // .handoffExpired, .launchdServiceOwnerMismatch, .targetExecutableMismatch,
+            // storage/io) still propagates as a hard failure, unchanged.
             return try store.acquire(
                 kind: .startup,
                 operationID: operationID,

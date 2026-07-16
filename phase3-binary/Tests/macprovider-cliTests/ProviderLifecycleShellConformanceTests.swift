@@ -97,6 +97,163 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         )
     }
 
+    /// EMPIRICAL EXACT-IDENTITY SELF-CHECK (R8 CODE-M): proves the shell
+    /// reconciler's owner-liveness now reads the SAME microsecond process-start
+    /// the Swift store persists, by driving BOTH sides against THIS running
+    /// process. The real `.live` store writes owner.process_start_us for the
+    /// current pid (its Swift proc_pidinfo read); the shell reconciler's
+    /// process_start_microseconds reads the same pid's kinfo_proc.p_starttime via
+    /// sysctl. Because both kernel paths yield identical microseconds, the
+    /// live-pid lease is PRESERVED. A byte-identical copy whose
+    /// owner.process_start_us is bumped by EXACTLY ONE microsecond is REMOVED --
+    /// which can only happen if the shell compares at full microsecond precision
+    /// (the former second-truncated compare would have PRESERVED the +1us copy,
+    /// since +1us stays in the same whole second). This is the mutation guard for
+    /// the exact-identity fix.
+    func testShellReconcilerExactMicrosecondIdentityPreservesLivePidAndRemovesPlusOneMicrosecond() throws {
+        // POSITIVE: a live-pid store-written lease is PRESERVED (python and Swift
+        // read identical microsecond start values from the kernel).
+        let preserveDir = try makeTrustedDirectory()
+        let preserveURL = preserveDir.appendingPathComponent("lease.json")
+        let preserveLock = preserveDir.appendingPathComponent(".lease.json.lock")
+        let preserveStore = ProviderLifecycleLeaseStore(url: preserveURL, environment: .live)
+        let live = try preserveStore.acquire(
+            kind: .maintenance,
+            operationID: "exact-identity-live-op",
+            duration: 20 * 60
+        )
+        // Confirm the store wrote a positive microsecond start for THIS process.
+        XCTAssertGreaterThan(live.owner.processStartMicroseconds, 0)
+        let preserveRC = try runReconcile(
+            leaseURL: preserveURL,
+            lockURL: preserveLock,
+            installOperationID: "install:unrelated-exact-identity"
+        )
+        XCTAssertEqual(preserveRC, 0)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: preserveURL.path),
+            "a live-pid lease with the store's exact microsecond start must be PRESERVED"
+        )
+
+        // NEGATIVE: the SAME record with owner.process_start_us + 1 (one
+        // microsecond off, still the same whole second) must be REMOVED, proving
+        // the shell compares at exact microsecond precision, not second precision.
+        let removeDir = try makeTrustedDirectory()
+        let removeURL = removeDir.appendingPathComponent("lease.json")
+        let removeLock = removeDir.appendingPathComponent(".lease.json.lock")
+        guard var mutated = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: preserveURL)
+        ) as? [String: Any],
+              var owner = mutated["owner"] as? [String: Any] else {
+            return XCTFail("store lease must decode as JSON with a nested owner")
+        }
+        owner["process_start_us"] = live.owner.processStartMicroseconds + 1
+        mutated["owner"] = owner
+        let mutatedData = try JSONSerialization.data(
+            withJSONObject: mutated,
+            options: [.sortedKeys]
+        )
+        try (mutatedData + Data([0x0a])).write(to: removeURL)
+        // Sanity: THIS is exactly the record Swift would also reject on read
+        // (.ownerProcessMissingOrReused), so removing it keeps the shell's
+        // preserve-set a subset of Swift's read-acceptance.
+        let mutatedStore = ProviderLifecycleLeaseStore(url: removeURL, environment: .live)
+        if case .valid = mutatedStore.inspect() {
+            XCTFail("store must reject a +1us owner start as invalid")
+        }
+        let removeRC = try runReconcile(
+            leaseURL: removeURL,
+            lockURL: removeLock,
+            installOperationID: "install:unrelated-exact-identity"
+        )
+        XCTAssertEqual(removeRC, 0)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: removeURL.path),
+            "a lease whose owner start is off by ONE microsecond must be REMOVED"
+        )
+    }
+
+    /// ADOPTED-handoff conformance (R8 CODE-M): a store-shaped record in the
+    /// ADOPTED state (kind=startup, handoff.state=adopted) routes through the
+    /// reconciler's ORDINARY owner-liveness path (state != "prepared"), NOT the
+    /// prepared-handoff exemption. With a DEAD or MISMATCHED owner it must be
+    /// REMOVED -- and with exact microsecond identity this is now deterministic
+    /// (a same-second pid reuse is no longer preservable). This mirrors the Swift
+    /// side, where adoptStartupHandoff's adopted branch rejects such a record as
+    /// leaseNotValid(.ownerProcessMissingOrReused) and the paired CLI fallback
+    /// re-acquires fresh rather than restart-looping.
+    func testShellReconcilerRemovesAdoptedHandoffRecordWithDeadOwner() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+        guard let boot = LeaseHandoffHarness.realBootSession() else {
+            throw XCTSkip("kern.bootsessionuuid unavailable")
+        }
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+        let recordIssuedWall = wallNow - 5 * 60 * 1_000
+        let recordExpiresWall = wallNow + 15 * 60 * 1_000
+        let recordIssuedMono = monoNow - 5 * 60 * 1_000_000_000
+        let recordExpiresMono = monoNow + 15 * 60 * 1_000_000_000
+        // An ADOPTED startup record: kind=startup, handoff.state=adopted. Its
+        // owner is a DEAD pid, so owner-liveness must REMOVE it. The handoff
+        // window brackets now, so the removal is due to owner death, not a stale
+        // window (proving the adopted record flows through owner-liveness, not the
+        // prepared-only exemption).
+        let handoff: [String: Any] = [
+            "version": 1,
+            "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "state": "adopted",
+            "operation_id": "adopted-dead-owner-op",
+            "provider_id": "provider-a",
+            "service_identity": LeaseHandoffHarness.serviceIdentity,
+            "boot_session": boot,
+            "target_executable_path": LeaseHandoffHarness.targetPath,
+            "target_executable_sha256": LeaseHandoffHarness.targetSHA256,
+            "issued_wall_ms": wallNow - 60 * 1_000,
+            "expires_wall_ms": wallNow + 4 * 60 * 1_000,
+            "issued_monotonic_ns": monoNow - 60 * 1_000_000_000,
+            "expires_monotonic_ns": monoNow + 4 * 60 * 1_000_000_000,
+            "startup_lease_duration_ms": 5 * 60 * 1_000,
+        ]
+        let record: [String: Any] = [
+            "version": 1,
+            "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "operation_id": "adopted-dead-owner-op",
+            "kind": "startup",
+            "owner": [
+                "pid": 999_999,
+                "process_start_us": 100_000_456,
+                "boot_session": boot,
+            ] as [String: Any],
+            "issued_wall_ms": recordIssuedWall,
+            "expires_wall_ms": recordExpiresWall,
+            "issued_monotonic_ns": recordIssuedMono,
+            "expires_monotonic_ns": recordExpiresMono,
+            "startup_handoff": handoff,
+        ]
+        let recordData = try JSONSerialization.data(
+            withJSONObject: record,
+            options: [.sortedKeys]
+        )
+        try (recordData + Data([0x0a])).write(to: leaseURL)
+        // Sanity: the store also rejects this adopted record on read (dead owner).
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider an adopted record with a dead owner valid")
+        }
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-adopted-conformance"
+        )
+        XCTAssertEqual(rc, 0)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "an adopted-handoff record with a dead owner must be removed"
+        )
+    }
+
     /// The shell reconciler must not PRESERVE a record Swift's validationFailure
     /// would REJECT for an out-of-window clock, even when the owner is LIVE. The
     /// store's validationFailure runs the shared record boot/wall/monotonic

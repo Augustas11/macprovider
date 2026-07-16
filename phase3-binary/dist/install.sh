@@ -1729,11 +1729,13 @@ reconcile_lifecycle_lease() {
     "${REC_LIFECYCLE_LEASE_LOCK_PATH:-}" \
     "${REC_LIFECYCLE_INSTALL_OPERATION_ID:-}" \
     <<'PY'
+import ctypes
 import errno
 import fcntl
 import json
 import os
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -1751,23 +1753,16 @@ uid = os.getuid()
 # availability delay -- the CLI re-mints a fresh lease one store cycle later),
 # but it must NEVER PRESERVE a lease Swift would reject on read (that would
 # restart-loop the provider, because serve startup only falls back on
-# handoffNotPrepared). Every place the shell mirror is not byte-identical to the
-# Swift validators is one of the following FIVE deliberate, documented
-# conservative divergences. Each is annotated at its implementation site; this
-# is the consolidated inventory with each divergence's DIRECTION:
+# handoffNotPrepared and, for an invalid-owner RECORD, on leaseNotValid). Every
+# place the shell mirror is not byte-identical to the Swift validators is one of
+# the following FOUR deliberate, documented conservative divergences. Each is
+# ONE-DIRECTIONAL fail-toward-removal (the shell may only REMOVE a record Swift
+# would keep, never PRESERVE one Swift would reject), so the preserve-set is now
+# a TOTAL subset of Swift's read-acceptance with NO fail-open remaining. Each is
+# annotated at its implementation site; this is the consolidated inventory with
+# each divergence's DIRECTION:
 #
-#   1. Owner liveness at SECOND resolution (owner_is_live /
-#      process_start_epoch_seconds). Swift compares owner.process_start at
-#      MICROSECOND precision; shell has only `ps lstart` (whole-second).
-#      DIRECTION: bounded-availability-with-downstream-Swift-revalidation. This
-#      is the one BOUNDED FAIL-OPEN: a same-second/same-boot pid reuse can be
-#      PRESERVED here yet rejected by Swift's exact-microsecond identity. Safe
-#      because the store re-runs the exact check downstream and replaces the
-#      lease; worst case is a bounded availability delay, never a restart loop.
-#      In every OTHER respect (dead pid, boot change, different-second start,
-#      unverifiable start) owner_is_live is at-least-as-strict as Swift.
-#
-#   2. Stricter printable-ASCII identity policy (ascii_identity_scalar, applied
+#   1. Stricter printable-ASCII identity policy (ascii_identity_scalar, applied
 #      to operation_id / provider_id / service_identity). Swift trims with
 #      Foundation's trimmingCharacters(.whitespacesAndNewlines) then compares
 #      trimmed == value; shell requires every scalar to be printable ASCII
@@ -1777,14 +1772,14 @@ uid = os.getuid()
 #      at-most-theoretical false-removal (e.g. a non-ASCII provider_id) is a
 #      bounded availability delay, never a restart loop.
 #
-#   3. Duplicate-key STRICT REJECTION vs Foundation keep-first (_strict_pairs).
+#   2. Duplicate-key STRICT REJECTION vs Foundation keep-first (_strict_pairs).
 #      Foundation's JSONDecoder keeps the FIRST value for a duplicate key;
 #      Python's default keeps the LAST. Rather than replicate keep-first, shell
 #      REJECTS any duplicate-key document outright.
 #      DIRECTION: fail-toward-removal. A duplicate-key file Foundation would
 #      accept keeping-first is REMOVED here; removal self-heals.
 #
-#   4. GLOBAL rejection of float / NaN / Infinity JSON tokens, even in fields the
+#   3. GLOBAL rejection of float / NaN / Infinity JSON tokens, even in fields the
 #      shell otherwise ignores (strict_json_loads parse_float / parse_constant).
 #      Foundation rejects these only where a numeric field is decoded; shell
 #      rejects them anywhere in the document.
@@ -1792,7 +1787,7 @@ uid = os.getuid()
 #      unread field that Foundation would accept is REMOVED here; removal
 #      self-heals.
 #
-#   5. TRAILING-SLASH rejection of target_executable_path, including the
+#   4. TRAILING-SLASH rejection of target_executable_path, including the
 #      filesystem-root path "/" that Swift accepts STRUCTURALLY
 #      (valid_target_path). Swift's standardizedFileURL guard accepts "/"; shell's
 #      conservative component rule rejects any trailing slash (so "/" too).
@@ -1800,10 +1795,31 @@ uid = os.getuid()
 #      plausible executable, never emitted by the store) is REMOVED here; removal
 #      self-heals.
 #
+# ELIMINATED (was item 1 in prior revisions): owner liveness at SECOND
+# resolution. The reconciler previously compared owner.process_start_us TRUNCATED
+# to whole seconds (`ps lstart`) against the live pid's start second, a bounded
+# FAIL-OPEN that could PRESERVE a same-second/same-boot pid-reuse record Swift's
+# exact-microsecond identity rejects. The prior acceptance rationale (Swift
+# re-validates and replaces downstream) held for the ordinary owner-liveness path
+# but NOT for an ADOPTED handoff record: such a record routes through owner
+# liveness here (state != "prepared"), yet on the Swift side serve startup adopts
+# via adoptStartupHandoff, whose adopted branch (ProviderLifecycleLease.swift
+# ~620) rejects an invalid owner with leaseNotValid(.ownerProcessMissingOrReused)
+# rather than transparently re-minting -- so a same-second false-preserve here
+# could feed the CLI a record it rejects. owner_is_live now reads the EXACT
+# kernel start timeval via sysctl(KERN_PROC_PID) -> kinfo_proc.p_starttime (see
+# process_start_microseconds), the same value Swift reads via
+# proc_pidinfo(PROC_PIDTBSDINFO), and compares at full microsecond precision.
+# The fail-open is gone; the paired Swift startup fallback (MacProviderCLI.swift:
+# leaseNotValid now also falls back to replaceable acquisition) additionally
+# hardens the pre-existing invalid-owner adopted-record surface.
+#
 # All boot/clock-window, storage-envelope, and structural checks are
 # at-least-as-strict subsets of Swift with NO divergence (the shared-validity
-# gate mirrors validationFailure ~888..894 exactly, and the prepared-handoff
-# exemption mirrors the ~895 branch). The five above are the complete set.
+# gate mirrors validationFailure ~888..894 exactly, the owner-liveness check
+# mirrors ~904 EXACTLY at microsecond precision, and the prepared-handoff
+# exemption mirrors the ~895 branch). The four above are the complete set, all
+# fail-toward-removal, so the preserve-set is a TOTAL subset of Swift's.
 # ======================================================================
 #
 # The Swift store enforces ProviderLifecycleLeaseStore.maximumRecordBytes = 16 KiB
@@ -1971,74 +1987,93 @@ def boot_session():
         return ""
 
 
-def process_start_epoch_seconds(pid):
-    # The Swift store persists owner.process_start_us at microsecond precision
-    # (proc_pidinfo: pbi_start_tvsec*1e6 + pbi_start_tvusec). Shell has no
-    # equivalent primitive; `ps -o lstart=` resolves start time only to the
-    # whole second. We therefore compare at SECOND precision (the lease's
-    # process_start_us truncated to seconds vs the live pid's start second).
+def process_start_microseconds(pid):
+    # EXACT-microsecond process-start identity, mirroring the value the Swift
+    # store persists as owner.process_start_us. Swift's live environment reads
+    # it via proc_pidinfo(PROC_PIDTBSDINFO) -> pbi_start_tvsec*1e6 +
+    # pbi_start_tvusec (ProviderLifecycleLease.swift ~255..272). That start-time
+    # timeval originates from the same kernel `p_starttime` field that
+    # sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid) exposes as the FIRST field
+    # of `struct kinfo_proc` (kp_proc.p_un.__p_starttime, a `struct timeval`).
+    # We read that timeval here so python and Swift compute BYTE-IDENTICAL
+    # microsecond values from the kernel (verified empirically: proc_pidinfo and
+    # this sysctl path return the same combined microseconds for a live pid; the
+    # conformance self-check test asserts a store-written live-pid lease is
+    # PRESERVED and its process_start_us+1 copy is REMOVED). This ELIMINATES the
+    # former second-resolution fail-open: shell now applies the SAME exact
+    # identity Swift's validationFailure -> .ownerProcessMissingOrReused applies,
+    # so a same-second pid-reuse record is no longer preservable here.
     #
-    # SECOND-precision identity is FAIL-OPEN toward preserving a foreign lease
-    # within the same second and same boot session: if a pid is reused and the
-    # replacement process happens to start in the SAME whole second as the
-    # original owner, this coarse check treats it as the same owner and
-    # preserves the lease -- a case Swift's exact-microsecond identity would
-    # reject. This is a deliberate, bounded fail-open, NOT a correctness gap:
-    # preservation here only defers the decision. The Swift ProviderLifecycle-
-    # LeaseStore re-validates with exact microsecond process-start identity
-    # downstream (validationFailure -> .ownerProcessMissingOrReused): inspect()
-    # is read-only and merely reports the same-second-reused lease as
-    # invalid/expired, while the next acquire() is what actually replaces it. The
-    # only consequence of a same-second false-preserve is a bounded
-    # availability delay (the restored CLI mints its fresh lease one store
-    # cycle later), never spurious deletion of a lease Swift would keep. A
-    # reused pid that started in a DIFFERENT second is still rejected here.
-    # See owner_is_live() for the fail-toward-single-writer decision when start
-    # time is entirely unverifiable.
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    # `struct timeval` on 64-bit Darwin: __darwin_time_t tv_sec (int64) followed
+    # by __darwin_suseconds_t tv_usec (int32). We unpack the leading 12 bytes of
+    # the kinfo_proc blob as "=qi" (native, no padding: int64 then int32).
+    #
+    # Directionality on ANY failure (sysctl error, short/implausible blob, parse
+    # error) is fail-toward-removal: return None so owner_is_live() declines to
+    # preserve (removal self-heals; the restored CLI mints a fresh lease one
+    # store cycle later), never a false preserve.
+    if not isinstance(pid, int) or isinstance(pid, bool) or not (1 <= pid <= 2**31 - 1):
+        return None
+    if sys.platform != "darwin":
         return None
     try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "lstart="],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        libc.sysctl.restype = ctypes.c_int
+        # CTL_KERN=1, KERN_PROC=14, KERN_PROC_PID=1.
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)
+        size = ctypes.c_size_t(0)
+        # First call sizes the kinfo_proc result; a dead/reaped pid yields size 0.
+        if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0:
+            return None
+        if size.value < 12:
+            # No process (or a truncated result): cannot read a start timeval.
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        buffer_size = ctypes.c_size_t(size.value)
+        if libc.sysctl(mib, 4, buffer, ctypes.byref(buffer_size), None, 0) != 0:
+            return None
+        data = buffer.raw[:buffer_size.value]
+        if len(data) < 12:
+            return None
+        # p_starttime is the FIRST field of kinfo_proc: timeval{int64 sec; int32 usec}.
+        tv_sec, tv_usec = struct.unpack_from("=qi", data, 0)
+    except (OSError, ValueError, struct.error):
         return None
-    if result.returncode != 0:
+    # Plausibility: a real start time is a positive epoch with usec in [0, 1e6).
+    # An implausible value is fail-toward-removal (None), never a false preserve.
+    if tv_sec <= 0 or not (0 <= tv_usec < 1_000_000):
         return None
-    raw = result.stdout.strip()
-    if not raw:
+    combined = tv_sec * 1_000_000 + tv_usec
+    if not (1 <= combined <= 2**63 - 1):
         return None
-    try:
-        return int(time.mktime(time.strptime(raw)))
-    except (ValueError, OverflowError):
-        return None
+    return combined
 
 
 def owner_is_live(owner):
     # A live foreign owner is preserved only when EVERY identity check the
     # Swift store applies (validationFailure / .ownerProcessMissingOrReused)
     # can be reproduced and passes: pid alive, boot_session unchanged, and the
-    # owner's process-start identity confirmed. Because shell cannot read the
-    # microsecond process-start the Swift store records, an unverifiable
-    # process-start (owner missing it, or ps not resolving the live pid's start)
-    # is treated as NOT preservable: fail toward single-writer so a stale lease
-    # from the failed transaction is cleared rather than protected.
+    # owner's EXACT-microsecond process-start identity confirmed. The shell now
+    # reads the identical kernel start timeval Swift reads (see
+    # process_start_microseconds), so this comparison is byte-for-byte the same
+    # identity Swift enforces at ProviderLifecycleLease.swift ~904
+    # (environment.processStartMicroseconds(record.owner.pid) ==
+    # record.owner.processStartMicroseconds). An unverifiable process-start
+    # (owner missing it, or the sysctl read failing/implausible) returns None
+    # from process_start_microseconds and is treated as NOT preservable: fail
+    # toward single-writer so a stale lease from the failed transaction is
+    # cleared rather than protected.
     #
-    # This check is NOT strictly stricter than the Swift check in one bounded
-    # respect: same-second pid reuse (see process_start_epoch_seconds). When a
-    # reused pid's replacement process started in the same whole second as the
-    # original owner, the second-precision compare below returns True even
-    # though Swift's exact-microsecond compare would return
-    # .ownerProcessMissingOrReused. The reconciler therefore fails OPEN toward
-    # preserving such a foreign lease. That is safe: the Swift store re-runs the
-    # exact-microsecond identity check downstream and replaces the lease, so the
-    # worst case is a bounded availability delay, never spurious deletion of a
-    # lease Swift would keep. In every OTHER respect (dead pid, boot-session
-    # change, different-second start, unverifiable start) this check is at least
-    # as strict as Swift's.
+    # This check is now at-least-as-strict as Swift's in EVERY respect: the
+    # former bounded fail-open (same-second pid reuse preserved here but rejected
+    # by Swift) is ELIMINATED, because the comparison below is the same exact
+    # microsecond compare Swift runs. A reused pid whose replacement started even
+    # one microsecond apart -- including within the same whole second -- is now
+    # REJECTED here exactly as Swift rejects it (.ownerProcessMissingOrReused).
     if not isinstance(owner, dict):
         return False
     owner_pid = owner.get("pid")
@@ -2047,7 +2082,7 @@ def owner_is_live(owner):
     # WIRE-TYPE BOUNDS (Finding 1, R5 CODE-M) on the ordinary-liveness path too:
     # owner.pid is Swift Int32 and process_start_us is Swift Int64, so a value
     # outside the type range could never have been decoded by the Swift store.
-    # Bound them BEFORE pid_alive/process_start_epoch_seconds do arithmetic or
+    # Bound them BEFORE pid_alive/process_start_microseconds do arithmetic or
     # syscalls: os.kill(pid, 0) raises OverflowError (uncaught by pid_alive) for
     # a pid beyond C int range, so an Int32-overflow pid would otherwise crash
     # the reconciler instead of failing toward removal. Any out-of-range value
@@ -2071,11 +2106,14 @@ def owner_is_live(owner):
         # A boot-session mismatch (or unknown current boot) means the pid is a
         # post-reboot coincidence, not the original owner: treat as dead.
         return False
-    live_start_seconds = process_start_epoch_seconds(owner_pid)
-    if live_start_seconds is None:
+    live_start_us = process_start_microseconds(owner_pid)
+    if live_start_us is None:
         # Unverifiable process-start identity: fail toward single-writer.
         return False
-    return live_start_seconds == owner_start // 1_000_000
+    # EXACT-microsecond identity, mirroring Swift ProviderLifecycleLease.swift
+    # ~904. No truncation: a same-second pid reuse whose start differs by even
+    # one microsecond is rejected here exactly as Swift rejects it.
+    return live_start_us == owner_start
 
 
 def wall_milliseconds():

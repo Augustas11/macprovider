@@ -110,10 +110,14 @@ PY
 # is nested under `owner` (owner.pid / owner.process_start_us /
 # owner.boot_session), NOT a flat owner_pid. The reconciler decodes this real
 # shape (Defect 1). When a pid is given, owner.process_start_us and
-# owner.boot_session are derived from that live process's ACTUAL start second
-# and the current boot session, so the reconciler's second-resolution liveness
-# check (see owner_is_live in install.sh) can confirm the owner is live. This is
-# a generated conformance artifact; the paired Swift test
+# owner.boot_session are derived from that live process's EXACT MICROSECOND
+# start and the current boot session, so the reconciler's exact-microsecond
+# liveness check (see owner_is_live / process_start_microseconds in install.sh)
+# can confirm the owner is live. The live-pid start is read via the SAME sysctl
+# kinfo_proc.p_starttime path the reconciler uses, so the fabricated value is
+# byte-identical to what owner_is_live() reads (a whole-second-scaled start
+# would no longer match after the R8 exact-identity fix). This is a generated
+# conformance artifact; the paired Swift test
 # (ProviderLifecycleShellConformanceTests) proves this shape byte-decodes
 # through the real store.
 write_lease_record() {
@@ -127,8 +131,10 @@ write_lease_record() {
   # removes an out-of-window record even when the owner is LIVE (the MEDIUM fix).
   LEASE_RECORD_WINDOW="${LEASE_RECORD_WINDOW:-}" \
   python3 - "$out_path" "$operation_id" "$kind" "$owner_pid" <<'PY'
+import ctypes
 import json
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -139,19 +145,37 @@ record_window = os.environ.get("LEASE_RECORD_WINDOW", "")
 
 
 def process_start_us(pid):
-    if pid <= 0:
+    # Read the EXACT microsecond process-start via the SAME sysctl kinfo_proc
+    # path the reconciler's owner_is_live()/process_start_microseconds uses, so a
+    # LIVE-owner fixture carries the byte-identical value owner_is_live() will
+    # read (the R8 exact-identity fix rejects a whole-second-scaled start). A
+    # dead/unknown pid emits a fixed non-live marker so owner-liveness rejects it.
+    if pid <= 0 or pid > 2**31 - 1:
         return 1
-    result = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "lstart="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    raw = result.stdout.strip() if result.returncode == 0 else ""
-    if not raw:
-        # A dead/unknown pid: emit a fixed non-live start marker.
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        libc.sysctl.restype = ctypes.c_int
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID, pid
+        size = ctypes.c_size_t(0)
+        if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0 or size.value < 12:
+            return 1
+        buffer = ctypes.create_string_buffer(size.value)
+        buffer_size = ctypes.c_size_t(size.value)
+        if libc.sysctl(mib, 4, buffer, ctypes.byref(buffer_size), None, 0) != 0:
+            return 1
+        data = buffer.raw[:buffer_size.value]
+        if len(data) < 12:
+            return 1
+        tv_sec, tv_usec = struct.unpack_from("=qi", data, 0)
+    except (OSError, ValueError, struct.error):
         return 1
-    return int(time.mktime(time.strptime(raw))) * 1_000_000
+    if tv_sec <= 0 or not (0 <= tv_usec < 1_000_000):
+        return 1
+    return tv_sec * 1_000_000 + tv_usec
 
 
 def boot_session():
@@ -260,8 +284,10 @@ write_prepared_handoff_lease_record() {
   PREPARED_OVERRIDE_HANDOFF_VERSION="${PREPARED_OVERRIDE_HANDOFF_VERSION:-}" \
   PREPARED_OVERRIDE_LIVE_OWNER="${PREPARED_OVERRIDE_LIVE_OWNER:-}" \
   python3 - "$out_path" "$operation_id" "$owner_pid" "$expiry" "$record_kind" <<'PY'
+import ctypes
 import json
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -276,19 +302,38 @@ process_start_us = int(override_process_start_us) if override_process_start_us e
 
 
 def _live_process_start_us(pid):
-    # The exact process_start_us the reconciler's owner_is_live() compares
-    # against: ps lstart resolves to whole-second precision, scaled to
-    # microseconds. A LIVE pid with this start makes owner_is_live() return True.
-    result = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "lstart="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    raw = result.stdout.strip() if result.returncode == 0 else ""
-    if not raw:
+    # The EXACT microsecond process_start_us the reconciler's owner_is_live()
+    # compares against, read via the SAME sysctl kinfo_proc.p_starttime path
+    # (matching process_start_microseconds in install.sh). A LIVE pid with this
+    # exact start makes owner_is_live() return True; the R8 exact-identity fix
+    # rejects a whole-second-scaled start, so the fixture must carry the true
+    # microsecond value.
+    if pid <= 0 or pid > 2**31 - 1:
         return 1
-    return int(time.mktime(time.strptime(raw))) * 1_000_000
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        libc.sysctl.restype = ctypes.c_int
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID, pid
+        size = ctypes.c_size_t(0)
+        if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0 or size.value < 12:
+            return 1
+        buffer = ctypes.create_string_buffer(size.value)
+        buffer_size = ctypes.c_size_t(size.value)
+        if libc.sysctl(mib, 4, buffer, ctypes.byref(buffer_size), None, 0) != 0:
+            return 1
+        data = buffer.raw[:buffer_size.value]
+        if len(data) < 12:
+            return 1
+        tv_sec, tv_usec = struct.unpack_from("=qi", data, 0)
+    except (OSError, ValueError, struct.error):
+        return 1
+    if tv_sec <= 0 or not (0 <= tv_usec < 1_000_000):
+        return 1
+    return tv_sec * 1_000_000 + tv_usec
 
 
 override_live_owner = os.environ.get("PREPARED_OVERRIDE_LIVE_OWNER", "")
@@ -1619,9 +1664,10 @@ if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json
 fi
 
 # (A-05.3) A live foreign-owner lease (not part of this transaction) is
-# preserved. The owner block carries the live pid's real start second and the
-# current boot session so the second-resolution liveness check confirms it. The
-# lock files are never mutated byte-wise.
+# preserved. The owner block carries the live pid's EXACT microsecond start
+# (read via the same sysctl kinfo_proc path the reconciler uses) and the current
+# boot session so the exact-microsecond liveness check confirms it. The lock
+# files are never mutated byte-wise.
 sleep 300 &
 foreign_pid=$!
 lease_fixture="$TMP/lease_live_foreign.json"
@@ -2042,8 +2088,8 @@ wait "$m3_pid" 2>/dev/null || true
 # reconciler evaluated owner-liveness BEFORE structure (the pre-fix order), this
 # live-owner lease would be PRESERVED and Swift's inspect() would then reject it
 # as .unsupportedVersion -> restart loop. The owner is genuinely live (the sleep
-# pid with its real process-start second), so owner_is_live() returns True; only
-# the structure-first ordering makes this REMOVED.
+# pid with its exact microsecond process-start), so owner_is_live() returns True;
+# only the structure-first ordering makes this REMOVED.
 sleep 300 &
 m4_pid=$!
 lease_fixture="$TMP/lease_live_owner_invalid_version.json"
@@ -2103,8 +2149,8 @@ wait "$m5_pid" 2>/dev/null || true
 # exemption; a live owner must NOT rescue an expired-handoff lease. WITHOUT the
 # prepared/owner branch split (record_has_prepared_handoff) owner_is_live() would
 # fire first and PRESERVE this lease, yet Swift's inspect() rejects it ->
-# restart loop. The owner is genuinely live (the sleep pid with its real
-# process-start second), so owner_is_live() would return True; only routing
+# restart loop. The owner is genuinely live (the sleep pid with its exact
+# microsecond process-start), so owner_is_live() would return True; only routing
 # prepared-handoff records through the handoff-window gate makes this REMOVED.
 sleep 300 &
 m6_pid=$!
