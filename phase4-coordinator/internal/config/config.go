@@ -708,6 +708,7 @@ type AuthConfig struct {
 // written to the credential database.
 type ReferralConfig struct {
 	RequireForRegistration  bool              `yaml:"require_for_registration"`
+	EnablePublicValidation  bool              `yaml:"enable_public_validation"`
 	EnableSocialInviteBonus bool              `yaml:"enable_social_invite_bonus"`
 	Campaign                string            `yaml:"campaign"`
 	PolicyVersion           string            `yaml:"policy_version"`
@@ -1852,7 +1853,7 @@ var referralConfigPartPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
 
 func (c Config) validateReferrals() error {
 	r := c.Referrals
-	if !r.RequireForRegistration && !r.EnableSocialInviteBonus {
+	if !r.RequireForRegistration && !r.EnablePublicValidation && !r.EnableSocialInviteBonus {
 		return nil
 	}
 	if !referralConfigPartPattern.MatchString(r.Campaign) {

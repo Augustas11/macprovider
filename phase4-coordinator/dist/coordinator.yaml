@@ -86,10 +86,12 @@ auth:
     spec026_a: env:OPERATOR_AUTH_POLICY_A
     spec026_b: env:OPERATOR_AUTH_POLICY_B
 
-# Pre-beta referral admission. Both switches remain off in checked-in config;
-# enabling either requires an explicit campaign, key id, and 32+ byte HMAC key.
+# Pre-beta referral admission. All public/enforcement switches remain off in
+# checked-in config; enabling one requires an explicit campaign, key id, and
+# 32+ byte HMAC key.
 referrals:
   require_for_registration: false
+  enable_public_validation: false
   enable_social_invite_bonus: false
   campaign: ""
   policy_version: "v1"

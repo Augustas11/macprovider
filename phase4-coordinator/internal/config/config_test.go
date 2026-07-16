@@ -35,7 +35,7 @@ func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 
 func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T) {
 	cfg := Default()
-	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnableSocialInviteBonus {
+	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableSocialInviteBonus {
 		t.Fatal("referral launch policy must default off")
 	}
 	cfg.Auth.OperatorKey = "operator-key"

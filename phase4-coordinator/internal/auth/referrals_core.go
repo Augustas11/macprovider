@@ -223,7 +223,13 @@ func redeemReferralTx(ctx context.Context, conn *sql.Conn, policy ReferralPolicy
 				`SELECT decision FROM provider_referral_admissions WHERE provider_id = ? AND campaign = ?`,
 				providerID, policy.Campaign,
 			).Scan(&decision)
-			if err == nil && decision == "grandfathered" {
+			// Exact bootstrap-key custody may recover a response lost after a
+			// referral was already committed. The campaign-scoped admission row
+			// proves policy was satisfied; accepting no code here avoids storing
+			// the plaintext invite in the CLI restart journal. GrandfatherProof is
+			// set only after MintBootstrapToken byte-matches the retained key and
+			// rejects confirmed, ordinary, or operator-revoked ownership.
+			if err == nil && (decision == "grandfathered" || decision == "referred") {
 				return false, nil
 			}
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
