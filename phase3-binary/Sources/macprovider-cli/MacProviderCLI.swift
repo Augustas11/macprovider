@@ -669,6 +669,21 @@ struct ServeCommand: AsyncParsableCommand {
         return await measure()
     }
 
+    /// Route the serve command's lifecycle store by mode. Autotune candidates
+    /// persist to the candidate-scoped store so they never overwrite the
+    /// incumbent's Malibu-visible `state-v1.json` (ARCHITECT finding); the
+    /// incumbent (non-candidate) path is unchanged. Pure and side-effect free so
+    /// it can be unit-tested with an injected home directory.
+    static func lifecycleStateStore(
+        autotuneCandidate: Bool,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> ProviderLifecycleStateStore {
+        let url = autotuneCandidate
+            ? ProviderLifecycleStateStore.candidateURL(homeDirectory: homeDirectory)
+            : ProviderLifecycleStateStore.defaultURL(homeDirectory: homeDirectory)
+        return ProviderLifecycleStateStore(url: url)
+    }
+
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -713,7 +728,15 @@ struct ServeCommand: AsyncParsableCommand {
         // dependencies so direct callers retain the same validation contract.
         try Self.runSupportedModelsPreflight(&resolved)
 
-        let lifecycleStateStore = ProviderLifecycleStateStore()
+        // Autotune candidates (`--autotune-candidate`, always with `--no-join`)
+        // share the incumbent's lifecycle directory but persist to a distinct
+        // candidate-scoped store so a successful candidate reaching
+        // `degraded_serving` never overwrites the installed incumbent's
+        // Malibu-visible `state-v1.json` (ARCHITECT finding). The transition
+        // graph is still enforced against the candidate's own history; only the
+        // persistence file changes. Incumbent serve is untouched: same path,
+        // schema, and fields.
+        let lifecycleStateStore = Self.lifecycleStateStore(autotuneCandidate: autotuneCandidate)
         let lifecycleLeaseStore = ProviderLifecycleLeaseStore()
         let existingLifecycle: ProviderLifecycleStateRecord?
         let operatorPausedInitially: Bool
@@ -1329,6 +1352,9 @@ struct ServeCommand: AsyncParsableCommand {
         let lifecycleReadyReason = operatorPausedInitially
             ? "operator_pause_restored_after_startup"
             : (coordinatorClient == nil ? "local_http_ready_join_disabled" : "local_http_ready_awaiting_coordinator")
+        let lifecycleReadyWriter: ProviderLifecycleWriter = operatorPausedInitially
+            ? .operatorCommand
+            : .serve
         let server = HTTPServer(
             config: resolved,
             modelRuntime: modelRuntime,
@@ -1346,7 +1372,7 @@ struct ServeCommand: AsyncParsableCommand {
                 _ = try lifecycleStateStore.transition(
                     to: lifecycleReadyState,
                     reasonCode: lifecycleReadyReason,
-                    writer: .serve,
+                    writer: lifecycleReadyWriter,
                     providerID: lifecycleProviderID,
                     modelID: lifecycleModelID,
                     compatibilitySetID: lifecycleCompatibilitySetID,
@@ -1418,8 +1444,35 @@ struct ServeCommand: AsyncParsableCommand {
                 serviceIdentity: providerLaunchdServiceIdentity
             )
         } catch ProviderLifecycleLeaseError.handoffNotPrepared {
-            // This is the only fallback: every prepared mismatch, expiry, wrong
-            // launchd PID, boot, path, or hash fails closed.
+            // No prepared/adopted handoff to consume: fall back to a fresh
+            // startup lease. acquire() re-validates and refuses to displace a
+            // VALID live foreign owner (throws .alreadyHeld) -- see below.
+            return try store.acquire(
+                kind: .startup,
+                operationID: operationID,
+                duration: duration
+            )
+        } catch ProviderLifecycleLeaseError.leaseNotValid {
+            // The on-disk record IS a matching handoff, but its OWNER identity is
+            // no longer valid (adoptStartupHandoff's adopted branch,
+            // ProviderLifecycleLease.swift ~620, rethrows validationFailure as
+            // leaseNotValid -- e.g. .ownerProcessMissingOrReused after a crash +
+            // launchd restart + PID reuse, or an expired window). That denotes an
+            // invalid/expired/wrong-owner RECORD, not a live conflicting owner, so
+            // it is replaceable. Fall back to fresh acquisition instead of
+            // restart-looping. This is SAFE because acquire() itself re-validates
+            // the record it is about to overwrite (ProviderLifecycleLease.swift
+            // ~432..444): if that record is still a VALID live foreign owner it
+            // throws .alreadyHeld (hard failure, unchanged startup_lease_unavailable
+            // path); it only overwrites when the failure permitsReplacement
+            // (.wallExpired/.monotonicExpired/.bootSessionChanged/
+            // .ownerProcessMissingOrReused, ~1279..1293), and it rethrows
+            // leaseNotValid for non-replaceable structural failures. So this
+            // fallback cannot bypass the valid-live-owner guard. Every error kind
+            // meaning "another live valid owner holds this" (.alreadyHeld,
+            // .compareAndSwapFailed, .currentOwnerUnavailable, .handoffMismatch,
+            // .handoffExpired, .launchdServiceOwnerMismatch, .targetExecutableMismatch,
+            // storage/io) still propagates as a hard failure, unchanged.
             return try store.acquire(
                 kind: .startup,
                 operationID: operationID,

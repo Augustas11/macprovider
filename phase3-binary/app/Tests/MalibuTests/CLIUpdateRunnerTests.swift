@@ -8,17 +8,17 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.30",
                 compatibilitySetID: nil,
-                bundledAppVersion: "1.8.39"
+                bundledAppVersion: "1.8.40"
             ),
-            .pinnedInstaller(version: "v1.8.39")
+            .pinnedInstaller(version: "v1.8.40")
         )
         XCTAssertEqual(
             try CLIUpdateRunner.strategy(
                 installedVersion: "v1.8.32",
                 compatibilitySetID: "legacy-placeholder",
-                bundledAppVersion: "v1.8.39"
+                bundledAppVersion: "v1.8.40"
             ),
-            .pinnedInstaller(version: "v1.8.39")
+            .pinnedInstaller(version: "v1.8.40")
         )
     }
 
@@ -27,7 +27,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.33",
                 compatibilitySetID: "Augustas11/macprovider:v1.8.33@abc123",
-                bundledAppVersion: "1.8.39"
+                bundledAppVersion: "1.8.40"
             ),
             .installedCompatibilityCLI
         )
@@ -38,14 +38,17 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.38",
                 compatibilitySetID: "  ",
-                bundledAppVersion: "1.8.39"
+                bundledAppVersion: "1.8.40"
             ),
-            .pinnedInstaller(version: "v1.8.39")
+            .pinnedInstaller(version: "v1.8.40")
         )
     }
 
     func testLegacyRepairRequiresExactBridgeAppVersion() throws {
-        for appVersion in [nil, "1.8.38", "1.8.40", "not-a-version"] as [String?] {
+        // Any bundle version other than the current pin target disarms the
+        // bridge — including the previous release's target (1.8.39), which must
+        // no longer arm 1.8.40's repair.
+        for appVersion in [nil, "1.8.38", "1.8.39", "1.8.41", "not-a-version"] as [String?] {
             XCTAssertThrowsError(
                 try CLIUpdateRunner.strategy(
                     installedVersion: "1.8.30",
@@ -65,7 +68,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.x",
                 compatibilitySetID: nil,
-                bundledAppVersion: "1.8.39"
+                bundledAppVersion: "1.8.40"
             )
         ) { error in
             guard case CLIUpdateRunner.Error.invalidInstalledVersion = error else {
@@ -77,9 +80,9 @@ final class CLIUpdateRunnerTests: XCTestCase {
     func testBridgeNeverDowngradesNewerDamagedCLI() {
         XCTAssertThrowsError(
             try CLIUpdateRunner.strategy(
-                installedVersion: "1.8.40",
+                installedVersion: "1.8.41",
                 compatibilitySetID: nil,
-                bundledAppVersion: "1.8.39"
+                bundledAppVersion: "1.8.40"
             )
         ) { error in
             guard case CLIUpdateRunner.Error.legacyBootstrapWouldDowngrade = error else {
@@ -92,9 +95,9 @@ final class CLIUpdateRunnerTests: XCTestCase {
         let environment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: [:],
             installPort: 61919,
-            pinnedVersion: "1.8.39"
+            pinnedVersion: "1.8.40"
         )
-        XCTAssertEqual(environment["MACPROVIDER_VERSION"], "v1.8.39")
+        XCTAssertEqual(environment["MACPROVIDER_VERSION"], "v1.8.40")
         XCTAssertEqual(environment["MACPROVIDER_NO_PROMPT"], "1")
         XCTAssertEqual(environment["MACPROVIDER_PORT"], "61919")
     }
@@ -104,7 +107,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIInstallRunner.installerEnvironment(
                 parentEnvironment: [:],
                 installPort: nil,
-                pinnedVersion: "1.8.39-beta"
+                pinnedVersion: "1.8.40-beta"
             )
         ) { error in
             guard case CLIInstallRunner.Error.invalidPinnedVersion = error else {
@@ -132,7 +135,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
         let environment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: hostile,
             installPort: 61919,
-            pinnedVersion: "v1.8.39"
+            pinnedVersion: "v1.8.40"
         )
 
         XCTAssertEqual(
@@ -146,7 +149,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
         XCTAssertEqual(environment["HOME"], NSHomeDirectory())
         XCTAssertEqual(environment["TMPDIR"], "/tmp")
         XCTAssertEqual(environment["LC_ALL"], "C")
-        XCTAssertEqual(environment["MACPROVIDER_VERSION"], "v1.8.39")
+        XCTAssertEqual(environment["MACPROVIDER_VERSION"], "v1.8.40")
     }
 
     func testInstalledUpdaterEnvironmentDropsAmbientAuthorityAndSecrets() throws {
@@ -173,7 +176,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
     func testSelectedLegacyStrategyInvokesOnlyPinnedInstallerAndReadiness() async throws {
         let recorder = CLIUpdateInvocationRecorder()
         try await CLIUpdateRunner.runStrategyForTest(
-            strategy: .pinnedInstaller(version: "v1.8.39"),
+            strategy: .pinnedInstaller(version: "v1.8.40"),
             installedUpdate: { await recorder.recordInstalledUpdate() },
             pinnedInstall: { version in await recorder.recordPinnedInstall(version) },
             readinessCheck: {
@@ -183,7 +186,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
         )
         let result = await recorder.snapshot()
         XCTAssertEqual(result.installedUpdates, 0)
-        XCTAssertEqual(result.pinnedVersions, ["v1.8.39"])
+        XCTAssertEqual(result.pinnedVersions, ["v1.8.40"])
         XCTAssertEqual(result.readinessChecks, 1)
     }
 

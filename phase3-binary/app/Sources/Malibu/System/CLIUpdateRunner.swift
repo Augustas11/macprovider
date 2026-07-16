@@ -1,7 +1,13 @@
 import Foundation
 
 enum CLIUpdateRunner {
-    static let legacyBootstrapTarget = "1.8.39"
+    // Legacy repair pins exactly the CLI version this app shipped as. The
+    // 1.8.40 arming is a cohort-bound recovery exception (Decision Entry 160)
+    // for the stranded 1.8.30/1.8.32/1.8.39 test cohort. Later releases MUST
+    // leave this constant unchanged — the exact-match interlock in
+    // `strategy(...)` then disarms the bridge automatically — unless a new
+    // decision entry authorizes re-arming with release-specific proof.
+    static let legacyBootstrapTarget = "1.8.40"
 
     enum Strategy: Equatable {
         case installedCompatibilityCLI
