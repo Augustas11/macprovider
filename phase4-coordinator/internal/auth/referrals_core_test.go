@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,6 +64,217 @@ func TestReferralRedemptionAndTokenInsertAreAtomic(t *testing.T) {
 	}
 	if tokens != 1 || redemptions != 1 {
 		t.Fatalf("tokens=%d redemptions=%d, want 1/1", tokens, redemptions)
+	}
+}
+
+func TestReferralValidationRejectsInvalidExpiredRevokedAndExhausted(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+	t.Run("invalid", func(t *testing.T) {
+		store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		policy := coreReferralPolicy()
+		code := seedCoreReferral(t, store, policy, "seedinvalid")
+		tagStart := strings.LastIndex(code, "-") + 1
+		replacement := "A"
+		if code[tagStart] == replacement[0] {
+			replacement = "B"
+		}
+		code = code[:tagStart] + replacement + code[tagStart+1:]
+
+		validation, err := store.ValidateReferral(context.Background(), policy, code, now)
+		if !errors.Is(err, ErrReferralInvalid) || validation.Reason != "invalid" {
+			t.Fatalf("validation=%+v err=%v, want invalid", validation, err)
+		}
+	})
+
+	t.Run("expired", func(t *testing.T) {
+		store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		policy := coreReferralPolicy()
+		code := seedCoreReferral(t, store, policy, "seedexpired")
+		if _, err := store.db.Exec(`UPDATE referral_issuers SET expires_at = ? WHERE issuer_id = ?`, timeText(now.Add(-time.Second)), "seedexpired"); err != nil {
+			t.Fatal(err)
+		}
+
+		validation, err := store.ValidateReferral(context.Background(), policy, code, now)
+		if !errors.Is(err, ErrReferralExpired) || validation.Reason != "expired" {
+			t.Fatalf("validation=%+v err=%v, want expired", validation, err)
+		}
+	})
+
+	t.Run("revoked", func(t *testing.T) {
+		store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		policy := coreReferralPolicy()
+		code := seedCoreReferral(t, store, policy, "seedrevoked")
+		if _, err := store.db.Exec(`UPDATE referral_issuers SET revoked_at = ? WHERE issuer_id = ?`, timeText(now.Add(-time.Second)), "seedrevoked"); err != nil {
+			t.Fatal(err)
+		}
+
+		validation, err := store.ValidateReferral(context.Background(), policy, code, now)
+		if !errors.Is(err, ErrReferralRevoked) || validation.Reason != "revoked" {
+			t.Fatalf("validation=%+v err=%v, want revoked", validation, err)
+		}
+	})
+
+	t.Run("exhausted", func(t *testing.T) {
+		store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		policy := coreReferralPolicy()
+		code := seedCoreReferral(t, store, policy, "seedexhausted")
+		if _, _, err := store.IssueTokenWithReferral(context.Background(), "provider-a", "host-a", code, policy); err != nil {
+			t.Fatal(err)
+		}
+
+		validation, err := store.ValidateReferral(context.Background(), policy, code, now)
+		if !errors.Is(err, ErrReferralExhausted) || validation.Reason != "exhausted" {
+			t.Fatalf("validation=%+v err=%v, want exhausted", validation, err)
+		}
+	})
+}
+
+func TestReferralReplayForSameProviderDoesNotConsumeCapacityTwice(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := coreReferralPolicy()
+	code := seedCoreReferral(t, store, policy, "seedreplay")
+
+	first, firstToken, err := store.IssueTokenWithReferral(ctx, "provider-a", "host-a", code, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	_, secondToken, err := store.IssueTokenWithReferral(ctx, "provider-a", "host-a", code, policy)
+	if err != nil {
+		t.Fatalf("idempotent replay mint: %v", err)
+	}
+	if secondToken == firstToken {
+		t.Fatal("replay returned the revoked credential")
+	}
+
+	var redemptions, activeTokens int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_redemptions WHERE provider_id = ?`, "provider-a").Scan(&redemptions); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM provider_tokens WHERE provider_id = ? AND revoked_at IS NULL`, "provider-a").Scan(&activeTokens); err != nil {
+		t.Fatal(err)
+	}
+	if redemptions != 1 || activeTokens != 1 {
+		t.Fatalf("redemptions=%d active_tokens=%d, want 1/1", redemptions, activeTokens)
+	}
+}
+
+func TestConcurrentReferralRedemptionHasOneTokenAndRedemptionWinner(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := coreReferralPolicy()
+	code := seedCoreReferral(t, store, policy, "seedconcurrent")
+
+	type result struct {
+		providerID string
+		err        error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for _, providerID := range []string{"provider-a", "provider-b"} {
+		providerID := providerID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, err := store.IssueTokenWithReferral(context.Background(), providerID, "host-"+providerID, code, policy)
+			results <- result{providerID: providerID, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winner := ""
+	for result := range results {
+		switch {
+		case result.err == nil:
+			if winner != "" {
+				t.Fatalf("multiple winners: %q and %q", winner, result.providerID)
+			}
+			winner = result.providerID
+		case errors.Is(result.err, ErrReferralExhausted):
+		default:
+			t.Fatalf("provider %q error=%v, want exhausted", result.providerID, result.err)
+		}
+	}
+	if winner == "" {
+		t.Fatal("no redemption winner")
+	}
+
+	var tokens, redemptions int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM provider_tokens WHERE revoked_at IS NULL`).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_redemptions`).Scan(&redemptions); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 1 || redemptions != 1 {
+		t.Fatalf("tokens=%d redemptions=%d, want 1/1", tokens, redemptions)
+	}
+
+	var tokenProvider, redemptionProvider string
+	if err := store.db.QueryRow(`SELECT provider_id FROM provider_tokens WHERE revoked_at IS NULL`).Scan(&tokenProvider); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT provider_id FROM referral_redemptions`).Scan(&redemptionProvider); err != nil {
+		t.Fatal(err)
+	}
+	if tokenProvider != winner || redemptionProvider != winner {
+		t.Fatalf("winner=%q token_provider=%q redemption_provider=%q", winner, tokenProvider, redemptionProvider)
+	}
+}
+
+func TestReferralFeatureOffAllowsFreshProviderWithoutRedemption(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	_, token, err := store.IssueTokenWithReferral(ctx, "provider-fresh", "host-fresh", "", ReferralPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID, ok, err := store.ValidateToken(ctx, token)
+	if err != nil || !ok || providerID != "provider-fresh" {
+		t.Fatalf("provider_id=%q ok=%v err=%v", providerID, ok, err)
+	}
+	var redemptions int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_redemptions`).Scan(&redemptions); err != nil {
+		t.Fatal(err)
+	}
+	if redemptions != 0 {
+		t.Fatalf("redemptions=%d, want 0", redemptions)
 	}
 }
 
