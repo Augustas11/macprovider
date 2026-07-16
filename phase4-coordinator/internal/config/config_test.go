@@ -90,6 +90,38 @@ func TestReferralJoinLinksRequireAdmissionAndFixedDownload(t *testing.T) {
 	}
 }
 
+func TestReferralSocialBonusRequiresDarkStackAndConfiguredDwell(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Referrals.EnableSocialInviteBonus = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires referral admission and join links") {
+		t.Fatalf("social without server stack error=%v", err)
+	}
+
+	cfg.Referrals.RequireForRegistration = true
+	cfg.Referrals.EnableJoinLinks = true
+	cfg.Referrals.Campaign = "prebeta_2026"
+	cfg.Referrals.CurrentKeyID = "k1"
+	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
+	cfg.Referrals.JoinDownloadURL = "https://download.malibu.tech/releases/Malibu-1.9.0.dmg"
+	cfg.Referrals.XAPIBearerToken = "secret"
+	cfg.Referrals.SocialBonusUses = 2
+	cfg.Referrals.ChallengeTTLS = 900
+	cfg.Referrals.SocialVerificationDwellS = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "social_verification_dwell_s") {
+		t.Fatalf("social without dwell error=%v", err)
+	}
+	cfg.Referrals.SocialVerificationDwellS = 1800
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid dark social stack: %v", err)
+	}
+
+	cfg.Referrals.JoinBaseURL = "https://user:secret@coordinator.streamvc.live/j"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "credential-free") {
+		t.Fatalf("credentialed join URL error=%v", err)
+	}
+}
+
 func TestReferralRequestAccessURLMustBeCredentialFreeHTTPSEvenWhenGateIsOff(t *testing.T) {
 	for _, raw := range []string{
 		"http://access.example.test/waitlist",
