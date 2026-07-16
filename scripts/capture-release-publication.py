@@ -102,7 +102,13 @@ if not isinstance(signed_assets, dict) or not all(
 expected_names = set(signed_assets) | {"release-provenance.json", "checksums.txt", "checksums.txt.sig"}
 if set(api_assets) != expected_names:
     fail("numeric release asset names differ from the signed release set")
-required_local = {f"Malibu-{tag}.dmg", "appcast.xml", "release-provenance.json", "checksums.txt", "checksums.txt.sig"}
+required_local = {
+    f"Malibu-{tag}.dmg",
+    "compatibility-artifact-index.json",
+    "release-provenance.json",
+    "checksums.txt",
+    "checksums.txt.sig",
+}
 if not required_local <= set(local_assets):
     fail("captured publication files are incomplete")
 
@@ -123,13 +129,17 @@ for name, digest in signed_assets.items():
         fail(f"signed provenance hash differs for {name}")
 
 dmg_name = f"Malibu-{tag}.dmg"
-if dmg_name not in local_assets or "appcast.xml" not in local_assets:
-    fail("publication requires Malibu DMG and appcast.xml")
+index_name = "compatibility-artifact-index.json"
+if dmg_name not in local_assets or index_name not in local_assets:
+    fail("publication requires Malibu DMG and compatibility artifact index")
+publication_content = {
+    "compatibility_artifact_index_sha256": local_assets[index_name][1],
+    "dmg_sha256": local_assets[dmg_name][1],
+}
+if "appcast.xml" in local_assets:
+    publication_content["appcast_sha256"] = local_assets["appcast.xml"][1]
 content = json.dumps(
-    {
-        "appcast_sha256": local_assets["appcast.xml"][1],
-        "dmg_sha256": local_assets[dmg_name][1],
-    },
+    publication_content,
     sort_keys=True,
     separators=(",", ":"),
 ).encode()

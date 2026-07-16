@@ -7,19 +7,21 @@ die() {
   exit 1
 }
 
-[[ "$#" == 6 ]] ||
-  die "usage: $0 MANIFEST DMG APPCAST CHECKSUMS SIGNATURE PROVENANCE"
+[[ "$#" == 7 ]] ||
+  die "usage: $0 MANIFEST DMG APPCAST ARTIFACT_INDEX CHECKSUMS SIGNATURE PROVENANCE"
 
 manifest="$1"
 asset="$2"
 appcast="$3"
-checksums="$4"
-signature="$5"
-provenance="$6"
+artifact_index="$4"
+checksums="$5"
+signature="$6"
+provenance="$7"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 bash "$SCRIPT_DIR/verify-malibu-publication-set.sh" \
-  "$manifest" "$asset" "$appcast" "$checksums" "$signature" "$provenance"
+  "$manifest" "$asset" "$appcast" "$artifact_index" \
+  "$checksums" "$signature" "$provenance"
 
 read -r tag commit release_number publication_id dmg_asset_id appcast_asset_id < <(
   python3 - "$manifest" <<'PY'
@@ -41,6 +43,7 @@ print(
 PY
 )
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "manifest tag is invalid"
+[[ "$tag" == v1.8.39 ]] || die "legacy Malibu publication is frozen to v1.8.39"
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "manifest commit is invalid"
 [[ "$release_number" =~ ^[1-9][0-9]*$ ]] || die "manifest release id is invalid"
 [[ "$publication_id" =~ ^[0-9a-f]{64}$ ]] || die "manifest publication id is invalid"
@@ -145,9 +148,8 @@ malibu_download_ssh "set -euo pipefail
 "
 remote_stage=""
 
+bash "$SCRIPT_DIR/verify-malibu-bootstrap-publication.sh" \
+  "$tag" "$asset" "$appcast"
+
 printf '[publish-malibu-latest-dmg] ok: %s/%s + latest.dmg on Pearl (release=%s assets=%s,%s commit=%s)\n' \
   "$WEBROOT" "$dmg_name" "$release_number" "$dmg_asset_id" "$appcast_asset_id" "$commit"
-
-if [[ "${VERIFY_MALIBU_DOWNLOAD:-0}" == 1 ]]; then
-  bash "$SCRIPT_DIR/verify-malibu-download.sh"
-fi

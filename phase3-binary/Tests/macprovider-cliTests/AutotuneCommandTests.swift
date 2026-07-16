@@ -164,6 +164,45 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertTrue(command.donorMode)
     }
 
+    func testRecommendPrefetchRequiresExplicitCandidateAndRejectsMutationModes() throws {
+        let command = try AutotuneCommand.parse([
+            "--recommend",
+            "--prefetch",
+            "--candidate-models", "namespace/existing-model",
+            "--prefetch-receipt", "/tmp/prefetch-receipt.json",
+            "--no-submit-hardware-evidence",
+        ])
+
+        XCTAssertTrue(command.recommend)
+        XCTAssertTrue(command.prefetch)
+        XCTAssertEqual(command.candidateModels, "namespace/existing-model")
+        XCTAssertEqual(command.prefetchReceipt, "/tmp/prefetch-receipt.json")
+        XCTAssertFalse(command.submitHardwareEvidence)
+
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--prefetch", "--candidate-models", "namespace/model", "--prefetch-receipt", "/tmp/receipt",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--recommend", "--prefetch"]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--prefetch", "--apply", "--candidate-models", "namespace/model",
+            "--prefetch-receipt", "/tmp/receipt",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--prefetch", "--freshness-check", "--candidate-models", "namespace/model",
+            "--prefetch-receipt", "/tmp/receipt",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--prefetch", "--donor-mode", "--candidate-models", "namespace/model",
+            "--prefetch-receipt", "/tmp/receipt",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--prefetch", "--candidate-models", "namespace/model",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--apply", "--prefetch-receipt", "/tmp/receipt",
+        ]))
+    }
+
     func testRecommendUsesSpec023FourKProbeContext() throws {
         let command = try AutotuneCommand.parse(["--recommend"])
 
@@ -175,6 +214,21 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertThrowsError(try AutotuneCommand.parse([
             "--freshness-check",
         ]))
+    }
+
+    func testTrustBlockedFreshnessMapsToDedicatedExitCodeAndSortedDiagnostic() throws {
+        let failure = try XCTUnwrap(AutotuneCommand.recommendationFreshnessFailure(
+            for: .trustBlocked(
+                nil,
+                [.demandRankUpdateRequired, .candidateCatalogUpdateRequired]
+            )
+        ))
+
+        XCTAssertEqual(failure.exitCode, ExitCode(12))
+        XCTAssertEqual(
+            failure.diagnostic,
+            "catalog_trust_blocked: candidate_catalog_update_required, demand_rank_update_required\n"
+        )
     }
 
     func testRequiredHardwareEvidenceRequiresRecommend() {

@@ -1485,6 +1485,204 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertThrowsError(try CachedModelArtifactResolver(hubRoot: hub).verifiedExistingArtifact(for: mismatch))
     }
 
+    func testPrefetchVerifiesOnlyExplicitSignedArtifactWithoutStartingBenchmarkRuntime() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("prefetched-weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("prefetch must not start a provider runtime") },
+            prober: RecordingStage1Prober(results: [:]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcome = try await benchmarker.prefetchArtifacts(
+            candidateCatalog: request.candidateCatalog,
+            hardware: request.hardware,
+            candidateModelIDs: [row.modelID]
+        )
+
+        XCTAssertEqual(outcome.matchedModelIDs, [row.modelID])
+        XCTAssertEqual(outcome.prefetchedModelIDs, [row.modelID])
+        XCTAssertEqual(outcome.artifacts.map(\.path), [snapshot.path])
+        XCTAssertTrue(outcome.diagnostics.isEmpty)
+    }
+
+    func testPrefetchRejectsDuplicateSignedRowsBeforeArtifactAcquisition() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        request.candidateCatalog.rows["duplicate-row"] = row
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(
+                hubRoot: try tempDir(),
+                downloader: HuggingFaceSnapshotDownloader(
+                    fetch: { _ in
+                        throw AutotuneRecommendError.invalidArtifact("artifact acquisition must not start")
+                    },
+                    download: { _ in
+                        throw AutotuneRecommendError.invalidArtifact("artifact acquisition must not start")
+                    }
+                )
+            ),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("prefetch must not start a provider runtime") },
+            prober: RecordingStage1Prober(results: [:]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        do {
+            _ = try await benchmarker.prefetchArtifacts(
+                candidateCatalog: request.candidateCatalog,
+                hardware: request.hardware,
+                candidateModelIDs: [row.modelID]
+            )
+            XCTFail("duplicate signed rows must fail before artifact acquisition")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("exactly one signed catalog row"))
+            XCTAssertTrue(message.contains(modelKey))
+            XCTAssertTrue(message.contains("duplicate-row"))
+            XCTAssertFalse(message.contains("artifact acquisition must not start"))
+        }
+    }
+
+    func testPrefetchPreservesMismatchedIncumbentSnapshotWhileAcquiringReplacement() async throws {
+        let hub = try tempDir()
+        let revision = String(repeating: "c", count: 40)
+        let canonical = CachedModelArtifactResolver(hubRoot: hub)
+            .snapshotURL(modelID: "namespace/model", revision: revision)
+        try FileManager.default.createDirectory(at: canonical, withIntermediateDirectories: true)
+        try Data("incumbent".utf8).write(to: canonical.appendingPathComponent("weights.bin"))
+
+        let expectedDirectory = try tempDir()
+        try Data("replacement".utf8).write(to: expectedDirectory.appendingPathComponent("weights.bin"))
+        let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: expectedDirectory)
+        let row = CandidateCatalog.Row(
+            modelID: "namespace/model",
+            modelRevision: revision,
+            modelSHA256: expected,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        let downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                let url = try XCTUnwrap(request.url)
+                let response = try XCTUnwrap(HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                ))
+                return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
+            },
+            download: { _ in
+                let downloaded = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("autotune-prefetch-\(UUID().uuidString).bin")
+                try Data("replacement".utf8).write(to: downloaded)
+                return (
+                    downloaded,
+                    URLResponse(
+                        url: URL(string: "https://example.test/weights.bin")!,
+                        mimeType: nil,
+                        expectedContentLength: 11,
+                        textEncodingName: nil
+                    )
+                )
+            }
+        )
+
+        let artifact = try await CachedModelArtifactResolver(hubRoot: hub, downloader: downloader)
+            .prefetchedArtifactPreservingExisting(for: row)
+
+        XCTAssertNotEqual(artifact.modelArgument, canonical.path)
+        XCTAssertEqual(artifact.sha256, expected)
+        XCTAssertEqual(try String(contentsOf: canonical.appendingPathComponent("weights.bin")), "incumbent")
+        XCTAssertEqual(
+            try String(contentsOf: URL(fileURLWithPath: artifact.modelArgument).appendingPathComponent("weights.bin")),
+            "replacement"
+        )
+    }
+
+    func testPrefetchReceiptRejectsCatalogDriftAndBenchmarkNeverDownloadsAfterBinding() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("receipt-weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.candidateCatalogSHA256 = String(repeating: "d", count: 64)
+        let outcome = try await AutotuneRecommendationBenchmarker(artifactResolver: resolver).prefetchArtifacts(
+            candidateCatalog: request.candidateCatalog,
+            hardware: request.hardware,
+            candidateModelIDs: [row.modelID]
+        )
+        let receipt = AutotuneArtifactPrefetchReceipt(
+            schemaVersion: AutotuneArtifactPrefetchReceipt.currentSchemaVersion,
+            candidateCatalogSHA256: request.candidateCatalogSHA256,
+            candidateCatalogVersion: request.candidateCatalog.version,
+            candidateCatalogPolicyVersion: request.candidateCatalog.policyVersion,
+            artifacts: outcome.artifacts
+        )
+        let bindings = try receipt.validatedArtifacts(
+            candidateCatalog: request.candidateCatalog,
+            candidateCatalogSHA256: request.candidateCatalogSHA256
+        )
+
+        var drifted = request.candidateCatalog
+        drifted.rows[modelKey]?.modelRevision = String(repeating: "e", count: 40)
+        XCTAssertThrowsError(try receipt.validatedArtifacts(
+            candidateCatalog: drifted,
+            candidateCatalogSHA256: request.candidateCatalogSHA256
+        ))
+
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: try XCTUnwrap(bindings[modelKey]).path))
+        let offlineBenchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(
+                hubRoot: hub,
+                downloader: HuggingFaceSnapshotDownloader(
+                    fetch: { _ in throw AutotuneRecommendError.invalidArtifact("downloader must not run after cutover") },
+                    download: { _ in throw AutotuneRecommendError.invalidArtifact("downloader must not run after cutover") }
+                )
+            ),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("runner must not start without receipt bytes") }
+        )
+        do {
+            _ = try await offlineBenchmarker.benchmarks(
+                request: request,
+                targetContext: 4_000,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                port: 18_080,
+                candidateModelIDs: [row.modelID],
+                prefetchedArtifacts: bindings
+            )
+            XCTFail("cache-only receipt binding must fail when prefetched bytes disappear")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("missing pinned snapshot"))
+            XCTAssertFalse(String(describing: error).contains("downloader must not run"))
+        }
+    }
+
     func testVerifiedArtifactRepairsMismatchedCachedSnapshot() async throws {
         let hub = try tempDir()
         let revision = String(repeating: "b", count: 40)
@@ -1899,7 +2097,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(staleWithDifferentProvider, Optional(Self.date("2026-07-02T00:00:00Z")))
     }
 
-    func testFreshnessIsStaleWhenRemoteCatalogIntegrityFails() async throws {
+    func testFreshnessTrustBlockIsDistinctFromOrdinaryStaleness() async throws {
         let dir = try tempDir()
         let secretURL = dir.appendingPathComponent("secret")
         let secret = Data(repeating: 9, count: 32)
@@ -1915,17 +2113,23 @@ final class AutotuneRecommendTests: XCTestCase {
         """.utf8).write(to: stateURL)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"\(AutotuneStaticInputs.keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        let olderDemand = Data(AutotuneStaticInputs.bakedDemandRankJSON
+            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-07T12:00:00Z")
+            .utf8)
+        let olderCatalog = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON
+            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-07T12:00:00Z")
+            .utf8)
         let staticInputs = AutotuneStaticInputs(
             fetch: { url in
                 if url.path.hasSuffix(".sig") { return sidecar }
                 if url.path.hasSuffix("/demand-rank") {
-                    return Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+                    return olderDemand
                 }
-                if url.path.hasSuffix("/autotune-candidates") { return catalogBytes }
+                if url.path.hasSuffix("/autotune-candidates") { return olderCatalog }
                 throw AutotuneRecommendError.invalidStaticJSON("offline")
             },
-            verifySignature: { _, _ in false },
-            now: { Self.date("2026-07-02T00:00:00Z") }
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-15T00:00:00Z") }
         )
 
         let status = await RecommendationFreshnessChecker(
@@ -1934,10 +2138,30 @@ final class AutotuneRecommendTests: XCTestCase {
             providerID: "provider-a",
             hmacSecretURL: secretURL,
             stateURL: stateURL,
-            now: Self.date("2026-07-02T00:00:00Z")
+            now: Self.date("2026-07-15T00:00:00Z")
         ).status()
 
-        XCTAssertEqual(status, .stale(Self.date("2026-07-02T00:00:00Z")))
+        XCTAssertEqual(
+            status,
+            .trustBlocked(
+                Optional(Self.date("2026-07-02T00:00:00Z")),
+                [.candidateCatalogUpdateRequired, .demandRankUpdateRequired]
+            )
+        )
+
+        let missingStateStatus = await RecommendationFreshnessChecker(
+            staticInputs: staticInputs,
+            fingerprint: fingerprint,
+            providerID: "provider-a",
+            hmacSecretURL: secretURL,
+            stateURL: dir.appendingPathComponent("missing-recommendation.json"),
+            now: Self.date("2026-07-15T00:00:00Z")
+        ).status()
+
+        XCTAssertEqual(
+            missingStateStatus,
+            .trustBlocked(nil, [.candidateCatalogUpdateRequired, .demandRankUpdateRequired])
+        )
     }
 
     // MARK: - Default-tier fallthrough + swap tolerance (v1.7.6 Track A1/A2a)
@@ -2152,6 +2376,56 @@ final class AutotuneRecommendTests: XCTestCase {
             outcomes.diagnostics[modelKey],
             "probe request failed: The request timed out. (n_err=3)"
         )
+    }
+
+    func testReceiptBoundBenchmarkFailsClosedWhenCandidateIsNotReady() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = artifactSHA
+        request.benchmarks = [:]
+        let prefetched = PrefetchedModelArtifact(
+            modelKey: modelKey,
+            modelID: row.modelID,
+            modelRevision: revision,
+            candidateRowIdentity: try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey)),
+            path: snapshot.path,
+            sha256: artifactSHA
+        )
+        let readinessFailure = "provider readiness timeout before Stage 1 probe: Could not connect to the server"
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .infeasible(reason: readinessFailure, nErr: 1),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        do {
+            _ = try await benchmarker.benchmarks(
+                request: request,
+                targetContext: 4_000,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                port: 18_080,
+                candidateModelIDs: [row.modelID],
+                prefetchedArtifacts: [modelKey: prefetched]
+            )
+            XCTFail("receipt-bound upgrade probes must fail before recommendation state is replaced")
+        } catch AutotuneRecommendError.candidateProbeFailed(let failedModelKey, let reason) {
+            XCTAssertEqual(failedModelKey, modelKey)
+            XCTAssertEqual(reason, "\(readinessFailure) (n_err=1)")
+        }
     }
 
     func testBenchmarksDiagnosesRowsSkippedByRAMGate() async throws {

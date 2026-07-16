@@ -20,7 +20,7 @@ on:
       provider_admission_policy:
         description: "Signed provider admission rollout policy"
         required: true
-        default: bridge_required
+        default: strict_post_migration
         type: choice
         options:
           - bridge_required
@@ -61,7 +61,7 @@ jobs:
           RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
           RELEASE_PRERELEASE_INPUT: ${{ github.event.inputs.prerelease || 'false' }}
           RELEASE_CANDIDATE_INPUT: ${{ github.event.inputs.candidate || 'false' }}
-          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
           bash scripts/validate-release-inputs.sh \
@@ -167,10 +167,13 @@ jobs:
 
       - name: Build package
         shell: bash
+        env:
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
           cd phase3-binary/dist
-          ./package.sh "${{ steps.release_source.outputs.tag }}"
+          MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \
+            ./package.sh "${{ steps.release_source.outputs.tag }}"
 
       - name: Build Malibu.app
         shell: bash
@@ -178,9 +181,6 @@ jobs:
           set -euo pipefail
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
-          resolved_dir="Malibu.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
-          mkdir -p "$resolved_dir"
-          cp Package.resolved "$resolved_dir/Package.resolved"
           xcodebuild \
             -project Malibu.xcodeproj \
             -scheme Malibu \
@@ -188,7 +188,6 @@ jobs:
             -destination "generic/platform=macOS" \
             -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
             archive \
-            -onlyUsePackageVersionsFromResolvedFile \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
@@ -329,6 +328,8 @@ jobs:
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
           WORK=""
@@ -419,10 +420,42 @@ jobs:
           echo "WORK=$WORK" >> "$GITHUB_ENV"
           tar xzf "$src" -C "$WORK"
           test -x "$WORK/macprovider-cli"
+          test -f "$WORK/compatibility-set.json"
+
+          # Bind the semantic compatibility set before it enters any final
+          # container. The signed payload intentionally omits tar/pkg/dmg
+          # hashes; those enclosing bytes are bound later by checksums.txt.
+          [ -n "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ] || {
+            echo "::error::MACPROVIDER_RELEASE_SIGNING_KEY_PEM is required for the compatibility set." >&2
+            exit 1
+          }
+          COMPATIBILITY_SIGNING_KEY="$SIGNING_TMP/compatibility-signing-key.pem"
+          printf '%s\n' "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$COMPATIBILITY_SIGNING_KEY"
+          chmod 600 "$COMPATIBILITY_SIGNING_KEY"
+          python3 scripts/compatibility-set-manifest.py validate \
+            --input "$WORK/compatibility-set.json" \
+            --payload-directory "$WORK" \
+            --expected-tag "$tag" \
+            --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
+          python3 scripts/compatibility-set-manifest.py sign \
+            --input "$WORK/compatibility-set.json" \
+            --private-key "$COMPATIBILITY_SIGNING_KEY"
+          python3 scripts/compatibility-set-manifest.py validate \
+            --input "$WORK/compatibility-set.json" \
+            --payload-directory "$WORK" \
+            --require-signature \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --expected-tag "$tag" \
+            --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
+          cp "$WORK/compatibility-set.json" phase3-binary/dist/compatibility-set.json
+          rm -f "$COMPATIBILITY_SIGNING_KEY"
 
           codesign --force \
             --options runtime \
             --timestamp \
+            --identifier live.streamvc.macprovider.cli \
             --sign "$SIGNING_ID" \
             "$WORK/macprovider-cli"
 
@@ -430,6 +463,18 @@ jobs:
           # early (e.g. cert expired) without burning notary submission
           # quota.
           codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
+          CLI_REQUIREMENT=$(codesign -d -r- "$WORK/macprovider-cli" 2>&1)
+          printf '%s\n' "$CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+            echo "::error::CLI designated requirement lacks the stable release identifier" >&2
+            exit 1
+          }
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            "$WORK/macprovider-cli" || {
+            echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
+            exit 1
+          }
+          "$WORK/macprovider-cli" release-payload-preflight
 
           # Step 3: notarize. notarytool needs a zip or dmg, not a raw
           # binary, so wrap the binary in a transient zip for submission
@@ -451,9 +496,30 @@ jobs:
           # Step 4: re-tar with the signed + notarized binary.
           # Preserve the same internal layout package.sh produced; the
           # only difference vs the input tarball is that
-          # ./macprovider-cli now carries a real signature chain.
+          # macprovider-cli now carries a real signature chain. Name every
+          # member explicitly so the shipped archive cannot regain an
+          # ambiguous root entry after the unsigned archive was validated.
           rm -f "$src"
-          tar czf "$src" -C "$WORK" .
+          release_archive_members=(
+            macprovider-cli
+            mlx.metallib
+            THIRD-PARTY-NOTICES.txt
+            compatibility-set.json
+            compatibility-set-local
+            catalog-release
+          )
+          release_bundle_count=0
+          for release_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+            if [ -d "$WORK/$release_bundle" ]; then
+              release_archive_members+=("$release_bundle")
+              release_bundle_count=$((release_bundle_count + 1))
+            fi
+          done
+          [ "$release_bundle_count" -gt 0 ] || {
+            echo "::error::Signed release payload lacks a SwiftPM resource bundle" >&2
+            exit 1
+          }
+          tar czf "$src" -C "$WORK" "${release_archive_members[@]}"
 
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
           if [ -n "$INSTALLER_ID" ]; then
@@ -475,6 +541,8 @@ jobs:
             if [ -f "$WORK/THIRD-PARTY-NOTICES.txt" ]; then
               cp "$WORK/THIRD-PARTY-NOTICES.txt" "$PKG_ROOT/THIRD-PARTY-NOTICES.txt"
             fi
+            cp "$WORK/compatibility-set.json" "$PKG_ROOT/compatibility-set.json"
+            cp -R "$WORK/compatibility-set-local" "$PKG_ROOT/compatibility-set-local"
             if [ -d "$WORK/catalog-release" ]; then
               cp -R "$WORK/catalog-release" "$PKG_ROOT/catalog-release"
             fi
@@ -530,6 +598,7 @@ jobs:
         run: |
           set -euo pipefail
           APP="$RUNNER_TEMP/Malibu.app"
+          tag="${{ needs.build.outputs.tag }}"
 
           if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
             echo "::error::APPLE_DEVELOPER_ID_CERT_P12_BASE64 is required for Malibu.app." >&2
@@ -553,6 +622,15 @@ jobs:
             exit 1
           }
 
+          # Preflight the restored app before any protected-job bundle writes.
+          # Sparkle 2.6.4 also rejects an update when the old bundle has an
+          # EdDSA key and the new bundle removes it. Inject only the frozen
+          # v1.8.32 trust anchor into the one-time v1.8.39 bridge; no feed,
+          # framework, or app-owned updater returns with it.
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py prepare \
+            "$tag" "$APP" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+
           cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"
           chmod 755 "$APP/Contents/MacOS/macprovider-cli"
           [ -f "$WORK/mlx.metallib" ] || {
@@ -562,15 +640,45 @@ jobs:
           cp "$WORK/mlx.metallib" "$APP/Contents/MacOS/mlx.metallib"
           find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' \
             -exec cp -R {} "$APP/Contents/MacOS"/ \;
+          cp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
+          cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
 
+          # Re-verify after bundling and before codesign so copied payloads
+          # cannot introduce a symlink or Sparkle runtime into the target.
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py verify \
+            "$APP" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+          MALIBU_LINKS="$(/usr/bin/otool -L "$APP/Contents/MacOS/Malibu")"
+          if printf '%s\n' "$MALIBU_LINKS" | /usr/bin/grep -F Sparkle >/dev/null; then
+            echo "::error::Malibu bridge must not link a Sparkle runtime" >&2
+            exit 1
+          fi
+
+          SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
           codesign --force --deep \
             --options runtime \
             --timestamp \
+            --preserve-metadata=identifier \
             --entitlements phase3-binary/app/Malibu.entitlements \
             --sign "$SIGNING_ID" \
             "$APP"
 
           codesign --verify --strict --verbose=2 --deep "$APP"
+          BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
+          printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+            echo "::error::Bundling changed the CLI designated requirement identifier" >&2
+            exit 1
+          }
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            "$APP/Contents/MacOS/macprovider-cli" || {
+            echo "::error::Bundled CLI designated requirement is not pinned to the release Team ID" >&2
+            exit 1
+          }
+          test "$SOURCE_CLI_REQUIREMENT" = "$BUNDLED_CLI_REQUIREMENT" || {
+            echo "::error::Bundling changed the CLI designated requirement" >&2
+            exit 1
+          }
 
           NOTARIZE_ZIP="$RUNNER_TEMP/Malibu-notary.zip"
           /usr/bin/ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
@@ -586,7 +694,6 @@ jobs:
           xcrun stapler validate "$APP"
           spctl -a -vvv -t exec "$APP"
 
-          tag="${{ needs.build.outputs.tag }}"
           mkdir -p "phase3-binary/app/dist"
           DIST_DMG="phase3-binary/app/dist/Malibu-${tag}.dmg"
 
@@ -676,7 +783,7 @@ jobs:
             echo "  Malibu.app.pkg: phase3-binary/app/dist/Malibu-${tag}.pkg"
           fi
 
-      - name: Clean Apple signing material before third-party tools
+      - name: Clean Apple signing material after notarization
         if: always()
         shell: bash
         run: |
@@ -684,26 +791,28 @@ jobs:
           security delete-keychain build.keychain >/dev/null 2>&1 || true
           rm -rf "${SIGNING_TMP:-}" "${WORK:-}" 2>/dev/null || true
 
-      - name: Generate Sparkle appcast for Malibu.app
+      - name: Generate one-time Malibu 1.8.32 bootstrap bridge
+        if: needs.build.outputs.tag == 'v1.8.39'
         shell: bash
         env:
           SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+          PRERELEASE_INPUT: ${{ needs.build.outputs.prerelease }}
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
+          [ "$PRERELEASE_INPUT" = false ] || {
+            echo "::error::the one-time v1.8.39 Malibu bootstrap must be a stable release" >&2
+            exit 1
+          }
+          [ -n "$SPARKLE_EDDSA_PRIVATE_KEY" ] || {
+            echo "::error::SPARKLE_EDDSA_PRIVATE_KEY is required for the v1.8.39 bootstrap" >&2
+            exit 1
+          }
           dmg="phase3-binary/app/dist/Malibu-${tag}.dmg"
-          if [ ! -f "$dmg" ]; then
-            echo "::error::required Malibu dmg is absent: $dmg" >&2
-            exit 1
-          fi
-          if [ -z "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]; then
-            echo "::error::SPARKLE_EDDSA_PRIVATE_KEY is required when a Malibu dmg was built." >&2
-            exit 1
-          fi
           bash scripts/generate-malibu-appcast.sh "$tag"
-          bash scripts/test-coordinator-advertised-version.sh \
-            "$tag" \
-            phase3-binary/app/dist/appcast.xml
+          python3 scripts/verify-malibu-sparkle-signature.py \
+            "$tag" "$dmg" phase3-binary/app/dist/appcast.xml \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
 
       - name: Tier-2 provider artifact preflight
         shell: bash
@@ -745,6 +854,12 @@ jobs:
             has_catalog_candidates_signature=0
             has_catalog_demand=0
             has_catalog_demand_signature=0
+            has_compatibility_set=0
+            has_local_install_contract=0
+            has_local_provider_plist=0
+            has_local_updater_metadata=0
+            has_local_watchdog_plist=0
+            has_local_watchdog_script=0
             while IFS= read -r entry; do
               normalized_entry="$entry"
               while :; do
@@ -767,6 +882,26 @@ jobs:
                 mlx.metallib)
                   ;;
                 THIRD-PARTY-NOTICES.txt)
+                  ;;
+                compatibility-set.json)
+                  has_compatibility_set=$((has_compatibility_set + 1))
+                  ;;
+                compatibility-set-local)
+                  ;;
+                compatibility-set-local/install.sh)
+                  has_local_install_contract=$((has_local_install_contract + 1))
+                  ;;
+                compatibility-set-local/provider-launch-agent.plist.template)
+                  has_local_provider_plist=$((has_local_provider_plist + 1))
+                  ;;
+                compatibility-set-local/updater-rollback.json)
+                  has_local_updater_metadata=$((has_local_updater_metadata + 1))
+                  ;;
+                compatibility-set-local/watchdog-launch-agent.plist.template)
+                  has_local_watchdog_plist=$((has_local_watchdog_plist + 1))
+                  ;;
+                compatibility-set-local/watchdog.sh)
+                  has_local_watchdog_script=$((has_local_watchdog_script + 1))
                   ;;
                 catalog-release)
                   ;;
@@ -808,6 +943,12 @@ jobs:
             [ "$has_catalog_candidates_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/autotune-candidates.json.sig" >&2; exit 1; }
             [ "$has_catalog_demand" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/demand-rank.json" >&2; exit 1; }
             [ "$has_catalog_demand_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/demand-rank.json.sig" >&2; exit 1; }
+            [ "$has_compatibility_set" -eq 1 ] || { echo "::error::$label must contain exactly one compatibility-set.json" >&2; exit 1; }
+            [ "$has_local_install_contract" -eq 1 ] || { echo "::error::$label must contain exactly one compatibility-set-local/install.sh" >&2; exit 1; }
+            [ "$has_local_provider_plist" -eq 1 ] || { echo "::error::$label must contain exactly one provider launchd template" >&2; exit 1; }
+            [ "$has_local_updater_metadata" -eq 1 ] || { echo "::error::$label must contain exactly one updater rollback metadata file" >&2; exit 1; }
+            [ "$has_local_watchdog_plist" -eq 1 ] || { echo "::error::$label must contain exactly one watchdog launchd template" >&2; exit 1; }
+            [ "$has_local_watchdog_script" -eq 1 ] || { echo "::error::$label must contain exactly one watchdog script" >&2; exit 1; }
             if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
               echo "::error::$label contains unsafe link or device members" >&2
               exit 1
@@ -851,26 +992,37 @@ jobs:
             PROVIDER_SHA256="" \
             scripts/check-tier2-provider-artifact.sh
 
+          tar -xzf "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" \
+            -C "$tar_payload_dir" compatibility-set.json
+          cmp "$tar_payload_dir/compatibility-set.json" \
+            "$pkg_expand_dir/Payload/compatibility-set.json"
+
       - name: Verify Malibu release cryptographic bindings
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
           dmg="phase3-binary/app/dist/Malibu-${tag}.dmg"
-          appcast="phase3-binary/app/dist/appcast.xml"
           test -f "$dmg"
-          test -f "$appcast"
           bash scripts/verify-malibu-release-artifacts.sh "$dmg"
-          python3 scripts/verify-malibu-sparkle-signature.py \
-            "$tag" "$dmg" "$appcast" phase3-binary/app/project.yml
-          bash scripts/test-coordinator-advertised-version.sh "$tag" "$appcast"
+          if [ "$tag" = v1.8.39 ]; then
+            appcast="phase3-binary/app/dist/appcast.xml"
+            test -f "$appcast"
+            python3 scripts/verify-malibu-sparkle-signature.py \
+              "$tag" "$dmg" "$appcast" \
+              scripts/dist/malibu-v1.8.32-sparkle-public-key
+            bash scripts/test-coordinator-advertised-version.sh "$tag"
+          elif [ -e phase3-binary/app/dist/appcast.xml ]; then
+            echo "::error::legacy appcast must exist only for v1.8.39" >&2
+            exit 1
+          fi
 
       - name: Prepare release assets
         id: assets
         shell: bash
         env:
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
-          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
@@ -889,6 +1041,8 @@ jobs:
           gateway_asset="gateway-linux-amd64"
           pearl_metadata="pearl-release.json"
           pearl_metadata_sig="pearl-release.json.sig"
+          compatibility_manifest="compatibility-set.json"
+          compatibility_artifact_index="compatibility-artifact-index.json"
           catalog_manifest_src="phase3-binary/catalog/autotune/release.json"
           catalog_keys_src="phase3-binary/catalog/autotune/trusted-keys.json"
           catalog_candidates_src="phase3-binary/dist/static/autotune-candidates.json"
@@ -925,16 +1079,41 @@ jobs:
             demand-rank.json.sig
           )
           release_assets+=("${catalog_assets[@]}")
+          compatibility_manifest_src="phase3-binary/dist/compatibility-set.json"
+          test -f "$compatibility_manifest_src"
+          cp "$compatibility_manifest_src" "$compatibility_manifest"
+          compatibility_extract="$(mktemp -d "$RUNNER_TEMP/compatibility-release.XXXXXX")"
+          tar -xzf "$src" -C "$compatibility_extract"
+          cmp "$compatibility_manifest" "$compatibility_extract/compatibility-set.json"
+          python3 scripts/compatibility-set-manifest.py validate \
+            --input "$compatibility_manifest" \
+            --payload-directory "$compatibility_extract" \
+            --require-signature \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --expected-tag "$tag" \
+            --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
+          release_assets+=("$compatibility_manifest")
+          rm -rf "$compatibility_extract"
           if [ -f "$pkg_src" ]; then
             cp "$pkg_src" "$pkg_asset"
             release_assets+=("$pkg_asset")
           fi
           test -f "$app_dmg_src"
-          test -f "$appcast_src"
           cp "$app_dmg_src" "$app_dmg_asset"
           release_assets+=("$app_dmg_asset")
-          cp "$appcast_src" "$appcast_asset"
-          release_assets+=("$appcast_asset")
+          if [ "$tag" = v1.8.39 ]; then
+            [ "${{ needs.build.outputs.prerelease }}" = false ] || {
+              echo "::error::v1.8.39 bootstrap cannot be a prerelease" >&2
+              exit 1
+            }
+            test -f "$appcast_src"
+            cp "$appcast_src" "$appcast_asset"
+            release_assets+=("$appcast_asset")
+          elif [ -e "$appcast_src" ]; then
+            echo "::error::legacy appcast must exist only for v1.8.39" >&2
+            exit 1
+          fi
           if [ -f "$app_src" ]; then
             cp "$app_src" "$app_asset"
             release_assets+=("$app_asset")
@@ -1026,6 +1205,37 @@ jobs:
             -verify ops/pearl-updater/release-signing-public.pem \
             -signature "$pearl_metadata_sig" "$pearl_metadata"
           release_assets+=("$pearl_metadata" "$pearl_metadata_sig")
+          artifact_index_arguments=(
+            --artifact "provider_cli=$tar_asset"
+            --artifact "malibu_app=$app_dmg_asset"
+            --artifact "coordinator=$coordinator_asset"
+            --artifact "coordinator_cli=$coordinator_cli_asset"
+            --artifact "gateway=$gateway_asset"
+            --artifact "compatibility_manifest=$compatibility_manifest"
+            --artifact "catalog_manifest=release.json"
+            --artifact "catalog_trusted_keys=trusted-keys.json"
+            --artifact "catalog_candidates=autotune-candidates.json"
+            --artifact "catalog_candidates_signature=autotune-candidates.json.sig"
+            --artifact "catalog_demand=demand-rank.json"
+            --artifact "catalog_demand_signature=demand-rank.json.sig"
+            --artifact "pearl_metadata=$pearl_metadata"
+            --artifact "pearl_metadata_signature=$pearl_metadata_sig"
+          )
+          python3 scripts/compatibility-artifact-index.py build \
+            --output "$compatibility_artifact_index" \
+            --compatibility-manifest "$compatibility_manifest" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$tag" \
+            --commit "${{ needs.build.outputs.commit }}" \
+            "${artifact_index_arguments[@]}"
+          python3 scripts/compatibility-artifact-index.py validate \
+            --input "$compatibility_artifact_index" \
+            --compatibility-manifest "$compatibility_manifest" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$tag" \
+            --commit "${{ needs.build.outputs.commit }}" \
+            "${artifact_index_arguments[@]}"
+          release_assets+=("$compatibility_artifact_index")
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ needs.build.outputs.commit }}" "$GITHUB_REPOSITORY" \
             "${{ needs.build.outputs.prerelease }}" release-toolchain.json \
@@ -1064,10 +1274,18 @@ jobs:
           notarized, and stapled \`Malibu-${tag}.dmg\`. Open the disk image, drag
           Malibu.app to Applications, and launch. First run drives install.sh
           onboarding with no terminal setup; Malibu monitors the launchd provider.
-          Publish recovery requires the numeric GitHub release and asset IDs;
-          use \`scripts/recover-malibu-publication.sh\` with the reviewed commit.
-          Malibu checks \`https://download.malibu.tech/appcast.xml\` for in-app updates via Sparkle.
+          The launchd-managed CLI owns signed compatibility-set updates and replaces
+          Malibu.app only as one member of the same atomic transaction.
           EOF
+            if [ "$tag" = v1.8.39 ]; then
+              cat >> release-notes.md <<EOF
+
+          Malibu 1.8.32 installations receive this exact DMG through a one-time,
+          EdDSA-signed compatibility appcast. Malibu 1.8.39 contains no Sparkle
+          dependency, runtime, or feed; it retains only the frozen 1.8.32 public
+          key needed for trust continuity. Subsequent updates are CLI-owned.
+          EOF
+            fi
           elif [ -f "phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then
             cat >> release-notes.md <<EOF
 
@@ -1224,25 +1442,28 @@ jobs:
             "${release_assets[@]}" checksums.txt checksums.txt.sig
           cmp final-draft-manifest.json publication-manifest.json
 
-      - name: Publish Malibu latest.dmg
-        if: needs.build.outputs.prerelease == 'false'
+      - name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl
+        if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'
         env:
           MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
           MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${MALIBU_DOWNLOAD_SSH_KEY:-}" ]; then
-            key_file="$(mktemp)"
-            trap 'rm -f "$key_file"' EXIT
-            printf '%s\n' "$MALIBU_DOWNLOAD_SSH_KEY" > "$key_file"
-            chmod 600 "$key_file"
-            export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
-          fi
+          [ -n "$MALIBU_DOWNLOAD_SSH_KEY" ] || {
+            echo "::error::MALIBU_DOWNLOAD_SSH_KEY is required for bridge publication" >&2
+            exit 1
+          }
+          key_file="$(mktemp "$RUNNER_TEMP/malibu-download-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$MALIBU_DOWNLOAD_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
           tag="${{ needs.build.outputs.tag }}"
           bash scripts/publish-malibu-latest-dmg.sh \
             publication-manifest.json "Malibu-${tag}.dmg" appcast.xml \
-            checksums.txt checksums.txt.sig release-provenance.json
+            compatibility-artifact-index.json checksums.txt checksums.txt.sig \
+            release-provenance.json
 
       - name: Verify published Tier-2 Release assets
         shell: bash

@@ -17,6 +17,7 @@ fatal() {
 
 lib="$(mktemp "${TMPDIR:-/tmp}/macprovider-install-version-lib.XXXXXX")"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-install-version.XXXXXX")"
+workdir="$(cd "$workdir" && pwd -P)"
 trap 'rm -f "$lib"; rm -rf "$workdir"' EXIT
 
 awk '
@@ -56,12 +57,42 @@ awk '
 ' "$INSTALL_SH" >> "$lib"
 
 awk '
+  /^verify_emergency_config_activation\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^config_without_provider_token_sha256\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^preserve_failed_bootstrap_identity\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
   /^validate_emergency_target\(\)/ { emit = 1 }
   /^disable_staged_autoupdate\(\)/ { emit = 0 }
   emit { print }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag download_release verify_sha256 validate_staged_entries validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate; do
+awk '
+  /^validate_acceptance_upgrade_target\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^validate_non_emergency_pinned_target\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries validate_acceptance_upgrade_target validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
@@ -73,6 +104,8 @@ asset_path=""
 asset_kind=""
 checksums_path=""
 checksums_sig_path=""
+ACCEPTANCE_METADATA_PATH=""
+ACCEPTANCE_METADATA_SIGNATURE_PATH=""
 DOWNLOAD_LOG="$workdir/downloads.log"
 LOG_FILE="$workdir/log.out"
 BINARY_PATH="$workdir/installed-macprovider-cli"
@@ -95,6 +128,10 @@ validate_release_payload() {
   log "payload validated"
 }
 shasum() {
+  if [ "${MOCK_REAL_SHA:-0}" = "1" ]; then
+    command shasum "$@"
+    return
+  fi
   printf '%s  %s\n' "${MOCK_SHA:-goodhash}" "$2"
 }
 curl() {
@@ -166,10 +203,13 @@ reset_mocks() {
   VALIDATE_CALLED=0
   MOCK_SHA="goodhash"
   MOCK_SIGNATURE_FAIL=0
+  MOCK_REAL_SHA=0
   MOCK_CHECKSUMS="goodhash macprovider-cli-v1.7.11-darwin-arm64.pkg"
   MOCK_RELEASES_JSON='[{"tag_name":"v1.8.0","prerelease":true},{"tag_name":"verify-v1.0.0","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
-  MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.30"}'
-  unset MACPROVIDER_VERSION
+  MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.33"}'
+  unset MACPROVIDER_VERSION MACPROVIDER_ACCEPTANCE_ASSET_DIR MACPROVIDER_ACCEPTANCE_COMMIT
+  unset MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT MACPROVIDER_ACCEPTANCE_RUN_ID
+  unset MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM
   EMERGENCY_ROLLBACK=0
 }
 
@@ -345,7 +385,7 @@ report "case12-flow-legacy-opt-out-added" 1 \
 ################################################################
 cat > "$BINARY_PATH" <<'SH'
 #!/usr/bin/env bash
-printf '1.8.31\n'
+printf '1.8.34\n'
 SH
 chmod +x "$BINARY_PATH"
 reset_mocks
@@ -353,19 +393,34 @@ rc=0
 ( validate_emergency_target v1.8.30 ) >/dev/null 2>&1 || rc=$?
 report "case13-older-target-accepted" 0 "$rc"
 rc=0
-( validate_emergency_target v1.8.31 ) >/dev/null 2>&1 || rc=$?
+( validate_emergency_target v1.8.34 ) >/dev/null 2>&1 || rc=$?
 report "case13-equal-target-rejected" 7 "$rc"
 rc=0
-( validate_emergency_target v1.8.32 ) >/dev/null 2>&1 || rc=$?
+( validate_emergency_target v1.8.35 ) >/dev/null 2>&1 || rc=$?
 report "case13-newer-target-rejected" 7 "$rc"
 
 rc=0
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.30"}'
 ( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
 report "case13-exact-advertisement-accepted" 0 "$rc"
 MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.29"}'
 rc=0
 ( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
 report "case13-mismatched-advertisement-rejected" 7 "$rc"
+
+reset_mocks
+EMERGENCY_ROLLBACK=1
+MACPROVIDER_VERSION="v1.8.29"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case13-pre-contract-target-rejected" 7 "$rc"
+reset_mocks
+EMERGENCY_ROLLBACK=1
+MACPROVIDER_VERSION="v1.8.30"
+rc=0
+observed_tag="$(resolve_release_tag)" || rc=$?
+report "case13-contract-floor-target-accepted" 0 "$rc"
+report "case13-contract-floor-target-preserved" "v1.8.30" "$observed_tag"
 
 ################################################################
 # Case 14 — emergency rollback consumes the exact inventoried
@@ -401,6 +456,240 @@ EMERGENCY_CONFIG_SHA256="$(printf '0%.0s' {1..64})"
 rc=0
 ( validate_emergency_config_backup ) >/dev/null 2>&1 || rc=$?
 report "case14-mismatched-backup-hash-rejected" 7 "$rc"
+
+################################################################
+# Case 15 — a v1.8.34 emergency activation may remove only the
+# provider_token after admission; all other byte drift is rejected.
+################################################################
+STAGED_CONFIG_PATH="$workdir/staged-with-token.yaml"
+LIVE_CONFIG_PATH="$workdir/live-emergency-config.yaml"
+printf 'provider_id: mp-test\nprovider_token: secret-token\nmodel: prior-model\nauto_update_enabled: false\n' > "$STAGED_CONFIG_PATH"
+cp "$STAGED_CONFIG_PATH" "$LIVE_CONFIG_PATH"
+MOCK_REAL_SHA=1
+EMERGENCY_STAGED_CONFIG_SHA256="$(command shasum -a 256 "$STAGED_CONFIG_PATH" | awk '{print $1}')"
+EMERGENCY_STAGED_CONFIG_TOKENLESS_SHA256="$(config_without_provider_token_sha256 "$STAGED_CONFIG_PATH")"
+EMERGENCY_MODEL="prior-model"
+read_config_model() { sed -n 's/^model:[[:space:]]*//p' "$LIVE_CONFIG_PATH" | tail -n 1; }
+rc=0
+( verify_emergency_config_activation ) >/dev/null 2>&1 || rc=$?
+report "case15-exact-activation-accepted" 0 "$rc"
+grep -v '^provider_token:' "$STAGED_CONFIG_PATH" > "$LIVE_CONFIG_PATH"
+rc=0
+( verify_emergency_config_activation ) >/dev/null 2>&1 || rc=$?
+report "case15-tokenless-activation-accepted" 0 "$rc"
+printf 'provider_id: mp-test\nmodel: changed-model\nauto_update_enabled: false\n' > "$LIVE_CONFIG_PATH"
+rc=0
+( verify_emergency_config_activation ) >/dev/null 2>&1 || rc=$?
+report "case15-noncredential-drift-rejected" 7 "$rc"
+
+################################################################
+# Case 16 — failed tokenless v1.8.34 bootstrap identity recovery
+# preserves the transaction-restored legacy bearer for an old binary.
+################################################################
+failed_config="$workdir/failed-tokenless.yaml"
+restored_config="$workdir/restored-token-bearing.yaml"
+restored_provider_id="$workdir/restored-provider-id"
+provider_id="mp-0123456789abcdef0123456789abcdef"
+legacy_token="$(printf 'a%.0s' {1..64})"
+printf 'provider_id: %s\nmodel: new-model\n' "$provider_id" > "$failed_config"
+printf 'provider_id: old-provider\nprovider_token: %s\nmodel: old-model\n' "$legacy_token" > "$restored_config"
+preserve_failed_bootstrap_identity "$failed_config" "$restored_config" "$restored_provider_id"
+report "case16-tokenless-failure-preserves-restored-bearer" 1 \
+  "$(grep -c "^provider_token: $legacy_token$" "$restored_config")"
+report "case16-tokenless-failure-preserves-new-provider-id" 1 \
+  "$(grep -c "^provider_id: \"$provider_id\"$" "$restored_config")"
+
+################################################################
+# Case 17 — protected acceptance assets require an exact version
+# and use only locally staged, signed payloads.
+################################################################
+acceptance_dir="$workdir/acceptance-v1.8.33"
+mkdir -m 700 "$acceptance_dir"
+printf 'goodhash macprovider-cli-v1.8.33-darwin-arm64.pkg\n' > "$acceptance_dir/checksums.txt"
+printf '{}\n' > "$acceptance_dir/acceptance-candidate.json"
+printf 'signature\n' > "$acceptance_dir/acceptance-candidate.json.sig"
+printf 'candidate-package\n' > "$acceptance_dir/macprovider-cli-v1.8.33-darwin-arm64.pkg"
+chmod 600 "$acceptance_dir"/*
+
+reset_mocks
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case17-acceptance-assets-require-version" 7 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+run_release_chain
+report "case17-local-candidate-skips-release-download" "" "$(cat "$DOWNLOAD_LOG")"
+report "case17-local-candidate-payload-staged" "candidate-package" \
+  "$(tr -d '\n' < "$asset_path")"
+report "case17-local-candidate-validation-chain-called" 1 "$VALIDATE_CALLED"
+
+################################################################
+# Case 18 — unsafe acceptance paths and signing-key substitution
+# fail closed before a candidate payload is staged.
+################################################################
+acceptance_link="$workdir/acceptance-link"
+ln -s "$acceptance_dir" "$acceptance_link"
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_link"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case18-symlinked-acceptance-dir-rejected" 7 "$rc"
+
+unsafe_acceptance_dir="$workdir/acceptance-world-writable"
+cp -R "$acceptance_dir" "$unsafe_acceptance_dir"
+chmod 700 "$unsafe_acceptance_dir"
+chmod 666 "$unsafe_acceptance_dir/checksums.txt"
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$unsafe_acceptance_dir"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case18-world-writable-acceptance-asset-rejected" 7 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="untrusted replacement key"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case18-acceptance-signing-key-override-rejected" 7 "$rc"
+
+################################################################
+# Case 19 — acceptance candidates retain the domain-separated metadata
+# signature and checksum hash fail-closed chain.
+################################################################
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+MOCK_SIGNATURE_FAIL=1
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case19-acceptance-signature-mismatch-fails" 4 "$rc"
+report "case19-signature-failure-stages-no-payload" "" "$(cat "$DOWNLOAD_LOG")"
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+MOCK_SHA="badhash"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "case19-acceptance-checksum-mismatch-fails" 4 "$rc"
+
+################################################################
+# Case 20 — acceptance install is upgrade-only; downgrade remains
+# available only to the complete emergency rollback flow.
+################################################################
+printf '#!/usr/bin/env bash\nprintf "1.8.34\\n"\n' > "$BINARY_PATH"
+chmod +x "$BINARY_PATH"
+reset_mocks
+MACPROVIDER_VERSION="v1.8.34"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+rc=0
+( validate_acceptance_upgrade_target v1.8.34 ) >/dev/null 2>&1 || rc=$?
+report "case20-acceptance-equal-version-rejected" 7 "$rc"
+rc=0
+( validate_acceptance_upgrade_target v1.8.33 ) >/dev/null 2>&1 || rc=$?
+report "case20-acceptance-downgrade-rejected" 7 "$rc"
+EMERGENCY_ROLLBACK=1
+rc=0
+( validate_acceptance_upgrade_target v1.8.33 && validate_emergency_target v1.8.33 ) >/dev/null 2>&1 || rc=$?
+report "case20-emergency-downgrade-reaches-existing-gate" 0 "$rc"
+
+################################################################
+# Case 21 — validating the installed version must not overwrite
+# the acceptance target selected by the installer transaction.
+################################################################
+printf '#!/usr/bin/env bash\nprintf "1.8.30\\n"\n' > "$BINARY_PATH"
+chmod +x "$BINARY_PATH"
+reset_mocks
+MACPROVIDER_VERSION="v1.8.33"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+MACPROVIDER_ACCEPTANCE_COMMIT="$(printf 'a%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT="$(printf 'b%.0s' {1..40})"
+MACPROVIDER_ACCEPTANCE_RUN_ID="123456789"
+MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="2"
+rc=0
+observed_tag="$(
+  tag="$(resolve_release_tag)"
+  validate_acceptance_upgrade_target "$tag"
+  printf '%s' "$tag"
+)" || rc=$?
+report "case21-older-install-accepts-newer-candidate" 0 "$rc"
+report "case21-installed-version-does-not-rewrite-target" "v1.8.33" "$observed_tag"
+
+################################################################
+# Case 22 — the locked transaction rejects stale-snapshot pinned
+# downgrades while allowing same-version repair and normal upgrade.
+# main() acquires the install lock before this check, so the tested
+# decision is made against the binary present at mutation time.
+################################################################
+write_installed_version() {
+  printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$1" > "$BINARY_PATH"
+  chmod +x "$BINARY_PATH"
+}
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.39"
+write_installed_version "1.8.40"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-newer-installed-version-rejects-pinned-downgrade" 7 "$rc"
+
+write_installed_version "1.8.39"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-equal-installed-version-allows-repair" 0 "$rc"
+
+write_installed_version "1.8.38"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-older-installed-version-allows-upgrade" 0 "$rc"
+
+EMERGENCY_ROLLBACK=1
+write_installed_version "1.8.40"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-emergency-downgrade-reaches-existing-gates" 0 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v01.8.39"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case22-leading-zero-version-rejected" 7 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v9999999999.8.39"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case22-oversized-version-component-rejected" 7 "$rc"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

@@ -2,7 +2,6 @@
 import base64
 import hashlib
 import pathlib
-import re
 import subprocess
 import sys
 import tempfile
@@ -14,15 +13,18 @@ def fail(message: str) -> None:
 
 
 if len(sys.argv) != 5:
-    fail("usage: TAG DMG APPCAST PROJECT_YML")
-tag, dmg_name, appcast_name, project_name = sys.argv[1:]
+    fail("usage: TAG DMG APPCAST LEGACY_PUBLIC_KEY")
+tag, dmg_name, appcast_name, public_key_name = sys.argv[1:]
 dmg = pathlib.Path(dmg_name)
 appcast = pathlib.Path(appcast_name)
-project = pathlib.Path(project_name)
-if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
-    fail("invalid tag")
-if not dmg.is_file() or dmg.is_symlink() or not appcast.is_file() or appcast.is_symlink():
-    fail("DMG and appcast must be regular files")
+public_key_path = pathlib.Path(public_key_name)
+if tag != "v1.8.39":
+    fail("legacy Malibu bootstrap is frozen to v1.8.39")
+if any(
+    not path.is_file() or path.is_symlink()
+    for path in (dmg, appcast, public_key_path)
+):
+    fail("DMG, appcast, and legacy public key must be regular files")
 
 namespace = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 try:
@@ -32,6 +34,12 @@ except ET.ParseError as exc:
 items = root.findall("./channel/item")
 if len(items) != 1:
     fail("appcast must contain exactly one item")
+short_versions = items[0].findall(f"{{{namespace}}}shortVersionString")
+if len(short_versions) != 1 or (short_versions[0].text or "").strip() != "1.8.39":
+    fail("appcast short version differs from the bootstrap target")
+build_versions = items[0].findall(f"{{{namespace}}}version")
+if len(build_versions) != 1 or (build_versions[0].text or "").strip() != "39":
+    fail("appcast build version differs from the bootstrap target")
 enclosures = items[0].findall("enclosure")
 if len(enclosures) != 1:
     fail("appcast must contain exactly one enclosure")
@@ -51,16 +59,19 @@ except ValueError as exc:
 if len(signature) != 64:
     fail("Sparkle signature must be 64 bytes")
 
-project_text = project.read_text(encoding="utf-8")
-matches = re.findall(r"^\s*SUPublicEDKey:\s*([^\s#]+)\s*$", project_text, re.MULTILINE)
-if len(matches) != 1:
-    fail("project must declare exactly one SUPublicEDKey")
+key_lines = [
+    line.strip()
+    for line in public_key_path.read_text(encoding="ascii").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+if key_lines != ["JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="]:
+    fail("legacy public key differs from Malibu v1.8.32")
 try:
-    public_key = base64.b64decode(matches[0], validate=True)
+    public_key = base64.b64decode(key_lines[0], validate=True)
 except ValueError as exc:
-    fail(f"invalid SUPublicEDKey encoding: {exc}")
+    fail(f"invalid legacy public key encoding: {exc}")
 if len(public_key) != 32:
-    fail("SUPublicEDKey must be 32 bytes")
+    fail("legacy public key must be 32 bytes")
 
 if sys.platform == "darwin":
     swift_verifier = pathlib.Path(__file__).with_name("verify-ed25519-signature.swift")
@@ -111,6 +122,6 @@ else:
             stderr=subprocess.DEVNULL,
         )
 if result.returncode != 0:
-    fail("Sparkle EdDSA signature does not verify against SUPublicEDKey")
+    fail("Sparkle EdDSA signature does not verify against the Malibu v1.8.32 key")
 
 print(f"Sparkle signature verified: {hashlib.sha256(dmg.read_bytes()).hexdigest()}")

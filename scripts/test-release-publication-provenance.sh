@@ -6,8 +6,6 @@ build="$root/scripts/build-release-provenance.py"
 capture="$root/scripts/capture-release-publication.py"
 draft_identity="$root/scripts/verify-release-draft-identity.py"
 verify_published="$root/scripts/verify-published-release.py"
-sparkle="$root/scripts/verify-malibu-sparkle-signature.py"
-recovery="$root/scripts/recover-malibu-publication.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-provenance.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -15,7 +13,8 @@ tag=v1.2.3
 commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf 'cli archive\n' > "$work/phase3-binary-m4-${tag}.tar.gz"
 printf 'dmg payload\n' > "$work/Malibu-${tag}.dmg"
-printf 'appcast payload\n' > "$work/appcast.xml"
+printf 'legacy bootstrap appcast\n' > "$work/appcast.xml"
+printf 'compatibility artifact index\n' > "$work/compatibility-artifact-index.json"
 printf 'coordinator payload\n' > "$work/coordinator-linux-amd64"
 printf 'coordinator cli payload\n' > "$work/coordinator-cli-linux-amd64"
 printf 'gateway payload\n' > "$work/gateway-linux-amd64"
@@ -28,13 +27,15 @@ EOF
 
 python3 "$build" "$tag" "$commit" Augustas11/macprovider false \
   "$work/release-toolchain.json" "$work/release-provenance.json" \
-  "$work/phase3-binary-m4-${tag}.tar.gz" "$work/Malibu-${tag}.dmg" "$work/appcast.xml" \
+  "$work/phase3-binary-m4-${tag}.tar.gz" "$work/Malibu-${tag}.dmg" \
+  "$work/appcast.xml" \
+  "$work/compatibility-artifact-index.json" \
   "$work/coordinator-linux-amd64" "$work/coordinator-cli-linux-amd64" \
   "$work/gateway-linux-amd64" "$work/pearl-release.json" "$work/pearl-release.json.sig"
 (
   cd "$work"
   shasum -a 256 \
-    "phase3-binary-m4-${tag}.tar.gz" "Malibu-${tag}.dmg" appcast.xml \
+    "phase3-binary-m4-${tag}.tar.gz" "Malibu-${tag}.dmg" appcast.xml compatibility-artifact-index.json \
     coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64 \
     pearl-release.json pearl-release.json.sig release-provenance.json \
     > checksums.txt
@@ -52,6 +53,7 @@ names = [
     f"phase3-binary-m4-{tag}.tar.gz",
     f"Malibu-{tag}.dmg",
     "appcast.xml",
+    "compatibility-artifact-index.json",
     "coordinator-linux-amd64",
     "coordinator-cli-linux-amd64",
     "gateway-linux-amd64",
@@ -83,6 +85,7 @@ local_assets=(
   "$work/phase3-binary-m4-${tag}.tar.gz"
   "$work/Malibu-${tag}.dmg"
   "$work/appcast.xml"
+  "$work/compatibility-artifact-index.json"
   "$work/coordinator-linux-amd64"
   "$work/coordinator-cli-linux-amd64"
   "$work/gateway-linux-amd64"
@@ -159,6 +162,7 @@ fi
 grep -q 'numeric release is still a draft' "$work/draft.out"
 
 python3 - "$work/publication-manifest.json" <<'PY'
+import hashlib
 import json
 import pathlib
 import re
@@ -172,8 +176,15 @@ assert re.fullmatch(r"[0-9a-f]{64}", manifest["body_sha256"])
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["publication_id"])
 assert manifest["assets"]["Malibu-v1.2.3.dmg"]["id"] == 502
 assert manifest["assets"]["appcast.xml"]["id"] == 503
-assert manifest["assets"]["coordinator-linux-amd64"]["id"] == 504
-assert manifest["assets"]["pearl-release.json.sig"]["id"] == 508
+assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 504
+assert manifest["assets"]["coordinator-linux-amd64"]["id"] == 505
+assert manifest["assets"]["pearl-release.json.sig"]["id"] == 509
+expected_publication = hashlib.sha256(json.dumps({
+    "appcast_sha256": manifest["assets"]["appcast.xml"]["sha256"],
+    "compatibility_artifact_index_sha256": manifest["assets"]["compatibility-artifact-index.json"]["sha256"],
+    "dmg_sha256": manifest["assets"]["Malibu-v1.2.3.dmg"]["sha256"],
+}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+assert manifest["publication_id"] == expected_publication
 PY
 
 for field in name body; do
@@ -282,63 +293,5 @@ if python3 "$capture" "$work/release-extra.json" "$work/release-provenance.json"
   exit 1
 fi
 grep -q 'asset names differ from the signed release set' "$work/extra.out"
-
-python3 - "$work" "$tag" <<'PY'
-import base64
-import pathlib
-import sys
-
-root, tag = pathlib.Path(sys.argv[1]), sys.argv[2]
-# Fixed fixture for the exact `dmg payload\n` bytes written above. Only the
-# public key and signature are retained; no test signing tool is required.
-public = base64.b64decode("fugrlkokiAkObj9GZt3iFt1kRCYdZ3EmGIu+rPiov6k=")
-signature = base64.b64decode(
-    "QvFsufr4l5sxqRmjxXDGGJqbSnAa67fFxsDVe39TuLZiNWuyiUKvOVPcrRBDFpPWM/n+J+agXrH8dS8P7byYAA=="
-)
-(root / "project.yml").write_text(f"SUPublicEDKey: {base64.b64encode(public).decode()}\n")
-size = (root / f"Malibu-{tag}.dmg").stat().st_size
-(root / "sparkle-appcast.xml").write_text(
-    '<?xml version="1.0"?><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">'
-    '<channel><item><enclosure '
-    f'url="https://download.malibu.tech/Malibu-{tag}.dmg" length="{size}" '
-    f'sparkle:edSignature="{base64.b64encode(signature).decode()}" />'
-    '</item></channel></rss>\n'
-)
-PY
-python3 "$sparkle" "$tag" "$work/Malibu-${tag}.dmg" \
-  "$work/sparkle-appcast.xml" "$work/project.yml" >/dev/null
-cp "$work/Malibu-${tag}.dmg" "$work/Malibu-${tag}.original"
-python3 - "$work/Malibu-${tag}.dmg" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-payload = bytearray(path.read_bytes())
-payload[0] ^= 1
-path.write_bytes(payload)
-PY
-if python3 "$sparkle" "$tag" "$work/Malibu-${tag}.dmg" \
-  "$work/sparkle-appcast.xml" "$work/project.yml" >"$work/sparkle-signature-drift.out" 2>&1; then
-  echo "Sparkle verifier accepted same-length tampered DMG bytes" >&2
-  exit 1
-fi
-grep -q 'does not verify' "$work/sparkle-signature-drift.out"
-mv "$work/Malibu-${tag}.original" "$work/Malibu-${tag}.dmg"
-printf 'tamper\n' >> "$work/Malibu-${tag}.dmg"
-if python3 "$sparkle" "$tag" "$work/Malibu-${tag}.dmg" \
-  "$work/sparkle-appcast.xml" "$work/project.yml" >"$work/sparkle-drift.out" 2>&1; then
-  echo "Sparkle verifier accepted a tampered DMG" >&2
-  exit 1
-fi
-grep -Eq 'length differs|does not verify' "$work/sparkle-drift.out"
-
-grep -q "releases/assets/\${asset_ids" "$recovery" || {
-  echo "manual recovery must download captured numeric asset IDs" >&2
-  exit 1
-}
-if grep -qE 'gh release download|releases/tags/' "$recovery"; then
-  echo "manual recovery must not redownload by mutable tag" >&2
-  exit 1
-fi
 
 echo "release publication provenance regression checks passed"

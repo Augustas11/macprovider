@@ -6,17 +6,32 @@ workflow="$root/.github/workflows/release.yml"
 guard="$root/scripts/verify-github-release-posture.sh"
 input_guard="$root/scripts/validate-release-inputs.sh"
 checksums_guard="$root/scripts/verify-release-checksums.sh"
-sparkle_generator="$root/scripts/generate-malibu-appcast.sh"
 xcodegen_installer="$root/scripts/install-pinned-xcodegen.sh"
+sparkle_generator="$root/scripts/generate-malibu-appcast.sh"
+legacy_sparkle_key="$root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+trust_anchor_helper="$root/scripts/prepare-malibu-bootstrap-trust-anchor.py"
+malibu_artifact_verifier="$root/scripts/verify-malibu-release-artifacts.sh"
+release_runbook="$root/phase3-binary/dist/release-signing-runbook.md"
+decision_log="$root/beta/DECISION_CRITERIA.md"
+ci_workflow="$root/.github/workflows/ci.yml"
+sparkle_validator_integration="$root/scripts/test-malibu-sparkle-validator-integration.sh"
+sparkle_validator_patch="$root/scripts/fixtures/SUUpdateValidator-2.6.4-ephemeral.patch"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-python3 - "$workflow" <<'PY'
+python3 - "$workflow" "$root/phase3-binary/app/project.yml" \
+  "$root/phase3-binary/app/Sources/Malibu/Info.plist" \
+  "$trust_anchor_helper" "$malibu_artifact_verifier" <<'PY'
 import pathlib
 import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+current_app = "\n".join(
+    pathlib.Path(path).read_text(encoding="utf-8") for path in sys.argv[2:4]
+)
+trust_anchor_helper = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+malibu_artifact_verifier = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
 if "\n  push:" in text or "refs/tags/" in text:
     raise SystemExit("release workflow must not execute from a tag-push ref")
 if "\n  workflow_dispatch:" not in text:
@@ -44,12 +59,123 @@ if "--allow-absent" in publish:
     raise SystemExit("protected publish job must always require the exact release tag")
 if "unsigned-release-manifest.json" not in build or "unsigned-release-manifest.json" not in publish:
     raise SystemExit("unsigned candidate inputs lack an end-to-end provenance manifest")
+for requirement in ("MACPROVIDER_PROVIDER_ADMISSION_POLICY",):
+    if requirement not in build:
+        raise SystemExit(f"unsigned build omits compatibility-set generation input: {requirement}")
+for requirement in (
+    "scripts/compatibility-set-manifest.py sign",
+    "--require-signature",
+    'cp "$WORK/compatibility-set.json" "$PKG_ROOT/compatibility-set.json"',
+    'cp -R "$WORK/compatibility-set-local" "$PKG_ROOT/compatibility-set-local"',
+    '"$APP/Contents/Resources/compatibility-set.json"',
+    'cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"',
+    'release_assets+=("$compatibility_manifest")',
+    'cmp "$compatibility_manifest" "$compatibility_extract/compatibility-set.json"',
+):
+    if requirement not in publish:
+        raise SystemExit(f"protected publication omits compatibility-set binding: {requirement}")
 if "scripts/verify-github-release-posture.sh" not in publish:
     raise SystemExit("publish job must verify external repository posture")
 if publish.find("Verify Malibu release cryptographic bindings") > publish.find("Create verified draft GitHub release"):
-    raise SystemExit("Apple and Sparkle verification must run before draft release creation")
-if "scripts/verify-malibu-release-artifacts.sh" not in publish or "verify-malibu-sparkle-signature.py" not in publish:
-    raise SystemExit("publish job must verify Apple and Sparkle signatures")
+    raise SystemExit("Apple verification must run before draft release creation")
+if "scripts/verify-malibu-release-artifacts.sh" not in publish:
+    raise SystemExit("publish job must verify Apple signatures and notarization")
+for forbidden in ("Sparkle", "SUFeedURL", "SUPublicEDKey"):
+    if forbidden in current_app:
+        raise SystemExit(f"current Malibu app retains legacy update authority: {forbidden}")
+if re.search(r"^packages:\s*", current_app, re.MULTILINE):
+    raise SystemExit("current Malibu app must remain dependency-free")
+app_sign = publish.split("- name: Sign + notarize + staple Malibu.app", 1)[1].split(
+    "\n      - name:", 1
+)[0]
+first_bundle_write = app_sign.find(
+    'cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"'
+)
+compatibility_copy = app_sign.find(
+    'cp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"'
+)
+anchor_prepare = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py prepare")
+anchor_verify = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py verify")
+app_codesign = app_sign.find("codesign --force --deep")
+if min(first_bundle_write, compatibility_copy, anchor_prepare, anchor_verify, app_codesign) < 0 or not (
+    anchor_prepare < first_bundle_write < compatibility_copy < anchor_verify < app_codesign
+):
+    raise SystemExit(
+        "Malibu app must be preflighted before bundle writes and reverified before codesign"
+    )
+if app_sign.count("prepare-malibu-bootstrap-trust-anchor.py prepare") != 1:
+    raise SystemExit("Malibu signing must prepare the one-time trust anchor exactly once")
+if app_sign.count("prepare-malibu-bootstrap-trust-anchor.py verify") != 1:
+    raise SystemExit("Malibu signing must reverify the bundled trust posture exactly once")
+if 'mkdir -p "$APP/Contents/Resources"' in app_sign:
+    raise SystemExit("Malibu signing must not mutate bundle paths before trust preflight")
+for requirement in (
+    'tag="${{ needs.build.outputs.tag }}"',
+    "scripts/dist/malibu-v1.8.32-sparkle-public-key",
+    '/usr/bin/otool -L "$APP/Contents/MacOS/Malibu"',
+    "Malibu bridge must not link a Sparkle runtime",
+):
+    if requirement not in app_sign:
+        raise SystemExit(f"Malibu signing omits trust-continuity guard: {requirement}")
+for requirement in (
+    'BRIDGE_TAG = "v1.8.39"',
+    'BRIDGE_VERSION = "1.8.39"',
+    'BRIDGE_BUILD = "39"',
+    'EXPECTED_PUBLIC_KEY = "JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="',
+    'key.startswith("SU")',
+    'document["SUPublicEDKey"] = key',
+    "os.replace(temporary_path, path)",
+    "stat.S_ISREG",
+    "candidate.is_symlink()",
+    'require_directory(contents / "MacOS"',
+    'require_directory(contents / "Resources"',
+):
+    if requirement not in trust_anchor_helper:
+        raise SystemExit(f"trust-anchor helper omits fail-closed control: {requirement}")
+for requirement in (
+    "prepare-malibu-bootstrap-trust-anchor.py",
+    "malibu-v1.8.32-sparkle-public-key",
+    '/usr/bin/otool -L "$app_path/Contents/MacOS/Malibu"',
+    "Malibu must not link a Sparkle runtime",
+):
+    if requirement not in malibu_artifact_verifier:
+        raise SystemExit(f"final Malibu artifact verification omits: {requirement}")
+if publish.count("Generate one-time Malibu 1.8.32 bootstrap bridge") != 1:
+    raise SystemExit("release workflow must contain exactly one named bootstrap generator")
+if publish.count("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") != 1:
+    raise SystemExit("release workflow must contain exactly one named bootstrap publisher")
+bridge = publish.split("- name: Generate one-time Malibu 1.8.32 bootstrap bridge", 1)[1].split(
+    "\n      - name:", 1
+)[0]
+pearl_bridge = publish.split(
+    "- name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 1
+)[1].split("\n      - name:", 1)[0]
+if "if: needs.build.outputs.tag == 'v1.8.39'" not in bridge:
+    raise SystemExit("legacy appcast generation is not frozen to v1.8.39")
+if "SPARKLE_EDDSA_PRIVATE_KEY" not in bridge or "verify-malibu-sparkle-signature.py" not in bridge:
+    raise SystemExit("legacy appcast lacks protected signing or frozen-key verification")
+if "if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'" not in pearl_bridge:
+    raise SystemExit("Pearl bridge publication is not frozen to stable v1.8.39")
+for requirement in (
+    "publish-malibu-latest-dmg.sh",
+    "publication-manifest.json",
+    "compatibility-artifact-index.json",
+    "checksums.txt.sig",
+):
+    if requirement not in pearl_bridge:
+        raise SystemExit(f"Pearl bootstrap publication omits {requirement}")
+if publish.find("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") < publish.find(
+    "cmp final-draft-manifest.json publication-manifest.json"
+):
+    raise SystemExit("Pearl bridge must publish only after immutable GitHub publication")
+team_requirement = (
+    '-R="identifier \\"live.streamvc.macprovider.cli\\" and anchor apple generic '
+    'and certificate leaf[subject.OU] = \\"$APPLE_NOTARY_TEAM_ID\\""'
+)
+if publish.count(team_requirement) != 2:
+    raise SystemExit("CLI and bundled CLI must evaluate the exact Team ID requirement semantically")
+if 'grep -F "certificate leaf[subject.OU]' in publish:
+    raise SystemExit("release workflow must not parse codesign requirement display formatting")
 if '"repos/$GITHUB_REPOSITORY/releases/$release_id"' not in publish:
     raise SystemExit("post-create verification must re-fetch the captured numeric release id")
 if "ensure-release-tag-target" in text or "git push" in text:
@@ -97,9 +223,33 @@ for asset in ("coordinator-linux-amd64", "coordinator-cli-linux-amd64", "gateway
         raise SystemExit(f"Pearl artifact does not cross the reviewed build boundary: {asset}")
 prepare = publish.split("- name: Prepare release assets", 1)[1].split("\n      - name:", 1)[0]
 metadata_position = prepare.find('release_assets+=("$pearl_metadata" "$pearl_metadata_sig")')
+index_position = prepare.find("scripts/compatibility-artifact-index.py build")
 provenance_position = prepare.find("scripts/build-release-provenance.py")
-if metadata_position < 0 or provenance_position < 0 or metadata_position > provenance_position:
-    raise SystemExit("signed Pearl metadata must enter the release set before provenance")
+if (
+    metadata_position < 0
+    or index_position < metadata_position
+    or provenance_position < index_position
+    or 'release_assets+=("$compatibility_artifact_index")' not in prepare
+):
+    raise SystemExit("exact compatibility artifact index must bind Pearl metadata before provenance")
+appcast_position = prepare.find('release_assets+=("$appcast_asset")')
+if appcast_position < 0 or appcast_position > provenance_position:
+    raise SystemExit("v1.8.39 appcast must enter signed provenance and checksums")
+if 'if [ "$tag" = v1.8.39 ]' not in prepare or 'legacy appcast must exist only for v1.8.39' not in prepare:
+    raise SystemExit("release assets do not fail closed outside the one-time bridge tag")
+for requirement in (
+    "provider_cli=$tar_asset",
+    "malibu_app=$app_dmg_asset",
+    "coordinator=$coordinator_asset",
+    "coordinator_cli=$coordinator_cli_asset",
+    "gateway=$gateway_asset",
+    "compatibility_manifest=$compatibility_manifest",
+    "catalog_trusted_keys=trusted-keys.json",
+    "pearl_metadata=$pearl_metadata",
+    "pearl_metadata_signature=$pearl_metadata_sig",
+):
+    if requirement not in prepare:
+        raise SystemExit(f"compatibility artifact index omits required role: {requirement}")
 if "ops/pearl-updater/release-signing-public.pem" not in prepare:
     raise SystemExit("Pearl metadata signature is not checked against the updater trust anchor")
 for asset in (
@@ -154,8 +304,12 @@ if "release-toolchain.json" not in build or "release-toolchain.json" not in publ
     raise SystemExit("verified build toolchain must cross the artifact boundary into publication")
 if "actions/checkout v6.0.3" not in build:
     raise SystemExit("checkout provenance comment differs from the pinned action commit")
-if publish.find("Clean Apple signing material before third-party tools") > publish.find("Generate Sparkle appcast"):
-    raise SystemExit("Apple keychain and private material must be deleted before Sparkle tools run")
+if "Clean Apple signing material after notarization" not in publish:
+    raise SystemExit("Apple keychain and private material must be deleted after notarization")
+if publish.find("Clean Apple signing material after notarization") > publish.find(
+    "Generate one-time Malibu 1.8.32 bootstrap bridge"
+):
+    raise SystemExit("Apple private material must be removed before third-party Sparkle tools run")
 create = publish.split("- name: Create verified draft GitHub release", 1)[1].split("\n      - name:", 1)[0]
 verify_draft = publish.split("- name: Verify draft release assets by numeric ID", 1)[1].split("\n      - name:", 1)[0]
 make_public = publish.split("- name: Publish only the revalidated numeric draft", 1)[1].split("\n      - name:", 1)[0]
@@ -208,28 +362,207 @@ for requirement in (
 ):
     if make_public.find(requirement, patch_position) < 0:
         raise SystemExit(f"post-publication release-state verification is missing: {requirement}")
-if "if: needs.build.outputs.prerelease == 'false'" not in publish.split(
-    "- name: Publish Malibu latest.dmg", 1
-)[1].split("\n      - name:", 1)[0]:
-    raise SystemExit("stable Pearl feed publication is not gated to prerelease=false")
 PY
 
-python3 - "$sparkle_generator" "$xcodegen_installer" <<'PY'
+for requirement in \
+  '### 8.1 Frozen v1.8.39 pre-publication tag recovery' \
+  '3aa5b37ac774100902179b21fd3bb35bc8075c4e' \
+  '2d8b0849efe9bb09803296fb375324daed80220c' \
+  '29425477660' \
+  "refs/recovery/\$TAG-old" \
+  "--force-with-lease=\"refs/tags/\$TAG:\$OLD_TAG_OBJECT\"" \
+  "--force-with-lease=\"refs/tags/\$TAG:\"" \
+  '-f provider_admission_policy=bridge_required' \
+  "RUN_ID=\"\$NEW_RUN_IDS\"" \
+  'Build unsigned release inputs from reviewed main' \
+  'Sign and publish reviewed release' \
+  "actions/runs/\$RUN_ID/pending_deployments" \
+  '.reviewer.login=="antfleet-ops"' \
+  'This exception is permanently closed' \
+  'no second deletion, update, or recovery is permitted'; do
+  grep -Fq -- "$requirement" "$release_runbook" || {
+    echo "release runbook omits frozen v1.8.39 recovery control: $requirement" >&2
+    exit 1
+  }
+done
+python3 - "$release_runbook" <<'PY'
 import pathlib
 import sys
 
-sparkle = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-xcodegen = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
-sparkle_digest = "50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b"
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("### 8.1 Frozen v1.8.39 pre-publication tag recovery")
+end = text.index("Steps 11-13 execute only in normal production mode.", start)
+recovery = text[start:end]
+
+for unsafe in (
+    'test -z "$(' ,
+    'test "$(curl',
+    'test "$(gh api',
+    'test "$(git ls-remote',
+    'export GH_TOKEN="$(gh auth token',
+    "! curl -fsSL",
+):
+    if unsafe in recovery:
+        raise SystemExit(f"v1.8.39 recovery can mistake lookup failure for absence: {unsafe}")
+
+ordered = (
+    "gh workflow run release.yml",
+    'RUN_ID="$NEW_RUN_IDS"',
+    'actions/runs/$RUN_ID"',
+    "Build unsigned release inputs from reviewed main",
+    "Sign and publish reviewed release",
+    "actions/runs/$RUN_ID/pending_deployments",
+    "git fetch origin refs/heads/main:refs/remotes/origin/main",
+    'REMOTE_TAG_BEFORE_CREATE="$(git ls-remote origin refs/tags/$TAG',
+    'releases?per_page=100',
+    "https://download.malibu.tech/Malibu-v1.8.39.dmg",
+    'PUBLIC_APPCAST_BEFORE_CREATE="$(curl -fsSL',
+    "<sparkle:shortVersionString>1.8.39</sparkle:shortVersionString>",
+    'git tag -s "$TAG"',
+)
+cursor = 0
+for marker in ordered:
+    position = recovery.find(marker, cursor)
+    if position < 0:
+        raise SystemExit(
+            f"v1.8.39 recovery does not enforce ordered run/tag gate: {marker}"
+        )
+    cursor = position + len(marker)
+
+for marker in (
+    'releases?per_page=100',
+    "https://download.malibu.tech/Malibu-v1.8.39.dmg",
+    "<sparkle:shortVersionString>1.8.39</sparkle:shortVersionString>",
+):
+    if recovery.count(marker) < 3:
+        raise SystemExit(
+            f"v1.8.39 recovery must gate initial, pre-delete, and pre-create state: {marker}"
+        )
+
+for marker in (
+    'test "$(git rev-parse HEAD)" = "$NEW_COMMIT"',
+    'test "$NEW_COMMIT" != "$OLD_COMMIT"',
+):
+    if recovery.count(marker) < 3:
+        raise SystemExit(
+            f"v1.8.39 recovery must gate initial, pre-delete, and pre-create commit: {marker}"
+        )
+    if recovery.index(marker) > recovery.index(
+        '--force-with-lease="refs/tags/$TAG:$OLD_TAG_OBJECT"'
+    ):
+        raise SystemExit(
+            f"v1.8.39 recovery must reject the failed commit before tag deletion: {marker}"
+        )
+
+delete_position = recovery.index(
+    '--force-with-lease="refs/tags/$TAG:$OLD_TAG_OBJECT"'
+)
+for marker in (
+    'RELEASE_IDS_BEFORE_DELETE="$(gh api --paginate',
+    'PUBLIC_APPCAST_BEFORE_DELETE="$(curl -fsSL',
+    'select(.status!="completed")] | length',
+):
+    position = recovery.find(marker)
+    if position < 0 or position > delete_position:
+        raise SystemExit(
+            f"v1.8.39 recovery must close mutable-state races before deletion: {marker}"
+        )
+
+for marker in (
+    '.head_sha)\" = \"$NEW_COMMIT\"',
+    "$'completed\\tsuccess'",
+    "$'waiting\\t'",
+    '.environment.name=="production-release"',
+    '.reviewer.login=="antfleet-ops"',
+    '.reviewer.id==285575208',
+    '.status=="completed" and .conclusion=="success"',
+    '.status=="waiting" and .conclusion==null',
+    'select(.status!="completed" and .id!=$run)',
+    'GH_TOKEN="$(gh auth token -u Augustas11)"',
+    'REMOTE_MAIN_SHA_BEFORE="$(git ls-remote',
+    'RELEASE_IDS_BEFORE="$(gh api --paginate',
+    'FAILED_RUN_STATE="$(gh api',
+    'ACTIVE_RELEASE_RUNS_BEFORE="$(gh api',
+    'CI_REQUIRED_SUCCESSES="$(gh api',
+    'PUBLIC_DMG_STATUS_BEFORE="$(curl',
+    'REMOTE_MAIN_SHA_BEFORE_DELETE="$(git ls-remote',
+    'ACTIVE_RELEASE_RUNS_BEFORE_DELETE="$(gh api',
+    'RELEASE_IDS_BEFORE_DELETE="$(gh api --paginate',
+    'PUBLIC_DMG_STATUS_BEFORE_DELETE="$(curl',
+    'REMOTE_TAG_AFTER_DELETE="$(git ls-remote',
+    'CAPTURED_RUN_IDENTITY="$(gh api',
+    'REMOTE_MAIN_SHA_BEFORE_CREATE="$(git ls-remote',
+    'REMOTE_TAG_BEFORE_CREATE="$(git ls-remote',
+    'RUN_STATE_BEFORE_CREATE="$(gh api',
+    'OTHER_ACTIVE_RELEASE_RUNS="$(gh api',
+    'RELEASE_IDS_BEFORE_CREATE="$(gh api --paginate',
+    'PUBLIC_DMG_STATUS_BEFORE_CREATE="$(curl',
+    'PUBLIC_APPCAST_BEFORE="$(curl -fsSL',
+    'PUBLIC_APPCAST_BEFORE_DELETE="$(curl -fsSL',
+    'REMOTE_NEW_TAG_OBJECT="$(git ls-remote',
+    'REMOTE_NEW_TAG_COMMIT="$(git ls-remote',
+    'verify-github-release-posture.sh',
+):
+    if marker not in recovery:
+        raise SystemExit(f"v1.8.39 recovery omits exact-run safety assertion: {marker}")
+PY
+for requirement in \
+  'Entry 157 — Retire and re-create the unpublished v1.8.39 tag' \
+  '3aa5b37ac774100902179b21fd3bb35bc8075c4e' \
+  'This authority expires when the replacement v1.8.39 ref is created'; do
+  grep -Fq -- "$requirement" "$decision_log" || {
+    echo "decision log omits frozen v1.8.39 recovery boundary: $requirement" >&2
+    exit 1
+  }
+done
+for requirement in \
+  'sparkle_commit="0ef1ee0220239b3776f433314515fd849025673f"' \
+  'sparkle_remote="https://github.com/sparkle-project/Sparkle.git"' \
+  'testEphemeralEdDSAKeyContinuityForApplicationUpdate' \
+  'CODE_SIGNING_ALLOWED=NO'; do
+  grep -Fq -- "$requirement" "$sparkle_validator_integration" || {
+    echo "Sparkle validator integration omits pinned control: $requirement" >&2
+    exit 1
+  }
+done
+for requirement in \
+  'targetContainsKey: true' \
+  'targetContainsKey: false' \
+  'SUSparkleErrorDomain' \
+  'only supports rotation, but not removal'; do
+  grep -Fq -- "$requirement" "$sparkle_validator_patch" || {
+    echo "Sparkle validator fixture omits continuity assertion: $requirement" >&2
+    exit 1
+  }
+done
+generator_ci_position="$(grep -nF 'bash scripts/test-malibu-sparkle-generator-integration.sh' \
+  "$ci_workflow" | cut -d: -f1)"
+validator_ci_position="$(grep -nF 'bash scripts/test-malibu-sparkle-validator-integration.sh' \
+  "$ci_workflow" | cut -d: -f1)"
+[[ -n "$generator_ci_position" && -n "$validator_ci_position" && \
+  "$generator_ci_position" -lt "$validator_ci_position" ]] || {
+  echo "macOS CI does not run generator then real Sparkle validator integration" >&2
+  exit 1
+}
+
+python3 - "$xcodegen_installer" "$sparkle_generator" "$legacy_sparkle_key" <<'PY'
+import pathlib
+import sys
+
+xcodegen = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+sparkle = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+legacy_key = pathlib.Path(sys.argv[3]).read_text(encoding="ascii")
 xcodegen_digest = "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"
-if sparkle_digest not in sparkle or sparkle.find("shasum -a 256") > sparkle.find("tar -xJf"):
-    raise SystemExit("Sparkle release tools must be digest-pinned before extraction")
-if sparkle.find("tar -xJf") > sparkle.find('"$generate_appcast"'):
-    raise SystemExit("Sparkle executable ordering is invalid")
-if "SPARKLE_VERSION" in sparkle or "SPARKLE_TOOLS_DIR" in sparkle:
-    raise SystemExit("Sparkle tool version and bytes must not be caller-overridable")
 if xcodegen_digest not in xcodegen or xcodegen.find("shasum -a 256") > xcodegen.find("unzip -q"):
     raise SystemExit("XcodeGen artifact must be digest-pinned before extraction")
+sparkle_digest = "50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b"
+if sparkle_digest not in sparkle or sparkle.find("shasum -a 256") > sparkle.find("tar -xJf"):
+    raise SystemExit("legacy Sparkle tools must be digest-pinned before extraction")
+if 'bridge_tag="v1.8.39"' not in sparkle or "SPARKLE_VERSION" in sparkle:
+    raise SystemExit("legacy appcast generator is not frozen to one tag and tool version")
+key_lines = [line.strip() for line in legacy_key.splitlines() if line.strip() and not line.startswith("#")]
+if key_lines != ["JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="]:
+    raise SystemExit("legacy public key differs from the SUPublicEDKey shipped in Malibu v1.8.32")
 PY
 
 marker="$work/input-command-executed"
@@ -261,7 +594,6 @@ bash "$input_guard" v1.2.3 false true | grep -Fxq 'v1.2.3 false true'
 mkdir -p "$work/reviewed/scripts" "$work/reviewed/phase3-binary/app"
 cp "$root/scripts/verify-app-build-inputs.sh" "$work/reviewed/scripts/"
 cp "$root/phase3-binary/Package.resolved" "$work/reviewed/phase3-binary/"
-cp "$root/phase3-binary/app/Package.resolved" "$work/reviewed/phase3-binary/app/"
 cp "$root/phase3-binary/app/project.yml" "$work/reviewed/phase3-binary/app/"
 git -C "$work/reviewed" init -q
 git -C "$work/reviewed" config user.name release-test

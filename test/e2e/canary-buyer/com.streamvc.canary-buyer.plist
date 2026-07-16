@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd agent template — runs the canary buyer probe every 30 minutes on a lab Mac.
+  launchd agent template — runs low-impact liveness every 30 minutes on a lab Mac.
 
   Install (per-user LaunchAgent):
-    1. Edit REPLACE_REPO_PATH below to the absolute checkout path.
-    2. Optionally set CANARY_PUSHGATEWAY / CANARY_MODELS in EnvironmentVariables.
+    1. sudo install -d -o root -g wheel -m 0755 /opt/macprovider-canary-buyer
+       sudo install -o root -g wheel -m 0755 probe.mjs safety.mjs run-canary.sh emergency-disable.sh /opt/macprovider-canary-buyer/
+    2. Install GNU coreutils (`brew install coreutils`) and create user-owned,
+       mode-0600 buyer/operator/heartbeat files plus canary-expected-fleet.json
+       as described in README.md. The wrapper rejects symlinks, other owners,
+       and group/world-readable files.
     3. cp com.streamvc.canary-buyer.plist ~/Library/LaunchAgents/
     4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.streamvc.canary-buyer.plist
     5. launchctl kickstart -p gui/$(id -u)/com.streamvc.canary-buyer   # run once now
@@ -21,7 +25,10 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>REPLACE_REPO_PATH/test/e2e/canary-buyer/run-canary.sh</string>
+    <string>/opt/macprovider-canary-buyer/run-canary.sh</string>
+    <string>--mode</string>
+    <string>liveness</string>
+    <string>--fail-on-degraded</string>
   </array>
 
   <key>EnvironmentVariables</key>
@@ -30,16 +37,39 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>CANARY_BASE</key>
     <string>https://api.streamvc.live</string>
+    <key>CANARY_POOLZ_URL</key>
+    <string>https://coordinator.streamvc.live/poolz</string>
+    <key>CANARY_MODELS</key>
+    <string>mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit,mlx-community/Llama-3.2-3B-Instruct-4bit</string>
+    <key>CANARY_MIN_READY_PROVIDERS</key>
+    <string>2</string>
+    <key>CANARY_OPERATOR_TOKEN_FILE</key>
+    <string>REPLACE_HOME/.config/macprovider/operator-api-key</string>
+    <key>CANARY_HEARTBEAT_FILE</key>
+    <string>REPLACE_HOME/.config/macprovider/canary-heartbeat-url</string>
+    <key>CANARY_EXPECTED_FLEET_FILE</key>
+    <string>REPLACE_HOME/.config/macprovider/canary-expected-fleet.json</string>
+    <key>CANARY_REQUIRE_HEARTBEAT</key>
+    <string>1</string>
+    <key>CANARY_PROBE_TIMEOUT_SECONDS</key>
+    <string>120</string>
+    <key>CANARY_TIMEOUT_BIN</key>
+    <string>/opt/homebrew/bin/gtimeout</string>
+    <key>CANARY_ENABLE_FILE</key>
+    <string>REPLACE_HOME/.config/macprovider/canary-buyer.enabled</string>
+    <key>CANARY_DISABLE_FILE</key>
+    <string>REPLACE_HOME/.local/state/canary-buyer/DISABLED</string>
+    <key>CANARY_MAX_REQUESTS_PER_PROVIDER</key>
+    <string>4</string>
+    <key>CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER</key>
+    <string>32</string>
+    <key>CANARY_MAX_RUN_DURATION_MS</key>
+    <string>90000</string>
     <!-- Uncomment to push to a Prometheus pushgateway instead of relying on the
-         node_exporter textfile collector. A localhost/http pushgateway also
-         requires CANARY_ALLOW_INSECURE=1 (URLs must be https + non-private by
-         default); prefer an https, non-private pushgateway address:
+         node_exporter textfile collector. Pushgateway URLs must be https and
+         resolve only to public addresses:
     <key>CANARY_PUSHGATEWAY</key>
     <string>https://pushgateway.internal.example:9091</string>
-    -->
-    <!-- Uncomment to pin an explicit model set instead of deriving from /v1/status:
-    <key>CANARY_MODELS</key>
-    <string>mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit</string>
     -->
   </dict>
 

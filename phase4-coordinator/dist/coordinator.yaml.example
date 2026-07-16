@@ -321,13 +321,22 @@ malibu_emission:
   # base_usdc_balance_rpc_urls: []
 
 # Auto-update recommendation surface. The coordinator forwards
-# `latest_binary_version` to every connected provider in its
-# `auth_response` / `state_update` frame as `recommended_binary_version`.
-# Provider CLIs whose auto-update trust-state gate accepts the coordinator
-# (pinned tier, OR provisional + operator opt-in via
+# `latest_binary_version` as `recommended_binary_version` in its
+# `hello_ack` / `auth_response` frame.
+#
+# S-H1 (2026-07-15) — CAPABILITY-GATED server-side. The recommendation is
+# emitted ONLY to providers that declare a `compatibility_set_id` in their
+# hello (v1.8.33+), whose CLI-owned updater performs full signed
+# compatibility-set transactions. Pre-compatibility-set providers (<=1.8.32)
+# never receive it: their shipped default binary-only autoupdater would
+# otherwise self-swap into a mixed install, bypassing the authorized
+# operator-assisted full-installer recovery path. The operator-assisted full
+# installer is the ONLY sanctioned upgrade path for that legacy cohort
+# (DECISION_CRITERIA Entry 161). Providers whose auto-update trust-state gate
+# accepts the coordinator (pinned tier, OR provisional + operator opt-in via
 # `auto_update_accept_provisional: true` on the provider config — added
 # 2026-07-03 to unblock self-service providers from being trust-orphaned
-# from fixes) will then fetch + install the target release.
+# from fixes) AND that pass the capability gate will fetch + install the target.
 #
 # WHEN THIS BLOCK IS UNSET the field is omitted from the wire frame and
 # providers receive no recommendation → auto-update never fires. This
@@ -338,10 +347,12 @@ malibu_emission:
 # clone deploy.
 #
 # `required_binary_version` (optional) hard-rejects providers below the
-# version, closing WS with CloseVersionTooOld. Use for security fixes
-# that must not be optional. Leave unset for advisory releases.
+# version, closing WS with CloseVersionTooOld. It is a hard admission floor,
+# not an autoupdate target, and is NOT subject to the S-H1 capability gate.
+# Use for security fixes that must not be optional. Leave unset for advisory
+# releases.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.32"
+  latest_binary_version: "1.8.40"
   # required_binary_version: "1.7.0"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that

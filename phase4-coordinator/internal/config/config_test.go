@@ -746,6 +746,26 @@ func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
 	}
 }
 
+func TestCLIOnlyOperatorKeysAllowPartialConfigurationWhileRoutesFailClosed(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "legacy-operator"
+	cfg.Onboarding.AppTrackRegisterEnabled = false
+	cfg.Auth.OperatorKeys = map[string]string{"alice": "same-secret", "bob": "same-secret"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("CLI-only duplicate operator map must remain startup-compatible: %v", err)
+	}
+
+	cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("CLI-only single operator map must remain startup-compatible: %v", err)
+	}
+
+	cfg.Auth.OperatorKeys = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("CLI-only deployment without named admin operators should remain valid: %v", err)
+	}
+}
+
 func TestOnboardingCoordinatorDomainMustBeBareLowercaseHost(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"

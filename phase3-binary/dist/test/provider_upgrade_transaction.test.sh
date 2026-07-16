@@ -49,11 +49,13 @@ stage = main.index("stage_release_payload", snapshot)
 prepare = main.index("prepare_staged_config", stage)
 freshness = main.index("use_fresh_recommendation_if_available", stage)
 recommend_gate = main.index('if [ "$AUTOTUNE_RECOMMENDATION_REQUIRED" -eq 1 ]', freshness)
+prefetch = main.index("prefetch_upgrade_autotune_model", freshness)
+cutover_marker = main.index("mark_install_cutover_started", recommend_gate)
 stop = main.index("ensure_port_free 1", recommend_gate)
 recommend = main.index("run_autotune_recommend_apply", stop)
 install = main.index("install_binary", recommend)
 activate = main.index("activate_staged_config", install)
-if not snapshot < stage < prepare < freshness < recommend_gate < stop < recommend < install < activate:
+if not snapshot < stage < prepare < freshness < prefetch < recommend_gate < cutover_marker < stop < recommend < install < activate:
     raise SystemExit("benchmarks are not isolated from the live provider and staged cutover")
 helper = source[source.index("run_macprovider_cli_with_amfi_retry() {"):source.index("detect_existing_port() {")]
 if 'local cli_path="$MACPROVIDER_CLI_EXECUTABLE"' not in helper:
@@ -97,6 +99,13 @@ fi
 complete_payload="$(printf '%s\n' \
   macprovider-cli \
   mlx.metallib \
+  compatibility-set.json \
+  compatibility-set-local \
+  compatibility-set-local/install.sh \
+  compatibility-set-local/provider-launch-agent.plist.template \
+  compatibility-set-local/updater-rollback.json \
+  compatibility-set-local/watchdog-launch-agent.plist.template \
+  compatibility-set-local/watchdog.sh \
   Runtime.bundle \
   Runtime.bundle/resource \
   catalog-release \
@@ -117,6 +126,10 @@ if (validate_staged_entries "${complete_payload//$'\n'Runtime.bundle$'\n'Runtime
 fi
 if (validate_staged_entries "${complete_payload//$'\n'catalog-release\/release.json/}" "test payload"); then
   echo "payload without the signed catalog manifest unexpectedly passed validation" >&2
+  exit 1
+fi
+if (validate_staged_entries "${complete_payload//$'\n'compatibility-set.json/}" "test payload"); then
+  echo "payload without the compatibility-set manifest unexpectedly passed validation" >&2
   exit 1
 fi
 
@@ -198,7 +211,7 @@ skip_discard_called="$TMP/skip-discard-called"
   SKIP_PROVIDER_START=1
   EXISTING_INSTALL_WAS_PRESENT=1
   rollback_install_transaction() { : > "$skip_restore_called"; }
-  commit_install_transaction() { : > "$skip_discard_called"; }
+  discard_install_transaction_before_cutover() { : > "$skip_discard_called"; }
   restore_existing_provider_if_start_skipped
 )
 test -f "$skip_discard_called"

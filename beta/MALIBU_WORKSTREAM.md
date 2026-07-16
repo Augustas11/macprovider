@@ -49,30 +49,27 @@ repo.
 
 ## FAQ
 
-### Update paths (post v1.8.19)
+### Update path (issue #585 Option 2)
 
 | Path | What it updates |
 |---|---|
-| **Sparkle** (`Check for Updates…`) | Whole `Malibu.app` bundle via `https://download.malibu.tech/appcast.xml` |
-| **CLI self-update** | Disabled under `--managed-by malibu-app` |
+| **CLI compatibility-set update** | One signed transaction containing Malibu.app, provider CLI, launchd, watchdog, catalog/keyring, coordinator admission identity, and rollback metadata |
 
-### Download host (P4 — live)
+Malibu has no independent updater. `auto_update_enabled: false` therefore gates
+the complete compatibility set rather than only the provider binary.
+
+### Historical download host
 
 Pearl VPS nginx static host. DNS: `download.malibu.tech` **A** → `159.223.165.194`.
 
-Operator scripts (repo):
-
-1. `bash scripts/setup-malibu-download-pearl.sh` — nginx + Let's Encrypt + docroot
-2. `bash scripts/publish-malibu-latest-dmg.sh vX.Y.Z` — after GitHub release tag
-3. `bash scripts/verify-malibu-download.sh`
-
-GitHub Actions secrets: `MALIBU_DOWNLOAD_VPS_HOST`, `MALIBU_DOWNLOAD_SSH_KEY`.
+The former Pearl appcast/`latest.dmg` publication is retired. GitHub's immutable
+release plus the signed compatibility artifact index is the sole update source.
 
 ### SPEC-025 phases vs this file
 
 | SPEC-025 §11 | Status |
 |---|---|
 | P2 signing / `.dmg` | Done |
-| P3 Sparkle | Live (v1.8.19) |
+| P3 Sparkle | Superseded by issue #585 CLI-owned compatibility-set update |
 | P4 landing page | **Partial** — download endpoint live; `malibu.tech/host` HTML redesign + troubleshoot page not started |
 | P5+ WalletConnect, Homebrew | Backlog |

@@ -30,6 +30,13 @@ moves, or silently reuses the tag. Once tagged, the captured commit may remain
 an ancestor of a newer `origin/main` so unrelated merges during review or
 notarization do not burn the immutable release identity.
 
+The only historical exception is the exact pre-publication v1.8.39 recovery in
+the signing runbook §8.1: its first signed tag belonged to a failed workflow
+that created no GitHub Release or public asset. That old object is lease-deleted
+before a replacement candidate is built, and the replacement tag becomes
+immutable when recreated. This exception cannot apply to an ordinary or
+already-published Pearl release.
+
 The updater pins `Augustas11/macprovider` and the existing release-signing
 P-256 public key in root-owned files. Neither trust anchor can be selected by
 the service environment. It verifies both detached signatures, the signed
@@ -68,12 +75,67 @@ legacy git-describe bootstrap is no longer accepted.
 
 ## One-time installation
 
-First deploy #524's canary buyer exactly as reviewed, including its root-only
-`LoadCredential` files. The updater pins that probe, wrapper, service, and
-timer as rollout authority `issue-524-r1`; `--plan` fails on any SHA drift,
-unexpected unit drop-in, stale systemd fragment, or changed 11-minute canary
-budget. The one allowed canary drop-in is the updater's exact root-owned
-transaction gate installed below.
+First deploy the #585 integration revision of #584's redesigned canary buyer
+exactly as reviewed, including its root-only `LoadCredential` files, safety
+observer, emergency stop, and classified no-load exits. The
+updater pins that complete runtime, service, and timer as rollout authority
+`issue-585-integration-r6` at source commit `95ea4ab96f8a09cc646b287c1ab6a30bbf2a5ecf`;
+`--plan` fails on any SHA drift, missing credential, invalid two-provider
+expected-fleet document, absent reviewed enable gate, active emergency-disable
+sentinel, unexpected unit drop-in, stale systemd fragment, or changed
+three-minute canary budget. The one allowed canary drop-in is the updater's
+exact root-owned transaction gate installed below.
+Leave `/etc/macprovider-canary-buyer/enabled` absent until Issue #584's
+real-hardware, recovery, and operating-day evidence has reviewed sign-off.
+The updater intentionally refuses even `--plan` until that gate is present;
+creating it authorizes the redesigned liveness probe as a rollout gate, not the
+scheduled timer.
+
+From the authority commit's reviewed checkout, install the four runtime files
+as executable root-owned files and the two units as non-executable root-owned
+fragments. Provision all four `LoadCredential` inputs as exact `0600` files,
+remove the retired environment file, and reload systemd without enabling either
+schedule:
+
+```bash
+sudo install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
+sudo install -o root -g root -m 0755 \
+  test/e2e/canary-buyer/probe.mjs \
+  test/e2e/canary-buyer/safety.mjs \
+  test/e2e/canary-buyer/run-canary.sh \
+  test/e2e/canary-buyer/emergency-disable.sh \
+  /opt/macprovider-canary-buyer/
+sudo install -o root -g root -m 0644 \
+  test/e2e/canary-buyer/canary-buyer.service \
+  test/e2e/canary-buyer/canary-buyer.timer \
+  /etc/systemd/system/
+sudo install -d -o root -g root -m 0750 /etc/macprovider
+sudo install -o root -g root -m 0600 /dev/null \
+  /etc/macprovider/canary-buyer.token
+sudo install -o root -g root -m 0600 /dev/null \
+  /etc/macprovider/canary-buyer.heartbeat
+sudo install -o root -g root -m 0600 /dev/null \
+  /etc/macprovider/canary-buyer.operator-token
+sudo install -o root -g root -m 0600 \
+  /secure/reviewed-canary-expected-fleet.json \
+  /etc/macprovider/canary-buyer.expected-fleet.json
+printf '%s\n' "$CANARY_BUYER_TOKEN" | sudo tee /etc/macprovider/canary-buyer.token >/dev/null
+printf '%s\n' "$CANARY_HEARTBEAT_URL" | sudo tee /etc/macprovider/canary-buyer.heartbeat >/dev/null
+printf '%s\n' "$CANARY_OPERATOR_TOKEN" | sudo tee /etc/macprovider/canary-buyer.operator-token >/dev/null
+sudo rm -f /etc/macprovider/canary-buyer.env
+sudo install -d -o root -g root -m 0755 \
+  /etc/macprovider-canary-buyer
+sudo systemctl daemon-reload
+sudo systemctl disable --now canary-buyer.timer
+```
+
+Only after Issue #584 sign-off, create the empty reviewed gate. This authorizes
+manual rollout serving checks but still does not enable the timer:
+
+```bash
+sudo install -o root -g root -m 0644 /dev/null \
+  /etc/macprovider-canary-buyer/enabled
+```
 
 Create a separate root-only Better Stack Uptime API credential. This token is
 not the canary heartbeat ping URL and should have only the heartbeat read/update
@@ -157,25 +219,46 @@ later lost.
 
 ```bash
 ~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
-KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.31
+KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.39
 ```
 
    Keep the prior provider live. The verifier proves the signed checksum
    manifest, artifact hash, and complete provider payload; it does not authorize
    a provider-first install against the legacy coordinator.
-2. Confirm #524's canary units and heartbeat configuration are operational:
+2. Confirm #584's redesigned canary runtime and credential configuration are
+   installed. The reviewed enable gate is required for rollout use; the
+   emergency-disable sentinel must remain absent:
 
 ```bash
 sudo systemctl start canary-buyer.service
-systemctl show --property=Result --value canary-buyer.service
+systemctl show --property=Result --property=ExecMainStatus canary-buyer.service
 sudo test -s /etc/macprovider/canary-buyer.token
 sudo test -s /etc/macprovider/canary-buyer.heartbeat
+sudo test -s /etc/macprovider/canary-buyer.operator-token
+sudo test -s /etc/macprovider/canary-buyer.expected-fleet.json
+sudo test -f /etc/macprovider-canary-buyer/enabled
+sudo test ! -e /var/lib/macprovider-canary-buyer/DISABLED
 sudo test ! -e /etc/macprovider/canary-buyer.env
 systemctl show --property=LoadCredential canary-buyer.service
 ```
 
-   The result must be `success`; heartbeat delivery failure (exit 3) is a
-   rollout failure, not a warning.
+   A fleet already emitting direct v2 telemetry must return exactly
+   `Result=success` and `ExecMainStatus=0`. A legacy v1.8.30 fleet behind the
+   pre-bridge coordinator must instead fail closed with status `1` and only the
+   exact expected providers' `provider_signal_missing` reasons. That failure is
+   required evidence that the old coordinator cannot authorize the substitute;
+   it is not serving proof. After the updater activates the reviewed bridge,
+   the new coordinator may classify those same exact ID/model/version rows
+   `legacy_bridge`; r4 accepts that classification only as a substitute for the
+   missing direct signal while retaining every pool, routing, connection, and
+   heartbeat invariant. Before that canary starts, the updater requires three
+   consecutive authenticated public `/poolz` samples that contain every exact
+   protected provider as ready and routing-eligible and retain the captured
+   ready-provider floor. A failed or timed-out canary oneshot is explicitly
+   stopped and proven inactive with no queued job before rollback may touch
+   state. The updater requires the post-activation run to exit `0` before it
+   emits `provider_install_ready`. Any other reason, classified no-load status
+   `20`/`21`, or heartbeat delivery failure (exit `3`) aborts the rollout.
 3. Before apply, preserve a protected `/poolz` snapshot containing every exact
    provider ID and admission/routing state plus `summary.ready` and
    `summary.free_slots`. Record an operator-approved ready-provider floor of at
@@ -192,7 +275,9 @@ systemctl show --property=LoadCredential canary-buyer.service
 ```text
 PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=bridge_required
 PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT=<operator-approved-floor-at-least-2>
-PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=<seconds-greater-than-provider-recovery-plus-service-health-timeouts>
+PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900
+PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60
+PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200
 ```
 
    The updater rejects a post-rollout local `/healthz.pool_ready` below that
@@ -201,7 +286,22 @@ PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=<seconds-greater-than-provider-recovery
 5. Set `PEARL_UPDATER_ENABLED=1` and keep the config, revocation list, Better
    Stack token, catalog-canary bearer token, and catalog-canary SSH key
    `root:root 0600`.
-6. Run a plan, then start the manual apply in operator terminal A:
+6. Prove the live root-owned config carries the exact outer handoff deadline
+   and bridge safety window before starting the plan. These reads expose no
+   credentials:
+
+```bash
+sudo grep -Fx 'PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900' /etc/macprovider/pearl-updater.conf
+sudo grep -Fx 'PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60' /etc/macprovider/pearl-updater.conf
+sudo grep -Fx 'PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200' /etc/macprovider/pearl-updater.conf
+```
+
+   Any missing line is a fail-closed preflight failure. The 900-second provider
+   recovery timeout is the updater's outer wall-clock handoff deadline; the
+   candidate's internal prewarm and measured-probe timeouts are idle-progress
+   budgets and do not replace or extend that deadline.
+
+7. Run a plan, then start the manual apply in operator terminal A:
 
 ```bash
 sudo /usr/local/sbin/macprovider-pearl-update --plan
@@ -225,7 +325,7 @@ sudo tail -Fn0 /var/lib/macprovider-pearl-updater/audit.jsonl | \
 
 ```bash
 curl -fsSL https://get.streamvc.live/install.sh | \
-  MACPROVIDER_VERSION=v1.8.31 MACPROVIDER_NO_PROMPT=1 bash
+  MACPROVIDER_VERSION=v1.8.39 MACPROVIDER_NO_PROMPT=1 bash
 ```
 
    The installer commits only after the bridge coordinator reports that exact
@@ -253,25 +353,31 @@ service quiescence does it sequentially snapshot binaries, effective
 configuration, current release state, and SQLite databases and fsync the
 transaction. Every configured database gets an existence record, including
 databases that did not exist before the candidate. A pre-armed snapshot
-failure restores the exact captured backend versions, archive/stats units,
-canary timer/service, and heartbeat state without touching a live binary,
-configuration file, or database. The updater then installs both binaries
+failure restores the exact captured backend versions, archive/stats units, and
+heartbeat state without touching a live binary, configuration file, or
+database. It restores the canary timer only when it was previously active and
+the reviewed enable gate still exists with no emergency-disable sentinel; it
+never replays a previously in-flight oneshot service. The updater then installs both binaries
 with same-filesystem atomic renames. It
 starts the coordinator first, verifies local version and advertised provider
 version, starts the gateway, verifies the signed coordinator bridge settings and
 the configured `pool_ready` floor, waits for a routing-eligible provider to
 reconnect and pass warmup, verifies local and public semantic health, and finally runs
 `canary-buyer.service` with a 12-minute updater deadline around its verified
-11-minute unit budget. It then requires the configured provider to be
+three-minute unit budget. Systemd records deliberate no-load exits `20` and
+`21` as classified unit outcomes, but the updater requires both `Result=success`
+and the original `ExecMainStatus=0`; a removed enable gate or newly asserted
+emergency sentinel can never satisfy serving validation. It then requires the configured provider to be
 buyer-serving on the exact current release/policy/digest/signer/row envelope
 and independently proves that the trusted canary Mac has all six exact catalog
 files and that its live launchd PID uses the inspected binary text vnode and
-listener. The generic #524 buyer canary alone cannot commit a catalog release.
+listener. The redesigned #584 buyer liveness canary alone cannot commit a catalog release.
 Only after both canaries succeed does the updater persist success and disarm
 rollback. A client-side timeout explicitly stops and verifies
-cancellation of the canary systemd job. The prior timer/service work is
-restored after success or rollback, and the heartbeat's exact prior paused
-state is restored and verified with a fresh GET before the updater exits.
+cancellation of the canary systemd job. The prior timer state is restored after
+success or rollback only while both kill-switch conditions remain safe; the
+oneshot service is never replayed. The heartbeat's exact prior paused state is
+restored and verified with a fresh GET before the updater exits.
 
 This API pause is the external maintenance contract: the canary's normal
 45-minute dead-man grace is intentionally shorter than a worst-case backend
@@ -292,8 +398,8 @@ journal before acquiring another release: an armed transaction before the
 durable success commit point is rolled back; a transaction whose signed release
 state was durably committed is reconciled forward by revalidating the installed
 pair and rerunning all serving gates. Otherwise the exact captured coordinator,
-gateway, archive/stats units, canary
-service/timer, and Better Stack state is restored. The journal is deleted only
+gateway, archive/stats units, conditionally eligible canary timer, and Better
+Stack state is restored; the canary oneshot service is never replayed. The journal is deleted only
 after recovery is complete. The conditional boot reconciler is ordered before
 both backend services, all archive/stats units, both canary units, and the
 updater. Each service that can touch a captured database or dependent backend
@@ -338,9 +444,21 @@ coordinator and proves its exact captured health version before starting and
 proving the prior gateway version; gateway remains stopped if coordinator
 restoration fails. Rollback then proves provider reconnect/warmup, gateway
 serving state, exact public TLS versions, and the restored advertised provider
-version, and unconditionally reruns the #524 canary. The previously active
+version, and unconditionally reruns the #584 canary. The previously active
 archive/stats services are restored before their timers, and no timer is
-restored until that full serving proof succeeds.
+restored until that full serving proof succeeds. Even then the canary timer
+remains stopped if its enable gate is missing or its emergency-disable sentinel
+exists, including when either kill switch changes during timer restoration.
+When restoring a pre-direct-telemetry backend, r4 may create
+`/run/macprovider-canary-buyer/legacy-rollback.json` only inside the active
+phase-journal restoration. That root-owned `0644` control binds the exact
+captured two-provider ID/model fleet, the exact prior advertised binary
+version, the 64-hex transaction ID, and an expiry no more than 15 minutes away.
+It substitutes only for missing provider v2 signals on unclassified legacy
+rows; bridge/current/previous modes, wrong versions/models/IDs, stale sessions,
+capacity loss, and all other canary failures remain rejected. The updater
+removes the control on every success or failure exit. Its presence outside a
+restoration blocks an ordinary rollout canary.
 The Better Stack heartbeat is then returned to its exact pre-maintenance paused
 state. Transaction snapshots and root-only JSON audit records live under
 `/var/lib/macprovider-pearl-updater`.
@@ -350,6 +468,7 @@ Manual interrupted-transaction recovery is idempotent:
 ```bash
 sudo systemctl stop canary-buyer.timer canary-buyer.service
 sudo /usr/local/sbin/macprovider-pearl-update --reconcile
+sudo test ! -e /run/macprovider-canary-buyer/legacy-rollback.json
 sudo journalctl -u macprovider-pearl-updater -u 'macprovider-pearl-updater-alert@*' --since -4h --no-pager
 ```
 
@@ -375,7 +494,7 @@ Enable the timer only after all three production drills have succeeded:
 
 Keep the timer disabled throughout the drills. Preserve the transaction journal
 for reconciliation; never fabricate or edit it by hand. After the third drill,
-confirm both public health endpoints, `/v1/status`, the #524 canary result,
+confirm both public health endpoints, `/v1/status`, the #584 canary result,
 Better Stack state, and absence of `active-transaction.json`, then enable:
 
 ```bash

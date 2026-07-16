@@ -33,10 +33,22 @@
 #      retry, rc 0 on the inode-refresh retry → helper returns 0,
 #      emits the transient-race + inode-refresh logs, does NOT emit
 #      the genuine-signature-failure log. The binary's inode must
-#      differ before vs. after (proving cp/rm/cp actually ran).
+#      differ before vs. after (proving an atomic fresh-inode replacement ran).
 #  10. Inode-refresh idempotent on non-137 rc: if attempt 2 succeeds
 #      via FLAVOR 1 fix, the inode is NOT touched (proving the helper
 #      does not do unnecessary filesystem work).
+#  11. Primary install path uses the same atomic helper.
+#  12. Replacement preserves exact bytes, installs mode 0755, and leaves no
+#      staging file.
+#  13. A missing source preserves the old target and cleans staging state.
+#  14. A directory target is rejected rather than accepting `mv`-into-dir
+#      semantics.
+#  15. The helper fsyncs the staged bytes and containing directory around
+#      `os.replace`, locking the crash-durability contract.
+#  16. A post-replace durability failure is distinguished from a pre-replace
+#      failure that leaves the old target installed.
+#  17. The AMFI caller preserves that distinction and does not claim the old
+#      inode remains after a committed-but-not-durably-confirmed replacement.
 #
 # Motivating incidents:
 #   - 2026-07-03 fresh v1.7.9 install on Apple M5 macOS 26.5.
@@ -50,8 +62,8 @@
 #     persistently, but the SAME binary content ran cleanly when
 #     copied to a different path. FLAVOR 2: the AMFI kernel cache
 #     had a stuck rejection tied to the specific inode
-#     `installer -pkg` created; `rm` + fresh `cp` gave the file a
-#     new inode and AMFI re-evaluated successfully.
+#     `installer -pkg` created; a fresh same-directory inode plus atomic
+#     rename made AMFI re-evaluate successfully.
 
 set -euo pipefail
 
@@ -66,21 +78,21 @@ fatal() {
 
 [ -f "$INSTALL_SH" ] || fatal "missing installer: $INSTALL_SH"
 
-# Extract the helper function block from install.sh. The helper begins
-# at the `run_macprovider_cli_with_amfi_retry()` line and ends at the
-# next top-level `}` at column 0.
+# Extract the atomic replacement helper and the retry helper from install.sh.
 lib="$(mktemp "${TMPDIR:-/tmp}/macprovider-install-amfi-lib.XXXXXX")"
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-install-amfi.XXXXXX")"
 trap 'rm -f "$lib"; rm -rf "$workdir"' EXIT
 
 awk '
-  /^run_macprovider_cli_with_amfi_retry\(\)/ { emit = 1 }
+  /^atomic_replace_provider_binary\(\)/ { emit = 1 }
   emit { print }
-  emit && /^\}$/ { exit }
+  emit && /^\}$/ { closed++ }
+  emit && closed == 2 { exit }
 ' "$INSTALL_SH" > "$lib"
 
-if ! grep -q '^run_macprovider_cli_with_amfi_retry()' "$lib"; then
-  fatal "could not extract run_macprovider_cli_with_amfi_retry from $INSTALL_SH"
+if ! grep -q '^atomic_replace_provider_binary()' "$lib" \
+  || ! grep -q '^run_macprovider_cli_with_amfi_retry()' "$lib"; then
+  fatal "could not extract atomic replacement and AMFI retry helpers from $INSTALL_SH"
 fi
 
 # shellcheck source=/dev/null
@@ -90,6 +102,7 @@ fi
 # whose behavior is controllable per scenario.
 INSTALL_DIR="$workdir/install"
 mkdir -p "$INSTALL_DIR"
+export MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
 
 # Capture the helper's log output for assertion. `log` is a script-
 # level function in install.sh; the extraction above pulls only the
@@ -100,6 +113,21 @@ log() { printf '%s\n' "$*" >> "$LOG_FILE"; }
 reset_log() { : > "$LOG_FILE"; }
 log_contains() { grep -q -- "$1" "$LOG_FILE"; }
 log_line_count() { wc -l < "$LOG_FILE" | tr -d ' '; }
+inode_of() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.stat(sys.argv[1]).st_ino)
+PY
+}
+mode_of() {
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))
+PY
+}
 
 install_mock() {
   # Writes a mock macprovider-cli that follows the given script body.
@@ -266,10 +294,10 @@ if [ \"\$n\" -le 2 ]; then kill -KILL \$\$; fi
 echo \"third-attempt-ok\"
 exit 0
 "
-inode_before="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+inode_before="$(inode_of "$INSTALL_DIR/macprovider-cli")"
 rc=0
 out="$(run_macprovider_cli_with_amfi_retry autotune --recommend 2>&1)" || rc=$?
-inode_after="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+inode_after="$(inode_of "$INSTALL_DIR/macprovider-cli")"
 report "case9-sigkill-twice-then-success-rc" 0 "$rc"
 if [ "$inode_before" != "$inode_after" ]; then
   report "case9-inode-changed-after-refresh" changed changed
@@ -299,7 +327,7 @@ fi
 
 ################################################################
 # Case 10 — FLAVOR 1 success does NOT touch the inode. If the 2s
-# retry succeeds, we must NOT do the cp/rm/cp dance (defends against
+# retry succeeds, we must NOT replace the inode (defends against
 # unnecessary filesystem work).
 ################################################################
 reset_log
@@ -311,15 +339,171 @@ echo \"\$n\" > \"$COUNTER_FILE\"
 if [ \"\$n\" -eq 1 ]; then kill -KILL \$\$; fi
 exit 0
 "
-inode_before="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+inode_before="$(inode_of "$INSTALL_DIR/macprovider-cli")"
 rc=0
 run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
-inode_after="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+inode_after="$(inode_of "$INSTALL_DIR/macprovider-cli")"
 report "case10-flavor1-success-rc" 0 "$rc"
 if [ "$inode_before" = "$inode_after" ]; then
   report "case10-inode-unchanged-on-flavor1-success" same same
 else
   report "case10-inode-unchanged-on-flavor1-success" same changed
+fi
+
+################################################################
+# Case 11 — the primary install path must also activate the verified
+# executable through the fresh-inode helper instead of overwriting an
+# already-executed vnode in place.
+################################################################
+install_body="$(awk '
+  /^install_binary\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH")"
+# Exact source text is the assertion target.
+# shellcheck disable=SC2016
+if printf '%s\n' "$install_body" | grep -Fq \
+  'atomic_replace_provider_binary "$staging_dir/macprovider-cli" "$real_binary"'; then
+  report "case11-install-uses-atomic-fresh-inode" yes yes
+else
+  report "case11-install-uses-atomic-fresh-inode" yes no
+fi
+# Exact source text is the assertion target.
+# shellcheck disable=SC2016
+if printf '%s\n' "$install_body" | grep -Fq \
+  'cp "$staging_dir/macprovider-cli" "$real_binary"'; then
+  report "case11-install-avoids-in-place-overwrite" no yes
+else
+  report "case11-install-avoids-in-place-overwrite" no no
+fi
+
+################################################################
+# Case 12 — direct activation preserves the verified bytes, installs
+# executable mode 0755, changes the inode, and cleans staging state.
+################################################################
+atomic_dir="$workdir/atomic"
+mkdir -p "$atomic_dir"
+printf '%s\n' 'verified-provider-bytes' > "$atomic_dir/source"
+printf '%s\n' 'old-provider-bytes' > "$atomic_dir/target"
+chmod 600 "$atomic_dir/source" "$atomic_dir/target"
+inode_before="$(inode_of "$atomic_dir/target")"
+rc=0
+atomic_replace_provider_binary "$atomic_dir/source" "$atomic_dir/target" || rc=$?
+inode_after="$(inode_of "$atomic_dir/target")"
+report "case12-atomic-replacement-rc" 0 "$rc"
+if cmp -s "$atomic_dir/source" "$atomic_dir/target"; then
+  report "case12-atomic-replacement-bytes" same same
+else
+  report "case12-atomic-replacement-bytes" same different
+fi
+report "case12-atomic-replacement-mode" 755 "$(mode_of "$atomic_dir/target")"
+if [ "$inode_before" != "$inode_after" ]; then
+  report "case12-atomic-replacement-inode" changed changed
+else
+  report "case12-atomic-replacement-inode" changed same
+fi
+report "case12-atomic-replacement-cleanup" 0 \
+  "$(find "$atomic_dir" -maxdepth 1 -name '.macprovider-cli.install.*' | wc -l | tr -d ' ')"
+
+################################################################
+# Case 13 — pre-rename source failure leaves the prior target exact.
+################################################################
+printf '%s\n' 'preserve-this-target' > "$atomic_dir/target"
+chmod 700 "$atomic_dir/target"
+target_before_sha="$(shasum -a 256 "$atomic_dir/target" | awk '{print $1}')"
+target_before_inode="$(inode_of "$atomic_dir/target")"
+rc=0
+atomic_replace_provider_binary "$atomic_dir/missing-source" "$atomic_dir/target" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  report "case13-missing-source-rejected" rejected rejected
+else
+  report "case13-missing-source-rejected" rejected accepted
+fi
+report "case13-prior-target-bytes-preserved" "$target_before_sha" \
+  "$(shasum -a 256 "$atomic_dir/target" | awk '{print $1}')"
+report "case13-prior-target-inode-preserved" "$target_before_inode" \
+  "$(inode_of "$atomic_dir/target")"
+report "case13-staging-cleanup" 0 \
+  "$(find "$atomic_dir" -maxdepth 1 -name '.macprovider-cli.install.*' | wc -l | tr -d ' ')"
+
+################################################################
+# Case 14 — a directory target must fail instead of receiving the
+# temporary binary as a child through platform-specific mv behavior.
+################################################################
+mkdir -p "$atomic_dir/directory-target"
+rc=0
+atomic_replace_provider_binary "$atomic_dir/source" "$atomic_dir/directory-target" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  report "case14-directory-target-rejected" rejected rejected
+else
+  report "case14-directory-target-rejected" rejected accepted
+fi
+report "case14-directory-target-remains-empty" 0 \
+  "$(find "$atomic_dir/directory-target" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+report "case14-staging-cleanup" 0 \
+  "$(find "$atomic_dir" -maxdepth 1 -name '.macprovider-cli.install.*' | wc -l | tr -d ' ')"
+
+################################################################
+# Case 15 — the implementation must durably order staged-file fsync,
+# atomic replace, then directory fsync.
+################################################################
+atomic_body="$(awk '
+  /^atomic_replace_provider_binary\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH")"
+python3 - "$atomic_body" <<'PY'
+import sys
+
+body = sys.argv[1]
+file_sync = body.index("os.fsync(temporary_fd)")
+replace = body.index("os.replace(temporary, target)")
+directory_sync = body.index("os.fsync(directory_fd)")
+if not file_sync < replace < directory_sync:
+    raise SystemExit("atomic replacement durability order is not file-fsync -> replace -> directory-fsync")
+PY
+report "case15-crash-durability-order" durable durable
+
+################################################################
+# Case 16 — diagnostics must distinguish a committed replacement whose
+# directory durability is unconfirmed from a pre-replace failure.
+################################################################
+python3 - "$atomic_body" <<'PY'
+import sys
+
+body = sys.argv[1]
+for required in (
+    "replaced = False",
+    "replaced = True",
+    "if replaced:",
+    "raise SystemExit(10)",
+    "replacement occurred but directory durability could not be confirmed",
+    "the prior target was left in place",
+):
+    if required not in body:
+        raise SystemExit(f"missing atomic replacement state distinction: {required}")
+PY
+report "case16-post-replace-state-distinguished" exact exact
+
+################################################################
+# Case 17 — inject the post-replace durability status at the AMFI
+# caller boundary and require exact, non-contradictory diagnostics.
+################################################################
+reset_log
+install_mock 'kill -KILL $$'
+atomic_replace_provider_binary() { return 10; }
+rc=0
+run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+report "case17-post-replace-amfi-rc" 137 "$rc"
+if log_contains "replacement occurred but directory durability was unconfirmed"; then
+  report "case17-post-replace-log-present" yes yes
+else
+  report "case17-post-replace-log-present" yes no
+fi
+if log_contains "leaving the original binary in place"; then
+  report "case17-no-contradictory-original-log" no yes
+else
+  report "case17-no-contradictory-original-log" no no
 fi
 
 ################################################################

@@ -24,6 +24,22 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+provider_version_at_least() {
+  local required_major="$1"
+  local required_minor="$2"
+  local required_patch="$3"
+  local major minor patch
+  if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  [ "$major" -gt "$required_major" ] || \
+    { [ "$major" -eq "$required_major" ] && [ "$minor" -gt "$required_minor" ]; } || \
+    { [ "$major" -eq "$required_major" ] && [ "$minor" -eq "$required_minor" ] && [ "$patch" -ge "$required_patch" ]; }
+}
+
 sha256_file() {
   local path="$1"
   if command -v shasum >/dev/null 2>&1; then
@@ -62,6 +78,9 @@ validate_artifact_entries() {
   local has_catalog_candidates_signature=0
   local has_catalog_demand=0
   local has_catalog_demand_signature=0
+  local has_compatibility_set=0
+  local has_local_install_contract=0 has_local_provider_plist=0 has_local_updater_metadata=0
+  local has_local_watchdog_plist=0 has_local_watchdog_script=0
   local version_major version_minor version_patch
   local entry normalized_entry
   while IFS= read -r entry; do
@@ -86,6 +105,26 @@ validate_artifact_entries() {
         has_metal=1
         ;;
       THIRD-PARTY-NOTICES.txt)
+        ;;
+      compatibility-set.json)
+        has_compatibility_set=$((has_compatibility_set + 1))
+        ;;
+      compatibility-set-local|compatibility-set-local/)
+        ;;
+      compatibility-set-local/install.sh)
+        has_local_install_contract=$((has_local_install_contract + 1))
+        ;;
+      compatibility-set-local/provider-launch-agent.plist.template)
+        has_local_provider_plist=$((has_local_provider_plist + 1))
+        ;;
+      compatibility-set-local/updater-rollback.json)
+        has_local_updater_metadata=$((has_local_updater_metadata + 1))
+        ;;
+      compatibility-set-local/watchdog-launch-agent.plist.template)
+        has_local_watchdog_plist=$((has_local_watchdog_plist + 1))
+        ;;
+      compatibility-set-local/watchdog.sh)
+        has_local_watchdog_script=$((has_local_watchdog_script + 1))
         ;;
       catalog-release|catalog-release/)
         ;;
@@ -135,6 +174,16 @@ EOF
     [ "$has_catalog_demand" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json"
     [ "$has_catalog_demand_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json.sig"
   fi
+  if [ "$version_major" -gt 1 ] || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -gt 8 ]; } || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -eq 8 ] && [ "$version_patch" -ge 33 ]; }; then
+    [ "$has_compatibility_set" -eq 1 ] || die "provider artifact must contain exactly one compatibility-set.json"
+    [ "$has_local_install_contract" -eq 1 ] || die "provider artifact must contain exactly one local install contract"
+    [ "$has_local_provider_plist" -eq 1 ] || die "provider artifact must contain exactly one provider launchd template"
+    [ "$has_local_updater_metadata" -eq 1 ] || die "provider artifact must contain exactly one updater rollback metadata file"
+    [ "$has_local_watchdog_plist" -eq 1 ] || die "provider artifact must contain exactly one watchdog launchd template"
+    [ "$has_local_watchdog_script" -eq 1 ] || die "provider artifact must contain exactly one watchdog script"
+  fi
 }
 
 validate_artifact_member_types() {
@@ -181,6 +230,21 @@ if [ "$provider_version" != "$PROVIDER_VERSION" ]; then
   die "provider version mismatch: got $provider_version want $PROVIDER_VERSION"
 fi
 log "provider version ok: $provider_version"
+
+if [ -f "$tmpdir/compatibility-set.json" ]; then
+  require_file "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem"
+  python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
+    --input "$tmpdir/compatibility-set.json" \
+    --payload-directory "$tmpdir" \
+    --require-signature \
+    --public-key "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
+    --expected-tag "v$PROVIDER_VERSION"
+  log "compatibility-set manifest signature and provider version verified"
+  if provider_version_at_least 1 8 39; then
+    "$provider_binary" release-payload-preflight >/dev/null
+    log "staged provider validated its signed compatibility release payload"
+  fi
+fi
 
 if [ "$REQUIRE_TIER2_STRINGS" = "1" ]; then
   for literal in \

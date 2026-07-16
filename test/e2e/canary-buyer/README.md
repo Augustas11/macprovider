@@ -1,184 +1,272 @@
-# Canary buyer probe
+# Canary buyer safety runbook
 
-A continuous synthetic buyer that measures the live macprovider network the way
-a real buyer experiences it, and exports the result as Prometheus metrics.
+The canary has two deliberately separate modes:
 
-This is **P1** from the 2026-07-09 e2e-testing review. The month's pattern was
-that every serious finding came from live contact with prod (KV-cache verify,
-W3 canary TTFT false-fail), yet the network had **no continuous
-buyer-perspective measurement** — a metallib-class silent 2× TPS regression, or
-a provider that `/v1/status` calls "ready" but that 502s every completion, would
-be invisible until a buyer complained.
+- `liveness` is the only scheduled mode. It sends one request with at most eight
+  completion tokens for each exact expected-fleet model, never retries, checks the pool before and after
+  every request, and requires a recovery soak before reporting healthy.
+- `qualification` sends load only to one private/loopback provider HTTP endpoint.
+  It never sends qualification load through the production gateway. Operator
+  `/poolz` must prove that exact target is non-routable while the separately
+  enumerated rollout-safety fleet remains Ready. The production gateway is
+  observed only for safety, not used for the qualification workload.
 
-It productionizes `test/e2e/malibu-console/smoke.mjs` and network-harness
-scenarios `07_sustained_throughput` / `09_streaming_ttft_distribution` into a
-scheduled, dependency-free probe.
+The shipped systemd and launchd schedules are fail-closed. They issue no network
+requests until an operator creates the configured enable-gate file after the
+Issue #584 production re-enable criteria are approved. The wrapper returns
+status `20` for the emergency-disable sentinel and `21` for a missing enable
+gate. The systemd unit records those deliberate no-load states as successful
+unit outcomes for alert hygiene, but rollout/recovery tooling requires the
+original `ExecMainStatus=0`; neither skip status is serving evidence.
 
-## What it measures (per model class, per run)
-
-| Signal | Metric | Why it matters |
-|--------|--------|----------------|
-| Serviceability | `macprovider_canary_model_serviceable{model}` | 1 iff a chat actually produced a token. Catches the status-vs-serviceable divergence (status says ready, completions 502). |
-| TTFT | `macprovider_canary_ttft_ms{model,quantile}` | p50/p95/p99 time-to-first-token. Feeds real numbers into the W3 `max_ttft_ms` canary gate instead of guesses. |
-| Decode TPS | `macprovider_canary_decode_tps{model,quantile}` | Sustained tokens/sec (first token excluded). Catches metallib/thermal silent regressions. |
-| KV-cache reuse | `macprovider_canary_cached_prompt_ratio{model}` | Turn-2 `cached_prompt_tokens / prompt_tokens` over a large shared prefix. Locks in the sticky-affinity win (measured ~64% live 2026-07-09). Requires the usage frame to survive large prompts (gateway PR #511). |
-| Outcomes | `macprovider_canary_requests{model,outcome}` | Per-run gauge over buckets `2xx / 502 / 5xx / timeout / network_error / stream_error / empty / other` → 502-rate and mid-stream-failure signal. |
-| Sample counts | `macprovider_canary_ttft_samples{model}`, `macprovider_canary_decode_tps_samples{model}` | Valid samples collected — alert on `== 0 while serviceable == 1` to catch a signal going dark (e.g. gateway stops returning usage). |
-| Pool view | `macprovider_canary_pool_providers{state}`, `macprovider_canary_up` | What `/v1/status` claims, for divergence comparison. |
-
-Also writes a per-run JSON artifact (same shape as the network-harness
-artifacts) for archival and offline analysis.
-
-> **Buyer-side scope.** From the buyer we can split latency into *TTFT*
-> (network + queue + prefill + first token) and *decode window* (sustained
-> rate). The finer server-side phase timing the gateway logs on completion is
-> not exposed in the buyer response, so this probe does not claim it — pair
-> gateway logs with these metrics by `x-request-id` when you need the split.
-
-## Run once (by hand)
+## Emergency disable — one command
 
 ```bash
-export MACPROVIDER_BUYER_TOKEN=mp_...        # or MALIBU_API_KEY
-node test/e2e/canary-buyer/probe.mjs --metrics-out /tmp/canary.prom --json-out ./artifacts
+sudo /opt/macprovider-canary-buyer/emergency-disable.sh
 ```
 
-Or via the wrapper, which resolves the token from the documented harness
-location (`~/.config/macprovider/buyer-api-key`) and rotates artifacts:
+This first writes a sentinel checked before credential resolution, before
+networking, and again before every request. It then removes the enable gate,
+stops the in-progress service, disables the timer, and verifies both are
+inactive. On macOS it resolves the invoking non-root user under `sudo`, boots
+out that user's LaunchAgent, and verifies the agent is gone. Do not remove the
+sentinel or recreate the enable gate until reviewed approval.
+
+## Scheduled liveness
+
+The service runs:
 
 ```bash
-test/e2e/canary-buyer/run-canary.sh
+run-canary.sh --mode liveness --fail-on-degraded
 ```
 
-The token is never echoed. Diagnostics go to stderr; the JSON run summary goes
-to stdout.
+Default hard worst-case-per-provider budget:
 
-## Schedule it (lab Mac, every 30 min)
+| Limit | Default |
+|---|---:|
+| Requests | 4 |
+| Reserved completion tokens | 32 |
+| Whole run, including soak | 90 seconds |
+| Recovery soak | 45 seconds |
+
+The internal budget is enforced globally because the buyer cannot predict gateway
+routing. Even if every request routes to one provider, that provider cannot
+exceed the stated cap. A failed or degraded run stops immediately and is never
+automatically repeated. `CANARY_DEGRADED_RETRIES` values other than `0` are
+rejected before the probe process starts. Every invocation is also wrapped by
+GNU `timeout`/`gtimeout` (`120s` liveness, `330s` qualification by default), so
+DNS, output delivery, or runtime bugs cannot defeat the external deadline.
+The exact two-provider/two-model topology is a code invariant, not an operator
+override. During every stream a separate safety observer polls at two-second
+intervals and aborts the request immediately if provider, heartbeat, thermal,
+memory, queue, session, or build identity regresses.
+
+For systemd, install `probe.mjs`, `safety.mjs`, `run-canary.sh`, and
+`emergency-disable.sh` together,
+plus the buyer token, operator token, heartbeat URL, and expected-fleet JSON
+credentials documented in `canary-buyer.service`. Leave
+`/etc/macprovider-canary-buyer/enabled` absent until sign-off. The dedicated
+control directory is intentionally root-owned and world-traversable because the
+systemd service uses `DynamicUser=true`; it contains no credentials and remains
+non-writable to the service identity. After sign-off:
 
 ```bash
-# 1. Edit REPLACE_REPO_PATH / REPLACE_HOME in the plist to absolute paths.
-cp test/e2e/canary-buyer/com.streamvc.canary-buyer.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.streamvc.canary-buyer.plist
-launchctl kickstart -p gui/$(id -u)/com.streamvc.canary-buyer   # run now
+sudo install -d -o root -g root -m 0755 /etc/macprovider-canary-buyer
+sudo install -o root -g root -m 0644 /dev/null \
+  /etc/macprovider-canary-buyer/enabled
+sudo systemctl enable --now canary-buyer.timer
 ```
 
-By default it writes a `.prom` textfile to
-`~/.local/state/canary-buyer/canary_buyer.prom` for the node_exporter
-[textfile collector](https://github.com/prometheus/node_exporter#textfile-collector).
-To push instead, set `CANARY_PUSHGATEWAY=http://host:9091` (in the plist
-`EnvironmentVariables` or the environment).
+The dead-man heartbeat is pinged only after successful preconditions, workload,
+postconditions, and recovery soak. A failure never pings and never retries.
 
-## Schedule it (always-on Linux host, e.g. Pearl — every 30 min)
-
-Prefer this over a lab Mac when you have an always-on host: a sleeping Mac
-creates blind spots. Units ship next to this README (`canary-buyer.service`,
-`canary-buyer.timer`).
+For the per-user macOS LaunchAgent, the four fallback files under
+`~/.config/macprovider` (buyer token, operator token, heartbeat URL, and expected
+fleet) must be owned by that user and mode `0400` or `0600`. The wrapper rejects
+symlinks, files owned by another uid, and any group/world permission bits.
+Install the complete runtime, including the universal emergency command, before
+bootstrapping the LaunchAgent:
 
 ```bash
-apt-get install -y nodejs            # Ubuntu 24.04 ships node 18 (probe-compatible)
-install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
-install -o root -g root -m 0755 probe.mjs run-canary.sh /opt/macprovider-canary-buyer/
-# Rotate the existing buyer token and heartbeat URL before migrating; copying
-# old values while retaining the legacy group-readable env file defeats the
-# new service boundary. Configure the replacements before enabling the unit.
-# They stay root-only at rest; systemd exposes them only to this unit's dynamic
-# identity.
-systemctl stop canary-buyer.timer
-install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.token
-install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.heartbeat
-printf '%s\n' "$TOKEN" > /etc/macprovider/canary-buyer.token
-printf '%s\n' "$HEARTBEAT_URL" > /etc/macprovider/canary-buyer.heartbeat
-rm -f /etc/macprovider/canary-buyer.env
-test ! -e /etc/macprovider/canary-buyer.env
-cp canary-buyer.service canary-buyer.timer /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now canary-buyer.timer
-systemctl start canary-buyer.service   # run once now; check `journalctl -u canary-buyer`
+sudo install -d -o root -g wheel -m 0755 /opt/macprovider-canary-buyer
+sudo install -o root -g wheel -m 0755 \
+  probe.mjs safety.mjs run-canary.sh emergency-disable.sh \
+  /opt/macprovider-canary-buyer/
 ```
 
-### Alerting without Prometheus — dead-man's-switch heartbeat
+## Explicit performance qualification
 
-No Prometheus/pushgateway is required. The service runs with `--fail-on-degraded`,
-so an availability, request-outcome, TTFT, decode-TPS, cache, or missing-signal
-regression makes the run **exit non-zero** (visible in `journalctl -u canary-buyer`) and the wrapper then **does not** ping the
-heartbeat. Point `CANARY_HEARTBEAT_URL` at a BetterStack "Heartbeat" (or
-healthchecks.io) monitor with an expected period of at least 45 minutes: a healthy
-run pings it; a degraded/failed/missed run leaves it stale and the monitor
-alerts. The bound covers the 30-minute timer, one minute of jitter, and two
-five-minute probe budgets plus retry delay. Store the URL in the systemd
-credential file:
+Run only with capacity isolated from rollout-safety capacity, one target model
+per invocation:
 
-```
-install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.heartbeat
-printf '%s\n' 'https://uptime.betterstack.com/api/v1/heartbeat/<token>' \
-  > /etc/macprovider/canary-buyer.heartbeat
-```
-(https required unless `CANARY_ALLOW_INSECURE=1`; the URL carries no buyer token.)
-
-## Configuration
-
-All env, all optional except the token:
-
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `MACPROVIDER_BUYER_TOKEN` / `MALIBU_API_KEY` | — | buyer bearer (required); the systemd unit reads it from its `buyer_token` credential instead of an environment file |
-| `CANARY_BASE` | `https://api.streamvc.live` | gateway base URL |
-| `CANARY_MODELS` | *(all from `/v1/status`)* | comma-separated model ids to probe |
-| `CANARY_TTFT_SAMPLES` | `12` | short requests/model for the TTFT histogram |
-| `CANARY_TPS_SAMPLES` | `3` | longer requests/model for sustained TPS |
-| `CANARY_TPS_MAX_TOKENS` | `128` | decode window for TPS samples |
-| `CANARY_INTERVAL_MS` | `1500` | floor gap between samples (avoids self-induced queueing; see scenario 09 pacing math) |
-| `CANARY_REQ_TIMEOUT_MS` | `45000` | per-request timeout |
-| `CANARY_STICKY_PREFIX_LINES` | `80` | shared-prefix size (~10 tok/line) for the sticky KV-cache test; must exceed the provider's prefix-cache granularity or turn-2 `cached_prompt_tokens` is always 0 |
-| `CANARY_MAX_TTFT_P95_MS` | `7000` | deploy-gate ceiling for per-model p95 TTFT |
-| `CANARY_MIN_DECODE_TPS_P50` | `15` | deploy-gate floor for per-model p50 sustained decode TPS |
-| `CANARY_MIN_CACHED_PROMPT_RATIO` | `0.1` | deploy-gate floor for sticky prefix-cache reuse |
-| `CANARY_ALLOW_INSECURE` | *(unset)* | set `1` to permit `http`/localhost/private-host targets (local mock testing only). By default `CANARY_BASE`/`CANARY_PUSHGATEWAY` must be `https` and non-private, so the buyer token can't be sent to an arbitrary origin. |
-| `CANARY_HEARTBEAT_URL` | *(unset)* | https dead-man's-switch ping (BetterStack/healthchecks). The systemd unit reads it from its `heartbeat_url` credential. Only an explicit 2xx response counts as delivery. |
-| `CANARY_REQUIRE_HEARTBEAT` | `0` (systemd unit: `1`) | fail before probing when heartbeat delivery is not configured; prevents a production timer from silently becoming journal-only |
-| `CANARY_DEGRADED_RETRIES` | `0` (systemd unit: `1`) | rerun the complete strict probe up to 3 times before withholding the heartbeat; partial attempts never count as healthy |
-| `CANARY_RETRY_DELAY_SECONDS` | `15` | bounded delay (0–300 seconds) between complete probe attempts |
-| `CANARY_PROBE_TIMEOUT_SECONDS` | *(unset)* (systemd unit: `300`) | optional strict full-probe wall-clock budget (60–900 seconds); a timeout is a failed attempt and may consume a configured retry |
-| `CANARY_TIMEOUT_BIN` | `timeout` on `PATH` | GNU timeout executable used when `CANARY_PROBE_TIMEOUT_SECONDS` is set |
-
-The buyer token is redacted from all logs, stdout, and artifacts even if a
-mispointed gateway echoes the `Authorization` header.
-
-Flags: `--metrics-out <path>`, `--json-out <dir>`, `--pushgateway <url>`,
-`--fail-on-degraded` (exit 1 if availability or the configured TTFT/TPS/cache
-gate fails, including missing signals — for CI/alerting and deploy rollback;
-default exit is 0 so launchd can remain measurement-only).
-
-## Cost
-
-Tiny. Default per model per run ≈ `12×8 + 3×128 + 2×16` ≈ **500 completion
-tokens**. At 30-minute cadence and one model that is ~24k tokens/day.
-
-## Suggested alerts
-
-```
-# Network says ready but can't actually serve. `on()` is required because
-# _up has no labels while _model_serviceable has {model} — a bare `and` matches
-# no series and the alert would silently never fire.
-(macprovider_canary_model_serviceable == 0) and on() (macprovider_canary_up == 1)
-
-# Silent throughput regression (tune the floor per model/tier from observed p50).
-macprovider_canary_decode_tps{quantile="p50"} < 15
-
-# Serviceable but a signal went dark (e.g. gateway stopped returning usage).
-macprovider_canary_model_serviceable == 1 and on(model) macprovider_canary_decode_tps_samples == 0
-
-# TTFT SLO breach.
-macprovider_canary_ttft_ms{quantile="p95"} > 7000
-
-# Sticky affinity / KV-cache reuse collapsed.
-macprovider_canary_cached_prompt_ratio < 0.1
-
-# Probe stopped reporting.
-time() - macprovider_canary_run_timestamp_seconds > 5400
+```bash
+CANARY_MODELS='<model-id>' \
+CANARY_BASELINE_FILE=/secure/canary-baselines.json \
+CANARY_EXPECTED_FLEET_FILE=/secure/canary-expected-fleet.json \
+CANARY_POOLZ_URL='https://coordinator.example/poolz' \
+CANARY_OPERATOR_TOKEN="$(< /secure/operator-token)" \
+CANARY_ISOLATED_PROVIDER_ID='provider-id-from-poolz-and-local-status' \
+CANARY_ISOLATED_PROVIDER_BASE='http://127.0.0.1:8080' \
+CANARY_ALLOW_INSECURE_PROVIDER_OBSERVER=1 \
+run-canary.sh --mode qualification --fail-on-degraded
 ```
 
-## Validation (2026-07-09)
+Qualification refuses to start without every required argument above. The
+operator `/poolz` API supplies exact provider membership, connection identity,
+state, model, routing eligibility, and heartbeat timestamps. The target must
+appear exactly once, match `CANARY_ISOLATED_PROVIDER_ID` and `CANARY_MODELS`, and
+be non-routable (`routing_eligible=false`; Ready or draining). The local
+`/v1/status` `safety_telemetry` object and every SSE response must independently
+report the same provider, model, and exact coordinator-assigned session. Every
+successful stream must terminate with `[DONE]`. Local HTTP is allowed only by the narrowly
+scoped `CANARY_ALLOW_INSECURE_PROVIDER_OBSERVER=1`; buyer and operator
+credentials are never sent to the local endpoint. Failure to establish any of
+these facts aborts as `isolation_unproven` before additional load.
 
-- Failure path verified against live prod during an active `upstream_provider_error`
-  incident: `up=1`, `serviceable=0`, outcomes `{502:4, 5xx:1}` recorded correctly.
-- Success path (TTFT percentiles, decode-TPS math, cache ratio, Prometheus
-  emission) verified against a local mock SSE gateway.
+Expected rollout-safety fleet schema (the qualification target is intentionally
+not listed; no unlisted provider other than that exact target is accepted):
+
+```json
+{
+  "schema_version": 1,
+  "providers": [
+    { "provider_id": "ready-provider-a", "model_id": "model-a" },
+    { "provider_id": "ready-provider-b", "model_id": "model-b" }
+  ]
+}
+```
+
+Scheduled liveness uses the same document without an allowed extra target, so
+membership, provider IDs, model IDs, Ready/routable state, and heartbeat
+freshness must all match exactly. The document is required to contain exactly
+two unique providers mapped one-to-one to two unique models.
+`CANARY_MODELS` must exactly equal the unique
+model set in the document. The shipped schedules pin both live models:
+`mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` and
+`mlx-community/Llama-3.2-3B-Instruct-4bit`, producing one 8-token request each.
+Each provider heartbeat carries versioned `safety_telemetry`; the coordinator
+validates it, stamps receipt freshness, and publishes it through authenticated
+`/poolz`. Version 2 binds the observation to the coordinator session, binary,
+compatibility set, model hash, and power source and carries live CPU/GPU,
+queue, current RSS, thermal, and memory-pressure signals. Liveness fails closed
+if any expected provider lacks a complete measurement,
+so Pearl does not need a provider-local route to enforce queue, restart,
+memory-pressure, RSS, thermal, and runtime-state invariants.
+GPU utilization is explicitly marked `host` scope: Apple exposes AGX device
+utilization rather than per-process accounting. The two-provider fleet keeps
+one provider service per physical Mac, and evidence reviewers treat this as a
+host-condition signal rather than misattributing it to the provider process.
+
+Baseline file schema:
+
+```json
+{
+  "schema_version": 3,
+  "entries": [{
+    "model": "model-id",
+    "provider": "x-provider-id value",
+    "hardware_tier": "8GB",
+    "compatibility_set_id": "Augustas11/macprovider:v1.8.33@0123456789abcdef0123456789abcdef01234567",
+    "binary_version": "1.8.33",
+    "model_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "power_source": "external",
+    "decode_tps_p50": 30.0,
+    "ttft_p95_ms": 1200,
+    "sample_size": 20,
+    "cold_sample_size": 10,
+    "warm_sample_size": 10,
+    "max_tps_regression_fraction": 0.35,
+    "max_ttft_regression_fraction": 0.5,
+    "percentile_choice": "decode p50 / TTFT p95",
+    "conditions": "warm model, AC power, nominal thermal state",
+    "safety_margin": "35% TPS / 50% TTFT",
+    "thermal_condition": "nominal",
+    "decode_tps_variance": 2.1,
+    "ttft_ms_variance": 12000,
+    "measured_at": "2026-07-14T12:00:00Z",
+    "approved_at": "2026-07-14T12:05:00Z",
+    "valid_until": "2026-07-21T12:05:00Z",
+    "evidence_uri": "s3://immutable-evidence/run.json",
+    "evidence_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }]
+}
+```
+
+A sharp per-request regression aborts immediately even when the request returns
+HTTP 2xx. The generic 15 tok/s onboarding default is not used as the
+qualification performance decision. Baselines expire, may be approved for at
+most 30 days, and match only the exact provider, hardware tier, compatibility
+set, binary, model hash, and current external/battery state.
+
+## Invariants and recovery
+
+Before load, between requests, after load, and throughout soak the probe checks:
+
+- gateway and coordinator remain up and non-degraded;
+- total/Ready provider counts and per-model Ready counts do not change;
+- every expected rollout-safety provider stays Ready/routable with its exact model;
+- the isolated qualification target stays non-routable without reconnecting;
+- actual heartbeat timestamps (never generic activity) remain fresh and never
+  regress between soak samples, and the final sample advances from the initial
+  timestamp across a soak longer than the production heartbeat cadence;
+- versioned provider telemetry observations advance on every successive sample,
+  queues return to zero,
+  memory stays below its configured fraction, RSS growth stays bounded, and
+  thermal and memory-pressure states remain clear.
+
+If any attempted request fails—including 401/403 authentication failures—the
+probe issues no more workload, but it still performs post-request observation
+and the fixed recovery soak. The original failure remains the primary result;
+any recovery failure is preserved separately in `safety.recovery_result`.
+
+Failures are recorded in JSON and Prometheus with an explicit class such as
+`precondition_failed`, `budget_exhausted`, `performance_regression`,
+`provider_state_regression`, `heartbeat_regression`, `memory_regression`,
+`thermal_regression`, `authentication_failure`, `request_failure`,
+`isolation_unproven`, `safety_observer_failure`, or
+`recovery_failed`. Each JSON artifact preserves per-request TTFT, decode time,
+total time, token reservation/usage, provider, request ID, and outcome.
+It also preserves the bounded raw safety observation series and recovery record
+summaries so heartbeat and workload evolution can be audited after the run.
+
+## Configuration summary
+
+| Variable | Liveness default | Purpose |
+|---|---:|---|
+| `CANARY_MAX_REQUESTS_PER_PROVIDER` | `4` | worst-case routed request cap |
+| `CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER` | `32` | worst-case reserved completion-token cap |
+| `CANARY_MAX_RUN_DURATION_MS` | `90000` | internal whole-run cap |
+| `CANARY_RECOVERY_SOAK_SECONDS` | `45` | spans the 30-second production heartbeat cadence |
+| `CANARY_RECOVERY_POLL_MS` | `7000` | samples faster than the 30-second production heartbeat cadence |
+| `CANARY_SAFETY_POLL_MS` | `2000` | concurrent in-request safety observation cadence |
+| `CANARY_MIN_READY_PROVIDERS` | `2` | rollout-safety capacity floor (also at least expected-fleet size) |
+| `CANARY_MAX_HEARTBEAT_AGE_MS` | `90000` | operator-observed freshness cap |
+| `CANARY_MAX_MEMORY_GROWTH_MB` | `512` | provider RSS growth cap |
+| `CANARY_MAX_MEMORY_FRACTION` | `0.9` | provider RSS / RAM cap |
+| `CANARY_ENABLE_FILE` | unset | scheduled fail-closed enable gate |
+| `CANARY_DISABLE_FILE` | user state path | emergency no-load sentinel |
+| `CANARY_EXPECTED_FLEET_FILE` | required | exact provider/model allow-list |
+| `CANARY_POOLZ_URL` / `CANARY_OPERATOR_TOKEN` | required | authenticated operator truth |
+| `CANARY_PROBE_TIMEOUT_SECONDS` | `120` | mandatory external wrapper timeout |
+
+The only cleartext override is
+`CANARY_ALLOW_INSECURE_PROVIDER_OBSERVER=1`, scoped to the private provider
+qualification endpoint. A separate test-only
+`CANARY_ALLOW_INSECURE_HEARTBEAT=1` does not affect any other URL. Buyer and
+operator tokens are redacted from logs, stdout, and artifacts; the heartbeat
+URL is supplied to curl over stdin rather than exposed in the process argv.
+
+## Validation
+
+```bash
+node --test test/e2e/canary-buyer/probe.test.mjs \
+  test/e2e/canary-buyer/safety.test.mjs
+bash test/e2e/canary-buyer/run-canary.test.sh
+```
+
+These tests prove the software controls, installed-file layout, abort and auth
+classification, exact fleet/isolation invariants, recovery requirements, kill
+switches, and no retry/load amplification. The sole remaining production gate
+outside this software ledger is collected physical-Mac evidence: thermal and
+memory-pressure behavior, real heartbeat/disconnect recovery, and the required
+operating-day cadence from the approved target hardware.

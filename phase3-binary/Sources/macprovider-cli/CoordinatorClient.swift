@@ -143,8 +143,9 @@ actor CoordinatorClient {
         CoordinatorReadinessClient.ExpectedCatalogEnvelope
     ) async -> Bool?
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
+    typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
 
-    static let binaryVersion = "1.8.32"
+    static let binaryVersion = "1.8.40"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -164,6 +165,11 @@ actor CoordinatorClient {
     private let warmSwapEnabled: Bool
     private let hardwareSummary: [String: Any]?
     private var providerReceiptPublicKey: String?
+    private var providerAdmissionPublicKey: String?
+    private var providerAdmissionNextPublicKey: String?
+    private var providerAdmissionRecovery: Bool
+    private var lastAdmissionProofPublicKey: String?
+    private let commitAdmissionIdentityPublicKey: (@Sendable (Data, Date?) throws -> Void)?
     private let receiptBuilder: ReceiptBuilder?
     private var receiptRotationInFlight = false
     private let reconnectGraceNanoseconds: UInt64
@@ -191,6 +197,9 @@ actor CoordinatorClient {
     // acceptCoordinatorSession knows where to write the new token
     // without taking another dependency on the loader.
     private let configPath: String
+    private let providerCredentialStore: any ProviderCredentialStoring
+    private let credentialStatusRuntime: ProviderCredentialStatusRuntime
+    private let admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private let pairingController: PairingController
     private struct PendingAEADRekey {
@@ -228,6 +237,7 @@ actor CoordinatorClient {
     private var autoupdateDisabledForSessionReason: String?
     private var autoupdateDrainExtensions = false
     private var autoupdateAttemptedTargets = Set<String>()
+    private var recommendedCompatibilitySetID: String?
     private var webSocket: ProviderWebSocketTask?
     private var coordinatorSessionAccepted = false
     private var runTask: Task<Void, Never>?
@@ -247,23 +257,22 @@ actor CoordinatorClient {
     private let receiptIdentitySigningKeys: [Curve25519.Signing.PrivateKey]
     private let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
 
-    // SPEC-026 §7: optional bridge for delegating identity signature to
-    // Malibu.app via the control socket. `nil` when the CLI runs standalone
-    // (install.sh path) — the coordinator's per-provider exemption
-    // (identity_signature.go:38) covers that case.
-    private let identityBridge: IdentitySignatureBridge?
-    private let identitySignatureTimeoutSeconds: TimeInterval
     private let catalogReleaseID: String?
     private let catalogPolicyVersion: String?
     private let catalogCandidateSHA256: String?
     private let catalogSignerKeyID: String?
     private let catalogRowIdentity: String?
+    private let compatibilitySetID: String?
+    private let installedCompatibilityManifest: InstalledCompatibilityManifest
     private let catalogModelSHA256: String?
     private let catalogArtifactIdentity: CatalogArtifactIdentity
     private let coordinatorReadiness: CoordinatorReadiness
     private let coordinatorReadinessAttempts: Int
     private let coordinatorReadinessRetryNanoseconds: UInt64
     private let autoupdateMarkerStore: AutoUpdateMarkerStore
+    private let lifecycleStateStore: ProviderLifecycleStateStore
+    private let lifecycleOperationID: String?
+    private var operatorPaused: Bool
     private var catalogWarmSwapInvalidated = false
     private var acceptedAssignedProviderID: String?
 
@@ -289,38 +298,35 @@ actor CoordinatorClient {
         pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
         providerReceiptPublicKey: String? = nil,
+        providerAdmissionPublicKey: String? = nil,
+        providerAdmissionNextPublicKey: String? = nil,
+        providerAdmissionRecovery: Bool = false,
+        commitAdmissionIdentityPublicKey: (@Sendable (Data, Date?) throws -> Void)? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
-        identityBridge: IdentitySignatureBridge? = nil,
         catalogReleaseID: String? = nil,
         catalogPolicyVersion: String? = nil,
         catalogCandidateSHA256: String? = nil,
         catalogSignerKeyID: String? = nil,
         catalogRowIdentity: String? = nil,
+        compatibilitySetIDOverride: String? = nil,
+        installedCompatibilityManifest: InstalledCompatibilityManifest? = nil,
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CatalogArtifactIdentity? = nil,
         coordinatorReadiness: CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 15,
         coordinatorReadinessRetryNanoseconds: UInt64 = 2_000_000_000,
         autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
-        // Must sit well below the coordinator's WS handshake timeout
-        // (`Config.ProviderWSHandshakeTimeout` — 10s default in Pearl's
-        // production config). If our identity_signature roundtrip
-        // (CLI → Malibu.app → Ed25519 sign → CLI → coordinator) takes
-        // longer than the coordinator's read deadline, the coordinator
-        // closes the WS with 4001 `invalid_auth_request: read` before we
-        // finish sending the proof. Malibu.app's signing itself is
-        // <100ms; the roundtrip includes control-socket write + read,
-        // typically <200ms. Budget 3s so a truly-wedged Malibu (App
-        // hung, TCC race) falls through to the unsigned proof path
-        // within one coordinator handshake window; the coordinator's
-        // per-provider exemption at `identity_signature.go:38` then
-        // decides whether to admit us.
-        identitySignatureTimeoutSeconds: TimeInterval = 3,
         credentialBootstrap: Bool = false,
         bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
         receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = nil,
         receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = [],
         persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)? = nil,
+        providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
+        credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
+        admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
+        lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
+        lifecycleOperationID: String? = nil,
+        operatorPausedInitially: Bool = false,
         // Issue #189: injectable in tests; production uses Darwin.exit(1)
         // so the launchd KeepAlive contract recovers the wedged process.
         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
@@ -358,6 +364,10 @@ actor CoordinatorClient {
         self.warmSwapEnabled = config.enableWarmSwap
         self.hardwareSummary = ProviderHardwareSummary.liveWireObject()
         self.providerReceiptPublicKey = providerReceiptPublicKey
+        self.providerAdmissionPublicKey = providerAdmissionPublicKey
+        self.providerAdmissionNextPublicKey = providerAdmissionNextPublicKey
+        self.providerAdmissionRecovery = providerAdmissionRecovery
+        self.commitAdmissionIdentityPublicKey = commitAdmissionIdentityPublicKey
         self.receiptBuilder = receiptBuilder
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.reconnectInitialBackoffNanoseconds = reconnectInitialBackoffNanoseconds
@@ -370,17 +380,31 @@ actor CoordinatorClient {
             return trimmed.isEmpty ? nil : trimmed
         }
         self.configPath = config.configPath
+        self.providerCredentialStore = providerCredentialStore
+        self.credentialStatusRuntime = credentialStatusRuntime
+        self.admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
+        self.lifecycleStateStore = lifecycleStateStore
+        self.lifecycleOperationID = lifecycleOperationID
+        self.operatorPaused = operatorPausedInitially
         self.sleepAssertionFactory = sleepAssertionFactory
         self.pairingController = pairingController ?? PairingController(configPath: config.configPath)
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
-        self.identityBridge = identityBridge
-        self.identitySignatureTimeoutSeconds = identitySignatureTimeoutSeconds
         self.catalogReleaseID = catalogReleaseID
         self.catalogPolicyVersion = catalogPolicyVersion
         self.catalogCandidateSHA256 = catalogCandidateSHA256
         self.catalogSignerKeyID = catalogSignerKeyID
         self.catalogRowIdentity = catalogRowIdentity
+        let compatibilityManifestLoader = installedCompatibilityManifest ?? { executableURL, expectedVersion in
+            CompatibilitySetManifest.loadInstalled(
+                executableURL: executableURL,
+                expectedVersion: expectedVersion
+            )
+        }
+        self.installedCompatibilityManifest = compatibilityManifestLoader
+        self.compatibilitySetID = compatibilitySetIDOverride ?? Bundle.main.executableURL.flatMap {
+            compatibilityManifestLoader($0, Self.binaryVersion)?.compatibilitySetID
+        }
         self.catalogModelSHA256 = catalogModelSHA256
         self.catalogArtifactIdentity = catalogArtifactIdentity ?? { modelID in
             guard let modelID,
@@ -447,6 +471,8 @@ actor CoordinatorClient {
         autoupdateAssignedProviderTokenAdopted = false
         autoupdateDemotionReason = "coordinator_disconnected"
         autoupdateDisabledForSessionReason = nil
+        recommendedCompatibilitySetID = nil
+        try? autoupdateMarkerStore.clearCompatibilityAdmission()
         autoupdateTrustState = AutoUpdateTrustState(
             v2Accepted: false,
             tier: nil,
@@ -459,6 +485,13 @@ actor CoordinatorClient {
             connected: false
         )
         await providerStatus.setCoordinatorSession(connected: false)
+        if !operatorPaused {
+            _ = try? recordLifecycleTransition(
+                to: .coordinatorUnavailable,
+                reasonCode: "coordinator_stopped",
+                compatibilitySetID: installedCompatibilitySetID()
+            )
+        }
         runTask = nil
         heartbeatTask = nil
         heartbeatWatchdogTask = nil
@@ -546,9 +579,20 @@ actor CoordinatorClient {
         var failedAttempts = 0
         var consecutiveAuthProtocolFailures = 0
         while !Task.isCancelled {
+            if !operatorPaused {
+                _ = try? recordLifecycleTransition(
+                    to: .locallyReadyConnecting,
+                    reasonCode: "coordinator_connecting",
+                    compatibilitySetID: installedCompatibilitySetID()
+                )
+            }
             do {
                 try await connectAndRunOnce()
                 await cleanupConnection()
+                recordConnectionFailureLifecycle(
+                    state: .coordinatorUnavailable,
+                    reasonCode: "coordinator_connection_ended"
+                )
                 backoffNanoseconds = reconnectInitialBackoffNanoseconds
                 failedAttempts = 0
                 consecutiveAuthProtocolFailures = 0
@@ -561,6 +605,10 @@ actor CoordinatorClient {
                 // Wait a grace period so the coordinator has time to come back
                 // before we try to reconnect, then loop.
                 await cleanupConnection()
+                recordConnectionFailureLifecycle(
+                    state: .coordinatorUnavailable,
+                    reasonCode: "coordinator_drain_complete"
+                )
                 print("coordinator reconnect attempt 1 scheduled after drain")
                 try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
                 backoffNanoseconds = reconnectInitialBackoffNanoseconds
@@ -571,6 +619,13 @@ actor CoordinatorClient {
                 // so the coordinator registers auth_state=bearer_validated and the
                 // session becomes buyer-routable.
                 await cleanupConnection()
+                if !operatorPaused {
+                    _ = try? recordLifecycleTransition(
+                        to: .locallyReadyConnecting,
+                        reasonCode: "coordinator_auth_upgrade_reconnect",
+                        compatibilitySetID: installedCompatibilitySetID()
+                    )
+                }
                 print("coordinator reconnect scheduled after provisional token adoption")
                 try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
                 backoffNanoseconds = reconnectInitialBackoffNanoseconds
@@ -578,6 +633,11 @@ actor CoordinatorClient {
                 consecutiveAuthProtocolFailures = 0
             } catch {
                 await cleanupConnection()
+                let classification = Self.lifecycleClassification(for: error)
+                recordConnectionFailureLifecycle(
+                    state: classification.state,
+                    reasonCode: classification.reasonCode
+                )
                 failedAttempts += 1
                 if Self.isFatalAuthProtocolFailure(error) {
                     consecutiveAuthProtocolFailures += 1
@@ -639,6 +699,101 @@ actor CoordinatorClient {
         }
     }
 
+    struct ConnectionLifecycleClassification: Equatable, Sendable {
+        let state: ProviderLifecycleState
+        let reasonCode: String
+    }
+
+    /// Reduces transport and admission failures to stable, non-secret lifecycle
+    /// reason codes. The persisted state is intentionally coarser than logs: it
+    /// drives Malibu recovery UX without copying coordinator messages, URLs, or
+    /// credential-bearing diagnostics into durable storage.
+    static func lifecycleClassification(for error: Error) -> ConnectionLifecycleClassification {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            let offlineCodes: Set<Int> = [
+                URLError.notConnectedToInternet.rawValue,
+                URLError.networkConnectionLost.rawValue,
+                URLError.cannotFindHost.rawValue,
+                URLError.dnsLookupFailed.rawValue,
+                URLError.dataNotAllowed.rawValue,
+                URLError.internationalRoamingOff.rawValue,
+                URLError.callIsActive.rawValue,
+            ]
+            if offlineCodes.contains(nsError.code) {
+                return ConnectionLifecycleClassification(
+                    state: .networkOffline,
+                    reasonCode: "network_offline"
+                )
+            }
+        }
+
+        guard let authError = error as? CoordinatorAuthError else {
+            return ConnectionLifecycleClassification(
+                state: .coordinatorUnavailable,
+                reasonCode: "coordinator_unavailable"
+            )
+        }
+        switch authError {
+        case .rejected(let code, _):
+            let normalized = code.lowercased()
+            if normalized.contains("catalog") || normalized.contains("compatibility") {
+                return ConnectionLifecycleClassification(
+                    state: .catalogIncompatible,
+                    reasonCode: "catalog_incompatible"
+                )
+            }
+            if normalized.contains("identity") {
+                return ConnectionLifecycleClassification(
+                    state: .identityMigrationRequired,
+                    reasonCode: "identity_migration_required"
+                )
+            }
+            if normalized == "invalid_auth_request" {
+                return ConnectionLifecycleClassification(
+                    state: .failed,
+                    reasonCode: "coordinator_auth_protocol_invalid"
+                )
+            }
+            if normalized == "invalid_token" || normalized.contains("token") || normalized.contains("auth") {
+                return ConnectionLifecycleClassification(
+                    state: .authenticationRequired,
+                    reasonCode: "authentication_required"
+                )
+            }
+        case .invalidMessage(let message):
+            let normalized = message.lowercased()
+            if normalized.contains("catalog") || normalized.contains("compatibility") {
+                return ConnectionLifecycleClassification(
+                    state: .catalogIncompatible,
+                    reasonCode: "catalog_incompatible"
+                )
+            }
+            if normalized.contains("admission identity") || normalized.contains("identity_") {
+                return ConnectionLifecycleClassification(
+                    state: .identityMigrationRequired,
+                    reasonCode: "identity_migration_required"
+                )
+            }
+        }
+        return ConnectionLifecycleClassification(
+            state: .coordinatorUnavailable,
+            reasonCode: "coordinator_unavailable"
+        )
+    }
+
+    private func recordConnectionFailureLifecycle(
+        state: ProviderLifecycleState,
+        reasonCode: String
+    ) {
+        guard !operatorPaused else { return }
+        _ = try? recordLifecycleTransition(
+            to: state,
+            reasonCode: reasonCode,
+            compatibilitySetID: installedCompatibilitySetID()
+        )
+    }
+
     private func connectAndRunOnce() async throws {
         if catalogReleaseID != nil, warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
@@ -678,7 +833,6 @@ actor CoordinatorClient {
     /// closed without local mutation.
     private func recoverInvalidBootstrapCredential() async -> Bool {
         guard !credentialBootstrap,
-              appConfig.managedBy != "malibu-app",
               BootstrapAuthCommand.isCredentialBootstrapPrincipal(providerID),
               let rejectedToken = providerToken,
               let receiptKey = receiptIdentitySigningKeys.first else {
@@ -701,6 +855,8 @@ actor CoordinatorClient {
             providerReceiptPublicKey: publicKey,
             credentialBootstrap: true,
             bootstrapReceiptSigningKey: receiptKey,
+            providerCredentialStore: providerCredentialStore,
+            credentialStatusRuntime: credentialStatusRuntime,
             watchdogExitHook: watchdogExitHook
         ) else {
             return false
@@ -710,16 +866,15 @@ actor CoordinatorClient {
             try await recoveryClient.connectAndRunOnce()
         } catch is CoordinatorAuthUpgradeReconnect {
             await recoveryClient.stop()
-            let loaded = try? ConfigLoader.load(
-                cli: CLIOverrides(configPath: configPath),
-                environment: [:]
-            )
-            guard let recovered = loaded?.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+            let recoveredFromKeychain = try? providerCredentialStore.load(providerID: providerID)
+            guard let recovered = recoveredFromKeychain?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
                   !recovered.isEmpty,
                   recovered != rejectedToken else {
                 Self.keepaliveDebug("bootstrap_credential_recovery_persist_missing")
                 return false
             }
+            await removeRejectedLegacyCredentialSource(rejectedToken)
             providerToken = recovered
             Self.keepaliveDebug("bootstrap_credential_recovery_succeeded")
             return true
@@ -1114,6 +1269,10 @@ actor CoordinatorClient {
         do {
             try await receiveLoop(socket)
             await cleanupConnection()
+            recordConnectionFailureLifecycle(
+                state: .coordinatorUnavailable,
+                reasonCode: "coordinator_connection_ended"
+            )
             runTask = nil
             startReconnectTask()
         } catch is CancellationError {
@@ -1121,18 +1280,34 @@ actor CoordinatorClient {
             runTask = nil
         } catch is CoordinatorDrainComplete {
             await cleanupConnection()
+            recordConnectionFailureLifecycle(
+                state: .coordinatorUnavailable,
+                reasonCode: "coordinator_drain_complete"
+            )
             runTask = nil
             print("coordinator reconnect attempt 1 scheduled after drain")
             try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
             startReconnectTask()
         } catch is CoordinatorAuthUpgradeReconnect {
             await cleanupConnection()
+            if !operatorPaused {
+                _ = try? recordLifecycleTransition(
+                    to: .locallyReadyConnecting,
+                    reasonCode: "coordinator_auth_upgrade_reconnect",
+                    compatibilitySetID: installedCompatibilitySetID()
+                )
+            }
             runTask = nil
             print("coordinator reconnect scheduled after provisional token adoption")
             try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
             startReconnectTask()
         } catch {
             await cleanupConnection()
+            let classification = Self.lifecycleClassification(for: error)
+            recordConnectionFailureLifecycle(
+                state: classification.state,
+                reasonCode: classification.reasonCode
+            )
             runTask = nil
             print("WARN coordinator rotated session ended last_error=\(error)")
             startReconnectTask()
@@ -1320,6 +1495,8 @@ actor CoordinatorClient {
         autoupdateCoordinatorPayloadIsV2 = false
         autoupdateAssignedProviderTokenAdopted = false
         autoupdateDemotionReason = "coordinator_disconnected"
+        recommendedCompatibilitySetID = nil
+        try? autoupdateMarkerStore.clearCompatibilityAdmission()
         autoupdateTrustState = AutoUpdateTrustState(
             v2Accepted: false,
             tier: nil,
@@ -1839,12 +2016,13 @@ actor CoordinatorClient {
             proof["identity_signature_transcript_sha256"] = transcriptSHA256
         }
 
-        // Installer-generated mp-* providers keep their bootstrap receipt key
-        // in Keychain. Reuse that durable identity for every ordinary bearer-v2
-        // admission instead of relying on the ephemeral live provider pool.
+        // Every credentialed provider keeps a CLI-owned admission key in
+        // Keychain. Historical mp-* coordinators use the bootstrap hint name;
+        // current coordinators use admission_identity_public_key.
         let receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = {
             guard !receiptIdentitySigningKeys.isEmpty else { return nil }
-            if let expected = challenge["bootstrap_identity_public_key"] as? String {
+            if let expected = (challenge["admission_identity_public_key"] as? String)
+                ?? (challenge["bootstrap_identity_public_key"] as? String) {
                 return receiptIdentitySigningKeys.first(where: {
                     Data($0.publicKey.rawRepresentation).base64EncodedString() == expected
                 })
@@ -1852,8 +2030,16 @@ actor CoordinatorClient {
             return receiptIdentitySigningKeys.count == 1 ? receiptIdentitySigningKeys[0] : nil
         }()
         if !credentialBootstrap, let receiptIdentitySigningKey, let initialMessage {
-            if challenge["bootstrap_identity_public_key"] != nil {
+            let signingPublicKey = Data(receiptIdentitySigningKey.publicKey.rawRepresentation).base64EncodedString()
+            if challenge["admission_identity_public_key"] != nil
+                || challenge["bootstrap_identity_public_key"] != nil {
                 try persistReceiptIdentitySigningKey?(receiptIdentitySigningKey)
+                // This closure exists only while restoring/enrolling a missing
+                // dedicated CLI identity. Pending rotation uses a separate CAS
+                // closure and must not become current before acceptance.
+                if persistReceiptIdentitySigningKey != nil {
+                    providerAdmissionPublicKey = signingPublicKey
+                }
             }
             let transcriptSHA256 = try Self.initialAuthTranscriptHashBase64(initialMessage)
             let payload = try Self.receiptIdentityPayload(
@@ -1865,36 +2051,7 @@ actor CoordinatorClient {
             let signature = try receiptIdentitySigningKey.signature(for: payload)
             proof["identity_signature"] = signature.base64EncodedString()
             proof["identity_signature_transcript_sha256"] = transcriptSHA256
-        }
-
-        // SPEC-026 §7: if we have both the initial-stage message (needed
-        // to compute the retained transcript hash) and an
-        // IdentitySignatureBridge (i.e. Malibu.app is attached), ask
-        // Malibu to sign the canonical tuple with its Keychain Ed25519
-        // key. Failure to obtain a signature falls through — the
-        // coordinator's `identitySignatures == nil` gate or per-provider
-        // exemption at `identity_signature.go:38` covers the CLI-track
-        // path.
-        if !credentialBootstrap, receiptIdentitySigningKey == nil,
-           let identityBridge, let initialMessage,
-           let transcriptSHA256 = try? Self.initialAuthTranscriptHashBase64(initialMessage) {
-            let request = IdentitySignatureBridge.Request(
-                authAttemptID: attemptID,
-                providerID: providerID,
-                binaryVersion: Self.binaryVersion,
-                providerECDHPublicKey: attempt.publicKeyBase64URL,
-                transcriptSHA256: transcriptSHA256
-            )
-            let response = await identityBridge.requestSignature(
-                request,
-                timeout: identitySignatureTimeoutSeconds
-            )
-            if let response, response.accepted,
-               let signature = response.identitySignature,
-               let echoed = response.transcriptSHA256 {
-                proof["identity_signature"] = signature
-                proof["identity_signature_transcript_sha256"] = echoed
-            }
+            lastAdmissionProofPublicKey = signingPublicKey
         }
 
         return proof
@@ -1972,6 +2129,7 @@ actor CoordinatorClient {
                 message: error?["message"] as? String ?? "Coordinator rejected auth_response"
             )
         }
+        _ = try validateCompatibilitySetAcceptance(response)
         guard let tier2 = response["tier2_session"] as? [String: Any],
               let encryptedLeg = tier2["encrypted_leg"] as? [String: Any],
               encryptedLeg["enabled"] as? Bool == true,
@@ -1986,36 +2144,10 @@ actor CoordinatorClient {
         inBandAEADRekeyEnabled = encryptedLeg["in_band_aead_rekey_v1"] as? Bool == true
     }
 
-    /// SPEC-003 v0.8.2 FR-C9.3 — extract `assigned_provider_token` from
-    /// a hello_ack / auth_response payload, persist it to disk via a
-    /// detached I/O task, and adopt it in-memory ONLY on persist
-    /// success. The token is `await`-gated by the persist outcome.
-    ///
-    /// v0.8.2 hardening: v0.8.1 implemented this as "adopt in memory
-    /// FIRST, then fire-and-forget detached persist". The codex security
-    /// re-audit on PR #44 (MINOR-1) flagged the brick-mode window:
-    /// process crash / SIGKILL between in-memory adoption and persist
-    /// flush leaves the coordinator holding a valid token row that the
-    /// binary will never use. On next process restart the binary
-    /// reconnects tokenless, the coordinator's FR-C9.4 TOFU gate refuses
-    /// it ("an active token already exists"), and the provider is
-    /// bricked until operator runs `coordinator-cli revoke-token`.
-    ///
-    /// v0.8.2 closes this by awaiting the persist task before adopting
-    /// in memory. The disk I/O still runs on a detached priority-utility
-    /// task so the receive loop is suspended (not the whole runtime)
-    /// during the ~10ms persist; this preserves the FR-C9.3 SHOULD-not-
-    /// block contract because it is a `Task.detached(...).value` await,
-    /// not a sync blocking call.
-    ///
-    /// On persist failure the in-memory token is NOT adopted. The
-    /// current WS session continues with whatever bearer (if any) was
-    /// already configured — the connect already authenticated, so the
-    /// session itself is fine. Next reconnect attempt will retry from
-    /// scratch and the legitimate provider can mint cleanly. The
-    /// asymmetry "coordinator has token / binary doesn't" never appears
-    /// in this design.
-    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async -> Bool {
+    /// Persist-before-adopt for newly assigned credentials. CLI Keychain is
+    /// the only durable destination; a failed commit leaves the in-memory
+    /// credential unchanged and fails this admission attempt.
+    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async throws -> Bool {
         guard let assigned = payload["assigned_provider_token"] as? String else {
             return false
         }
@@ -2023,40 +2155,70 @@ actor CoordinatorClient {
         guard !trimmed.isEmpty else {
             return false
         }
-        // AUDIT R1 SECURITY S4 fix (PR #334) — when the CLI is spawned as a
-        // managed child of Malibu.app, disk persistence of the bearer token
-        // is contrary to the App-track security model: the app stores the
-        // token in Keychain and NEVER wants it landed in
-        // ~/.config/macprovider/config.yaml. We still adopt in-memory so
-        // the current WS session keeps authenticating, and emit an event
-        // so operators can see the skip. Keychain-side rotation lands with
-        // SPEC-025 §11 P1 alongside the "CLI reads Keychain directly" work.
-        if appConfig.managedBy == "malibu-app" {
-            self.providerToken = trimmed
-            Self.emitTokenPersistEvent(
-                event: "provider_token_persist_skipped_managed_by_malibu_app",
-                path: configPath,
-                error: nil
-            )
-            return true
-        }
         let path = configPath
+        let providerID = providerID
+        let store = providerCredentialStore
+        let rejectedToken = providerToken
         let result: Result<Void, Error> = await Task.detached(priority: .utility) {
             do {
-                try ProviderTokenPersist.write(token: trimmed, configPath: path)
+                try store.replace(providerID: providerID, token: trimmed)
                 return .success(())
             } catch {
                 return .failure(error)
             }
         }.value
+
         switch result {
         case .success:
-            self.providerToken = trimmed
-            Self.emitTokenPersistEvent(event: "provider_token_persisted", path: path, error: nil)
-            return true
+            Self.emitTokenPersistEvent(event: "provider_token_keychain_persisted", path: path, error: nil)
         case .failure(let error):
-            Self.emitTokenPersistEvent(event: "provider_token_persist_failed", path: path, error: error)
-            return false
+            Self.emitTokenPersistEvent(event: "provider_token_keychain_persist_failed", path: path, error: error)
+            throw CoordinatorAuthError.invalidMessage("assigned provider credential could not be committed")
+        }
+
+        if let rejectedToken, rejectedToken != trimmed {
+            await removeRejectedLegacyCredentialSource(rejectedToken)
+        }
+
+        self.providerToken = trimmed
+        await credentialStatusRuntime.update(
+            ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+        )
+        return true
+    }
+
+    private func removeRejectedLegacyCredentialSource(_ rejectedToken: String) async {
+        guard !rejectedToken.isEmpty else { return }
+        let path = configPath
+        let cleanup: Result<Bool, Error> = await Task.detached(priority: .utility) {
+            do {
+                return .success(try ProviderTokenPersist.remove(
+                    expectedToken: rejectedToken,
+                    configPath: path
+                ))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        switch cleanup {
+        case .success(true):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_rejected_legacy_source_removed",
+                path: path,
+                error: nil
+            )
+        case .success(false):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_rejected_legacy_source_preserved_mismatch",
+                path: path,
+                error: nil
+            )
+        case .failure(let error):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_rejected_legacy_source_cleanup_failed",
+                path: path,
+                error: error
+            )
         }
     }
 
@@ -2085,15 +2247,60 @@ actor CoordinatorClient {
         }
     }
 
+    private func validateCompatibilitySetAcceptance(
+        _ payload: [String: Any]
+    ) throws -> (accepted: String, recommended: String)? {
+        guard let compatibilitySetID else {
+            return nil
+        }
+        guard let policy = payload["compatibility_policy"] as? String else {
+            throw CoordinatorAuthError.invalidMessage(
+                "coordinator omitted explicit compatibility-set policy"
+            )
+        }
+        switch policy {
+        case "configured":
+            guard payload["accepted_compatibility_set_id"] as? String == compatibilitySetID,
+                  let recommended = payload["recommended_compatibility_set_id"] as? String,
+                  CompatibilitySetManifest.isCanonicalCompatibilitySetID(recommended) else {
+                throw CoordinatorAuthError.invalidMessage(
+                    "coordinator compatibility-set acknowledgement did not match installed signed set"
+                )
+            }
+            return (compatibilitySetID, recommended)
+        case "unconfigured":
+            guard payload["accepted_compatibility_set_id"] == nil,
+                  payload["recommended_compatibility_set_id"] == nil else {
+                throw CoordinatorAuthError.invalidMessage(
+                    "unconfigured coordinator returned a contradictory compatibility-set acknowledgement"
+                )
+            }
+            return nil
+        default:
+            throw CoordinatorAuthError.invalidMessage(
+                "coordinator returned an unknown compatibility-set policy"
+            )
+        }
+    }
+
     private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
+        let compatibilityAdmission: (accepted: String, recommended: String)?
+        do {
+            compatibilityAdmission = try validateCompatibilitySetAcceptance(payload)
+        } catch {
+            recommendedCompatibilitySetID = nil
+            try? autoupdateMarkerStore.clearCompatibilityAdmission()
+            throw error
+        }
         if catalogReleaseID != nil, payload["catalog_compatible"] as? Bool != true {
             throw CoordinatorAuthError.invalidMessage("coordinator did not accept provider catalog release")
         }
+        try await reconcileAdmissionIdentityIfNeeded(payload)
         // SPEC-003 v0.8.2 FR-C9.3 — single hook for both v1 (hello_ack)
         // and v2 (auth_response) ack paths since both funnel here.
         // Awaited so that persist-before-adopt holds: see
         // adoptAssignedProviderTokenIfPresent doc-comment.
-        let assignedProviderTokenAdopted = await adoptAssignedProviderTokenIfPresent(payload)
+        let assignedProviderTokenAdopted = try await adoptAssignedProviderTokenIfPresent(payload)
         if assignedProviderTokenAdopted {
             // The current tokenless WS session stays auth_state=self_minted and is
             // not buyer-routable until we reconnect with Authorization: Bearer.
@@ -2124,10 +2331,25 @@ actor CoordinatorClient {
         )
         autoupdateDrainExtensions = payload["autoupdate_drain_extensions"] as? Bool == true
         autoupdateAttemptedTargets.removeAll()
+        recommendedCompatibilitySetID = compatibilityAdmission?.recommended
+        autoupdateDisabledForSessionReason = nil
+        do {
+            if let compatibilityAdmission {
+                try autoupdateMarkerStore.persistCompatibilityAdmission(
+                    acceptedCompatibilitySetID: compatibilityAdmission.accepted,
+                    recommendedCompatibilitySetID: compatibilityAdmission.recommended
+                )
+            } else {
+                try autoupdateMarkerStore.clearCompatibilityAdmission()
+            }
+        } catch {
+            autoupdateDisabledForSessionReason = "compatibility_admission_persist_failed"
+        }
         await providerStatus.setCoordinatorSession(
             connected: true,
             assignedID: payload["assigned_id"] as? String,
             tier: payload["tier"] as? String,
+            identityAdmissionMode: payload["identity_admission_mode"] as? String,
             recommendedBinaryVersion: payload["recommended_binary_version"] as? String
         )
         acceptedAssignedProviderID = (payload["assigned_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2142,41 +2364,35 @@ actor CoordinatorClient {
         sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
         try await sendStateUpdate(state: nil, reason: reason)
-        if let completedAutoupdate = await pendingSuccessfulAutoupdate(),
-           await waitForCoordinatorServingCapability() {
-            do {
-                let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
-                defer { withExtendedLifetime(transactionLock) {} }
-                guard let current = try autoupdateMarkerStore.readPending(),
-                      current == completedAutoupdate else {
-                    throw AutoUpdateMarkerError.invalidMarker
-                }
-                try autoupdateMarkerStore.completeSuccessfulUpdate(current)
-                try autoupdateMarkerStore.finalizeSuccessfulUpdate(current)
-                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                    updateID: completedAutoupdate.updateID,
-                    currentVersion: Self.binaryVersion,
-                    targetVersion: completedAutoupdate.targetVersion,
-                    phase: .postStart,
-                    outcome: .success,
-                    reason: "coordinator_admitted_serving_capability_confirmed",
-                    attempt: 1
-                ))
-            } catch {
-                // Preserve the sentinel/pending state when cleanup is
-                // incomplete so startup recovery can finish it idempotently.
-                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                    updateID: completedAutoupdate.updateID,
-                    currentVersion: Self.binaryVersion,
-                    targetVersion: completedAutoupdate.targetVersion,
-                    phase: .postStart,
-                    outcome: .failure,
-                    reason: "buyer_serving_commit_cleanup_failed",
-                    attempt: 1,
-                    failureClass: .other
-                ))
+        if operatorPaused {
+            _ = try recordLifecycleTransition(
+                to: .pausedByOperator,
+                reasonCode: "operator_pause_restored_after_admission",
+                compatibilitySetID: installedCompatibilitySetID(),
+                writer: .operatorCommand,
+                operatorPaused: true
+            )
+            return
+        }
+        if lifecycleOperationID != nil {
+            let servingCapabilityConfirmed = await waitForCoordinatorServingCapability()
+            guard servingCapabilityConfirmed else {
+                _ = try recordLifecycleTransition(
+                    to: .locallyReadyConnecting,
+                    reasonCode: "buyer_serving_readiness_unconfirmed",
+                    compatibilitySetID: installedCompatibilitySetID()
+                )
+                throw CoordinatorAuthError.invalidMessage("coordinator buyer-serving readiness was not confirmed")
             }
         }
+        _ = try recordLifecycleTransition(
+            to: .servingBuyers,
+            reasonCode: "coordinator_buyer_serving_confirmed",
+            compatibilitySetID: installedCompatibilitySetID()
+        )
+        await finalizeAdmissionBoundaryAfterServingProof(
+            successReason: "coordinator_admitted_serving_capability_confirmed"
+        )
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {
@@ -2201,6 +2417,401 @@ actor CoordinatorClient {
         }
     }
 
+    /// The server returns its authoritative active key after every accepted
+    /// signed admission. Persist a staged rotation before adopting the session;
+    /// an unknown key fails closed instead of silently changing local custody.
+    func reconcileAdmissionIdentityIfNeeded(_ payload: [String: Any]) async throws {
+        let admissionIdentityContractExpected = providerAdmissionPublicKey != nil
+            || providerAdmissionNextPublicKey != nil
+            || providerAdmissionRecovery
+            || lastAdmissionProofPublicKey != nil
+        guard admissionIdentityContractExpected else {
+            return
+        }
+        guard let active = payload["admission_identity_public_key"] as? String,
+              !active.isEmpty else {
+            await admissionIdentityStatusRuntime.recordFailure(
+                "coordinator_omitted_admission_identity_contract",
+                recoveryAction: "retry_or_run_credentials_repair"
+            )
+            throw CoordinatorAuthError.invalidMessage("coordinator omitted the admission identity contract")
+        }
+        guard let raw = Data(base64Encoded: active), raw.count == 32 else {
+            await admissionIdentityStatusRuntime.recordFailure(
+                "coordinator_returned_invalid_admission_identity",
+                recoveryAction: "retry_or_run_credentials_repair"
+            )
+            throw CoordinatorAuthError.invalidMessage("coordinator returned an invalid admission identity")
+        }
+        let activeDigest = SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
+        guard let generation = payload["identity_generation"] as? Int,
+              generation >= 1,
+              let keyRole = payload["identity_admission_key_role"] as? String,
+              ["current", "previous", "recovery"].contains(keyRole) else {
+            await admissionIdentityStatusRuntime.recordFailure(
+                "coordinator_returned_incomplete_admission_identity_contract",
+                recoveryAction: "retry_or_run_credentials_repair"
+            )
+            throw CoordinatorAuthError.invalidMessage("coordinator returned an incomplete admission identity contract")
+        }
+        let previousValidUntil: Date?
+        if let text = payload["admission_identity_previous_valid_until"] as? String {
+            guard let parsed = CredentialRestartProver.parseISO8601(text) else {
+                await admissionIdentityStatusRuntime.recordFailure(
+                    "coordinator_returned_invalid_previous_identity_deadline",
+                    recoveryAction: "retry_or_run_credentials_repair"
+                )
+                throw CoordinatorAuthError.invalidMessage(
+                    "coordinator returned an invalid previous admission identity deadline"
+                )
+            }
+            previousValidUntil = parsed
+        } else {
+            previousValidUntil = nil
+        }
+        if active == providerAdmissionPublicKey {
+            if providerAdmissionRecovery {
+                guard generation >= 2,
+                      ["recovery", "current"].contains(keyRole),
+                      let commitAdmissionIdentityPublicKey else {
+                    await admissionIdentityStatusRuntime.recordFailure(
+                        "coordinator_did_not_authorize_identity_recovery",
+                        recoveryAction: "obtain_operator_recovery_approval_then_retry"
+                    )
+                    throw CoordinatorAuthError.invalidMessage("coordinator did not authorize admission identity recovery")
+                }
+                try commitAdmissionIdentityPublicKey(raw, nil)
+                providerAdmissionRecovery = false
+                await admissionIdentityStatusRuntime.recordAccepted(
+                    coordinatorPublicKeySHA256: activeDigest,
+                    generation: generation,
+                    keyRole: keyRole,
+                    localState: "ready",
+                    localSource: "cli_keychain",
+                    localPublicKeySHA256: activeDigest,
+                    recoveryAction: "none",
+                    replaceLocalKeyState: true
+                )
+            } else {
+                guard keyRole == "current" else {
+                    await admissionIdentityStatusRuntime.recordFailure(
+                        "coordinator_returned_mismatched_admission_identity_role",
+                        recoveryAction: "retry_or_run_credentials_repair"
+                    )
+                    throw CoordinatorAuthError.invalidMessage("coordinator returned a mismatched admission identity role")
+                }
+                await admissionIdentityStatusRuntime.recordAccepted(
+                    coordinatorPublicKeySHA256: activeDigest,
+                    generation: generation,
+                    keyRole: keyRole
+                )
+            }
+            return
+        }
+        if active == providerAdmissionNextPublicKey,
+           generation >= 2,
+           keyRole == "current" {
+            guard let previousValidUntil, let commitAdmissionIdentityPublicKey else {
+                await admissionIdentityStatusRuntime.recordFailure(
+                    "coordinator_omitted_previous_identity_deadline",
+                    recoveryAction: "retry_or_run_credentials_repair"
+                )
+                throw CoordinatorAuthError.invalidMessage(
+                    "coordinator omitted the previous admission identity deadline"
+                )
+            }
+            let previousDigest = providerAdmissionPublicKey
+                .flatMap { Data(base64Encoded: $0) }
+                .map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
+            try commitAdmissionIdentityPublicKey(raw, previousValidUntil)
+            providerAdmissionPublicKey = active
+            providerAdmissionNextPublicKey = nil
+            let stillValid = previousValidUntil > Date()
+            let previousValidUntilText = stillValid
+                ? Self.formatAdmissionIdentityDeadline(previousValidUntil)
+                : nil
+            await admissionIdentityStatusRuntime.recordAccepted(
+                coordinatorPublicKeySHA256: activeDigest,
+                generation: generation,
+                keyRole: keyRole,
+                localState: "ready",
+                localSource: "cli_keychain",
+                localPublicKeySHA256: activeDigest,
+                previousPublicKeySHA256: stillValid ? previousDigest : nil,
+                previousValidUntil: previousValidUntilText,
+                recoveryAction: "none",
+                replaceLocalKeyState: true
+            )
+            return
+        }
+
+        // A rolled-back binary may prove the coordinator's bounded previous
+        // key. The authenticated response still names the authoritative current
+        // public key, which cannot restore a missing private key. Admit this
+        // degraded session without changing custody; rotation remains disabled.
+        if keyRole == "previous",
+           generation >= 2,
+           let lastAdmissionProofPublicKey,
+           lastAdmissionProofPublicKey == providerAdmissionPublicKey,
+           lastAdmissionProofPublicKey != active {
+            guard let previousValidUntil, previousValidUntil > Date() else {
+                await admissionIdentityStatusRuntime.recordFailure(
+                    "coordinator_previous_identity_deadline_expired_or_missing",
+                    recoveryAction: "restore_current_key_or_run_recover_admission_identity"
+                )
+                throw CoordinatorAuthError.invalidMessage(
+                    "coordinator returned an expired or missing previous admission identity deadline"
+                )
+            }
+            await admissionIdentityStatusRuntime.recordAccepted(
+                coordinatorPublicKeySHA256: activeDigest,
+                generation: generation,
+                keyRole: keyRole,
+                localState: "degraded_previous_key",
+                previousValidUntil: Self.formatAdmissionIdentityDeadline(previousValidUntil),
+                recoveryAction: "restore_current_key_or_run_recover_admission_identity"
+            )
+            return
+        }
+        await admissionIdentityStatusRuntime.recordFailure(
+            "coordinator_accepted_unknown_admission_identity",
+            recoveryAction: "run_credentials_repair_or_recover_admission_identity"
+        )
+        throw CoordinatorAuthError.invalidMessage("coordinator accepted an unknown admission identity")
+    }
+
+    private static func formatAdmissionIdentityDeadline(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private enum AdmissionUpdateBoundary: Equatable {
+        case noPendingUpdate
+        case committed(AutoUpdatePendingMarker)
+        case restoredPrevious(AutoUpdatePendingMarker)
+        case pendingRollback
+    }
+
+    private func commitPendingAutoupdateAfterServingProof() async -> AdmissionUpdateBoundary {
+        guard let completedAutoupdate = try? autoupdateMarkerStore.readPending() else {
+            return .noPendingUpdate
+        }
+        if completedAutoupdate.transactionState == .restoringPrevious
+            || completedAutoupdate.transactionState == .awaitingPreviousReadiness
+        {
+            guard completedAutoupdate.previousVersion == Self.binaryVersion,
+                  previousCompatibilitySetMatchesInstalled(completedAutoupdate),
+                  await waitForCoordinatorServingCapability()
+            else {
+                return .pendingRollback
+            }
+            do {
+                let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
+                defer { withExtendedLifetime(transactionLock) {} }
+                guard var current = try autoupdateMarkerStore.readPending(),
+                      current.updateID == completedAutoupdate.updateID,
+                      current.transactionState == .restoringPrevious
+                        || current.transactionState == .awaitingPreviousReadiness
+                else {
+                    throw AutoUpdateMarkerError.invalidMarker
+                }
+                if current.transactionState == .restoringPrevious {
+                    current = try autoupdateMarkerStore.markPreviousRestoredAwaitingReadiness(current)
+                }
+                try autoupdateMarkerStore.completeRestoredPreviousSet(current)
+                return .restoredPrevious(current)
+            } catch {
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: completedAutoupdate.updateID,
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: completedAutoupdate.targetVersion,
+                    phase: .rollback,
+                    outcome: .failure,
+                    reason: "previous_set_readiness_cleanup_failed",
+                    attempt: 1,
+                    failureClass: .other
+                ))
+                return .pendingRollback
+            }
+        }
+        guard completedAutoupdate.targetVersion == Self.binaryVersion else {
+            return .pendingRollback
+        }
+        // The old `macprovider-cli update` process owns this transaction and
+        // may still roll back its child. The child must not clear either the
+        // marker or the legacy YAML credential.
+        guard completedAutoupdate.commitOwner != "self_update" else {
+            return .pendingRollback
+        }
+        guard await waitForCoordinatorServingCapability() else {
+            return .pendingRollback
+        }
+        guard pendingCompatibilitySetMatchesInstalled(completedAutoupdate) else {
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: completedAutoupdate.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: completedAutoupdate.targetVersion,
+                phase: .postStart,
+                outcome: .failure,
+                reason: "compatibility_set_readiness_mismatch",
+                attempt: 1,
+                failureClass: .other
+            ))
+            return .pendingRollback
+        }
+        do {
+            let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
+            defer { withExtendedLifetime(transactionLock) {} }
+            guard let current = try autoupdateMarkerStore.readPending(),
+                  current == completedAutoupdate else {
+                throw AutoUpdateMarkerError.invalidMarker
+            }
+            try autoupdateMarkerStore.completeSuccessfulUpdate(current)
+            try autoupdateMarkerStore.finalizeSuccessfulUpdate(current)
+            return .committed(completedAutoupdate)
+        } catch {
+            // Preserve the sentinel/pending state when cleanup is incomplete so
+            // startup recovery can finish it idempotently. Credential cleanup
+            // is also withheld because rollback may still restore an old binary.
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: completedAutoupdate.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: completedAutoupdate.targetVersion,
+                phase: .postStart,
+                outcome: .failure,
+                reason: "buyer_serving_commit_cleanup_failed",
+                attempt: 1,
+                failureClass: .other
+            ))
+            return .pendingRollback
+        }
+    }
+
+    private func finalizeAdmissionBoundaryAfterServingProof(successReason: String) async {
+        let updateBoundary = await commitPendingAutoupdateAfterServingProof()
+        if updateBoundary != .pendingRollback {
+            // A pre-v1.8.34 rollback binary cannot read CLI Keychain. Commit
+            // the coordinator update transaction before removing its YAML
+            // compatibility bearer; failed readiness must leave rollback viable.
+            await finalizeLegacyCredentialSourceAfterAdmission()
+        }
+        if case .committed(let completedAutoupdate) = updateBoundary {
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: completedAutoupdate.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: completedAutoupdate.targetVersion,
+                phase: .postStart,
+                outcome: .success,
+                reason: successReason,
+                attempt: 1
+            ))
+        } else if case .restoredPrevious(let completedAutoupdate) = updateBoundary {
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: completedAutoupdate.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: completedAutoupdate.targetVersion,
+                phase: .rollback,
+                outcome: .success,
+                reason: "previous_compatibility_set_admitted_and_buyer_serving",
+                attempt: 1
+            ))
+        }
+    }
+
+    private func pendingCompatibilitySetMatchesInstalled(_ marker: AutoUpdatePendingMarker) -> Bool {
+        switch (marker.targetCompatibilitySetID, marker.targetCompatibilitySetSHA256) {
+        case (nil, nil):
+            return true
+        case let (.some(expectedID), .some(expectedDigest)):
+            guard let installed = CompatibilitySetManifest.loadInstalled(
+                executableURL: Bundle.main.executableURL,
+                expectedVersion: Self.binaryVersion
+            ) else { return false }
+            return installed.compatibilitySetID == expectedID
+                && installed.envelopeSHA256 == expectedDigest
+        default:
+            return false
+        }
+    }
+
+    private func previousCompatibilitySetMatchesInstalled(_ marker: AutoUpdatePendingMarker) -> Bool {
+        guard let expectedVersion = marker.previousVersion,
+              let expectedID = marker.previousCompatibilitySetID,
+              let expectedDigest = marker.previousCompatibilitySetSHA256,
+              let installed = installedCompatibilityManifest(
+                  URL(fileURLWithPath: marker.targetPath),
+                  expectedVersion
+              )
+        else { return false }
+        return installed.compatibilitySetID == expectedID
+            && installed.envelopeSHA256 == expectedDigest
+            && compatibilitySetID == expectedID
+    }
+
+    func finalizeCredentialAfterAutoupdateBoundaryForTest(assignedProviderID: String) async {
+        acceptedAssignedProviderID = assignedProviderID
+        let boundary = await commitPendingAutoupdateAfterServingProof()
+        if boundary != .pendingRollback {
+            await finalizeLegacyCredentialSourceAfterAdmission()
+        }
+    }
+
+    /// The compatibility YAML remains intact until a restarted provider that
+    /// resolved this exact value from CLI Keychain completes authenticated
+    /// coordinator admission and publishes its first state update. Cleanup is
+    /// compare-and-remove under the config lock, so a newer or conflicting
+    /// credential is never deleted.
+    private func finalizeLegacyCredentialSourceAfterAdmission() async {
+        let status = await credentialStatusRuntime.snapshot()
+        guard status.source == .cliKeychain,
+              status.migrationPending,
+              let expected = providerToken,
+              !expected.isEmpty else {
+            return
+        }
+        let store = providerCredentialStore
+        let providerID = providerID
+        let path = configPath
+        let result: Result<Bool, Error> = await Task.detached(priority: .utility) {
+            do {
+                guard try store.load(providerID: providerID) == expected else {
+                    return .success(false)
+                }
+                return .success(try ProviderTokenPersist.remove(
+                    expectedToken: expected,
+                    configPath: path
+                ))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        switch result {
+        case .success(true):
+            await credentialStatusRuntime.update(
+                ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+            )
+            Self.emitTokenPersistEvent(
+                event: "provider_token_legacy_source_removed_after_admission",
+                path: path,
+                error: nil
+            )
+        case .success(false):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_legacy_source_preserved_mismatch",
+                path: path,
+                error: nil
+            )
+        case .failure(let error):
+            Self.emitTokenPersistEvent(
+                event: "provider_token_legacy_source_cleanup_failed",
+                path: path,
+                error: error
+            )
+        }
+    }
+
     private static func emitClaimURLHandoffEvent(error: Error) {
         let payload = [
             "event": "claim_url_handoff_failed",
@@ -2213,16 +2824,6 @@ actor CoordinatorClient {
         } catch {
             FileHandle.standardError.write(Data("{\"event\":\"claim_url_handoff_failed\"}\n".utf8))
         }
-    }
-
-    private func pendingSuccessfulAutoupdate() async -> AutoUpdatePendingMarker? {
-        guard let marker = try? autoupdateMarkerStore.readPending(),
-              marker.targetVersion == Self.binaryVersion,
-              marker.commitOwner == nil || marker.commitOwner == "coordinator"
-        else {
-            return nil
-        }
-        return marker
     }
 
     /// Rollback is committed only after the coordinator's public readiness
@@ -2260,6 +2861,32 @@ actor CoordinatorClient {
             try? await Task.sleep(nanoseconds: coordinatorReadinessRetryNanoseconds)
         }
         return false
+    }
+
+    @discardableResult
+    private func recordLifecycleTransition(
+        to state: ProviderLifecycleState,
+        reasonCode: String,
+        compatibilitySetID: String?,
+        writer: ProviderLifecycleWriter = .serve,
+        operationID: String? = nil,
+        operatorPaused: Bool? = nil
+    ) throws -> ProviderLifecycleStateRecord? {
+        guard let lifecycleOperationID else { return nil }
+        return try lifecycleStateStore.transition(
+            to: state,
+            reasonCode: reasonCode,
+            writer: writer,
+            providerID: providerID,
+            modelID: loadedModelID,
+            compatibilitySetID: compatibilitySetID,
+            operationID: operationID ?? lifecycleOperationID,
+            operatorPaused: operatorPaused
+        )
+    }
+
+    private func installedCompatibilitySetID() -> String? {
+        compatibilitySetID
     }
 
     private func runStartupAutoupdateRecovery() async {
@@ -2372,6 +2999,17 @@ actor CoordinatorClient {
                         phase: .rollback,
                         outcome: .failure,
                         reason: "orphaned_pending_marker_recovered",
+                        attempt: 1,
+                        failureClass: .orphanedPendingMarker
+                    ))
+                case .restoredAwaitingReadiness(let recovered):
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: recovered.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: recovered.targetVersion,
+                        phase: .rollback,
+                        outcome: .inProgress,
+                        reason: "previous_set_restored_awaiting_buyer_serving",
                         attempt: 1,
                         failureClass: .orphanedPendingMarker
                     ))
@@ -2587,6 +3225,25 @@ actor CoordinatorClient {
             defer { group.cancelAll() }
             try await group.next()
         }
+        if resetWindow {
+            renewCompatibilityAdmission()
+        }
+    }
+
+    private func renewCompatibilityAdmission() {
+        guard coordinatorSessionAccepted,
+              let accepted = compatibilitySetID,
+              let recommended = recommendedCompatibilitySetID else {
+            return
+        }
+        do {
+            try autoupdateMarkerStore.persistCompatibilityAdmission(
+                acceptedCompatibilitySetID: accepted,
+                recommendedCompatibilitySetID: recommended
+            )
+        } catch {
+            autoupdateDisabledForSessionReason = "compatibility_admission_persist_failed"
+        }
     }
 
     private func closeWebSocketAfterKeepaliveFailure() {
@@ -2635,6 +3292,113 @@ actor CoordinatorClient {
                 "estimated_wait_ms": 0,
             ])
         }
+    }
+
+    func pauseByOperator() async -> ProviderControlCommandResult {
+        if operatorPaused {
+            return .accepted
+        }
+
+        await providerStatus.setState(.draining, reason: "operator_pause_draining")
+        do {
+            try await sendStateUpdate(state: nil, reason: "operator_pause_draining")
+        } catch {
+            // A disconnected coordinator must not prevent a local pause. Closing
+            // the socket also prevents a stale remote route from surviving until
+            // the next heartbeat timeout.
+            webSocket?.cancel(with: .goingAway, reason: nil)
+        }
+
+        guard await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds) else {
+            await providerStatus.setState(.ready, reason: "operator_pause_drain_timeout")
+            try? await sendStateUpdate(state: nil, reason: "operator_pause_drain_timeout")
+            return .rejected("drain_timeout")
+        }
+
+        let operationID = "operator-pause:\(UUID().uuidString.lowercased())"
+        do {
+            _ = try recordLifecycleTransition(
+                to: .pausedByOperator,
+                reasonCode: "operator_pause_confirmed",
+                compatibilitySetID: installedCompatibilitySetID(),
+                writer: .operatorCommand,
+                operationID: operationID,
+                operatorPaused: true
+            )
+        } catch {
+            await providerStatus.setState(.ready, reason: "operator_pause_persistence_failed")
+            try? await sendStateUpdate(state: nil, reason: "operator_pause_persistence_failed")
+            return .rejected("lifecycle_state_persistence_failed")
+        }
+
+        operatorPaused = true
+        await providerStatus.setState(.unavailable, reason: "operator_paused")
+        do {
+            try await sendStateUpdate(state: nil, reason: "operator_paused")
+        } catch {
+            webSocket?.cancel(with: .goingAway, reason: nil)
+        }
+        return .accepted
+    }
+
+    func resumeByOperator() async -> ProviderControlCommandResult {
+        guard operatorPaused else {
+            return .accepted
+        }
+
+        let operationID = "operator-resume:\(UUID().uuidString.lowercased())"
+        do {
+            _ = try recordLifecycleTransition(
+                to: .locallyReadyConnecting,
+                reasonCode: "operator_resume_requested",
+                compatibilitySetID: installedCompatibilitySetID(),
+                writer: .operatorCommand,
+                operationID: operationID,
+                operatorPaused: false
+            )
+        } catch {
+            return .rejected("lifecycle_state_persistence_failed")
+        }
+
+        operatorPaused = false
+        await providerStatus.setState(.ready, reason: "operator_resumed")
+        do {
+            try await sendStateUpdate(state: nil, reason: "operator_resumed")
+        } catch {
+            webSocket?.cancel(with: .goingAway, reason: nil)
+            return .accepted
+        }
+
+        guard lifecycleOperationID != nil, coordinatorSessionAccepted else {
+            return .accepted
+        }
+        if await waitForCoordinatorServingCapability() {
+            _ = try? recordLifecycleTransition(
+                to: .servingBuyers,
+                reasonCode: "operator_resume_buyer_serving_confirmed",
+                compatibilitySetID: installedCompatibilitySetID(),
+                writer: .operatorCommand,
+                operationID: operationID,
+                operatorPaused: false
+            )
+            // A provider may restart into a durable paused state while an
+            // installer-owned update transaction is awaiting buyer-serving
+            // proof. Resume supplies that proof, so it must cross the same
+            // commit/credential-cleanup boundary as ordinary admission.
+            await finalizeAdmissionBoundaryAfterServingProof(
+                successReason: "operator_resume_serving_capability_confirmed"
+            )
+        } else {
+            _ = try? recordLifecycleTransition(
+                to: .locallyReadyConnecting,
+                reasonCode: "operator_resume_readiness_unconfirmed",
+                compatibilitySetID: installedCompatibilitySetID(),
+                writer: .operatorCommand,
+                operationID: operationID,
+                operatorPaused: false
+            )
+        }
+        return .accepted
     }
 
     func drainAndExit(reason: String, exitCode: Int32 = 0) async {
@@ -2704,27 +3468,10 @@ actor CoordinatorClient {
         sleepAssertion = nil
         // v1.1.4: reset local state for the next coordinator session.
         // Local HTTP server kept serving throughout drain; provider is ready.
-        await providerStatus.setState(.ready)
+        await providerStatus.setState(.ready, reason: "drain_complete")
     }
 
     private func runAutoupdateIfEligible(_ recommended: String) async {
-        // SPEC-025 §12 conflict #2 — when the CLI is spawned as a managed child of
-        // Malibu.app, Sparkle owns whole-bundle updates end-to-end. Two auto-update
-        // paths racing on the same binary would fight over rollback markers and
-        // the launchd LaunchAgent. Skip loudly so we can see it in event history.
-        if appConfig.managedBy == "malibu-app" {
-            let parsedTarget = (try? AutoUpdateRecommendation.validate(recommended))?.normalized ?? "<unvalidated>"
-            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                updateID: UUID().uuidString.lowercased(),
-                currentVersion: Self.binaryVersion,
-                targetVersion: parsedTarget,
-                phase: .eligibility,
-                outcome: .skipped,
-                reason: "managed_by_malibu_app",
-                attempt: 1
-            ))
-            return
-        }
         if let parsed = try? AutoUpdateRecommendation.validate(recommended) {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {
@@ -2757,6 +3504,7 @@ actor CoordinatorClient {
             config: appConfig,
             currentVersion: Self.binaryVersion,
             providerStatus: providerStatus,
+            expectedCompatibilitySetID: recommendedCompatibilitySetID,
             trustProvider: { await self.currentAutoupdateTrustState() },
             drain: { target in try await self.autoupdateDrain(target: target) },
             sendReady: { try await self.sendStateUpdate(state: .ready, reason: "autoupdate_timeout_skipped_ready") }
@@ -3012,12 +3760,23 @@ actor CoordinatorClient {
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event
         }
+        let observedAt = Date()
+        payload["safety_telemetry"] = snapshot.safetyTelemetry(
+            providerID: providerID,
+            modelID: payload["model_id"] as? String ?? snapshotWireModelID,
+            binaryVersion: Self.binaryVersion,
+            compatibilitySetID: compatibilitySetID,
+            modelHash: payload["model_hash"] as? String ?? snapshot.modelHash,
+            observationID: UUID().uuidString.lowercased(),
+            observedAt: ISO8601DateFormatter().string(from: observedAt),
+            validForMS: 90_000
+        )
         try await send(payload)
     }
 
     private func sendStateUpdate(state newState: ProviderHealthState?, reason: String) async throws {
         if let newState {
-            await providerStatus.setState(newState)
+            await providerStatus.setState(newState, reason: reason)
         }
         let snapshot = await providerStatus.snapshot()
         var payload: [String: Any] = [
@@ -3113,6 +3872,7 @@ actor CoordinatorClient {
         attempt: Tier2AuthAttempt,
         providerReceiptPublicKeyOverride: String? = nil
     ) async -> [String: Any] {
+        lastAdmissionProofPublicKey = nil
         let snapshot = await providerStatus.snapshot()
         // Issue #203: when warm-swap is enabled, the authoritative
         // post-swap model metadata lives in `ModelRuntime.currentSnapshot()`,
@@ -3174,6 +3934,20 @@ actor CoordinatorClient {
         let receiptPublicKey = providerReceiptPublicKeyOverride ?? providerReceiptPublicKey
         if let receiptPublicKey, !receiptPublicKey.isEmpty {
             message["provider_receipt_public_key"] = receiptPublicKey
+        }
+        if let providerAdmissionPublicKey, !providerAdmissionPublicKey.isEmpty,
+           !credentialBootstrap {
+            message["provider_admission_public_key"] = providerAdmissionPublicKey
+        }
+        if let providerAdmissionNextPublicKey, !providerAdmissionNextPublicKey.isEmpty,
+           !credentialBootstrap {
+            message["provider_admission_next_public_key"] = providerAdmissionNextPublicKey
+        }
+        if providerAdmissionRecovery, !credentialBootstrap {
+            message["provider_admission_recovery"] = true
+        }
+        if let compatibilitySetID {
+            message["compatibility_set_id"] = compatibilitySetID
         }
         if let endpointURL {
             message["endpoint_url"] = endpointURL
@@ -3237,6 +4011,9 @@ actor CoordinatorClient {
             message["model_hash"] = hashForHello
         }
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
+        if let compatibilitySetID {
+            message["compatibility_set_id"] = compatibilitySetID
+        }
         return message
     }
 

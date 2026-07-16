@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Build Sparkle appcast.xml for a signed Malibu-{tag}.dmg release asset.
+# Build the one-time Sparkle bootstrap appcast for Malibu v1.8.32 clients.
 #
 # Requires:
 #   - Malibu-{tag}.dmg at phase3-binary/app/dist/ (or pass DMG=...)
 #   - SPARKLE_EDDSA_PRIVATE_KEY (base64 Ed25519 seed) or SPARKLE_PRIVATE_KEY_FILE
 #   - curl + tar (reviewed Sparkle release tools downloaded on demand)
 #
-# Usage:
-#   SPARKLE_EDDSA_PRIVATE_KEY=... bash scripts/generate-malibu-appcast.sh v1.8.18
-#   DMG=path/to/Malibu-v1.8.18.dmg bash scripts/generate-malibu-appcast.sh v1.8.18
+# The current Malibu app remains free of Sparkle runtime and feeds. Its signed
+# v1.8.39 target retains only the old public trust anchor required by Sparkle's
+# post-extraction policy. This signer is locked to that one bridge tag.
 
 set -euo pipefail
 
@@ -17,10 +17,15 @@ tag="${1:-}"
   echo "usage: $0 vX.Y.Z" >&2
   exit 2
 }
+bridge_tag="v1.8.39"
+[[ "$tag" == "$bridge_tag" ]] || {
+  echo "legacy Malibu Sparkle bootstrap is frozen to $bridge_tag" >&2
+  exit 1
+}
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 dmg="${DMG:-$repo_root/phase3-binary/app/dist/Malibu-${tag}.dmg}"
-[[ -f "$dmg" ]] || {
+[[ -f "$dmg" && ! -L "$dmg" ]] || {
   echo "missing dmg: $dmg" >&2
   exit 1
 }
@@ -59,6 +64,7 @@ if [[ -n "${SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
 elif [[ -n "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]]; then
   key_file="$(mktemp "${TMPDIR:-/tmp}/sparkle-ed-key.XXXXXX")"
   printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" > "$key_file"
+  chmod 600 "$key_file"
 else
   echo "SPARKLE_EDDSA_PRIVATE_KEY or SPARKLE_PRIVATE_KEY_FILE is required" >&2
   exit 1
@@ -79,4 +85,8 @@ EOF
 
 out="$repo_root/phase3-binary/app/dist/appcast.xml"
 cp "$work/appcast.xml" "$out"
+[[ -f "$out" && ! -L "$out" ]] || {
+  echo "generated appcast is not a regular file" >&2
+  exit 1
+}
 echo "wrote $out"

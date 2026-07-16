@@ -94,7 +94,11 @@ struct MalibuAccrualClient: Sendable {
         if let session {
             (data, response) = try await session.data(for: request)
         } else {
-            let ephemeral = URLSession(configuration: .ephemeral)
+            let ephemeral = URLSession(
+                configuration: .ephemeral,
+                delegate: NoRedirectURLSessionDelegate(),
+                delegateQueue: nil
+            )
             defer { ephemeral.finishTasksAndInvalidate() }
             (data, response) = try await ephemeral.data(for: request)
         }

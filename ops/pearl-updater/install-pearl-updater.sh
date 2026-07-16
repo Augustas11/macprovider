@@ -96,6 +96,6 @@ if [ "$SKIP_SYSTEMD" != "1" ]; then
   systemctl enable macprovider-pearl-updater-reconcile.service
 fi
 echo "installed disabled-by-default Pearl updater"
-echo "configure the #524 canary authority plus Better Stack heartbeat ID/API token before planning"
+echo "configure the #584 canary authority plus Better Stack heartbeat ID/API token before planning"
 echo "plan:  /usr/local/sbin/macprovider-pearl-update --plan"
 echo "enable apply in /etc/macprovider/pearl-updater.conf; keep the timer disabled until manual success, failed-rollout rollback, and interrupted committed-success reconciliation drills all pass"

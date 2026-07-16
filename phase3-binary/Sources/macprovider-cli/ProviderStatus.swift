@@ -1,6 +1,8 @@
 import Darwin
 import CryptoKit
+import Dispatch
 import Foundation
+import IOKit
 
 enum ProviderHealthState: String, Sendable {
     case ready
@@ -8,6 +10,149 @@ enum ProviderHealthState: String, Sendable {
     case degraded
     case draining
     case unavailable
+}
+
+enum ProviderMemoryPressure: String, Sendable {
+    case normal
+    case warning
+    case critical
+}
+
+protocol MemoryPressureProviding: Sendable {
+    func currentMemoryPressure() -> ProviderMemoryPressure
+}
+
+struct ProviderWorkloadTelemetry: Sendable, Equatable {
+    let cpuUtilizationPercent: Double?
+    let gpuUtilizationPercent: Double?
+    let gpuUtilizationScope: String
+    let powerSource: PowerSourceState
+}
+
+protocol ProviderWorkloadTelemetryProviding: Sendable {
+    func currentWorkloadTelemetry() -> ProviderWorkloadTelemetry
+}
+
+final class SystemProviderWorkloadTelemetryMonitor: ProviderWorkloadTelemetryProviding, @unchecked Sendable {
+    static let shared = SystemProviderWorkloadTelemetryMonitor()
+
+    private let lock = NSLock()
+    private let powerSource: PowerSourceReporting
+    private let gpuSampler: DispatchSourceTimer
+    private var priorCPUSeconds: Double?
+    private var priorWallTime: TimeInterval?
+    private var cachedGPU: (sampledAt: TimeInterval, value: Double?)?
+
+    init(powerSource: PowerSourceReporting = SystemPowerSourceReporter()) {
+        self.powerSource = powerSource
+        self.gpuSampler = DispatchSource.makeTimerSource(
+            queue: DispatchQueue(label: "live.streamvc.macprovider.gpu-telemetry", qos: .utility)
+        )
+        self.priorCPUSeconds = Self.processCPUSeconds()
+        self.priorWallTime = ProcessInfo.processInfo.systemUptime
+        gpuSampler.schedule(deadline: .now(), repeating: .seconds(1), leeway: .milliseconds(200))
+        gpuSampler.setEventHandler { [weak self] in
+            let sampledAt = ProcessInfo.processInfo.systemUptime
+            let value = Self.readGPUUtilizationPercent()
+            self?.lock.withLock { self?.cachedGPU = (sampledAt, value) }
+        }
+        gpuSampler.resume()
+    }
+
+    deinit {
+        gpuSampler.cancel()
+    }
+
+    func currentWorkloadTelemetry() -> ProviderWorkloadTelemetry {
+        lock.withLock {
+            let now = ProcessInfo.processInfo.systemUptime
+            let cpu = Self.processCPUSeconds().flatMap { total -> Double? in
+                defer {
+                    priorCPUSeconds = total
+                    priorWallTime = now
+                }
+                guard let previousCPU = priorCPUSeconds,
+                      let previousWall = priorWallTime,
+                      now > previousWall,
+                      total >= previousCPU else {
+                    return nil
+                }
+                let cores = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
+                return Self.clampPercent(((total - previousCPU) / (now - previousWall)) * 100.0 / cores)
+            }
+            let gpu = cachedGPU.flatMap { now - $0.sampledAt <= 3.0 ? $0.value : nil }
+            return ProviderWorkloadTelemetry(
+                cpuUtilizationPercent: cpu,
+                gpuUtilizationPercent: gpu,
+                // Apple exposes AGX utilization for the host device, not a
+                // process counter. The canary treats this conservatively and
+                // permits exactly one provider per host.
+                gpuUtilizationScope: "host",
+                powerSource: powerSource.currentPowerSourceState()
+            )
+        }
+    }
+
+    private static func processCPUSeconds() -> Double? {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return nil }
+        let user = Double(usage.ru_utime.tv_sec) + Double(usage.ru_utime.tv_usec) / 1_000_000.0
+        let system = Double(usage.ru_stime.tv_sec) + Double(usage.ru_stime.tv_usec) / 1_000_000.0
+        return user + system
+    }
+
+    private static func readGPUUtilizationPercent() -> Double? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AGXAccelerator"))
+        guard service != IO_OBJECT_NULL else { return nil }
+        defer { IOObjectRelease(service) }
+        guard let raw = IORegistryEntryCreateCFProperty(
+            service,
+            "PerformanceStatistics" as CFString,
+            kCFAllocatorDefault,
+            0
+        ), let statistics = raw.takeRetainedValue() as? [String: Any],
+              let value = statistics["Device Utilization %"] as? NSNumber else {
+            return nil
+        }
+        return clampPercent(value.doubleValue)
+    }
+
+    private static func clampPercent(_ value: Double) -> Double? {
+        guard value.isFinite else { return nil }
+        return min(100.0, max(0.0, value))
+    }
+}
+
+final class SystemMemoryPressureMonitor: MemoryPressureProviding, @unchecked Sendable {
+    static let shared = SystemMemoryPressureMonitor()
+
+    private let lock = NSLock()
+    private var current: ProviderMemoryPressure = .normal
+    private let source: DispatchSourceMemoryPressure
+
+    private init() {
+        source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.normal, .warning, .critical],
+            queue: DispatchQueue(label: "live.streamvc.macprovider.memory-pressure")
+        )
+        source.setEventHandler { [weak self, weak source] in
+            guard let self, let event = source?.data else { return }
+            let next: ProviderMemoryPressure
+            if event.contains(.critical) {
+                next = .critical
+            } else if event.contains(.warning) {
+                next = .warning
+            } else {
+                next = .normal
+            }
+            self.lock.withLock { self.current = next }
+        }
+        source.resume()
+    }
+
+    func currentMemoryPressure() -> ProviderMemoryPressure {
+        lock.withLock { current }
+    }
 }
 
 struct ProviderCapacity: Sendable {
@@ -114,6 +259,11 @@ struct ProviderSnapshot: Sendable {
     let errorsTotal: Int
     let restartCount: Int
     let memoryRSSMB: Int
+    let memoryPressure: ProviderMemoryPressure
+    let cpuUtilizationPercent: Double?
+    let gpuUtilizationPercent: Double?
+    let gpuUtilizationScope: String
+    let powerSource: PowerSourceState
     let capacity: ProviderCapacity
     let requestsServedSinceLast: Int
     let avgLatencyMSSinceLast: Double?
@@ -121,10 +271,12 @@ struct ProviderSnapshot: Sendable {
     let coordinatorConnected: Bool
     let coordinatorAssignedID: String?
     let coordinatorTier: String?
+    let coordinatorIdentityAdmissionMode: String?
     let recommendedBinaryVersion: String?
     let catalogCompatibilityConfirmed: Bool
     let activeRequestIDCount: Int
     let thermallyThrottled: Bool
+    let thermalState: String
     let lastActivityAt: Date
     let lastPrewarmAt: Date?
     let specDecodeEnabled: Bool
@@ -134,6 +286,9 @@ struct ProviderSnapshot: Sendable {
     let specDecodeAcceptedTokensSinceLast: Int
     let specDecodeAcceptanceRate: Double?
     let specDecodeGeneration: Int
+    let transitionID: String
+    let transitionAt: Date
+    let transitionReason: String
 
     var slotsFree: Int {
         if thermallyThrottled { return 0 }
@@ -142,6 +297,55 @@ struct ProviderSnapshot: Sendable {
 
     var slotsTotal: Int {
         capacity.maxConcurrency
+    }
+
+    func safetyTelemetry(
+        providerID: String?,
+        modelID: String?,
+        modelLoaded: Bool? = nil,
+        binaryVersion: String? = nil,
+        compatibilitySetID: String? = nil,
+        modelHash: String? = nil,
+        observationID: String,
+        observedAt: String,
+        validForMS: Int
+    ) -> [String: Any] {
+        let hasV2Identity = binaryVersion?.isEmpty == false
+            && compatibilitySetID?.isEmpty == false
+            && modelHash?.isEmpty == false
+            && coordinatorAssignedID?.isEmpty == false
+        var telemetry: [String: Any] = [
+            "schema_version": hasV2Identity ? 2 : 1,
+            "provider_id": providerID ?? NSNull(),
+            "model_id": modelID ?? NSNull(),
+            "model_loaded": modelLoaded ?? self.modelLoaded,
+            "runtime_state": status.rawValue,
+            "hardware_tier": capacity.ramTier,
+            "requests_in_flight": requestsInFlight,
+            "requests_queued": requestsQueued,
+            "memory_rss_mb": memoryRSSMB,
+            "memory_capacity_mb": capacity.ramGB * 1024,
+            "memory_pressure": memoryPressure.rawValue,
+            "thermal_state": thermalState,
+            "thermally_throttled": thermallyThrottled,
+            "restart_count": restartCount,
+            "uptime_s": uptimeSeconds,
+            "coordinator_connected": coordinatorConnected,
+            "observation_id": observationID,
+            "observed_at": observedAt,
+            "valid_for_ms": validForMS,
+        ]
+        if hasV2Identity {
+            telemetry["coordinator_session_id"] = coordinatorAssignedID!
+            telemetry["cpu_utilization_pct"] = cpuUtilizationPercent ?? NSNull()
+            telemetry["gpu_utilization_pct"] = gpuUtilizationPercent ?? NSNull()
+            telemetry["gpu_utilization_scope"] = gpuUtilizationScope
+            telemetry["power_source"] = powerSource.wireValue
+            telemetry["binary_version"] = binaryVersion!
+            telemetry["compatibility_set_id"] = compatibilitySetID!
+            telemetry["model_hash"] = modelHash!
+        }
+        return telemetry
     }
 }
 
@@ -162,7 +366,6 @@ actor ProviderStatus {
     private var inputTokensAllTime: Int64 = 0
     private var outputTokensAllTime: Int64 = 0
     private var requestsInFlight = 0
-    private var requestsQueued = 0
     private var errorsTotal = 0
     private var restartCount = 0
     private var windowRequests = 0
@@ -172,10 +375,13 @@ actor ProviderStatus {
     private var coordinatorConnected = false
     private var coordinatorAssignedID: String?
     private var coordinatorTier: String?
+    private var coordinatorIdentityAdmissionMode: String?
     private var recommendedBinaryVersion: String?
     private var catalogCompatibilityConfirmed = false
     private var activeRequestIDs = Set<String>()
     private let thermalGate: ThermalGate?
+    private let memoryPressureProvider: MemoryPressureProviding
+    private let workloadTelemetryProvider: ProviderWorkloadTelemetryProviding
     private var lastActivityAt = Date()
     private var lastPrewarmAt: Date?
     private var lastPrewarmElapsedMS: Double?
@@ -185,6 +391,10 @@ actor ProviderStatus {
     private var specDecodeWindowDraftedTokens = 0
     private var specDecodeWindowAcceptedTokens = 0
     private var specDecodeGeneration = 0
+    private var transitionID = UUID().uuidString.lowercased()
+    private var transitionAt = Date()
+    private var transitionReason: String
+    private var lastObservedThermalThrottle = false
 
     init(
         modelID: String?,
@@ -192,6 +402,8 @@ actor ProviderStatus {
         capacity: ProviderCapacity,
         modelHash: String? = nil,
         thermalGate: ThermalGate? = nil,
+        memoryPressureProvider: MemoryPressureProviding = SystemMemoryPressureMonitor.shared,
+        workloadTelemetryProvider: ProviderWorkloadTelemetryProviding = SystemProviderWorkloadTelemetryMonitor.shared,
         specDecodeDraftModelID: String? = nil,
         specDecodeNumDraftTokens: Int? = nil,
         providerID: String? = nil,
@@ -203,9 +415,12 @@ actor ProviderStatus {
         self.capacity = capacity
         self.status = modelLoaded ? .ready : .unavailable
         self.thermalGate = thermalGate
+        self.memoryPressureProvider = memoryPressureProvider
+        self.workloadTelemetryProvider = workloadTelemetryProvider
         self.specDecodeEnabled = modelLoaded && specDecodeDraftModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         self.specDecodeDraftModelID = Self.publicSpecDecodeDraftModelID(specDecodeDraftModelID)
         self.specDecodeNumDraftTokens = self.specDecodeEnabled ? specDecodeNumDraftTokens : nil
+        self.transitionReason = modelLoaded ? "model_ready" : "model_not_loaded"
         let trimmedProviderID = providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmedProviderID, !trimmedProviderID.isEmpty {
             persistedProviderID = trimmedProviderID
@@ -225,6 +440,14 @@ actor ProviderStatus {
         }
         refreshAvailabilityState()
         return Date()
+    }
+
+    /// Atomically fences new work once an operator pause or drain begins.
+    /// Requests admitted before the transition remain counted and are drained;
+    /// requests racing after it are rejected without entering the runtime.
+    func beginRequestIfAccepting(requestID: String? = nil) -> Date? {
+        guard status != .draining, status != .unavailable else { return nil }
+        return beginRequest(requestID: requestID)
     }
 
     func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) {
@@ -287,7 +510,7 @@ actor ProviderStatus {
         self.modelHash = modelHash
         modelLoaded = true
         if status == .unavailable {
-            status = .ready
+            transition(to: .ready, reason: "target_swap_completed")
         }
         setSpecDecodeConfig(draftModelID: specDecodeDraftModelID, numDraftTokens: specDecodeNumDraftTokens)
         refreshAvailabilityState()
@@ -322,20 +545,30 @@ actor ProviderStatus {
         lastPrewarmElapsedMS = elapsedMS
     }
 
-    func setState(_ newState: ProviderHealthState) {
-        status = newState
+    func setState(_ newState: ProviderHealthState, reason: String = "state_update") {
+        transition(to: newState, reason: reason)
     }
 
-    func setCoordinatorSession(connected: Bool, assignedID: String? = nil, tier: String? = nil, recommendedBinaryVersion: String? = nil) {
+    func setCoordinatorSession(
+        connected: Bool,
+        assignedID: String? = nil,
+        tier: String? = nil,
+        identityAdmissionMode: String? = nil,
+        recommendedBinaryVersion: String? = nil
+    ) {
         coordinatorConnected = connected
         if !connected {
             catalogCompatibilityConfirmed = false
+            coordinatorIdentityAdmissionMode = nil
         }
         if let assignedID {
             coordinatorAssignedID = assignedID
         }
         if let tier {
             coordinatorTier = tier
+        }
+        if let identityAdmissionMode {
+            coordinatorIdentityAdmissionMode = identityAdmissionMode
         }
         if let recommendedBinaryVersion {
             self.recommendedBinaryVersion = recommendedBinaryVersion
@@ -353,6 +586,15 @@ actor ProviderStatus {
         // running during the suspension could mutate `windowRequests` and
         // friends between read and reset.
         let throttled = await thermalGate?.isThrottled() ?? false
+        let thermalState = await thermalGate?.currentState() ?? ProcessInfo.processInfo.thermalState
+        let memoryPressure = memoryPressureProvider.currentMemoryPressure()
+        let workload = workloadTelemetryProvider.currentWorkloadTelemetry()
+        if throttled != lastObservedThermalThrottle {
+            lastObservedThermalThrottle = throttled
+            transitionID = UUID().uuidString.lowercased()
+            transitionAt = Date()
+            transitionReason = throttled ? "thermal_throttled" : "thermal_recovered"
+        }
         let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
         let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
         let specAcceptanceRate = specDecodeWindowDraftedTokens > 0
@@ -372,10 +614,15 @@ actor ProviderStatus {
             inputTokensAllTime: inputTokensAllTime,
             outputTokensAllTime: outputTokensAllTime,
             requestsInFlight: requestsInFlight,
-            requestsQueued: requestsQueued,
+            requestsQueued: max(0, requestsInFlight - capacity.maxConcurrency),
             errorsTotal: errorsTotal,
             restartCount: restartCount,
             memoryRSSMB: Self.memoryRSSMB(),
+            memoryPressure: memoryPressure,
+            cpuUtilizationPercent: workload.cpuUtilizationPercent,
+            gpuUtilizationPercent: workload.gpuUtilizationPercent,
+            gpuUtilizationScope: workload.gpuUtilizationScope,
+            powerSource: workload.powerSource,
             capacity: capacity,
             requestsServedSinceLast: windowRequests,
             avgLatencyMSSinceLast: avgLatency,
@@ -383,10 +630,12 @@ actor ProviderStatus {
             coordinatorConnected: coordinatorConnected,
             coordinatorAssignedID: coordinatorAssignedID,
             coordinatorTier: coordinatorTier,
+            coordinatorIdentityAdmissionMode: coordinatorIdentityAdmissionMode,
             recommendedBinaryVersion: recommendedBinaryVersion,
             catalogCompatibilityConfirmed: catalogCompatibilityConfirmed,
             activeRequestIDCount: activeRequestIDs.count,
             thermallyThrottled: throttled,
+            thermalState: thermalState.label,
             lastActivityAt: lastActivityAt,
             lastPrewarmAt: lastPrewarmAt,
             specDecodeEnabled: specDecodeEnabled,
@@ -395,7 +644,10 @@ actor ProviderStatus {
             specDecodeDraftedTokensSinceLast: specDecodeWindowDraftedTokens,
             specDecodeAcceptedTokensSinceLast: specDecodeWindowAcceptedTokens,
             specDecodeAcceptanceRate: specAcceptanceRate,
-            specDecodeGeneration: specDecodeGeneration
+            specDecodeGeneration: specDecodeGeneration,
+            transitionID: transitionID,
+            transitionAt: transitionAt,
+            transitionReason: transitionReason
         )
         if resetWindow {
             windowRequests = 0
@@ -423,7 +675,18 @@ actor ProviderStatus {
         guard modelLoaded, status == .ready || status == .busy else {
             return
         }
-        status = requestsInFlight >= capacity.maxConcurrency ? .busy : .ready
+        transition(
+            to: requestsInFlight >= capacity.maxConcurrency ? .busy : .ready,
+            reason: requestsInFlight >= capacity.maxConcurrency ? "request_capacity_full" : "request_capacity_available"
+        )
+    }
+
+    private func transition(to newState: ProviderHealthState, reason: String) {
+        guard status != newState else { return }
+        status = newState
+        transitionID = UUID().uuidString.lowercased()
+        transitionAt = Date()
+        transitionReason = reason
     }
 
     private func rolloverDayCountersIfNeeded(now: Date = Date()) {
@@ -446,11 +709,15 @@ actor ProviderStatus {
     }
 
     private static func memoryRSSMB() -> Int {
-        var usage = rusage()
-        guard getrusage(RUSAGE_SELF, &usage) == 0 else {
-            return 0
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
         }
-        return max(0, Int(usage.ru_maxrss / 1_048_576))
+        guard result == KERN_SUCCESS else { return 0 }
+        return max(0, Int(info.resident_size / 1_048_576))
     }
 
     static func publicSpecDecodeDraftModelID(_ modelID: String?) -> String? {

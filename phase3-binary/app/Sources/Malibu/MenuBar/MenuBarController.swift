@@ -10,12 +10,12 @@ final class MenuBarController {
         case resume
         case checkForUpdates
         case updateCLI
+        case exportDiagnostics
         case quitAndUninstall
     }
 
     private let statusItem: NSStatusItem
     private let agent: MalibuAgent
-    private let sparkleUpdater: SparkleUpdaterController
     private let onAction: (Action) -> Void
     private var dismissalStore: UnclaimedBadgeDismissalStore
     private var cancellables: Set<AnyCancellable> = []
@@ -24,19 +24,16 @@ final class MenuBarController {
 
     init(
         agent: MalibuAgent,
-        sparkleUpdater: SparkleUpdaterController,
         dismissalStore: UnclaimedBadgeDismissalStore = UnclaimedBadgeDismissalStore(),
         onAction: @escaping (Action) -> Void
     ) {
         self.agent = agent
-        self.sparkleUpdater = sparkleUpdater
         self.dismissalStore = dismissalStore
         self.dismissedUnclaimedThreshold = dismissalStore.dismissedThreshold
         self.onAction = onAction
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         configureButton()
         subscribeToState()
-        subscribeToSparkle()
     }
 
     private func configureButton() {
@@ -108,10 +105,12 @@ final class MenuBarController {
         menu.addItem(.separator())
         menu.addItem(action("Open Dashboard", key: "d") { self.onAction(.openDashboard) })
         menu.addItem(action("Set up…", key: "o") { self.onAction(.openOnboarding) })
+        menu.addItem(action("Export Diagnostics…", key: "") { self.onAction(.exportDiagnostics) })
         menu.addItem(.separator())
         menu.addItem(action("Pause", key: "") { self.onAction(.pause) })
         menu.addItem(action("Resume", key: "") { self.onAction(.resume) })
         menu.addItem(.separator())
+        menu.addItem(action("Quit and Uninstall…", key: "") { self.onAction(.quitAndUninstall) })
         menu.addItem(action("Quit", key: "q") { NSApp.terminate(nil) })
         return menu
     }
@@ -125,16 +124,6 @@ final class MenuBarController {
 
     @objc private func dispatch(_ sender: NSMenuItem) {
         (sender.representedObject as? () -> Void)?()
-    }
-
-    private func subscribeToSparkle() {
-        sparkleUpdater.$updateAvailable
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                guard let self else { return }
-                self.render(self.latestSnapshot)
-            }
-            .store(in: &cancellables)
     }
 
     private func subscribeToState() {
@@ -151,7 +140,7 @@ final class MenuBarController {
         // snapshot data type. This lets locale/currency work touch one place.
         latestSnapshot = snapshot
         let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
-        let updateBadge = sparkleUpdater.updateAvailable ? "↑" : nil
+        let updateBadge = AgentSnapshotPresenter.updateAvailable(snapshot) ? "↑" : nil
         let queueDot = (snapshot.queueDepth ?? 0) > 0 ? "•" : nil
         if let button = statusItem.button {
             button.title = [AgentSnapshotPresenter.short(snapshot), badge, updateBadge, queueDot].compactMap { $0 }.joined(separator: " ")
@@ -176,11 +165,14 @@ final class MenuBarController {
         }
         if let updateItem = menu.item(withIdentifier: .updateAction) {
             updateItem.isHidden = false
-            updateItem.isEnabled = sparkleUpdater.canCheckForUpdates
-            if sparkleUpdater.updateAvailable {
-                updateItem.title = "Check for Updates… (available)"
+            updateItem.isEnabled = AgentSnapshotPresenter.updateAvailable(snapshot)
+                && !snapshot.cliUpdateInProgress
+            if AgentSnapshotPresenter.updateAvailable(snapshot) {
+                updateItem.title = snapshot.cliUpdateInProgress
+                    ? "Updating compatibility set…"
+                    : "Update compatibility set…"
             } else {
-                updateItem.title = "Check for Updates…"
+                updateItem.title = "Compatibility set is current"
             }
         }
         if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),

@@ -49,6 +49,48 @@ func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	}
 }
 
+func TestParseHeartbeatAcceptsCompleteVersionedSafetyTelemetry(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":1,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"m1-16gb","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if hb.SafetyTelemetry == nil || hb.SafetyTelemetry.ProviderID != "provider-a" || hb.SafetyTelemetry.MemoryPressure != "normal" {
+		t.Fatalf("safety telemetry = %+v", hb.SafetyTelemetry)
+	}
+}
+
+func TestParseHeartbeatAcceptsBuildAndSessionBoundV2SafetyTelemetry(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":12.5,"gpu_utilization_pct":null,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if hb.SafetyTelemetry == nil || hb.SafetyTelemetry.SchemaVersion != 2 ||
+		hb.SafetyTelemetry.CoordinatorSessionID != "session-a" || hb.SafetyTelemetry.CPUUtilizationPct == nil ||
+		hb.SafetyTelemetry.GPUUtilizationPct != nil {
+		t.Fatalf("safety telemetry = %+v", hb.SafetyTelemetry)
+	}
+}
+
+func TestParseHeartbeatRejectsInvalidV2Utilization(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":101,"gpu_utilization_pct":10,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil || field != "safety_telemetry.cpu_utilization_pct" {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+}
+
+func TestParseHeartbeatRejectsIncompleteSafetyTelemetry(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":1}}`)
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil || !strings.HasPrefix(field, "safety_telemetry.") {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+}
+
 func TestParseIdlePrewarmEventAcceptsStructuredEvents(t *testing.T) {
 	cases := []string{
 		"idle_prewarm_fired",
@@ -367,6 +409,9 @@ func TestParseAuthInitialAcceptsLegacyAbsentSpec010(t *testing.T) {
 	if req.ProviderReceiptPublicKey != "" || req.ProviderReceiptPubkey != nil {
 		t.Fatalf("receipt key = (%q, %#v), want absent", req.ProviderReceiptPublicKey, req.ProviderReceiptPubkey)
 	}
+	if req.ProviderAdmissionPublicKey != "" || req.ProviderAdmissionPubkey != nil {
+		t.Fatalf("admission key = (%q, %#v), want absent", req.ProviderAdmissionPublicKey, req.ProviderAdmissionPubkey)
+	}
 }
 
 func TestParseAuthInitialAcceptsNumericStringVersion(t *testing.T) {
@@ -456,6 +501,61 @@ func TestParseAuthInitialRejectsInvalidProviderReceiptPublicKey(t *testing.T) {
 				t.Fatalf("badField = %q", field)
 			}
 		})
+	}
+}
+
+func TestParseAuthInitialValidatesProviderAdmissionPublicKey(t *testing.T) {
+	pubkey := bytesOf(0x43, 32)
+	nextPubkey := bytesOf(0x44, 32)
+	payload := validAuthRequestInitial()
+	payload["provider_admission_public_key"] = base64.StdEncoding.EncodeToString(pubkey)
+	payload["provider_admission_next_public_key"] = base64.StdEncoding.EncodeToString(nextPubkey)
+	payload["provider_admission_recovery"] = true
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if req.ProviderAdmissionPublicKey != base64.StdEncoding.EncodeToString(pubkey) ||
+		string(req.ProviderAdmissionPubkey) != string(pubkey) ||
+		req.ProviderAdmissionNextPublicKey != base64.StdEncoding.EncodeToString(nextPubkey) ||
+		string(req.ProviderAdmissionNextPubkey) != string(nextPubkey) ||
+		!req.ProviderAdmissionRecovery {
+		t.Fatalf("admission keys current=(%q, %x) next=(%q, %x)",
+			req.ProviderAdmissionPublicKey, req.ProviderAdmissionPubkey,
+			req.ProviderAdmissionNextPublicKey, req.ProviderAdmissionNextPubkey)
+	}
+
+	for name, value := range map[string]string{
+		"invalid_base64": "not base64",
+		"wrong_length":   base64.StdEncoding.EncodeToString(bytesOf(0x43, 31)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := validAuthRequestInitial()
+			payload["provider_admission_public_key"] = value
+			_, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+			if err == nil || field != "provider_admission_public_key" {
+				t.Fatalf("field=%q err=%v", field, err)
+			}
+		})
+	}
+
+	for name, value := range map[string]string{
+		"invalid_base64": "not base64",
+		"wrong_length":   base64.StdEncoding.EncodeToString(bytesOf(0x44, 31)),
+	} {
+		t.Run("next_"+name, func(t *testing.T) {
+			payload := validAuthRequestInitial()
+			payload["provider_admission_next_public_key"] = value
+			_, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+			if err == nil || field != "provider_admission_next_public_key" {
+				t.Fatalf("field=%q err=%v", field, err)
+			}
+		})
+	}
+	payload = validAuthRequestInitial()
+	payload["provider_admission_recovery"] = "true"
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload)); err == nil || field != "provider_admission_recovery" {
+		t.Fatalf("recovery field=%q err=%v", field, err)
 	}
 }
 

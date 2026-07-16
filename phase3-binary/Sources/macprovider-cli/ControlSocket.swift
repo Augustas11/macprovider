@@ -22,6 +22,17 @@ public enum ReceiptKeyRotationResultStatus: String, Sendable, Equatable {
     case committedUnconfirmed = "committed_unconfirmed"
 }
 
+struct ProviderControlCommandResult: Equatable, Sendable {
+    let accepted: Bool
+    let reason: String?
+
+    static let accepted = ProviderControlCommandResult(accepted: true, reason: nil)
+
+    static func rejected(_ reason: String) -> ProviderControlCommandResult {
+        ProviderControlCommandResult(accepted: false, reason: reason)
+    }
+}
+
 public enum ControlSocketFrame: Equatable, Sendable {
     case switchRequest(targetModelID: String, requestedAtMs: Int64)
     case statusRequest
@@ -31,9 +42,7 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case switchProgress(state: SwitchProgressState, elapsedMs: Int, reason: String?)
     case statusResponse(currentModelID: String, runtimeState: SwapState)
 
-    // SPEC-025 §5.2 — additive frames used by the App track (Malibu.app menu bar wrapper).
-    // The stub server acks with accepted:false + reason "not_implemented" when the semantic
-    // is not yet wired end-to-end; the wire format is stable so the app can integrate now.
+    // SPEC-025 §5.2 — additive frames used by Malibu.app's read-only control client.
     case metricsRequest
     case metricsResponse(ControlMetricsSnapshot)
     case pauseRequest
@@ -43,28 +52,6 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case shutdownRequest(graceSeconds: Int)
     case shutdownAck
 
-    // SPEC-026 §7 identity-signature challenge. The CLI cannot sign the
-    // Tier-2 auth_request proof itself because the provider Ed25519 key
-    // lives in Malibu.app's Keychain. The CLI PUSHES a request out to
-    // the connected control-socket client (Malibu.app) with the auth
-    // parameters, awaits the response, then relays the signature to the
-    // coordinator in the auth_request proof stage.
-    case identitySignatureRequest(
-        authAttemptID: String,
-        providerID: String,
-        // String NOT Int: must byte-match the initial auth_request
-        // `binary_version` field so coordinator + Malibu.app canonical
-        // tuples agree on JSON type.
-        binaryVersion: String,
-        providerECDHPublicKey: String,
-        transcriptSHA256: String
-    )
-    case identitySignatureResponse(
-        accepted: Bool,
-        identitySignature: String?,
-        transcriptSHA256: String?,
-        reason: String?
-    )
 }
 
 public enum ControlSocketCodec {
@@ -130,10 +117,15 @@ public enum ControlSocketCodec {
         case let .metricsResponse(metrics):
             var frame: [String: Any] = [
                 "type": "metrics_response",
-                "earnings_usdc": metrics.earningsUsdc,
-                "malibu_accrued": metrics.malibuAccrued,
                 "uptime_sec": metrics.uptimeSec,
             ]
+            if let earningsUsdc = metrics.earningsUsdc { frame["earnings_usdc"] = earningsUsdc }
+            if let malibuAccrued = metrics.malibuAccrued { frame["malibu_accrued"] = malibuAccrued }
+            if let providerEarnings = metrics.providerEarnings {
+                frame["provider_earnings"] = try JSONSerialization.jsonObject(
+                    with: JSONEncoder().encode(providerEarnings)
+                )
+            }
             if let gpuC = metrics.gpuC { frame["gpu_c"] = gpuC }
             if let latencyP50Ms = metrics.latencyP50Ms { frame["latency_p50_ms"] = latencyP50Ms }
             if let requestsServedToday = metrics.requestsServedToday { frame["requests_served_today"] = requestsServedToday }
@@ -161,24 +153,6 @@ public enum ControlSocketCodec {
             object = ["type": "shutdown_request", "grace_seconds": graceSeconds]
         case .shutdownAck:
             object = ["type": "shutdown_ack"]
-        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
-            object = [
-                "type": "identity_signature_request",
-                "auth_attempt_id": authAttemptID,
-                "provider_id": providerID,
-                "binary_version": binaryVersion,
-                "provider_ecdh_public_key": ecdhKey,
-                "transcript_sha256": transcriptSHA256,
-            ]
-        case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
-            var frame: [String: Any] = [
-                "type": "identity_signature_response",
-                "accepted": accepted,
-            ]
-            if let signature { frame["identity_signature"] = signature }
-            if let transcriptSHA256 { frame["identity_signature_transcript_sha256"] = transcriptSHA256 }
-            if let reason { frame["reason"] = reason }
-            object = frame
         }
 
         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
@@ -255,8 +229,9 @@ public enum ControlSocketCodec {
             return .metricsRequest
         case "metrics_response":
             return .metricsResponse(ControlMetricsSnapshot(
-                earningsUsdc: try doubleField("earnings_usdc", in: object),
-                malibuAccrued: try doubleField("malibu_accrued", in: object),
+                earningsUsdc: optionalDoubleField("earnings_usdc", in: object),
+                malibuAccrued: optionalDoubleField("malibu_accrued", in: object),
+                providerEarnings: try decodeProviderEarnings(in: object),
                 gpuC: optionalDoubleField("gpu_c", in: object),
                 latencyP50Ms: optionalIntField("latency_p50_ms", in: object),
                 uptimeSec: try intField("uptime_sec", in: object),
@@ -287,21 +262,6 @@ public enum ControlSocketCodec {
             return .shutdownRequest(graceSeconds: try intField("grace_seconds", in: object))
         case "shutdown_ack":
             return .shutdownAck
-        case "identity_signature_request":
-            return .identitySignatureRequest(
-                authAttemptID: try stringField("auth_attempt_id", in: object),
-                providerID: try stringField("provider_id", in: object),
-                binaryVersion: try stringField("binary_version", in: object),
-                providerECDHPublicKey: try stringField("provider_ecdh_public_key", in: object),
-                transcriptSHA256: try stringField("transcript_sha256", in: object)
-            )
-        case "identity_signature_response":
-            return .identitySignatureResponse(
-                accepted: try boolField("accepted", in: object),
-                identitySignature: object["identity_signature"] as? String,
-                transcriptSHA256: object["identity_signature_transcript_sha256"] as? String,
-                reason: object["reason"] as? String
-            )
         default:
             throw ControlSocketError.unknownType(type)
         }
@@ -317,6 +277,12 @@ public enum ControlSocketCodec {
         if let value = object[field] as? Double { return value }
         if let value = object[field] as? NSNumber { return value.doubleValue }
         return nil
+    }
+
+    private static func decodeProviderEarnings(in object: [String: Any]) throws -> ProviderEarningsSummary? {
+        guard let raw = object["provider_earnings"] else { return nil }
+        let data = try JSONSerialization.data(withJSONObject: raw)
+        return try JSONDecoder().decode(ProviderEarningsSummary.self, from: data)
     }
 
     private static func optionalIntField(_ field: String, in object: [String: Any]) -> Int? {
@@ -436,10 +402,12 @@ actor ControlSocketServer {
     private let receiptRotator: (@Sendable () async throws -> Void)?
     private let receiptRotationProviderID: String?
     private let idleTimeoutSeconds: TimeInterval
-    private let identityBridge: IdentitySignatureBridge?
     private let providerStatus: ProviderStatus?
+    private let providerEarningsClient: ProviderEarningsClient?
     private let malibuAccrualClient: MalibuAccrualClient?
     private let providerToken: String?
+    private let pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?
+    private let resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
@@ -453,10 +421,12 @@ actor ControlSocketServer {
         receiptRotator: (@Sendable () async throws -> Void)? = nil,
         receiptRotationProviderID: String? = nil,
         idleTimeoutSeconds: TimeInterval = 30.0,
-        identityBridge: IdentitySignatureBridge? = nil,
         providerStatus: ProviderStatus? = nil,
+        providerEarningsClient: ProviderEarningsClient? = nil,
         malibuAccrualClient: MalibuAccrualClient? = nil,
-        providerToken: String? = nil
+        providerToken: String? = nil,
+        pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
+        resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil
     ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
@@ -464,10 +434,12 @@ actor ControlSocketServer {
         self.receiptRotator = receiptRotator
         self.receiptRotationProviderID = receiptRotationProviderID
         self.idleTimeoutSeconds = idleTimeoutSeconds
-        self.identityBridge = identityBridge
         self.providerStatus = providerStatus
+        self.providerEarningsClient = providerEarningsClient
         self.malibuAccrualClient = malibuAccrualClient
         self.providerToken = providerToken
+        self.pauseProvider = pauseProvider
+        self.resumeProvider = resumeProvider
     }
 
     func start() async throws {
@@ -513,10 +485,12 @@ actor ControlSocketServer {
         let receiptRotator = receiptRotator
         let receiptRotationProviderID = receiptRotationProviderID
         let idleTimeoutSeconds = idleTimeoutSeconds
-        let identityBridge = identityBridge
         let providerStatus = providerStatus
+        let providerEarningsClient = providerEarningsClient
         let malibuAccrualClient = malibuAccrualClient
         let providerToken = providerToken
+        let pauseProvider = pauseProvider
+        let resumeProvider = resumeProvider
         acceptTask = Task.detached(priority: .userInitiated) {
             await Self.acceptLoop(
                 listenerFD: fd,
@@ -526,10 +500,12 @@ actor ControlSocketServer {
                 receiptRotator: receiptRotator,
                 receiptRotationProviderID: receiptRotationProviderID,
                 idleTimeoutSeconds: idleTimeoutSeconds,
-                identityBridge: identityBridge,
                 providerStatus: providerStatus,
+                providerEarningsClient: providerEarningsClient,
                 malibuAccrualClient: malibuAccrualClient,
                 providerToken: providerToken,
+                pauseProvider: pauseProvider,
+                resumeProvider: resumeProvider,
                 server: self
             )
         }
@@ -582,10 +558,12 @@ actor ControlSocketServer {
         receiptRotator: (@Sendable () async throws -> Void)?,
         receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
-        identityBridge: IdentitySignatureBridge?,
         providerStatus: ProviderStatus?,
+        providerEarningsClient: ProviderEarningsClient?,
         malibuAccrualClient: MalibuAccrualClient?,
         providerToken: String?,
+        pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?,
+        resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
@@ -614,36 +592,16 @@ actor ControlSocketServer {
                     receiptRotator: receiptRotator,
                     receiptRotationProviderID: receiptRotationProviderID,
                     idleTimeoutSeconds: idleTimeoutSeconds,
-                    identityBridge: identityBridge,
                     providerStatus: providerStatus,
+                    providerEarningsClient: providerEarningsClient,
                     malibuAccrualClient: malibuAccrualClient,
-                    providerToken: providerToken
+                    providerToken: providerToken,
+                    pauseProvider: pauseProvider,
+                    resumeProvider: resumeProvider
                 )
                 await server.removeClientFD(clientFD)
             }
             await server.appendClientTask(id: taskID, task: task)
-        }
-    }
-
-    /// Direct write of a single control-socket frame to a fd, bypassing
-    /// the `ControlSocketConnection` actor. Safe for concurrent use with
-    /// the actor's own `receive()` loop: POSIX sockets are full-duplex,
-    /// and a single JSON frame (<PIPE_BUF = 512 bytes on Darwin) is
-    /// atomically written by `Darwin.write()`. Used by the SPEC-026 §7
-    /// identity-signature pusher — see `handleClient` above.
-    private nonisolated static func writeFrameDirect(fd: Int32, frame: ControlSocketFrame) throws {
-        let data = try ControlSocketCodec.encode(frame)
-        try data.withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress else { return }
-            var sent = 0
-            while sent < rawBuffer.count {
-                let count = Darwin.write(fd, base.advanced(by: sent), rawBuffer.count - sent)
-                if count < 0 {
-                    if errno == EINTR { continue }
-                    throw ControlSocketConnectError.other(underlying: String(cString: strerror(errno)))
-                }
-                sent += count
-            }
         }
     }
 
@@ -655,59 +613,14 @@ actor ControlSocketServer {
         receiptRotator: (@Sendable () async throws -> Void)?,
         receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
-        identityBridge: IdentitySignatureBridge? = nil,
         providerStatus: ProviderStatus? = nil,
+        providerEarningsClient: ProviderEarningsClient? = nil,
         malibuAccrualClient: MalibuAccrualClient? = nil,
-        providerToken: String? = nil
+        providerToken: String? = nil,
+        pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
+        resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil
     ) async {
         let connection = ControlSocketConnection(fd: fd)
-
-        // SPEC-026 §7: if an IdentitySignatureBridge is injected, spawn a
-        // sibling task that awaits pending signature requests from the
-        // CoordinatorClient and pushes them out on this connection.
-        //
-        // **Do NOT route the push through `connection.send()`**:
-        // `ControlSocketConnection.receive(timeout:)` does a blocking
-        // `Darwin.read()` inside the actor without any `await` (see
-        // :764-805). While the receive loop is waiting for a frame the
-        // actor's serial queue is HELD; any `await connection.send(...)`
-        // from a sibling task blocks until receive() returns. On an idle
-        // socket that never returns until the 30s idle timeout fires,
-        // so identity_signature_request frames sit in the mailbox for
-        // 30s each — well past our 3s bridge timeout and the coordinator's
-        // 10s WS handshake window.
-        //
-        // POSIX allows full-duplex reads and writes on the same socket
-        // concurrently, and `Darwin.write()` of a single JSON frame
-        // (<PIPE_BUF, i.e. 512 bytes on Darwin) is atomic. So the pusher
-        // writes to the raw fd directly, sidestepping the actor entirely.
-        var signatureSubscriberID: UUID?
-        var pusherTask: Task<Void, Never>?
-        if let identityBridge {
-            let (subscriberID, stream) = await identityBridge.subscribe()
-            signatureSubscriberID = subscriberID
-            let capturedFD = fd
-            pusherTask = Task.detached(priority: .userInitiated) {
-                for await request in stream {
-                    try? Self.writeFrameDirect(
-                        fd: capturedFD,
-                        frame: .identitySignatureRequest(
-                            authAttemptID: request.authAttemptID,
-                            providerID: request.providerID,
-                            binaryVersion: request.binaryVersion,
-                            providerECDHPublicKey: request.providerECDHPublicKey,
-                            transcriptSHA256: request.transcriptSHA256
-                        )
-                    )
-                }
-            }
-        }
-        defer {
-            pusherTask?.cancel()
-            if let identityBridge, let signatureSubscriberID {
-                Task { await identityBridge.unsubscribe(signatureSubscriberID) }
-            }
-        }
 
         while !Task.isCancelled {
             do {
@@ -740,31 +653,27 @@ actor ControlSocketServer {
                 case .metricsRequest:
                     let snapshot = await ControlMetricsBuilder.build(
                         providerStatus: providerStatus,
+                        providerEarningsClient: providerEarningsClient,
                         malibuAccrualClient: malibuAccrualClient,
                         providerToken: providerToken
                     )
                     try? await connection.send(.metricsResponse(snapshot))
                 case .pauseRequest:
-                    try? await connection.send(.pauseAck(accepted: false, reason: "not_implemented"))
+                    let result = await pauseProvider?()
+                        ?? .rejected("lifecycle_control_unavailable")
+                    try? await connection.send(.pauseAck(accepted: result.accepted, reason: result.reason))
                 case .resumeRequest:
-                    try? await connection.send(.resumeAck(accepted: false, reason: "not_implemented"))
+                    let result = await resumeProvider?()
+                        ?? .rejected("lifecycle_control_unavailable")
+                    try? await connection.send(.resumeAck(accepted: result.accepted, reason: result.reason))
                 case let .shutdownRequest(graceSeconds):
-                    // Ack immediately so the App track's wrapper can proceed with SIGTERM
-                    // fallback if we don't exit within graceSeconds. Real graceful drain
-                    // lands with SPEC-025 §11 P1 alongside pause/resume semantics.
+                    // This frame is retained for the temporary App-spawned
+                    // bootstrap child during launchd handoff. Ack immediately;
+                    // the spawning wrapper owns bounded process termination.
+                    // Ordinary Malibu quit never sends this to the standalone
+                    // launchd provider under the Issue 585 Option-2 contract.
                     try? await connection.send(.shutdownAck)
-                    _ = graceSeconds // reserved for graceful drain implementation
-                case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
-                    // SPEC-026 §7: Malibu.app answering our earlier
-                    // identity_signature_request. Forward to the
-                    // bridge so the suspended CoordinatorClient.auth_request
-                    // proof builder can proceed.
-                    await identityBridge?.deliverResponse(IdentitySignatureBridge.Response(
-                        accepted: accepted,
-                        identitySignature: signature,
-                        transcriptSHA256: transcriptSHA256,
-                        reason: reason
-                    ))
+                    _ = graceSeconds
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()

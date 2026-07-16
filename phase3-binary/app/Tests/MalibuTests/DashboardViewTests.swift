@@ -38,7 +38,7 @@ final class DashboardViewTests: XCTestCase {
             AgentSnapshotPresenter.stateLine(snapshot),
             "Local only · qwen3-coder-30b-a3b-instruct"
         )
-        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Sync")
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Reconnect")
     }
 
     func testPopulatedDashboardFieldsRenderValues() {

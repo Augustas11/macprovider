@@ -404,6 +404,66 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.releaseBackupPath ?? ""))
     }
 
+    func testExactCompatibilityRollbackRetainsSnapshotsUntilPreviousSetReadinessCommit() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: binaryDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        let legacyMarker = try store.preserveReleaseRollbackBackup(
+            binaryURL: binary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        let marker = AutoUpdatePendingMarker(
+            updateID: legacyMarker.updateID,
+            targetVersion: legacyMarker.targetVersion,
+            targetPath: legacyMarker.targetPath,
+            backupPath: legacyMarker.backupPath,
+            size: legacyMarker.size,
+            mode: legacyMarker.mode,
+            sha256: legacyMarker.sha256,
+            markerDeadline: ISO8601DateFormatter.autoupdateTest.string(
+                from: Date().addingTimeInterval(-1)
+            ),
+            releaseBackupPath: legacyMarker.releaseBackupPath,
+            releaseBackupSHA256: legacyMarker.releaseBackupSHA256,
+            commitOwner: "coordinator",
+            targetCompatibilitySetID: "Augustas11/macprovider:v1.7.0@fedcba9876543210fedcba9876543210fedcba98",
+            targetCompatibilitySetSHA256: String(repeating: "7", count: 64),
+            previousVersion: "1.6.0",
+            previousCompatibilitySetID: "Augustas11/macprovider:v1.6.0@0123456789abcdef0123456789abcdef01234567",
+            previousCompatibilitySetSHA256: String(repeating: "6", count: 64),
+            transactionState: .activatingTarget
+        )
+        try store.writePending(marker)
+        try Data("new-binary".utf8).write(to: binary)
+        try replaceOwnedReleaseResources(in: binaryDirectory, prefix: "new")
+
+        let outcome = store.recoverOrphanedMarker(marker)
+        guard case .restoredAwaitingReadiness(let awaiting) = outcome else {
+            return XCTFail("expected restoredAwaitingReadiness, got \(outcome)")
+        }
+        XCTAssertEqual(awaiting.transactionState, .awaitingPreviousReadiness)
+        XCTAssertEqual(try String(contentsOf: binary), "old-binary")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.backupPath))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.releaseBackupPath ?? ""))
+
+        try store.completeRestoredPreviousSet(awaiting)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.backupPath))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.releaseBackupPath ?? ""))
+    }
+
     func testFullReleasePendingMarkerRejectsTamperedResourceSnapshot() throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
@@ -455,6 +515,16 @@ final class AutoUpdateTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
         try writeOwnedReleaseResources(in: live, prefix: "old")
         try writeOwnedReleaseResources(in: payload, prefix: "new")
+        let launchAgents = fixture.url.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let watchdogDirectory = fixture.url.appendingPathComponent(".local/share/macprovider-watchdog", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: watchdogDirectory, withIntermediateDirectories: true)
+        let providerPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let watchdogScript = watchdogDirectory.appendingPathComponent("macprovider-health-monitor")
+        let watchdogPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider-watchdog.plist")
+        try Data("old-provider-plist".utf8).write(to: providerPlist)
+        try Data("old-watchdog".utf8).write(to: watchdogScript)
+        try installedWatchdogPlist(home: fixture.url, installDirectory: live).write(to: watchdogPlist)
         let marker = try store.preserveReleaseRollbackBackup(
             binaryURL: liveBinary,
             updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -466,11 +536,124 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: liveBinary), "new-binary")
         XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("mlx.metallib")), "new-metal")
         XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("catalog-release/release.json")), "new-catalog")
+        XCTAssertEqual(
+            try String(contentsOf: live.appendingPathComponent(CompatibilitySetManifest.fileName)),
+            "new-compatibility-set"
+        )
+        XCTAssertEqual(try String(contentsOf: watchdogScript), "new-watchdog")
+        XCTAssertTrue(try String(contentsOf: providerPlist).contains("live.streamvc.macprovider"))
+        XCTAssertTrue(try String(contentsOf: watchdogPlist).contains("live.streamvc.macprovider-watchdog"))
 
         try store.restoreBackup(marker)
         XCTAssertEqual(try String(contentsOf: liveBinary), "old-binary")
         XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("mlx.metallib")), "old-metal")
         XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("catalog-release/release.json")), "old-catalog")
+        XCTAssertEqual(
+            try String(contentsOf: live.appendingPathComponent(CompatibilitySetManifest.fileName)),
+            "old-compatibility-set"
+        )
+        XCTAssertEqual(try String(contentsOf: providerPlist), "old-provider-plist")
+        XCTAssertEqual(try String(contentsOf: watchdogScript), "old-watchdog")
+        XCTAssertEqual(
+            try Data(contentsOf: watchdogPlist),
+            try installedWatchdogPlist(home: fixture.url, installDirectory: live)
+        )
+    }
+
+    func testInterruptedCompatibilitySetCutoverRecoversAtEveryDestructivePhase() throws {
+        for phase in CompatibilitySetCutoverPhase.allCases {
+            let fixture = try TempHome()
+            let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+            try store.ensureTrustedRoot()
+            let live = fixture.url.appendingPathComponent("bin", isDirectory: true)
+            let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+            try FileManager.default.createDirectory(at: live, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let liveBinary = live.appendingPathComponent("macprovider-cli")
+            let newBinary = payload.appendingPathComponent("macprovider-cli")
+            try Data("old-binary".utf8).write(to: liveBinary)
+            try Data("new-binary".utf8).write(to: newBinary)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: liveBinary.path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+            try writeOwnedReleaseResources(in: live, prefix: "old")
+            try writeOwnedReleaseResources(in: payload, prefix: "new")
+            let applications = fixture.url.appendingPathComponent("Applications", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: applications,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let installedMalibu = applications.appendingPathComponent("Malibu.app", isDirectory: true)
+            try writeMalibuAppFixture(
+                at: installedMalibu,
+                version: "1.6.0",
+                compatibilityManifest: "old-compatibility-set",
+                marker: "old-app"
+            )
+            let stagedMalibu = fixture.url.appendingPathComponent("staged/Malibu.app", isDirectory: true)
+            try writeMalibuAppFixture(
+                at: stagedMalibu,
+                version: "1.7.0",
+                compatibilityManifest: "new-compatibility-set",
+                marker: "new-app"
+            )
+
+            let launchAgents = fixture.url.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            let watchdogDirectory = fixture.url.appendingPathComponent(".local/share/macprovider-watchdog", isDirectory: true)
+            try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: watchdogDirectory, withIntermediateDirectories: true)
+            let providerPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+            let watchdogScript = watchdogDirectory.appendingPathComponent("macprovider-health-monitor")
+            let watchdogPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider-watchdog.plist")
+            let oldWatchdogPlist = try installedWatchdogPlist(home: fixture.url, installDirectory: live)
+            try Data("old-provider-plist".utf8).write(to: providerPlist)
+            try Data("old-watchdog".utf8).write(to: watchdogScript)
+            try oldWatchdogPlist.write(to: watchdogPlist)
+
+            let marker = try store.preserveReleaseRollbackBackup(
+                binaryURL: liveBinary,
+                updateID: UUID().uuidString.lowercased(),
+                targetVersion: "1.7.0"
+            )
+            try store.writePending(marker)
+
+            XCTAssertThrowsError(
+                try store.activateReleasePayload(
+                    from: payload,
+                    newBinary: newBinary,
+                    to: liveBinary,
+                    stagedMalibuApp: stagedMalibu,
+                    rollbackMarker: marker,
+                    cutoverCheckpoint: { checkpoint in
+                        if checkpoint == phase {
+                            throw SimulatedCutoverInterruption.stop
+                        }
+                    }
+                ),
+                "phase \(phase.rawValue)"
+            )
+            let restartedStore = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+            let persistedMarker = try XCTUnwrap(restartedStore.readPending(), "phase \(phase.rawValue)")
+
+            XCTAssertEqual(restartedStore.recoverOrphanedMarker(persistedMarker), .restored(marker), "phase \(phase.rawValue)")
+            XCTAssertEqual(try String(contentsOf: liveBinary), "old-binary", "phase \(phase.rawValue)")
+            XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("mlx.metallib")), "old-metal", "phase \(phase.rawValue)")
+            XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("catalog-release/release.json")), "old-catalog", "phase \(phase.rawValue)")
+            XCTAssertEqual(
+                try String(contentsOf: live.appendingPathComponent(CompatibilitySetManifest.fileName)),
+                "old-compatibility-set",
+                "phase \(phase.rawValue)"
+            )
+            XCTAssertEqual(try String(contentsOf: providerPlist), "old-provider-plist", "phase \(phase.rawValue)")
+            XCTAssertEqual(try String(contentsOf: watchdogScript), "old-watchdog", "phase \(phase.rawValue)")
+            XCTAssertEqual(try Data(contentsOf: watchdogPlist), oldWatchdogPlist, "phase \(phase.rawValue)")
+            XCTAssertEqual(
+                try String(contentsOf: installedMalibu.appendingPathComponent("Contents/Resources/test-marker")),
+                "old-app",
+                "phase \(phase.rawValue)"
+            )
+            XCTAssertFalse(FileManager.default.fileExists(atPath: restartedStore.pendingURL.path), "phase \(phase.rawValue)")
+        }
     }
 
     func testLegacyBinaryOnlyPendingMarkerEncodingOmitsReleaseSnapshotFields() throws {
@@ -582,6 +765,64 @@ final class AutoUpdateTests: XCTestCase {
             markerDeadline: ISO8601DateFormatter.autoupdateTest.string(from: Date().addingTimeInterval(300))
         )
         XCTAssertThrowsError(try store.validateMarker(marker))
+    }
+
+    func testCoordinatorCompatibilityAdmissionRequiresFreshExactCurrentAndTargetSets() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let current = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let target = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let observed = Date(timeIntervalSince1970: 1_800_000_000)
+
+        try store.persistCompatibilityAdmission(
+            acceptedCompatibilitySetID: current,
+            recommendedCompatibilitySetID: target,
+            now: observed,
+            validitySeconds: 90
+        )
+
+        XCTAssertNoThrow(try store.requireCoordinatorCompatibilityTarget(
+            target,
+            currentCompatibilitySetID: current,
+            now: observed.addingTimeInterval(45)
+        ))
+        XCTAssertThrowsError(try store.requireCoordinatorCompatibilityTarget(
+            target,
+            currentCompatibilitySetID: target,
+            now: observed.addingTimeInterval(45)
+        ))
+        XCTAssertThrowsError(try store.requireCoordinatorCompatibilityTarget(
+            current,
+            currentCompatibilitySetID: current,
+            now: observed.addingTimeInterval(45)
+        ))
+        XCTAssertThrowsError(try store.requireCoordinatorCompatibilityTarget(
+            target,
+            currentCompatibilitySetID: current,
+            now: observed.addingTimeInterval(91)
+        ))
+    }
+
+    func testCoordinatorCompatibilityAdmissionRejectsUnknownFieldsAndClearsDurably() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let current = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let target = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        try store.persistCompatibilityAdmission(
+            acceptedCompatibilitySetID: current,
+            recommendedCompatibilitySetID: target
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: store.compatibilityAdmissionURL))
+                as? [String: Any]
+        )
+        object["unexpected"] = true
+        let tampered = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try tampered.write(to: store.compatibilityAdmissionURL, options: .atomic)
+
+        XCTAssertThrowsError(try store.readCompatibilityAdmissionForTest())
+        try store.clearCompatibilityAdmission()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.compatibilityAdmissionURL.path))
     }
 
     func testNotifyOnlyTrustDoesNotCreateAutoupdateState() async throws {
@@ -720,6 +961,7 @@ final class AutoUpdateTests: XCTestCase {
             modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
         )
+        let reloads = LockedInvocationCounter()
         let updater = AutoUpdater(
             config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
             currentVersion: "1.6.0",
@@ -740,7 +982,7 @@ final class AutoUpdateTests: XCTestCase {
             },
             drain: { _ in true },
             sendReady: {},
-            restartLaunchd: {},
+            restartLaunchd: { reloads.record() },
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true }
@@ -752,6 +994,53 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertEqual(reloads.value, 1)
+    }
+
+    func testRestartFailureRollbackKeepsRecoveryStateWhenRestoredJobsCannotReload() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: { throw SimulatedCutoverInterruption.stop },
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
+
+        XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
     }
 
     func testAutoupdateReasonRedactionUsesStableCodes() {
@@ -849,6 +1138,9 @@ final class AutoUpdateTests: XCTestCase {
     private func writeOwnedReleaseResources(in directory: URL, prefix: String) throws {
         try Data("\(prefix)-metal".utf8).write(to: directory.appendingPathComponent("mlx.metallib"))
         try Data("\(prefix)-notices".utf8).write(to: directory.appendingPathComponent("THIRD-PARTY-NOTICES.txt"))
+        try Data("\(prefix)-compatibility-set".utf8).write(
+            to: directory.appendingPathComponent(CompatibilitySetManifest.fileName)
+        )
         let bundle = directory.appendingPathComponent("Runtime.bundle", isDirectory: true)
         try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
         try Data("\(prefix)-bundle".utf8).write(to: bundle.appendingPathComponent("resource"))
@@ -865,13 +1157,102 @@ final class AutoUpdateTests: XCTestCase {
             let contents = name == "release.json" ? "\(prefix)-catalog" : "\(prefix)-\(name)"
             try Data(contents.utf8).write(to: catalog.appendingPathComponent(name))
         }
+        let localArtifacts = directory.appendingPathComponent(
+            CompatibilitySetManifest.localArtifactDirectoryName,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: localArtifacts, withIntermediateDirectories: false)
+        try Data("new-install".utf8).write(to: localArtifacts.appendingPathComponent("install.sh"))
+        try Data(providerPlistTemplate.utf8).write(
+            to: localArtifacts.appendingPathComponent("provider-launch-agent.plist.template")
+        )
+        try CompatibilitySetRollbackPlan.canonicalSupportedData().write(
+            to: localArtifacts.appendingPathComponent("updater-rollback.json")
+        )
+        try Data(watchdogPlistTemplate.utf8).write(
+            to: localArtifacts.appendingPathComponent("watchdog-launch-agent.plist.template")
+        )
+        try Data("\(prefix)-watchdog".utf8).write(to: localArtifacts.appendingPathComponent("watchdog.sh"))
     }
 
     private func replaceOwnedReleaseResources(in directory: URL, prefix: String) throws {
-        for name in ["mlx.metallib", "THIRD-PARTY-NOTICES.txt", "Runtime.bundle", "catalog-release"] {
+        for name in [
+            "mlx.metallib",
+            "THIRD-PARTY-NOTICES.txt",
+            CompatibilitySetManifest.fileName,
+            "Runtime.bundle",
+            "catalog-release",
+            CompatibilitySetManifest.localArtifactDirectoryName,
+        ] {
             try FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
         try writeOwnedReleaseResources(in: directory, prefix: prefix)
+    }
+
+    private func writeMalibuAppFixture(
+        at app: URL,
+        version: String,
+        compatibilityManifest: String,
+        marker: String
+    ) throws {
+        let contents = app.appendingPathComponent("Contents", isDirectory: true)
+        let resources = contents.appendingPathComponent("Resources", isDirectory: true)
+        let macOS = contents.appendingPathComponent("MacOS", isDirectory: true)
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        let info = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "CFBundleIdentifier": "tech.malibu.app",
+                "CFBundleShortVersionString": version,
+                "CFBundleExecutable": "Malibu",
+            ],
+            format: .binary,
+            options: 0
+        )
+        try info.write(to: contents.appendingPathComponent("Info.plist"))
+        try Data(compatibilityManifest.utf8).write(
+            to: resources.appendingPathComponent(CompatibilitySetManifest.fileName)
+        )
+        try Data(marker.utf8).write(to: resources.appendingPathComponent("test-marker"))
+        let executable = macOS.appendingPathComponent("Malibu")
+        try Data("fixture".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    }
+
+    private var providerPlistTemplate: String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+        <key>Label</key><string>live.streamvc.macprovider</string>
+        <key>ProgramArguments</key><array><string>__INSTALL_DIR__/macprovider-cli</string><string>serve</string><string>--config</string><string>__HOME__/.config/macprovider/config.yaml</string></array>
+        <key>WorkingDirectory</key><string>__INSTALL_DIR__</string>
+        </dict></plist>
+        """
+    }
+
+    private var watchdogPlistTemplate: String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+        <key>Label</key><string>live.streamvc.macprovider-watchdog</string>
+        <key>ProgramArguments</key><array><string>__HOME__/.local/share/macprovider-watchdog/macprovider-health-monitor</string></array>
+        <key>EnvironmentVariables</key><dict>
+        <key>MACPROVIDER_BINARY_PATH</key><string>__INSTALL_DIR__/macprovider-cli</string>
+        <key>MACPROVIDER_COORDINATOR_HOST</key><string>__COORDINATOR_HOST__</string>
+        </dict>
+        </dict></plist>
+        """
+    }
+
+    private func installedWatchdogPlist(home: URL, installDirectory: URL) throws -> Data {
+        try PropertyListSerialization.data(
+            fromPropertyList: [
+                "Label": "live.streamvc.macprovider-watchdog",
+                "EnvironmentVariables": ["MACPROVIDER_COORDINATOR_HOST": "coordinator.example.test"],
+            ],
+            format: .xml,
+            options: 0
+        )
     }
 
     // MARK: — Provisional-tier auto-update graduation (2026-07-03)
@@ -1180,6 +1561,27 @@ private extension ISO8601DateFormatter {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter
     }()
+}
+
+private enum SimulatedCutoverInterruption: Error {
+    case stop
+}
+
+private final class LockedInvocationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func record() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
 }
 
 private final class TempHome {

@@ -7,7 +7,7 @@ import Foundation
 
 struct ProviderPaths {
     let configFile: URL          // ~/.config/macprovider/config.yaml (shared with CLI track)
-    let controlSocket: URL       // ~/Library/Application Support/Malibu/agent.sock
+    let controlSocket: URL       // $TMPDIR/macprovider-cli/ctl.sock (CLI-owned, 0600)
     let cliLogFile: URL          // ~/Library/Logs/malibu/malibu-cli.log
     let launchdStdoutLog: URL    // ~/Library/Logs/macprovider/macprovider.out.log
     let launchdStderrLog: URL    // ~/Library/Logs/macprovider/macprovider.err.log
@@ -22,7 +22,9 @@ struct ProviderPaths {
             .appendingPathComponent("Library/Application Support/Malibu", isDirectory: true)
         return ProviderPaths(
             configFile: home.appendingPathComponent(".config/macprovider/config.yaml"),
-            controlSocket: appSupport.appendingPathComponent("agent.sock"),
+            controlSocket: FileManager.default.temporaryDirectory
+                .appendingPathComponent("macprovider-cli", isDirectory: true)
+                .appendingPathComponent("ctl.sock"),
             cliLogFile: home.appendingPathComponent("Library/Logs/malibu/malibu-cli.log"),
             launchdStdoutLog: home.appendingPathComponent("Library/Logs/macprovider/macprovider.out.log"),
             launchdStderrLog: home.appendingPathComponent("Library/Logs/macprovider/macprovider.err.log"),
@@ -32,6 +34,10 @@ struct ProviderPaths {
             downloadsDirectory: appSupport.appendingPathComponent("Downloads", isDirectory: true)
         )
     }()
+
+    var watchdogLog: URL {
+        launchdStdoutLog.deletingLastPathComponent().appendingPathComponent("watchdog.log")
+    }
 
     func ensureDirectories() throws {
         let fm = FileManager.default

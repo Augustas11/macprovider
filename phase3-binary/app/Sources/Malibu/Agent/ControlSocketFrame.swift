@@ -16,6 +16,7 @@ enum ControlFrame: Sendable, Equatable {
     case metricsResponse(
         earningsUsdc: Double?,
         malibuAccrued: Double?,
+        providerEarnings: ProviderEarnings?,
         gpuC: Double?,
         gpuUtilizationPct: Double?,
         latencyP50Ms: Int?,
@@ -38,23 +39,6 @@ enum ControlFrame: Sendable, Equatable {
 
     case shutdownRequest(graceSeconds: Int)
     case shutdownAck
-
-    case identitySignatureRequest(
-        authAttemptID: String,
-        providerID: String,
-        // String NOT Int: must byte-match the CLI's `binary_version` field
-        // in the initial auth_request so coordinator + Malibu canonical
-        // tuples agree on JSON type (SPEC-026 §7).
-        binaryVersion: String,
-        providerECDHPublicKey: String,
-        transcriptSHA256: String
-    )
-    case identitySignatureResponse(
-        accepted: Bool,
-        identitySignature: String?,
-        transcriptSHA256: String?,
-        reason: String?
-    )
 }
 
 enum ControlCodec {
@@ -96,6 +80,7 @@ enum ControlCodec {
         case let .metricsResponse(
             earnings,
             malibu,
+            providerEarnings,
             gpu,
             gpuUtilization,
             latencyP50,
@@ -113,6 +98,11 @@ enum ControlCodec {
             var obj: [String: Any] = ["type": "metrics_response"]
             if let earnings { obj["earnings_usdc"] = earnings }
             if let malibu { obj["malibu_accrued"] = malibu }
+            if let providerEarnings,
+               let encoded = try? JSONEncoder().encode(providerEarnings),
+               let nested = try? JSONSerialization.jsonObject(with: encoded) {
+                obj["provider_earnings"] = nested
+            }
             if let gpu { obj["gpu_c"] = gpu }
             if let gpuUtilization { obj["gpu_utilization_pct"] = gpuUtilization }
             if let latencyP50 { obj["latency_p50_ms"] = latencyP50 }
@@ -139,24 +129,6 @@ enum ControlCodec {
             return obj
         case let .shutdownRequest(grace): return ["type": "shutdown_request", "grace_seconds": grace]
         case .shutdownAck: return ["type": "shutdown_ack"]
-        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
-            return [
-                "type": "identity_signature_request",
-                "auth_attempt_id": authAttemptID,
-                "provider_id": providerID,
-                "binary_version": binaryVersion,
-                "provider_ecdh_public_key": ecdhKey,
-                "transcript_sha256": transcriptSHA256
-            ]
-        case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
-            var obj: [String: Any] = [
-                "type": "identity_signature_response",
-                "accepted": accepted
-            ]
-            if let signature { obj["identity_signature"] = signature }
-            if let transcriptSHA256 { obj["identity_signature_transcript_sha256"] = transcriptSHA256 }
-            if let reason { obj["reason"] = reason }
-            return obj
         }
     }
 
@@ -185,6 +157,7 @@ enum ControlCodec {
             return .metricsResponse(
                 earningsUsdc: doubleValue(dict["earnings_usdc"]),
                 malibuAccrued: doubleValue(dict["malibu_accrued"]),
+                providerEarnings: try providerEarningsValue(dict["provider_earnings"]),
                 gpuC: doubleValue(dict["gpu_c"]),
                 gpuUtilizationPct: doubleValue(dict["gpu_utilization_pct"]),
                 latencyP50Ms: intValue(dict["latency_p50_ms"]),
@@ -210,21 +183,6 @@ enum ControlCodec {
                 reason: dict["reason"] as? String
             )
         case "shutdown_ack": return .shutdownAck
-        case "identity_signature_request":
-            return .identitySignatureRequest(
-                authAttemptID: dict["auth_attempt_id"] as? String ?? "",
-                providerID: dict["provider_id"] as? String ?? "",
-                binaryVersion: dict["binary_version"] as? String ?? "",
-                providerECDHPublicKey: dict["provider_ecdh_public_key"] as? String ?? "",
-                transcriptSHA256: dict["transcript_sha256"] as? String ?? ""
-            )
-        case "identity_signature_response":
-            return .identitySignatureResponse(
-                accepted: dict["accepted"] as? Bool ?? false,
-                identitySignature: dict["identity_signature"] as? String,
-                transcriptSHA256: dict["identity_signature_transcript_sha256"] as? String,
-                reason: dict["reason"] as? String
-            )
         default: throw DecodeError.unknownType(type)
         }
     }
@@ -246,5 +204,11 @@ enum ControlCodec {
         if let value = value as? Int { return Int64(value) }
         if let value = value as? NSNumber { return value.int64Value }
         return nil
+    }
+
+    private static func providerEarningsValue(_ value: Any?) throws -> ProviderEarnings? {
+        guard let value else { return nil }
+        let data = try JSONSerialization.data(withJSONObject: value)
+        return try JSONDecoder().decode(ProviderEarnings.self, from: data)
     }
 }

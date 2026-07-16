@@ -531,6 +531,31 @@ func TestDurableBootstrapBearerCannotDowngradeToV1ButRowlessLegacyRemainsCompati
 		t.Fatalf("durable v1 downgrade close=%d reason=%q", code, reason)
 	}
 
+	const ordinaryProviderID = "mac"
+	_, ordinaryBearer, err := store.IssueToken(context.Background(), ordinaryProviderID, "ordinary durable provider")
+	if err != nil {
+		t.Fatalf("issue ordinary bearer: %v", err)
+	}
+	ordinaryPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("ordinary keypair: %v", err)
+	}
+	if err := store.BindAdmissionIdentity(context.Background(), ordinaryProviderID, ordinaryBearer, ordinaryPub, time.Now().UTC()); err != nil {
+		t.Fatalf("bind ordinary admission identity: %v", err)
+	}
+	ordinaryConn, ordinaryBuffered, _, err := bearerDialer(ordinaryBearer).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial ordinary v1 downgrade: %v", err)
+	}
+	if err := wsutil.WriteClientText(ordinaryConn, mustJSON(validHello(ordinaryProviderID))); err != nil {
+		t.Fatalf("write ordinary v1 hello: %v", err)
+	}
+	code, reason = readCredentialBootstrapClose(t, ordinaryConn, ordinaryBuffered)
+	_ = ordinaryConn.Close()
+	if code != providerws.CloseIdentitySignatureRequired || reason != "durable_identity_requires_v2" {
+		t.Fatalf("ordinary durable v1 downgrade close=%d reason=%q", code, reason)
+	}
+
 	_, legacyBearer, err := store.IssueToken(context.Background(), legacyProviderID, "rowless legacy provider")
 	if err != nil {
 		t.Fatalf("issue rowless legacy bearer: %v", err)

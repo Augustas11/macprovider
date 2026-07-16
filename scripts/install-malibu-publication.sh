@@ -18,6 +18,7 @@ sha_source="$7"
 [[ "$webroot" == /* ]] || die "webroot must be an absolute path"
 [[ "$webroot" =~ ^/[A-Za-z0-9._/-]+$ && "$webroot" != *'/../'* && "$webroot" != */.. ]] || die "unsafe webroot"
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag must be vX.Y.Z"
+[[ "$tag" == v1.8.39 ]] || die "legacy Malibu publication is frozen to v1.8.39"
 [[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || die "publication id must be a full content digest"
 
 testing="${MALIBU_PUBLICATION_TESTING:-0}"

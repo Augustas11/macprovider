@@ -78,6 +78,12 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend, check whether the stored recommendation is fresh without benchmarking.")
     var freshnessCheck = false
 
+    @Flag(help: "With --recommend and --candidate-models, download and verify the exact signed model artifacts without loading or benchmarking them.")
+    var prefetch = false
+
+    @Option(help: "Private receipt path written by --prefetch and required by a cache-only constrained --apply.")
+    var prefetchReceipt: String?
+
     @Flag(help: "Allow local donor-mode configuration for non-paid-yield rows.")
     var donorMode = false
 
@@ -130,6 +136,10 @@ struct AutotuneCommand: AsyncParsableCommand {
         if recommend {
             if freshnessCheck {
                 try await runRecommendationFreshnessCheck()
+                return
+            }
+            if prefetch {
+                try await runRecommendationPrefetch()
                 return
             }
             try await runAutotuneRecommend()
@@ -684,6 +694,33 @@ struct AutotuneCommand: AsyncParsableCommand {
         if freshnessCheck && !recommend {
             throw ValidationError("--freshness-check requires --recommend")
         }
+        if prefetch && !recommend {
+            throw ValidationError("--prefetch requires --recommend")
+        }
+        if prefetch && freshnessCheck {
+            throw ValidationError("--prefetch cannot be combined with --freshness-check")
+        }
+        if prefetch && apply {
+            throw ValidationError("--prefetch cannot be combined with --apply")
+        }
+        if prefetch && donorMode {
+            throw ValidationError("--prefetch cannot be combined with --donor-mode")
+        }
+        if prefetch && candidateModels == nil {
+            throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
+        }
+        if prefetch && prefetchReceipt == nil {
+            throw ValidationError("--prefetch requires --prefetch-receipt")
+        }
+        if prefetchReceipt != nil && !prefetch && !apply {
+            throw ValidationError("--prefetch-receipt requires --prefetch or --apply")
+        }
+        if prefetchReceipt != nil && !recommend {
+            throw ValidationError("--prefetch-receipt requires --recommend")
+        }
+        if prefetchReceipt != nil && apply && candidateModels == nil {
+            throw ValidationError("cache-only --apply requires an explicit --candidate-models allowlist")
+        }
         if requireHardwareEvidence && !recommend {
             throw ValidationError("--require-hardware-evidence requires --recommend")
         }
@@ -731,6 +768,22 @@ struct AutotuneCommand: AsyncParsableCommand {
         let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
         let candidateModelFilter = try recommendCandidateModelFilter()
+        let prefetchedArtifacts: [String: PrefetchedModelArtifact]?
+        if let prefetchReceipt {
+            let receiptURL = URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt))
+            let receipt = try AutotuneArtifactPrefetchReceipt.load(from: receiptURL)
+            let validated = try receipt.validatedArtifacts(
+                candidateCatalog: catalog.value,
+                candidateCatalogSHA256: catalogSHA
+            )
+            let receiptModelIDs = Set(validated.values.map(\.modelID))
+            guard candidateModelFilter == receiptModelIDs else {
+                throw ValidationError("--candidate-models must exactly match the prefetch receipt")
+            }
+            prefetchedArtifacts = validated
+        } else {
+            prefetchedArtifacts = nil
+        }
         let now = Date()
         var warnings = Set<AutotuneRecommendWarning>()
         warnings.formUnion(demand.warnings)
@@ -766,7 +819,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             replicates: stage1Replicates,
             port: port,
             interruptFlag: interruptFlag,
-            candidateModelIDs: candidateModelFilter
+            candidateModelIDs: candidateModelFilter,
+            prefetchedArtifacts: prefetchedArtifacts
         )
         if interruptFlag.isSet() {
             FileHandle.standardError.write(Data("autotune --recommend interrupted; exiting after subtree cleanup\n".utf8))
@@ -866,6 +920,71 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
     }
 
+    private func runRecommendationPrefetch() async throws {
+        let staticInputs = AutotuneStaticInputs()
+        let release = await staticInputs.loadCatalogRelease()
+        let catalog = release.candidate
+        let fingerprint = MachineFingerprinter().sample()
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
+        let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
+        let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
+        var warnings = Set<AutotuneRecommendWarning>()
+        warnings.formUnion(release.demand.warnings)
+        warnings.formUnion(catalog.warnings)
+
+        if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
+            let failures = warnings
+                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+                .map(\.rawValue)
+                .sorted()
+                .joined(separator: ", ")
+            throw ValidationError(
+                "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
+            )
+        }
+
+        guard let requestedModelIDs = try recommendCandidateModelFilter(), !requestedModelIDs.isEmpty else {
+            throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
+        }
+        let outcome = try await AutotuneRecommendationBenchmarker().prefetchArtifacts(
+            candidateCatalog: catalog.value,
+            hardware: hardware,
+            candidateModelIDs: requestedModelIDs
+        )
+        let missingRows = requestedModelIDs.subtracting(outcome.matchedModelIDs).sorted()
+        guard missingRows.isEmpty else {
+            throw ValidationError("prefetch models are absent from the signed catalog: \(missingRows.joined(separator: ", "))")
+        }
+        let failed = requestedModelIDs.subtracting(outcome.prefetchedModelIDs).sorted()
+        guard failed.isEmpty else {
+            let details = outcome.diagnostics
+                .filter { failed.contains($0.modelID) }
+                .sorted { $0.modelID < $1.modelID }
+                .map { "\($0.modelID): \($0.reason)" }
+                .joined(separator: "; ")
+            throw ValidationError("signed model artifact prefetch failed: \(details)")
+        }
+        guard outcome.artifacts.count == requestedModelIDs.count else {
+            throw ValidationError("each prefetch model must match exactly one signed catalog row")
+        }
+        let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+        let receipt = AutotuneArtifactPrefetchReceipt(
+            schemaVersion: AutotuneArtifactPrefetchReceipt.currentSchemaVersion,
+            candidateCatalogSHA256: catalogSHA,
+            candidateCatalogVersion: catalog.value.version,
+            candidateCatalogPolicyVersion: catalog.value.policyVersion,
+            artifacts: outcome.artifacts.sorted { $0.modelKey < $1.modelKey }
+        )
+        guard let prefetchReceipt else {
+            throw ValidationError("--prefetch requires --prefetch-receipt")
+        }
+        try receipt.write(to: URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt)))
+        for artifact in outcome.artifacts.sorted(by: { $0.modelID < $1.modelID }) {
+            print("prefetch_verified model=\(artifact.modelID) path=\(artifact.path) sha256=\(artifact.sha256)")
+        }
+    }
+
     static func recommendationCoreForConfig(
         selected: AutotuneCandidateScore,
         selectedBenchmark: CandidateBenchmark,
@@ -922,12 +1041,46 @@ struct AutotuneCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("hardware_evidence_unavailable: \(reason)\n".utf8))
                 throw ExitCode(11)
             }
+        case .missing, .stale, .trustBlocked:
+            guard let failure = Self.recommendationFreshnessFailure(for: status) else {
+                preconditionFailure("non-fresh recommendation status must have a failure mapping")
+            }
+            FileHandle.standardError.write(Data(failure.diagnostic.utf8))
+            throw failure.exitCode
+        }
+    }
+
+    struct RecommendationFreshnessFailure: Equatable {
+        let diagnostic: String
+        let exitCode: ExitCode
+    }
+
+    static func recommendationFreshnessFailure(
+        for status: RecommendationFreshnessChecker.Status
+    ) -> RecommendationFreshnessFailure? {
+        switch status {
+        case .fresh:
+            return nil
         case .missing:
-            FileHandle.standardError.write(Data("recommendation_stale: missing stored recommendation\n".utf8))
-            throw ExitCode(10)
+            return RecommendationFreshnessFailure(
+                diagnostic: "recommendation_stale: missing stored recommendation\n",
+                exitCode: ExitCode(10)
+            )
         case .stale(let generatedAt):
-            FileHandle.standardError.write(Data("recommendation_stale: inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))\n".utf8))
-            throw ExitCode(10)
+            return RecommendationFreshnessFailure(
+                diagnostic: "recommendation_stale: inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))\n",
+                exitCode: ExitCode(10)
+            )
+        case .trustBlocked(_, let warnings):
+            let failures = warnings
+                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+                .map(\.rawValue)
+                .sorted()
+                .joined(separator: ", ")
+            return RecommendationFreshnessFailure(
+                diagnostic: "catalog_trust_blocked: \(failures)\n",
+                exitCode: ExitCode(12)
+            )
         }
     }
 

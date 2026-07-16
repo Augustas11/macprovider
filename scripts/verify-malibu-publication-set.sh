@@ -6,16 +6,17 @@ die() {
   exit 1
 }
 
-[[ "$#" == 6 ]] || die "usage: MANIFEST DMG APPCAST CHECKSUMS SIGNATURE PROVENANCE"
+[[ "$#" == 7 ]] || die "usage: MANIFEST DMG APPCAST ARTIFACT_INDEX CHECKSUMS SIGNATURE PROVENANCE"
 manifest="$1"
 dmg="$2"
 appcast="$3"
-checksums="$4"
-signature="$5"
-provenance="$6"
+artifact_index="$4"
+checksums="$5"
+signature="$6"
+provenance="$7"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
-for path in "$manifest" "$dmg" "$appcast" "$checksums" "$signature" "$provenance"; do
+for path in "$manifest" "$dmg" "$appcast" "$artifact_index" "$checksums" "$signature" "$provenance"; do
   [[ -f "$path" && ! -L "$path" ]] || die "publication input is not a regular file: $path"
 done
 
@@ -29,19 +30,20 @@ print(value.get("repository", ""), value.get("tag", ""), value.get("commit", "")
 PY
 )"
 read -r expected_repository expected_tag expected_commit <<< "$expected_identity"
+[[ "$expected_tag" == v1.8.39 ]] || die "legacy Malibu publication is frozen to v1.8.39"
 bash "$repo_root/scripts/verify-release-checksums.sh" --allow-partial \
   "$checksums" "$signature" "$provenance" \
   "$expected_repository" "$expected_tag" "$expected_commit" \
-  "$dmg" "$appcast" "$provenance" >/dev/null
+  "$dmg" "$appcast" "$artifact_index" "$provenance" >/dev/null
 
-publication_identity="$(python3 - "$manifest" "$dmg" "$appcast" "$checksums" "$signature" "$provenance" <<'PY'
+publication_identity="$(python3 - "$manifest" "$dmg" "$appcast" "$artifact_index" "$checksums" "$signature" "$provenance" <<'PY'
 import hashlib
 import json
 import pathlib
 import re
 import sys
 
-manifest_path, dmg_path, appcast_path, checksums_path, signature_path, provenance_path = map(pathlib.Path, sys.argv[1:])
+manifest_path, dmg_path, appcast_path, index_path, checksums_path, signature_path, provenance_path = map(pathlib.Path, sys.argv[1:])
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
 if manifest.get("schema_version") != 1 or provenance.get("schema_version") != 1:
@@ -55,15 +57,21 @@ tag = manifest.get("tag")
 commit = manifest.get("commit")
 if not isinstance(tag, str) or not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
     raise SystemExit("invalid publication tag")
+if tag != "v1.8.39":
+    raise SystemExit("legacy Malibu publication is frozen to v1.8.39")
 if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
     raise SystemExit("invalid publication commit")
 if type(manifest.get("release_id")) is not int or manifest["release_id"] <= 0:
     raise SystemExit("invalid numeric release id")
 
-paths = [dmg_path, appcast_path, checksums_path, signature_path, provenance_path]
+paths = [dmg_path, appcast_path, index_path, checksums_path, signature_path, provenance_path]
 local = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 dmg_name = f"Malibu-{tag}.dmg"
-if dmg_path.name != dmg_name or appcast_path.name != "appcast.xml":
+if (
+    dmg_path.name != dmg_name
+    or appcast_path.name != "appcast.xml"
+    or index_path.name != "compatibility-artifact-index.json"
+):
     raise SystemExit("publication filenames do not match the tag")
 assets = manifest.get("assets")
 if not isinstance(assets, dict):
@@ -82,7 +90,11 @@ for name, digest in signed_assets.items():
         raise SystemExit(f"signed provenance differs from publication manifest for {name}")
 
 content = json.dumps(
-    {"appcast_sha256": local["appcast.xml"], "dmg_sha256": local[dmg_name]},
+    {
+        "appcast_sha256": local["appcast.xml"],
+        "compatibility_artifact_index_sha256": local["compatibility-artifact-index.json"],
+        "dmg_sha256": local[dmg_name],
+    },
     sort_keys=True,
     separators=(",", ":"),
 ).encode()
@@ -96,9 +108,10 @@ read -r tag commit <<< "$publication_identity"
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$commit" =~ ^[0-9a-f]{40}$ ]] ||
   die "publication identity verification failed"
 
-bash "$repo_root/scripts/test-coordinator-advertised-version.sh" "$tag" "$appcast"
+bash "$repo_root/scripts/test-coordinator-advertised-version.sh" "$tag"
 python3 "$repo_root/scripts/verify-malibu-sparkle-signature.py" \
-  "$tag" "$dmg" "$appcast" "$repo_root/phase3-binary/app/project.yml"
+  "$tag" "$dmg" "$appcast" \
+  "$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
 bash "$repo_root/scripts/verify-malibu-release-artifacts.sh" "$dmg"
 
 printf '[verify-malibu-publication-set] ok: release %s (%s)\n' "$tag" "$commit"

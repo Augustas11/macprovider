@@ -13,7 +13,10 @@ final class CandidateProviderRunnerTests: XCTestCase {
                 maxContext: nil,
                 maxBatch: nil
             ),
-            ["serve", "--no-join", "--model", "mlx/test", "--port", "18080"]
+            [
+                "serve", "--no-join", "--autotune-candidate",
+                "--model", "mlx/test", "--port", "18080",
+            ]
         )
 
         XCTAssertEqual(
@@ -25,7 +28,7 @@ final class CandidateProviderRunnerTests: XCTestCase {
                 maxBatch: 2
             ),
             [
-                "serve", "--no-join",
+                "serve", "--no-join", "--autotune-candidate",
                 "--model", "mlx/test",
                 "--port", "18081",
                 "--kv-bits", "4",
@@ -195,7 +198,7 @@ final class CandidateProviderRunnerTests: XCTestCase {
         XCTAssertFalse(try isPortOpen(port), "expected stub provider port to be free after stop")
 
         let log = try String(contentsOf: logFileURL, encoding: .utf8)
-        XCTAssertTrue(log.contains("serve --no-join --model mlx-community/Test Model --port \(port)"), log)
+        XCTAssertTrue(log.contains("serve --no-join --autotune-candidate --model mlx-community/Test Model --port \(port)"), log)
         XCTAssertTrue(log.contains("stub ready"), log)
     }
 

@@ -5,15 +5,177 @@ import Dispatch
 import Foundation
 import MacProviderCore
 
+enum AdmissionIdentityStartupTopology: Equatable {
+    case currentOnly
+    case duplicatePending
+    case rotationPending
+    case recoveryPending
+    case recoveryCommittedCleanup
+    case invalidRecoveryMarker
+
+    static func resolve(
+        currentPublicKey: Data,
+        pendingPublicKey: Data?,
+        recoveryMarkerPublicKey: Data?
+    ) -> Self {
+        guard let pendingPublicKey else {
+            guard let recoveryMarkerPublicKey else { return .currentOnly }
+            return recoveryMarkerPublicKey == currentPublicKey
+                ? .recoveryCommittedCleanup
+                : .invalidRecoveryMarker
+        }
+        if let recoveryMarkerPublicKey {
+            guard recoveryMarkerPublicKey == pendingPublicKey else {
+                return .invalidRecoveryMarker
+            }
+            return .recoveryPending
+        }
+        return pendingPublicKey == currentPublicKey ? .duplicatePending : .rotationPending
+    }
+}
+
 @main
 struct MacProviderCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self],
         defaultSubcommand: ServeCommand.self
     )
+}
+
+struct LifecycleStateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "lifecycle-state",
+        abstract: "Read or transition the CLI-owned persisted provider lifecycle state.",
+        subcommands: [LifecycleStateStatusCommand.self, LifecycleStateTransitionCommand.self]
+    )
+}
+
+struct LifecycleStateStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "status",
+        abstract: "Read the exact persisted lifecycle transition without changing it."
+    )
+
+    @Option(help: "Require the current transition ID to match exactly.")
+    var expectedTransitionID: String?
+
+    func run() throws {
+        switch ProviderLifecycleStateStore().inspect() {
+        case .missing:
+            try Self.writeJSON(["version": ProviderLifecycleStateRecord.schemaVersion, "state": "missing"])
+        case .invalid(let reason):
+            try Self.writeJSON([
+                "version": ProviderLifecycleStateRecord.schemaVersion,
+                "state": "invalid",
+                "invalid_reason": reason,
+            ])
+            throw ExitCode.failure
+        case .valid(let record):
+            guard expectedTransitionID == nil || expectedTransitionID == record.transitionID else {
+                throw ExitCode.failure
+            }
+            var payload = try Self.jsonObject(record)
+            payload["record_state"] = "valid"
+            try Self.writeJSON(payload)
+        }
+    }
+
+    static func jsonObject(_ record: ProviderLifecycleStateRecord) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(record)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ProviderLifecycleStateError.invalidRecord("json_encoding_failed")
+        }
+        return object
+    }
+
+    static func writeJSON(_ payload: [String: Any]) throws {
+        var data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        data.append(0x0a)
+        FileHandle.standardOutput.write(data)
+    }
+}
+
+struct LifecycleStateTransitionCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "transition",
+        abstract: "Persist one validated lifecycle transition as the signed CLI authority."
+    )
+
+    @Option(help: "Lifecycle state to persist.")
+    var state: ProviderLifecycleState
+
+    @Option(help: "Stable machine-readable reason code.")
+    var reasonCode: String
+
+    @Option(help: "Component asking the signed CLI to author this transition.")
+    var writer: ProviderLifecycleWriter
+
+    @Option var providerID: String?
+    @Option var modelID: String?
+    @Option var compatibilitySetID: String?
+    @Option var operationID: String?
+
+    func run() throws {
+        let record = try ProviderLifecycleStateStore().transition(
+            to: state,
+            reasonCode: reasonCode,
+            writer: writer,
+            providerID: providerID,
+            modelID: modelID,
+            compatibilitySetID: compatibilitySetID,
+            operationID: operationID
+        )
+
+        try LifecycleStateStatusCommand.writeJSON(LifecycleStateStatusCommand.jsonObject(record))
+    }
+}
+
+struct LifecycleLeaseCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "lifecycle-lease",
+        abstract: "Inspect the CLI-owned provider lifecycle lease.",
+        subcommands: [LifecycleLeaseStatusCommand.self]
+    )
+}
+
+struct LifecycleLeaseStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "status",
+        abstract: "Validate the bounded startup or maintenance lease without changing it."
+    )
+
+    @Option(help: "Require the valid lease to belong to this exact process ID.")
+    var expectedPID: Int32?
+
+    @Option(help: "Require the valid lease kind to be startup or maintenance.")
+    var expectedKind: ProviderLifecycleLeaseKind?
+
+    func run() throws {
+        guard case .valid(let record) = ProviderLifecycleLeaseStore().inspect(),
+              expectedPID == nil || record.owner.pid == expectedPID,
+              expectedKind == nil || record.kind == expectedKind
+        else {
+            throw ExitCode.failure
+        }
+        let payload: [String: Any] = [
+            "version": ProviderLifecycleLeaseRecord.schemaVersion,
+            "state": "valid",
+            "kind": record.kind.rawValue,
+            "operation_id": record.operationID,
+            "owner_pid": Int(record.owner.pid),
+            "expires_wall_ms": record.expiresWallMilliseconds,
+        ]
+        var data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        data.append(0x0a)
+        FileHandle.standardOutput.write(data)
+    }
+}
+
+struct ServeCatalogPreflightError: Error {
+    let underlying: Error
 }
 
 struct ServeCommand: AsyncParsableCommand {
@@ -90,7 +252,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Read provider authentication token from a 0600 file. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token without exposing the token in process arguments.")
     var tokenFile: String?
 
-    @Option(help: "Marks this binary as spawned by an outer manager (SPEC-025). Setting this to 'malibu-app' disables the CLI's own AutoUpdater so Sparkle in Malibu.app owns whole-bundle updates. Overrides MACPROVIDER_MANAGED_BY and config key managed_by. Unset for the standalone CLI track.")
+    @Option(help: "Records the installation origin for diagnostics. This never transfers lifecycle, credential, identity, or update authority away from the launchd-managed CLI. Overrides MACPROVIDER_MANAGED_BY and config key managed_by.")
     var managedBy: String?
 
     @Option(help: "KV-cache quantization precision in bits (4 or 8). When set, forwarded to mlx-swift GenerateParameters.kvBits — quantizes the KV cache to reduce per-token memory footprint at a small accuracy cost. Unset (default) keeps the mlx-swift default of no KV quantization. Overrides MACPROVIDER_KV_BITS and config key kv_bits.")
@@ -131,6 +293,17 @@ struct ServeCommand: AsyncParsableCommand {
 
     @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
     var noJoin = false
+
+    // Internal marker for CandidateProviderRunner. Stage 1 owns warmup and
+    // throughput measurement for these non-joining subprocesses.
+    @Flag(name: .customLong("autotune-candidate"), help: .private)
+    var autotuneCandidate = false
+
+    mutating func validate() throws {
+        guard !autotuneCandidate || noJoin else {
+            throw ValidationError("--autotune-candidate requires --no-join")
+        }
+    }
 
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
         if resolved.supportedModels != nil {
@@ -488,6 +661,29 @@ struct ServeCommand: AsyncParsableCommand {
         return factory()
     }
 
+    static func startupThroughputEstimate(
+        autotuneCandidate: Bool,
+        measure: () async -> Double
+    ) async -> Double {
+        guard !autotuneCandidate else { return 0 }
+        return await measure()
+    }
+
+    /// Route the serve command's lifecycle store by mode. Autotune candidates
+    /// persist to the candidate-scoped store so they never overwrite the
+    /// incumbent's Malibu-visible `state-v1.json` (ARCHITECT finding); the
+    /// incumbent (non-candidate) path is unchanged. Pure and side-effect free so
+    /// it can be unit-tested with an injected home directory.
+    static func lifecycleStateStore(
+        autotuneCandidate: Bool,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> ProviderLifecycleStateStore {
+        let url = autotuneCandidate
+            ? ProviderLifecycleStateStore.candidateURL(homeDirectory: homeDirectory)
+            : ProviderLifecycleStateStore.defaultURL(homeDirectory: homeDirectory)
+        return ProviderLifecycleStateStore(url: url)
+    }
+
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -526,6 +722,54 @@ struct ServeCommand: AsyncParsableCommand {
             )
         )
 
+        // Reject invalid invocation-only model catalogs before startup writes
+        // lifecycle state or touches credential custody. The complete startup
+        // preflight bundle repeats this idempotent check after acquiring its
+        // dependencies so direct callers retain the same validation contract.
+        try Self.runSupportedModelsPreflight(&resolved)
+
+        // Autotune candidates (`--autotune-candidate`, always with `--no-join`)
+        // share the incumbent's lifecycle directory but persist to a distinct
+        // candidate-scoped store so a successful candidate reaching
+        // `degraded_serving` never overwrites the installed incumbent's
+        // Malibu-visible `state-v1.json` (ARCHITECT finding). The transition
+        // graph is still enforced against the candidate's own history; only the
+        // persistence file changes. Incumbent serve is untouched: same path,
+        // schema, and fields.
+        let lifecycleStateStore = Self.lifecycleStateStore(autotuneCandidate: autotuneCandidate)
+        let lifecycleLeaseStore = ProviderLifecycleLeaseStore()
+        let existingLifecycle: ProviderLifecycleStateRecord?
+        let operatorPausedInitially: Bool
+        if case .valid(let record) = lifecycleStateStore.inspect() {
+            existingLifecycle = record
+            operatorPausedInitially = record.operatorPauseRequested
+        } else {
+            existingLifecycle = nil
+            operatorPausedInitially = false
+        }
+        // A compatibility-set updater can durably hand its maintenance lease to
+        // one exact launchd child. Carry that operation ID through the full
+        // startup transition chain; ordinary starts get a fresh serve ID.
+        let startupHandoffOperationID = Self.startupHandoffOperationID(in: lifecycleLeaseStore)
+        let lifecycleOperationID = startupHandoffOperationID
+            ?? "serve:\(UUID().uuidString.lowercased())"
+        let startupReason: String
+        if startupHandoffOperationID != nil {
+            startupReason = "maintenance_handoff_restart"
+        } else if existingLifecycle?.writer == .watchdog {
+            startupReason = "watchdog_recovery_restart"
+        } else {
+            startupReason = "launchd_service_started"
+        }
+        _ = try lifecycleStateStore.transition(
+            to: .startingProvider,
+            reasonCode: startupReason,
+            writer: .serve,
+            providerID: resolved.providerID,
+            modelID: resolved.model,
+            operationID: lifecycleOperationID
+        )
+
         // AUDIT R1 SECURITY S2 fix (PR #334): drop MACPROVIDER_PROVIDER_TOKEN
         // from the process env immediately after we've resolved it. Under
         // Malibu.app the token arrives via env (see SPEC-025 §7 followup:
@@ -536,9 +780,116 @@ struct ServeCommand: AsyncParsableCommand {
         // downstream.
         unsetenv("MACPROVIDER_PROVIDER_TOKEN")
 
-        let startupPreflight = try await Self.runServeStartupPreflights(&resolved, joiningCoordinator: !noJoin)
+        let credentialStore = KeychainProviderCredentialStore()
+        _ = try lifecycleStateStore.transition(
+            to: .importingCredentials,
+            reasonCode: "resolving_cli_keychain_custody",
+            writer: .serve,
+            providerID: resolved.providerID,
+            modelID: resolved.model,
+            operationID: lifecycleOperationID
+        )
+        let credentialStatus = try ProviderCredentialResolver.resolve(
+            config: &resolved,
+            store: credentialStore
+        )
+        switch credentialStatus.state {
+        case .locked, .notLoggedIn, .permissionDenied, .keychainFailure, .incompatible, .unavailable:
+            _ = try lifecycleStateStore.transition(
+                to: .keychainUnavailable,
+                reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                writer: .serve,
+                providerID: resolved.providerID,
+                modelID: resolved.model,
+                operationID: lifecycleOperationID
+            )
+        case .missing, .unconfigured:
+            _ = try lifecycleStateStore.transition(
+                to: .authenticationRequired,
+                reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                writer: .serve,
+                providerID: resolved.providerID,
+                modelID: resolved.model,
+                operationID: lifecycleOperationID
+            )
+        case .conflict, .corrupt:
+            _ = try lifecycleStateStore.transition(
+                to: .identityMigrationRequired,
+                reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                writer: .serve,
+                providerID: resolved.providerID,
+                modelID: resolved.model,
+                operationID: lifecycleOperationID
+            )
+        case .ready, .degraded:
+            break
+        }
+        try Self.validateCoordinatorCredential(
+            config: resolved,
+            credentialStatus: credentialStatus,
+            noJoin: noJoin
+        )
+        let credentialStatusRuntime = ProviderCredentialStatusRuntime(credentialStatus)
+
+        _ = try lifecycleStateStore.transition(
+            to: .validatingCatalog,
+            reasonCode: "startup_preflight",
+            writer: .serve,
+            providerID: resolved.providerID,
+            modelID: resolved.model,
+            operationID: lifecycleOperationID
+        )
+        let startupPreflight: Self.ServeStartupPreflightResult
+        let startupProviderID = resolved.providerID
+        var acquiredStartupLease: ProviderLifecycleLeaseRecord?
+        do {
+            startupPreflight = try await Self.runServeStartupPreflights(
+                &resolved,
+                joiningCoordinator: !noJoin,
+                afterServeLockAcquired: {
+                    acquiredStartupLease = try Self.acquireStartupLifecycleLease(
+                        store: lifecycleLeaseStore,
+                        operationID: lifecycleOperationID,
+                        providerID: startupProviderID,
+                        duration: 30 * 60
+                    )
+                }
+            )
+        } catch {
+            let lifecycleState: ProviderLifecycleState
+            let lifecycleReason: String
+            if error is ProviderLifecycleLeaseError {
+                lifecycleState = .failed
+                lifecycleReason = "startup_lease_unavailable"
+            } else if error is ServeCatalogPreflightError {
+                lifecycleState = .catalogIncompatible
+                lifecycleReason = "startup_catalog_incompatible"
+            } else {
+                lifecycleState = .failed
+                lifecycleReason = "startup_preflight_failed"
+            }
+            _ = try? lifecycleStateStore.transition(
+                to: lifecycleState,
+                reasonCode: lifecycleReason,
+                writer: .serve,
+                providerID: resolved.providerID,
+                modelID: resolved.model,
+                operationID: lifecycleOperationID
+            )
+            if error is ProviderLifecycleLeaseError {
+                FileHandle.standardError.write(Data("provider startup lease unavailable: \(error)\n".utf8))
+            }
+            if let catalogError = error as? ServeCatalogPreflightError {
+                throw catalogError.underlying
+            }
+            throw error
+        }
         let serveLock = startupPreflight.serveLock
         defer { serveLock.release() }
+        guard let startupLease = acquiredStartupLease else {
+            throw ProviderLifecycleLeaseError.currentOwnerUnavailable
+        }
+        defer { _ = try? lifecycleLeaseStore.clear(ifLeaseID: startupLease.leaseID) }
         let verifiedDraftModelLoadPath = startupPreflight.verifiedDraftModelLoadPath
 
         printResolvedConfiguration(resolved)
@@ -557,20 +908,41 @@ struct ServeCommand: AsyncParsableCommand {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
-        let modelRuntime = try await ModelRuntime(
+        _ = try lifecycleStateStore.transition(
+            to: .loadingModel,
+            reasonCode: "catalog_preflight_passed",
+            writer: .serve,
+            providerID: resolved.providerID,
             modelID: resolved.model,
-            modelLoadPath: resolved.modelArtifactPath,
-            draftModelID: resolved.draftModel,
-            draftModelLoadPath: verifiedDraftModelLoadPath,
-            numDraftTokens: resolved.numDraftTokens,
-            maxContextTokensOverride: resolved.maxContextOverride,
-            kvBitsOverride: effectiveKVBits,
-            prefillStepSize: resolved.prefillStepSize,
-            maxBatch: resolved.maxConcurrencyOverride ?? 1,
-            warmSwapEnabled: resolved.enableWarmSwap,
-            swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
-            catalogModelIDAlias: catalogModelIDAlias
+            operationID: lifecycleOperationID
         )
+        let modelRuntime: ModelRuntime
+        do {
+            modelRuntime = try await ModelRuntime(
+                modelID: resolved.model,
+                modelLoadPath: resolved.modelArtifactPath,
+                draftModelID: resolved.draftModel,
+                draftModelLoadPath: verifiedDraftModelLoadPath,
+                numDraftTokens: resolved.numDraftTokens,
+                maxContextTokensOverride: resolved.maxContextOverride,
+                kvBitsOverride: effectiveKVBits,
+                prefillStepSize: resolved.prefillStepSize,
+                maxBatch: resolved.maxConcurrencyOverride ?? 1,
+                warmSwapEnabled: resolved.enableWarmSwap,
+                swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
+                catalogModelIDAlias: catalogModelIDAlias
+            )
+        } catch {
+            _ = try? lifecycleStateStore.transition(
+                to: .failed,
+                reasonCode: "model_load_failed",
+                writer: .serve,
+                providerID: resolved.providerID,
+                modelID: resolved.model,
+                operationID: lifecycleOperationID
+            )
+            throw error
+        }
         // The serve runtime defaults `--max-batch` to 1 (the prior
         // single-slot behavior). Operators opting in via --max-batch >1
         // own the safety check; we surface the configured value in
@@ -579,7 +951,10 @@ struct ServeCommand: AsyncParsableCommand {
             maxContextOverride: resolved.maxContextOverride,
             maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1
         )
-        let throughputEstimate = await modelRuntime.measureStartupThroughput()
+        let throughputEstimate = await Self.startupThroughputEstimate(
+            autotuneCandidate: autotuneCandidate,
+            measure: { await modelRuntime.measureStartupThroughput() }
+        )
         let thermalGate = ThermalGate()
         // `slots_free` in the log reflects the throttle-driven free-slot
         // ceiling (configured `maxConcurrency` when unthrottled, 0 when
@@ -602,48 +977,212 @@ struct ServeCommand: AsyncParsableCommand {
             specDecodeNumDraftTokens: resolved.numDraftTokens,
             providerID: resolved.providerID
         )
+        if operatorPausedInitially {
+            await providerStatus.setState(.unavailable, reason: "operator_pause_restored")
+        }
         await modelRuntime.setProviderStatus(providerStatus)
         let receiptKeyStore = KeychainReceiptKeyStore()
-        let receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey]
-        let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
+        let admissionIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey]
+        let persistAdmissionIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
+        let providerAdmissionNextPublicKey: String?
+        let providerAdmissionRecovery: Bool
+        let admissionIdentityWasPersisted: Bool
+        let commitAdmissionIdentityPublicKey: (@Sendable (Data, Date?) throws -> Void)?
         if let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
-           BootstrapAuthCommand.isCredentialBootstrapPrincipal(providerID),
+           !providerID.isEmpty,
            resolved.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-            if let persistedIdentity = try receiptKeyStore.loadBootstrapIdentity(providerId: providerID) {
-                receiptIdentitySigningKeyCandidates = [persistedIdentity]
-                persistReceiptIdentitySigningKey = nil
-            } else {
-                guard let currentKey = try receiptKeyStore.loadCurrent(providerId: providerID) else {
-                    throw ValidationError("provider bootstrap receipt identity is missing from Keychain; refuse bearer admission")
-                }
-                var candidates = [currentKey]
-                if let previousKey = try receiptKeyStore.loadPrevious(providerId: providerID),
-                   previousKey.rawRepresentation != currentKey.rawRepresentation {
-                    candidates.append(previousKey)
-                }
-                receiptIdentitySigningKeyCandidates = candidates
-                persistReceiptIdentitySigningKey = { key in
-                    _ = try receiptKeyStore.loadOrStoreBootstrapIdentity(
+            // Enforce the bounded rollback-key retention even on the normal
+            // healthy-current path, where no recovery candidate is otherwise
+            // loaded during startup.
+            _ = try receiptKeyStore.loadPreviousAdmissionIdentity(providerId: providerID)
+            if let persistedIdentity = try receiptKeyStore.loadAdmissionIdentity(providerId: providerID) {
+                admissionIdentityWasPersisted = true
+                let pending = try receiptKeyStore.loadPendingAdmissionIdentity(providerId: providerID)
+                let topology = try AdmissionIdentityStartupTopology.resolve(
+                    currentPublicKey: persistedIdentity.publicKey.rawRepresentation,
+                    pendingPublicKey: pending?.publicKey.rawRepresentation,
+                    recoveryMarkerPublicKey: receiptKeyStore.loadAdmissionIdentityRecoveryMarker(
+                        providerId: providerID
+                    )
+                )
+                switch topology {
+                case .currentOnly:
+                    admissionIdentitySigningKeyCandidates = [persistedIdentity]
+                    providerAdmissionNextPublicKey = nil
+                    providerAdmissionRecovery = false
+                    commitAdmissionIdentityPublicKey = nil
+                case .duplicatePending:
+                    try receiptKeyStore.cancelAdmissionIdentityRotation(providerId: providerID)
+                    admissionIdentitySigningKeyCandidates = [persistedIdentity]
+                    providerAdmissionNextPublicKey = nil
+                    providerAdmissionRecovery = false
+                    commitAdmissionIdentityPublicKey = nil
+                case .rotationPending:
+                    guard let pending else {
+                        throw ValidationError("admission identity rotation candidate disappeared during startup")
+                    }
+                    admissionIdentitySigningKeyCandidates = [persistedIdentity, pending]
+                    providerAdmissionNextPublicKey = Data(pending.publicKey.rawRepresentation).base64EncodedString()
+                    providerAdmissionRecovery = false
+                    commitAdmissionIdentityPublicKey = { expectedPublicKey, previousValidUntil in
+                        _ = try receiptKeyStore.commitAdmissionIdentityRotation(
+                            providerId: providerID,
+                            expectedPublicKey: expectedPublicKey,
+                            previousValidUntil: previousValidUntil
+                        )
+                    }
+                case .recoveryPending:
+                    guard let pending else {
+                        throw ValidationError("admission identity recovery candidate disappeared during startup")
+                    }
+                    admissionIdentitySigningKeyCandidates = [pending]
+                    providerAdmissionNextPublicKey = nil
+                    providerAdmissionRecovery = true
+                    commitAdmissionIdentityPublicKey = { expectedPublicKey, _ in
+                        _ = try receiptKeyStore.commitAdmissionIdentityRecovery(
+                            providerId: providerID,
+                            expectedPublicKey: expectedPublicKey
+                        )
+                    }
+                case .recoveryCommittedCleanup:
+                    _ = try receiptKeyStore.commitAdmissionIdentityRecovery(
                         providerId: providerID,
-                        candidate: key
+                        expectedPublicKey: persistedIdentity.publicKey.rawRepresentation
+                    )
+                    admissionIdentitySigningKeyCandidates = [persistedIdentity]
+                    providerAdmissionNextPublicKey = nil
+                    providerAdmissionRecovery = false
+                    commitAdmissionIdentityPublicKey = nil
+                case .invalidRecoveryMarker:
+                    throw ValidationError(
+                        "admission identity recovery marker does not match the staged candidate; run credentials repair"
                     )
                 }
+                persistAdmissionIdentitySigningKey = nil
+            } else {
+                admissionIdentityWasPersisted = false
+                // A missing dedicated slot is either first legacy enrollment or
+                // partial Keychain loss. Offer only keys already held locally and
+                // let the coordinator's durable hint select one. A fresh candidate
+                // is persisted only when the server explicitly challenges it;
+                // an existing unknown binding therefore fails closed.
+                var candidates: [Curve25519.Signing.PrivateKey] = []
+                func appendCandidate(_ key: Curve25519.Signing.PrivateKey?) {
+                    guard let key,
+                          !candidates.contains(where: { $0.rawRepresentation == key.rawRepresentation }) else {
+                        return
+                    }
+                    candidates.append(key)
+                }
+                let pendingRecovery = try receiptKeyStore.loadPendingAdmissionIdentity(providerId: providerID)
+                let recoveryMarker = try receiptKeyStore.loadAdmissionIdentityRecoveryMarker(providerId: providerID)
+                if let recoveryMarker,
+                   recoveryMarker != pendingRecovery?.publicKey.rawRepresentation {
+                    throw ValidationError(
+                        "admission identity recovery marker does not match the staged candidate; run credentials repair"
+                    )
+                }
+                appendCandidate(pendingRecovery)
+                appendCandidate(try receiptKeyStore.loadPreviousAdmissionIdentity(providerId: providerID))
+                appendCandidate(try receiptKeyStore.loadCurrent(providerId: providerID))
+                appendCandidate(try receiptKeyStore.loadPrevious(providerId: providerID))
+                if candidates.isEmpty {
+                    candidates.append(Curve25519.Signing.PrivateKey())
+                }
+                admissionIdentitySigningKeyCandidates = candidates
+                providerAdmissionRecovery = recoveryMarker != nil
+                if providerAdmissionRecovery {
+                    persistAdmissionIdentitySigningKey = nil
+                    commitAdmissionIdentityPublicKey = { expectedPublicKey, _ in
+                        _ = try receiptKeyStore.commitAdmissionIdentityRecovery(
+                            providerId: providerID,
+                            expectedPublicKey: expectedPublicKey
+                        )
+                    }
+                } else {
+                    persistAdmissionIdentitySigningKey = { key in
+                        _ = try receiptKeyStore.loadOrStoreAdmissionIdentity(
+                            providerId: providerID,
+                            candidate: key
+                        )
+                    }
+                    commitAdmissionIdentityPublicKey = nil
+                }
+                providerAdmissionNextPublicKey = nil
             }
         } else {
-            receiptIdentitySigningKeyCandidates = []
-            persistReceiptIdentitySigningKey = nil
+            admissionIdentitySigningKeyCandidates = []
+            persistAdmissionIdentitySigningKey = nil
+            providerAdmissionNextPublicKey = nil
+            providerAdmissionRecovery = false
+            admissionIdentityWasPersisted = false
+            commitAdmissionIdentityPublicKey = nil
         }
+        let previousAdmissionIdentityState: AdmissionIdentityPreviousKeyState? = try {
+            guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !providerID.isEmpty else { return nil }
+            return try receiptKeyStore.loadPreviousAdmissionIdentityState(providerId: providerID)
+        }()
         let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
         let providerReceiptPublicKey = receiptRuntime.publicKeyBase64
-            ?? receiptIdentitySigningKeyCandidates.first.map { Data($0.publicKey.rawRepresentation).base64EncodedString() }
+        let providerAdmissionPublicKey = admissionIdentitySigningKeyCandidates.first
+            .map { Data($0.publicKey.rawRepresentation).base64EncodedString() }
+        let admissionIdentityStatus: ProviderAdmissionIdentityStatusContext = {
+            guard let key = admissionIdentitySigningKeyCandidates.first else {
+                return ProviderAdmissionIdentityStatusContext(
+                    source: "none",
+                    state: resolved.providerID == nil ? "unconfigured" : "missing",
+                    publicKeySHA256: nil
+                )
+            }
+            let digest = SHA256.hash(data: Data(key.publicKey.rawRepresentation))
+                .map { String(format: "%02x", $0) }
+                .joined()
+            let pendingDigest = providerAdmissionRecovery
+                ? digest
+                : providerAdmissionNextPublicKey
+                    .flatMap { Data(base64Encoded: $0) }
+                    .map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
+            let previousDigest = previousAdmissionIdentityState.map {
+                SHA256.hash(data: Data($0.privateKey.publicKey.rawRepresentation))
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+            }
+            let previousValidUntil = previousAdmissionIdentityState.map { state in
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                return formatter.string(from: state.validUntil)
+            }
+            return ProviderAdmissionIdentityStatusContext(
+                source: providerAdmissionRecovery ? "cli_keychain_pending" : (admissionIdentityWasPersisted ? "cli_keychain" : "local_recovery_candidate"),
+                state: providerAdmissionRecovery
+                    ? "recovery_pending"
+                    : (admissionIdentityWasPersisted
+                        ? (providerAdmissionNextPublicKey == nil ? "ready" : "rotation_pending")
+                        : "identity_migration_required"),
+                publicKeySHA256: digest,
+                pendingPublicKeySHA256: pendingDigest,
+                previousPublicKeySHA256: previousDigest,
+                previousValidUntil: previousValidUntil,
+                recoveryAction: providerAdmissionRecovery
+                    ? "obtain_operator_recovery_approval_then_restart"
+                    : (admissionIdentityWasPersisted ? "none" : "connect_to_enroll_or_run_recover_admission_identity")
+            )
+        }()
+        let admissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(admissionIdentityStatus)
+        let installedCompatibilityManifest: CompatibilitySetManifest? = try { () throws -> CompatibilitySetManifest? in
+            guard let executable = Bundle.main.executableURL else { return nil }
+            let directory = executable.deletingLastPathComponent()
+            let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
+            guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
+            return try CompatibilitySetManifest.loadValidated(
+                from: directory,
+                expectedVersion: CoordinatorClient.binaryVersion
+            )
+        }()
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
-        // SPEC-026 §7: shared bridge for the App-track identity-signature
-        // handshake. CoordinatorClient enqueues signature requests here
-        // when building the auth_request proof stage; ControlSocketServer
-        // drains them onto the connected Malibu.app control socket.
-        let identityBridge = IdentitySignatureBridge()
         let coordinatorClient = Self.makeCoordinatorClient(
             noJoin: noJoin,
             donorMode: resolved.donorMode,
@@ -662,16 +1201,25 @@ struct ServeCommand: AsyncParsableCommand {
                     return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
                 }(),
                 providerReceiptPublicKey: providerReceiptPublicKey,
+                providerAdmissionPublicKey: providerAdmissionPublicKey,
+                providerAdmissionNextPublicKey: providerAdmissionNextPublicKey,
+                providerAdmissionRecovery: providerAdmissionRecovery,
+                commitAdmissionIdentityPublicKey: commitAdmissionIdentityPublicKey,
                 receiptBuilder: receiptRuntime.builder,
-                identityBridge: identityBridge,
                 catalogReleaseID: startupPreflight.catalogTrust?.releaseID,
                 catalogPolicyVersion: startupPreflight.catalogTrust?.policyVersion,
                 catalogCandidateSHA256: startupPreflight.catalogTrust?.digest,
                 catalogSignerKeyID: startupPreflight.catalogTrust?.signerKeyID,
                 catalogRowIdentity: startupPreflight.catalogTrust?.rowIdentity,
                 catalogModelSHA256: startupPreflight.catalogTrust?.modelSHA256,
-                receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
-                persistReceiptIdentitySigningKey: persistReceiptIdentitySigningKey
+                receiptIdentitySigningKeyCandidates: admissionIdentitySigningKeyCandidates,
+                persistReceiptIdentitySigningKey: persistAdmissionIdentitySigningKey,
+                providerCredentialStore: credentialStore,
+                credentialStatusRuntime: credentialStatusRuntime,
+                admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+                lifecycleStateStore: lifecycleStateStore,
+                lifecycleOperationID: lifecycleOperationID,
+                operatorPausedInitially: operatorPausedInitially
             )
         }
         let idlePrewarmLogger = IdlePrewarmLogger { object in
@@ -707,34 +1255,106 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             receiptRotator = nil
         }
-        if resolved.enableWarmSwap || receiptRotator != nil {
-            let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
-            let malibuAccrualClient = try? MalibuAccrualClient(coordinatorURL: resolved.coordinatorURL)
-            controlSocket = ControlSocketServer(
-                socketPath: socketURL,
-                modelRuntime: modelRuntime,
-                supportedModels: resolved.supportedModels,
-                receiptRotator: receiptRotator,
-                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
-                identityBridge: identityBridge,
-                providerStatus: providerStatus,
-                malibuAccrualClient: malibuAccrualClient,
-                providerToken: resolved.providerToken
-            )
-            do {
-                try await controlSocket?.start()
-            } catch {
-                if let serverError = error as? ControlSocketServerError,
-                   serverError != .staleSocket(path: socketURL.path) {
-                    FileHandle.standardError.write(Data(("\(serverError.description)\n").utf8))
-                }
-                throw ExitCode(1)
-            }
+        let lifecycleControlProviderID = resolved.providerID
+        let lifecycleControlModelID = resolved.model
+        let lifecycleControlCompatibilitySetID = installedCompatibilityManifest?.compatibilitySetID
+        let lifecycleControlDrainTimeout = resolved.drainTimeoutSeconds
+        let pauseProvider: @Sendable () async -> ProviderControlCommandResult
+        let resumeProvider: @Sendable () async -> ProviderControlCommandResult
+        if let coordinatorClient {
+            pauseProvider = { await coordinatorClient.pauseByOperator() }
+            resumeProvider = { await coordinatorClient.resumeByOperator() }
         } else {
-            controlSocket = nil
+            pauseProvider = {
+                await providerStatus.setState(.draining, reason: "operator_pause_draining")
+                guard await providerStatus.waitUntilDrained(timeoutSeconds: lifecycleControlDrainTimeout) else {
+                    await providerStatus.setState(.ready, reason: "operator_pause_drain_timeout")
+                    return .rejected("drain_timeout")
+                }
+                do {
+                    _ = try lifecycleStateStore.transition(
+                        to: .pausedByOperator,
+                        reasonCode: "operator_pause_confirmed",
+                        writer: .operatorCommand,
+                        providerID: lifecycleControlProviderID,
+                        modelID: lifecycleControlModelID,
+                        compatibilitySetID: lifecycleControlCompatibilitySetID,
+                        operationID: "operator-pause:\(UUID().uuidString.lowercased())",
+                        operatorPaused: true
+                    )
+                } catch {
+                    await providerStatus.setState(.ready, reason: "operator_pause_persistence_failed")
+                    return .rejected("lifecycle_state_persistence_failed")
+                }
+                await providerStatus.setState(.unavailable, reason: "operator_paused")
+                return .accepted
+            }
+            resumeProvider = {
+                do {
+                    _ = try lifecycleStateStore.transition(
+                        to: .degradedServing,
+                        reasonCode: "operator_resume_local_only",
+                        writer: .operatorCommand,
+                        providerID: lifecycleControlProviderID,
+                        modelID: lifecycleControlModelID,
+                        compatibilitySetID: lifecycleControlCompatibilitySetID,
+                        operationID: "operator-resume:\(UUID().uuidString.lowercased())",
+                        operatorPaused: false
+                    )
+                } catch {
+                    return .rejected("lifecycle_state_persistence_failed")
+                }
+                await providerStatus.setState(.ready, reason: "operator_resumed")
+                return .accepted
+            }
+        }
+        // Every serve instance exposes the same owner-only control contract.
+        // Malibu must not lose lifecycle/earnings visibility merely because
+        // warm swap or receipt rotation is disabled for this provider.
+        let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+        let providerEarningsClient = resolved.providerID.flatMap {
+            try? ProviderEarningsClient(
+                coordinatorURL: resolved.coordinatorURL,
+                providerID: $0
+            )
+        }
+        let malibuAccrualClient = try? MalibuAccrualClient(coordinatorURL: resolved.coordinatorURL)
+        controlSocket = ControlSocketServer(
+            socketPath: socketURL,
+            modelRuntime: modelRuntime,
+            supportedModels: resolved.supportedModels,
+            receiptRotator: receiptRotator,
+            receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+            providerStatus: providerStatus,
+            providerEarningsClient: providerEarningsClient,
+            malibuAccrualClient: malibuAccrualClient,
+            providerToken: resolved.providerToken,
+            pauseProvider: pauseProvider,
+            resumeProvider: resumeProvider
+        )
+        do {
+            try await controlSocket?.start()
+        } catch {
+            if let serverError = error as? ControlSocketServerError,
+               serverError != .staleSocket(path: socketURL.path) {
+                FileHandle.standardError.write(Data(("\(serverError.description)\n").utf8))
+            }
+            throw ExitCode(1)
         }
         await coordinatorClient?.start()
         await idlePrewarmer.start()
+        let lifecycleProviderID = resolved.providerID
+        let lifecycleModelID = resolved.model
+        let lifecycleCompatibilitySetID = installedCompatibilityManifest?.compatibilitySetID
+        let lifecycleReadyState: ProviderLifecycleState = operatorPausedInitially
+            ? .pausedByOperator
+            : (coordinatorClient == nil ? .degradedServing : .locallyReadyConnecting)
+        let lifecycleReadyReason = operatorPausedInitially
+            ? "operator_pause_restored_after_startup"
+            : (coordinatorClient == nil ? "local_http_ready_join_disabled" : "local_http_ready_awaiting_coordinator")
+        let lifecycleReadyWriter: ProviderLifecycleWriter = operatorPausedInitially
+            ? .operatorCommand
+            : .serve
         let server = HTTPServer(
             config: resolved,
             modelRuntime: modelRuntime,
@@ -742,7 +1362,26 @@ struct ServeCommand: AsyncParsableCommand {
             receiptBuilder: receiptRuntime.builder,
             idlePrewarmer: idlePrewarmer,
             catalogModelIDAlias: catalogModelIDAlias,
-            catalogTrust: startupPreflight.catalogTrust
+            catalogTrust: startupPreflight.catalogTrust,
+            credentialStatusRuntime: credentialStatusRuntime,
+            admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+            compatibilitySetManifest: installedCompatibilityManifest,
+            lifecycleStateStore: lifecycleStateStore,
+            lifecycleLeaseStore: lifecycleLeaseStore,
+            onListening: {
+                _ = try lifecycleStateStore.transition(
+                    to: lifecycleReadyState,
+                    reasonCode: lifecycleReadyReason,
+                    writer: lifecycleReadyWriter,
+                    providerID: lifecycleProviderID,
+                    modelID: lifecycleModelID,
+                    compatibilitySetID: lifecycleCompatibilitySetID,
+                    operationID: lifecycleOperationID
+                )
+                guard try lifecycleLeaseStore.clear(ifLeaseID: startupLease.leaseID) else {
+                    throw ProviderLifecycleLeaseError.compareAndSwapFailed
+                }
+            }
         )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer)
         defer {
@@ -769,6 +1408,95 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    static let providerLaunchdServiceIdentity = "live.streamvc.macprovider"
+
+    static func startupHandoffOperationID(in store: ProviderLifecycleLeaseStore) -> String? {
+        switch store.inspect() {
+        case .valid(let record):
+            return record.startupHandoff?.operationID
+        case .invalidOrExpired(let record, _):
+            // Preserve the exact ID so adoption reports expiry/mismatch rather
+            // than silently replacing the updater's prepared authorization.
+            return record?.startupHandoff?.operationID
+        case .missing:
+            return nil
+        }
+    }
+
+    static func acquireStartupLifecycleLease(
+        store: ProviderLifecycleLeaseStore,
+        operationID: String,
+        providerID: String?,
+        duration: TimeInterval
+    ) throws -> ProviderLifecycleLeaseRecord {
+        let trimmedProviderID = providerID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let adoptionProviderID: String
+        if let trimmedProviderID, !trimmedProviderID.isEmpty {
+            adoptionProviderID = trimmedProviderID
+        } else {
+            adoptionProviderID = "missing-provider-id"
+        }
+        do {
+            return try store.adoptStartupHandoff(
+                operationID: operationID,
+                providerID: adoptionProviderID,
+                serviceIdentity: providerLaunchdServiceIdentity
+            )
+        } catch ProviderLifecycleLeaseError.handoffNotPrepared {
+            // No prepared/adopted handoff to consume: fall back to a fresh
+            // startup lease. acquire() re-validates and refuses to displace a
+            // VALID live foreign owner (throws .alreadyHeld) -- see below.
+            return try store.acquire(
+                kind: .startup,
+                operationID: operationID,
+                duration: duration
+            )
+        } catch ProviderLifecycleLeaseError.leaseNotValid {
+            // The on-disk record IS a matching handoff, but its OWNER identity is
+            // no longer valid (adoptStartupHandoff's adopted branch,
+            // ProviderLifecycleLease.swift ~620, rethrows validationFailure as
+            // leaseNotValid -- e.g. .ownerProcessMissingOrReused after a crash +
+            // launchd restart + PID reuse, or an expired window). That denotes an
+            // invalid/expired/wrong-owner RECORD, not a live conflicting owner, so
+            // it is replaceable. Fall back to fresh acquisition instead of
+            // restart-looping. This is SAFE because acquire() itself re-validates
+            // the record it is about to overwrite (ProviderLifecycleLease.swift
+            // ~432..444): if that record is still a VALID live foreign owner it
+            // throws .alreadyHeld (hard failure, unchanged startup_lease_unavailable
+            // path); it only overwrites when the failure permitsReplacement
+            // (.wallExpired/.monotonicExpired/.bootSessionChanged/
+            // .ownerProcessMissingOrReused, ~1279..1293), and it rethrows
+            // leaseNotValid for non-replaceable structural failures. So this
+            // fallback cannot bypass the valid-live-owner guard. Every error kind
+            // meaning "another live valid owner holds this" (.alreadyHeld,
+            // .compareAndSwapFailed, .currentOwnerUnavailable, .handoffMismatch,
+            // .handoffExpired, .launchdServiceOwnerMismatch, .targetExecutableMismatch,
+            // storage/io) still propagates as a hard failure, unchanged.
+            return try store.acquire(
+                kind: .startup,
+                operationID: operationID,
+                duration: duration
+            )
+        }
+    }
+
+    static func validateCoordinatorCredential(
+        config: AppConfig,
+        credentialStatus: ProviderCredentialStatus,
+        noJoin: Bool
+    ) throws {
+        guard !noJoin, !config.donorMode else { return }
+        guard config.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+              let configuredProviderID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !configuredProviderID.isEmpty else {
+            return
+        }
+        throw ValidationError(
+            "coordinator join credential state is \(credentialStatus.state.rawValue); action=\(credentialStatus.recoveryAction.rawValue)"
+        )
+    }
+
     struct ServeStartupPreflightResult {
         let serveLock: ProviderServeLock
         let verifiedDraftModelLoadPath: String?
@@ -781,6 +1509,7 @@ struct ServeCommand: AsyncParsableCommand {
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
         acquireServeLock: (AppConfig) throws -> ProviderServeLock = Self.acquireProviderServeLock,
+        afterServeLockAcquired: () throws -> Void = {},
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
     ) async throws -> ServeStartupPreflightResult {
@@ -791,12 +1520,18 @@ struct ServeCommand: AsyncParsableCommand {
             acquireServeLock: acquireServeLock
         )
         do {
-            let catalogTrust = try await Self.runModelArtifactPreflight(
-                resolved,
-                joiningCoordinator: joiningCoordinator,
-                staticInputs: staticInputs,
-                artifactResolver: artifactResolver
-            )
+            try afterServeLockAcquired()
+            let catalogTrust: CatalogRuntimeTrust?
+            do {
+                catalogTrust = try await Self.runModelArtifactPreflight(
+                    resolved,
+                    joiningCoordinator: joiningCoordinator,
+                    staticInputs: staticInputs,
+                    artifactResolver: artifactResolver
+                )
+            } catch where joiningCoordinator || resolved.donorMode {
+                throw ServeCatalogPreflightError(underlying: error)
+            }
             let verifiedDraftModelLoadPath = try Self.runDraftModelArtifactPreflight(
                 resolved,
                 joiningCoordinator: joiningCoordinator
@@ -893,7 +1628,7 @@ struct StatusCommand: AsyncParsableCommand {
         let status = try await LocalStatusClient.fetch(port: resolved.port)
         let latest = try? await SelfUpdate(currentVersion: CoordinatorClient.binaryVersion, releasesAPIURL: nil).latestVersionCached()
         let staleSince = await Self.staleRecommendationSince(providerID: resolved.providerID)
-        print(LocalStatusFormatter.format(status, latestVersion: latest, ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath), donorMode: resolved.donorMode, staleRecommendationSince: staleSince))
+        print(LocalStatusFormatter.format(status, latestVersion: latest, ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath), donorMode: resolved.donorMode, staleRecommendationSince: staleSince, configPath: resolved.configPath))
     }
 
     static func staleRecommendationSince(
@@ -964,12 +1699,57 @@ struct UpdateCommand: AsyncParsableCommand {
     @Option(help: "GitHub latest-release API URL. Defaults to the public macprovider release repository.")
     var releasesAPIURL: String?
 
+    @Option(help: "Protected signed acceptance-candidate asset directory. Never fetches or publishes a release.")
+    var acceptanceDirectory: String?
+
+    @Option(help: "Exact vX.Y.Z identity of the signed acceptance candidate.")
+    var acceptanceTag: String?
+
+    @Option(help: "Exact 40-character commit identity of the signed acceptance candidate.")
+    var acceptanceCommit: String?
+
+    @Option(help: "Exact GitHub Actions run ID of the signed acceptance candidate.")
+    var acceptanceRunID: String?
+
+    @Option(help: "Exact trusted-main control commit that authorized the acceptance signature.")
+    var acceptanceControlCommit: String?
+
+    @Option(help: "Exact positive GitHub Actions run attempt that signed the candidate.")
+    var acceptanceRunAttempt: Int?
+
     func run() async throws {
-        try await SelfUpdate(
-            currentVersion: CoordinatorClient.binaryVersion,
-            releasesAPIURL: releasesAPIURL
-        ).run(checkOnly: check)
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides())
+        let updater = SelfUpdate(
+            currentVersion: CoordinatorClient.binaryVersion,
+            releasesAPIURL: releasesAPIURL,
+            providerID: resolvedConfig?.providerID
+        )
+        if acceptanceDirectory != nil || acceptanceTag != nil || acceptanceCommit != nil
+            || acceptanceRunID != nil || acceptanceControlCommit != nil || acceptanceRunAttempt != nil
+        {
+            guard !check, releasesAPIURL == nil,
+                  let acceptanceDirectory,
+                  let acceptanceTag,
+                  let acceptanceCommit,
+                  let acceptanceRunID,
+                  let acceptanceControlCommit,
+                  let acceptanceRunAttempt
+            else {
+                throw ValidationError(
+                    "all --acceptance-* identity options must be supplied together and cannot be combined with --check or --releases-api-url"
+                )
+            }
+            try await updater.runAcceptanceCandidate(
+                from: URL(fileURLWithPath: acceptanceDirectory, isDirectory: true),
+                tag: acceptanceTag,
+                expectedCommit: acceptanceCommit,
+                expectedControlCommit: acceptanceControlCommit,
+                expectedRunID: acceptanceRunID,
+                expectedRunAttempt: acceptanceRunAttempt
+            )
+        } else {
+            try await updater.run(checkOnly: check)
+        }
         if let staleSince = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).staleRecommendationSince() {
             FileHandle.standardError.write(Data("""
 

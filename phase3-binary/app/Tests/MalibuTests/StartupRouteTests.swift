@@ -30,7 +30,13 @@ final class StartupRouteTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
         defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_import") } }
 
-        let result = try await StartupState.applyMigrationDecision(.importExisting, paths: paths)
+        let result = try await StartupState.applyMigrationDecision(
+            .importExisting,
+            paths: paths,
+            importCredentialIntoCLI: { snapshot in
+                XCTAssertTrue(try String(contentsOf: snapshot).contains("provider_token: secret-token"))
+            }
+        )
         let state = await StartupState.detect(paths: paths)
         let expectedRoute: StartupRoute = state.launchdInstallEvidenceExists ? .startAgent : .showOnboarding
         XCTAssertEqual(result.route, expectedRoute)
@@ -39,9 +45,9 @@ final class StartupRouteTests: XCTestCase {
         let rewritten = try String(contentsOf: paths.configFile)
         XCTAssertTrue(rewritten.contains("provider_id: p_import"))
         XCTAssertTrue(rewritten.contains("model: test"))
-        XCTAssertFalse(rewritten.contains("provider_token"))
+        XCTAssertTrue(rewritten.contains("provider_token: secret-token"))
         let importedToken = await KeychainStore.readProviderToken(providerID: "p_import")
-        XCTAssertEqual(importedToken, "secret-token")
+        XCTAssertNil(importedToken)
     }
 
     func testMigrationStartFreshMovesConfigAsideAndShowsOnboarding() async throws {

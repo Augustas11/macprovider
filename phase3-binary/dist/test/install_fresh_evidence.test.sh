@@ -39,12 +39,20 @@ run_case() {
   : > "$root/install/macprovider-cli"
   chmod +x "$root/install/macprovider-cli"
   provider_id="mp-0123456789abcdef0123456789abcdef"
-  [ "$mode" != "predictable-id" ] || provider_id="office-mac"
+  case "$mode" in
+    predictable-id|existing-legacy) provider_id="office-mac" ;;
+  esac
+  if [ "$mode" = "receipt-probe-fails" ]; then
+    : > "$root/prefetch-receipt.json"
+  fi
   cat > "$root/config/config.yaml" <<EOF
 model: "seed"
 provider_id: "$provider_id"
 coordinator_url: "wss://coordinator.example/ws/provider"
 EOF
+  case "$mode" in
+    existing-mp|existing-legacy) : > "$root/credential" ;;
+  esac
   set +e
   CASE_MODE="$mode" CASE_ROOT="$root" bash -c '
     set -euo pipefail
@@ -53,6 +61,10 @@ EOF
     DRY_RUN=0
     SKIP_PROVIDER_START=0
     model="seed"
+    if [ "$CASE_MODE" = "receipt-probe-fails" ]; then
+      AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="namespace/seed"
+      AUTOTUNE_PREFETCH_RECEIPT_PATH="$CASE_ROOT/prefetch-receipt.json"
+    fi
     log() { :; }
     die() { exit "$1"; }
     prompt_yes_no() { return 0; }
@@ -61,15 +73,21 @@ EOF
       case "$1" in
         bootstrap-auth)
           [ "$CASE_MODE" != "bootstrap-fails" ] || return 9
-          printf "provider_token: minted-token\n" >> "$CONFIG_PATH"
+          : > "$CASE_ROOT/credential"
+          ;;
+        credentials)
+          [ "$2" = "verify" ] || return 12
+          [ "$CASE_MODE" != "store-unavailable" ] || return 17
+          [ -f "$CASE_ROOT/credential" ] || return 3
           ;;
         autotune)
           case "$*" in
             *--no-submit-hardware-evidence*)
+              [ "$CASE_MODE" != "receipt-probe-fails" ] || return 9
               printf "model: \"recommended\"\nmodel_artifact_path: \"/tmp/model\"\nmodel_artifact_sha256: \"abc\"\n" >> "$CONFIG_PATH"
               ;;
             *--require-hardware-evidence*)
-              grep -F "provider_token: minted-token" "$CONFIG_PATH" >/dev/null
+              [ -f "$CASE_ROOT/credential" ]
               [ "$CASE_MODE" != "evidence-fails" ] || return 11
               ;;
           esac
@@ -88,15 +106,43 @@ EOF
       awk '
         /--no-submit-hardware-evidence/ { tune=NR }
         /bootstrap-auth/ { bootstrap=NR }
+        /credentials verify/ { verify=NR }
         /--require-hardware-evidence/ { evidence=NR }
         /service-start/ { service=NR }
-        END { exit !(tune < bootstrap && bootstrap < evidence && evidence < service) }
+        END { exit !(tune < bootstrap && bootstrap < verify && verify < evidence && evidence < service) }
       ' "$root/calls"
       ;;
     bootstrap-fails|evidence-fails|predictable-id)
       [ "$rc" -ne 0 ]
       if grep -F "service-start" "$root/calls" >/dev/null; then
         echo "$mode started service before authenticated evidence" >&2
+        exit 1
+      fi
+      ;;
+    existing-mp|existing-legacy)
+      [ "$rc" -eq 0 ]
+      grep -F "credentials verify" "$root/calls" >/dev/null
+      if grep -F "bootstrap-auth" "$root/calls" >/dev/null; then
+        echo "$mode bootstrapped over an existing CLI-Keychain credential" >&2
+        exit 1
+      fi
+      ;;
+    store-unavailable)
+      [ "$rc" -ne 0 ]
+      if grep -F "bootstrap-auth" "$root/calls" >/dev/null; then
+        echo "$mode bootstrapped while the authoritative store was unavailable" >&2
+        exit 1
+      fi
+      ;;
+    receipt-probe-fails)
+      [ "$rc" -ne 0 ]
+      grep -F -- "--prefetch-receipt $root/prefetch-receipt.json" "$root/calls" >/dev/null
+      if grep -F -- "--require-hardware-evidence" "$root/calls" >/dev/null; then
+        echo "$mode attempted hardware evidence after the bound candidate probe failed" >&2
+        exit 1
+      fi
+      if grep -F "service-start" "$root/calls" >/dev/null; then
+        echo "$mode started service after the bound candidate probe failed" >&2
         exit 1
       fi
       ;;
@@ -107,6 +153,10 @@ run_case success
 run_case bootstrap-fails
 run_case evidence-fails
 run_case predictable-id
+run_case existing-mp
+run_case existing-legacy
+run_case store-unavailable
+run_case receipt-probe-fails
 
 # The durable upgrade transaction must remain live through every service-file
 # mutation and the required local-model self-test. Coordinator visibility is a

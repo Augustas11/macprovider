@@ -149,6 +149,17 @@ actor InferenceRelay {
             return
         }
 
+        guard let startedAt = await providerStatus.beginRequestIfAccepting(requestID: requestID) else {
+            try await Self.sendEndFrame([
+                "type": "inference_response_end",
+                "request_id": requestID,
+                "status": "error_provider_paused",
+                "chunks_sent": 0,
+                "error": "Provider is paused or draining",
+            ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+            return
+        }
+
         let state = RelayRequestState()
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
@@ -168,6 +179,7 @@ actor InferenceRelay {
                 receiptProviderID: receiptProviderID,
                 settlementMetadata: settlementMetadata,
                 conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
+                startedAt: startedAt,
                 streamInterval: streamInterval,
                 sendFrame: sendFrame
             )
@@ -259,10 +271,10 @@ actor InferenceRelay {
         receiptProviderID: String?,
         settlementMetadata: SettlementReceiptMetadata?,
         conversationKey: String?,
+        startedAt: Date,
         streamInterval: Int = 1,
         sendFrame: @escaping SendFrame
     ) async {
-        let startedAt = await providerStatus.beginRequest(requestID: requestID)
         var completionResult: CompletionResult?
         var failed = false
         var telemetryModelID = loadedModelID ?? ""
