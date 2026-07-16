@@ -27,13 +27,13 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.20 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.1.8 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.4 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
-| SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.4 | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
+| SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.6 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU bootstrap rewards emission ledger | 0.1.0 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.1.5 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.6 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.1 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
-| SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.13 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
+| SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.14 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.24 | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1 | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
 | SPEC-028 | MLX Speculative Decoding for Provider Serve | 0.2-draft | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |

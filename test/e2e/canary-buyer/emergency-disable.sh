@@ -33,7 +33,7 @@ if [[ "$platform" == "Darwin" ]]; then
   : "${CANARY_ENABLE_FILE:=$target_home/.config/macprovider/canary-buyer.enabled}"
 else
   : "${CANARY_DISABLE_FILE:=/var/lib/macprovider-canary-buyer/DISABLED}"
-  : "${CANARY_ENABLE_FILE:=/etc/macprovider/canary-buyer.enabled}"
+  : "${CANARY_ENABLE_FILE:=/etc/macprovider-canary-buyer/enabled}"
 fi
 
 mkdir -p "$(dirname "$CANARY_DISABLE_FILE")"

@@ -6078,11 +6078,12 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"preflight_rejected", "idempotency_unavailable", "rate_limited",
 		"coordinator_unavailable", "upstream_provider_error", "invalid_provider_usage",
 		// Round-2 sweep (H-R2 + rate_limit_exceeded-family extension), as
-		// narrowed by round-3's SECURITY MEDIUM revert: only the codes that
-		// actually ship a Retry-After/reset header (or, for
-		// signup_rate_limited, weren't named in the revert) stay true.
+		// narrowed by round-3's SECURITY MEDIUM revert and runbook item 20:
+		// only the codes that actually ship a Retry-After/reset header stay
+		// true (signup_rate_limited moved to permanent in item 20 — no
+		// header, outside the chat-path clamp).
 		"account_request_rate_exceeded", "account_concurrency_exceeded",
-		"demo_concurrency_exceeded", "quota_exhausted", "signup_rate_limited",
+		"demo_concurrency_exceeded", "quota_exhausted",
 		// Round-2 sweep (M-R2-3 + capacity-pause extension): wording on all
 		// three already promises the buyer this resolves with time.
 		"public_api_paused", "demo_paused", "capacity_signup_closed",
@@ -6096,10 +6097,11 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"model_not_found", "invalid_request", "method_not_allowed",
 		"invalid_api_key", "not_found", "request_content_encoding_unsupported",
 		"api_key_lookup_failed", "feedback_limit_check_failed", "settlement_failed",
-		// Round-3 SECURITY MEDIUM revert: no Retry-After/reset header and
-		// no account-level rate clamp on these paths — retryable:true would
-		// invite SDK auto-retry hot-looping (DoS amplifier).
+		// Round-3 SECURITY MEDIUM revert + runbook item 20: no Retry-After/reset
+		// header and no account-level rate clamp on these paths — retryable:true
+		// would invite SDK auto-retry hot-looping (DoS amplifier).
 		"feedback_rate_limited", "oauth_state_rate_limited", "demo_session_rate_limited",
+		"signup_rate_limited",
 	}
 	for _, code := range permanent {
 		if gatewayRetryable(code) {

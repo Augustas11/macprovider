@@ -1048,7 +1048,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		AssignedID:                entry.AssignedID,
 		HeartbeatIntervalS:        int(s.cfg.HeartbeatInterval().Seconds()),
 		Tier:                      string(entry.Tier),
-		RecommendedBinaryVersion:  s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RecommendedBinaryVersion:  s.gatedRecommendedBinaryVersion(hello.CompatibilitySetID),
 		RequiredBinaryVersion:     s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AutoupdateDrainExtensions: true,
 		AssignedProviderToken:     assignedProviderToken,
@@ -1549,7 +1549,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		AssignedID:                entry.AssignedID,
 		HeartbeatIntervalS:        int(s.cfg.HeartbeatInterval().Seconds()),
 		Tier:                      string(entry.Tier),
-		RecommendedBinaryVersion:  s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RecommendedBinaryVersion:  s.gatedRecommendedBinaryVersion(initial.CompatibilitySetID),
 		RequiredBinaryVersion:     s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AutoupdateDrainExtensions: true,
 		AssignedProviderToken:     assignedProviderToken,
@@ -1994,6 +1994,32 @@ func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, accep
 	response.CompatibilityPolicy = "configured"
 	response.AcceptedCompatibilitySetID = acceptedID
 	response.RecommendedCompatibilitySetID = policy.TargetID
+}
+
+// gatedRecommendedBinaryVersion is a per-connection capability gate for the
+// coordinator's advertised `latest_binary_version` (S-H1). The configured
+// value (`coordinator_advertised_version.latest_binary_version`) is delivered
+// to a provider as `recommended_binary_version` and drives its autoupdater.
+//
+// Pre-compatibility-set CLIs (<=1.8.32, verified against v1.8.30) ship a
+// default-enabled autoupdater that performs a BINARY-ONLY swap when they see a
+// newer recommendation — bypassing the operator-assisted full signed
+// compatibility-set installer, the only sanctioned recovery path for that
+// cohort (DECISION_CRITERIA entries 155/158/161). Those clients do not send
+// `compatibility_set_id` in their hello, so an empty capability => legacy =>
+// emit no recommendation (the field is `omitempty`, so the wire key is absent;
+// the legacy client treats an absent recommendation as a clean no-op).
+//
+// Providers that declare a compatibility-set identity (v1.8.33+) own a
+// full-set updater that performs signed compatibility-set transactions and
+// receive the configured recommendation unchanged. `required_binary_version`
+// semantics are intentionally untouched — it is a hard admission floor, not an
+// autoupdate target, so it is gated separately (or not at all) by design.
+func (s *Server) gatedRecommendedBinaryVersion(compatibilitySetID string) string {
+	if strings.TrimSpace(compatibilitySetID) == "" {
+		return ""
+	}
+	return s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion
 }
 
 func (s *Server) recordProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {
@@ -3900,10 +3926,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Version                  string `json:"version"`
 		RecommendedBinaryVersion string `json:"recommended_binary_version"`
 	}{
-		Status:                   "ok",
-		UptimeS:                  int64(s.now().Sub(s.started).Seconds()),
-		PoolSize:                 len(providers),
-		Version:                  s.version,
+		Status:   "ok",
+		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
+		PoolSize: len(providers),
+		Version:  s.version,
+		// S-H1: NOT capability-gated. /healthz is a public operator/monitoring
+		// mirror, not a per-connection provider surface. No legacy CLI code
+		// path (verified against v1.8.30 sources: no `/healthz` reference in
+		// SelfUpdate/CoordinatorClient/AutoUpdater/HTTPServer) fetches this
+		// endpoint to drive an autoupdate — the autoupdater is fed exclusively
+		// by the WebSocket hello_ack / auth_response `recommended_binary_version`
+		// field, which IS gated above. Gating this monitoring value would blind
+		// operators with no security benefit.
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 	}
 	for _, p := range providers {

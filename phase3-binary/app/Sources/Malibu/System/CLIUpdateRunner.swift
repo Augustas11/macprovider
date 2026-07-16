@@ -1,8 +1,24 @@
 import Foundation
 
 enum CLIUpdateRunner {
+    // Legacy repair pins exactly the CLI version this app shipped as. The
+    // 1.8.40 arming is a cohort-bound recovery exception (Decision Entry 160)
+    // for the stranded 1.8.30/1.8.32/1.8.39 test cohort. Later releases MUST
+    // leave this constant unchanged — the exact-match interlock in
+    // `strategy(...)` then disarms the bridge automatically — unless a new
+    // decision entry authorizes re-arming with release-specific proof.
+    static let legacyBootstrapTarget = "1.8.40"
+
+    enum Strategy: Equatable {
+        case installedCompatibilityCLI
+        case pinnedInstaller(version: String)
+    }
+
     enum Error: Swift.Error, LocalizedError {
         case cliNotFound
+        case invalidInstalledVersion(String?)
+        case legacyBootstrapUnavailable(appVersion: String?)
+        case legacyBootstrapWouldDowngrade(installedVersion: String)
         case nonZeroExit(Int32)
         case rollbackRestored(Int32)
         case rollbackFailed(Int32)
@@ -13,6 +29,12 @@ enum CLIUpdateRunner {
             switch self {
             case .cliNotFound:
                 return "macprovider-cli was not found at the expected install path."
+            case let .invalidInstalledVersion(version):
+                return "Installed provider CLI version is invalid: \(version ?? "unknown")."
+            case let .legacyBootstrapUnavailable(appVersion):
+                return "This legacy provider requires Malibu v\(legacyBootstrapTarget) to install the complete compatibility set (running \(appVersion.map { "v\($0)" } ?? "an unknown app version"))."
+            case let .legacyBootstrapWouldDowngrade(installedVersion):
+                return "Malibu v\(legacyBootstrapTarget) will not downgrade provider CLI v\(installedVersion)."
             case let .nonZeroExit(code):
                 return "CLI update failed (exit \(code))."
             case let .rollbackRestored(code):
@@ -49,14 +71,87 @@ enum CLIUpdateRunner {
         throw Error.cliNotFound
     }
 
-    static func run(onLogLine: @escaping @Sendable @MainActor (String) -> Void) async throws {
-        let executable = try resolveExecutableURL()
-        try await runForTest(
-            executableURL: executable,
-            arguments: ["update"],
-            onLogLine: onLogLine,
+    static func strategy(
+        installedVersion: String?,
+        compatibilitySetID: String?,
+        bundledAppVersion: String?
+    ) throws -> Strategy {
+        guard let installedVersion,
+              let normalizedInstalled = ProviderCLIVersion.strictNormalize(installedVersion) else {
+            throw Error.invalidInstalledVersion(installedVersion)
+        }
+        let hasCompatibilitySet = compatibilitySetID?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty == false
+        let predatesCompatibilityUpdater = ProviderCLIVersion.compare(
+            normalizedInstalled,
+            ProviderCLIVersion.compatibilitySetReleaseFloor
+        ) == .ascending
+        guard predatesCompatibilityUpdater || !hasCompatibilitySet else {
+            return .installedCompatibilityCLI
+        }
+
+        guard ProviderCLIVersion.compare(normalizedInstalled, legacyBootstrapTarget) != .descending else {
+            throw Error.legacyBootstrapWouldDowngrade(installedVersion: normalizedInstalled)
+        }
+        guard let bundledAppVersion,
+              ProviderCLIVersion.strictNormalize(bundledAppVersion) == legacyBootstrapTarget else {
+            throw Error.legacyBootstrapUnavailable(appVersion: bundledAppVersion)
+        }
+        return .pinnedInstaller(version: "v\(legacyBootstrapTarget)")
+    }
+
+    static func run(
+        installedVersion: String?,
+        compatibilitySetID: String?,
+        onLogLine: @escaping @Sendable @MainActor (String) -> Void
+    ) async throws {
+        let appVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+        let selectedStrategy = try strategy(
+            installedVersion: installedVersion,
+            compatibilitySetID: compatibilitySetID,
+            bundledAppVersion: appVersion
+        )
+        try await runStrategyForTest(
+            strategy: selectedStrategy,
+            installedUpdate: {
+                let executable = try resolveExecutableURL()
+                try await runCommand(
+                    executableURL: executable,
+                    arguments: ["update"],
+                    onLogLine: onLogLine
+                )
+            },
+            pinnedInstall: { version in
+                await onLogLine(
+                    "[Malibu] Repairing the complete provider installation with signed \(version)."
+                )
+                try await CLIInstallRunner.run(
+                    pinnedVersion: version,
+                    onLogLine: onLogLine
+                )
+            },
             readinessCheck: { await waitForBuyerServing() }
         )
+    }
+
+    static func runStrategyForTest(
+        strategy: Strategy,
+        installedUpdate: @escaping @Sendable () async throws -> Void,
+        pinnedInstall: @escaping @Sendable (String) async throws -> Void,
+        readinessCheck: @escaping @Sendable () async -> Bool
+    ) async throws {
+        switch strategy {
+        case .installedCompatibilityCLI:
+            try await installedUpdate()
+        case let .pinnedInstaller(version):
+            try await pinnedInstall(version)
+        }
+        guard await readinessCheck() else {
+            throw Error.readinessFailed
+        }
     }
 
     static func runForTest(
@@ -65,6 +160,24 @@ enum CLIUpdateRunner {
         onLogLine: @escaping @Sendable @MainActor (String) -> Void,
         readinessCheck: @escaping @Sendable () async -> Bool
     ) async throws {
+        try await runCommand(
+            executableURL: executableURL,
+            arguments: arguments,
+            onLogLine: onLogLine
+        )
+        guard await readinessCheck() else {
+            throw Error.readinessFailed
+        }
+    }
+
+    private static func runCommand(
+        executableURL: URL,
+        arguments: [String],
+        onLogLine: @escaping @Sendable @MainActor (String) -> Void
+    ) async throws {
+        let environment = try updaterEnvironment(
+            parentEnvironment: ProcessInfo.processInfo.environment
+        )
         let outputState = CLIUpdateOutputState()
         let exitCode: Int32 = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -76,11 +189,6 @@ enum CLIUpdateRunner {
                 process.standardOutput = stdout
                 process.standardError = stderr
 
-                var environment = ProcessInfo.processInfo.environment
-                environment["HOME"] = NSHomeDirectory()
-                if environment["PATH"]?.isEmpty != false {
-                    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-                }
                 process.environment = environment
 
                 let emit: (Pipe) -> Void = { pipe in
@@ -130,9 +238,24 @@ enum CLIUpdateRunner {
             }
             throw Error.nonZeroExit(exitCode)
         }
-        guard await readinessCheck() else {
-            throw Error.readinessFailed
-        }
+    }
+
+    static func updaterEnvironment(
+        parentEnvironment: [String: String]
+    ) throws -> [String: String] {
+        // The installed updater owns release selection and mutation. Do not
+        // forward app-launch tokens, repository/key overrides, shell startup,
+        // dynamic-loader configuration, or test hooks into that authority.
+        _ = parentEnvironment
+        return try ProcessEnvironmentSanitizer.sanitized(
+            from: [:],
+            extraEnvironment: [
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "HOME": NSHomeDirectory(),
+                "TMPDIR": "/tmp",
+                "LC_ALL": "C",
+            ]
+        )
     }
 
     private static func waitForBuyerServing(timeout: TimeInterval = 90) async -> Bool {

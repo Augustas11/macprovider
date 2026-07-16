@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+trust_anchor_helper="$repo_root/scripts/prepare-malibu-bootstrap-trust-anchor.py"
+legacy_sparkle_key="$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+
 die() {
   printf '[verify-malibu-release] ERROR: %s\n' "$*" >&2
   exit 1
@@ -18,6 +22,18 @@ die() {
 
 target="$1"
 [ -e "$target" ] || die "missing: $target"
+
+verify_update_posture() {
+  local app_path="$1"
+  local malibu_links
+
+  python3 "$trust_anchor_helper" verify "$app_path" "$legacy_sparkle_key"
+  malibu_links="$(/usr/bin/otool -L "$app_path/Contents/MacOS/Malibu")" ||
+    die "could not inspect Malibu runtime linkage"
+  if printf '%s\n' "$malibu_links" | /usr/bin/grep -F Sparkle >/dev/null; then
+    die "Malibu must not link a Sparkle runtime"
+  fi
+}
 
 case "$target" in
   *.dmg)
@@ -31,11 +47,13 @@ case "$target" in
     app_path="$mount_dir/Malibu.app"
     [ -d "$app_path" ] || die "Malibu.app not found inside $target"
     codesign --verify --strict --deep --verbose=2 "$app_path"
+    verify_update_posture "$app_path"
     xcrun stapler validate "$target"
     spctl -a -vvv -t open "$target" || spctl -a -vvv -t exec "$app_path"
     ;;
   *.app)
     codesign --verify --strict --deep --verbose=2 "$target"
+    verify_update_posture "$target"
     xcrun stapler validate "$target"
     spctl -a -vvv -t exec "$target"
     ;;

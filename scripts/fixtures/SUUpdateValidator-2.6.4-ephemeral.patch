@@ -1,0 +1,109 @@
+diff --git a/Tests/SUUpdateValidatorTest.swift b/Tests/SUUpdateValidatorTest.swift
+index 0102648..4106eff 100644
+--- a/Tests/SUUpdateValidatorTest.swift
++++ b/Tests/SUUpdateValidatorTest.swift
+@@ -9,1 +9,4 @@
++#if canImport(CryptoKit)
++import CryptoKit
++#endif
+ import Foundation
+@@ -244,4 +247,99 @@ class SUUpdateValidatorTest: XCTestCase {
+             testPostValidation(oldBundle: .codeSignedBoth, newBundle: .both, signatures: signatureConfig, expectedResult: signatureIsValid)
+         }
+     }
++
++#if canImport(CryptoKit)
++    @available(macOS 10.15, *)
++    func testEphemeralEdDSAKeyContinuityForApplicationUpdate() throws {
++        let fileManager = FileManager.default
++        let rootURL = fileManager.temporaryDirectory.appendingPathComponent("SparkleEphemeralValidator-\(UUID().uuidString)", isDirectory: true)
++        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
++        defer { try? fileManager.removeItem(at: rootURL) }
++
++        let privateKey = Curve25519.Signing.PrivateKey()
++        let publicKey = privateKey.publicKey.rawRepresentation.base64EncodedString()
++
++        func createApp(at appURL: URL, version: String, build: String, publicKey: String?) throws {
++            let contentsURL = appURL.appendingPathComponent("Contents", isDirectory: true)
++            try fileManager.createDirectory(at: contentsURL, withIntermediateDirectories: true)
++            var info: [String: Any] = [
++                "CFBundleIdentifier": "tech.malibu.app",
++                "CFBundleName": "Malibu",
++                "CFBundlePackageType": "APPL",
++                "CFBundleShortVersionString": version,
++                "CFBundleVersion": build,
++            ]
++            if let publicKey = publicKey {
++                info["SUPublicEDKey"] = publicKey
++            }
++            let plist = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
++            try plist.write(to: contentsURL.appendingPathComponent("Info.plist"), options: .atomic)
++        }
++
++        let oldAppURL = rootURL.appendingPathComponent("old/Malibu.app", isDirectory: true)
++        try createApp(at: oldAppURL, version: "1.8.32", build: "32", publicKey: publicKey)
++        guard let oldBundle = Bundle(url: oldAppURL) else {
++            return XCTFail("Failed to construct old Malibu bundle")
++        }
++        let host = SUHost(bundle: oldBundle)
++
++        func createDiskImage(from stageURL: URL, at dmgURL: URL) throws {
++            let process = Process()
++            process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
++            process.arguments = ["create", "-quiet", "-srcfolder", stageURL.path, "-ov", "-format", "UDZO", dmgURL.path]
++            let diagnostics = Pipe()
++            process.standardOutput = diagnostics
++            process.standardError = diagnostics
++            try process.run()
++            process.waitUntilExit()
++            if process.terminationStatus != 0 {
++                let output = String(data: diagnostics.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
++                throw NSError(domain: "SparkleEphemeralValidatorHarness", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: output])
++            }
++        }
++
++        func validate(targetContainsKey: Bool) throws {
++            let name = targetContainsKey ? "with-key" : "without-key"
++            let stageURL = rootURL.appendingPathComponent("\(name)-stage", isDirectory: true)
++            try createApp(
++                at: stageURL.appendingPathComponent("Malibu.app", isDirectory: true),
++                version: "1.8.39",
++                build: "39",
++                publicKey: targetContainsKey ? publicKey : nil)
++
++            let payloadURL = rootURL.appendingPathComponent("Malibu-v1.8.39-\(name).dmg")
++            try createDiskImage(from: stageURL, at: payloadURL)
++            let payload = try Data(contentsOf: payloadURL)
++            let signature = try privateKey.signature(for: payload).base64EncodedString()
++#if SPARKLE_BUILD_LEGACY_DSA_SUPPORT
++            let signatures = SUSignatures(ed: signature, dsa: nil)
++#else
++            let signatures = SUSignatures(ed: signature)
++#endif
++
++            func verifierInformation() -> SPUVerifierInformation {
++                let information = SPUVerifierInformation(expectedVersion: "39", expectedContentLength: UInt64(payload.count))
++                information.actualContentLength = UInt64(payload.count)
++                return information
++            }
++
++            // A separate validator proves that the ephemeral signature over the
++            // real DMG is accepted. Do not reuse it below: normal application
++            // DMGs skip prevalidation and exercise post-extraction key continuity.
++            let signatureValidator = SUUpdateValidator(downloadPath: payloadURL.path, signatures: signatures, host: host, verifierInformation: verifierInformation())
++            try signatureValidator.validateDownloadPath()
++
++            let validator = SUUpdateValidator(downloadPath: payloadURL.path, signatures: signatures, host: host, verifierInformation: verifierInformation())
++            try validator.validate(withUpdateDirectory: stageURL.path)
++        }
++
++        XCTAssertNoThrow(try validate(targetContainsKey: true))
++        XCTAssertThrowsError(try validate(targetContainsKey: false)) { error in
++            let error = error as NSError
++            XCTAssertEqual(error.domain, SUSparkleErrorDomain)
++            XCTAssertEqual(error.code, 3002) // SUValidationError
++            XCTAssertTrue(error.localizedDescription.contains("only supports rotation, but not removal"), error.localizedDescription)
++        }
++    }
++#endif
+ }

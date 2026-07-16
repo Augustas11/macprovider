@@ -286,6 +286,90 @@ final class ProviderLifecycleLeaseTests: XCTestCase {
         XCTAssertEqual(fixture.store.inspect(), .valid(prepared))
     }
 
+    /// An ADOPTED-state handoff record whose OWNER identity is no longer valid
+    /// (crash + launchd restart + PID reuse: the live pid's process-start no
+    /// longer matches the record) makes adoptStartupHandoff's adopted branch
+    /// throw leaseNotValid(.ownerProcessMissingOrReused). Serve startup must FALL
+    /// BACK to a fresh startup acquisition (not restart-loop): the record denotes
+    /// an invalid/expired/wrong-owner RECORD, not a live conflicting owner.
+    func testServeStartupLeaseFallsBackWhenAdoptedRecordOwnerIdentityInvalid() throws {
+        let fixture = try makeFixture()
+        _ = try prepareHandoff(fixture)
+        fixture.environment.setProcessStart(nil, for: 4_321)
+        fixture.environment.transitionToLaunchdService(pid: 5_321, processStart: 100_000_456)
+
+        // First startup adopts the prepared handoff, producing an ADOPTED record
+        // owned by pid 5_321 / process-start 100_000_456.
+        let adopted = try ServeCommand.acquireStartupLifecycleLease(
+            store: fixture.store,
+            operationID: "provider-restart-1",
+            providerID: "provider-a",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(adopted.kind, .startup)
+        XCTAssertEqual(adopted.startupHandoff?.state, .adopted)
+        XCTAssertEqual(adopted.owner.processStartMicroseconds, 100_000_456)
+
+        // Simulate a crash + launchd restart that REUSED pid 5_321 with a
+        // DIFFERENT process-start. The adopted record's owner identity is now
+        // stale: adoptStartupHandoff's adopted branch rejects it as
+        // .ownerProcessMissingOrReused (leaseNotValid).
+        fixture.environment.setProcessStart(200_000_999, for: 5_321)
+        XCTAssertEqual(
+            fixture.store.inspect(),
+            .invalidOrExpired(record: adopted, reason: .ownerProcessMissingOrReused)
+        )
+
+        // The restarted process re-invokes startup with the SAME operation/provider
+        // identity the handoff was prepared for, so adoptStartupHandoff reaches its
+        // adopted branch and throws leaseNotValid(.ownerProcessMissingOrReused).
+        // The new fallback must replace the invalid record with a fresh startup
+        // lease owned by the live process rather than throwing.
+        let fresh = try ServeCommand.acquireStartupLifecycleLease(
+            store: fixture.store,
+            operationID: "provider-restart-1",
+            providerID: "provider-a",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertEqual(fresh.operationID, "provider-restart-1")
+        XCTAssertNotEqual(fresh.leaseID, adopted.leaseID)
+        XCTAssertEqual(fresh.owner.pid, 5_321)
+        XCTAssertEqual(fresh.owner.processStartMicroseconds, 200_000_999)
+        // Fresh acquisition mints a plain startup lease (no adopted handoff).
+        XCTAssertNil(fresh.startupHandoff)
+        XCTAssertEqual(fixture.store.inspect(), .valid(fresh))
+    }
+
+    /// A VALID live foreign owner (no handoff on disk) must still be a HARD
+    /// failure: the leaseNotValid fallback path must NOT bypass acquire()'s
+    /// refusal to displace a valid live owner. Here adoptStartupHandoff throws
+    /// handoffNotPrepared (no handoff), the fallback calls acquire(), and
+    /// acquire() re-validates the live foreign owner and throws .alreadyHeld --
+    /// the unchanged startup_lease_unavailable outcome.
+    func testServeStartupLeaseStillFailsHardWhenValidLiveForeignOwnerHoldsLease() throws {
+        let fixture = try makeFixture()
+        // A foreign owner (current pid 4_321) holds a valid, live startup lease
+        // with an unrelated operation and no handoff.
+        let foreign = try fixture.store.acquire(
+            kind: .startup,
+            operationID: "foreign-live-op",
+            duration: 20 * 60
+        )
+        XCTAssertEqual(fixture.store.inspect(), .valid(foreign))
+
+        XCTAssertThrowsError(try ServeCommand.acquireStartupLifecycleLease(
+            store: fixture.store,
+            operationID: "different-startup-op",
+            providerID: "provider-a",
+            duration: 5 * 60
+        )) { error in
+            XCTAssertEqual(error as? ProviderLifecycleLeaseError, .alreadyHeld(foreign))
+        }
+        // The valid live foreign lease is untouched.
+        XCTAssertEqual(fixture.store.inspect(), .valid(foreign))
+    }
+
     func testHandoffPreparationAndAdoptionAreResponseLossIdempotentButNotReplayable() throws {
         let fixture = try makeFixture()
         let firstPrepared = try prepareHandoff(fixture)

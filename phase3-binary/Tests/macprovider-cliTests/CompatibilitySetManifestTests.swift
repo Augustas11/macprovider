@@ -4,6 +4,32 @@ import XCTest
 @testable import macprovider_cli
 
 final class CompatibilitySetManifestTests: XCTestCase {
+    func testDistributedRollbackPlanMatchesSupportedExecutionContract() throws {
+        let phase3Root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let planURL = phase3Root.appendingPathComponent(
+            "dist/compatibility-set-assets/updater-rollback.json"
+        )
+
+        let plan = try CompatibilitySetRollbackPlan.loadValidated(from: planURL)
+
+        XCTAssertEqual(plan.activationCheckpoints, [
+            "owned_resources_removed",
+            "owned_resources_activated",
+            "watchdog_script_activated",
+            "provider_plist_activated",
+            "watchdog_plist_activated",
+            "binary_activated",
+            "malibu_app_activated",
+        ])
+        XCTAssertEqual(
+            plan.rollbackOrder,
+            CompatibilitySetRollbackPlan.supportedRollbackOrder
+        )
+    }
+
     func testValidSignedCanonicalManifestBindsCatalogAndRelease() throws {
         let fixture = try CompatibilityManifestFixture()
 

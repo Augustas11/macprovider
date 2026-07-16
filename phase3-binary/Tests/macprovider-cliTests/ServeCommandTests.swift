@@ -97,6 +97,77 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertEqual(command.port, 18080)
     }
 
+    func testAutotuneCandidateFlagRequiresNoJoin() throws {
+        XCTAssertThrowsError(try ServeCommand.parse([
+            "--autotune-candidate",
+            "--model", "model-a",
+            "--port", "18080",
+        ])) { error in
+            XCTAssertTrue(
+                String(describing: error).contains("--autotune-candidate requires --no-join"),
+                "unexpected error: \(error)"
+            )
+        }
+
+        let command = try ServeCommand.parse([
+            "--no-join",
+            "--autotune-candidate",
+            "--model", "model-a",
+            "--port", "18080",
+        ])
+        XCTAssertTrue(command.noJoin)
+        XCTAssertTrue(command.autotuneCandidate)
+    }
+
+    func testAutotuneCandidateSkipsDuplicateStartupMeasurement() async {
+        let candidateEstimate = await ServeCommand.startupThroughputEstimate(
+            autotuneCandidate: true,
+            measure: {
+                XCTFail("autotune candidates must leave inference measurement to Stage 1")
+                return 99
+            }
+        )
+        XCTAssertEqual(candidateEstimate, 0)
+
+        let providerEstimate = await ServeCommand.startupThroughputEstimate(
+            autotuneCandidate: false,
+            measure: { 42 }
+        )
+        XCTAssertEqual(providerEstimate, 42)
+    }
+
+    func testAutotuneCandidateRoutesLifecycleStoreToCandidateFile() {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("serve-lifecycle-home-\(UUID().uuidString)", isDirectory: true)
+
+        let candidateStore = ServeCommand.lifecycleStateStore(
+            autotuneCandidate: true,
+            homeDirectory: home
+        )
+        XCTAssertEqual(candidateStore.url.lastPathComponent, "candidate-state-v1.json")
+        XCTAssertEqual(
+            candidateStore.url,
+            ProviderLifecycleStateStore.candidateURL(homeDirectory: home)
+        )
+
+        let incumbentStore = ServeCommand.lifecycleStateStore(
+            autotuneCandidate: false,
+            homeDirectory: home
+        )
+        XCTAssertEqual(incumbentStore.url.lastPathComponent, "state-v1.json")
+        XCTAssertEqual(
+            incumbentStore.url,
+            ProviderLifecycleStateStore.defaultURL(homeDirectory: home)
+        )
+
+        XCTAssertNotEqual(candidateStore.url, incumbentStore.url)
+        XCTAssertEqual(
+            candidateStore.url.deletingLastPathComponent(),
+            incumbentStore.url.deletingLastPathComponent(),
+            "candidate and incumbent stores must share the lifecycle directory"
+        )
+    }
+
     func testEnableReceiptsFlagParses() throws {
         let command = try ServeCommand.parse([
             "--enable-receipts",

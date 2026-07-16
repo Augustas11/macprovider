@@ -134,6 +134,7 @@ test('operator pool projects versioned heartbeat safety telemetry for remote liv
   const now = Date.parse('2026-07-14T12:00:00Z');
   const rows = poolzSnapshot({ pool: [{
     provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a',
+    binary_version: '1.8.30', catalog_admission_mode: 'legacy_bridge',
     state: 'ready', routing_eligible: true, connected_at: new Date(now - 60_000).toISOString(),
     last_heartbeat_at: new Date(now - 1_000).toISOString(),
     safety_telemetry: {
@@ -149,6 +150,8 @@ test('operator pool projects versioned heartbeat safety telemetry for remote liv
       observed_at: new Date(now - 1_000).toISOString(), valid_for_ms: 90_000,
     },
   }] }, now);
+  assert.equal(rows[0].binary_version, '1.8.30');
+  assert.equal(rows[0].catalog_admission_mode, 'legacy_bridge');
   assert.equal(rows[0].safety_telemetry.provider_id, 'provider-a');
   assert.deepEqual(providerSignalReasons(rows[0].safety_telemetry, rows[0].safety_telemetry), []);
 });

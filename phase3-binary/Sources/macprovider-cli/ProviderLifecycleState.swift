@@ -301,9 +301,9 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         case .loadingModel:
             [.validatingCatalog]
         case .degradedServing:
-            [.pausedByOperator, .locallyReadyConnecting, .servingBuyers, .degradedServing]
+            [.loadingModel, .pausedByOperator, .locallyReadyConnecting, .servingBuyers, .degradedServing]
         case .pausedByOperator:
-            [.installing, .locallyReadyConnecting, .servingBuyers, .degradedServing, .pausedByOperator]
+            [.installing, .loadingModel, .locallyReadyConnecting, .servingBuyers, .degradedServing, .pausedByOperator]
         case .servingBuyers:
             [
                 .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
@@ -327,6 +327,24 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         }
         if let allowedPredecessors, !allowedPredecessors.contains(previous.state) {
             throw ProviderLifecycleStateError.invalidTransition(from: previous.state.rawValue, to: state.rawValue)
+        }
+
+        // Decision Entry 158 pins the writer for the two `loading_model` exits
+        // introduced by v1.8.40. The predecessor list and writer authorization
+        // are evaluated independently above, so a writer that is separately
+        // allowed to enter the target state (operator_command → degraded_serving,
+        // installer → paused_by_operator) would otherwise ride the new
+        // predecessor edge. Validate (predecessor, target, writer) as a tuple so
+        // ONLY the Entry-158 combinations remain legal for these two edges.
+        if previous.state == .loadingModel {
+            switch state {
+            case .degradedServing where writer != .serve:
+                throw ProviderLifecycleStateError.invalidTransition(from: previous.state.rawValue, to: state.rawValue)
+            case .pausedByOperator where writer != .operatorCommand:
+                throw ProviderLifecycleStateError.invalidTransition(from: previous.state.rawValue, to: state.rawValue)
+            default:
+                break
+            }
         }
     }
 
@@ -447,6 +465,18 @@ struct ProviderLifecycleStateStore: @unchecked Sendable {
         homeDirectory
             .appendingPathComponent("Library/Application Support/macprovider/lifecycle", isDirectory: true)
             .appendingPathComponent("state-v1.json")
+    }
+
+    /// Autotune candidates (`serve --no-join --autotune-candidate`) share the
+    /// installed incumbent's lifecycle directory but MUST NOT overwrite the
+    /// incumbent's Malibu-visible `state-v1.json`. They persist to a distinct
+    /// candidate-scoped store (own file, own lock — see `init`) so a successful
+    /// candidate reaching `degraded_serving` never masks a healthy incumbent's
+    /// state. The transition graph is still enforced; only the file changes.
+    static func candidateURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        homeDirectory
+            .appendingPathComponent("Library/Application Support/macprovider/lifecycle", isDirectory: true)
+            .appendingPathComponent("candidate-state-v1.json")
     }
 
     func inspect() -> ProviderLifecycleStateInspection {

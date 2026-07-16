@@ -905,15 +905,14 @@ var gatewayRetryableByCode = map[string]bool{
 	"invalid_provider_usage":  true,
 	// rate_limit_exceeded-typed 429s that actually ship a backoff signal
 	// (Retry-After via setConcurrencyRateLimitHeaders, or X-RateLimit-Reset
-	// via setRateLimitHeaders) — H-R2. signup_rate_limited ships no header
-	// either but is left true pending a dedicated review; it was not named
-	// in the round-3 revert (see gatewayPermanentCodes for the three that
-	// were reverted, and why).
+	// via setRateLimitHeaders) — H-R2. (signup_rate_limited was the one
+	// rate_limit_exceeded code left true only because the round-3 revert
+	// didn't name it; runbook item 20 reverted it to false alongside its
+	// three siblings — see gatewayPermanentCodes.)
 	"account_request_rate_exceeded": true,
 	"account_concurrency_exceeded":  true,
 	"demo_concurrency_exceeded":     true,
 	"quota_exhausted":               true,
-	"signup_rate_limited":           true,
 	// Operator-controlled capacity pauses (M-R2-3 + sweep): the wording on
 	// all three ("paused"/"closed ... while capacity catches up") already
 	// promises the buyer this resolves with time; the code must agree.
@@ -957,6 +956,14 @@ var gatewayPermanentCodes = map[string]bool{
 	// throttle, a DoS-amplification risk. Reverted to false.
 	"feedback_rate_limited": true, "oauth_state_rate_limited": true,
 	"demo_session_rate_limited": true,
+	// Runbook item 20 (deferred from #548 r4 audit): signup_rate_limited is
+	// the same shape — a per-IP-per-day signup cap (oauth.go
+	// createSignupAccount, SignupAccountsPerIPPerDay over a 24h window)
+	// emitted with no Retry-After header and outside the chat-path rate
+	// clamp. #548 left it true only because the round-3 revert didn't name
+	// it. Retrying the identical signup within the 24h window cannot
+	// succeed, so zero-backoff SDK auto-retry is pure DoS amplification.
+	"signup_rate_limited": true,
 	// Internal-fault codes: absent Retry-After/reset header and no
 	// "retry later" wording, so the sweep's rule doesn't require true —
 	// these are ambiguous store/settlement faults, not availability
