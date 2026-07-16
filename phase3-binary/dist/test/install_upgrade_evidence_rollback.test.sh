@@ -1636,7 +1636,19 @@ grep -F '"state":"serving"' "$root/home/Library/Application Support/macprovider/
 # (owner.pid / owner.process_start_us / owner.boot_session) authored by
 # write_lease_record, proving the reconciler decodes what the Swift store
 # actually writes (Defect 1), not a flat owner_pid it never emits.
-
+#
+# Every fixture writer here (write_lease_record /
+# write_prepared_handoff_lease_record) reads an EXACT-microsecond process start
+# via the Darwin sysctl kinfo_proc.p_starttime ABI (ctypes libc.sysctl) and the
+# boot session via `/usr/sbin/sysctl -n kern.bootsessionuuid`. Both are
+# Darwin-only: on glibc Linux `libc.sysctl` is absent (AttributeError, uncaught)
+# and `/usr/sbin/sysctl` cannot answer kern.bootsessionuuid, so the very first
+# fixture (A-05.1) would abort the whole script within ~1s under `set -e`. The
+# reconciler under test (install.sh recover.sh) only ever runs on macOS, so
+# these cases are Darwin-only. They are wrapped in a function and invoked only on
+# Darwin (see the uname guard at the end); portable CI still exercises every
+# non-lease rollback case above.
+run_darwin_lease_reconciliation_cases() {
 # (A-05.1) A stale lease from the rolled-back install operation is removed.
 lease_fixture="$TMP/lease_stale_operation.json"
 write_lease_record "$lease_fixture" "install:test-$$" maintenance 999999
@@ -2168,6 +2180,7 @@ if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json
 fi
 kill "$m6_pid" >/dev/null 2>&1 || true
 wait "$m6_pid" 2>/dev/null || true
+}
 
 run_darwin_manual_recovery_cases() {
 # A non-launchd provider holding the configured port is a real protected
@@ -2290,13 +2303,18 @@ fi
 kill "$retry_pid"
 }
 
-# Exact capture and byte-for-byte replay of an existing process uses Darwin's
-# KERN_PROCARGS2 contract. Portable CI still exercises every other rollback
-# case above; the macOS lane runs these two process-preservation cases.
+# The A-05 lease-reconciliation cases and the manual-provider argv-replay cases
+# both depend on Darwin-only primitives: the sysctl kinfo_proc.p_starttime ABI
+# (exact process-start microseconds) and kern.bootsessionuuid for the lease
+# fixtures, and Darwin's KERN_PROCARGS2 argv contract for the manual-provider
+# cases. The reconciler under test only runs on macOS. Portable CI still
+# exercises every other rollback case above; the macOS lane runs these.
 if [ "$(uname -s)" = "Darwin" ]; then
+  run_darwin_lease_reconciliation_cases
   run_darwin_manual_recovery_cases
 else
-  echo "skipping Darwin-only manual provider argv recovery cases"
+  echo "SKIP: Darwin-only lease reconciliation cases (A-05.1..A-05.21) -- reconciler is macOS-only (sysctl kinfo_proc process-start + kern.bootsessionuuid)"
+  echo "SKIP: Darwin-only manual provider argv recovery cases -- KERN_PROCARGS2 exact argv capture/replay is macOS-only"
 fi
 
 echo "upgrade evidence rollback fault matrix ok"
