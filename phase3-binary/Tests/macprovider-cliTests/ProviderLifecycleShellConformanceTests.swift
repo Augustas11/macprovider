@@ -577,6 +577,77 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         }
     }
 
+    /// Auditor reproduction (R6 CODE-M1): the record `version` field decodes as a
+    /// Swift Int, and JSONDecoder rejects a JSON boolean for an Int field. The
+    /// shell's `record.get("version") != 1` check alone would ACCEPT a JSON
+    /// `true`, because Python's `True == 1`. A record whose `version` is the
+    /// boolean `true` is therefore store-READABLE-shaped but NOT decodable by the
+    /// real store (its inspect() cannot yield a valid record), so preserving it
+    /// would restart-loop the provider. The reconciler must apply the non-bool
+    /// integer predicate to the version field and REMOVE the file, after which
+    /// the real store self-heals by acquiring a fresh lease. The record otherwise
+    /// carries a live prepared handoff + dead owner, so the ONLY thing that could
+    /// have preserved it is the exemption -- which the version predicate declines.
+    func testShellReconcilerRemovesBooleanVersionPreparedHandoffThenStoreAcquiresFresh() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        guard let boot = LeaseHandoffHarness.realBootSession() else {
+            throw XCTSkip("kern.bootsessionuuid unavailable")
+        }
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+        var record = Self.preparedHandoffRecordJSON(
+            boot: boot,
+            wallNow: wallNow,
+            monoNow: monoNow,
+            operationID: "provider-restart-bool-version",
+            serviceIdentity: LeaseHandoffHarness.serviceIdentity,
+            ownerPID: 999_999,
+            ownerProcessStartUS: 1
+        )
+        // The sole defect: a JSON boolean where an Int version is required.
+        record["version"] = true
+        let recordData = try JSONSerialization.data(
+            withJSONObject: record,
+            options: [.sortedKeys]
+        )
+        try (recordData + Data([0x0a])).write(to: leaseURL)
+
+        // Sanity: the real store does NOT consider this a valid record (the
+        // boolean version overflows the Int decode -> malformed), so the shell
+        // must not rely on "Swift revalidates".
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider a boolean-version record valid")
+        }
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a boolean-version prepared-handoff record must be removed"
+        )
+
+        // Self-healing: the real store can now acquire a fresh lease.
+        let freshStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        let fresh = try freshStore.acquire(
+            kind: .startup,
+            operationID: "serve:after-bool-version-removal",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertNil(fresh.startupHandoff)
+        guard case .valid = freshStore.inspect() else {
+            return XCTFail("freshly acquired lease must inspect as valid")
+        }
+    }
+
     /// Builds a store-READABLE-shaped MAINTENANCE lease record carrying a live
     /// `.prepared` startup handoff and a dead owner, so the ONLY preservation
     /// path is the exemption. Callers inject a single boundary-violating field

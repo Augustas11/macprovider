@@ -155,6 +155,23 @@ def boot_session():
     return value or "00000000-0000-0000-0000-000000000000"
 
 
+# Build a STRUCTURALLY VALID record window from the real current clocks so the
+# reconciler's base structural validator (record_matches_swift_structure, which
+# mirrors Swift's validateRecordStructure and now gates the ordinary live-owner
+# preservation path too) accepts it: correct kind-specific duration bound and
+# the exact monotonicDuration == wallDuration * 1_000_000 algebra Swift enforces.
+# A 15-minute window is inside BOTH the startup (30 min) and maintenance (20 min)
+# ceilings and currently brackets `now`. The live-foreign case therefore stays a
+# genuine "Swift-valid record + live owner -> PRESERVED" test; the dead-owner and
+# rollback cases remove regardless of structure.
+wall_now = int(time.time() * 1_000)
+mono_now = int(time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))
+issued_wall = wall_now - 5 * 60 * 1_000
+expires_wall = wall_now + 10 * 60 * 1_000
+wall_duration = expires_wall - issued_wall
+issued_mono = mono_now - 5 * 60 * 1_000_000_000
+expires_mono = issued_mono + wall_duration * 1_000_000
+
 record = {
     "version": 1,
     "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -165,10 +182,10 @@ record = {
         "process_start_us": process_start_us(owner_pid),
         "boot_session": boot_session(),
     },
-    "issued_wall_ms": 1_784_016_000_000,
-    "expires_wall_ms": 1_784_016_900_000,
-    "issued_monotonic_ns": 500_000_000_000,
-    "expires_monotonic_ns": 500_900_000_000_000,
+    "issued_wall_ms": issued_wall,
+    "expires_wall_ms": expires_wall,
+    "issued_monotonic_ns": issued_mono,
+    "expires_monotonic_ns": expires_mono,
 }
 with open(out_path, "w", encoding="utf-8") as handle:
     handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
@@ -202,11 +219,24 @@ write_prepared_handoff_lease_record() {
   #   PREPARED_OVERRIDE_TARGET_PATH        -> handoff.target_executable_path (e.g. a
   #                                           ".."-containing path Swift's
   #                                           standardizedFileURL guard rejects)
+  #   PREPARED_OVERRIDE_RECORD_VERSION     -> record.version raw token (e.g. "true"
+  #                                           to emit a JSON boolean the version
+  #                                           field must reject; R6 CODE-M1)
+  #   PREPARED_OVERRIDE_HANDOFF_VERSION    -> handoff.version raw token (same, M1)
+  #   PREPARED_OVERRIDE_LIVE_OWNER         -> when set to a LIVE pid, owner.pid and
+  #                                           owner.process_start_us are set so the
+  #                                           reconciler's owner_is_live() returns
+  #                                           True; used to prove structural
+  #                                           validation runs BEFORE owner-liveness
+  #                                           (R6 CODE-M4).
   PREPARED_OVERRIDE_OWNER_PID="${PREPARED_OVERRIDE_OWNER_PID:-}" \
   PREPARED_OVERRIDE_PROCESS_START_US="${PREPARED_OVERRIDE_PROCESS_START_US:-}" \
   PREPARED_OVERRIDE_HANDOFF_OPERATION="${PREPARED_OVERRIDE_HANDOFF_OPERATION:-}" \
   PREPARED_OVERRIDE_SERVICE_IDENTITY="${PREPARED_OVERRIDE_SERVICE_IDENTITY:-}" \
   PREPARED_OVERRIDE_TARGET_PATH="${PREPARED_OVERRIDE_TARGET_PATH:-}" \
+  PREPARED_OVERRIDE_RECORD_VERSION="${PREPARED_OVERRIDE_RECORD_VERSION:-}" \
+  PREPARED_OVERRIDE_HANDOFF_VERSION="${PREPARED_OVERRIDE_HANDOFF_VERSION:-}" \
+  PREPARED_OVERRIDE_LIVE_OWNER="${PREPARED_OVERRIDE_LIVE_OWNER:-}" \
   python3 - "$out_path" "$operation_id" "$owner_pid" "$expiry" "$record_kind" <<'PY'
 import json
 import os
@@ -221,6 +251,45 @@ if override_owner_pid:
     owner_pid = int(override_owner_pid)
 override_process_start_us = os.environ.get("PREPARED_OVERRIDE_PROCESS_START_US", "")
 process_start_us = int(override_process_start_us) if override_process_start_us else 1
+
+
+def _live_process_start_us(pid):
+    # The exact process_start_us the reconciler's owner_is_live() compares
+    # against: ps lstart resolves to whole-second precision, scaled to
+    # microseconds. A LIVE pid with this start makes owner_is_live() return True.
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    raw = result.stdout.strip() if result.returncode == 0 else ""
+    if not raw:
+        return 1
+    return int(time.mktime(time.strptime(raw))) * 1_000_000
+
+
+override_live_owner = os.environ.get("PREPARED_OVERRIDE_LIVE_OWNER", "")
+if override_live_owner:
+    owner_pid = int(override_live_owner)
+    process_start_us = _live_process_start_us(owner_pid)
+override_record_version = os.environ.get("PREPARED_OVERRIDE_RECORD_VERSION", "")
+override_handoff_version = os.environ.get("PREPARED_OVERRIDE_HANDOFF_VERSION", "")
+
+
+def _version_value(raw, default):
+    # Interpret an override token as its JSON scalar: "true"/"false" -> bool,
+    # otherwise an integer. Emitting a JSON boolean lets the fixture exercise the
+    # record/handoff version field's non-bool integer predicate (R6 CODE-M1).
+    if raw == "":
+        return default
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    return int(raw)
+
+
 override_handoff_operation = os.environ.get("PREPARED_OVERRIDE_HANDOFF_OPERATION", "")
 handoff_operation_id = override_handoff_operation or operation_id
 override_service_identity = os.environ.get("PREPARED_OVERRIDE_SERVICE_IDENTITY", "")
@@ -270,7 +339,7 @@ else:
     handoff_expires_mono = mono_now + 4 * 60 * 1_000_000_000
 
 handoff = {
-    "version": 1,
+    "version": _version_value(override_handoff_version, 1),
     "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     "state": "prepared",
     "operation_id": handoff_operation_id,
@@ -287,7 +356,7 @@ handoff = {
 }
 
 record = {
-    "version": 1,
+    "version": _version_value(override_record_version, 1),
     "lease_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     "operation_id": operation_id,
     # Default "maintenance" is the only kind Swift permits to carry a prepared
@@ -689,6 +758,9 @@ run_case() {
     MUTATION_LIFECYCLE_SEQUENCE="${MUTATION_LIFECYCLE_SEQUENCE:-}" \
     MUTATION_LIFECYCLE_OPERATOR_PAUSED="${MUTATION_LIFECYCLE_OPERATOR_PAUSED:-}" \
     MUTATION_LEASE_JSON="${MUTATION_LEASE_JSON:-}" \
+    MUTATION_LEASE_RAW_PATH="${MUTATION_LEASE_RAW_PATH:-}" \
+    MUTATION_LEASE_MODE="${MUTATION_LEASE_MODE:-}" \
+    MUTATION_LEASE_HARDLINK="${MUTATION_LEASE_HARDLINK:-}" \
     MUTATION_LEASE_OPERATION_ID="${MUTATION_LEASE_OPERATION_ID:-}" \
     RECOVERY_LIFECYCLE_FAULT="${RECOVERY_LIFECYCLE_FAULT:-}" \
     bash -c '
@@ -809,12 +881,26 @@ run_case() {
         "${MUTATION_LIFECYCLE_OPERATOR_PAUSED:-false}" \
         '22222222-2222-4222-8222-222222222222'
       chmod 600 "$LIFECYCLE_STATE_PATH"
-      if [ -n "${MUTATION_LEASE_JSON:-}" ]; then
+      if [ -n "${MUTATION_LEASE_RAW_PATH:-}" ]; then
+        # Byte-exact raw lease injection (R6 CODE-M2): NaN/duplicate-key/unpaired-
+        # surrogate fixtures cannot survive an env-var + printf round-trip, so the
+        # bytes are copied verbatim from a fixture file the parent shell built.
+        cp "$MUTATION_LEASE_RAW_PATH" "$LIFECYCLE_LEASE_PATH"
+        chmod "${MUTATION_LEASE_MODE:-600}" "$LIFECYCLE_LEASE_PATH"
+      elif [ -n "${MUTATION_LEASE_JSON:-}" ]; then
         # Double quotes here: this block runs inside the single-quoted `bash -c`
         # harness, so a single-quoted format string would break out of the outer
         # quote and drop the backslash from \n.
         printf "%s\n" "$MUTATION_LEASE_JSON" > "$LIFECYCLE_LEASE_PATH"
-        chmod 600 "$LIFECYCLE_LEASE_PATH"
+        chmod "${MUTATION_LEASE_MODE:-600}" "$LIFECYCLE_LEASE_PATH"
+      fi
+      if [ -n "${MUTATION_LEASE_HARDLINK:-}" ] && [ -e "$LIFECYCLE_LEASE_PATH" ]; then
+        # Storage-envelope negative (R6 CODE-M3): a second hard link makes
+        # st_nlink == 2, which the Swift store rejects on read as .unsafeStorage
+        # ("hard link"); the reconciler must REMOVE such a lease. The extra link
+        # lives beside the lease so unlinking the lease path still leaves it (the
+        # test asserts the lease path itself is gone).
+        ln "$LIFECYCLE_LEASE_PATH" "${LIFECYCLE_LEASE_PATH}.hardlink"
       fi
       case "$INSTALL_PHASE" in
         plist|watchdog) exit 9 ;;
@@ -1613,9 +1699,29 @@ fi
 # A-05.8 .. A-05.11: R5 CODE-M parity-class closures. Each fixture is a
 # store-READABLE-shaped record with a live prepared handoff and a dead owner --
 # so the ONLY reason to preserve it would be the exemption -- but a single wire
-# field is set to a value the real Swift store can never emit and its
-# JSONDecoder/validate would reject. Preserving any of these would restart-loop
-# the provider, so record_matches_swift_structure MUST decline the exemption and
+# field carries a value that must NOT preserve. Two distinct kinds of coverage
+# live here, and they rest on DIFFERENT guarantees:
+#
+#   * SWIFT-REJECTION evidence (A-05.8, A-05.9, A-05.10): the value is one the
+#     real Swift store can never emit AND its JSONDecoder/validate would REJECT
+#     (Int32/Int64 overflow decode failure; a Foundation-trimmed leading U+200B
+#     failing the store's `trimmed == value` guard). Preserving these would
+#     restart-loop the provider because Swift's inspect() rejects them; the
+#     shell mirror MUST decline the exemption for correctness parity.
+#
+#   * STRICT-SUBSET POLICY coverage (A-05.11): an interior-space service_identity
+#     is actually ACCEPTED by Swift's validateHandoffIdentity
+#     (ProviderLifecycleLease.swift ~774: trimmingCharacters trims only the ends,
+#     so `value == trimmed` holds for an interior space, and 0x20 passes the
+#     `>= 0x20` scalar rule). It is rejected ONLY by our deliberately STRICTER
+#     shell ASCII 0x21..0x7e rule. This is NOT a Swift-rejection case; it is a
+#     strict-superset policy the reconciler applies knowing the store never
+#     WRITES a spaced service identity (launchd labels contain no spaces), so the
+#     at-most-theoretical false-removal is a bounded availability delay, never a
+#     restart loop. It is covered here to lock the stricter policy in place, not
+#     because Swift would reject the value.
+#
+# In every case record_matches_swift_structure MUST decline the exemption and
 # the reconciler MUST REMOVE the file.
 # ---------------------------------------------------------------------------
 
@@ -1706,6 +1812,220 @@ if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json
   echo "prepared-handoff lease with '..'-component target_executable_path survived rollback" >&2
   exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# A-05.13 .. A-05.19: R6 CODE-M parity-class closures. As above, each fixture is
+# a store-READABLE-shaped record whose sole defect is a value/envelope the real
+# Swift store rejects (JSONDecoder bool-for-Int, lax JSON constants/duplicate
+# keys/surrogates, or a storage envelope validateOpenFile refuses). Preserving
+# any of these would restart-loop the provider, so the reconciler MUST REMOVE
+# the file -- and must never CRASH on the malformed input (removal, not exit).
+# ---------------------------------------------------------------------------
+
+# (A-05.13, R6 CODE-M1) record.version = JSON boolean `true`. Python's
+# `record.get("version") != 1` alone would pass (True == 1), but Swift's
+# JSONDecoder rejects `true` for an Int field -> .unsupportedVersion. The
+# non-bool integer predicate on the version field must reject it -> REMOVED.
+lease_fixture="$TMP/lease_prepared_handoff_record_version_true.json"
+PREPARED_OVERRIDE_RECORD_VERSION=true \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-9" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_record_version_true "" "" "" self-test
+root="$TMP/lease_prepared_handoff_record_version_true"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with boolean record.version survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.14, R6 CODE-M1) handoff.version = JSON boolean `true`. Same defect on the
+# handoff version field -> REMOVED.
+lease_fixture="$TMP/lease_prepared_handoff_handoff_version_true.json"
+PREPARED_OVERRIDE_HANDOFF_VERSION=true \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-10" 999999 valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_prepared_handoff_handoff_version_true "" "" "" self-test
+root="$TMP/lease_prepared_handoff_handoff_version_true"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with boolean handoff.version survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.15, R6 CODE-M2) a NaN extra field. Python's default json.loads accepts
+# NaN; Foundation's JSONDecoder rejects it. The strict loader (parse_constant)
+# rejects it, and the reconciler treats the parse failure as REMOVAL without
+# crashing.
+lease_fixture="$TMP/lease_prepared_handoff_valid_for_nan.json"
+write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-11" 999999 valid
+raw_fixture="$TMP/lease_prepared_handoff_nan.raw.json"
+python3 - "$lease_fixture" "$raw_fixture" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+text = open(src, "r", encoding="utf-8").read().rstrip("\n")
+# Insert a NaN-valued extra field just inside the top-level object. The default
+# Python json encoder would emit NaN, but we inject it as raw text so the bytes
+# are unambiguous regardless of encoder settings.
+assert text.startswith("{") and text.endswith("}")
+mutated = "{" + '"extra":NaN,' + text[1:]
+open(dst, "w", encoding="utf-8").write(mutated + "\n")
+PY
+MUTATION_LEASE_RAW_PATH="$raw_fixture" \
+  run_case lease_prepared_handoff_nan "" "" "" self-test
+root="$TMP/lease_prepared_handoff_nan"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with NaN field survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.16, R6 CODE-M2) a duplicate "version" key ("version":2,"version":1).
+# Python's default json.loads keeps the LAST value (1, valid); Foundation keeps
+# the FIRST (2, .unsupportedVersion). The strict loader's object_pairs_hook
+# rejects duplicate keys outright -> REMOVED, never a false preserve, never a
+# crash.
+raw_fixture="$TMP/lease_prepared_handoff_dupkey.raw.json"
+python3 - "$lease_fixture" "$raw_fixture" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+text = open(src, "r", encoding="utf-8").read().rstrip("\n")
+assert text.startswith("{") and '"version":1' in text, text[:40]
+# Prepend a second, DIFFERENT version value (order-independent: the record is
+# sorted-keys, so "version" is last, but keep-first vs keep-last disagreement
+# only needs two entries with the same key). The strict loader rejects the
+# duplicate key regardless of which value each parser would otherwise keep.
+mutated = '{"version":2,' + text[1:]
+open(dst, "w", encoding="utf-8").write(mutated + "\n")
+PY
+MUTATION_LEASE_RAW_PATH="$raw_fixture" \
+  run_case lease_prepared_handoff_dupkey "" "" "" self-test
+root="$TMP/lease_prepared_handoff_dupkey"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with duplicate version key survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.17, R6 CODE-M2) an unpaired surrogate escape in an identity field. Python
+# json accepts \ud800 and yields a lone surrogate; Foundation rejects it, and a
+# lone surrogate can later raise an uncaught UnicodeEncodeError inside a
+# validator (value.encode("utf-8")) -- which would CRASH the reconciler. The
+# strict loader's surrogate scan rejects it -> REMOVED, never a crash.
+raw_fixture="$TMP/lease_prepared_handoff_surrogate.raw.json"
+python3 - "$lease_fixture" "$raw_fixture" <<'PY'
+import json
+import sys
+src, dst = sys.argv[1:]
+record = json.loads(open(src, "r", encoding="utf-8").read())
+# Put a lone high surrogate escape in the handoff provider_id. Emit with
+# ensure_ascii so the escape is literal \ud800 bytes (valid JSON text, invalid
+# scalar) rather than raw surrogate bytes.
+record["startup_handoff"]["provider_id"] = "\ud800provider"
+open(dst, "w", encoding="ascii").write(
+    json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+)
+PY
+MUTATION_LEASE_RAW_PATH="$raw_fixture" \
+  run_case lease_prepared_handoff_surrogate "" "" "" self-test
+root="$TMP/lease_prepared_handoff_surrogate"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "prepared-handoff lease with unpaired surrogate survived rollback" >&2
+  exit 1
+fi
+
+# (A-05.18, R6 CODE-M3) storage envelope: >16 KiB, mode 0644, and a hard link
+# (nlink 2). Each is a record the Swift store's validateOpenFile rejects on read
+# (.unsafeStorage: "record too large" / "mode is not 0600" / "hard link"), so the
+# reconciler's pre-parse storage gate must REMOVE it. A live foreign owner is
+# used for these so the ONLY reason to preserve would be a lax storage gate --
+# which is exactly the defect these guard.
+sleep 300 &
+m3_pid=$!
+
+# >16 KiB padded valid record.
+lease_fixture="$TMP/lease_storage_oversized.json"
+write_lease_record "$lease_fixture" storage-oversized-live startup "$m3_pid"
+oversized_fixture="$TMP/lease_storage_oversized.raw.json"
+python3 - "$lease_fixture" "$oversized_fixture" <<'PY'
+import json
+import sys
+src, dst = sys.argv[1:]
+record = json.loads(open(src, "r", encoding="utf-8").read())
+# A padding field pushes the file well past the 16 KiB ceiling while keeping the
+# record otherwise valid (so removal is provably the storage gate, not structure).
+record["padding"] = "x" * (16 * 1024 + 64)
+open(dst, "w", encoding="utf-8").write(
+    json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+)
+PY
+MUTATION_LEASE_RAW_PATH="$oversized_fixture" \
+  run_case lease_storage_oversized "" "" "" self-test
+root="$TMP/lease_storage_oversized"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "oversized (>16KiB) live-owner lease survived rollback" >&2
+  kill "$m3_pid" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+# mode 0644 (world/group readable): Swift rejects "mode is not 0600".
+lease_fixture="$TMP/lease_storage_mode0644.json"
+write_lease_record "$lease_fixture" storage-mode-live startup "$m3_pid"
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+MUTATION_LEASE_MODE=644 \
+  run_case lease_storage_mode0644 "" "" "" self-test
+root="$TMP/lease_storage_mode0644"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "mode-0644 live-owner lease survived rollback" >&2
+  kill "$m3_pid" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+# hard link (nlink 2): Swift rejects "hard link".
+lease_fixture="$TMP/lease_storage_hardlink.json"
+write_lease_record "$lease_fixture" storage-hardlink-live startup "$m3_pid"
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+MUTATION_LEASE_HARDLINK=1 \
+  run_case lease_storage_hardlink "" "" "" self-test
+root="$TMP/lease_storage_hardlink"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "hard-linked (nlink 2) live-owner lease survived rollback" >&2
+  kill "$m3_pid" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+kill "$m3_pid" >/dev/null 2>&1 || true
+wait "$m3_pid" 2>/dev/null || true
+
+# (A-05.19, R6 CODE-M4) A LIVE-OWNER record with ONE structurally invalid field
+# (record.version = boolean `true`) -> REMOVED. This is the direct mutation guard
+# for the decision-order fix: Swift validates structure FIRST for EVERY record,
+# so a live owner can NEVER rescue a structurally invalid record. If the
+# reconciler evaluated owner-liveness BEFORE structure (the pre-fix order), this
+# live-owner lease would be PRESERVED and Swift's inspect() would then reject it
+# as .unsupportedVersion -> restart loop. The owner is genuinely live (the sleep
+# pid with its real process-start second), so owner_is_live() returns True; only
+# the structure-first ordering makes this REMOVED.
+sleep 300 &
+m4_pid=$!
+lease_fixture="$TMP/lease_live_owner_invalid_version.json"
+PREPARED_OVERRIDE_LIVE_OWNER="$m4_pid" \
+PREPARED_OVERRIDE_RECORD_VERSION=true \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-11-live" "$m4_pid" valid
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_live_owner_invalid_version "" "" "" self-test
+root="$TMP/lease_live_owner_invalid_version"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "live-owner lease with structurally invalid version survived rollback (structure must gate liveness)" >&2
+  kill "$m4_pid" >/dev/null 2>&1 || true
+  exit 1
+fi
+kill "$m4_pid" >/dev/null 2>&1 || true
+wait "$m4_pid" 2>/dev/null || true
 
 run_darwin_manual_recovery_cases() {
 # A non-launchd provider holding the configured port is a real protected

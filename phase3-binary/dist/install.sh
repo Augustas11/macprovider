@@ -1742,7 +1742,16 @@ lease_path, lock_path, install_operation_id = sys.argv[1:]
 if not lease_path:
     raise SystemExit(0)
 uid = os.getuid()
-MAX_LEASE_BYTES = 1024 * 1024
+# The Swift store enforces ProviderLifecycleLeaseStore.maximumRecordBytes = 16 KiB
+# on EVERY read (validateOpenFile, called from readRecordIfPresent before the
+# JSONDecoder runs): a record larger than 16 KiB is rejected as .unsafeStorage
+# and never decoded. The reconciler must apply the identical ceiling as a
+# conservative subset -- a >16 KiB file Swift rejects on read must not be
+# preserved here (that would restart-loop the provider), so we reject it too and
+# remove the lease. (An underestimate would be UNSAFE only if Swift accepted a
+# file we rejected, but Swift's ceiling is exactly 16 KiB, so matching it is
+# at-least-as-strict.)
+MAX_LEASE_BYTES = 16 * 1024
 LOCK_TIMEOUT_SECONDS = 10.0
 
 
@@ -1751,11 +1760,117 @@ def fail(message):
     raise SystemExit(1)
 
 
+def _strict_pairs(values):
+    # Foundation's JSONDecoder keeps the FIRST value for a duplicate key; Python's
+    # default json.loads keeps the LAST. A record whose duplicate key changes
+    # meaning between the two parsers could let the shell PRESERVE a record whose
+    # Foundation-visible value Swift rejects. Rather than replicate keep-first, we
+    # reject duplicate keys outright: for any duplicate-key file Foundation either
+    # also rejects it (it does not, but) or accepts it keeping-first, and in the
+    # accept case removing the lease is the safe direction (removal self-heals),
+    # so strict rejection is at-least-as-strict.
+    result = {}
+    for key, value in values:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def _reject_surrogates(node):
+    # Python's json accepts \uD800-\uDFFF escapes and yields lone surrogate code
+    # points in the resulting str; Foundation's JSONDecoder rejects unpaired
+    # surrogates. Worse, a lone surrogate can later raise an UNCAUGHT
+    # UnicodeEncodeError deep inside a validator (e.g. value.encode("utf-8")),
+    # which would crash the reconciler instead of failing toward removal. Scan
+    # every decoded string for surrogate code points and reject the record if any
+    # is present (str keys and values, recursively through dict/list).
+    if isinstance(node, str):
+        for char in node:
+            if 0xD800 <= ord(char) <= 0xDFFF:
+                raise ValueError("surrogate in string")
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            _reject_surrogates(key)
+            _reject_surrogates(value)
+    elif isinstance(node, list):
+        for item in node:
+            _reject_surrogates(item)
+
+
+def strict_json_loads(text):
+    # Parse a lease record with Foundation-comparable strictness: reject
+    # NaN/Infinity/-Infinity (parse_constant) and bare floats (parse_float) that
+    # Foundation's JSONDecoder would reject, reject duplicate keys
+    # (object_pairs_hook, keep-first divergence), and reject unpaired surrogate
+    # escapes. Mirrors the strict-loader already used for acceptance-candidate
+    # metadata elsewhere in this installer. Returns the decoded value, or raises
+    # ValueError on any strictness failure (the caller turns that into removal).
+    value = json.loads(
+        text,
+        object_pairs_hook=_strict_pairs,
+        parse_constant=lambda raw: (_ for _ in ()).throw(ValueError(raw)),
+        parse_float=lambda raw: (_ for _ in ()).throw(ValueError(raw)),
+    )
+    _reject_surrogates(value)
+    return value
+
+
 def lstat_or_none(path):
     try:
         return os.lstat(path)
     except FileNotFoundError:
         return None
+
+
+def lease_has_extended_acl(path):
+    # Mirror the Swift store's rejectExtendedACL (called from validateOpenFile on
+    # EVERY read): a lease file carrying an extended (non-mode) ACL is rejected as
+    # .unsafeStorage and never decoded, because an ACL could grant another
+    # principal read/write to the single-writer lease. Return True if an extended
+    # ACL is present, False if provably absent, and None if presence cannot be
+    # determined -- the caller treats None as "decline preservation" (removal),
+    # since we can only preserve a lease Swift would also accept.
+    #
+    # Detection via `ls -lde`: on macOS an extended ACL renders as one or more
+    # numbered entries (" 0: user:... allow ...") on the lines AFTER the mode
+    # line, and the mode string carries a trailing "+" (e.g. "-rw-------+"). We
+    # treat EITHER signal as ACL-present. If `ls` is unavailable or its output is
+    # unparseable, return None (decline) rather than guessing absence.
+    try:
+        result = subprocess.run(
+            ["/bin/ls", "-lde", path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    if not lines:
+        return None
+    mode_field = lines[0].split(" ", 1)[0] if lines[0] else ""
+    if not mode_field:
+        return None
+    if mode_field.endswith("+"):
+        return True
+    # Numbered ACL entry lines follow the mode line, e.g. " 0: user:foo allow ...".
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped and stripped[0].isdigit() and ":" in stripped.split(None, 1)[0]:
+            return True
+    return False
+
+
+def lease_dir_has_extended_acl(path):
+    # Directory-flavored ACL gate for the trusted lifecycle directory. Swift's
+    # validateTrustedDirectory rejects a directory carrying an extended ACL. We
+    # treat both "ACL present" and "presence undeterminable" (None) as unsafe:
+    # we may only preserve a lease Swift would also read, and Swift declines to
+    # read a lease whose directory it cannot confirm ACL-free.
+    return lease_has_extended_acl(path) is not False
 
 
 def pid_alive(pid):
@@ -1929,16 +2044,25 @@ def monotonic_nanoseconds():
 def record_matches_swift_structure(record):
     # Mirror EVERY invariant the Swift store's validateRecordStructure /
     # validateStartupHandoffStructure enforce (ProviderLifecycleLease.swift,
-    # validationFailure runs validateRecordStructure FIRST, before the prepared-
-    # handoff exemption at line 895). This must run BEFORE the exemption checks
-    # below, because a record the shell PRESERVES but Swift would reject as
-    # .invalidField is the harmful outcome: inspect() later rejects it, the
-    # restored CLI's fallback only re-acquires on handoffNotPrepared, and the
-    # provider restart-loops. Directionality is fail-toward-removal: anything
-    # this mirror cannot positively verify returns False so the lease follows
-    # the ordinary owner-liveness path (-> removal for a dead owner), never a
-    # false preserve. Scope is a lease record carrying a `.prepared` handoff;
-    # the caller has already confirmed startup_handoff.state == "prepared".
+    # validationFailure runs validateRecordStructure FIRST, before ANY
+    # preservation branch -- the boot/clock/owner-liveness checks and the
+    # prepared-handoff exemption at line 895 all run AFTER it). This must
+    # therefore gate EVERY preservation branch in the reconciler, because a
+    # record the shell PRESERVES but Swift would reject as .invalidField /
+    # .durationOutOfRange / .unsupportedVersion is the harmful outcome:
+    # inspect() later rejects it, the restored CLI's fallback re-acquires only
+    # on handoffNotPrepared, and the provider restart-loops. Directionality is
+    # fail-toward-removal: anything this mirror cannot positively verify returns
+    # False so the lease follows the ordinary owner-liveness path (-> removal),
+    # never a false preserve.
+    #
+    # SCOPE (R6 CODE-M4): this is the BASE structural validator for ANY lease
+    # record, whether or not it carries a startup handoff -- exactly like Swift's
+    # validateRecordStructure, which validates the record for both `startup` and
+    # `maintenance` kinds and only descends into validateStartupHandoffStructure
+    # when `record.startupHandoff` is present. The ordinary live-foreign-owner
+    # preservation path (a plain startup lease with no handoff) is gated on this
+    # too, so a live owner cannot rescue a structurally invalid record.
     if not isinstance(record, dict):
         return False
 
@@ -2135,7 +2259,11 @@ def record_matches_swift_structure(record):
         return wall_duration
 
     # --- record-level structure (validateRecordStructure) ---
-    if record.get("version") != 1:
+    # `version` is Swift Int: JSONDecoder decodes it into an integer and rejects
+    # `true`/`false`. Python's bool subclasses int, so `record.get("version") != 1`
+    # alone would let a JSON `true` pass (True == 1). Require a real (non-bool)
+    # integer equal to the schema constant, matching Swift's decode-then-compare.
+    if not is_int(record.get("version")) or record.get("version") != 1:
         return False
     if not valid_uuid(record.get("lease_id")):
         return False
@@ -2178,16 +2306,24 @@ def record_matches_swift_structure(record):
     if record_issued_wall <= 0 or record_issued_mono < 0:
         return False
 
-    # Only kind "maintenance" can carry a prepared handoff (Swift's prepared
-    # branch: `record.kind == .maintenance`). Reject any other kind here so a
-    # `kind: "startup"` record carrying a prepared handoff -- which Swift's
-    # inspect() rejects as .invalidField("startup_handoff_state") -- is NOT
-    # preserved by the shell.
-    if record.get("kind") != "maintenance":
+    # Swift's ProviderLifecycleLeaseKind decodes ONLY "startup" or "maintenance"
+    # (any other string fails JSONDecoder). The record duration ceiling is
+    # kind-specific: maintenance 20 min, startup 30 min
+    # (ProviderLifecycleLeaseKind.maximumDurationMilliseconds). The prior mirror
+    # pinned kind == "maintenance" because it only ran for prepared-handoff
+    # records; as the BASE validator (R6 CODE-M4) it must accept both kinds so a
+    # plain `startup` lease with a live owner is structurally validated too.
+    # The handoff `state` gate below still enforces prepared -> maintenance and
+    # adopted -> startup exactly as Swift does.
+    record_kind = record.get("kind")
+    record_kind_max_ms = {
+        "maintenance": 20 * 60 * 1_000,
+        "startup": 30 * 60 * 1_000,
+    }.get(record_kind)
+    if record_kind_max_ms is None:
         return False
-    record_max_ms = 20 * 60 * 1_000  # maintenance kind maximumDurationMilliseconds
     record_wall_duration = duration_ok(
-        record_issued_wall, record_expires_wall, max_ms=record_max_ms
+        record_issued_wall, record_expires_wall, max_ms=record_kind_max_ms
     )
     if record_wall_duration is None:
         return False
@@ -2195,10 +2331,18 @@ def record_matches_swift_structure(record):
         return False
 
     # --- handoff-level structure (validateStartupHandoffStructure) ---
+    # Swift descends into validateStartupHandoffStructure ONLY when a handoff is
+    # present (`if let handoff = record.startupHandoff`). A record with NO handoff
+    # (the ordinary startup/maintenance lease) is structurally complete at this
+    # point. A `startup_handoff` present but not a JSON object is malformed ->
+    # Swift's decode would reject it -> False.
     handoff = record.get("startup_handoff")
+    if handoff is None:
+        return True
     if not isinstance(handoff, dict):
         return False
-    if handoff.get("version") != 1:
+    # handoff.version is Swift Int too (same JSON-bool caveat as record.version).
+    if not is_int(handoff.get("version")) or handoff.get("version") != 1:
         return False
     if not valid_uuid(handoff.get("handoff_id")):
         return False
@@ -2250,13 +2394,27 @@ def record_matches_swift_structure(record):
     if handoff_lease_duration <= 0 or handoff_lease_duration > startup_max_ms:
         return False
 
-    # Prepared-state containment: the handoff window must close within the
-    # record window (Swift's prepared branch requires handoff.expires* <=
-    # record.expires*). The state == "prepared" and kind == "maintenance"
-    # invariants are already enforced above (caller + kind check).
-    if handoff_expires_wall > record_expires_wall:
-        return False
-    if handoff_expires_mono > record_expires_mono:
+    # Handoff-state gate (Swift's `switch handoff.state`):
+    #   .prepared -> record.kind == .maintenance AND handoff.expires* <=
+    #                record.expires* (window containment);
+    #   .adopted  -> record.kind == .startup (no containment requirement).
+    # Any other state string fails JSONDecoder (the enum has exactly these two
+    # cases) -> reject. This subsumes the previous prepared-only mirror while
+    # keeping the reconciler at-least-as-strict for adopted handoffs, whose
+    # live-owner record now flows through the base validator instead of being
+    # preserved unvalidated.
+    handoff_state = handoff.get("state")
+    if handoff_state == "prepared":
+        if record_kind != "maintenance":
+            return False
+        if handoff_expires_wall > record_expires_wall:
+            return False
+        if handoff_expires_mono > record_expires_mono:
+            return False
+    elif handoff_state == "adopted":
+        if record_kind != "startup":
+            return False
+    else:
         return False
 
     return True
@@ -2387,38 +2545,118 @@ try:
     if lease_st is None:
         # No lease to reconcile.
         raise SystemExit(0)
-    if stat.S_ISLNK(lease_st.st_mode) or not stat.S_ISREG(lease_st.st_mode):
-        fail("lifecycle_lease_not_regular")
-    if lease_st.st_uid != uid:
-        fail("lifecycle_lease_not_owned")
-    if lease_st.st_size > MAX_LEASE_BYTES:
-        fail("lifecycle_lease_oversized")
-    fd = os.open(lease_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        raw = b""
-        while len(raw) <= MAX_LEASE_BYTES:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            raw += chunk
-    finally:
-        os.close(fd)
-    try:
-        record = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        record = None
 
+    # -- PRE-PARSE STORAGE GATE (R6 CODE-M3) ---------------------------------
+    # Mirror EXACTLY the envelope the Swift store enforces on EVERY read
+    # (validateOpenFile, called from readRecordIfPresent BEFORE JSONDecoder):
+    # regular file, owned by us, st_nlink == 1, mode == 0600, no extended ACL,
+    # and size <= 16 KiB (maximumRecordBytes). Any violation is a record Swift
+    # would reject as .unsafeStorage and never decode, so preserving it would
+    # restart-loop the provider. Per the reconciler's design rule, every such
+    # divergence fails toward REMOVAL (self-healing) rather than a loud recovery
+    # abort: a fresh CLI re-mints a clean lease. Removal of our own lease path
+    # (under a 0700 HOME-owned directory, opened O_NOFOLLOW / lstat only) is
+    # always safe -- unlink never dereferences a symlink and never needs the
+    # file's own perms, only the parent directory's, which we own.
+    #
+    # st_flags is deliberately NOT checked: the Swift read path does not inspect
+    # st_flags, so adding it would over-reach beyond "at-least-as-strict subset".
+    #
+    # The TRUSTED-DIRECTORY gate mirrors Swift's inspect() path too: inspect()
+    # calls validateTrustedDirectory(createIfMissing:false) BEFORE reading the
+    # lease, and a directory that is not a real dir owned by us with mode EXACTLY
+    # 0700 and no extended ACL makes inspect() return .missing -- i.e. Swift
+    # would refuse to read the lease at all. So a lease in a lax directory is one
+    # Swift rejects on read; the reconciler must not preserve it. Declining
+    # preservation (removal) is safe: the CLI's ensureTrustedDirectory recreates
+    # the 0700 directory on the next acquire.
     remove = False
-    if not isinstance(record, dict):
-        # A malformed lease from the failed transaction is not a live protected
-        # process; clear it so a restored CLI can mint a fresh lease.
+    storage_ok = True
+    parent_dir = os.path.dirname(lease_path)
+    parent_st = lstat_or_none(parent_dir)
+    if (
+        parent_st is None
+        or stat.S_ISLNK(parent_st.st_mode)
+        or not stat.S_ISDIR(parent_st.st_mode)
+        or parent_st.st_uid != uid
+        or stat.S_IMODE(parent_st.st_mode) != 0o700
+    ):
+        storage_ok = False  # untrusted directory: Swift inspect() -> .missing
+    elif lease_dir_has_extended_acl(parent_dir):
+        storage_ok = False  # dir extended ACL (or undeterminable): Swift rejects
+    elif stat.S_ISLNK(lease_st.st_mode) or not stat.S_ISREG(lease_st.st_mode):
+        storage_ok = False  # symlink or non-regular: Swift .unsafeStorage
+    elif lease_st.st_uid != uid:
+        storage_ok = False  # wrong owner: Swift .unsafeStorage
+    elif lease_st.st_nlink != 1:
+        storage_ok = False  # hard link: Swift "hard link" .unsafeStorage
+    elif stat.S_IMODE(lease_st.st_mode) != 0o600:
+        storage_ok = False  # mode != 0600: Swift "mode is not 0600" .unsafeStorage
+    elif lease_st.st_size > MAX_LEASE_BYTES:
+        storage_ok = False  # oversized: Swift "record too large" .unsafeStorage
+    else:
+        # Extended-ACL check mirrors Swift's rejectExtendedACL. ACL present OR
+        # presence-undeterminable both decline preservation (removal), since we
+        # may only preserve a lease Swift would also accept.
+        acl_present = lease_has_extended_acl(lease_path)
+        if acl_present is None or acl_present:
+            storage_ok = False
+
+    if not storage_ok:
+        # Storage envelope Swift would reject on read -> remove (self-healing).
+        remove = True
+        record = None
+    else:
+        fd = os.open(lease_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            raw = b""
+            while len(raw) <= MAX_LEASE_BYTES:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+        # -- STRICT PARSE (R6 CODE-M2) --------------------------------------
+        # Parse with Foundation-comparable strictness (reject NaN/Infinity, bare
+        # floats, duplicate keys keep-first divergence, unpaired surrogates).
+        # ANY strictness failure -- or a lone surrogate that would otherwise
+        # raise UnicodeEncodeError deep in a validator -- becomes REMOVAL here,
+        # never a reconciler crash: the broad except catches every parse-path
+        # exception and routes it to removal.
+        try:
+            record = strict_json_loads(raw.decode("utf-8"))
+        except Exception:
+            record = None
+
+    if remove:
+        # Already decided by the storage gate; skip the record decision below.
+        pass
+    elif not isinstance(record, dict):
+        # A malformed / strictly-rejected lease from the failed transaction is
+        # not a live protected process; clear it so a restored CLI can mint a
+        # fresh lease.
         remove = True
     else:
+        # -- DECISION ORDER (R6 CODE-M4) ------------------------------------
+        # Swift's validationFailure validates the record STRUCTURE FIRST, before
+        # any boot/clock/owner-liveness check and before the prepared-handoff
+        # exemption. Mirror that order exactly so NO preservation branch (live
+        # owner OR prepared handoff) can rescue a record Swift's inspect() would
+        # reject on read as .invalidField / .durationOutOfRange /
+        # .unsupportedVersion (which would restart-loop the provider).
+        #
+        #   parse-strict -> storage gate  (both already done above)
+        #   -> rollback-bound?  => REMOVE (valid regardless of structure: a
+        #                          record we are undoing must never survive, and
+        #                          removal is safe for a structurally invalid one)
+        #   -> structure valid? => (no) REMOVE
+        #   -> owner live?      => KEEP
+        #   -> prepared handoff exemption? => KEEP
+        #   -> otherwise        => REMOVE
+        #
         # The Swift ProviderLifecycleLeaseStore persists the owner NESTED under
-        # `owner` (owner.pid / owner.process_start_us / owner.boot_session), not
-        # a flat owner_pid. Decode the real wire schema so a production live
-        # lease is not misread as dead. A missing/malformed owner object is a
-        # malformed record: clear it (matches remove-behavior for non-dict).
+        # `owner` (owner.pid / owner.process_start_us / owner.boot_session).
         lease_operation = record.get("operation_id")
         owner = record.get("owner")
         belongs_to_rollback = bool(
@@ -2428,13 +2666,21 @@ try:
         )
         if belongs_to_rollback:
             # A lease minted by the rolled-back transaction is removed
-            # regardless of any prepared handoff it carries: the operation it
-            # authorizes is being undone, so its handoff (and the
+            # regardless of structure or any prepared handoff it carries: the
+            # operation it authorizes is being undone, so its handoff (and the
             # operation/service/path/hash authorization inside it) must not
-            # survive the rollback.
+            # survive. Removal is safe even for a structurally invalid record;
+            # only PRESERVATION requires structural validity.
+            remove = True
+        elif not record_matches_swift_structure(record):
+            # Swift validates structure FIRST for EVERY record. A structurally
+            # invalid record can never be preserved -- not by a live owner, not
+            # by a prepared handoff -- because Swift's inspect() would reject it.
+            # This gate runs BEFORE owner-liveness so a LIVE owner cannot rescue
+            # an invalid record (the R6 CODE-M4 fix).
             remove = True
         elif owner_is_live(owner):
-            # Ordinary live foreign owner: preserved.
+            # Structurally valid + ordinary live foreign owner: preserved.
             remove = False
         elif prepared_handoff_preserves(record):
             # The Swift store intentionally exempts an unexpired `.prepared`
@@ -2446,10 +2692,12 @@ try:
             # unexpired prepared handoff on the current boot session is
             # PRESERVED even though its owner process is gone, so the
             # operation/service/path/hash authorization it carries survives for
-            # the launchd adopter.
+            # the launchd adopter. (prepared_handoff_preserves re-runs the
+            # structural mirror internally; it is redundant now but harmless.)
             remove = False
         else:
-            # Dead owner, no valid prepared handoff: clear it.
+            # Structurally valid but dead owner, no valid prepared handoff:
+            # clear it.
             remove = True
 
     if remove:
