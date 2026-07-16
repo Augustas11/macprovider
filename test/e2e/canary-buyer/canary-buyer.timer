@@ -1,5 +1,5 @@
 # Schedules only the low-impact liveness mode. The service remains inert until
-# /etc/macprovider/canary-buyer.enabled is created after reviewed approval.
+# /etc/macprovider-canary-buyer/enabled is created after reviewed approval.
 [Unit]
 Description=Run low-impact macprovider liveness probe every 30 min
 

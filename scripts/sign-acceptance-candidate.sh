@@ -225,7 +225,24 @@ spctl -a -vvv -t exec "$app"
 mkdir "$output_dir"
 provider_asset="$output_dir/macprovider-cli-${tag}-darwin-arm64.tar.gz"
 malibu_asset="$output_dir/Malibu-${tag}.dmg"
-tar -czf "$provider_asset" -C "$cli_work" .
+provider_archive_members=(
+  macprovider-cli
+  mlx.metallib
+  THIRD-PARTY-NOTICES.txt
+  compatibility-set.json
+  compatibility-set-local
+  catalog-release
+)
+provider_bundle_count=0
+for provider_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+  if [[ -d "$cli_work/$provider_bundle" ]]; then
+    provider_archive_members+=("$provider_bundle")
+    provider_bundle_count=$((provider_bundle_count + 1))
+  fi
+done
+[[ "$provider_bundle_count" -gt 0 ]] || die "signed provider payload lacks a SwiftPM resource bundle"
+tar -czf "$provider_asset" -C "$cli_work" "${provider_archive_members[@]}"
+python3 "$metadata" validate-archive --input "$provider_asset" --forbid-links
 dmg_stage="$signing_tmp/dmg"
 mkdir "$dmg_stage"
 cp -R "$app" "$dmg_stage/Malibu.app"

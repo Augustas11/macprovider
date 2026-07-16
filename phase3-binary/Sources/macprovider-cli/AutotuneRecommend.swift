@@ -8,6 +8,7 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
     case invalidStaticJSON(String)
     case invalidRateCard(String)
     case invalidArtifact(String)
+    case candidateProbeFailed(modelKey: String, reason: String)
     case noHMACSecret
 
     var description: String {
@@ -18,6 +19,8 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
             return "invalid rate card: \(message)"
         case .invalidArtifact(let message):
             return "invalid model artifact: \(message)"
+        case .candidateProbeFailed(let modelKey, let reason):
+            return "candidate probe failed for \(modelKey): \(reason)"
         case .noHMACSecret:
             return "HMAC secret unavailable"
         }
@@ -2440,11 +2443,69 @@ struct CachedModelArtifactResolver {
         return try verifiedExistingArtifact(for: row)
     }
 
+    /// Acquire a signed artifact without deleting or replacing the incumbent
+    /// snapshot. If the canonical revision no longer matches the active
+    /// catalog, download into a hash-qualified sibling and leave the prior
+    /// provider's restart/rollback path untouched.
+    func prefetchedArtifactPreservingExisting(for row: CandidateCatalog.Row) async throws -> VerifiedModelArtifact {
+        do {
+            return try verifiedExistingArtifact(for: row)
+        } catch let error as AutotuneRecommendError {
+            guard case .invalidArtifact = error else { throw error }
+        }
+
+        guard let revision = row.modelRevision, let expectedSHA256 = row.modelSHA256 else {
+            throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
+        }
+        let prefetched = prefetchSnapshotURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expectedSHA256
+        )
+        var info = stat()
+        if lstat(prefetched.path, &info) == 0 {
+            do {
+                return try verifiedExistingArtifact(for: row, at: prefetched)
+            } catch let error as AutotuneRecommendError {
+                guard case .invalidArtifact(let message) = error else { throw error }
+                do {
+                    try FileManager.default.removeItem(at: prefetched)
+                } catch {
+                    throw AutotuneRecommendError.invalidArtifact(
+                        message + "; automatic prefetch repair could not remove its isolated staging snapshot: "
+                            + String(describing: error)
+                    )
+                }
+            }
+        }
+
+        do {
+            try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: prefetched)
+        } catch {
+            throw AutotuneRecommendError.invalidArtifact(
+                "isolated artifact prefetch failed: " + String(describing: error)
+            )
+        }
+        return try verifiedExistingArtifact(for: row, at: prefetched)
+    }
+
     func verifiedExistingArtifact(for row: CandidateCatalog.Row) throws -> VerifiedModelArtifact {
+        guard let revision = row.modelRevision else {
+            throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
+        }
+        return try verifiedExistingArtifact(
+            for: row,
+            at: snapshotURL(modelID: row.modelID, revision: revision)
+        )
+    }
+
+    func verifiedExistingArtifact(
+        for row: CandidateCatalog.Row,
+        at snapshot: URL
+    ) throws -> VerifiedModelArtifact {
         guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
             throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
         }
-        let snapshot = snapshotURL(modelID: row.modelID, revision: revision)
         var st = stat()
         guard lstat(snapshot.path, &st) == 0,
               (st.st_mode & S_IFMT) == S_IFDIR
@@ -2467,6 +2528,12 @@ struct CachedModelArtifactResolver {
             .appendingPathComponent("snapshots", isDirectory: true)
             .appendingPathComponent(revision, isDirectory: true)
     }
+
+    func prefetchSnapshotURL(modelID: String, revision: String, sha256: String) -> URL {
+        snapshotURL(modelID: modelID, revision: revision)
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(revision).macprovider-prefetch.\(sha256)", isDirectory: true)
+    }
 }
 
 /// Outcome of running Stage 1 probes across every eligible candidate row.
@@ -2487,12 +2554,185 @@ struct BenchmarkOutcomes: Equatable {
     var diagnostics: [String: String]
 }
 
+struct PrefetchedModelArtifact: Codable, Equatable {
+    let modelKey: String
+    let modelID: String
+    let modelRevision: String
+    let candidateRowIdentity: String
+    let path: String
+    let sha256: String
+
+    enum CodingKeys: String, CodingKey {
+        case modelKey = "model_key"
+        case modelID = "model_id"
+        case modelRevision = "model_revision"
+        case candidateRowIdentity = "candidate_row_identity"
+        case path
+        case sha256
+    }
+}
+
+struct AutotuneArtifactPrefetchReceipt: Codable, Equatable {
+    static let currentSchemaVersion = "macprovider.autotune-prefetch-receipt.v1"
+
+    let schemaVersion: String
+    let candidateCatalogSHA256: String
+    let candidateCatalogVersion: String
+    let candidateCatalogPolicyVersion: String
+    let artifacts: [PrefetchedModelArtifact]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case candidateCatalogSHA256 = "candidate_catalog_sha256"
+        case candidateCatalogVersion = "candidate_catalog_version"
+        case candidateCatalogPolicyVersion = "candidate_catalog_policy_version"
+        case artifacts
+    }
+
+    func write(to url: URL) throws {
+        var data = try JSONEncoder.autotunePrefetch.encode(self)
+        data.append(0x0A)
+        try data.write(to: url, options: .atomic)
+        guard chmod(url.path, 0o600) == 0 else {
+            throw AutotuneRecommendError.invalidArtifact("could not secure prefetch receipt")
+        }
+    }
+
+    static func load(from url: URL) throws -> Self {
+        var info = stat()
+        guard lstat(url.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              info.st_nlink == 1,
+              info.st_mode & (S_IWGRP | S_IWOTH) == 0,
+              info.st_size > 0,
+              info.st_size <= 65_536
+        else {
+            throw AutotuneRecommendError.invalidArtifact("prefetch receipt is not a private owned regular file")
+        }
+        return try JSONDecoder.autotune.decode(Self.self, from: Data(contentsOf: url))
+    }
+
+    func validatedArtifacts(
+        candidateCatalog: CandidateCatalog,
+        candidateCatalogSHA256: String
+    ) throws -> [String: PrefetchedModelArtifact] {
+        guard schemaVersion == Self.currentSchemaVersion,
+              self.candidateCatalogSHA256 == candidateCatalogSHA256,
+              candidateCatalogVersion == candidateCatalog.version,
+              candidateCatalogPolicyVersion == candidateCatalog.policyVersion,
+              !artifacts.isEmpty,
+              artifacts.count <= 64
+        else {
+            throw AutotuneRecommendError.invalidArtifact("prefetch receipt does not match the active signed catalog")
+        }
+        var validated: [String: PrefetchedModelArtifact] = [:]
+        for artifact in artifacts {
+            guard validated[artifact.modelKey] == nil,
+                  let row = candidateCatalog.rows[artifact.modelKey],
+                  row.modelID == artifact.modelID,
+                  row.modelRevision == artifact.modelRevision,
+                  row.modelSHA256 == artifact.sha256,
+                  candidateCatalog.rowIdentity(for: artifact.modelKey) == artifact.candidateRowIdentity,
+                  artifact.path.hasPrefix("/"),
+                  URL(fileURLWithPath: artifact.path).standardizedFileURL.path == artifact.path
+            else {
+                throw AutotuneRecommendError.invalidArtifact(
+                    "prefetch receipt row no longer matches the active signed catalog"
+                )
+            }
+            validated[artifact.modelKey] = artifact
+        }
+        return validated
+    }
+}
+
+struct PrefetchDiagnostic: Equatable {
+    let modelID: String
+    let reason: String
+}
+
+struct ArtifactPrefetchOutcomes: Equatable {
+    var artifacts: [PrefetchedModelArtifact]
+    var diagnostics: [PrefetchDiagnostic]
+    var matchedModelIDs: Set<String>
+
+    var prefetchedModelIDs: Set<String> {
+        Set(artifacts.map(\.modelID))
+    }
+}
+
 struct AutotuneRecommendationBenchmarker {
     var artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
     var runnerFactory: () throws -> CandidateProviderRunner = { try CandidateProviderRunner() }
     var prober: any Stage1Probing = Stage1Prober()
     var safetySampler: ProbeSafetySampling = SystemProbeSafetySampler()
     var clock: () -> Date = Date.init
+
+    func prefetchArtifacts(
+        candidateCatalog: CandidateCatalog,
+        hardware: AutotuneRecommendHardware,
+        candidateModelIDs: Set<String>
+    ) async throws -> ArtifactPrefetchOutcomes {
+        var matchedModelKeysByID: [String: [String]] = [:]
+        for modelKey in candidateCatalog.rows.keys.sorted() {
+            guard let row = candidateCatalog.rows[modelKey], candidateModelIDs.contains(row.modelID) else {
+                continue
+            }
+            matchedModelKeysByID[row.modelID, default: []].append(modelKey)
+        }
+        let ambiguousMatches = matchedModelKeysByID
+            .filter { $0.value.count > 1 }
+            .sorted { $0.key < $1.key }
+            .map { modelID, modelKeys in
+                "\(modelID) [\(modelKeys.joined(separator: ", "))]"
+            }
+        guard ambiguousMatches.isEmpty else {
+            throw AutotuneRecommendError.invalidArtifact(
+                "each prefetch model must match exactly one signed catalog row; duplicate matches: "
+                    + ambiguousMatches.joined(separator: "; ")
+            )
+        }
+
+        var artifacts: [PrefetchedModelArtifact] = []
+        var diagnostics: [PrefetchDiagnostic] = []
+        var matchedModelIDs = Set<String>()
+        for modelKey in candidateCatalog.rows.keys.sorted() {
+            guard let row = candidateCatalog.rows[modelKey], candidateModelIDs.contains(row.modelID) else {
+                continue
+            }
+            matchedModelIDs.insert(row.modelID)
+            if let reason = Self.ineligibilityReason(row: row, hardware: hardware) {
+                diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: reason))
+                continue
+            }
+            do {
+                guard let revision = row.modelRevision,
+                      let rowIdentity = candidateCatalog.rowIdentity(for: modelKey)
+                else {
+                    diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: "missing signed artifact identity"))
+                    continue
+                }
+                let artifact = try await artifactResolver.prefetchedArtifactPreservingExisting(for: row)
+                artifacts.append(PrefetchedModelArtifact(
+                    modelKey: modelKey,
+                    modelID: row.modelID,
+                    modelRevision: revision,
+                    candidateRowIdentity: rowIdentity,
+                    path: artifact.modelArgument,
+                    sha256: artifact.sha256
+                ))
+            } catch let error as AutotuneRecommendError {
+                guard case .invalidArtifact(let message) = error else { throw error }
+                diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: message))
+            }
+        }
+        return ArtifactPrefetchOutcomes(
+            artifacts: artifacts,
+            diagnostics: diagnostics,
+            matchedModelIDs: matchedModelIDs
+        )
+    }
 
     func benchmarks(
         request: AutotuneRecommendRequest,
@@ -2501,7 +2741,8 @@ struct AutotuneRecommendationBenchmarker {
         replicates: Int,
         port: Int,
         interruptFlag: AutotuneInterruptFlag? = nil,
-        candidateModelIDs: Set<String>? = nil
+        candidateModelIDs: Set<String>? = nil,
+        prefetchedArtifacts: [String: PrefetchedModelArtifact]? = nil
     ) async throws -> BenchmarkOutcomes {
         var results: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
@@ -2520,20 +2761,32 @@ struct AutotuneRecommendationBenchmarker {
             if let candidateModelIDs, !candidateModelIDs.contains(row.modelID) {
                 continue
             }
-            if row.runtimeStatus == "blocked" {
-                diagnostics[modelKey] = "catalog row blocked pending migration validation/rate-card rollout"
-                continue
-            }
-            if row.minRAMGB > request.hardware.memoryGB - AutotuneRecommendEngine.safetyMarginGB {
-                diagnostics[modelKey] = "min_ram \(row.minRAMGB)GB exceeds \(request.hardware.memoryGB)GB - \(AutotuneRecommendEngine.safetyMarginGB)GB safety margin"
-                continue
-            }
-            if !request.hardware.bandwidthTier.satisfies(minimum: row.minBandwidthTier) {
-                diagnostics[modelKey] = "bandwidth tier \(request.hardware.bandwidthTier.rawValue) below minimum \(row.minBandwidthTier.rawValue)"
+            if let reason = Self.ineligibilityReason(row: row, hardware: request.hardware) {
+                diagnostics[modelKey] = reason
                 continue
             }
             do {
-                let artifact = try await artifactResolver.verifiedArtifact(for: row)
+                let artifact: VerifiedModelArtifact
+                if let prefetchedArtifacts {
+                    guard let prefetched = prefetchedArtifacts[modelKey] else {
+                        throw AutotuneRecommendError.invalidArtifact(
+                            "prefetch receipt is missing the selected catalog row \(modelKey)"
+                        )
+                    }
+                    artifact = try artifactResolver.verifiedExistingArtifact(
+                        for: row,
+                        at: URL(fileURLWithPath: prefetched.path)
+                    )
+                    guard artifact.sha256 == prefetched.sha256,
+                          artifact.modelArgument == prefetched.path
+                    else {
+                        throw AutotuneRecommendError.invalidArtifact(
+                            "prefetched artifact binding changed for \(modelKey)"
+                        )
+                    }
+                } else {
+                    artifact = try await artifactResolver.verifiedArtifact(for: row)
+                }
                 let runner = try runnerFactory()
                 let before = safetySampler.sample()
                 let probe = try await prober.probe(
@@ -2572,9 +2825,19 @@ struct AutotuneRecommendationBenchmarker {
                         diagnostics[modelKey] = "feasible but " + flags.joined(separator: ", ")
                     }
                 case .infeasible(let reason, let nErr):
-                    diagnostics[modelKey] = "\(reason) (n_err=\(nErr))"
+                    let diagnostic = "\(reason) (n_err=\(nErr))"
+                    if prefetchedArtifacts != nil {
+                        throw AutotuneRecommendError.candidateProbeFailed(
+                            modelKey: modelKey,
+                            reason: diagnostic
+                        )
+                    }
+                    diagnostics[modelKey] = diagnostic
                 }
             } catch let error as AutotuneRecommendError {
+                if prefetchedArtifacts != nil {
+                    throw error
+                }
                 if case .invalidArtifact(let message) = error {
                     diagnostics[modelKey] = message
                     continue
@@ -2583,6 +2846,22 @@ struct AutotuneRecommendationBenchmarker {
             }
         }
         return BenchmarkOutcomes(benchmarks: results, diagnostics: diagnostics)
+    }
+
+    private static func ineligibilityReason(
+        row: CandidateCatalog.Row,
+        hardware: AutotuneRecommendHardware
+    ) -> String? {
+        if row.runtimeStatus == "blocked" {
+            return "catalog row blocked pending migration validation/rate-card rollout"
+        }
+        if row.minRAMGB > hardware.memoryGB - AutotuneRecommendEngine.safetyMarginGB {
+            return "min_ram \(row.minRAMGB)GB exceeds \(hardware.memoryGB)GB - \(AutotuneRecommendEngine.safetyMarginGB)GB safety margin"
+        }
+        if !hardware.bandwidthTier.satisfies(minimum: row.minBandwidthTier) {
+            return "bandwidth tier \(hardware.bandwidthTier.rawValue) below minimum \(row.minBandwidthTier.rawValue)"
+        }
+        return nil
     }
 }
 
@@ -2646,6 +2925,14 @@ extension ISO8601DateFormatter {
 
 private extension JSONDecoder {
     static let autotune: JSONDecoder = JSONDecoder()
+}
+
+private extension JSONEncoder {
+    static var autotunePrefetch: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
 }
 
 private extension Data {

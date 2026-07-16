@@ -139,10 +139,15 @@ final class MalibuAgent: ObservableObject {
         guard AgentSnapshotPresenter.updateAvailable(snapshot) else { return }
         cliUpdateTask?.cancel()
         snapshot.cliUpdateInProgress = true
+        let installedVersion = snapshot.cliVersion
+        let compatibilitySetID = snapshot.compatibilitySetID
         cliUpdateTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await CLIUpdateRunner.run { line in
+                try await CLIUpdateRunner.run(
+                    installedVersion: installedVersion,
+                    compatibilitySetID: compatibilitySetID
+                ) { line in
                     self.logLines.append(LogTailBuffer.redacted(line))
                     if self.logLines.count > 400 {
                         self.logLines.removeFirst(self.logLines.count - 400)

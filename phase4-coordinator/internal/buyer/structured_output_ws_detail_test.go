@@ -234,6 +234,111 @@ func TestForwardWSStreamingBufferedLatchesInvalidCachedPromptTokensAfterLaterVal
 	}
 }
 
+// TestForwardWSStreamingHonorsScopedRetryableOverride is the routing-path
+// regression for runbook item 20: it drives the REAL forwardWSStreaming call
+// site (not writeSSEErrorWithRetryable directly) with an InferenceResponseEnd
+// carrying an explicit Retryable, and asserts the synthesized SSE `retryable`
+// reflects the override ONLY for the two override-eligible codes
+// (malformed_json_response / json_schema_validation_failed), matching the
+// non-streaming scope. A future edit that drops end.Retryable at the call site,
+// OR widens the scope to a cap/timeout code, fails this test.
+func TestForwardWSStreamingHonorsScopedRetryableOverride(t *testing.T) {
+	tr := func(b bool) *bool { return &b }
+	cases := []struct {
+		name          string
+		code          string
+		override      *bool
+		wantRetryable bool
+	}{
+		// Override-eligible: json_schema_validation_failed static default is
+		// true; a provider override:false must flip it through the routing path.
+		{"eligible_override_false_flips", "json_schema_validation_failed", tr(false), false},
+		{"eligible_nil_keeps_default_true", "json_schema_validation_failed", nil, true},
+		// NOT override-eligible: response_byte_cap_exceeded static default is
+		// false; a provider override:true must be IGNORED at the routing site
+		// (scope guard), so the buyer still sees false. This is the security
+		// invariant — a provider cannot flip a non-retryable cap failure.
+		{"scoped_out_override_true_ignored", "response_byte_cap_exceeded", tr(true), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requestID := "req-override"
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{
+				Type:      "inference_response_chunk",
+				RequestID: requestID,
+				Seq:       0,
+				Data:      "data: {\"choices\":[{\"delta\":{\"content\":\"prefix\"}}]}\n\n",
+			}
+			close(chunks)
+			done <- providerws.InferenceResponseEnd{
+				Type:      "inference_response_end",
+				RequestID: requestID,
+				Status:    tc.code,
+				Retryable: tc.override,
+			}
+
+			server := &Server{}
+			provider := pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}
+			relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}
+			req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			req.RemoteAddr = "127.0.0.1:12345"
+			rr := httptest.NewRecorder()
+
+			result, _ := server.forwardWSStreaming(rr, req, requestID, provider, relay, &forwardState{}, 0)
+			if result != wsForwardComplete {
+				t.Fatalf("result=%q, want %q", result, wsForwardComplete)
+			}
+			var envelope struct {
+				Error struct {
+					Code      string `json:"code"`
+					Retryable bool   `json:"retryable"`
+				} `json:"error"`
+			}
+			// The body streams the prefix content chunk first, then the
+			// synthesized error frame; find the segment carrying error.code.
+			var errLine string
+			for _, seg := range strings.Split(rr.Body.String(), "\n\n") {
+				payload := strings.TrimPrefix(strings.TrimSpace(seg), "data: ")
+				if strings.Contains(payload, `"error"`) {
+					errLine = payload
+					break
+				}
+			}
+			if errLine == "" {
+				t.Fatalf("no SSE error frame in body: %s", rr.Body.String())
+			}
+			if err := json.Unmarshal([]byte(errLine), &envelope); err != nil {
+				t.Fatalf("decode SSE envelope: %v line=%s", err, errLine)
+			}
+			if envelope.Error.Code != tc.code {
+				t.Fatalf("SSE code=%q, want %q", envelope.Error.Code, tc.code)
+			}
+			if envelope.Error.Retryable != tc.wantRetryable {
+				t.Fatalf("routing-path retryable=%v, want %v (code=%s override=%v)", envelope.Error.Retryable, tc.wantRetryable, tc.code, tc.override)
+			}
+		})
+	}
+}
+
+// TestSpec019RetryableOverrideScope pins the override allow-list to exactly the
+// two codes the non-streaming writeWSEndError routes through
+// writeProviderStructuredOutputError.
+func TestSpec019RetryableOverrideScope(t *testing.T) {
+	for _, code := range []string{"malformed_json_response", "json_schema_validation_failed"} {
+		if !isSpec019RetryableOverrideCode(code) {
+			t.Errorf("isSpec019RetryableOverrideCode(%q)=false, want true", code)
+		}
+	}
+	for _, code := range []string{"response_byte_cap_exceeded", "provider_timeout", "provider_error", ""} {
+		if isSpec019RetryableOverrideCode(code) {
+			t.Errorf("isSpec019RetryableOverrideCode(%q)=true, want false", code)
+		}
+	}
+}
+
 func assertForwardWSStreamingMapsDetailCodeToSSE(t *testing.T, code string) {
 	t.Helper()
 	requestID := "req-structured"

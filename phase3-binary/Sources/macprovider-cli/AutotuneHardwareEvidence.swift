@@ -13,6 +13,7 @@ struct AutotuneHardwareEvidenceSubmitter {
     static let acceptedResponseStatuses: Set<String> = ["queued", "existing", "verified"]
 
     var config: AppConfig?
+    var credentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore()
     var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
@@ -25,9 +26,28 @@ struct AutotuneHardwareEvidenceSubmitter {
     }
 
     func submit(snapshot: AutotuneHardwareEvidenceSnapshot) async -> AutotuneHardwareEvidenceSubmission {
-        guard let config else { return .skipped("config unavailable") }
+        guard var config else { return .skipped("config unavailable") }
+        // First-install bootstrap deliberately leaves YAML tokenless. Resolve
+        // CLI Keychain custody here so both initial and freshness submissions
+        // use the same restart-safe credential boundary as `serve`.
+        let credentialStatus: ProviderCredentialStatus
+        do {
+            credentialStatus = try ProviderCredentialResolver.resolve(
+                config: &config,
+                store: credentialStore
+            )
+        } catch {
+            return .failed("provider credential resolution failed")
+        }
+        guard credentialStatus.source == .cliKeychain,
+              credentialStatus.state == .ready,
+              credentialStatus.restartSafe else {
+            return .failed(Self.credentialUnavailableReason(credentialStatus))
+        }
         guard let providerID = trimmedNonEmpty(config.providerID) else { return .skipped("provider_id missing") }
-        guard let providerToken = trimmedNonEmpty(config.providerToken) else { return .skipped("provider_token missing") }
+        guard let providerToken = trimmedNonEmpty(config.providerToken) else {
+            return .failed("provider credential unavailable (condition=missing action=restore_or_reenroll)")
+        }
         guard let coordinatorURL = trimmedNonEmpty(config.coordinatorURL),
               let endpoint = Self.hardwareEvidenceEndpoint(from: coordinatorURL)
         else {
@@ -59,6 +79,10 @@ struct AutotuneHardwareEvidenceSubmitter {
         } catch {
             return .failed("\(error)")
         }
+    }
+
+    static func credentialUnavailableReason(_ status: ProviderCredentialStatus) -> String {
+        "provider credential unavailable (condition=\(status.state.rawValue) action=\(status.recoveryAction.rawValue))"
     }
 
     static func hardwareEvidenceEndpoint(from raw: String) -> URL? {

@@ -42,6 +42,9 @@ run_case() {
   case "$mode" in
     predictable-id|existing-legacy) provider_id="office-mac" ;;
   esac
+  if [ "$mode" = "receipt-probe-fails" ]; then
+    : > "$root/prefetch-receipt.json"
+  fi
   cat > "$root/config/config.yaml" <<EOF
 model: "seed"
 provider_id: "$provider_id"
@@ -58,6 +61,10 @@ EOF
     DRY_RUN=0
     SKIP_PROVIDER_START=0
     model="seed"
+    if [ "$CASE_MODE" = "receipt-probe-fails" ]; then
+      AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="namespace/seed"
+      AUTOTUNE_PREFETCH_RECEIPT_PATH="$CASE_ROOT/prefetch-receipt.json"
+    fi
     log() { :; }
     die() { exit "$1"; }
     prompt_yes_no() { return 0; }
@@ -76,6 +83,7 @@ EOF
         autotune)
           case "$*" in
             *--no-submit-hardware-evidence*)
+              [ "$CASE_MODE" != "receipt-probe-fails" ] || return 9
               printf "model: \"recommended\"\nmodel_artifact_path: \"/tmp/model\"\nmodel_artifact_sha256: \"abc\"\n" >> "$CONFIG_PATH"
               ;;
             *--require-hardware-evidence*)
@@ -126,6 +134,18 @@ EOF
         exit 1
       fi
       ;;
+    receipt-probe-fails)
+      [ "$rc" -ne 0 ]
+      grep -F -- "--prefetch-receipt $root/prefetch-receipt.json" "$root/calls" >/dev/null
+      if grep -F -- "--require-hardware-evidence" "$root/calls" >/dev/null; then
+        echo "$mode attempted hardware evidence after the bound candidate probe failed" >&2
+        exit 1
+      fi
+      if grep -F "service-start" "$root/calls" >/dev/null; then
+        echo "$mode started service after the bound candidate probe failed" >&2
+        exit 1
+      fi
+      ;;
   esac
 }
 
@@ -136,6 +156,7 @@ run_case predictable-id
 run_case existing-mp
 run_case existing-legacy
 run_case store-unavailable
+run_case receipt-probe-fails
 
 # The durable upgrade transaction must remain live through every service-file
 # mutation and the required local-model self-test. Coordinator visibility is a

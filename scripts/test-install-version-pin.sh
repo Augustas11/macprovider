@@ -86,7 +86,13 @@ awk '
   emit && /^\}$/ { exit }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries validate_acceptance_upgrade_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
+awk '
+  /^validate_non_emergency_pinned_target\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries validate_acceptance_upgrade_target validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
@@ -638,6 +644,52 @@ observed_tag="$(
 )" || rc=$?
 report "case21-older-install-accepts-newer-candidate" 0 "$rc"
 report "case21-installed-version-does-not-rewrite-target" "v1.8.33" "$observed_tag"
+
+################################################################
+# Case 22 — the locked transaction rejects stale-snapshot pinned
+# downgrades while allowing same-version repair and normal upgrade.
+# main() acquires the install lock before this check, so the tested
+# decision is made against the binary present at mutation time.
+################################################################
+write_installed_version() {
+  printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$1" > "$BINARY_PATH"
+  chmod +x "$BINARY_PATH"
+}
+
+reset_mocks
+MACPROVIDER_VERSION="v1.8.39"
+write_installed_version "1.8.40"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-newer-installed-version-rejects-pinned-downgrade" 7 "$rc"
+
+write_installed_version "1.8.39"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-equal-installed-version-allows-repair" 0 "$rc"
+
+write_installed_version "1.8.38"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-older-installed-version-allows-upgrade" 0 "$rc"
+
+EMERGENCY_ROLLBACK=1
+write_installed_version "1.8.40"
+rc=0
+( validate_non_emergency_pinned_target v1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case22-emergency-downgrade-reaches-existing-gates" 0 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v01.8.39"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case22-leading-zero-version-rejected" 7 "$rc"
+
+reset_mocks
+MACPROVIDER_VERSION="v9999999999.8.39"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case22-oversized-version-component-rejected" 7 "$rc"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

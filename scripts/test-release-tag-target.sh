@@ -177,4 +177,71 @@ git -C "$work/source" checkout -q --detach "$second"
     bash "$source_guard" v1.0.0 "$second" "$work/remote.git" --require-existing
 ) | grep -q 'ok: v1.0.0 at reviewed origin/main'
 
+# The frozen v1.8.39 pre-publication recovery is a one-time compare-and-swap:
+# stale leases cannot delete, the exact old object can be retired, candidate
+# mode accepts the absent ref, and only an expected-absent lease may recreate
+# the signed annotated tag at the fresh reviewed commit.
+git -C "$work/source" tag -a v1.0.4 -m old-unpublished-v1.0.4 "$first"
+old_recovery_object="$(git -C "$work/source" rev-parse refs/tags/v1.0.4)"
+git -C "$work/source" push -q origin refs/tags/v1.0.4
+if git -C "$work/source" push -q \
+  --force-with-lease="refs/tags/v1.0.4:$second" \
+  origin :refs/tags/v1.0.4 >"$work/stale-delete.out" 2>&1; then
+  echo "pre-publication recovery deleted a tag through a stale lease" >&2
+  exit 1
+fi
+[[ "$(git ls-remote "$work/remote.git" refs/tags/v1.0.4 | awk '{print $1}')" == \
+  "$old_recovery_object" ]] || {
+  echo "stale deletion lease changed the remote tag" >&2
+  exit 1
+}
+git -C "$work/source" push -q \
+  --force-with-lease="refs/tags/v1.0.4:$old_recovery_object" \
+  origin :refs/tags/v1.0.4
+[[ -z "$(git ls-remote "$work/remote.git" refs/tags/v1.0.4 'refs/tags/v1.0.4^{}')" ]] || {
+  echo "exact-object recovery deletion did not remove the tag" >&2
+  exit 1
+}
+
+git -C "$work/source" checkout -q --detach "$third"
+(
+  cd "$work/source"
+  GITHUB_EVENT_NAME=workflow_dispatch \
+    GITHUB_REF=refs/heads/main \
+    GITHUB_SHA="$third" \
+    bash "$source_guard" v1.0.4 "$third" "$work/remote.git" --allow-absent
+) | grep -q 'ok: v1.0.4 at reviewed origin/main'
+
+git -C "$work/source" tag -d v1.0.4 >/dev/null
+git -C "$work/source" tag -a v1.0.4 -m replacement-v1.0.4 "$third"
+new_recovery_object="$(git -C "$work/source" rev-parse refs/tags/v1.0.4)"
+[[ "$new_recovery_object" != "$old_recovery_object" ]]
+git -C "$work/source" push -q \
+  --force-with-lease='refs/tags/v1.0.4:' \
+  origin refs/tags/v1.0.4
+[[ "$(git ls-remote "$work/remote.git" refs/tags/v1.0.4 | awk '{print $1}')" == \
+  "$new_recovery_object" ]]
+[[ "$(git ls-remote "$work/remote.git" 'refs/tags/v1.0.4^{}' | awk '{print $1}')" == \
+  "$third" ]]
+bash "$guard" v1.0.4 "$third" "$work/remote.git" | \
+  grep -q 'already targets build commit'
+if bash "$guard" v1.0.4 "$first" "$work/remote.git" \
+  >"$work/recovery-old-target.out" 2>&1; then
+  echo "strict source guard accepted the retired tag target" >&2
+  exit 1
+fi
+grep -q "targets $third; refusing assets built from $first" \
+  "$work/recovery-old-target.out"
+if git -C "$work/source" push -q \
+  --force-with-lease="refs/tags/v1.0.4:$old_recovery_object" \
+  origin :refs/tags/v1.0.4 >"$work/reused-delete.out" 2>&1; then
+  echo "pre-publication recovery reused the consumed deletion lease" >&2
+  exit 1
+fi
+[[ "$(git ls-remote "$work/remote.git" refs/tags/v1.0.4 | awk '{print $1}')" == \
+  "$new_recovery_object" ]] || {
+  echo "consumed deletion lease changed the replacement tag" >&2
+  exit 1
+}
+
 echo "release tag target regression checks passed"

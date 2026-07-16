@@ -65,10 +65,15 @@ For systemd, install `probe.mjs`, `safety.mjs`, `run-canary.sh`, and
 `emergency-disable.sh` together,
 plus the buyer token, operator token, heartbeat URL, and expected-fleet JSON
 credentials documented in `canary-buyer.service`. Leave
-`/etc/macprovider/canary-buyer.enabled` absent until sign-off. After sign-off:
+`/etc/macprovider-canary-buyer/enabled` absent until sign-off. The dedicated
+control directory is intentionally root-owned and world-traversable because the
+systemd service uses `DynamicUser=true`; it contains no credentials and remains
+non-writable to the service identity. After sign-off:
 
 ```bash
-sudo install -m 0644 /dev/null /etc/macprovider/canary-buyer.enabled
+sudo install -d -o root -g root -m 0755 /etc/macprovider-canary-buyer
+sudo install -o root -g root -m 0644 /dev/null \
+  /etc/macprovider-canary-buyer/enabled
 sudo systemctl enable --now canary-buyer.timer
 ```
 

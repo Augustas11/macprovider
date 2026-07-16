@@ -24,6 +24,22 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+provider_version_at_least() {
+  local required_major="$1"
+  local required_minor="$2"
+  local required_patch="$3"
+  local major minor patch
+  if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  [ "$major" -gt "$required_major" ] || \
+    { [ "$major" -eq "$required_major" ] && [ "$minor" -gt "$required_minor" ]; } || \
+    { [ "$major" -eq "$required_major" ] && [ "$minor" -eq "$required_minor" ] && [ "$patch" -ge "$required_patch" ]; }
+}
+
 sha256_file() {
   local path="$1"
   if command -v shasum >/dev/null 2>&1; then
@@ -224,6 +240,10 @@ if [ -f "$tmpdir/compatibility-set.json" ]; then
     --public-key "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
     --expected-tag "v$PROVIDER_VERSION"
   log "compatibility-set manifest signature and provider version verified"
+  if provider_version_at_least 1 8 39; then
+    "$provider_binary" release-payload-preflight >/dev/null
+    log "staged provider validated its signed compatibility release payload"
+  fi
 fi
 
 if [ "$REQUIRE_TIER2_STRINGS" = "1" ]; then

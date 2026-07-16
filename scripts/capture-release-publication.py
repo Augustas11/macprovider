@@ -132,11 +132,14 @@ dmg_name = f"Malibu-{tag}.dmg"
 index_name = "compatibility-artifact-index.json"
 if dmg_name not in local_assets or index_name not in local_assets:
     fail("publication requires Malibu DMG and compatibility artifact index")
+publication_content = {
+    "compatibility_artifact_index_sha256": local_assets[index_name][1],
+    "dmg_sha256": local_assets[dmg_name][1],
+}
+if "appcast.xml" in local_assets:
+    publication_content["appcast_sha256"] = local_assets["appcast.xml"][1]
 content = json.dumps(
-    {
-        "compatibility_artifact_index_sha256": local_assets[index_name][1],
-        "dmg_sha256": local_assets[dmg_name][1],
-    },
+    publication_content,
     sort_keys=True,
     separators=(",", ":"),
 ).encode()

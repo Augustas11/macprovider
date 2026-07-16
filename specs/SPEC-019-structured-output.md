@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.4 (2026-06-29, LOCKED)
+**Version:** 0.2.5 (2026-07-14, item 20 — streaming SSE retryable-override symmetry made explicit in §8)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** LOCKED — r4 defensive audit returned 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes (4 codex + 2 Claude blind-spot).
+**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 is a normative clarification of the existing §8 "preserve retryability" requirement — the coordinator streaming SSE writer MUST honor the provider `end.Retryable` override, matching the non-streaming path (runbook item 20; codex 3-lane 0 C/H/M).
 
 ## Quick orientation
 
@@ -1375,7 +1375,13 @@ Provider-to-coordinator WS terminal validation failure MUST carry
 `inference_response_end.status` in `{malformed_json_response,
 json_schema_validation_failed}`, preserve retryability, and omit a receipt. The
 coordinator terminal SSE writer MUST include `request_id` and
-`settlement_ran:true`. The gateway MUST treat terminal SSE error frames with
+`settlement_ran:true`, and MUST honor the provider-supplied
+`inference_response_end.retryable` override when synthesizing the terminal SSE
+`error.retryable` — the same override the non-streaming JSON writer applies
+(`writeProviderStructuredOutputError`) — so a buyer sees the identical
+`retryable` verdict for the same terminal outcome on both transports (runbook
+item 20: `writeSSEErrorWithRetryable` at
+`phase4-coordinator/internal/buyer/server.go`). The gateway MUST treat terminal SSE error frames with
 `error.code` in `{malformed_json_response, json_schema_validation_failed}` as
 final structured-output failures, forward them verbatim through `[DONE]`, and
 skip gateway-side positive / ok settlement; it MUST NOT remap them to
@@ -1605,9 +1611,9 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.2.4 (2026-06-29, LOCKED)
+**Version:** 0.2.5 (2026-07-14, item 20 amendment)
 
-**Status:** LOCKED — r4 defensive audit returned 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes.
+**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 adds one normative clause to §8 (streaming SSE writer MUST honor the provider `end.Retryable` override) — a clarification of the pre-existing "preserve retryability" requirement, landed with the item-20 code fix under a codex 3-lane 0 C/H/M audit.
 
 Audit trajectory:
 - r1: 1C + 9H + 9M → absorbed in v0.2.1.
@@ -1629,6 +1635,21 @@ Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.2.5 (2026-07-14, runbook item 20 — streaming retryable-override
+  symmetry):** §8's "Provider-to-coordinator WS terminal validation failure
+  MUST ... preserve retryability" clause now states explicitly that the
+  coordinator terminal **SSE** writer MUST honor the provider-supplied
+  `inference_response_end.retryable` override — the same override the
+  non-streaming JSON writer (`writeProviderStructuredOutputError`) already
+  applied — so a buyer sees the identical `retryable` verdict for the same
+  terminal structured-output outcome on both transports. This closes a
+  documented asymmetry (SPEC-006 §5.2 "Known carried items" (2)): the
+  streaming synthesis path was defaulting to the static `spec018Retryable`
+  classification and dropping the override. Landed WITH the code fix
+  (`writeSSEErrorWithRetryable`, `phase4-coordinator/internal/buyer/server.go`)
+  under a codex 3-lane 0 C/H/M audit. Normative clarification only — no
+  change to the v0.2.4 grammar, caps, money-path, or error-code table.
 
 - **v0.2.4 (2026-06-29, LOCKED):** r4 defensive audit returned **READY TO
   LOCK** from all 6 lanes (architect, code, security, product-design codex

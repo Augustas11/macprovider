@@ -211,13 +211,13 @@ enum AutoUpdateOrphanRecoveryOutcome: Equatable {
 }
 
 enum CompatibilitySetCutoverPhase: String, CaseIterable, Sendable {
-    case ownedResourcesRemoved
-    case ownedResourcesActivated
-    case watchdogScriptActivated
-    case providerPlistActivated
-    case watchdogPlistActivated
-    case binaryActivated
-    case malibuAppActivated
+    case ownedResourcesRemoved = "owned_resources_removed"
+    case ownedResourcesActivated = "owned_resources_activated"
+    case watchdogScriptActivated = "watchdog_script_activated"
+    case providerPlistActivated = "provider_plist_activated"
+    case watchdogPlistActivated = "watchdog_plist_activated"
+    case binaryActivated = "binary_activated"
+    case malibuAppActivated = "malibu_app_activated"
 }
 
 final class AutoUpdateLock: @unchecked Sendable {

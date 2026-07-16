@@ -54,12 +54,15 @@ test-dist:
 	bash scripts/test-coordinator-advertised-version-test.sh
 	bash scripts/test-release-tag-target.sh
 	bash scripts/test-release-security-posture.sh
+	bash scripts/test-malibu-bootstrap-bridge.sh
+	bash scripts/test-recover-malibu-publication.sh
 	bash scripts/test-acceptance-candidate-security.sh
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-release-toolchain.sh
 	bash scripts/test-release-publication-provenance.sh
 	bash scripts/test-compatibility-set-manifest.sh
 	bash scripts/test-compatibility-artifact-index.sh
+	bash scripts/test-tier2-provider-artifact.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
@@ -84,6 +87,7 @@ test-dist:
 	bash scripts/test-install-provider-id-preserve.sh
 	bash scripts/test-install-launchd-enable.sh
 	bash scripts/test-install-version-pin.sh
+	bash scripts/test-install-amfi-retry.sh
 	bash phase3-binary/dist/test/install_fresh_evidence.test.sh
 	bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
 	bash phase3-binary/dist/test/install_lifecycle_state.test.sh
