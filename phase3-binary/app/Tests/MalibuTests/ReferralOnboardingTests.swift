@@ -1,0 +1,191 @@
+import CryptoKit
+import Darwin
+import XCTest
+@testable import Malibu
+
+final class ReferralOnboardingTests: XCTestCase {
+    private let validCode = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
+
+    func testNormalizesExactCodeAndCanonicalJoinLink() throws {
+        XCTAssertEqual(try ReferralOnboardingInput.normalize(validCode), validCode)
+        XCTAssertEqual(
+            try ReferralOnboardingInput.normalize("https://coordinator.streamvc.live/j/\(validCode)"),
+            validCode
+        )
+        XCTAssertNil(try ReferralOnboardingInput.normalize("  \n"))
+    }
+
+    func testRejectsNonCanonicalOrAuthorityChangingLinks() {
+        for input in [
+            "http://coordinator.streamvc.live/j/\(validCode)",
+            "https://evil.example/j/\(validCode)",
+            "https://user@coordinator.streamvc.live/j/\(validCode)",
+            "https://coordinator.streamvc.live:443/j/\(validCode)",
+            "https://coordinator.streamvc.live/j/\(validCode)?next=evil",
+            "https://coordinator.streamvc.live/j/%4D\(validCode.dropFirst())",
+            validCode.lowercased(),
+        ] {
+            XCTAssertThrowsError(try ReferralOnboardingInput.normalize(input), input)
+        }
+    }
+
+    func testInstallContractAcceptsExactRegularFiles() throws {
+        let fixture = try Fixture(script: Data("#!/bin/bash\nexit 0\n".utf8))
+        defer { fixture.remove() }
+
+        XCTAssertNoThrow(
+            try BundledInstallContractVerifier.verify(
+                scriptURL: fixture.script,
+                manifestURL: fixture.manifest,
+                publicKeyPEM: fixture.publicKeyPEM
+            )
+        )
+    }
+
+    func testInstallContractRejectsMismatchAndSymlink() throws {
+        let fixture = try Fixture(script: Data("#!/bin/bash\nexit 0\n".utf8))
+        defer { fixture.remove() }
+        try Data("tampered\n".utf8).write(to: fixture.script)
+        XCTAssertThrowsError(
+            try BundledInstallContractVerifier.verify(
+                scriptURL: fixture.script,
+                manifestURL: fixture.manifest,
+                publicKeyPEM: fixture.publicKeyPEM
+            )
+        )
+
+        let target = fixture.root.appendingPathComponent("target.sh")
+        try Data("#!/bin/bash\nexit 0\n".utf8).write(to: target)
+        let link = fixture.root.appendingPathComponent("linked.sh")
+        XCTAssertEqual(symlink(target.path, link.path), 0)
+        XCTAssertThrowsError(
+            try BundledInstallContractVerifier.verify(
+                scriptURL: link,
+                manifestURL: fixture.manifest,
+                publicKeyPEM: fixture.publicKeyPEM
+            )
+        )
+    }
+
+    func testInstallContractRejectsUnsignedOrNonCanonicalManifest() throws {
+        let fixture = try Fixture(script: Data("#!/bin/bash\nexit 0\n".utf8))
+        defer { fixture.remove() }
+        var envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fixture.manifest)) as? [String: Any]
+        )
+        envelope["signatures"] = []
+        let unsigned = try JSONSerialization.data(
+            withJSONObject: envelope,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        ) + Data([0x0a])
+        try unsigned.write(to: fixture.manifest)
+
+        XCTAssertThrowsError(
+            try BundledInstallContractVerifier.verify(
+                scriptURL: fixture.script,
+                manifestURL: fixture.manifest,
+                publicKeyPEM: fixture.publicKeyPEM
+            )
+        )
+    }
+
+    func testReferralCodeFileIsOwnerOnlyRegularAndContainsOnlyCode() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("referral-code-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let url = try ReferralCodeFile.create(code: validCode, directory: root)
+        var info = stat()
+        XCTAssertEqual(lstat(url.path, &info), 0)
+        XCTAssertEqual(info.st_mode & S_IFMT, S_IFREG)
+        XCTAssertEqual(info.st_mode & 0o777, 0o600)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), validCode)
+    }
+
+    func testInstallerEnvironmentPassesOnlyReferralFilePath() throws {
+        let referralURL = URL(fileURLWithPath: "/tmp/referral-secret")
+        let environment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: [
+                "MACPROVIDER_REFERRAL_CODE_FILE": "/tmp/attacker",
+                "MACPROVIDER_REFERRAL_CODE": validCode,
+            ],
+            installPort: nil,
+            pinnedVersion: nil,
+            referralCodeFile: referralURL
+        )
+
+        XCTAssertEqual(environment["MACPROVIDER_REFERRAL_CODE_FILE"], referralURL.path)
+        XCTAssertNil(environment["MACPROVIDER_REFERRAL_CODE"])
+        XCTAssertFalse(environment.values.contains(validCode))
+    }
+
+    private struct Fixture {
+        let root: URL
+        let script: URL
+        let manifest: URL
+        let publicKeyPEM: String
+
+        init(script data: Data) throws {
+            root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("install-contract-test-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            script = root.appendingPathComponent("install.sh")
+            manifest = root.appendingPathComponent("compatibility-set.json")
+            try data.write(to: script, options: .atomic)
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            let signingKey = P256.Signing.PrivateKey()
+            publicKeyPEM = signingKey.publicKey.pemRepresentation
+            let signed: [String: Any] = [
+                "artifact_binding": [:],
+                "compatibility_set_id": "Augustas11/macprovider:v1.8.41@" + String(repeating: "a", count: 40),
+                "components": [
+                    "catalog": [:],
+                    "coordinator_admission": [:],
+                    "launchd": [
+                        "activation": "local",
+                        "contract": "macprovider.launch-agent.v1",
+                        "install_contract": [
+                            "path": "compatibility-set-local/install.sh",
+                            "sha256": digest,
+                        ],
+                        "label": "live.streamvc.macprovider",
+                        "plist_template": [:],
+                    ],
+                    "malibu_app": [:],
+                    "provider_cli": [:],
+                    "updater_rollback": [:],
+                    "watchdog": [:],
+                ],
+                "release": [:],
+                "schema_version": "macprovider.compatibility-set.v1",
+                "transaction": [:],
+            ]
+            var signedBytes = try JSONSerialization.data(
+                withJSONObject: signed,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            )
+            signedBytes.append(0x0a)
+            let signature = try signingKey.signature(for: SHA256.hash(data: signedBytes))
+            let envelope: [String: Any] = [
+                "schema_version": "macprovider.compatibility-set-envelope.v1",
+                "signatures": [[
+                    "algorithm": "ecdsa-p256-sha256",
+                    "key_id": "macprovider-release-p256-v1",
+                    "signature": signature.derRepresentation.base64EncodedString(),
+                ]],
+                "signed": signed,
+            ]
+            var manifestData = try JSONSerialization.data(
+                withJSONObject: envelope,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            )
+            manifestData.append(0x0a)
+            try manifestData.write(to: manifest, options: .atomic)
+        }
+
+        func remove() {
+            try? FileManager.default.removeItem(at: root)
+        }
+    }
+}

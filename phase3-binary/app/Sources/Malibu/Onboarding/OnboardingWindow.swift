@@ -56,6 +56,7 @@ private struct OnboardingRootView: View {
         .padding(28)
         .frame(minWidth: 460, minHeight: 560)
         .task {
+            await controller.refreshReferralInputAvailability()
             await controller.refreshFromExistingInstall()
         }
     }
@@ -66,6 +67,7 @@ private struct OnboardingRootView: View {
         case .idle:
             stageRow(title: "Ready", detail: "Installs the provider CLI, picks a model, and registers a background service.") {
                 VStack(alignment: .leading, spacing: 8) {
+                    referralAvailability
                     launchButton(title: "Launch Provider")
                     Text("No wallet needed to start — add one anytime after.")
                         .font(.callout)
@@ -121,8 +123,8 @@ private struct OnboardingRootView: View {
             }
         case .importingProviderCredential:
             stageRow(
-                title: "Importing provider identity",
-                detail: "Saving the provider identity to Keychain before connecting Malibu."
+                title: "Confirming provider identity",
+                detail: "Waiting for the CLI-owned provider identity to become restart-safe before Malibu attaches."
             ) {
                 ProgressView().controlSize(.small)
             }
@@ -142,10 +144,15 @@ private struct OnboardingRootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(MalibuBrand.coral)
             }
-        case let .failed(_, retryable, message):
+        case let .failed(stage, retryable, message):
             stageRow(title: retryable ? "Needs retry" : "Setup failed", detail: message) {
-                if retryable {
-                    launchButton(title: "Retry")
+                VStack(alignment: .leading, spacing: 8) {
+                    if stage == "referral" {
+                        referralAvailability
+                    }
+                    if retryable {
+                        launchButton(title: "Retry")
+                    }
                 }
             }
         }
@@ -189,6 +196,41 @@ private struct OnboardingRootView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(MalibuBrand.coral)
+    }
+
+    private var referralField: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Invite code (optional)")
+                .font(.callout.weight(.medium))
+            TextField("MAL1-S-… or invite link", text: $controller.referralInput)
+                .textFieldStyle(.roundedBorder)
+                .textContentType(.oneTimeCode)
+                .disableAutocorrection(true)
+            Text("Malibu passes this once to the installed CLI. Malibu never receives or stores the provider credential.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var referralAvailability: some View {
+        if !controller.referralAvailabilityChecked {
+            Text("Checking installed CLI capabilities…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if controller.referralInputAvailable {
+            referralField
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Invite entry is unavailable until the authenticated launchd CLI advertises referral_bootstrap_v1. Malibu and CLI versions are checked by capability, not by marketing version.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Check again") {
+                    Task { await controller.refreshReferralInputAvailability() }
+                }
+                .buttonStyle(.link)
+            }
+        }
     }
 
     private func formattedElapsed(since start: Date) -> String {

@@ -379,6 +379,50 @@ final class CoordinatorClientTests: XCTestCase {
         }
     }
 
+    func testTier2ReferralCloseIsTypedWithoutEchoingRawCode() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "mp-0123456789abcdef0123456789abcdef"
+        config.model = "model-a"
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(
+            receiveResults: [.failure(CoordinatorClientTestError.closedByCoordinator)],
+            closeCodeRawValue: 4005,
+            closeReasonText: "referral_expired"
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            providerReceiptPublicKey: receiptPublicKey,
+            credentialBootstrap: true,
+            bootstrapReceiptSigningKey: receiptKey,
+            bootstrapReferralCode: "MAL1-S-key-issuer-secret-tag"
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("terminal referral close should throw")
+        } catch let CoordinatorAuthError.rejected(code, message) {
+            XCTAssertEqual(code, "referral_expired")
+            XCTAssertEqual(message, "referral_expired")
+            XCTAssertFalse(message.contains("MAL1"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testRepeatedInvalidAuthRequestFailuresFireRecoveryHook() async throws {
         let recorder = CoordinatorFrameRecorder()
         let attempts = ReconnectAttemptRecorder()
@@ -2986,7 +3030,8 @@ final class CoordinatorClientTests: XCTestCase {
             recorder: recorder,
             providerReceiptPublicKey: receiptPublicKey,
             credentialBootstrap: true,
-            bootstrapReceiptSigningKey: receiptKey
+            bootstrapReceiptSigningKey: receiptKey,
+            bootstrapReferralCode: "MAL1-S-key-issuer-tag"
         )
         let attempt = Tier2AuthAttempt()
         let hello = await client.helloMessage()
@@ -3007,10 +3052,73 @@ final class CoordinatorClientTests: XCTestCase {
 
         XCTAssertNil(hello["credential_bootstrap"])
         XCTAssertEqual(initial["credential_bootstrap"] as? Bool, true)
+        XCTAssertEqual(initial["referral_code"] as? String, "MAL1-S-key-issuer-tag")
         XCTAssertEqual(initial["provider_receipt_public_key"] as? String, receiptPublicKey)
         XCTAssertEqual(proof["credential_bootstrap"] as? Bool, true)
+        XCTAssertEqual(proof["referral_code"] as? String, "MAL1-S-key-issuer-tag")
         XCTAssertNotNil(proof["identity_signature"] as? String)
         XCTAssertNotNil(proof["identity_signature_transcript_sha256"] as? String)
+    }
+
+    func testReferralCodeIsOmittedOutsideCredentialBootstrap() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            bootstrapReferralCode: "MAL1-S-key-issuer-tag"
+        )
+        let attempt = Tier2AuthAttempt()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "ordinary-no-referral",
+            "attestation_challenge": Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+        ], attempt: attempt, initialMessage: initial)
+
+        XCTAssertNil(initial["referral_code"])
+        XCTAssertNil(proof["referral_code"])
+    }
+
+    func testTerminalReferralRejectionStopsBootstrapReconnectLoop() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        let attempts = ReferralBootstrapConnectAttempts()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            reconnectInitialBackoffNanoseconds: 1_000_000,
+            connectAndRunOverride: {
+                await attempts.increment()
+                throw CoordinatorAuthError.rejected(code: "referral_expired", message: "redacted")
+            },
+            providerReceiptPublicKey: receiptPublicKey,
+            credentialBootstrap: true,
+            bootstrapReceiptSigningKey: receiptKey,
+            bootstrapReferralCode: "MAL1-S-key-issuer-tag"
+        )
+
+        await client.start()
+        try await Self.waitUntil {
+            await client.credentialBootstrapTerminalReferralFailure() != nil
+        }
+        let terminalFailure = await client.credentialBootstrapTerminalReferralFailure()
+        XCTAssertEqual(terminalFailure, ReferralBootstrapFailure(kind: .expired))
+        try await Task.sleep(nanoseconds: 10_000_000)
+        let attemptCount = await attempts.value()
+        XCTAssertEqual(attemptCount, 1)
+        await client.stop()
     }
 
     func testOrdinaryBearerV2PublishesAndSignsWithSeparateAdmissionIdentity() async throws {
@@ -4483,6 +4591,7 @@ final class CoordinatorClientTests: XCTestCase {
         losslessnessProbeEnabled: Bool = false,
         credentialBootstrap: Bool = false,
         bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
+        bootstrapReferralCode: String? = nil,
         receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = nil,
         receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = [],
         catalogReleaseID: String? = nil,
@@ -4557,6 +4666,7 @@ final class CoordinatorClientTests: XCTestCase {
             autoupdateMarkerStore: autoupdateMarkerStore,
             credentialBootstrap: credentialBootstrap,
             bootstrapReceiptSigningKey: bootstrapReceiptSigningKey,
+            bootstrapReferralCode: bootstrapReferralCode,
             receiptIdentitySigningKey: receiptIdentitySigningKey,
             receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
             providerCredentialStore: providerCredentialStore,
@@ -4855,6 +4965,18 @@ private struct StaticAttestationGenerator: Tier2AttestationTokenGenerating, @unc
         providerECDHPublicKey: String
     ) async -> [String: Any]? {
         token
+    }
+}
+
+private actor ReferralBootstrapConnectAttempts {
+    private var count = 0
+
+    func increment() {
+        count += 1
+    }
+
+    func value() -> Int {
+        count
     }
 }
 
