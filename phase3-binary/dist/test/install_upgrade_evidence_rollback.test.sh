@@ -118,14 +118,24 @@ PY
 # through the real store.
 write_lease_record() {
   out_path="$1"; operation_id="$2"; kind="$3"; owner_pid="$4"
+  # Optional record-window override (env, so the positional signature stays
+  # backward-compatible for the existing A-05.1/.2/.3 callers). The default
+  # window brackets `now`; LEASE_RECORD_WINDOW=expired issues the whole record
+  # window in the past so it is STRUCTURALLY VALID (correct duration algebra)
+  # yet NOT in-bracket. This proves the reconciler's shared-validity gate
+  # (record_shared_validity_ok, mirroring Swift's validationFailure ~888..894)
+  # removes an out-of-window record even when the owner is LIVE (the MEDIUM fix).
+  LEASE_RECORD_WINDOW="${LEASE_RECORD_WINDOW:-}" \
   python3 - "$out_path" "$operation_id" "$kind" "$owner_pid" <<'PY'
 import json
+import os
 import subprocess
 import sys
 import time
 
 out_path, operation_id, kind, owner_pid_text = sys.argv[1:]
 owner_pid = int(owner_pid_text)
+record_window = os.environ.get("LEASE_RECORD_WINDOW", "")
 
 
 def process_start_us(pid):
@@ -166,11 +176,23 @@ def boot_session():
 # rollback cases remove regardless of structure.
 wall_now = int(time.time() * 1_000)
 mono_now = int(time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))
-issued_wall = wall_now - 5 * 60 * 1_000
-expires_wall = wall_now + 10 * 60 * 1_000
-wall_duration = expires_wall - issued_wall
-issued_mono = mono_now - 5 * 60 * 1_000_000_000
-expires_mono = issued_mono + wall_duration * 1_000_000
+if record_window == "expired":
+    # Whole window shifted into the PAST: issued 20 min ago, expired 5 min ago.
+    # Still a valid 15-min duration (inside both kind ceilings, monotonicDuration
+    # == wallDuration * 1_000_000), so record_matches_swift_structure ACCEPTS it
+    # -- the only reason to REMOVE is the shared-validity gate's wall/monotonic
+    # window check, on BOTH axes (Swift's .wallExpired / .monotonicExpired).
+    issued_wall = wall_now - 20 * 60 * 1_000
+    expires_wall = wall_now - 5 * 60 * 1_000
+    wall_duration = expires_wall - issued_wall
+    issued_mono = mono_now - 20 * 60 * 1_000_000_000
+    expires_mono = issued_mono + wall_duration * 1_000_000
+else:
+    issued_wall = wall_now - 5 * 60 * 1_000
+    expires_wall = wall_now + 10 * 60 * 1_000
+    wall_duration = expires_wall - issued_wall
+    issued_mono = mono_now - 5 * 60 * 1_000_000_000
+    expires_mono = issued_mono + wall_duration * 1_000_000
 
 record = {
     "version": 1,
@@ -330,6 +352,19 @@ if expiry == "expired":
     handoff_expires_wall = wall_now - 60 * 1_000
     handoff_issued_mono = mono_now - 10 * 60 * 1_000_000_000
     handoff_expires_mono = mono_now - 60 * 1_000_000_000
+elif expiry == "expired_short":
+    # A STRUCTURALLY VALID handoff window (3.5-min duration, inside the 5-min
+    # handoff ceiling and contained by the record window) that is nonetheless
+    # EXPIRED: issued 4 minutes ago, closed 30 seconds ago. Unlike "expired"
+    # (whose 9-min duration record_matches_swift_structure would reject), this
+    # passes structure so the ONLY reason to REMOVE is the handoff-window gate --
+    # exactly Swift's ~900..901 .wallExpired / .monotonicExpired. Used with a
+    # LIVE owner to prove a prepared-handoff record is governed SOLELY by the
+    # handoff window, never by owner liveness (the remaining-surface fix).
+    handoff_issued_wall = wall_now - 4 * 60 * 1_000
+    handoff_expires_wall = wall_now - 30 * 1_000
+    handoff_issued_mono = mono_now - 4 * 60 * 1_000_000_000
+    handoff_expires_mono = mono_now - 30 * 1_000_000_000
 else:
     # A live prepared handoff window that currently brackets `now` and stays
     # inside the record window (Swift requires handoff.expires <= record.expires).
@@ -2026,6 +2061,67 @@ if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json
 fi
 kill "$m4_pid" >/dev/null 2>&1 || true
 wait "$m4_pid" 2>/dev/null || true
+
+# (A-05.20, MEDIUM) A LIVE-OWNER record whose record wall/monotonic window is
+# EXPIRED -> REMOVED. This is the direct mutation guard for the shared-validity
+# gate: Swift's validationFailure runs the record boot/wall/monotonic window
+# checks (~888..894) AFTER structure and BEFORE either preservation branch, so a
+# live owner can NEVER rescue an out-of-window record. owner_is_live() checks
+# only pid/boot/process-start, NOT the record's clock windows, so WITHOUT the new
+# record_shared_validity_ok gate this live-owner lease would be PRESERVED yet
+# Swift's inspect() would reject it as .wallExpired -> restart loop for a
+# handoff-bearing lease. The record stays STRUCTURALLY VALID (correct duration
+# algebra), so the ONLY thing that makes it REMOVED is the shared-window gate.
+# The owner is genuinely live (the sleep pid with its real process-start
+# second), so owner_is_live() returns True; only the window gate makes this
+# REMOVED. Disabling record_shared_validity_ok (or dropping its wall/monotonic
+# checks) would false-PRESERVE and fail this test.
+sleep 300 &
+m5_pid=$!
+lease_fixture="$TMP/lease_live_owner_expired_window.json"
+LEASE_RECORD_WINDOW=expired \
+  write_lease_record "$lease_fixture" unrelated-live-expired startup "$m5_pid"
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_live_owner_expired_window "" "" "" self-test
+root="$TMP/lease_live_owner_expired_window"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "live-owner lease with expired record window survived rollback (shared-validity gate must remove it)" >&2
+  kill "$m5_pid" >/dev/null 2>&1 || true
+  exit 1
+fi
+kill "$m5_pid" >/dev/null 2>&1 || true
+wait "$m5_pid" 2>/dev/null || true
+
+# (A-05.21, MEDIUM remaining-surface) A LIVE-OWNER record carrying a `.prepared`
+# handoff whose HANDOFF window is EXPIRED (but structurally valid + record window
+# valid) -> REMOVED. In Swift's validationFailure the owner process-start
+# liveness check (~904) is reached ONLY in the ELSE / no-prepared-handoff case: a
+# record WITH a prepared handoff is governed SOLELY by the handoff-window check
+# (~896..901), which returns .wallExpired for an expired handoff regardless of
+# owner liveness. So a prepared-handoff record must route EXCLUSIVELY through the
+# exemption; a live owner must NOT rescue an expired-handoff lease. WITHOUT the
+# prepared/owner branch split (record_has_prepared_handoff) owner_is_live() would
+# fire first and PRESERVE this lease, yet Swift's inspect() rejects it ->
+# restart loop. The owner is genuinely live (the sleep pid with its real
+# process-start second), so owner_is_live() would return True; only routing
+# prepared-handoff records through the handoff-window gate makes this REMOVED.
+sleep 300 &
+m6_pid=$!
+lease_fixture="$TMP/lease_live_owner_expired_handoff.json"
+PREPARED_OVERRIDE_LIVE_OWNER="$m6_pid" \
+  write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-live-expired" "$m6_pid" expired_short
+MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
+  run_case lease_live_owner_expired_handoff "" "" "" self-test
+root="$TMP/lease_live_owner_expired_handoff"
+[ "$(cat "$root/rc")" -eq 9 ]
+if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json" ]; then
+  echo "live-owner lease with expired prepared handoff survived rollback (handoff window must govern, not owner liveness)" >&2
+  kill "$m6_pid" >/dev/null 2>&1 || true
+  exit 1
+fi
+kill "$m6_pid" >/dev/null 2>&1 || true
+wait "$m6_pid" 2>/dev/null || true
 
 run_darwin_manual_recovery_cases() {
 # A non-launchd provider holding the configured port is a real protected

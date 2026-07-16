@@ -1742,6 +1742,70 @@ lease_path, lock_path, install_operation_id = sys.argv[1:]
 if not lease_path:
     raise SystemExit(0)
 uid = os.getuid()
+#
+# ======================================================================
+# COMPLETE DIVERGENCE INVENTORY (reconciler-vs-Swift-store).
+# ======================================================================
+# The reconciler's contract is that its PRESERVE-set is a SUBSET of Swift's
+# read-acceptance set: it may REMOVE a lease Swift would keep (bounded
+# availability delay -- the CLI re-mints a fresh lease one store cycle later),
+# but it must NEVER PRESERVE a lease Swift would reject on read (that would
+# restart-loop the provider, because serve startup only falls back on
+# handoffNotPrepared). Every place the shell mirror is not byte-identical to the
+# Swift validators is one of the following FIVE deliberate, documented
+# conservative divergences. Each is annotated at its implementation site; this
+# is the consolidated inventory with each divergence's DIRECTION:
+#
+#   1. Owner liveness at SECOND resolution (owner_is_live /
+#      process_start_epoch_seconds). Swift compares owner.process_start at
+#      MICROSECOND precision; shell has only `ps lstart` (whole-second).
+#      DIRECTION: bounded-availability-with-downstream-Swift-revalidation. This
+#      is the one BOUNDED FAIL-OPEN: a same-second/same-boot pid reuse can be
+#      PRESERVED here yet rejected by Swift's exact-microsecond identity. Safe
+#      because the store re-runs the exact check downstream and replaces the
+#      lease; worst case is a bounded availability delay, never a restart loop.
+#      In every OTHER respect (dead pid, boot change, different-second start,
+#      unverifiable start) owner_is_live is at-least-as-strict as Swift.
+#
+#   2. Stricter printable-ASCII identity policy (ascii_identity_scalar, applied
+#      to operation_id / provider_id / service_identity). Swift trims with
+#      Foundation's trimmingCharacters(.whitespacesAndNewlines) then compares
+#      trimmed == value; shell requires every scalar to be printable ASCII
+#      0x21..0x7e instead of reproducing Foundation's trim set.
+#      DIRECTION: fail-toward-removal (strictly-stricter). Any value outside the
+#      ASCII set is REMOVED; the store never WRITES such identities, so the
+#      at-most-theoretical false-removal (e.g. a non-ASCII provider_id) is a
+#      bounded availability delay, never a restart loop.
+#
+#   3. Duplicate-key STRICT REJECTION vs Foundation keep-first (_strict_pairs).
+#      Foundation's JSONDecoder keeps the FIRST value for a duplicate key;
+#      Python's default keeps the LAST. Rather than replicate keep-first, shell
+#      REJECTS any duplicate-key document outright.
+#      DIRECTION: fail-toward-removal. A duplicate-key file Foundation would
+#      accept keeping-first is REMOVED here; removal self-heals.
+#
+#   4. GLOBAL rejection of float / NaN / Infinity JSON tokens, even in fields the
+#      shell otherwise ignores (strict_json_loads parse_float / parse_constant).
+#      Foundation rejects these only where a numeric field is decoded; shell
+#      rejects them anywhere in the document.
+#      DIRECTION: fail-toward-removal. A record carrying a stray float in an
+#      unread field that Foundation would accept is REMOVED here; removal
+#      self-heals.
+#
+#   5. TRAILING-SLASH rejection of target_executable_path, including the
+#      filesystem-root path "/" that Swift accepts STRUCTURALLY
+#      (valid_target_path). Swift's standardizedFileURL guard accepts "/"; shell's
+#      conservative component rule rejects any trailing slash (so "/" too).
+#      DIRECTION: fail-toward-removal. A "/"-valued target path (never a
+#      plausible executable, never emitted by the store) is REMOVED here; removal
+#      self-heals.
+#
+# All boot/clock-window, storage-envelope, and structural checks are
+# at-least-as-strict subsets of Swift with NO divergence (the shared-validity
+# gate mirrors validationFailure ~888..894 exactly, and the prepared-handoff
+# exemption mirrors the ~895 branch). The five above are the complete set.
+# ======================================================================
+#
 # The Swift store enforces ProviderLifecycleLeaseStore.maximumRecordBytes = 16 KiB
 # on EVERY read (validateOpenFile, called from readRecordIfPresent before the
 # JSONDecoder runs): a record larger than 16 KiB is rejected as .unsafeStorage
@@ -2420,6 +2484,92 @@ def record_matches_swift_structure(record):
     return True
 
 
+def record_shared_validity_ok(record):
+    # Mirror the SHARED validity checks the Swift store's validationFailure
+    # (ProviderLifecycleLease.swift ~888..894) runs AFTER validateRecordStructure
+    # and BEFORE it branches to EITHER preservation path -- the prepared-handoff
+    # exemption at ~895 OR the owner process-start liveness check at ~904. Those
+    # four guards, in Swift's exact order, are:
+    #
+    #     guard environment.bootSession() == record.owner.bootSession  -> .bootSessionChanged
+    #     guard wallNow    >= record.issuedWallMilliseconds             -> .wallClockBeforeIssue
+    #     guard monotonicNow >= record.issuedMonotonicNanoseconds       -> .monotonicClockBeforeIssue
+    #     guard wallNow    <  record.expiresWallMilliseconds            -> .wallExpired
+    #     guard monotonicNow <  record.expiresMonotonicNanoseconds      -> .monotonicExpired
+    #
+    # The reconciler previously ran only structure -> owner_is_live (pid/boot/
+    # process-start) -> prepared exemption. owner_is_live did NOT check the
+    # record's wall/monotonic WINDOWS, so a live foreign owner whose record clock
+    # window did not bracket `now` (issued in the future, or already expired, on
+    # either the wall or the monotonic axis) was PRESERVED by the shell yet
+    # REJECTED by Swift's validationFailure. For a handoff-bearing lease, serve
+    # startup only falls back on handoffNotPrepared (MacProviderCLI.swift ~1413),
+    # so preserving such a record can restart-loop rollback startup. This gate
+    # closes that divergence by running Swift's shared window/boot checks BEFORE
+    # both preservation branches, exactly where Swift runs them.
+    #
+    # Directionality is fail-toward-removal: anything this cannot positively
+    # verify (missing CLOCK_MONOTONIC_RAW, unknown boot, malformed window) returns
+    # False so the lease is REMOVED. record_matches_swift_structure has already
+    # bounded and typed the four window fields (Int64, issued_wall > 0,
+    # issued_mono >= 0, duration algebra), so this reads them as plain ints.
+    if not isinstance(record, dict):
+        return False
+    owner = record.get("owner")
+    if not isinstance(owner, dict):
+        return False
+    owner_boot = owner.get("boot_session")
+    if not isinstance(owner_boot, str) or not owner_boot:
+        return False
+    current_boot = boot_session()
+    if not current_boot or owner_boot != current_boot:
+        # Swift's .bootSessionChanged: a boot-session mismatch (or unknown
+        # current boot) means the record's monotonic base is not comparable and
+        # the owner is a post-reboot coincidence. Fail toward removal.
+        return False
+
+    issued_wall = record.get("issued_wall_ms")
+    expires_wall = record.get("expires_wall_ms")
+    issued_mono = record.get("issued_monotonic_ns")
+    expires_mono = record.get("expires_monotonic_ns")
+    for value in (issued_wall, expires_wall, issued_mono, expires_mono):
+        if not isinstance(value, int) or isinstance(value, bool):
+            return False
+
+    wall_now = wall_milliseconds()
+    monotonic_now = monotonic_nanoseconds()
+    if monotonic_now is None:
+        # No CLOCK_MONOTONIC_RAW on this platform: we cannot reproduce Swift's
+        # monotonic comparison, so we cannot confirm the record is in-window.
+        # Decline preservation (removal) as elsewhere -- never a false preserve.
+        return False
+
+    # Swift's guards, same axes and strictness: now must be at-or-after issue and
+    # strictly before expiry on BOTH the wall and monotonic axes.
+    if wall_now < issued_wall or wall_now >= expires_wall:
+        return False
+    if monotonic_now < issued_mono or monotonic_now >= expires_mono:
+        return False
+    return True
+
+
+def record_has_prepared_handoff(record):
+    # True iff the record carries a `.prepared` startup handoff, mirroring the
+    # SELECTOR of Swift's validationFailure branch (ProviderLifecycleLease.swift
+    # ~895: `if let handoff = record.startupHandoff, handoff.state == .prepared`).
+    # This decides WHICH preservation path applies -- the prepared-handoff
+    # exemption (handoff-window governed) vs the ordinary owner-liveness check --
+    # exactly as Swift's if/else does. By the time this runs, structure has
+    # already been validated, so a present-but-malformed handoff cannot reach
+    # here; but this is deliberately a shape-only predicate (no structural
+    # re-check) so it can never itself flip a record from the exemption path to
+    # the owner-liveness path and thereby preserve something Swift rejects.
+    if not isinstance(record, dict):
+        return False
+    handoff = record.get("startup_handoff")
+    return isinstance(handoff, dict) and handoff.get("state") == "prepared"
+
+
 def prepared_handoff_preserves(record):
     # Mirror the prepared-handoff validity exception in the Swift store's
     # validationFailure (ProviderLifecycleLease.swift, `if let handoff =
@@ -2448,6 +2598,15 @@ def prepared_handoff_preserves(record):
     #     handoff (same-boot comparable via the boot_session match above).
     # Any missing/malformed field or an expired/before-issue window means the
     # exemption does NOT apply and the lease follows the ordinary path.
+    #
+    # NOTE (MEDIUM fix): the caller now runs record_shared_validity_ok BEFORE
+    # this exemption, so the record's boot/wall/monotonic window is ALREADY
+    # confirmed in-bracket by the time we get here (matching Swift's ~888..894
+    # running before the ~895 prepared branch). The record-window and boot
+    # re-checks below are therefore redundant with that gate; they are KEPT so
+    # this function remains a correct standalone predicate (and still enforces
+    # the HANDOFF window, which the shared gate does not touch -- Swift's ~896..
+    # 901 handoff-window guards).
     if not isinstance(record, dict):
         return False
     handoff = record.get("startup_handoff")
@@ -2651,9 +2810,36 @@ try:
         #                          record we are undoing must never survive, and
         #                          removal is safe for a structurally invalid one)
         #   -> structure valid? => (no) REMOVE
-        #   -> owner live?      => KEEP
-        #   -> prepared handoff exemption? => KEEP
-        #   -> otherwise        => REMOVE
+        #   -> shared validity (boot + record wall/monotonic windows)? => (no) REMOVE
+        #   -> record carries a `prepared` handoff?
+        #        yes => prepared handoff exemption (handoff window)? KEEP else REMOVE
+        #        no  => owner live? KEEP else REMOVE
+        #
+        # The last split MIRRORS Swift's validationFailure branch structure
+        # EXACTLY (ProviderLifecycleLease.swift ~895..907): after the shared
+        # boot/window checks, Swift takes `if let handoff = record.startupHandoff,
+        # handoff.state == .prepared { ...handoff-window checks...; return nil }`
+        # and ONLY reaches the owner process-start liveness check (~904) in the
+        # ELSE case (no prepared handoff). For a record that carries a prepared
+        # handoff, Swift's acceptance is governed SOLELY by the handoff window --
+        # owner liveness is NEVER consulted. A previous order that ran
+        # owner_is_live for ALL records would PRESERVE a live-owner record whose
+        # prepared HANDOFF window is expired, yet Swift's inspect() rejects it as
+        # .wallExpired at the handoff-window check -> restart loop (serve only
+        # falls back on handoffNotPrepared). Routing prepared-handoff records
+        # exclusively through the exemption closes that surface.
+        #
+        # The shared-validity gate mirrors validationFailure's boot/window checks
+        # (ProviderLifecycleLease.swift ~888..894), which Swift runs AFTER
+        # validateRecordStructure and BEFORE it branches to EITHER preservation
+        # path (the prepared-handoff exemption OR the owner process-start
+        # liveness check). owner_is_live checks only pid/boot/process-start, NOT
+        # the record's wall/monotonic WINDOWS, so without this gate a LIVE
+        # foreign owner with an out-of-window record would be PRESERVED here yet
+        # REJECTED by Swift's validationFailure -- a restart-loop for a
+        # handoff-bearing lease (serve only falls back on handoffNotPrepared).
+        # Running it before BOTH branches keeps the reconciler's preserve-set a
+        # subset of Swift's read-acceptance.
         #
         # The Swift ProviderLifecycleLeaseStore persists the owner NESTED under
         # `owner` (owner.pid / owner.process_start_us / owner.boot_session).
@@ -2679,25 +2865,40 @@ try:
             # This gate runs BEFORE owner-liveness so a LIVE owner cannot rescue
             # an invalid record (the R6 CODE-M4 fix).
             remove = True
+        elif not record_shared_validity_ok(record):
+            # Swift's validationFailure runs the SHARED boot/window checks
+            # (~888..894) AFTER structure and BEFORE either preservation branch.
+            # A record whose boot session no longer matches, or whose wall or
+            # monotonic window does not bracket `now`, is rejected by Swift's
+            # inspect() regardless of owner liveness -- so a LIVE owner must NOT
+            # rescue an out-of-window record (that would restart-loop a
+            # handoff-bearing lease). This gate runs BEFORE the prepared/owner
+            # split, exactly as Swift orders it (the MEDIUM fix).
+            remove = True
+        elif record_has_prepared_handoff(record):
+            # MIRROR Swift's `if let handoff = record.startupHandoff,
+            # handoff.state == .prepared { ... }` branch (~895..903): when the
+            # record carries a `prepared` handoff, Swift's acceptance is governed
+            # SOLELY by the handoff-window exemption -- it NEVER consults owner
+            # liveness for such a record (the owner process-start check at ~904
+            # is only reached in the ELSE / no-handoff case). So route
+            # prepared-handoff records EXCLUSIVELY through the exemption: a live
+            # owner must NOT rescue a record whose prepared handoff window is
+            # expired (Swift rejects it as .wallExpired -> restart loop). The
+            # store intentionally exempts an unexpired `.prepared` handoff from
+            # owner liveness so launchd can adopt it AFTER the maintenance
+            # process that prepared it has exited; prepared_handoff_preserves
+            # checks the handoff window (and re-checks structure/boot/record
+            # window, redundant but harmless) exactly as Swift's ~896..901 do.
+            remove = not prepared_handoff_preserves(record)
         elif owner_is_live(owner):
-            # Structurally valid + ordinary live foreign owner: preserved.
-            remove = False
-        elif prepared_handoff_preserves(record):
-            # The Swift store intentionally exempts an unexpired `.prepared`
-            # startup handoff from the owner process-start liveness check so
-            # launchd can adopt it AFTER the maintenance process that prepared
-            # it has exited (see prepared_handoff_preserves / validationFailure
-            # in ProviderLifecycleLease.swift). Mirror that cross-process
-            # semantics: a foreign lease carrying a structurally valid,
-            # unexpired prepared handoff on the current boot session is
-            # PRESERVED even though its owner process is gone, so the
-            # operation/service/path/hash authorization it carries survives for
-            # the launchd adopter. (prepared_handoff_preserves re-runs the
-            # structural mirror internally; it is redundant now but harmless.)
+            # No prepared handoff: MIRROR Swift's ELSE branch (~904), the owner
+            # process-start liveness check. Structurally valid, in-window +
+            # ordinary live foreign owner -> preserved.
             remove = False
         else:
-            # Structurally valid but dead owner, no valid prepared handoff:
-            # clear it.
+            # No prepared handoff, structurally valid, in-window, but dead owner:
+            # clear it (Swift's .ownerProcessMissingOrReused).
             remove = True
 
     if remove:

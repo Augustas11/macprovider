@@ -97,6 +97,228 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         )
     }
 
+    /// The shell reconciler must not PRESERVE a record Swift's validationFailure
+    /// would REJECT for an out-of-window clock, even when the owner is LIVE. The
+    /// store's validationFailure runs the shared record boot/wall/monotonic
+    /// window checks (ProviderLifecycleLease.swift ~888..894) AFTER structure and
+    /// BEFORE either preservation branch, so a live owner cannot rescue an
+    /// out-of-window record. The shell's owner_is_live() checks only
+    /// pid/boot/process-start, NOT the record windows, so without the shell's
+    /// record_shared_validity_ok gate this live-owner lease would be PRESERVED by
+    /// the shell yet REJECTED by Swift -- a restart loop for a handoff-bearing
+    /// lease (serve only falls back on handoffNotPrepared).
+    ///
+    /// This test acquires a REAL lease via the `.live` store (stamping THIS
+    /// running process as the genuinely-live owner: real pid, real process-start
+    /// second, real boot session), then rewrites ONLY the record's four window
+    /// fields so the whole window is in the PAST (structurally valid duration
+    /// algebra, but expired). The ACTUAL shell reconciler must REMOVE it, and the
+    /// real store then self-heals by acquiring a fresh lease.
+    func testShellReconcilerRemovesLiveOwnerOutOfWindowRecordThenStoreAcquiresFresh() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        // 1. Acquire a REAL lease: the `.live` environment stamps the owner with
+        //    THIS process's live identity (pid alive, real process-start second,
+        //    real boot session), so the shell's owner_is_live() returns True.
+        let store = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        _ = try store.acquire(
+            kind: .startup,
+            operationID: "unrelated-live-out-of-window",
+            duration: 15 * 60
+        )
+
+        // 2. Rewrite ONLY the record's four window fields so the whole window is
+        //    in the PAST (issued 20m ago, expired 5m ago) on BOTH the wall and
+        //    monotonic axes, keeping monotonicDuration == wallDuration * 1e6 so
+        //    the record stays STRUCTURALLY VALID. The owner block is untouched:
+        //    the ONLY reason to REMOVE is the shared-validity window gate.
+        guard var onDisk = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: leaseURL)
+        ) as? [String: Any] else {
+            return XCTFail("acquired lease is not a JSON object")
+        }
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+        let issuedWall = wallNow - 20 * 60 * 1_000
+        let expiresWall = wallNow - 5 * 60 * 1_000
+        let wallDuration = expiresWall - issuedWall
+        let issuedMono = monoNow - 20 * 60 * 1_000_000_000
+        let expiresMono = issuedMono + wallDuration * 1_000_000
+        onDisk["issued_wall_ms"] = issuedWall
+        onDisk["expires_wall_ms"] = expiresWall
+        onDisk["issued_monotonic_ns"] = issuedMono
+        onDisk["expires_monotonic_ns"] = expiresMono
+        let rewritten = try JSONSerialization.data(
+            withJSONObject: onDisk,
+            options: [.sortedKeys]
+        )
+        try (rewritten + Data([0x0a])).write(to: leaseURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: leaseURL.path
+        )
+
+        // Sanity: the real store does NOT consider this a valid record (its
+        // window is expired) even though the owner is live -- proving the shell
+        // must not rely on "Swift revalidates".
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider an out-of-window live-owner record valid")
+        }
+
+        // 3. Run the ACTUAL shell reconciler with an UNRELATED install operation
+        //    id (this is a foreign lease, not the rolled-back transaction).
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+
+        // 4. The out-of-window record must be REMOVED even though the owner is
+        //    live (the shared-validity gate).
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a live-owner record with an expired window must be removed"
+        )
+
+        // 5. Self-healing: with the invalid record gone, the REAL store can
+        //    acquire a fresh lease.
+        let freshStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        let fresh = try freshStore.acquire(
+            kind: .startup,
+            operationID: "serve:after-out-of-window-removal",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertNil(fresh.startupHandoff)
+        guard case .valid = freshStore.inspect() else {
+            return XCTFail("freshly acquired lease must inspect as valid")
+        }
+    }
+
+    /// The reconciler must not PRESERVE a record that carries a `.prepared`
+    /// handoff whose HANDOFF window is expired, even when the OWNER is LIVE. In
+    /// Swift's validationFailure the owner process-start liveness check (~904) is
+    /// reached ONLY in the ELSE / no-prepared-handoff case: a record WITH a
+    /// prepared handoff is governed SOLELY by the handoff-window check (~896..
+    /// 901), which returns `.wallExpired` for an expired handoff regardless of
+    /// owner liveness. A decision order that ran owner_is_live for ALL records
+    /// would PRESERVE this live-owner record yet Swift's inspect() would reject
+    /// it -> restart loop (serve only falls back on handoffNotPrepared). This
+    /// test acquires a REAL maintenance lease via `.live` (stamping THIS process
+    /// as the genuinely-live owner), splices in a `.prepared` handoff with an
+    /// EXPIRED window (record window still valid + containing it), runs the
+    /// ACTUAL shell reconciler (which must REMOVE it because the record carries a
+    /// prepared handoff, routing it exclusively through the handoff-window
+    /// exemption), and proves the real store self-heals.
+    func testShellReconcilerRemovesLiveOwnerExpiredPreparedHandoffThenStoreAcquiresFresh() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        // 1. Acquire a REAL maintenance lease: `.live` stamps the owner with THIS
+        //    process's live identity, so the shell's owner_is_live() would return
+        //    True -- making the handoff-window governance the ONLY thing that can
+        //    remove it.
+        let store = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        _ = try store.acquire(
+            kind: .maintenance,
+            operationID: "unrelated-live-expired-handoff",
+            duration: 19 * 60
+        )
+        guard var onDisk = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: leaseURL)
+        ) as? [String: Any] else {
+            return XCTFail("acquired lease is not a JSON object")
+        }
+
+        let wallNow = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        let monoNow = Int64(min(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), UInt64(Int64.max)))
+        // Record window: valid + in-bracket, and wide enough to CONTAIN the
+        // (expired) handoff window (Swift requires handoff.expires <= record.expires).
+        let recordIssuedWall = wallNow - 10 * 60 * 1_000
+        let recordExpiresWall = wallNow + 9 * 60 * 1_000
+        let recordWallDuration = recordExpiresWall - recordIssuedWall
+        let recordIssuedMono = monoNow - 10 * 60 * 1_000_000_000
+        let recordExpiresMono = recordIssuedMono + recordWallDuration * 1_000_000
+        onDisk["issued_wall_ms"] = recordIssuedWall
+        onDisk["expires_wall_ms"] = recordExpiresWall
+        onDisk["issued_monotonic_ns"] = recordIssuedMono
+        onDisk["expires_monotonic_ns"] = recordExpiresMono
+
+        guard let boot = LeaseHandoffHarness.realBootSession() else {
+            throw XCTSkip("kern.bootsessionuuid unavailable")
+        }
+        // Handoff window: 3.5-min duration (<= 5-min ceiling), issued 4m ago and
+        // EXPIRED 30s ago -> Swift's ~900..901 return .wallExpired / .monotonicExpired.
+        let handoffIssuedWall = wallNow - 4 * 60 * 1_000
+        let handoffExpiresWall = wallNow - 30 * 1_000
+        let handoffWallDuration = handoffExpiresWall - handoffIssuedWall
+        let handoffIssuedMono = monoNow - 4 * 60 * 1_000_000_000
+        let handoffExpiresMono = handoffIssuedMono + handoffWallDuration * 1_000_000
+        let operationID = onDisk["operation_id"] as? String ?? "unrelated-live-expired-handoff"
+        let handoff: [String: Any] = [
+            "version": 1,
+            "handoff_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "state": "prepared",
+            "operation_id": operationID,
+            "provider_id": "provider-a",
+            "service_identity": LeaseHandoffHarness.serviceIdentity,
+            "boot_session": boot,
+            "target_executable_path": LeaseHandoffHarness.targetPath,
+            "target_executable_sha256": LeaseHandoffHarness.targetSHA256,
+            "issued_wall_ms": handoffIssuedWall,
+            "expires_wall_ms": handoffExpiresWall,
+            "issued_monotonic_ns": handoffIssuedMono,
+            "expires_monotonic_ns": handoffExpiresMono,
+            "startup_lease_duration_ms": 5 * 60 * 1_000,
+        ]
+        onDisk["startup_handoff"] = handoff
+        let rewritten = try JSONSerialization.data(
+            withJSONObject: onDisk,
+            options: [.sortedKeys]
+        )
+        try (rewritten + Data([0x0a])).write(to: leaseURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: leaseURL.path
+        )
+
+        // Sanity: the real store does NOT consider this valid (expired handoff
+        // window) even though the owner is live.
+        let decodedStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        if case .valid = decodedStore.inspect() {
+            XCTFail("store must not consider an expired-handoff live-owner record valid")
+        }
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a live-owner record with an expired prepared handoff must be removed"
+        )
+
+        // Self-healing: the real store can now acquire a fresh lease.
+        let freshStore = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        let fresh = try freshStore.acquire(
+            kind: .startup,
+            operationID: "serve:after-expired-handoff-removal",
+            duration: 5 * 60
+        )
+        XCTAssertEqual(fresh.kind, .startup)
+        XCTAssertNil(fresh.startupHandoff)
+        guard case .valid = freshStore.inspect() else {
+            return XCTFail("freshly acquired lease must inspect as valid")
+        }
+    }
+
     // MARK: - Lease: prepared-handoff exemption parity (R3 CODE MEDIUM)
 
     /// The real lease store INTENTIONALLY exempts an unexpired `.prepared`
@@ -708,6 +930,111 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         ]
     }
 
+    // MARK: - Lease: trusted-directory gate negatives (R7 CODE LOW 1)
+
+    /// The reconciler's pre-parse storage gate mirrors Swift inspect()'s
+    /// validateTrustedDirectory: it declines to preserve (removes) a lease whose
+    /// PARENT directory is not a real directory owned by us with mode EXACTLY
+    /// 0700 and no extended ACL, because Swift's inspect() returns `.missing`
+    /// for such a directory and never reads the lease. These are direct
+    /// regression tests for the parent-directory gate (previously only file-level
+    /// storage rejections were covered): each builds a live-owner store-shaped
+    /// lease under a directory violating one testable trusted-directory rule and
+    /// asserts the reconciler REMOVES the lease (or reconciles it as removable)
+    /// without crashing. A live owner is used so the ONLY reason to preserve
+    /// would be a lax directory gate -- exactly the defect these guard.
+    ///
+    /// Disabling the directory gate (accepting a lax parent dir) would let at
+    /// least the 0755 and symlink cases false-PRESERVE, failing these tests, so
+    /// they also mutation-guard the gate.
+
+    /// Parent dir mode 0755 (group/other traversable): Swift's
+    /// validateTrustedDirectory requires EXACTLY 0700 -> inspect() `.missing`.
+    func testShellReconcilerRemovesLeaseUnderMode0755Directory() throws {
+        let directory = try makeTrustedDirectory()
+        // Loosen the parent dir to 0755 after building the live-owner lease so
+        // the ONLY violation is the directory mode.
+        let leaseURL = try acquireLiveLease(in: directory)
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+        XCTAssertEqual(chmod(directory.path, 0o755), 0)
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed without crashing")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a lease under a 0755 (non-0700) directory must be removed"
+        )
+    }
+
+    /// Parent dir is a SYMLINK to the real 0700 directory: Swift's
+    /// validateTrustedDirectory rejects a symlinked directory (it lstat/O_NOFOLLOW
+    /// resolves and refuses) -> inspect() `.missing`. The reconciler's gate uses
+    /// lstat on the parent and rejects `S_ISLNK`.
+    func testShellReconcilerRemovesLeaseUnderSymlinkDirectory() throws {
+        let realDirectory = try makeTrustedDirectory()
+        let leaseURL = try acquireLiveLease(in: realDirectory)
+        let lockURL = realDirectory.appendingPathComponent(".lease.json.lock")
+
+        // A sibling symlink pointing AT the real 0700 directory. The lease is
+        // addressed THROUGH the symlink so the reconciler's parent dir
+        // (dirname of the symlinked lease path) is the symlink itself.
+        let symlinkDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("conformance-symlinkdir-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(
+            at: symlinkDir,
+            withDestinationURL: realDirectory
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: symlinkDir) }
+
+        let leaseViaSymlink = symlinkDir.appendingPathComponent("lease.json")
+        let lockViaSymlink = symlinkDir.appendingPathComponent(".lease.json.lock")
+        _ = leaseURL // real path retained for teardown symmetry
+        _ = lockURL
+
+        let rc = try runReconcile(
+            leaseURL: leaseViaSymlink,
+            lockURL: lockViaSymlink,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed without crashing")
+        // The real lease (reached via the symlinked parent) must be removed: the
+        // reconciler declined to preserve it because its parent dir is a symlink.
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseViaSymlink.path),
+            "a lease whose parent directory is a symlink must be removed"
+        )
+    }
+
+    /// Parent dir carrying an extended ACL: Swift's validateTrustedDirectory
+    /// rejects a directory with a non-mode ACL -> inspect() `.missing`. The
+    /// reconciler's lease_dir_has_extended_acl gate declines preservation.
+    func testShellReconcilerRemovesLeaseUnderExtendedACLDirectory() throws {
+        let directory = try makeTrustedDirectory()
+        let leaseURL = try acquireLiveLease(in: directory)
+        let lockURL = directory.appendingPathComponent(".lease.json.lock")
+
+        // Add an extended ACL entry to the parent directory via `chmod +a`.
+        // The reconciler detects the trailing "+" / numbered ACL entry and
+        // declines preservation. If chmod +a is unavailable on this host, skip.
+        let chmodRC = try runChmodAddACL(path: directory.path)
+        try XCTSkipUnless(chmodRC == 0, "chmod +a unavailable; cannot add an ACL")
+
+        let rc = try runReconcile(
+            leaseURL: leaseURL,
+            lockURL: lockURL,
+            installOperationID: "install:unrelated-conformance-transaction"
+        )
+        XCTAssertEqual(rc, 0, "reconcile should succeed without crashing")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: leaseURL.path),
+            "a lease under a directory carrying an extended ACL must be removed"
+        )
+    }
+
     // MARK: - State: shell translation writes -> Swift store reads (Defect 3)
 
     /// A stale updater-written snapshot must translate into an installer-owned
@@ -922,6 +1249,36 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
         XCTAssertEqual(chmod(directory.path, 0o700), 0)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
         return directory
+    }
+
+    /// Acquires a REAL lease via the `.live` store inside `directory`, stamping
+    /// THIS running process as the genuinely-live owner (so the shell's
+    /// owner_is_live() returns True and the ONLY reason the reconciler could
+    /// REMOVE the lease is a storage/directory gate, not owner death). Returns
+    /// the lease URL.
+    private func acquireLiveLease(in directory: URL) throws -> URL {
+        let leaseURL = directory.appendingPathComponent("lease.json")
+        let store = ProviderLifecycleLeaseStore(url: leaseURL, environment: .live)
+        _ = try store.acquire(
+            kind: .startup,
+            operationID: "unrelated-live-trusted-dir",
+            duration: 15 * 60
+        )
+        return leaseURL
+    }
+
+    /// Adds an extended ACL entry to `path` via `/bin/chmod +a`. Returns the
+    /// process exit status (0 = ACL added). Used to build the extended-ACL
+    /// directory negative; callers skip when it is unavailable.
+    private func runChmodAddACL(path: String) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        process.arguments = ["+a", "everyone allow read", path]
+        process.standardError = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }
 
