@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.8.4 (2026-07-15, §6.5.1 `auth_state` admission-verdict ack field — runbook item 23)
+**Version:** 1.9.0 (2026-07-16, referral bootstrap and sanitized status capability)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,18 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.9.0 (2026-07-16, SPEC-034 integration):**
+- The v1 `hello` and v2 initial/proof `auth_request` bootstrap shapes gain an
+  OPTIONAL `referral_code` string. It is emitted only from a supported CLI-owned
+  onboarding attempt and is covered by the v2 signed transcript. SPEC-003
+  FR-C9.7 owns coordinator emission/admission behavior; SPEC-034 owns code policy.
+- Local status may advertise `referral_bootstrap_v1` when the installed CLI
+  accepts the protected referral-journal handoff, and independently advertise
+  `referral_status_v1` with a sanitized coordinator-authored referral
+  projection. It never includes the provider bearer or raw referral code.
+  Referral mutation uses an owner-only typed local CLI boundary rather than
+  direct Malibu coordinator authentication.
 
 **Change log v1.8.4 (2026-07-15, runbook item 23 — `auth_state` ack field):**
 - §6.5.1 adds the OPTIONAL `auth_state` string on the v1 `hello_ack` and v2 accepted `auth_response` frames — the coordinator's admission verdict (`bearer_validated` / `self_minted` / `bearerless_duplicate`). SPEC-001 owns the field shape/domain; emission is SPEC-003 FR-C9.2a and autoupdate interpretation is SPEC-020 v0.1.7. Additive `omitempty`; pre-v1.8.4 binaries ignore the key.
@@ -1029,7 +1041,8 @@ The local `GET /v1/status` response includes a versioned envelope. Contract v1 h
 `minimum_reader_version=1`, names `macprovider_cli` as `lifecycle_owner`, and advertises
 only fields a reader may trust through these capabilities:
 `buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
-`status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`, and
+`status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`,
+`referral_bootstrap_v1`, `referral_status_v1`, and
 `legacy_reader_fallback_v1`. A reader MUST suppress a typed field when its capability
 is absent and MUST suppress all typed fields when the minimum reader exceeds its
 supported version. An absent envelope is the legacy-reader path.
@@ -1039,7 +1052,7 @@ supported version. An absent envelope is the legacy-reader path.
   "version": 1,
   "minimum_reader_version": 1,
   "lifecycle_owner": "macprovider_cli",
-  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1"]
+  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1", "referral_bootstrap_v1", "referral_status_v1"]
 },
 "observation": {
   "id": "per-response UUID",
@@ -1066,6 +1079,17 @@ supported version. An absent envelope is the legacy-reader path.
   "restart_safe": true,
   "migration_pending": false,
   "recovery_action": "none | retry | unlock_keychain | authorize_keychain | repair_from_protected_source | restore_or_reenroll"
+},
+"referral": {
+  "revision": "opaque coordinator revision",
+  "admission_state": "disabled | validating | admitted | rejected | unavailable",
+  "advocacy_state": "disabled | locked_until_first_serving | eligible | pending | failed | matured | exhausted | revoked | unavailable",
+  "invite_url": "https://configured-origin/j/shareable-code-or-null",
+  "base_capacity": 1,
+  "bonus_capacity": 0,
+  "redeemed": 0,
+  "remaining": 1,
+  "reason_code": "typed non-secret reason or null"
 }
 ```
 
@@ -1074,7 +1098,23 @@ hash, or any other stable token-derived value. The service instance identifies a
 process, not a provider principal or credential. Observation IDs change per response;
 service instance IDs remain stable only for that running `serve` process; transition
 IDs change only on a reported lifecycle edge. Older clients MUST tolerate all objects'
-absence.
+absence. `referral_bootstrap_v1` means the running installed CLI implements the
+complete SPEC-026 protected handoff: `bootstrap-auth --referral-code-file`,
+owner/mode and bounded-content validation, identical initial/proof transmission,
+Keychain persist-before-adopt, and safe journal retirement. It is not evidence
+that a code is valid or referral enforcement is enabled; it gates only whether
+Malibu may offer referral input to that installed CLI.
+
+The `referral` object is present only when `referral_status_v1` is
+advertised. Its invite URL is a shareable product artifact, not a credential; all
+other secrets and raw onboarding inputs remain omitted. A reader MUST treat absent,
+unknown, or newer referral capability as `unavailable`, not as zero or eligible.
+`invite_url` and every capacity/count field are nullable. When coordinator state
+is unavailable, the CLI MUST emit null or omit those values; it MUST NOT emit
+zero. A disabled, locked, exhausted, or revoked coordinator response may include
+counts only when the coordinator actually supplied them. `revoked` is distinct
+from `failed`: revocation is an authoritative issuer/policy action, while failure
+is a social-verification result.
 
 The config file schema includes at minimum: `port`, `model` (HuggingFace
 model path), `coordinator_url`, `log_format` (`json` or `text`),
@@ -3009,6 +3049,10 @@ Initial-stage fields:
   credential-bootstrap / TOFU token-mint path (**SPEC-003** open onboarding,
   FR-C9 / `allow_tokenless_provisional_bootstrap`). SPEC-026 §4.3 does **not**
   define this flag — it owns only the identity-signature binding it pairs with.
+- `referral_code: <string>` — OPTIONAL untrusted admission input from the
+  CLI-owned onboarding journal. It MUST be omitted outside a referral attempt,
+  bounded to the SPEC-034 code limit, and redacted from logs. Its presence never
+  grants admission by itself.
 - Signed-catalog admission block: `catalog_release_id`, `catalog_policy_version`,
   `catalog_candidate_sha256`, `catalog_signer_key_id`, `catalog_row_identity`
   (**SPEC-010 / SPEC-022** signed-catalog admission). This block is **also**
@@ -3038,7 +3082,8 @@ catalog-invalidation guards (a field is dropped if its catalog admission was
 invalidated). A coordinator MUST treat each field as independently optional.
 
 Proof-stage `auth_request` (the second handshake message) can additionally
-carry `credential_bootstrap` (**SPEC-003** FR-C9), `identity_signature`, and
+carry `credential_bootstrap` and the same `referral_code` (**SPEC-003**
+FR-C9/FR-C9.7), `identity_signature`, and
 `identity_signature_transcript_sha256` (**SPEC-026 §4.3** identity binding;
 `CoordinatorClient.swift`).
 
