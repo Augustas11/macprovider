@@ -1,7 +1,66 @@
+import Security
 import XCTest
 @testable import Malibu
 
 final class ProviderCredentialHandoffRunnerTests: XCTestCase {
+    func testSigningInformationRequestsExtendedSigningMetadata() throws {
+        var staticCode: SecStaticCode?
+        XCTAssertEqual(
+            SecStaticCodeCreateWithPath(
+                URL(fileURLWithPath: "/usr/bin/true") as CFURL,
+                [],
+                &staticCode
+            ),
+            errSecSuccess
+        )
+        let code = try XCTUnwrap(staticCode)
+        var observedFlags: SecCSFlags?
+        let expected = [
+            kSecCodeInfoTeamIdentifier as String: "YF7XNRJUG4",
+            kSecCodeInfoUnique as String: Data([0x01, 0x02]),
+        ] as CFDictionary
+
+        let result = try ProviderCredentialHandoffRunner.signingInformation(
+            for: code,
+            copy: { _, flags, information in
+                observedFlags = flags
+                information.pointee = expected
+                return errSecSuccess
+            }
+        )
+
+        XCTAssertEqual(
+            observedFlags?.rawValue,
+            SecCSFlags(rawValue: kSecCSSigningInformation).rawValue
+        )
+        XCTAssertEqual(result[kSecCodeInfoTeamIdentifier as String] as? String, "YF7XNRJUG4")
+        XCTAssertEqual(result[kSecCodeInfoUnique as String] as? Data, Data([0x01, 0x02]))
+    }
+
+    func testSigningInformationFailsClosedWhenSecurityReadFails() throws {
+        var staticCode: SecStaticCode?
+        XCTAssertEqual(
+            SecStaticCodeCreateWithPath(
+                URL(fileURLWithPath: "/usr/bin/true") as CFURL,
+                [],
+                &staticCode
+            ),
+            errSecSuccess
+        )
+
+        XCTAssertThrowsError(
+            try ProviderCredentialHandoffRunner.signingInformation(
+                for: try XCTUnwrap(staticCode),
+                copy: { _, _, _ in errSecCSUnsigned }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProviderCredentialHandoffRunner.Error,
+                .invalidCLI("code signing metadata is unavailable")
+            )
+        }
+    }
+
     func testHandoffImportsThenVerifiesWithFreshInvocation() async throws {
         let recorder = HandoffInvocationRecorder(exitCodes: [0, 0])
         let executable = URL(fileURLWithPath: "/tmp/macprovider-cli")
