@@ -1,6 +1,8 @@
 import Foundation
 
 enum ProviderCLIVersion {
+    static let compatibilitySetReleaseFloor = "1.8.33"
+
     enum Order: Equatable {
         case ascending
         case same
@@ -10,6 +12,34 @@ enum ProviderCLIVersion {
     static func normalize(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"^[vV]"#, with: "", options: .regularExpression)
+    }
+
+    /// Returns a canonical three-component release version or `nil` for
+    /// malformed/pre-release input. Update authority must never be selected
+    /// from the permissive display comparator below.
+    static func strictNormalize(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(
+            of: #"^[vV]?[0-9]+\.[0-9]+\.[0-9]+$"#,
+            options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        let components = normalize(trimmed).split(
+            separator: ".",
+            omittingEmptySubsequences: false
+        )
+        guard components.count == 3 else { return nil }
+        var canonical: [String] = []
+        canonical.reserveCapacity(3)
+        for component in components {
+            guard let value = Int(component), String(value) == component else {
+                // Reject integer overflow and non-canonical leading zeroes.
+                return nil
+            }
+            canonical.append(String(value))
+        }
+        return canonical.joined(separator: ".")
     }
 
     static func compare(_ lhs: String, _ rhs: String) -> Order {

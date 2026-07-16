@@ -1,6 +1,17 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.13 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.14 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.14 (2026-07-15, issue #585 bootstrap trust continuity).**
+Stable Malibu 1.8.39 is the only CLI-owned build whose signed app bundle retains
+the exact `SUPublicEDKey` shipped by Malibu 1.8.32. Sparkle 2.6.4 rejects an
+otherwise valid update when the target bundle removes that key, so the protected
+release injects the frozen public key after unsigned app construction, before
+protected bundle writes, and re-verifies it after bundling before codesigning. The
+target still contains no Sparkle package/framework, feed URL, automatic-check
+setting, or updater runtime; the key is inert trust metadata for the one legacy
+hop. Final-DMG verification requires that exact posture, and every later Malibu
+version must omit the key again.
 
 **Change log v0.13 (2026-07-14, issue #585 Option 2 completion).** The
 launchd-managed CLI is the sole provider lifecycle, credential, admission-identity,
@@ -318,8 +329,11 @@ time (60–240 s for the first model) in the background.
   checked before mutation.
 - The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
   dashboard invoke `macprovider-cli update`; they do not download or replace artifacts.
-  Removing the Sparkle dependency, appcast tooling, and feed keys eliminates the prior
-  second update authority.
+  Removing the Sparkle dependency/runtime and feed settings eliminates the prior
+  second update authority. Stable v1.8.39 alone retains the frozen 1.8.32
+  `SUPublicEDKey` in its signed target bundle because Sparkle 2.6.4 requires key
+  continuity after extraction; without Sparkle code or a feed, this public key cannot
+  initiate an update. Later builds must omit it.
 - The updater acquires the maintenance lease, persists a phase journal and exact typed
   rollback plan, stages and validates the target, drains buyer work, installs the whole
   set, restarts launchd, and commits only after the coordinator admits that exact set
@@ -673,7 +687,9 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
 - The CLI verifies the catalog/release trust chain, artifact-index signature, exact set
   identity, per-role uniqueness, hashes, Developer ID identity/team where applicable,
   launchd labels, and target coordinator policy before any drain or replacement.
-- Malibu carries no update public key, feed URL, or independent discovery channel.
+- Malibu carries no feed URL or independent discovery channel. Stable v1.8.39
+  alone carries the frozen v1.8.32 public key as inert trust-continuity metadata;
+  it has no Sparkle runtime, and later builds carry no app-update public key.
   Failure to verify or fetch any required member leaves the current set running and
   emits a typed redacted update state. A staged target that cannot prove exact-set
   admission and buyer-serving readiness is rolled back as a whole.

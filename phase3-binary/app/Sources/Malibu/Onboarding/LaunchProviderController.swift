@@ -31,7 +31,9 @@ final class LaunchProviderController: ObservableObject {
     struct Dependencies {
         var localInstallSucceeded: @MainActor () async -> Bool
         var registerLoginItem: @MainActor () async throws -> Void
-        var runCLIInstall: @MainActor (@escaping @MainActor (String) -> Void) async throws -> Void
+        var runCLIInstall: @MainActor (
+            @escaping @Sendable @MainActor (String) -> Void
+        ) async throws -> Void
         var importCLIConfigAfterInstall: @MainActor () async throws -> Void
         var waitForInstalledProviderHealth: @MainActor () async -> Bool
         var attachInstalledProviderAfterInstall: @MainActor () async -> Bool

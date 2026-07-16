@@ -6,6 +6,7 @@ grep -q '^DynamicUser=true$' "$SERVICE_FILE"
 grep -q '^ProtectSystem=strict$' "$SERVICE_FILE"
 grep -q '^Environment=CANARY_ENABLE_FILE=/etc/macprovider-canary-buyer/enabled$' "$SERVICE_FILE"
 grep -q '^Environment=CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS=1$' "$SERVICE_FILE"
+grep -q '^Environment=CANARY_LEGACY_ROLLBACK_AUTHORIZATION_FILE=/run/macprovider-canary-buyer/legacy-rollback.json$' "$SERVICE_FILE"
 if grep -q '^Environment=CANARY_ENABLE_FILE=/etc/macprovider/' "$SERVICE_FILE"; then
   echo "canary service enable gate must not live beneath the non-traversable credential directory" >&2
   exit 1

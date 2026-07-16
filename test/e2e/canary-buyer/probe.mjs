@@ -74,6 +74,8 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-585-integration-r6';
+const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
   mode: selectedMode,
@@ -116,6 +118,7 @@ const CONFIG = {
   pushJob: args['push-job'] || env('CANARY_PUSH_JOB') || 'canary_buyer',
   disableFile: env('CANARY_DISABLE_FILE'),
   allowLegacyBridgeProviderSignals: boolEnv('CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS', false),
+  legacyRollbackAuthorizationFile: env('CANARY_LEGACY_ROLLBACK_AUTHORIZATION_FILE'),
   failOnDegraded: 'fail-on-degraded' in args,
 };
 CONFIG.postRequestRecoveryMs = GATEWAY_STATUS_CACHE_TTL_MS
@@ -1066,11 +1069,180 @@ function isLegacyBridgeProviderSignalSubstitute(row, expected) {
     && /^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(row?.binary_version || '');
 }
 
+function isLegacyRollbackProviderSignalSubstitute(
+  row,
+  expected,
+  authorizedProviders,
+  nowMs,
+  activeProviderID,
+) {
+  const authorization = authorizedProviders?.get(expected.provider_id);
+  const routingAllowed = row?.routing_eligible === true
+    || (row?.provider_id === activeProviderID
+      && row?.state === 'busy'
+      && row?.routing_eligible === false);
+  return authorization?.model_id === expected.model_id
+    && Number.isFinite(authorization?.expires_at_ms)
+    && nowMs < authorization.expires_at_ms
+    && row?.provider_id === expected.provider_id
+    && typeof row?.assigned_id === 'string'
+    && row.assigned_id.length > 0
+    && row?.model_id === expected.model_id
+    && Number.isFinite(row?.connected_at_ms)
+    && routingAllowed
+    && row?.catalog_admission_mode == null
+    && row?.binary_version === authorization.binary_version;
+}
+
+function hasDirectProviderSignal(signal) {
+  return Object.entries(signal || {}).some(
+    ([field, value]) => field !== 'source' && value != null,
+  );
+}
+
+function recoveryProviderSignals(
+  observation,
+  expectedFleet,
+  authorizedProviders,
+  nowMs,
+  allowLegacyBridgeProviderSignals = false,
+) {
+  const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
+  const operatorPool = Array.isArray(observation?.operator_pool) ? observation.operator_pool : [];
+  const providers = Array.isArray(observation?.providers) ? observation.providers : [];
+  return providers.filter((signal, index) => {
+    if (hasDirectProviderSignal(signal)) return true;
+    const poolRow = operatorPool[index];
+    const expected = expectedByID.get(poolRow?.provider_id);
+    const exactReadyLegacyBridge = expected
+      && allowLegacyBridgeProviderSignals
+      && poolRow?.state === 'ready'
+      && poolRow?.routing_eligible === true
+      && isLegacyBridgeProviderSignalSubstitute(poolRow, expected);
+    const exactReadyLegacyRollback = expected
+      && poolRow?.state === 'ready'
+      && isLegacyRollbackProviderSignalSubstitute(
+        poolRow,
+        expected,
+        authorizedProviders,
+        nowMs,
+        '',
+      );
+    return !(exactReadyLegacyBridge || exactReadyLegacyRollback);
+  });
+}
+
+export function recoverySoakObservationReasons(
+  initial,
+  samples,
+  expectedFleet,
+  legacyRollbackProviders,
+  options = {},
+  nowMs = Date.now(),
+) {
+  const {
+    allowLegacyBridgeProviderSignals = false,
+    ...soakOptions
+  } = options;
+  return recoverySoakReasons({
+    gatewayInitial: initial.gateway,
+    gatewaySamples: samples.map((sample) => sample.gateway),
+    poolzInitial: expectedPoolRows(initial.operator_pool, expectedFleet),
+    poolzSamples: samples.map(
+      (sample) => expectedPoolRows(sample.operator_pool || [], expectedFleet),
+    ),
+    providerInitial: recoveryProviderSignals(
+      initial,
+      expectedFleet,
+      legacyRollbackProviders,
+      nowMs,
+      allowLegacyBridgeProviderSignals,
+    ),
+    providerSamples: samples.map(
+      (sample) => recoveryProviderSignals(
+        sample,
+        expectedFleet,
+        legacyRollbackProviders,
+        nowMs,
+        allowLegacyBridgeProviderSignals,
+      ),
+    ),
+  }, soakOptions);
+}
+
+export function validateLegacyRollbackAuthorization(document, expectedFleet, nowMs = Date.now()) {
+  const exactKeys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join('\u0000') === [...expected].sort().join('\u0000');
+  if (!exactKeys(document, ['schema_version', 'kind', 'authority', 'transaction_id', 'expires_at', 'providers'])
+      || document.schema_version !== 1
+      || document.kind !== 'legacy_rollback'
+      || document.authority !== LEGACY_ROLLBACK_AUTHORITY
+      || typeof document.transaction_id !== 'string'
+      || !/^[0-9a-f]{64}$/.test(document.transaction_id)
+      || typeof document.expires_at !== 'string'
+      || !Array.isArray(document.providers)) {
+    throw new Error('legacy rollback authorization envelope is invalid');
+  }
+  const expiresAtMs = Date.parse(document.expires_at);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs
+      || expiresAtMs > nowMs + LEGACY_ROLLBACK_MAX_VALIDITY_MS) {
+    throw new Error('legacy rollback authorization expiry is invalid');
+  }
+  if (document.providers.length !== expectedFleet.length) {
+    throw new Error('legacy rollback authorization fleet size is invalid');
+  }
+  const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
+  const authorized = new Map();
+  for (const row of document.providers) {
+    if (!exactKeys(row, ['provider_id', 'model_id', 'binary_version'])
+        || typeof row.provider_id !== 'string'
+        || typeof row.model_id !== 'string'
+        || typeof row.binary_version !== 'string'
+        || !/^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(row.binary_version)
+        || authorized.has(row.provider_id)) {
+      throw new Error('legacy rollback authorization provider row is invalid');
+    }
+    const expected = expectedByID.get(row.provider_id);
+    if (!expected || expected.model_id !== row.model_id) {
+      throw new Error('legacy rollback authorization provider identity is invalid');
+    }
+    authorized.set(row.provider_id, {
+      model_id: row.model_id,
+      binary_version: row.binary_version,
+      expires_at_ms: expiresAtMs,
+    });
+  }
+  return authorized;
+}
+
+async function loadLegacyRollbackAuthorization(expectedFleet) {
+  const path = CONFIG.legacyRollbackAuthorizationFile;
+  if (!path) return null;
+  const fs = await import('node:fs/promises');
+  let info;
+  try {
+    info = await fs.lstat(path);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const parentInfo = await fs.lstat(dirname(path));
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== 0 || info.nlink !== 1
+      || (info.mode & 0o777) !== 0o644 || info.size < 2 || info.size > 4096
+      || !parentInfo.isDirectory() || parentInfo.isSymbolicLink() || parentInfo.uid !== 0
+      || (parentInfo.mode & 0o777) !== 0o755) {
+    throw new Error('legacy rollback authorization file is not a trusted root control');
+  }
+  return validateLegacyRollbackAuthorization(JSON.parse(await fs.readFile(path, 'utf8')), expectedFleet);
+}
+
 export function safetyObservationReasons(initial, observed, expectedFleet, {
   requireHeartbeatAdvance = false,
   activeModelID = '',
   cachedGatewayModelID = '',
   allowLegacyBridgeProviderSignals = false,
+  legacyRollbackProviders = null,
+  nowMs = Date.now(),
 } = {}) {
   const qualification = CONFIG.mode === 'qualification';
   const activeProviderID = activeModelID
@@ -1156,7 +1328,19 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       const current = currentByID.get(expected.provider_id);
       if (!current) {
         const poolRow = currentPoolByID.get(expected.provider_id);
+        const poolIndex = observed.operator_pool.indexOf(poolRow);
+        const directSignalMissing = poolIndex >= 0
+          && !hasDirectProviderSignal(observed.providers[poolIndex]);
         if (allowLegacyBridgeProviderSignals && isLegacyBridgeProviderSignalSubstitute(poolRow, expected)) {
+          continue;
+        }
+        if (directSignalMissing && isLegacyRollbackProviderSignalSubstitute(
+          poolRow,
+          expected,
+          legacyRollbackProviders,
+          nowMs,
+          activeProviderID,
+        )) {
           continue;
         }
         reasons.push(`${expected.provider_id}:provider_signal_missing`);
@@ -1178,7 +1362,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   return [...new Set(reasons)];
 }
 
-function createControl(initial, baselines, expectedFleet, budget) {
+function createControl(initial, baselines, expectedFleet, budget, legacyRollbackProviders) {
   let failure = null;
   const observations = [initial];
 
@@ -1196,6 +1380,7 @@ function createControl(initial, baselines, expectedFleet, budget) {
   const observationReasons = (observed, options) => safetyObservationReasons(initial, observed, expectedFleet, {
     ...options,
     allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
+    legacyRollbackProviders,
   });
 
   const observeAndCheck = async (phase, {
@@ -1361,8 +1546,16 @@ function createControl(initial, baselines, expectedFleet, budget) {
   };
 }
 
-function preconditionReasons(observed, expectedFleet) {
-  return safetyObservationReasons(observed, observed, expectedFleet);
+export function preconditionReasons(
+  observed,
+  expectedFleet,
+  legacyRollbackProviders,
+  allowLegacyBridgeProviderSignals = false,
+) {
+  return safetyObservationReasons(observed, observed, expectedFleet, {
+    legacyRollbackProviders,
+    allowLegacyBridgeProviderSignals,
+  });
 }
 
 async function emitRun(run) {
@@ -1434,6 +1627,7 @@ async function main() {
   }
   let baselines = [];
   let expectedFleet = [];
+  let legacyRollbackProviders = null;
   try {
     const baseUrl = parseSafeUrl(`${CONFIG.base}/v1/status`, 'CANARY_BASE');
     await assertResolvesPublic(baseUrl, 'CANARY_BASE');
@@ -1462,6 +1656,9 @@ async function main() {
       throw new Error(`CANARY_MODELS value ${CONFIG.models[0]} is absent from CANARY_EXPECTED_FLEET_FILE`);
     }
     if (CONFIG.mode === 'qualification') baselines = await loadBaselines();
+    if (CONFIG.mode === 'liveness') {
+      legacyRollbackProviders = await loadLegacyRollbackAuthorization(expectedFleet);
+    }
   } catch (e) {
     console.error(`FAIL: ${redact(e.message)}`);
     process.exitCode = 2;
@@ -1490,8 +1687,13 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const control = createControl(initial, baselines, expectedFleet, budget);
-  const preReasons = preconditionReasons(initial, expectedFleet);
+  const control = createControl(initial, baselines, expectedFleet, budget, legacyRollbackProviders);
+  const preReasons = preconditionReasons(
+    initial,
+    expectedFleet,
+    legacyRollbackProviders,
+    CONFIG.allowLegacyBridgeProviderSignals,
+  );
   if (preReasons.length) {
     const isolationFailure = CONFIG.mode === 'qualification'
       && preReasons.some((reason) => /isolation_|isolated_provider_/.test(reason));
@@ -1538,30 +1740,31 @@ async function main() {
         recoverySamples.push(record.observed);
       }
     }
-    const expectedInitialPool = expectedPoolRows(initial.operator_pool, expectedFleet);
     const recoveryReasons = recoveryRecords.flatMap((record) => [
       ...(record.error ? [`${record.phase}:${record.error}`] : []),
       ...record.reasons.map((reason) => `${record.phase}:${reason}`),
     ]);
-    recoveryReasons.push(...recoverySoakReasons({
-      gatewayInitial: initial.gateway,
-      gatewaySamples: recoverySamples.map((sample) => sample.gateway),
-      poolzInitial: expectedInitialPool,
-      poolzSamples: recoverySamples.map((sample) => expectedPoolRows(sample.operator_pool || [], expectedFleet)),
-      providerInitial: initial.providers,
-      providerSamples: recoverySamples.map((sample) => sample.providers),
-    }, {
-      minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
-      maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
-      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
-      maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
-      maxMemoryFraction: CONFIG.maxMemoryFraction,
-      requireNominalThermal: CONFIG.mode === 'qualification',
-    }));
+    recoveryReasons.push(...recoverySoakObservationReasons(
+      initial,
+      recoverySamples,
+      expectedFleet,
+      legacyRollbackProviders,
+      {
+        minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+        maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
+        maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+        maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
+        maxMemoryFraction: CONFIG.maxMemoryFraction,
+        requireNominalThermal: CONFIG.mode === 'qualification',
+        allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
+      },
+    ));
     const finalRecovery = recoverySamples.at(-1);
     if (finalRecovery) {
       recoveryReasons.push(...safetyObservationReasons(initial, finalRecovery, expectedFleet, {
         requireHeartbeatAdvance: true,
+        allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
+        legacyRollbackProviders,
       }).map((reason) => `recovery_final:${reason}`));
     }
     if (recoveryReasons.length) {

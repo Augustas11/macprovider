@@ -43,6 +43,7 @@ make_fake_binary() {
   local dir="$1"
   local version="$2"
   local include_surfaces="$3"
+  local supports_release_preflight="${4:-1}"
   mkdir -p "$dir"
   cat >"$dir/macprovider-cli" <<EOF
 #!/usr/bin/env bash
@@ -50,7 +51,10 @@ if [ "\${1:-}" = "--version" ]; then
   printf '%s\n' "$version"
   exit 0
 fi
-exit 0
+if [ "$supports_release_preflight" = "1" ] && [ "\${1:-}" = "release-payload-preflight" ]; then
+  exit "\${FAKE_RELEASE_PREFLIGHT_RC:-0}"
+fi
+exit 64
 EOF
   if [ "$include_surfaces" = "1" ]; then
     cat >>"$dir/macprovider-cli" <<'EOF'
@@ -148,6 +152,65 @@ PROVIDER_ARTIFACT="$good_tar" \
   "$CHECKER" >"$WORKDIR/good.out" 2>"$WORKDIR/good.err"
 assert_contains "$WORKDIR/good.err" "SPEC-008 Phase 2 B6 provider artifact preflight passed"
 
+preflight_dir="$WORKDIR/release-preflight"
+preflight_tar="$WORKDIR/release-preflight.tar.gz"
+fake_bin="$WORKDIR/fake-bin"
+make_fake_binary "$preflight_dir" "1.8.39" "1"
+mkdir -p "$preflight_dir/catalog-release" "$preflight_dir/compatibility-set-local" "$fake_bin"
+for catalog_member in release.json trusted-keys.json autotune-candidates.json \
+  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+  printf '{}\n' > "$preflight_dir/catalog-release/$catalog_member"
+done
+for local_member in install.sh provider-launch-agent.plist.template updater-rollback.json \
+  watchdog-launch-agent.plist.template watchdog.sh; do
+  printf '{}\n' > "$preflight_dir/compatibility-set-local/$local_member"
+done
+printf '{}\n' > "$preflight_dir/compatibility-set.json"
+cat > "$fake_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$fake_bin/python3"
+make_tarball "$preflight_dir" "$preflight_tar"
+preflight_sha="$(sha256_file "$preflight_tar")"
+
+if PATH="$fake_bin:$PATH" \
+  FAKE_RELEASE_PREFLIGHT_RC=17 \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  "$CHECKER" >"$WORKDIR/preflight-failure.out" 2>"$WORKDIR/preflight-failure.err"; then
+  die "staged provider release-payload-preflight failure was ignored"
+fi
+
+PATH="$fake_bin:$PATH" \
+  FAKE_RELEASE_PREFLIGHT_RC=0 \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  "$CHECKER" >"$WORKDIR/preflight-success.out" 2>"$WORKDIR/preflight-success.err"
+assert_contains "$WORKDIR/preflight-success.err" \
+  "staged provider validated its signed compatibility release payload"
+
+historical_dir="$WORKDIR/historical-release"
+historical_tar="$WORKDIR/historical-release.tar.gz"
+mkdir -p "$historical_dir"
+cp -R "$preflight_dir/." "$historical_dir/"
+make_fake_binary "$historical_dir" "1.8.38" "1" "0"
+make_tarball "$historical_dir" "$historical_tar"
+historical_sha="$(sha256_file "$historical_tar")"
+PATH="$fake_bin:$PATH" \
+  PROVIDER_ARTIFACT="$historical_tar" \
+  PROVIDER_VERSION="1.8.38" \
+  PROVIDER_SHA256="$historical_sha" \
+  "$CHECKER" >"$WORKDIR/historical.out" 2>"$WORKDIR/historical.err"
+assert_contains "$WORKDIR/historical.err" \
+  "compatibility-set manifest signature and provider version verified"
+if grep -q "staged provider validated its signed compatibility release payload" \
+  "$WORKDIR/historical.err"; then
+  die "historical provider unexpectedly ran the v1.8.39 release preflight"
+fi
+
 missing_catalog_dir="$WORKDIR/missing-catalog"
 missing_catalog_tar="$WORKDIR/missing-catalog.tar.gz"
 make_fake_binary "$missing_catalog_dir" "1.8.31" "1"
@@ -174,7 +237,7 @@ PROVIDER_ARTIFACT="$good_tar" \
 assert_contains "$WORKDIR/dynamic.err" "provider artifact sha256 observed"
 
 if PROVIDER_ARTIFACT="$good_tar" \
-  PROVIDER_VERSION="9.9.9" \
+  PROVIDER_VERSION="1.2.7" \
   PROVIDER_SHA256="$good_sha" \
   "$CHECKER" >"$WORKDIR/version.out" 2>"$WORKDIR/version.err"; then
   die "version mismatch unexpectedly passed"

@@ -31,6 +31,21 @@ LIVE_CONFIG_PATH="$CONFIG_PATH"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
 MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
+# The provider lifecycle-state file is authored by the CLI (ProviderLifecycleState
+# .defaultURL). Because it can be left in a transactional intermediate state such
+# as rollback_in_progress that only a lifecycle-aware CLI can clear, it must be
+# part of the install transaction so a rollback to a legacy incumbent restores
+# the exact prior contents (or prior absence) instead of stranding a stale state.
+LIFECYCLE_STATE_PATH="$MANIFEST_DIR/lifecycle/state-v1.json"
+# The CLI serializes the lifecycle store behind sibling lock files. The install
+# transaction acquires the same locks around both snapshot and restore so a
+# concurrent operator pause or lease mutation cannot be lost or clobbered, and
+# it reconciles the operation-bound lease after a rollback. The lock files
+# themselves are synchronization primitives and are never snapshotted, moved,
+# or deleted.
+LIFECYCLE_LEASE_PATH="$MANIFEST_DIR/lifecycle/lease.json"
+LIFECYCLE_STATE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.state-v1.json.lock"
+LIFECYCLE_LEASE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.lease.json.lock"
 EXISTING_INSTALL_WAS_PRESENT=0
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
@@ -62,6 +77,8 @@ staging_dir=""
 STAGED_CONFIG_PATH=""
 STAGED_PROVIDER_ID_PATH=""
 AUTOTUNE_BENCHMARK_PORT=""
+AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+AUTOTUNE_PREFETCH_RECEIPT_PATH=""
 MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
 LIFECYCLE_STAGED_CLI_TRUSTED=0
 LAUNCHD_INSTALLED=0
@@ -81,6 +98,7 @@ INSTALL_TX_HAD_PLIST=0
 INSTALL_TX_HAD_WATCHDOG_DIR=0
 INSTALL_TX_HAD_WATCHDOG_PLIST=0
 INSTALL_TX_HAD_MANIFEST=0
+INSTALL_TX_HAD_LIFECYCLE_STATE=0
 INSTALL_TX_SERVICE_WAS_DISABLED=0
 INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
 INSTALL_TX_WATCHDOG_WAS_DISABLED=0
@@ -842,12 +860,7 @@ restore_existing_provider_if_start_skipped() {
   [ "$SKIP_PROVIDER_START" -eq 1 ] || return 1
   [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 1
   if [ "$CUTOVER_STARTED" -eq 0 ]; then
-    log "No replacement provider will be started; discarding staged files without touching the active provider."
-    if [ "${INSTALL_TX_WATCHDOG_WAS_ACTIVE:-0}" -eq 1 ]; then
-      launchctl bootstrap "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || return 1
-      launchctl kickstart -k "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1 || return 1
-    fi
-    commit_install_transaction || return 1
+    discard_install_transaction_before_cutover || return 1
     log "The active provider release remained online and unchanged."
     return 0
   fi
@@ -861,7 +874,9 @@ cleanup() {
   cleanup_rc=$?
   trap - EXIT
   if [ "$INSTALL_TX_ACTIVE" -eq 1 ] && [ "$INSTALL_TX_COMMITTED" -ne 1 ]; then
-    if ! rollback_install_transaction; then
+    if [ "$CUTOVER_STARTED" -eq 0 ]; then
+      discard_install_transaction_before_cutover || cleanup_rc=70
+    elif ! rollback_install_transaction; then
       cleanup_rc=70
     fi
   fi
@@ -908,6 +923,258 @@ stage_install_tx_path() {
   install_tx_path_matches "$source_path" "$copied_path" "$path_kind"
 }
 
+# Snapshot the CLI-owned lifecycle-state file into the recovery staging area
+# with the same posture the real store enforces, holding the store's lock file
+# so a concurrent operator transition cannot be lost. The snapshot follows no
+# symlinks, validates ownership/type/nlink/mode/size, copies with umask 077
+# into a freshly created 0600 destination, and re-verifies the source after the
+# copy (lstat again + byte compare). It writes `had=1` to the meta file when a
+# state file was snapshotted (restore reads the snapshot record directly under
+# the lock). Exit non-zero (before any live mutation) on violation or lock
+# timeout. Absence of the state file is a normal, non-fatal outcome reported as
+# had=0.
+stage_lifecycle_snapshot() {
+  state_path="$1"
+  lock_path="$2"
+  destination_path="$3"
+  meta_path="$4"
+  LIFECYCLE_SNAPSHOT_FAULT="${LIFECYCLE_SNAPSHOT_FAULT:-}" \
+  python3 - "$state_path" "$lock_path" "$destination_path" "$meta_path" <<'PY'
+import errno
+import fcntl
+import json
+import os
+import stat
+import sys
+import time
+
+state_path, lock_path, destination_path, meta_path = sys.argv[1:]
+uid = os.getuid()
+MAX_STATE_BYTES = 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 10.0
+# Fault-injection hook (tests only). "short-write" forces os.write to report a
+# single truncated byte count so the write loop's short-write handling and the
+# staged-file byte-compare abort BEFORE had=1 is published.
+FAULT = os.environ.get("LIFECYCLE_SNAPSHOT_FAULT", "")
+
+
+def fail(message):
+    sys.stderr.write("lifecycle_snapshot_failed:%s\n" % message)
+    raise SystemExit(70)
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def write_all(fd, payload):
+    # Persist every byte: os.write may write fewer than requested, so loop until
+    # the whole payload lands and reject any zero/negative progress rather than
+    # trusting a single call (which could silently truncate the snapshot).
+    total = 0
+    forced_short = FAULT == "short-write"
+    while total < len(payload):
+        chunk = payload[total:]
+        if forced_short and total == 0 and len(chunk) > 1:
+            # Simulate a kernel short write of a single byte on the first call.
+            written = os.write(fd, chunk[:1])
+        else:
+            written = os.write(fd, chunk)
+        if written <= 0:
+            fail("lifecycle_snapshot_write_no_progress")
+        total += written
+        if forced_short:
+            # Stop after the injected short write so the destination is left
+            # truncated; the post-write byte-compare must then abort.
+            break
+    return total
+
+
+parent = os.path.dirname(state_path)
+parent_st = lstat_or_none(parent)
+if parent_st is None:
+    # No lifecycle directory: an incumbent that predates the lifecycle contract.
+    # There is nothing to lock (the store's lock lives inside this directory),
+    # so re-read the parent to confirm it is STILL absent before publishing
+    # had=0. Residual race: a concurrent CLI could create the directory and a
+    # state file in the window between this double-read and the installer's
+    # subsequent mutation; that is out of scope for a byte snapshot with no lock
+    # to hold and is bounded by the installer transaction lock taken elsewhere.
+    if lstat_or_none(parent) is not None:
+        fail("lifecycle_parent_appeared_during_snapshot")
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        handle.write("had=0\n")
+    raise SystemExit(0)
+if stat.S_ISLNK(parent_st.st_mode):
+    fail("lifecycle_parent_symlink")
+if not stat.S_ISDIR(parent_st.st_mode):
+    fail("lifecycle_parent_not_directory")
+if parent_st.st_uid != uid:
+    fail("lifecycle_parent_not_owned")
+if stat.S_IMODE(parent_st.st_mode) != 0o700:
+    fail("lifecycle_parent_mode:%o" % stat.S_IMODE(parent_st.st_mode))
+
+# Acquire the store's lock (O_NOFOLLOW, owned, non-symlink, 0600) with a bounded
+# timeout so a concurrent CLI transition serializes against the snapshot.
+lock_st = lstat_or_none(lock_path)
+if lock_st is not None and stat.S_ISLNK(lock_st.st_mode):
+    fail("lifecycle_lock_symlink")
+lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    lock_desc = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(lock_desc.st_mode)
+        or lock_desc.st_uid != uid
+        or lock_desc.st_nlink != 1
+        or stat.S_IMODE(lock_desc.st_mode) & 0o077
+    ):
+        fail("lifecycle_lock_invalid")
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            if time.monotonic() >= deadline:
+                fail("lifecycle_lock_contended")
+            time.sleep(0.05)
+
+    st = lstat_or_none(state_path)
+    if st is None:
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            handle.write("had=0\n")
+        raise SystemExit(0)
+    if stat.S_ISLNK(st.st_mode):
+        fail("lifecycle_state_symlink")
+    if not stat.S_ISREG(st.st_mode):
+        fail("lifecycle_state_not_regular")
+    if st.st_uid != uid:
+        fail("lifecycle_state_not_owned")
+    if st.st_nlink != 1:
+        fail("lifecycle_state_hardlinked")
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        fail("lifecycle_state_mode:%o" % stat.S_IMODE(st.st_mode))
+    if st.st_size > MAX_STATE_BYTES:
+        fail("lifecycle_state_oversized:%d" % st.st_size)
+
+    # Read the exact bytes through an O_NOFOLLOW descriptor and confirm the
+    # descriptor still refers to the lstat'd inode (defeats a swap between the
+    # lstat and open).
+    src_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        src_desc = os.fstat(src_fd)
+        if (src_desc.st_dev, src_desc.st_ino) != (st.st_dev, st.st_ino):
+            fail("lifecycle_state_raced")
+        if not stat.S_ISREG(src_desc.st_mode) or src_desc.st_uid != uid or src_desc.st_nlink != 1:
+            fail("lifecycle_state_desc_invalid")
+        payload = b""
+        while len(payload) <= MAX_STATE_BYTES:
+            chunk = os.read(src_fd, 65536)
+            if not chunk:
+                break
+            payload += chunk
+        if len(payload) > MAX_STATE_BYTES:
+            fail("lifecycle_state_oversized_read")
+    finally:
+        os.close(src_fd)
+
+    # Write the snapshot into a freshly created 0600 destination with umask 077.
+    # A pre-existing destination is refused (O_EXCL) so the snapshot cannot land
+    # on an attacker-planted target.
+    previous_umask = os.umask(0o077)
+    try:
+        dest_fd = os.open(
+            destination_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    finally:
+        os.umask(previous_umask)
+    dest_dev = None
+    dest_ino = None
+    try:
+        dest_desc = os.fstat(dest_fd)
+        dest_dev, dest_ino = dest_desc.st_dev, dest_desc.st_ino
+        write_all(dest_fd, payload)
+        os.fsync(dest_fd)
+    finally:
+        os.close(dest_fd)
+
+    # Prove the DESTINATION now holds exactly the captured payload before
+    # publishing had=1. Reopen the staged file with O_NOFOLLOW, confirm it is
+    # the same owned regular inode we just created (not a swapped/planted
+    # target), revalidate type/link-count/mode/size, and byte-compare its
+    # contents against the payload. Any mismatch (e.g. a short write) aborts
+    # BEFORE the meta file is written, so no truncated snapshot is ever
+    # published or later restored.
+    verify_fd = os.open(destination_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        verify_desc = os.fstat(verify_fd)
+        if (verify_desc.st_dev, verify_desc.st_ino) != (dest_dev, dest_ino):
+            fail("lifecycle_snapshot_dest_raced")
+        if not stat.S_ISREG(verify_desc.st_mode):
+            fail("lifecycle_snapshot_dest_not_regular")
+        if verify_desc.st_uid != uid:
+            fail("lifecycle_snapshot_dest_not_owned")
+        if verify_desc.st_nlink != 1:
+            fail("lifecycle_snapshot_dest_hardlinked")
+        if stat.S_IMODE(verify_desc.st_mode) != 0o600:
+            fail("lifecycle_snapshot_dest_mode:%o" % stat.S_IMODE(verify_desc.st_mode))
+        if verify_desc.st_size != len(payload):
+            fail("lifecycle_snapshot_dest_size:%d" % verify_desc.st_size)
+        staged = b""
+        while len(staged) <= MAX_STATE_BYTES:
+            chunk = os.read(verify_fd, 65536)
+            if not chunk:
+                break
+            staged += chunk
+    finally:
+        os.close(verify_fd)
+    if staged != payload:
+        fail("lifecycle_snapshot_dest_byte_mismatch")
+
+    # Re-verify the source has not changed underneath the copy (lstat again +
+    # byte compare) while still holding the lock.
+    reverify = lstat_or_none(state_path)
+    if reverify is None:
+        fail("lifecycle_state_vanished")
+    if (
+        stat.S_ISLNK(reverify.st_mode)
+        or (reverify.st_dev, reverify.st_ino) != (st.st_dev, st.st_ino)
+        or reverify.st_size != st.st_size
+    ):
+        fail("lifecycle_state_changed_during_copy")
+    recheck_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        recheck_desc = os.fstat(recheck_fd)
+        if (recheck_desc.st_dev, recheck_desc.st_ino) != (st.st_dev, st.st_ino):
+            fail("lifecycle_state_raced_recheck")
+        recheck = b""
+        while len(recheck) <= MAX_STATE_BYTES:
+            chunk = os.read(recheck_fd, 65536)
+            if not chunk:
+                break
+            recheck += chunk
+    finally:
+        os.close(recheck_fd)
+    if recheck != payload:
+        fail("lifecycle_state_byte_mismatch")
+
+    # The snapshot's writer/pause posture is not threaded through the meta file:
+    # restore_lifecycle_state re-reads it from the snapshot and the live file
+    # under the lock so no snapshot-time value can go stale.
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        handle.write("had=1\n")
+finally:
+    os.close(lock_fd)
+PY
+}
+
 write_install_recovery_artifacts() {
   recovery_dir="$1"
   state_path="$recovery_dir/state.sh"
@@ -924,6 +1191,11 @@ write_install_recovery_artifacts() {
     printf 'REC_WATCHDOG_PLIST_PATH=%q\n' "$WATCHDOG_PLIST_PATH"
     printf 'REC_WATCHDOG_LABEL=%q\n' "$WATCHDOG_LABEL"
     printf 'REC_MANIFEST_PATH=%q\n' "$MANIFEST_PATH"
+    printf 'REC_LIFECYCLE_STATE_PATH=%q\n' "$LIFECYCLE_STATE_PATH"
+    printf 'REC_LIFECYCLE_LEASE_PATH=%q\n' "$LIFECYCLE_LEASE_PATH"
+    printf 'REC_LIFECYCLE_STATE_LOCK_PATH=%q\n' "$LIFECYCLE_STATE_LOCK_PATH"
+    printf 'REC_LIFECYCLE_LEASE_LOCK_PATH=%q\n' "$LIFECYCLE_LEASE_LOCK_PATH"
+    printf 'REC_LIFECYCLE_INSTALL_OPERATION_ID=%q\n' "${LIFECYCLE_INSTALL_OPERATION_ID:-}"
     printf 'REC_LOG_DIR=%q\n' "$LOG_DIR"
     printf 'REC_INSTALL_RECOVERY_LABEL=%q\n' "$INSTALL_RECOVERY_LABEL"
     printf 'REC_INSTALL_RECOVERY_PLIST_PATH=%q\n' "$INSTALL_RECOVERY_PLIST_PATH"
@@ -943,6 +1215,7 @@ write_install_recovery_artifacts() {
     printf 'REC_HAD_WATCHDOG_DIR=%q\n' "$INSTALL_TX_HAD_WATCHDOG_DIR"
     printf 'REC_HAD_WATCHDOG_PLIST=%q\n' "$INSTALL_TX_HAD_WATCHDOG_PLIST"
     printf 'REC_HAD_MANIFEST=%q\n' "$INSTALL_TX_HAD_MANIFEST"
+    printf 'REC_HAD_LIFECYCLE_STATE=%q\n' "$INSTALL_TX_HAD_LIFECYCLE_STATE"
     printf 'REC_SERVICE_WAS_ACTIVE=%q\n' "$INSTALL_TX_SERVICE_WAS_ACTIVE"
     printf 'REC_SERVICE_WAS_DISABLED=%q\n' "$INSTALL_TX_SERVICE_WAS_DISABLED"
     printf 'REC_WATCHDOG_WAS_ACTIVE=%q\n' "$INSTALL_TX_WATCHDOG_WAS_ACTIVE"
@@ -1140,11 +1413,1630 @@ swap_restore() {
     mv "$candidate_path" "$destination_path" || return 1
   fi
 }
+# Restore the lifecycle-state file coherently instead of a raw byte swap:
+#   * hold the store's lock across read + swap so a concurrent operator pause is
+#     not lost (A-01);
+#   * re-read the CURRENT live record first and preserve a durable operator
+#     pause the snapshot did not have (A-01.2);
+#   * translate an updater-written snapshot into an installer-owned
+#     rollback_in_progress record so a restored lifecycle-aware CLI cannot be
+#     permanently fenced on a dead operation (A-01.3); installer/serve/opaque
+#     snapshots restore byte-exact, absence restores as removal (A-01);
+#   * after the final rename/removal, verify the final file (byte compare vs the
+#     intended record, regular type, mode) or verified absence, then fsync the
+#     restored file and its parent directory before reporting success (S-M3).
+# The RECOVERY_LIFECYCLE_FAULT hook lets fault-injection tests interrupt between
+# the move-aside and the move-in without changing the production path.
+restore_lifecycle_state() {
+  RECOVERY_LIFECYCLE_FAULT="${RECOVERY_LIFECYCLE_FAULT:-}" \
+  python3 - \
+    "$REC_LIFECYCLE_STATE_PATH" \
+    "${REC_LIFECYCLE_STATE_LOCK_PATH:-}" \
+    "$RECOVERY_DIR/lifecycle-state-v1.json" \
+    "$FAILED_CURRENT_DIR/lifecycle-state-v1.json" \
+    "${REC_HAD_LIFECYCLE_STATE:-0}" \
+    "${REC_LIFECYCLE_INSTALL_OPERATION_ID:-}" \
+    <<'PY'
+import errno
+import fcntl
+import json
+import os
+import stat
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+
+(state_path, lock_path, snapshot_path, aside_path, had_text,
+ install_operation_id) = sys.argv[1:]
+had_snapshot = had_text == "1"
+fault = os.environ.get("RECOVERY_LIFECYCLE_FAULT", "")
+uid = os.getuid()
+MAX_STATE_BYTES = 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 10.0
+AUTHORITY = "macprovider_cli"
+SCHEMA_VERSION = 1
+RESERVED_TRANSLATION_REASON = "install_rollback_restored_translated"
+
+
+def fail(message):
+    sys.stderr.write("lifecycle_restore_failed:%s\n" % message)
+    raise SystemExit(1)
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def read_bytes_nofollow(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        data = b""
+        while len(data) <= MAX_STATE_BYTES:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > MAX_STATE_BYTES:
+            fail("lifecycle_state_oversized")
+        return data
+    finally:
+        os.close(fd)
+
+
+def parse_record(data):
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def encode_record(record):
+    # Match the store's JSONEncoder(.sortedKeys): compact, alphabetically
+    # sorted keys, UTF-8, no trailing newline.
+    return (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def atomic_write(path, data):
+    parent = os.path.dirname(path)
+    temporary = os.path.join(
+        parent, ".%s.recover-tmp-%s" % (os.path.basename(path), uuid.uuid4().hex)
+    )
+    previous_umask = os.umask(0o077)
+    try:
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    finally:
+        os.umask(previous_umask)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    os.replace(temporary, path)
+
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+# Acquire the store lock (bounded, fail closed) when a lock path is known.
+lock_fd = None
+if lock_path:
+    lock_st = lstat_or_none(lock_path)
+    if lock_st is not None and stat.S_ISLNK(lock_st.st_mode):
+        fail("lifecycle_lock_symlink")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    lock_desc = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(lock_desc.st_mode)
+        or lock_desc.st_uid != uid
+        or lock_desc.st_nlink != 1
+        or stat.S_IMODE(lock_desc.st_mode) & 0o077
+    ):
+        os.close(lock_fd)
+        fail("lifecycle_lock_invalid")
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                os.close(lock_fd)
+                raise
+            if time.monotonic() >= deadline:
+                os.close(lock_fd)
+                fail("lifecycle_lock_contended")
+            time.sleep(0.05)
+
+try:
+    # Read the CURRENT live record under the lock for pause reconciliation and
+    # to advance sequence past whatever the failed transaction wrote.
+    current_st = lstat_or_none(state_path)
+    current_record = None
+    current_sequence = 0
+    current_paused = False
+    if current_st is not None and not stat.S_ISLNK(current_st.st_mode) and stat.S_ISREG(current_st.st_mode):
+        current_bytes = read_bytes_nofollow(state_path)
+        current_record = parse_record(current_bytes)
+        if current_record is not None:
+            raw_seq = current_record.get("sequence")
+            if isinstance(raw_seq, int) and not isinstance(raw_seq, bool) and raw_seq > 0:
+                current_sequence = raw_seq
+            if current_record.get("operator_paused") is True:
+                current_paused = True
+
+    snapshot_bytes = None
+    snapshot_record = None
+    if had_snapshot:
+        snap_st = lstat_or_none(snapshot_path)
+        if snap_st is None or stat.S_ISLNK(snap_st.st_mode) or not stat.S_ISREG(snap_st.st_mode):
+            fail("lifecycle_snapshot_missing")
+        snapshot_bytes = read_bytes_nofollow(snapshot_path)
+        snapshot_record = parse_record(snapshot_bytes)
+
+    # Decide the exact bytes (or absence) to become durable.
+    remove_state = not had_snapshot
+    target_bytes = None
+    if had_snapshot:
+        snapshot_paused = bool(
+            snapshot_record is not None and snapshot_record.get("operator_paused") is True
+        )
+        snapshot_writer = snapshot_record.get("writer") if snapshot_record is not None else None
+        if snapshot_writer == "updater":
+            # Translating a maintenance-owned record into an installer-owned
+            # rollback_in_progress record. serve is always permitted to leave an
+            # installer-written maintenance state, so a restored lifecycle-aware
+            # CLI cannot be fenced on a dead updater operation.
+            # Start from the FULL snapshot record and replace only the
+            # transition-owned fields. The Swift ProviderLifecycleStateRecord
+            # constructor carries the last_restart / last_rejection /
+            # last_watchdog journals forward on every transition and only
+            # refreshes the journal whose trigger this transition matches. For
+            # an installer-written rollback_in_progress transition (writer
+            # installer, state rollback_in_progress, which is an update state),
+            # the constructor mints a NEW last_update event from this transition
+            # and preserves last_restart / last_rejection / last_watchdog. We
+            # mirror that exactly so Malibu (InstalledProviderMonitor) keeps
+            # displaying the restart/rejection/watchdog history and observes the
+            # installer's rollback summary in last_update.
+            base = dict(snapshot_record)
+            snap_seq = base.get("sequence")
+            snap_seq = snap_seq if isinstance(snap_seq, int) and not isinstance(snap_seq, bool) else 0
+            next_sequence = max(snap_seq, current_sequence) + 1
+            transition_id = str(uuid.uuid4()).lower()
+            previous_transition_id = base.get("transition_id")
+            transition_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") \
+                + "%03dZ" % (datetime.now(timezone.utc).microsecond // 1000)
+            fresh_operation_id = install_operation_id or ("install-rollback:%d" % os.getpid())
+            if not fresh_operation_id.startswith("install-rollback:"):
+                fresh_operation_id = "install-rollback:%s" % fresh_operation_id
+
+            translated = dict(base)
+            translated["version"] = (
+                base.get("version") if isinstance(base.get("version"), int)
+                and not isinstance(base.get("version"), bool) else SCHEMA_VERSION
+            )
+            translated["sequence"] = next_sequence
+            translated["transition_id"] = transition_id
+            translated["transition_at"] = transition_at
+            translated["state"] = "rollback_in_progress"
+            translated["reason_code"] = RESERVED_TRANSLATION_REASON
+            translated["authority"] = AUTHORITY
+            translated["writer"] = "installer"
+            translated["operation_id"] = fresh_operation_id
+            # Durable operator pause survives the rollback even if the
+            # incumbent snapshot was taken before it was set.
+            translated["operator_paused"] = bool(snapshot_paused or current_paused)
+            # Chain to the snapshot's transition; drop a non-chaining value.
+            if isinstance(previous_transition_id, str) and previous_transition_id:
+                translated["previous_transition_id"] = previous_transition_id
+            else:
+                translated.pop("previous_transition_id", None)
+
+            # SignificantEvent for this installer maintenance transition. Mirrors
+            # ProviderLifecycleStateRecord.SignificantEvent: sequence,
+            # transition_id, transition_at, state, reason_code, writer,
+            # compatibility_set_id (nil-omitted), operation_id.
+            update_event = {
+                "sequence": next_sequence,
+                "transition_id": transition_id,
+                "transition_at": transition_at,
+                "state": "rollback_in_progress",
+                "reason_code": RESERVED_TRANSLATION_REASON,
+                "writer": "installer",
+                "operation_id": fresh_operation_id,
+            }
+            compat = base.get("compatibility_set_id")
+            if isinstance(compat, str) and compat:
+                update_event["compatibility_set_id"] = compat
+            # rollback_in_progress is an update state, so the constructor refreshes
+            # last_update to this transition; the other journals carry forward
+            # unchanged from the snapshot (already copied by dict(base)).
+            translated["last_update"] = update_event
+            target_bytes = encode_record(translated)
+        elif snapshot_record is not None and (current_paused and not snapshot_paused):
+            # Byte-exact restore would otherwise drop a durable operator pause
+            # set during the transaction; preserve it on the restored record.
+            reconciled = dict(snapshot_record)
+            reconciled["operator_paused"] = True
+            target_bytes = encode_record(reconciled)
+        else:
+            # Installer-written, serve-written, or opaque snapshot with no pause
+            # to reconcile: restore byte-exact as today.
+            target_bytes = snapshot_bytes
+
+    # Move the current live file aside (durable failed-install evidence), then
+    # honor an injected interruption before the move-in, then write the intended
+    # record atomically. The lock is held across the whole critical section.
+    if current_st is not None:
+        os.replace(state_path, aside_path)
+    if fault == "between-aside-and-move-in":
+        fail("lifecycle_restore_interrupted_between_aside_and_move_in")
+    if remove_state:
+        # Absence restore: nothing to write.
+        pass
+    else:
+        atomic_write(state_path, target_bytes)
+    fsync_dir(os.path.dirname(state_path))
+    if fault == "post-swap-verify-failure":
+        # Simulate a post-swap durability/verification defect.
+        fail("lifecycle_restore_post_swap_verification_forced")
+
+    # Verify the FINAL durable outcome before reporting success (S-M3).
+    final_st = lstat_or_none(state_path)
+    if remove_state:
+        if final_st is not None:
+            fail("lifecycle_restore_absence_not_durable")
+    else:
+        if final_st is None:
+            fail("lifecycle_restore_final_missing")
+        if stat.S_ISLNK(final_st.st_mode) or not stat.S_ISREG(final_st.st_mode):
+            fail("lifecycle_restore_final_not_regular")
+        if stat.S_IMODE(final_st.st_mode) != 0o600:
+            fail("lifecycle_restore_final_mode:%o" % stat.S_IMODE(final_st.st_mode))
+        final_bytes = read_bytes_nofollow(state_path)
+        if final_bytes != target_bytes:
+            fail("lifecycle_restore_final_byte_mismatch")
+finally:
+    if lock_fd is not None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+PY
+}
+# Reconcile the operation-bound lease after the state restore, under the lease
+# lock (A-05): remove lease.json when it belongs to the rolled-back install
+# operation or its owner PID is dead; preserve it when a live foreign process
+# owns it. The lock files themselves are never snapshotted, moved, or deleted.
+reconcile_lifecycle_lease() {
+  python3 - \
+    "${REC_LIFECYCLE_LEASE_PATH:-}" \
+    "${REC_LIFECYCLE_LEASE_LOCK_PATH:-}" \
+    "${REC_LIFECYCLE_INSTALL_OPERATION_ID:-}" \
+    <<'PY'
+import ctypes
+import errno
+import fcntl
+import json
+import os
+import stat
+import struct
+import subprocess
+import sys
+import time
+
+lease_path, lock_path, install_operation_id = sys.argv[1:]
+if not lease_path:
+    raise SystemExit(0)
+uid = os.getuid()
+#
+# ======================================================================
+# COMPLETE DIVERGENCE INVENTORY (reconciler-vs-Swift-store).
+# ======================================================================
+# The reconciler's contract is that its PRESERVE-set is a SUBSET of Swift's
+# read-acceptance set: it may REMOVE a lease Swift would keep (bounded
+# availability delay -- the CLI re-mints a fresh lease one store cycle later),
+# but it must NEVER PRESERVE a lease Swift would reject on read (that would
+# restart-loop the provider, because serve startup only falls back on
+# handoffNotPrepared and, for an invalid-owner RECORD, on leaseNotValid). Every
+# place the shell mirror is not byte-identical to the Swift validators is one of
+# the following FOUR deliberate, documented conservative divergences. Each is
+# ONE-DIRECTIONAL fail-toward-removal (the shell may only REMOVE a record Swift
+# would keep, never PRESERVE one Swift would reject), so the preserve-set is now
+# a TOTAL subset of Swift's read-acceptance with NO fail-open remaining. Each is
+# annotated at its implementation site; this is the consolidated inventory with
+# each divergence's DIRECTION:
+#
+#   1. Stricter printable-ASCII identity policy (ascii_identity_scalar, applied
+#      to operation_id / provider_id / service_identity). Swift trims with
+#      Foundation's trimmingCharacters(.whitespacesAndNewlines) then compares
+#      trimmed == value; shell requires every scalar to be printable ASCII
+#      0x21..0x7e instead of reproducing Foundation's trim set.
+#      DIRECTION: fail-toward-removal (strictly-stricter). Any value outside the
+#      ASCII set is REMOVED; the store never WRITES such identities, so the
+#      at-most-theoretical false-removal (e.g. a non-ASCII provider_id) is a
+#      bounded availability delay, never a restart loop.
+#
+#   2. Duplicate-key STRICT REJECTION vs Foundation keep-first (_strict_pairs).
+#      Foundation's JSONDecoder keeps the FIRST value for a duplicate key;
+#      Python's default keeps the LAST. Rather than replicate keep-first, shell
+#      REJECTS any duplicate-key document outright.
+#      DIRECTION: fail-toward-removal. A duplicate-key file Foundation would
+#      accept keeping-first is REMOVED here; removal self-heals.
+#
+#   3. GLOBAL rejection of float / NaN / Infinity JSON tokens, even in fields the
+#      shell otherwise ignores (strict_json_loads parse_float / parse_constant).
+#      Foundation rejects these only where a numeric field is decoded; shell
+#      rejects them anywhere in the document.
+#      DIRECTION: fail-toward-removal. A record carrying a stray float in an
+#      unread field that Foundation would accept is REMOVED here; removal
+#      self-heals.
+#
+#   4. TRAILING-SLASH rejection of target_executable_path, including the
+#      filesystem-root path "/" that Swift accepts STRUCTURALLY
+#      (valid_target_path). Swift's standardizedFileURL guard accepts "/"; shell's
+#      conservative component rule rejects any trailing slash (so "/" too).
+#      DIRECTION: fail-toward-removal. A "/"-valued target path (never a
+#      plausible executable, never emitted by the store) is REMOVED here; removal
+#      self-heals.
+#
+# ELIMINATED (was item 1 in prior revisions): owner liveness at SECOND
+# resolution. The reconciler previously compared owner.process_start_us TRUNCATED
+# to whole seconds (`ps lstart`) against the live pid's start second, a bounded
+# FAIL-OPEN that could PRESERVE a same-second/same-boot pid-reuse record Swift's
+# exact-microsecond identity rejects. The prior acceptance rationale (Swift
+# re-validates and replaces downstream) held for the ordinary owner-liveness path
+# but NOT for an ADOPTED handoff record: such a record routes through owner
+# liveness here (state != "prepared"), yet on the Swift side serve startup adopts
+# via adoptStartupHandoff, whose adopted branch (ProviderLifecycleLease.swift
+# ~620) rejects an invalid owner with leaseNotValid(.ownerProcessMissingOrReused)
+# rather than transparently re-minting -- so a same-second false-preserve here
+# could feed the CLI a record it rejects. owner_is_live now reads the EXACT
+# kernel start timeval via sysctl(KERN_PROC_PID) -> kinfo_proc.p_starttime (see
+# process_start_microseconds), the same value Swift reads via
+# proc_pidinfo(PROC_PIDTBSDINFO), and compares at full microsecond precision.
+# The fail-open is gone; the paired Swift startup fallback (MacProviderCLI.swift:
+# leaseNotValid now also falls back to replaceable acquisition) additionally
+# hardens the pre-existing invalid-owner adopted-record surface.
+#
+# All boot/clock-window, storage-envelope, and structural checks are
+# at-least-as-strict subsets of Swift with NO divergence (the shared-validity
+# gate mirrors validationFailure ~888..894 exactly, the owner-liveness check
+# mirrors ~904 EXACTLY at microsecond precision, and the prepared-handoff
+# exemption mirrors the ~895 branch). The four above are the complete set, all
+# fail-toward-removal, so the preserve-set is a TOTAL subset of Swift's.
+# ======================================================================
+#
+# The Swift store enforces ProviderLifecycleLeaseStore.maximumRecordBytes = 16 KiB
+# on EVERY read (validateOpenFile, called from readRecordIfPresent before the
+# JSONDecoder runs): a record larger than 16 KiB is rejected as .unsafeStorage
+# and never decoded. The reconciler must apply the identical ceiling as a
+# conservative subset -- a >16 KiB file Swift rejects on read must not be
+# preserved here (that would restart-loop the provider), so we reject it too and
+# remove the lease. (An underestimate would be UNSAFE only if Swift accepted a
+# file we rejected, but Swift's ceiling is exactly 16 KiB, so matching it is
+# at-least-as-strict.)
+MAX_LEASE_BYTES = 16 * 1024
+LOCK_TIMEOUT_SECONDS = 10.0
+
+
+def fail(message):
+    sys.stderr.write("lifecycle_lease_reconcile_failed:%s\n" % message)
+    raise SystemExit(1)
+
+
+def _strict_pairs(values):
+    # Foundation's JSONDecoder keeps the FIRST value for a duplicate key; Python's
+    # default json.loads keeps the LAST. A record whose duplicate key changes
+    # meaning between the two parsers could let the shell PRESERVE a record whose
+    # Foundation-visible value Swift rejects. Rather than replicate keep-first, we
+    # reject duplicate keys outright: for any duplicate-key file Foundation either
+    # also rejects it (it does not, but) or accepts it keeping-first, and in the
+    # accept case removing the lease is the safe direction (removal self-heals),
+    # so strict rejection is at-least-as-strict.
+    result = {}
+    for key, value in values:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def _reject_surrogates(node):
+    # Python's json accepts \uD800-\uDFFF escapes and yields lone surrogate code
+    # points in the resulting str; Foundation's JSONDecoder rejects unpaired
+    # surrogates. Worse, a lone surrogate can later raise an UNCAUGHT
+    # UnicodeEncodeError deep inside a validator (e.g. value.encode("utf-8")),
+    # which would crash the reconciler instead of failing toward removal. Scan
+    # every decoded string for surrogate code points and reject the record if any
+    # is present (str keys and values, recursively through dict/list).
+    if isinstance(node, str):
+        for char in node:
+            if 0xD800 <= ord(char) <= 0xDFFF:
+                raise ValueError("surrogate in string")
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            _reject_surrogates(key)
+            _reject_surrogates(value)
+    elif isinstance(node, list):
+        for item in node:
+            _reject_surrogates(item)
+
+
+def strict_json_loads(text):
+    # Parse a lease record with Foundation-comparable strictness: reject
+    # NaN/Infinity/-Infinity (parse_constant) and bare floats (parse_float) that
+    # Foundation's JSONDecoder would reject, reject duplicate keys
+    # (object_pairs_hook, keep-first divergence), and reject unpaired surrogate
+    # escapes. Mirrors the strict-loader already used for acceptance-candidate
+    # metadata elsewhere in this installer. Returns the decoded value, or raises
+    # ValueError on any strictness failure (the caller turns that into removal).
+    value = json.loads(
+        text,
+        object_pairs_hook=_strict_pairs,
+        parse_constant=lambda raw: (_ for _ in ()).throw(ValueError(raw)),
+        parse_float=lambda raw: (_ for _ in ()).throw(ValueError(raw)),
+    )
+    _reject_surrogates(value)
+    return value
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def lease_has_extended_acl(path):
+    # Mirror the Swift store's rejectExtendedACL (called from validateOpenFile on
+    # EVERY read): a lease file carrying an extended (non-mode) ACL is rejected as
+    # .unsafeStorage and never decoded, because an ACL could grant another
+    # principal read/write to the single-writer lease. Return True if an extended
+    # ACL is present, False if provably absent, and None if presence cannot be
+    # determined -- the caller treats None as "decline preservation" (removal),
+    # since we can only preserve a lease Swift would also accept.
+    #
+    # Detection via `ls -lde`: on macOS an extended ACL renders as one or more
+    # numbered entries (" 0: user:... allow ...") on the lines AFTER the mode
+    # line, and the mode string carries a trailing "+" (e.g. "-rw-------+"). We
+    # treat EITHER signal as ACL-present. If `ls` is unavailable or its output is
+    # unparseable, return None (decline) rather than guessing absence.
+    try:
+        result = subprocess.run(
+            ["/bin/ls", "-lde", path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    if not lines:
+        return None
+    mode_field = lines[0].split(" ", 1)[0] if lines[0] else ""
+    if not mode_field:
+        return None
+    if mode_field.endswith("+"):
+        return True
+    # Numbered ACL entry lines follow the mode line, e.g. " 0: user:foo allow ...".
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped and stripped[0].isdigit() and ":" in stripped.split(None, 1)[0]:
+            return True
+    return False
+
+
+def lease_dir_has_extended_acl(path):
+    # Directory-flavored ACL gate for the trusted lifecycle directory. Swift's
+    # validateTrustedDirectory rejects a directory carrying an extended ACL. We
+    # treat both "ACL present" and "presence undeterminable" (None) as unsafe:
+    # we may only preserve a lease Swift would also read, and Swift declines to
+    # read a lease whose directory it cannot confirm ACL-free.
+    return lease_has_extended_acl(path) is not False
+
+
+def pid_alive(pid):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def boot_session():
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    if value:
+        return value
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def process_start_microseconds(pid):
+    # EXACT-microsecond process-start identity, mirroring the value the Swift
+    # store persists as owner.process_start_us. Swift's live environment reads
+    # it via proc_pidinfo(PROC_PIDTBSDINFO) -> pbi_start_tvsec*1e6 +
+    # pbi_start_tvusec (ProviderLifecycleLease.swift ~255..272). That start-time
+    # timeval originates from the same kernel `p_starttime` field that
+    # sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid) exposes as the FIRST field
+    # of `struct kinfo_proc` (kp_proc.p_un.__p_starttime, a `struct timeval`).
+    # We read that timeval here so python and Swift compute BYTE-IDENTICAL
+    # microsecond values from the kernel (verified empirically: proc_pidinfo and
+    # this sysctl path return the same combined microseconds for a live pid; the
+    # conformance self-check test asserts a store-written live-pid lease is
+    # PRESERVED and its process_start_us+1 copy is REMOVED). This ELIMINATES the
+    # former second-resolution fail-open: shell now applies the SAME exact
+    # identity Swift's validationFailure -> .ownerProcessMissingOrReused applies,
+    # so a same-second pid-reuse record is no longer preservable here.
+    #
+    # `struct timeval` on 64-bit Darwin: __darwin_time_t tv_sec (int64) followed
+    # by __darwin_suseconds_t tv_usec (int32). We unpack the leading 12 bytes of
+    # the kinfo_proc blob as "=qi" (native, no padding: int64 then int32).
+    #
+    # Directionality on ANY failure (sysctl error, short/implausible blob, parse
+    # error) is fail-toward-removal: return None so owner_is_live() declines to
+    # preserve (removal self-heals; the restored CLI mints a fresh lease one
+    # store cycle later), never a false preserve.
+    if not isinstance(pid, int) or isinstance(pid, bool) or not (1 <= pid <= 2**31 - 1):
+        return None
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        libc.sysctl.restype = ctypes.c_int
+        # CTL_KERN=1, KERN_PROC=14, KERN_PROC_PID=1.
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)
+        size = ctypes.c_size_t(0)
+        # First call sizes the kinfo_proc result; a dead/reaped pid yields size 0.
+        if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0:
+            return None
+        if size.value < 12:
+            # No process (or a truncated result): cannot read a start timeval.
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        buffer_size = ctypes.c_size_t(size.value)
+        if libc.sysctl(mib, 4, buffer, ctypes.byref(buffer_size), None, 0) != 0:
+            return None
+        data = buffer.raw[:buffer_size.value]
+        if len(data) < 12:
+            return None
+        # p_starttime is the FIRST field of kinfo_proc: timeval{int64 sec; int32 usec}.
+        tv_sec, tv_usec = struct.unpack_from("=qi", data, 0)
+    except (OSError, ValueError, struct.error):
+        return None
+    # Plausibility: a real start time is a positive epoch with usec in [0, 1e6).
+    # An implausible value is fail-toward-removal (None), never a false preserve.
+    if tv_sec <= 0 or not (0 <= tv_usec < 1_000_000):
+        return None
+    combined = tv_sec * 1_000_000 + tv_usec
+    if not (1 <= combined <= 2**63 - 1):
+        return None
+    return combined
+
+
+def owner_is_live(owner):
+    # A live foreign owner is preserved only when EVERY identity check the
+    # Swift store applies (validationFailure / .ownerProcessMissingOrReused)
+    # can be reproduced and passes: pid alive, boot_session unchanged, and the
+    # owner's EXACT-microsecond process-start identity confirmed. The shell now
+    # reads the identical kernel start timeval Swift reads (see
+    # process_start_microseconds), so this comparison is byte-for-byte the same
+    # identity Swift enforces at ProviderLifecycleLease.swift ~904
+    # (environment.processStartMicroseconds(record.owner.pid) ==
+    # record.owner.processStartMicroseconds). An unverifiable process-start
+    # (owner missing it, or the sysctl read failing/implausible) returns None
+    # from process_start_microseconds and is treated as NOT preservable: fail
+    # toward single-writer so a stale lease from the failed transaction is
+    # cleared rather than protected.
+    #
+    # This check is now at-least-as-strict as Swift's in EVERY respect: the
+    # former bounded fail-open (same-second pid reuse preserved here but rejected
+    # by Swift) is ELIMINATED, because the comparison below is the same exact
+    # microsecond compare Swift runs. A reused pid whose replacement started even
+    # one microsecond apart -- including within the same whole second -- is now
+    # REJECTED here exactly as Swift rejects it (.ownerProcessMissingOrReused).
+    if not isinstance(owner, dict):
+        return False
+    owner_pid = owner.get("pid")
+    owner_start = owner.get("process_start_us")
+    owner_boot = owner.get("boot_session")
+    # WIRE-TYPE BOUNDS (Finding 1, R5 CODE-M) on the ordinary-liveness path too:
+    # owner.pid is Swift Int32 and process_start_us is Swift Int64, so a value
+    # outside the type range could never have been decoded by the Swift store.
+    # Bound them BEFORE pid_alive/process_start_microseconds do arithmetic or
+    # syscalls: os.kill(pid, 0) raises OverflowError (uncaught by pid_alive) for
+    # a pid beyond C int range, so an Int32-overflow pid would otherwise crash
+    # the reconciler instead of failing toward removal. Any out-of-range value
+    # returns False here -> the dead-owner path (and then the structural mirror)
+    # -> removal, never a preserve or a crash.
+    if (
+        not isinstance(owner_pid, int)
+        or isinstance(owner_pid, bool)
+        or not (1 <= owner_pid <= 2**31 - 1)
+        or not isinstance(owner_start, int)
+        or isinstance(owner_start, bool)
+        or not (1 <= owner_start <= 2**63 - 1)
+        or not isinstance(owner_boot, str)
+        or not owner_boot
+    ):
+        return False
+    if not pid_alive(owner_pid):
+        return False
+    current_boot = boot_session()
+    if not current_boot or owner_boot != current_boot:
+        # A boot-session mismatch (or unknown current boot) means the pid is a
+        # post-reboot coincidence, not the original owner: treat as dead.
+        return False
+    live_start_us = process_start_microseconds(owner_pid)
+    if live_start_us is None:
+        # Unverifiable process-start identity: fail toward single-writer.
+        return False
+    # EXACT-microsecond identity, mirroring Swift ProviderLifecycleLease.swift
+    # ~904. No truncation: a same-second pid reuse whose start differs by even
+    # one microsecond is rejected here exactly as Swift rejects it.
+    return live_start_us == owner_start
+
+
+def wall_milliseconds():
+    # Mirror ProviderLifecycleLeaseEnvironment.live.wallMilliseconds:
+    # floor(Date().timeIntervalSince1970 * 1000).
+    return int(time.time() * 1_000)
+
+
+def monotonic_nanoseconds():
+    # Mirror ProviderLifecycleLeaseEnvironment.live.monotonicNanoseconds:
+    # clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW). Python's CLOCK_MONOTONIC_RAW
+    # reads the identical Darwin kernel clock (nanoseconds since boot), so the
+    # cross-process monotonic comparison is faithful -- it is only meaningful
+    # because the prepared-handoff exemption below also requires the lease's
+    # boot_session to match the current boot, which is precisely what keeps the
+    # monotonic base comparable across the maintenance owner's process and this
+    # reconciler process. If this platform lacks CLOCK_MONOTONIC_RAW, return
+    # None so the caller declines the monotonic-dependent exemption (the lease
+    # then follows the ordinary owner-liveness path -> removal, never a false
+    # preserve).
+    clock_id = getattr(time, "CLOCK_MONOTONIC_RAW", None)
+    if clock_id is None:
+        return None
+    try:
+        return int(time.clock_gettime_ns(clock_id))
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def record_matches_swift_structure(record):
+    # Mirror EVERY invariant the Swift store's validateRecordStructure /
+    # validateStartupHandoffStructure enforce (ProviderLifecycleLease.swift,
+    # validationFailure runs validateRecordStructure FIRST, before ANY
+    # preservation branch -- the boot/clock/owner-liveness checks and the
+    # prepared-handoff exemption at line 895 all run AFTER it). This must
+    # therefore gate EVERY preservation branch in the reconciler, because a
+    # record the shell PRESERVES but Swift would reject as .invalidField /
+    # .durationOutOfRange / .unsupportedVersion is the harmful outcome:
+    # inspect() later rejects it, the restored CLI's fallback re-acquires only
+    # on handoffNotPrepared, and the provider restart-loops. Directionality is
+    # fail-toward-removal: anything this mirror cannot positively verify returns
+    # False so the lease follows the ordinary owner-liveness path (-> removal),
+    # never a false preserve.
+    #
+    # SCOPE (R6 CODE-M4): this is the BASE structural validator for ANY lease
+    # record, whether or not it carries a startup handoff -- exactly like Swift's
+    # validateRecordStructure, which validates the record for both `startup` and
+    # `maintenance` kinds and only descends into validateStartupHandoffStructure
+    # when `record.startupHandoff` is present. The ordinary live-foreign-owner
+    # preservation path (a plain startup lease with no handoff) is gated on this
+    # too, so a live owner cannot rescue a structurally invalid record.
+    if not isinstance(record, dict):
+        return False
+
+    # --- primitive helpers mirroring the Swift validators ---
+    #
+    # WIRE-TYPE BOUNDS (Finding 1, R5 CODE-M). Swift's JSONDecoder decodes each
+    # numeric field into an EXACT fixed-width integer type; a JSON number that
+    # does not fit that type makes the decode FAIL, so inspect() rejects the
+    # record and -- if the shell had preserved it -- the restored CLI's fallback
+    # (which only re-acquires on handoffNotPrepared) leaves the provider in a
+    # restart loop. Preserving such a record is therefore the harmful outcome.
+    # So EVERY numeric wire field is bounded to its exact Swift type here,
+    # BEFORE any arithmetic, and is required to be a JSON integer (not a float,
+    # string, or bool -- Python's bool is an int subclass, hence the explicit
+    # bool rejection in is_int). These bounds are exactly-as-strict as Swift for
+    # the range check and strictly-stricter nowhere it matters:
+    #   owner.pid                    -> Swift Int32 -> [1, 2**31 - 1]
+    #   process_start_us             -> Swift Int64 -> [1, 2**63 - 1]
+    #   issued/expires_wall_ms       -> Swift Int64 -> [.., 2**63 - 1]
+    #   issued/expires_monotonic_ns  -> Swift Int64 -> [.., 2**63 - 1]
+    #   startup_lease_duration_ms    -> Swift Int64 -> [1, 2**63 - 1]
+    # (`version` fields are Swift Int but the shell already pins them to the
+    # exact schema constant 1, which is inside every integer type's range, so no
+    # separate Int64 bound is needed for them.)
+    INT32_MAX = 2**31 - 1  # Swift Int32.max
+    INT64_MAX = 2**63 - 1  # Swift Int64.max
+
+    def is_int(value):
+        # A JSON integer that is not a bool (Python bool subclasses int; Swift's
+        # JSONDecoder rejects `true`/`false` for an integer field).
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    def is_int32(value):
+        # Fits Swift Int32 (owner.pid). Any value outside [-2**31, 2**31 - 1]
+        # overflows Int32 and fails JSONDecoder; callers additionally require
+        # the store-specific positivity bound (pid > 0).
+        return is_int(value) and -(INT32_MAX + 1) <= value <= INT32_MAX
+
+    def is_int64(value):
+        # Fits Swift Int64 (all timestamp/duration/process-start fields). Any
+        # value outside [-2**63, 2**63 - 1] overflows Int64 and fails
+        # JSONDecoder; callers additionally require the store-specific lower
+        # bound (> 0 or >= 0).
+        return is_int(value) and -(INT64_MAX + 1) <= value <= INT64_MAX
+
+    def ascii_identity_scalar(text):
+        # STRICTLY-STRICTER-THAN-FOUNDATION identity rule (Finding 2, R5 CODE-M).
+        # Swift trims operation_id / provider_id / service_identity with
+        # Foundation's trimmingCharacters(.whitespacesAndNewlines), whose scalar
+        # set (e.g. U+200B ZERO WIDTH SPACE and other format/whitespace scalars)
+        # is NOT identical to Python str.strip(); mirroring the trim with
+        # str.strip() lets a U+200B-prefixed identity pass the shell yet fail the
+        # Swift store's own trimmed == value guard -> a false preserve ->
+        # restart loop. Rather than reproduce Foundation's trim set, we require
+        # EVERY scalar to be printable ASCII in 0x21..0x7e: no whitespace of any
+        # kind anywhere (so trivially trim-stable under BOTH Python and
+        # Foundation semantics), and no control/format scalars. The Swift store
+        # only ever WRITES such values for these three fields -- operation ids
+        # like "serve:<uuid>" / "install-rollback:<id>" / "provider-restart-N",
+        # launchd-label service identities, and config provider ids -- so any
+        # value outside this set cannot have been emitted by the store, and its
+        # removal self-heals via fresh acquisition (bounded availability delay,
+        # never a restart loop). The one theoretical false-removal is a
+        # deliberately non-ASCII provider_id, which declines the exemption
+        # (bounded availability delay), never a restart loop.
+        for char in text:
+            code = ord(char)
+            if code < 0x21 or code > 0x7E:
+                return False
+        return True
+
+    def valid_operation_id(value):
+        # validateOperationID, made strictly-stricter: str, non-empty, utf8
+        # <= 128, and every scalar printable ASCII 0x21..0x7e (subsumes Swift's
+        # trimmed == value and >= 0x20 && not-C1 checks; see
+        # ascii_identity_scalar).
+        if not isinstance(value, str):
+            return False
+        if not value or len(value.encode("utf-8")) > 128:
+            return False
+        return ascii_identity_scalar(value)
+
+    def valid_handoff_identity(value, *, forbid_slash):
+        # validateHandoffIdentity, made strictly-stricter: str, non-empty, utf8
+        # <= 256, every scalar printable ASCII 0x21..0x7e; service_identity
+        # additionally must not contain "/" (kept from Swift).
+        if not isinstance(value, str):
+            return False
+        if not value or len(value.encode("utf-8")) > 256:
+            return False
+        if not ascii_identity_scalar(value):
+            return False
+        if forbid_slash and "/" in value:
+            return False
+        return True
+
+    def valid_uuid(value):
+        # UUID(uuidString:) accepts the canonical 8-4-4-4-12 hex form. Reject
+        # anything else so a malformed lease_id/handoff_id is not preserved.
+        if not isinstance(value, str):
+            return False
+        parts = value.split("-")
+        if len(parts) != 5:
+            return False
+        if [len(part) for part in parts] != [8, 4, 4, 4, 12]:
+            return False
+        return all(
+            char in "0123456789abcdefABCDEF"
+            for part in parts
+            for char in part
+        )
+
+    def valid_target_path(value):
+        # validateTargetExecutablePath, made STRICTLY-STRICTER-THAN-BOTH-
+        # NORMALIZERS (Finding 2, R6 remaining-surface item 2). Swift rejects
+        # unless `path == URL(fileURLWithPath: path).standardizedFileURL.path`;
+        # the previous shell mirror used `os.path.normpath(value) == value`.
+        # Neither normalizer is a substring of the other (normpath collapses
+        # "a/b/../c" -> "a/c" and strips trailing "/", while Foundation's
+        # standardizedFileURL applies its own URL-path rules), so a path that is
+        # its-own-normpath but NOT its-own-standardizedFileURL (or vice versa)
+        # produces a false PRESERVE -> shell keeps a path Swift rejects ->
+        # restart loop, the exact defect class this round eliminates. Rather
+        # than reproduce EITHER normalizer, we require conservative component
+        # rules that are at-least-as-strict as BOTH: an absolute path made of
+        # non-empty components, none of which is "." or "..", with no trailing
+        # slash. Every rejection below is a path the Swift store never emits for
+        # target_executable_path -- the store persists an already-standardized
+        # absolute executable path resolved from the running process
+        # (executablePath(pid) / standardizedFileURL.path), which by
+        # construction is absolute, has no empty / "." / ".." components, and no
+        # trailing slash -- so any value we reject is corruption or forgery, and
+        # its removal self-heals via fresh acquisition (bounded availability
+        # delay, never a restart loop). Non-ASCII bytes are permitted: a
+        # non-ASCII home directory yields a legitimate non-ASCII executable
+        # path, and none of these component rules inspect byte class.
+        #
+        # AT-LEAST-AS-STRICT PROOF. A value V passing these rules is a "/"-led
+        # sequence of one-or-more components c1/.../cn where each ci is
+        # non-empty and ci not in {".", ".."} and V does not end in "/".
+        #   * V is its own os.path.normpath: normpath only mutates a path by
+        #     collapsing duplicate/leading-internal slashes (excluded: no empty
+        #     component => no "//"), removing "." components (excluded), resolving
+        #     ".." against a prior component (excluded), or stripping a trailing
+        #     "/" (excluded). With none of its rewrite triggers present,
+        #     normpath(V) == V. So V passes the OLD normpath mirror.
+        #   * V is its own URL(fileURLWithPath: V).standardizedFileURL.path:
+        #     standardizedFileURL resolves "." and ".." components and collapses
+        #     empty path segments; with none present and V absolute, the
+        #     standardized path equals V. So V passes the Swift guard.
+        # Thus {V : passes new rule} is a subset of both {V : normpath(V)==V}
+        # and {V : standardizedFileURL(V)==V}: the new rule is at-least-as-strict
+        # than BOTH, with no semantic mirroring of either normalizer remaining.
+        if not isinstance(value, str):
+            return False
+        if not value.startswith("/"):
+            return False
+        if "\x00" in value:
+            return False
+        if len(value.encode("utf-8")) > 1024 * 4:
+            return False
+        if value.endswith("/"):
+            # Trailing slash (including the bare-root "/" case, which is anyway
+            # never a plausible executable path). normpath strips it and
+            # standardizedFileURL drops it -> both would rewrite V, so V is not
+            # its own normal form under either.
+            return False
+        # value[1:] is the component sequence after the leading "/"; splitting on
+        # "/" yields each component. An empty component means "//" (a duplicate
+        # slash); "." / ".." are the relative components both normalizers
+        # rewrite.
+        for component in value[1:].split("/"):
+            if component == "" or component == "." or component == "..":
+                return False
+        return True
+
+    def valid_sha256(value):
+        # validatedSHA256: exactly 64 bytes of lowercase hex.
+        if not isinstance(value, str):
+            return False
+        if len(value.encode("utf-8")) != 64:
+            return False
+        return all(char in "0123456789abcdef" for char in value)
+
+    def duration_ok(issued, expires, *, max_ms):
+        # Mirror the shared duration algebra: no overflow (Python ints are
+        # unbounded, so overflow can't occur -- this is inherently at least as
+        # strict as Swift's Int64 overflow guard), 0 < wallDuration <= max_ms,
+        # and monotonicDuration == wallDuration * 1_000_000. Returns the wall
+        # duration on success, or None on failure.
+        wall_duration = expires - issued
+        if wall_duration <= 0 or wall_duration > max_ms:
+            return None
+        return wall_duration
+
+    # --- record-level structure (validateRecordStructure) ---
+    # `version` is Swift Int: JSONDecoder decodes it into an integer and rejects
+    # `true`/`false`. Python's bool subclasses int, so `record.get("version") != 1`
+    # alone would let a JSON `true` pass (True == 1). Require a real (non-bool)
+    # integer equal to the schema constant, matching Swift's decode-then-compare.
+    if not is_int(record.get("version")) or record.get("version") != 1:
+        return False
+    if not valid_uuid(record.get("lease_id")):
+        return False
+    if not valid_operation_id(record.get("operation_id")):
+        return False
+
+    owner = record.get("owner")
+    if not isinstance(owner, dict):
+        return False
+    owner_pid = owner.get("pid")
+    owner_start = owner.get("process_start_us")
+    owner_boot = owner.get("boot_session")
+    # owner.pid is Swift Int32: bound to [1, 2**31 - 1] BEFORE any use. A pid of
+    # 2**31 passes an unbounded positivity check but overflows Int32 in
+    # JSONDecoder -> false preserve. process_start_us is Swift Int64.
+    if not is_int32(owner_pid) or owner_pid <= 0:
+        return False
+    if not is_int64(owner_start) or owner_start <= 0:
+        return False
+    if not isinstance(owner_boot, str) or not owner_boot:
+        return False
+    if len(owner_boot.encode("utf-8")) > 256:
+        return False
+
+    record_issued_wall = record.get("issued_wall_ms")
+    record_expires_wall = record.get("expires_wall_ms")
+    record_issued_mono = record.get("issued_monotonic_ns")
+    record_expires_mono = record.get("expires_monotonic_ns")
+    # All four are Swift Int64: bound to [.., 2**63 - 1] BEFORE the duration
+    # algebra below (a value of 2**63 overflows Int64 in JSONDecoder ->
+    # false preserve). The store-specific lower bounds follow.
+    for value in (
+        record_issued_wall,
+        record_expires_wall,
+        record_issued_mono,
+        record_expires_mono,
+    ):
+        if not is_int64(value):
+            return False
+    if record_issued_wall <= 0 or record_issued_mono < 0:
+        return False
+
+    # Swift's ProviderLifecycleLeaseKind decodes ONLY "startup" or "maintenance"
+    # (any other string fails JSONDecoder). The record duration ceiling is
+    # kind-specific: maintenance 20 min, startup 30 min
+    # (ProviderLifecycleLeaseKind.maximumDurationMilliseconds). The prior mirror
+    # pinned kind == "maintenance" because it only ran for prepared-handoff
+    # records; as the BASE validator (R6 CODE-M4) it must accept both kinds so a
+    # plain `startup` lease with a live owner is structurally validated too.
+    # The handoff `state` gate below still enforces prepared -> maintenance and
+    # adopted -> startup exactly as Swift does.
+    record_kind = record.get("kind")
+    record_kind_max_ms = {
+        "maintenance": 20 * 60 * 1_000,
+        "startup": 30 * 60 * 1_000,
+    }.get(record_kind)
+    if record_kind_max_ms is None:
+        return False
+    record_wall_duration = duration_ok(
+        record_issued_wall, record_expires_wall, max_ms=record_kind_max_ms
+    )
+    if record_wall_duration is None:
+        return False
+    if record_expires_mono - record_issued_mono != record_wall_duration * 1_000_000:
+        return False
+
+    # --- handoff-level structure (validateStartupHandoffStructure) ---
+    # Swift descends into validateStartupHandoffStructure ONLY when a handoff is
+    # present (`if let handoff = record.startupHandoff`). A record with NO handoff
+    # (the ordinary startup/maintenance lease) is structurally complete at this
+    # point. A `startup_handoff` present but not a JSON object is malformed ->
+    # Swift's decode would reject it -> False.
+    handoff = record.get("startup_handoff")
+    if handoff is None:
+        return True
+    if not isinstance(handoff, dict):
+        return False
+    # handoff.version is Swift Int too (same JSON-bool caveat as record.version).
+    if not is_int(handoff.get("version")) or handoff.get("version") != 1:
+        return False
+    if not valid_uuid(handoff.get("handoff_id")):
+        return False
+    # Operation-identity equality between record and handoff (Swift requires
+    # handoff.operationID == record.operationID and handoff.bootSession ==
+    # record.owner.bootSession).
+    if handoff.get("operation_id") != record.get("operation_id"):
+        return False
+    if handoff.get("boot_session") != owner_boot:
+        return False
+    if not valid_operation_id(handoff.get("operation_id")):
+        return False
+    if not valid_handoff_identity(handoff.get("provider_id"), forbid_slash=False):
+        return False
+    if not valid_handoff_identity(handoff.get("service_identity"), forbid_slash=True):
+        return False
+    if not valid_target_path(handoff.get("target_executable_path")):
+        return False
+    if not valid_sha256(handoff.get("target_executable_sha256")):
+        return False
+
+    handoff_issued_wall = handoff.get("issued_wall_ms")
+    handoff_expires_wall = handoff.get("expires_wall_ms")
+    handoff_issued_mono = handoff.get("issued_monotonic_ns")
+    handoff_expires_mono = handoff.get("expires_monotonic_ns")
+    handoff_lease_duration = handoff.get("startup_lease_duration_ms")
+    # All five are Swift Int64: bound to [.., 2**63 - 1] BEFORE the duration
+    # algebra below. The store-specific lower bounds follow.
+    for value in (
+        handoff_issued_wall,
+        handoff_expires_wall,
+        handoff_issued_mono,
+        handoff_expires_mono,
+        handoff_lease_duration,
+    ):
+        if not is_int64(value):
+            return False
+    if handoff_issued_wall <= 0 or handoff_issued_mono < 0:
+        return False
+    handoff_max_ms = 5 * 60 * 1_000  # ProviderLifecycleStartupHandoff.maximumDurationMilliseconds
+    handoff_wall_duration = duration_ok(
+        handoff_issued_wall, handoff_expires_wall, max_ms=handoff_max_ms
+    )
+    if handoff_wall_duration is None:
+        return False
+    if handoff_expires_mono - handoff_issued_mono != handoff_wall_duration * 1_000_000:
+        return False
+    startup_max_ms = 30 * 60 * 1_000  # startup kind maximumDurationMilliseconds
+    if handoff_lease_duration <= 0 or handoff_lease_duration > startup_max_ms:
+        return False
+
+    # Handoff-state gate (Swift's `switch handoff.state`):
+    #   .prepared -> record.kind == .maintenance AND handoff.expires* <=
+    #                record.expires* (window containment);
+    #   .adopted  -> record.kind == .startup (no containment requirement).
+    # Any other state string fails JSONDecoder (the enum has exactly these two
+    # cases) -> reject. This subsumes the previous prepared-only mirror while
+    # keeping the reconciler at-least-as-strict for adopted handoffs, whose
+    # live-owner record now flows through the base validator instead of being
+    # preserved unvalidated.
+    handoff_state = handoff.get("state")
+    if handoff_state == "prepared":
+        if record_kind != "maintenance":
+            return False
+        if handoff_expires_wall > record_expires_wall:
+            return False
+        if handoff_expires_mono > record_expires_mono:
+            return False
+    elif handoff_state == "adopted":
+        if record_kind != "startup":
+            return False
+    else:
+        return False
+
+    return True
+
+
+def record_shared_validity_ok(record):
+    # Mirror the SHARED validity checks the Swift store's validationFailure
+    # (ProviderLifecycleLease.swift ~888..894) runs AFTER validateRecordStructure
+    # and BEFORE it branches to EITHER preservation path -- the prepared-handoff
+    # exemption at ~895 OR the owner process-start liveness check at ~904. Those
+    # four guards, in Swift's exact order, are:
+    #
+    #     guard environment.bootSession() == record.owner.bootSession  -> .bootSessionChanged
+    #     guard wallNow    >= record.issuedWallMilliseconds             -> .wallClockBeforeIssue
+    #     guard monotonicNow >= record.issuedMonotonicNanoseconds       -> .monotonicClockBeforeIssue
+    #     guard wallNow    <  record.expiresWallMilliseconds            -> .wallExpired
+    #     guard monotonicNow <  record.expiresMonotonicNanoseconds      -> .monotonicExpired
+    #
+    # The reconciler previously ran only structure -> owner_is_live (pid/boot/
+    # process-start) -> prepared exemption. owner_is_live did NOT check the
+    # record's wall/monotonic WINDOWS, so a live foreign owner whose record clock
+    # window did not bracket `now` (issued in the future, or already expired, on
+    # either the wall or the monotonic axis) was PRESERVED by the shell yet
+    # REJECTED by Swift's validationFailure. For a handoff-bearing lease, serve
+    # startup only falls back on handoffNotPrepared (MacProviderCLI.swift ~1413),
+    # so preserving such a record can restart-loop rollback startup. This gate
+    # closes that divergence by running Swift's shared window/boot checks BEFORE
+    # both preservation branches, exactly where Swift runs them.
+    #
+    # Directionality is fail-toward-removal: anything this cannot positively
+    # verify (missing CLOCK_MONOTONIC_RAW, unknown boot, malformed window) returns
+    # False so the lease is REMOVED. record_matches_swift_structure has already
+    # bounded and typed the four window fields (Int64, issued_wall > 0,
+    # issued_mono >= 0, duration algebra), so this reads them as plain ints.
+    if not isinstance(record, dict):
+        return False
+    owner = record.get("owner")
+    if not isinstance(owner, dict):
+        return False
+    owner_boot = owner.get("boot_session")
+    if not isinstance(owner_boot, str) or not owner_boot:
+        return False
+    current_boot = boot_session()
+    if not current_boot or owner_boot != current_boot:
+        # Swift's .bootSessionChanged: a boot-session mismatch (or unknown
+        # current boot) means the record's monotonic base is not comparable and
+        # the owner is a post-reboot coincidence. Fail toward removal.
+        return False
+
+    issued_wall = record.get("issued_wall_ms")
+    expires_wall = record.get("expires_wall_ms")
+    issued_mono = record.get("issued_monotonic_ns")
+    expires_mono = record.get("expires_monotonic_ns")
+    for value in (issued_wall, expires_wall, issued_mono, expires_mono):
+        if not isinstance(value, int) or isinstance(value, bool):
+            return False
+
+    wall_now = wall_milliseconds()
+    monotonic_now = monotonic_nanoseconds()
+    if monotonic_now is None:
+        # No CLOCK_MONOTONIC_RAW on this platform: we cannot reproduce Swift's
+        # monotonic comparison, so we cannot confirm the record is in-window.
+        # Decline preservation (removal) as elsewhere -- never a false preserve.
+        return False
+
+    # Swift's guards, same axes and strictness: now must be at-or-after issue and
+    # strictly before expiry on BOTH the wall and monotonic axes.
+    if wall_now < issued_wall or wall_now >= expires_wall:
+        return False
+    if monotonic_now < issued_mono or monotonic_now >= expires_mono:
+        return False
+    return True
+
+
+def record_has_prepared_handoff(record):
+    # True iff the record carries a `.prepared` startup handoff, mirroring the
+    # SELECTOR of Swift's validationFailure branch (ProviderLifecycleLease.swift
+    # ~895: `if let handoff = record.startupHandoff, handoff.state == .prepared`).
+    # This decides WHICH preservation path applies -- the prepared-handoff
+    # exemption (handoff-window governed) vs the ordinary owner-liveness check --
+    # exactly as Swift's if/else does. By the time this runs, structure has
+    # already been validated, so a present-but-malformed handoff cannot reach
+    # here; but this is deliberately a shape-only predicate (no structural
+    # re-check) so it can never itself flip a record from the exemption path to
+    # the owner-liveness path and thereby preserve something Swift rejects.
+    if not isinstance(record, dict):
+        return False
+    handoff = record.get("startup_handoff")
+    return isinstance(handoff, dict) and handoff.get("state") == "prepared"
+
+
+def prepared_handoff_preserves(record):
+    # Mirror the prepared-handoff validity exception in the Swift store's
+    # validationFailure (ProviderLifecycleLease.swift, `if let handoff =
+    # record.startupHandoff, handoff.state == .prepared`). The store
+    # INTENTIONALLY exempts an unexpired prepared startup handoff from the
+    # owner process-start liveness check so launchd can adopt the handoff AFTER
+    # the maintenance process that prepared it has exited. A rollback-bound
+    # lease is handled by the caller (belongs_to_rollback) and is NOT routed
+    # here, so this only ever preserves a foreign lease whose operation is
+    # unrelated to the rolled-back transaction.
+    #
+    # The exemption requires, exactly as Swift does before reaching line 895:
+    #   * a record that passes the FULL Swift structural validation
+    #     (validateRecordStructure / validateStartupHandoffStructure), checked
+    #     first via record_matches_swift_structure -- a record the shell
+    #     preserves but Swift's inspect() would reject as .invalidField would
+    #     restart-loop the provider, so anything unverifiable is declined here;
+    #   * state == "prepared";
+    #   * boot_session matches the current boot for BOTH record.owner and the
+    #     handoff (Swift enforces handoff.bootSession == record.owner.bootSession
+    #     structurally, and validationFailure guards record.owner.bootSession
+    #     against the live boot);
+    #   * wall-clock: now >= issued and now < expires for BOTH record and
+    #     handoff;
+    #   * monotonic: now >= issued and now < expires for BOTH record and
+    #     handoff (same-boot comparable via the boot_session match above).
+    # Any missing/malformed field or an expired/before-issue window means the
+    # exemption does NOT apply and the lease follows the ordinary path.
+    #
+    # NOTE (MEDIUM fix): the caller now runs record_shared_validity_ok BEFORE
+    # this exemption, so the record's boot/wall/monotonic window is ALREADY
+    # confirmed in-bracket by the time we get here (matching Swift's ~888..894
+    # running before the ~895 prepared branch). The record-window and boot
+    # re-checks below are therefore redundant with that gate; they are KEPT so
+    # this function remains a correct standalone predicate (and still enforces
+    # the HANDOFF window, which the shared gate does not touch -- Swift's ~896..
+    # 901 handoff-window guards).
+    if not isinstance(record, dict):
+        return False
+    handoff = record.get("startup_handoff")
+    if not isinstance(handoff, dict):
+        return False
+    if handoff.get("state") != "prepared":
+        return False
+    # FULL Swift structural validation FIRST: a record the shell preserves but
+    # Swift's inspect() would reject as .invalidField restart-loops the
+    # provider. record_matches_swift_structure fails toward removal on anything
+    # it cannot positively verify, so it must gate the exemption before the
+    # boot/window checks below.
+    if not record_matches_swift_structure(record):
+        return False
+    owner = record.get("owner")
+    if not isinstance(owner, dict):
+        return False
+    owner_boot = owner.get("boot_session")
+    handoff_boot = handoff.get("boot_session")
+    if (
+        not isinstance(owner_boot, str)
+        or not owner_boot
+        or not isinstance(handoff_boot, str)
+        or not handoff_boot
+    ):
+        return False
+    current_boot = boot_session()
+    if not current_boot or owner_boot != current_boot or handoff_boot != current_boot:
+        return False
+
+    def valid_window(container):
+        issued_wall = container.get("issued_wall_ms")
+        expires_wall = container.get("expires_wall_ms")
+        issued_mono = container.get("issued_monotonic_ns")
+        expires_mono = container.get("expires_monotonic_ns")
+        for value in (issued_wall, expires_wall, issued_mono, expires_mono):
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+        return (issued_wall, expires_wall, issued_mono, expires_mono)
+
+    record_window = valid_window(record)
+    handoff_window = valid_window(handoff)
+    if record_window is None or handoff_window is None:
+        return False
+
+    wall_now = wall_milliseconds()
+    monotonic_now = monotonic_nanoseconds()
+    if monotonic_now is None:
+        # Cannot reproduce Swift's monotonic comparison on this platform: do
+        # not grant the exemption. The lease falls back to owner-liveness.
+        return False
+
+    for issued_wall, expires_wall, issued_mono, expires_mono in (
+        record_window,
+        handoff_window,
+    ):
+        if wall_now < issued_wall or wall_now >= expires_wall:
+            return False
+        if monotonic_now < issued_mono or monotonic_now >= expires_mono:
+            return False
+    return True
+
+
+lock_fd = None
+if lock_path:
+    lock_st = lstat_or_none(lock_path)
+    if lock_st is not None and stat.S_ISLNK(lock_st.st_mode):
+        fail("lifecycle_lease_lock_symlink")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    lock_desc = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(lock_desc.st_mode)
+        or lock_desc.st_uid != uid
+        or lock_desc.st_nlink != 1
+        or stat.S_IMODE(lock_desc.st_mode) & 0o077
+    ):
+        os.close(lock_fd)
+        fail("lifecycle_lease_lock_invalid")
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                os.close(lock_fd)
+                raise
+            if time.monotonic() >= deadline:
+                os.close(lock_fd)
+                fail("lifecycle_lease_lock_contended")
+            time.sleep(0.05)
+
+try:
+    lease_st = lstat_or_none(lease_path)
+    if lease_st is None:
+        # No lease to reconcile. This is the ONLY path CI exercises for the
+        # non-gated cases, and it is fully portable (no Darwin primitive touched).
+        raise SystemExit(0)
+
+    # -- NON-DARWIN FAIL-TOWARD-REMOVAL (portability guard) ------------------
+    # Owner-identity evaluation (owner_is_live -> process_start_microseconds,
+    # boot_session) depends on Darwin-only primitives: the sysctl(KERN_PROC_PID)
+    # -> kinfo_proc.p_starttime ABI read via ctypes libc.sysctl, and
+    # `/usr/sbin/sysctl -n kern.bootsessionuuid`. On glibc `libc.sysctl` is
+    # ABSENT (accessing it raises AttributeError, which the syscall wrappers do
+    # NOT catch), so evaluating an EXISTING lease off-Darwin could crash the
+    # reconciler instead of resolving it. Production never runs this installer
+    # off macOS; only Linux CI reaches here, and only when a fixture injects a
+    # lease. Fail toward REMOVAL with a logged reason: removal is always the safe
+    # direction (a restored CLI re-mints a fresh lease one store cycle later),
+    # and it keeps ALL Darwin-only initialization strictly lazy -- no CDLL setup,
+    # no sysctl, no kinfo_proc parsing is ever reached on a non-Darwin platform.
+    if sys.platform != "darwin":
+        sys.stderr.write(
+            "lifecycle_lease_reconcile_removed_non_darwin:platform=%s\n" % sys.platform
+        )
+        try:
+            os.unlink(lease_path)
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(lease_path)
+        try:
+            dir_fd = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+        if lstat_or_none(lease_path) is not None:
+            fail("lifecycle_lease_removal_not_durable")
+        raise SystemExit(0)
+
+    # -- PRE-PARSE STORAGE GATE (R6 CODE-M3) ---------------------------------
+    # Mirror EXACTLY the envelope the Swift store enforces on EVERY read
+    # (validateOpenFile, called from readRecordIfPresent BEFORE JSONDecoder):
+    # regular file, owned by us, st_nlink == 1, mode == 0600, no extended ACL,
+    # and size <= 16 KiB (maximumRecordBytes). Any violation is a record Swift
+    # would reject as .unsafeStorage and never decode, so preserving it would
+    # restart-loop the provider. Per the reconciler's design rule, every such
+    # divergence fails toward REMOVAL (self-healing) rather than a loud recovery
+    # abort: a fresh CLI re-mints a clean lease. Removal of our own lease path
+    # (under a 0700 HOME-owned directory, opened O_NOFOLLOW / lstat only) is
+    # always safe -- unlink never dereferences a symlink and never needs the
+    # file's own perms, only the parent directory's, which we own.
+    #
+    # st_flags is deliberately NOT checked: the Swift read path does not inspect
+    # st_flags, so adding it would over-reach beyond "at-least-as-strict subset".
+    #
+    # The TRUSTED-DIRECTORY gate mirrors Swift's inspect() path too: inspect()
+    # calls validateTrustedDirectory(createIfMissing:false) BEFORE reading the
+    # lease, and a directory that is not a real dir owned by us with mode EXACTLY
+    # 0700 and no extended ACL makes inspect() return .missing -- i.e. Swift
+    # would refuse to read the lease at all. So a lease in a lax directory is one
+    # Swift rejects on read; the reconciler must not preserve it. Declining
+    # preservation (removal) is safe: the CLI's ensureTrustedDirectory recreates
+    # the 0700 directory on the next acquire.
+    remove = False
+    storage_ok = True
+    parent_dir = os.path.dirname(lease_path)
+    parent_st = lstat_or_none(parent_dir)
+    if (
+        parent_st is None
+        or stat.S_ISLNK(parent_st.st_mode)
+        or not stat.S_ISDIR(parent_st.st_mode)
+        or parent_st.st_uid != uid
+        or stat.S_IMODE(parent_st.st_mode) != 0o700
+    ):
+        storage_ok = False  # untrusted directory: Swift inspect() -> .missing
+    elif lease_dir_has_extended_acl(parent_dir):
+        storage_ok = False  # dir extended ACL (or undeterminable): Swift rejects
+    elif stat.S_ISLNK(lease_st.st_mode) or not stat.S_ISREG(lease_st.st_mode):
+        storage_ok = False  # symlink or non-regular: Swift .unsafeStorage
+    elif lease_st.st_uid != uid:
+        storage_ok = False  # wrong owner: Swift .unsafeStorage
+    elif lease_st.st_nlink != 1:
+        storage_ok = False  # hard link: Swift "hard link" .unsafeStorage
+    elif stat.S_IMODE(lease_st.st_mode) != 0o600:
+        storage_ok = False  # mode != 0600: Swift "mode is not 0600" .unsafeStorage
+    elif lease_st.st_size > MAX_LEASE_BYTES:
+        storage_ok = False  # oversized: Swift "record too large" .unsafeStorage
+    else:
+        # Extended-ACL check mirrors Swift's rejectExtendedACL. ACL present OR
+        # presence-undeterminable both decline preservation (removal), since we
+        # may only preserve a lease Swift would also accept.
+        acl_present = lease_has_extended_acl(lease_path)
+        if acl_present is None or acl_present:
+            storage_ok = False
+
+    if not storage_ok:
+        # Storage envelope Swift would reject on read -> remove (self-healing).
+        remove = True
+        record = None
+    else:
+        fd = os.open(lease_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            raw = b""
+            while len(raw) <= MAX_LEASE_BYTES:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+        # -- STRICT PARSE (R6 CODE-M2) --------------------------------------
+        # Parse with Foundation-comparable strictness (reject NaN/Infinity, bare
+        # floats, duplicate keys keep-first divergence, unpaired surrogates).
+        # ANY strictness failure -- or a lone surrogate that would otherwise
+        # raise UnicodeEncodeError deep in a validator -- becomes REMOVAL here,
+        # never a reconciler crash: the broad except catches every parse-path
+        # exception and routes it to removal.
+        try:
+            record = strict_json_loads(raw.decode("utf-8"))
+        except Exception:
+            record = None
+
+    if remove:
+        # Already decided by the storage gate; skip the record decision below.
+        pass
+    elif not isinstance(record, dict):
+        # A malformed / strictly-rejected lease from the failed transaction is
+        # not a live protected process; clear it so a restored CLI can mint a
+        # fresh lease.
+        remove = True
+    else:
+        # -- DECISION ORDER (R6 CODE-M4) ------------------------------------
+        # Swift's validationFailure validates the record STRUCTURE FIRST, before
+        # any boot/clock/owner-liveness check and before the prepared-handoff
+        # exemption. Mirror that order exactly so NO preservation branch (live
+        # owner OR prepared handoff) can rescue a record Swift's inspect() would
+        # reject on read as .invalidField / .durationOutOfRange /
+        # .unsupportedVersion (which would restart-loop the provider).
+        #
+        #   parse-strict -> storage gate  (both already done above)
+        #   -> rollback-bound?  => REMOVE (valid regardless of structure: a
+        #                          record we are undoing must never survive, and
+        #                          removal is safe for a structurally invalid one)
+        #   -> structure valid? => (no) REMOVE
+        #   -> shared validity (boot + record wall/monotonic windows)? => (no) REMOVE
+        #   -> record carries a `prepared` handoff?
+        #        yes => prepared handoff exemption (handoff window)? KEEP else REMOVE
+        #        no  => owner live? KEEP else REMOVE
+        #
+        # The last split MIRRORS Swift's validationFailure branch structure
+        # EXACTLY (ProviderLifecycleLease.swift ~895..907): after the shared
+        # boot/window checks, Swift takes `if let handoff = record.startupHandoff,
+        # handoff.state == .prepared { ...handoff-window checks...; return nil }`
+        # and ONLY reaches the owner process-start liveness check (~904) in the
+        # ELSE case (no prepared handoff). For a record that carries a prepared
+        # handoff, Swift's acceptance is governed SOLELY by the handoff window --
+        # owner liveness is NEVER consulted. A previous order that ran
+        # owner_is_live for ALL records would PRESERVE a live-owner record whose
+        # prepared HANDOFF window is expired, yet Swift's inspect() rejects it as
+        # .wallExpired at the handoff-window check -> restart loop (serve only
+        # falls back on handoffNotPrepared). Routing prepared-handoff records
+        # exclusively through the exemption closes that surface.
+        #
+        # The shared-validity gate mirrors validationFailure's boot/window checks
+        # (ProviderLifecycleLease.swift ~888..894), which Swift runs AFTER
+        # validateRecordStructure and BEFORE it branches to EITHER preservation
+        # path (the prepared-handoff exemption OR the owner process-start
+        # liveness check). owner_is_live checks only pid/boot/process-start, NOT
+        # the record's wall/monotonic WINDOWS, so without this gate a LIVE
+        # foreign owner with an out-of-window record would be PRESERVED here yet
+        # REJECTED by Swift's validationFailure -- a restart-loop for a
+        # handoff-bearing lease (serve only falls back on handoffNotPrepared).
+        # Running it before BOTH branches keeps the reconciler's preserve-set a
+        # subset of Swift's read-acceptance.
+        #
+        # The Swift ProviderLifecycleLeaseStore persists the owner NESTED under
+        # `owner` (owner.pid / owner.process_start_us / owner.boot_session).
+        lease_operation = record.get("operation_id")
+        owner = record.get("owner")
+        belongs_to_rollback = bool(
+            install_operation_id
+            and isinstance(lease_operation, str)
+            and lease_operation == install_operation_id
+        )
+        if belongs_to_rollback:
+            # A lease minted by the rolled-back transaction is removed
+            # regardless of structure or any prepared handoff it carries: the
+            # operation it authorizes is being undone, so its handoff (and the
+            # operation/service/path/hash authorization inside it) must not
+            # survive. Removal is safe even for a structurally invalid record;
+            # only PRESERVATION requires structural validity.
+            remove = True
+        elif not record_matches_swift_structure(record):
+            # Swift validates structure FIRST for EVERY record. A structurally
+            # invalid record can never be preserved -- not by a live owner, not
+            # by a prepared handoff -- because Swift's inspect() would reject it.
+            # This gate runs BEFORE owner-liveness so a LIVE owner cannot rescue
+            # an invalid record (the R6 CODE-M4 fix).
+            remove = True
+        elif not record_shared_validity_ok(record):
+            # Swift's validationFailure runs the SHARED boot/window checks
+            # (~888..894) AFTER structure and BEFORE either preservation branch.
+            # A record whose boot session no longer matches, or whose wall or
+            # monotonic window does not bracket `now`, is rejected by Swift's
+            # inspect() regardless of owner liveness -- so a LIVE owner must NOT
+            # rescue an out-of-window record (that would restart-loop a
+            # handoff-bearing lease). This gate runs BEFORE the prepared/owner
+            # split, exactly as Swift orders it (the MEDIUM fix).
+            remove = True
+        elif record_has_prepared_handoff(record):
+            # MIRROR Swift's `if let handoff = record.startupHandoff,
+            # handoff.state == .prepared { ... }` branch (~895..903): when the
+            # record carries a `prepared` handoff, Swift's acceptance is governed
+            # SOLELY by the handoff-window exemption -- it NEVER consults owner
+            # liveness for such a record (the owner process-start check at ~904
+            # is only reached in the ELSE / no-handoff case). So route
+            # prepared-handoff records EXCLUSIVELY through the exemption: a live
+            # owner must NOT rescue a record whose prepared handoff window is
+            # expired (Swift rejects it as .wallExpired -> restart loop). The
+            # store intentionally exempts an unexpired `.prepared` handoff from
+            # owner liveness so launchd can adopt it AFTER the maintenance
+            # process that prepared it has exited; prepared_handoff_preserves
+            # checks the handoff window (and re-checks structure/boot/record
+            # window, redundant but harmless) exactly as Swift's ~896..901 do.
+            remove = not prepared_handoff_preserves(record)
+        elif owner_is_live(owner):
+            # No prepared handoff: MIRROR Swift's ELSE branch (~904), the owner
+            # process-start liveness check. Structurally valid, in-window +
+            # ordinary live foreign owner -> preserved.
+            remove = False
+        else:
+            # No prepared handoff, structurally valid, in-window, but dead owner:
+            # clear it (Swift's .ownerProcessMissingOrReused).
+            remove = True
+
+    if remove:
+        try:
+            os.unlink(lease_path)
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(lease_path)
+        dir_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        # Assert the removal is durable.
+        if lstat_or_none(lease_path) is not None:
+            fail("lifecycle_lease_removal_not_durable")
+finally:
+    if lock_fd is not None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+PY
+}
 recovery_failed() {
   recovery_log "$1"
   recovery_log "Recovery data was preserved. Retry exactly: bash '$RECOVERY_DIR/recover.sh'"
   exit 70
 }
+
+# Before the durable cutover marker exists, the installer has not touched the
+# provider binary, config, launchd service, or manual process. Only the
+# watchdog may have been suspended while recovery was armed. Recover that
+# guard service without booting out or replacing the healthy incumbent.
+if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-started" ]; then
+  if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
+    if ! launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1; then
+      [ "$REC_HAD_PLIST" -eq 1 ] \
+        || recovery_failed "the prior provider service disappeared before cutover and no launchd plist was preserved"
+      launchctl bootstrap "gui/$REC_UID" "$REC_PLIST_PATH" >/dev/null 2>&1 \
+        || recovery_failed "could not restore the unexpectedly inactive pre-cutover provider service"
+      launchctl kickstart -k "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 \
+        || recovery_failed "could not start the unexpectedly inactive pre-cutover provider service"
+    fi
+    launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 \
+      || recovery_failed "pre-cutover provider service is not active"
+  fi
+  if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+    if ! launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
+      [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] \
+        || recovery_failed "the prior watchdog was active but no launchd plist was preserved"
+      launchctl bootstrap "gui/$REC_UID" "$REC_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+        || recovery_failed "could not restore the pre-cutover watchdog service"
+    fi
+    launchctl kickstart -k "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
+      || recovery_failed "could not start the pre-cutover watchdog service"
+    launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
+      || recovery_failed "pre-cutover watchdog service is not active"
+  fi
+  recovery_log "Cutover never started; incumbent provider files and process were left untouched."
+  exit 0
+fi
+if [ -L "$RECOVERY_DIR/cutover-started" ] || [ ! -f "$RECOVERY_DIR/cutover-started" ]; then
+  recovery_failed "install cutover marker is unsafe"
+fi
 pid_is_live_non_zombie() {
   candidate_pid="$1"
   kill -0 "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -1317,6 +3209,9 @@ fi
 if [ "$REC_HAD_MANIFEST" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/install-manifest.json" "$MANIFEST_CANDIDATE" file || recovery_failed "could not stage and verify the previous install manifest"
 fi
+# The lifecycle-state file is not pre-staged as a plain byte candidate: it is
+# restored under the store's lock by restore_lifecycle_state (translate/pause
+# reconcile/atomic write/verify/fsync), reading the snapshot directly.
 
 mkdir -p "$FAILED_CURRENT_DIR" || recovery_failed "could not create durable failed-install storage"
 chmod 700 "$RECOVERY_DIR/failed-current" "$FAILED_CURRENT_DIR" || recovery_failed "could not secure durable failed-install storage"
@@ -1348,6 +3243,20 @@ swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"
 swap_restore install-manifest.json "$REC_MANIFEST_PATH" "$MANIFEST_CANDIDATE" "$REC_HAD_MANIFEST" || recovery_failed "could not restore the previous install manifest"
+# The lifecycle-state file is restored last so the transactional intermediate
+# state (rollback_in_progress) authored before recovery began stays observable
+# for the whole rollback, and the reconciled prior contents (or prior absence)
+# are the final durable outcome. restore_lifecycle_state holds the store's lock
+# across the read + swap, preserves a durable operator pause set during the
+# transaction, translates an updater-written snapshot into an installer-owned
+# record so a restored lifecycle-aware CLI cannot be fenced on a dead operation,
+# verifies the final file/absence, and fsyncs the file and its parent directory
+# before recovery can report success.
+restore_lifecycle_state || recovery_failed "could not restore the previous lifecycle state"
+# Reconcile the operation-bound lease so a stale/dead-owner lease from the
+# failed transaction cannot survive rollback while a live foreign owner is
+# preserved. The lock files themselves are never touched.
+reconcile_lifecycle_lease || recovery_failed "could not reconcile the lifecycle lease after rollback"
 
 if [ "$REC_SERVICE_WAS_DISABLED" -eq 1 ]; then
   launchctl disable "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 || recovery_failed "could not restore the disabled provider service state"
@@ -1913,6 +3822,20 @@ begin_install_transaction() {
       || die 70 "could not stage and verify the previous install manifest; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_MANIFEST=1
   fi
+  # The lifecycle-state file is snapshotted under the store's lock with strict
+  # symlink/owner/type/nlink/mode/size validation (S-M2). Absence is recorded as
+  # had=0 and restored as absence. The writer/pause posture used for restore-time
+  # translation and pause reconciliation (A-01) is re-read directly from the
+  # snapshot and the live file under the lock at restore time, so no snapshot-time
+  # capture is threaded through here.
+  lifecycle_snapshot_meta="$recovery_staging/.lifecycle-snapshot-meta"
+  stage_lifecycle_snapshot "$LIFECYCLE_STATE_PATH" "$LIFECYCLE_STATE_LOCK_PATH" \
+    "$recovery_staging/lifecycle-state-v1.json" "$lifecycle_snapshot_meta" \
+    || die 70 "could not safely snapshot the previous lifecycle state; current install was not changed (partial recovery data: $recovery_staging)"
+  if grep -qx 'had=1' "$lifecycle_snapshot_meta" 2>/dev/null; then
+    INSTALL_TX_HAD_LIFECYCLE_STATE=1
+  fi
+  rm -f "$lifecycle_snapshot_meta"
   if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
   fi
@@ -1940,6 +3863,56 @@ begin_install_transaction() {
     launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
       || die 70 "could not suspend the existing watchdog for the protected install transaction"
   fi
+}
+
+mark_install_cutover_started() {
+  [ "$CUTOVER_STARTED" -eq 0 ] || return 0
+  [ "$INSTALL_TX_ACTIVE" -eq 1 ] && [ -n "$INSTALL_TX_BACKUP" ] \
+    || die 70 "install cutover cannot start without durable recovery"
+  assert_install_lock_ownership
+  python3 - "$INSTALL_TX_BACKUP/cutover-started" <<'PY' \
+    || die 70 "could not durably mark install cutover before live provider mutation"
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise RuntimeError("unsafe cutover marker")
+    os.write(fd, b"cutover-started\n")
+    os.fsync(fd)
+finally:
+    os.close(fd)
+directory_fd = os.open(os.path.dirname(path), os.O_RDONLY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+  CUTOVER_STARTED=1
+}
+
+discard_install_transaction_before_cutover() {
+  [ "$CUTOVER_STARTED" -eq 0 ] || return 1
+  log "Discarding staged install files without stopping or replacing the active provider."
+  if ! bash "$INSTALL_TX_BACKUP/recover.sh"; then
+    log "ERROR: pre-cutover cleanup failed; recovery data was preserved at $INSTALL_TX_BACKUP"
+    return 70
+  fi
+  if ! disarm_install_recovery_agent; then
+    log "ERROR: pre-cutover cleanup succeeded but the interrupted-install recovery agent could not be disarmed"
+    return 70
+  fi
+  if ! rm -rf "$INSTALL_TX_BACKUP"; then
+    log "ERROR: pre-cutover cleanup succeeded but recovery data could not be retired: $INSTALL_TX_BACKUP"
+    return 70
+  fi
+  INSTALL_TX_ACTIVE=0
+  log "The incumbent provider was never stopped; only staged update files were discarded."
 }
 
 rollback_install_transaction() {
@@ -2765,8 +4738,8 @@ validate_macprovider_version_tag() {
   case "$tag" in
     *[[:space:]]*|*[[:cntrl:]]*) die 7 "MACPROVIDER_VERSION must not contain whitespace or control characters" ;;
   esac
-  if ! [[ "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
-    die 7 "MACPROVIDER_VERSION must look like vMAJOR.MINOR.PATCH"
+  if ! [[ "$tag" =~ ^v(0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})$ ]]; then
+    die 7 "MACPROVIDER_VERSION must be a canonical vMAJOR.MINOR.PATCH with bounded numeric components"
   fi
   if ! version_at_least "$tag" "$MACPROVIDER_MIN_SUPPORTED_VERSION"; then
     die 7 "MACPROVIDER_VERSION $tag is below supported rollback floor $MACPROVIDER_MIN_SUPPORTED_VERSION"
@@ -3481,6 +5454,19 @@ read_config_artifact_path() {
   ' "$CONFIG_PATH"
 }
 
+read_config_catalog_model_id() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk -F: '
+    /^model_catalog_model_id:/ {
+      value=$0
+      sub(/^model_catalog_model_id:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
 read_config_donor_mode() {
   [ -f "$CONFIG_PATH" ] || return 1
   awk -F: '
@@ -3527,6 +5513,7 @@ ensure_provider_credentials() {
     # later evidence or startup admission fails. The incumbent process remains
     # running until cutover.
     assert_install_lock_ownership
+    mark_install_cutover_started
     mkdir -p "$CONFIG_DIR"
     bootstrap_config_temp="$LIVE_CONFIG_PATH.bootstrap.$$"
     cp "$STAGED_CONFIG_PATH" "$bootstrap_config_temp" \
@@ -3542,7 +5529,6 @@ ensure_provider_credentials() {
       mv "$bootstrap_provider_id_temp" "$LIVE_PROVIDER_ID_PATH" \
         || die 70 "could not publish the bootstrapped provider identity for rollback"
     fi
-    CUTOVER_STARTED=1
   fi
 }
 
@@ -3584,8 +5570,21 @@ run_autotune_recommend_apply() {
   if [ ! -x "${MACPROVIDER_CLI_EXECUTABLE:-$INSTALL_DIR/macprovider-cli}" ]; then
     die 5 "staged macprovider-cli missing before autotune recommendation"
   fi
+  autotune_candidate_args=()
+  upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
+  if [ -n "$upgrade_candidate_model_id" ]; then
+    [ -n "${AUTOTUNE_PREFETCH_RECEIPT_PATH:-}" ] \
+      && [ -f "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
+      && [ ! -L "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
+      || die 6 "upgrade benchmark lacks its private prefetch receipt; the staged release will not acquire artifacts after cutover"
+    autotune_candidate_args=(
+      --candidate-models "$upgrade_candidate_model_id"
+      --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
+    )
+  fi
   log "Running paid-yield recommendation before service start."
   if run_macprovider_cli_with_amfi_retry autotune --recommend --apply \
+    ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
     --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence; then
     recommended_model="$(read_config_model || true)"
     artifact_path="$(read_config_artifact_path || true)"
@@ -3610,6 +5609,7 @@ run_autotune_recommend_apply() {
     if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
       log "Applying donor-mode configuration."
       run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
+        ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
         --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence \
         || die 6 "donor-mode recommendation failed before service start"
       recommended_model="$(read_config_model || true)"
@@ -3633,6 +5633,23 @@ run_autotune_recommend_apply() {
     return 0
   fi
   die 6 "autotune recommendation failed before service start"
+}
+
+prefetch_upgrade_autotune_model() {
+  upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
+  [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 0
+  [ -n "$upgrade_candidate_model_id" ] \
+    || die 6 "stale upgrade recommendation lacks an exact signed-catalog model identity; the active provider was not stopped"
+  AUTOTUNE_PREFETCH_RECEIPT_PATH="$staging_dir/autotune-prefetch-receipt.json"
+  log "Prefetching and verifying the installed model's exact signed artifact while the current provider remains available."
+  run_macprovider_cli_with_amfi_retry autotune --recommend --prefetch \
+    --candidate-models "$upgrade_candidate_model_id" \
+    --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH" \
+    --config "$CONFIG_PATH" --no-submit-hardware-evidence >/dev/null \
+    || die 6 "installed model artifact prefetch failed; the active provider was not stopped"
+  [ -f "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] && [ ! -L "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
+    || die 6 "installed model artifact prefetch did not produce a private receipt; the active provider was not stopped"
+  log "Installed model artifact is locally verified; upgrade benchmarking is limited to $upgrade_candidate_model_id."
 }
 
 use_fresh_recommendation_if_available() {
@@ -5744,6 +7761,24 @@ validate_acceptance_upgrade_target() {
   fi
 }
 
+validate_non_emergency_pinned_target() {
+  local target="$1"
+  local installed_version installed_tag
+  [ -n "${MACPROVIDER_VERSION:-}" ] || return 0
+  [ -x "$BINARY_PATH" ] || return 0
+  [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && return 0
+
+  installed_version="$("$BINARY_PATH" --version 2>/dev/null | tr -d '\r\n')"
+  case "$installed_version" in
+    v*) installed_tag="$installed_version" ;;
+    *) installed_tag="v$installed_version" ;;
+  esac
+  validate_macprovider_version_tag "$installed_tag"
+  if [ "$installed_tag" != "$target" ] && version_at_least "$installed_tag" "$target"; then
+    die 7 "pinned install target $target must not downgrade installed $installed_tag"
+  fi
+}
+
 validate_acceptance_staged_identity() {
   [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 0
   manifest="$staging_dir/compatibility-set.json"
@@ -6043,6 +8078,9 @@ main() {
   fi
 
   tag="$(resolve_release_tag)"
+  # The install lock is already held here, so this check closes the race between
+  # Malibu's observed snapshot and the version actually present at mutation time.
+  validate_non_emergency_pinned_target "$tag"
   validate_acceptance_upgrade_target "$tag"
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
     validate_emergency_target "$tag"
@@ -6082,8 +8120,12 @@ main() {
   else
     log "Validating signed catalog and stored recommendation with the staged release while the current provider remains available."
     if ! use_fresh_recommendation_if_available; then
+      if [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ]; then
+        AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="$(read_config_catalog_model_id || true)"
+      fi
       write_config "$model" "$provider_id" "$coordinator_url"
       AUTOTUNE_RECOMMENDATION_REQUIRED=1
+      prefetch_upgrade_autotune_model
     fi
   fi
   if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
@@ -6092,6 +8134,7 @@ main() {
       exit 0
     fi
     assert_install_lock_ownership
+    mark_install_cutover_started
     ensure_port_free 1
     install_binary
     activate_staged_config
@@ -6114,8 +8157,8 @@ main() {
     # benchmarks so unified-memory pressure cannot disrupt buyer traffic or
     # corrupt benchmark results through contention.
     assert_install_lock_ownership
+    mark_install_cutover_started
     ensure_port_free 1
-    CUTOVER_STARTED=1
     select_autotune_benchmark_port
     run_autotune_recommend_apply
     if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
@@ -6138,8 +8181,8 @@ main() {
   # freshness evaluation; when benchmarks are required the incumbent is
   # deliberately stopped first to avoid double-loading model weights.
   assert_install_lock_ownership
+  mark_install_cutover_started
   ensure_port_free 1
-  CUTOVER_STARTED=1
   install_binary
   activate_staged_config
   check_path_hint

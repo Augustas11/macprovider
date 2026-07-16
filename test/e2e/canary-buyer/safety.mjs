@@ -185,7 +185,7 @@ export function poolzSnapshot(payload, nowMs = Date.now()) {
       catalog_admission_mode: stringOrNull(row?.catalog_admission_mode),
       slots_free: integerOrNull(row?.slots_free),
       slots_total: integerOrNull(row?.slots_total),
-      routing_eligible: row?.routing_eligible !== false,
+      routing_eligible: typeof row?.routing_eligible === 'boolean' ? row.routing_eligible : null,
       safety_telemetry: providerSignalSnapshot({ safety_telemetry: row?.safety_telemetry }, `poolz:${id || '<missing>'}`, nowMs),
     };
   }).sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -218,6 +218,9 @@ export function poolzInvariantReasons(initial, current, {
     const routingAllowed = observed.routing_eligible || (id === activeProviderID && observed.state === 'busy');
     if (!stateAllowed || !routingAllowed) {
       reasons.push(`${id}:state_${observed.state || 'missing'}_not_ready`);
+    }
+    if (expected.assigned_id && observed.assigned_id !== expected.assigned_id) {
+      reasons.push(`${id}:session_changed`);
     }
     if (expected.connected_at_ms != null && observed.connected_at_ms !== expected.connected_at_ms) {
       reasons.push(`${id}:connection_changed`);

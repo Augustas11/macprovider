@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import MacProviderCore
+import Security
 @testable import macprovider_cli
 import XCTest
 
@@ -140,16 +141,151 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         XCTAssertEqual(outcome, .blocked("provider_token missing"))
     }
 
-    func testSnapshotSubmitterSkipsBeforeNetworkWhenProviderTokenIsMissing() async {
-        var config = AppConfig.defaults()
-        config.providerID = "mac"
-        config.coordinatorURL = "wss://coordinator.streamvc.live/v2/provider"
+    func testSnapshotSubmitterFailsClosedBeforeNetworkWhenKeychainCredentialIsMissing() async throws {
+        let config = try makeTokenlessConfig(providerID: "mac")
 
-        let submission = await AutotuneHardwareEvidenceSubmitter(config: config).submit(
+        let submission = await AutotuneHardwareEvidenceSubmitter(
+            config: config,
+            credentialStore: InMemoryProviderCredentialStore()
+        ).submit(
             snapshot: makeFixture().snapshot
         )
 
-        XCTAssertEqual(submission, .skipped("provider_token missing"))
+        XCTAssertEqual(
+            submission,
+            .failed("provider credential unavailable (condition=missing action=restore_or_reenroll)")
+        )
+    }
+
+    func testInitialRecommendationHydratesTokenlessConfigFromKeychainBeforeEvidenceSubmission() async throws {
+        let providerID = "mp-0123456789abcdef0123456789abcdef"
+        let token = "keychain-bootstrap-bearer"
+        let fixture = makeFixture()
+        let expectedSHA = try AutotuneHardwareEvidenceSubmitter.canonicalPayload(
+            providerID: providerID,
+            snapshot: fixture.snapshot
+        ).evidenceSHA
+        let config = try makeTokenlessConfig(providerID: providerID)
+        let session = evidenceSession { request in
+            XCTAssertEqual(request.url?.path, AutotuneHardwareEvidenceSubmitter.endpointPath)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+            return Self.successResponse(
+                for: request,
+                data: self.responseData(
+                    status: "queued",
+                    providerID: providerID,
+                    jobID: 7,
+                    evidenceSHA: expectedSHA
+                )
+            )
+        }
+        defer {
+            session.invalidateAndCancel()
+            AutotuneHardwareEvidenceMockURLProtocol.requestHandler = nil
+        }
+
+        let submission = await AutotuneHardwareEvidenceSubmitter(
+            config: config,
+            credentialStore: InMemoryProviderCredentialStore(values: [providerID: token]),
+            session: session
+        ).submit(result: fixture.result, benchmarks: fixture.benchmarks)
+
+        XCTAssertEqual(submission, .submitted)
+        try assertConfigRemainsTokenless(config, bearer: token)
+    }
+
+    func testFreshnessResubmissionHydratesTokenlessConfigFromKeychain() async throws {
+        let providerID = "mp-fedcba9876543210fedcba9876543210"
+        let token = "keychain-freshness-bearer"
+        let fixture = makeFixture()
+        let expectedSHA = try AutotuneHardwareEvidenceSubmitter.canonicalPayload(
+            providerID: providerID,
+            snapshot: fixture.snapshot
+        ).evidenceSHA
+        let config = try makeTokenlessConfig(providerID: providerID)
+        let session = evidenceSession { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+            return Self.successResponse(
+                for: request,
+                data: self.responseData(
+                    status: "existing",
+                    providerID: providerID,
+                    jobID: 8,
+                    evidenceSHA: expectedSHA
+                )
+            )
+        }
+        defer {
+            session.invalidateAndCancel()
+            AutotuneHardwareEvidenceMockURLProtocol.requestHandler = nil
+        }
+        let submitter = AutotuneHardwareEvidenceSubmitter(
+            config: config,
+            credentialStore: InMemoryProviderCredentialStore(values: [providerID: token]),
+            session: session
+        )
+
+        let outcome = await AutotuneCommand.freshRecommendationEvidenceOutcome(
+            storedEvidence: fixture.snapshot,
+            submitEnabled: true,
+            submit: { evidence in
+                await submitter.submit(snapshot: evidence)
+            }
+        )
+
+        XCTAssertEqual(outcome, .ready(submitted: true))
+        try assertConfigRemainsTokenless(config, bearer: token)
+    }
+
+    func testEvidenceSubmissionFailsClosedForLockedMissingAndConflictingKeychain() async throws {
+        let providerID = "mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let session = evidenceSession { request in
+            XCTFail("credential failure must stop before network request: \(request)")
+            return Self.successResponse(for: request, data: Data())
+        }
+        defer {
+            session.invalidateAndCancel()
+            AutotuneHardwareEvidenceMockURLProtocol.requestHandler = nil
+        }
+        let snapshot = makeFixture().snapshot
+        let tokenlessConfig = try makeTokenlessConfig(providerID: providerID)
+
+        let locked = await AutotuneHardwareEvidenceSubmitter(
+            config: tokenlessConfig,
+            credentialStore: InMemoryProviderCredentialStore(
+                loadError: ProviderCredentialStoreError.readFailed(
+                    providerID: providerID,
+                    status: errSecInteractionNotAllowed
+                )
+            ),
+            session: session
+        ).submit(snapshot: snapshot)
+        XCTAssertEqual(
+            locked,
+            .failed("provider credential unavailable (condition=locked action=unlock_keychain)")
+        )
+
+        let missing = await AutotuneHardwareEvidenceSubmitter(
+            config: tokenlessConfig,
+            credentialStore: InMemoryProviderCredentialStore(),
+            session: session
+        ).submit(snapshot: snapshot)
+        XCTAssertEqual(
+            missing,
+            .failed("provider credential unavailable (condition=missing action=restore_or_reenroll)")
+        )
+
+        var conflictingConfig = tokenlessConfig
+        conflictingConfig.providerToken = "stale-config-bearer"
+        let conflict = await AutotuneHardwareEvidenceSubmitter(
+            config: conflictingConfig,
+            credentialStore: InMemoryProviderCredentialStore(values: [providerID: "authoritative-keychain-bearer"]),
+            session: session
+        ).submit(snapshot: snapshot)
+        XCTAssertEqual(
+            conflict,
+            .failed("provider credential unavailable (condition=conflict action=restore_or_reenroll)")
+        )
     }
 
     func testFreshRecommendationBlocksWhenSubmissionFails() async {
@@ -348,4 +484,75 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
             "{\"status\":\"\(status)\",\"provider_id\":\"\(providerID)\",\"job_id\":\(jobID),\"evidence_sha\":\"\(evidenceSHA)\"}".utf8
         )
     }
+
+    private func makeTokenlessConfig(providerID: String) throws -> AppConfig {
+        let configURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tokenless-autotune-config-\(UUID().uuidString).yaml")
+        let yaml = """
+        provider_id: "\(providerID)"
+        coordinator_url: "wss://coordinator.streamvc.live/ws/provider"
+        """
+        try Data(yaml.utf8).write(to: configURL, options: .atomic)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: configURL)
+        }
+        return try ConfigLoader.load(
+            cli: CLIOverrides(configPath: configURL.path),
+            environment: [:]
+        )
+    }
+
+    private func assertConfigRemainsTokenless(_ config: AppConfig, bearer: String) throws {
+        let yaml = try String(contentsOfFile: config.configPath, encoding: .utf8)
+        XCTAssertFalse(yaml.contains("provider_token"))
+        XCTAssertFalse(yaml.contains(bearer))
+    }
+
+    private func evidenceSession(
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) -> URLSession {
+        AutotuneHardwareEvidenceMockURLProtocol.requestHandler = handler
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AutotuneHardwareEvidenceMockURLProtocol.self]
+        return URLSession(
+            configuration: configuration,
+            delegate: NoRedirectURLSessionDelegate(),
+            delegateQueue: nil
+        )
+    }
+
+    private static func successResponse(for request: URLRequest, data: Data) -> (HTTPURLResponse, Data) {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (response, data)
+    }
+}
+
+private final class AutotuneHardwareEvidenceMockURLProtocol: URLProtocol {
+    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let requestHandler = Self.requestHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let (response, data) = try requestHandler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }

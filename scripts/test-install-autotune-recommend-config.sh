@@ -34,6 +34,13 @@ SKIP_PROVIDER_START=0
 model="initial/model"
 mkdir -p "$INSTALL_DIR"
 MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
+AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="namespace/existing-model"
+AUTOTUNE_PREFETCH_RECEIPT_PATH=""
+staging_dir="$workdir/staging"
+mkdir -p "$staging_dir"
+EXISTING_INSTALL_WAS_PRESENT=1
+FAKE_CLI_LOG="$workdir/cli.log"
+export FAKE_CLI_LOG
 
 log() {
   printf '[macprovider-install] %s\n' "$*" >/dev/null
@@ -83,13 +90,17 @@ cat > "$INSTALL_DIR/macprovider-cli" <<'EOF_CLI'
 set -euo pipefail
 
 config=""
+receipt=""
 donor=0
 freshness=0
 command="${1:-}"
+printf '%s\n' "$*" >> "$FAKE_CLI_LOG"
+prefetch=0
 for arg in "$@"; do
   case "$arg" in
     --donor-mode) donor=1 ;;
     --freshness-check) freshness=1 ;;
+    --prefetch) prefetch=1 ;;
   esac
 done
 while [ "$#" -gt 0 ]; do
@@ -97,13 +108,28 @@ while [ "$#" -gt 0 ]; do
     shift
     config="$1"
   fi
+  if [ "$1" = "--prefetch-receipt" ]; then
+    shift
+    receipt="$1"
+  fi
   shift || true
 done
 
 [ -n "$config" ] || exit 64
 
+if [ "$prefetch" -eq 1 ]; then
+  [ -n "$receipt" ] || exit 64
+  printf '{"fixture":true}\n' > "$receipt"
+  chmod 600 "$receipt"
+  exit 0
+fi
+
 if [ "$command" = "bootstrap-auth" ]; then
   printf 'provider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >> "$config"
+  exit 0
+fi
+
+if [ "$command" = "credentials" ]; then
   exit 0
 fi
 
@@ -179,9 +205,45 @@ run_fresh_donor_reuse_case() {
   [ "$SKIP_PROVIDER_START" -eq 1 ] || die "fresh donor reuse should not auto-start provider"
 }
 
+run_upgrade_prefetch_case() {
+  : > "$FAKE_CLI_LOG"
+  write_recommendation_config "org/existing-model" "/tmp/macprovider-existing-snapshot"
+  prefetch_upgrade_autotune_model
+  grep -Fq \
+    'autotune --recommend --prefetch --candidate-models namespace/existing-model --prefetch-receipt' \
+    "$FAKE_CLI_LOG" \
+    || die "upgrade prefetch did not constrain artifact acquisition to the installed catalog model"
+}
+
+run_upgrade_missing_catalog_identity_case() {
+  : > "$FAKE_CLI_LOG"
+  if (
+    AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+    prefetch_upgrade_autotune_model
+  ) >/dev/null 2>&1; then
+    die "stale upgrade without an exact catalog model identity must fail before cutover"
+  fi
+  [ ! -s "$FAKE_CLI_LOG" ] \
+    || die "missing catalog identity reached the staged CLI instead of failing before cutover"
+}
+
+run_upgrade_prefetch_case
+run_upgrade_missing_catalog_identity_case
 run_paid_apply_case
 run_donor_apply_case
 run_fresh_reuse_case
 run_fresh_donor_reuse_case
+
+grep -Fq \
+  'autotune --recommend --apply --candidate-models namespace/existing-model --prefetch-receipt' \
+  "$FAKE_CLI_LOG" \
+  || die "upgrade recommendation did not constrain benchmarking to the prefetched installed model"
+
+prefetch_call_line="$(awk '$0 == "      prefetch_upgrade_autotune_model" { print NR; exit }' "$INSTALL_SH")"
+cutover_line="$(awk -v after="$prefetch_call_line" 'NR > after && $0 == "    ensure_port_free 1" { print NR; exit }' "$INSTALL_SH")"
+[ -n "$prefetch_call_line" ] && [ -n "$cutover_line" ] \
+  || die "could not locate prefetch and cutover boundaries in installer main"
+[ "$prefetch_call_line" -lt "$cutover_line" ] \
+  || die "installed-model prefetch must complete before the installer stops the incumbent provider"
 
 printf '[install-autotune-config-test] installer recommendation config parsing ok\n'

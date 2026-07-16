@@ -262,5 +262,15 @@ providers:
     display_name: "Pearl Mac provider"
 
 # Auto-update recommendation surface (2026-07-03 — added post-#332 to unblock air5 v1.7.0 -> v1.7.9)
+#
+# S-H1 (2026-07-15): `latest_binary_version` is CAPABILITY-GATED server-side.
+# It is emitted as `recommended_binary_version` (autoupdate target) ONLY to
+# providers that declare a `compatibility_set_id` in their hello (v1.8.33+,
+# whose CLI-owned updater performs full signed compatibility-set transactions).
+# Pre-compatibility-set providers (<=1.8.32) never receive it — their default
+# binary-only autoupdater would otherwise self-swap into a mixed install. The
+# operator-assisted full installer is the ONLY sanctioned upgrade path for that
+# legacy cohort (DECISION_CRITERIA Entry 161). Setting this value does not, and
+# must not, re-arm the legacy binary-only updater.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.36"
+  latest_binary_version: "1.8.40"

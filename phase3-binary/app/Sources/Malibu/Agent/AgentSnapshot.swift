@@ -851,7 +851,26 @@ enum AgentSnapshotPresenter {
     }
 
     static func updateAvailable(_ s: AgentSnapshot) -> Bool {
-        updateTargetVersion(s) != nil
+        updateTargetVersion(s) != nil || compatibilityRepairAvailable(s)
+    }
+
+    /// A binary-only legacy update can report the latest CLI version while
+    /// still lacking the signed compatibility-set resources. Only a fresh
+    /// versioned status observation may expose that repair action; a transient
+    /// disconnect clears freshness and must not look like install damage.
+    static func compatibilityRepairAvailable(_ s: AgentSnapshot) -> Bool {
+        guard s.statusObservationFresh == true,
+              let current = s.cliVersion,
+              let normalized = ProviderCLIVersion.strictNormalize(current),
+              ProviderCLIVersion.compare(
+                normalized,
+                ProviderCLIVersion.compatibilitySetReleaseFloor
+              ) != .ascending else {
+            return false
+        }
+        return s.compatibilitySetID?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty != false
     }
 
     static func updateBadge(_ s: AgentSnapshot) -> String? {
@@ -866,6 +885,8 @@ enum AgentSnapshotPresenter {
         var parts = ["v\(current)"]
         if let target = updateTargetVersion(s) {
             parts.append("→ v\(target) available")
+        } else if compatibilityRepairAvailable(s) {
+            parts.append("compatibility repair available")
         } else if let latest = s.latestReleaseVersion {
             parts.append("latest v\(latest)")
         } else if let recommended = s.coordinatorRecommendedVersion {
@@ -890,6 +911,9 @@ enum AgentSnapshotPresenter {
         guard let current = s.cliVersion else { return nil }
         if let target = updateTargetVersion(s) {
             return "CLI v\(current) · v\(target) available"
+        }
+        if compatibilityRepairAvailable(s) {
+            return "CLI v\(current) · compatibility repair available"
         }
         return "CLI v\(current) · up to date"
     }
