@@ -92,6 +92,7 @@ auth:
 referrals:
   require_for_registration: false
   enable_public_validation: false
+  enable_join_links: false
   enable_social_invite_bonus: false
   campaign: ""
   policy_version: "v1"
@@ -102,6 +103,7 @@ referrals:
   social_bonus_uses: 2
   challenge_ttl_s: 900
   join_base_url: "https://coordinator.streamvc.live/j"
+  join_download_url: ""
   x_api_bearer_token: ""
   request_access_url: ""
 

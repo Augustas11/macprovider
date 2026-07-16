@@ -23,6 +23,7 @@ func joinHandlerFor(result error) *JoinHandler {
 		PublicLimiter:    NewBoundedLimiter(20, time.Minute, 20),
 		ValidateSlots:    make(chan struct{}, 1),
 		RequestAccessURL: "https://access.example.test/waitlist",
+		DownloadURL:      "https://download.example.test/releases/Malibu-1.9.0.dmg",
 	}
 }
 
@@ -46,6 +47,11 @@ func TestJoinHandlerRendersLifecycleStates(t *testing.T) {
 			joinHandlerFor(tc.err).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/MAL1-S-k1-seed-AAAAAAAAAAAAAAAAAAAAAAAAAA", nil))
 			if response.Code != tc.wantStatus || !strings.Contains(response.Body.String(), tc.wantBody) {
 				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+			if tc.name == "valid" {
+				if !strings.Contains(response.Body.String(), "https://download.example.test/releases/Malibu-1.9.0.dmg") || strings.Contains(response.Body.String(), "latest.dmg") {
+					t.Fatalf("valid download target is not fixed: %s", response.Body.String())
+				}
 			}
 			if got := response.Header().Get("Cache-Control"); got != "no-store" {
 				t.Fatalf("Cache-Control=%q", got)
@@ -73,13 +79,13 @@ func TestJoinHandlerOmitsAccessCTAWhenNotConfigured(t *testing.T) {
 	}
 }
 
-func TestJoinHandlerRemainsMountedForOpenAccess(t *testing.T) {
+func TestJoinHandlerFailsClosedWhenAdmissionPolicyIsOff(t *testing.T) {
 	h := joinHandlerFor(nil)
 	h.Policy.RequireForRegistration = false
 	h.Store = nil
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/old-invite", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "don't need an invite") {
+	if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), "latest.dmg") || strings.Contains(response.Body.String(), "don't need an invite") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

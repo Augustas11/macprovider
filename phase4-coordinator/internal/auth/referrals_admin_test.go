@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,12 +19,40 @@ func TestReferralAdminSeedLifecycleIsAuditedAndRedemptionOnly(t *testing.T) {
 	policy := coreReferralPolicy()
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 
-	code, err := store.CreateSeedReferral(ctx, policy, "launch", 3, nil)
+	creationPreview, err := store.CreateSeedReferralAudited(ctx, policy, "launch", 3, nil, false, "", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateSeedReferral(ctx, policy, "launch", 9, nil); !errors.Is(err, ErrReferralSeedExists) {
+	if creationPreview.Applied || creationPreview.Code != "" {
+		t.Fatalf("creation preview=%+v", creationPreview)
+	}
+	var previewRows int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_issuers WHERE issuer_id = 'launch'`).Scan(&previewRows); err != nil || previewRows != 0 {
+		t.Fatalf("dry-run issuer rows=%d err=%v", previewRows, err)
+	}
+	created, err := store.CreateSeedReferralAudited(ctx, policy, "launch", 3, nil, true, "ops", "open cohort", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := created.Code
+	if !created.Applied || code == "" {
+		t.Fatalf("creation result=%+v", created)
+	}
+	recovered, err := store.CreateSeedReferralAudited(ctx, policy, "launch", 3, nil, true, "ops", "retry after response loss", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Applied || !recovered.Recovered || recovered.Code != code {
+		t.Fatalf("response-loss recovery=%+v want code %q", recovered, code)
+	}
+	if _, err := store.CreateSeedReferralAudited(ctx, policy, "launch", 9, nil, true, "ops", "duplicate", now); !errors.Is(err, ErrReferralSeedExists) {
 		t.Fatalf("duplicate seed error=%v, want ErrReferralSeedExists", err)
+	}
+	otherKeyPolicy := policy
+	otherKeyPolicy.CurrentKeyID = "k2"
+	otherKeyPolicy.HMACKeys = map[string]string{"k2": strings.Repeat("k", 32)}
+	if _, err := store.CreateSeedReferralAudited(ctx, otherKeyPolicy, "launch", 3, nil, true, "ops", "wrong key", now); !errors.Is(err, ErrReferralSeedExists) {
+		t.Fatalf("mismatched-key seed error=%v, want ErrReferralSeedExists", err)
 	}
 	if _, _, err := store.IssueTokenWithReferral(ctx, "provider-a", "host-a", code, policy); err != nil {
 		t.Fatal(err)
@@ -52,6 +81,12 @@ func TestReferralAdminSeedLifecycleIsAuditedAndRedemptionOnly(t *testing.T) {
 	}
 	if capacity != 5 || auditRows != 1 {
 		t.Fatalf("capacity=%d audit_rows=%d, want 5/1", capacity, auditRows)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_admin_audit WHERE action = 'create_seed' AND actor = 'ops' AND reason = 'open cohort'`).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 1 {
+		t.Fatalf("create audit rows=%d, want 1", auditRows)
 	}
 	if _, err := store.db.Exec(`UPDATE referral_admin_audit SET reason = 'rewritten'`); err == nil {
 		t.Fatal("append-only referral audit accepted an update")
@@ -95,7 +130,10 @@ func TestReferralAdminApplyRequiresAttributionAndPreviewConfirmation(t *testing.
 	}
 	defer store.Close()
 	policy := coreReferralPolicy()
-	if _, err := store.CreateSeedReferral(context.Background(), policy, "launch", 1, nil); err != nil {
+	if _, err := store.CreateSeedReferralAudited(context.Background(), policy, "launch", 1, nil, true, "", "", time.Now().UTC()); err == nil {
+		t.Fatal("unattributed seed creation unexpectedly applied")
+	}
+	if _, err := store.CreateSeedReferralAudited(context.Background(), policy, "launch", 1, nil, true, "ops", "test", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()

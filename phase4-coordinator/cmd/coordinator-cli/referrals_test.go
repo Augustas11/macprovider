@@ -20,11 +20,19 @@ func TestReferralCommandsCreateAdjustAndRevoke(t *testing.T) {
 	}
 	base := []string{"--db", dbPath, "--campaign", "prebeta_test", "--key-id", "k1", "--secret-env", "REFERRAL_SECRET", "--seed-id", "launch"}
 	var created bytes.Buffer
-	if err := createSeedReferral(append(append([]string{}, base...), "--max-uses", "2"), getenv, &created); err != nil {
+	createArgs := append(append([]string{}, base...), "--max-uses", "2", "--apply", "--actor", "release", "--reason", "open cohort")
+	if err := createSeedReferral(createArgs, getenv, &created); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(created.String(), "referral_code=MAL1-S-k1-launch-") {
 		t.Fatalf("create output=%s", created.String())
+	}
+	var recovered bytes.Buffer
+	if err := createSeedReferral(createArgs, getenv, &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(recovered.String(), "mode=recovered") || !strings.Contains(recovered.String(), "referral_code=MAL1-S-k1-launch-") {
+		t.Fatalf("response-loss recovery output=%s", recovered.String())
 	}
 	if err := createSeedReferral(base, getenv, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "adjust-seed-referral") {
 		t.Fatalf("duplicate create error=%v", err)
