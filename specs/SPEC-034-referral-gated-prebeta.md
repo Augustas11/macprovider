@@ -1,12 +1,15 @@
 # SPEC-034 — Referral admission, provider invites, and advocacy rewards
 
-Version: v0.4.0
+Version: v0.4.1
 Status: recovery implementation; production activation prohibited
 Owner: coordinator admission and referral services
 Product parent: https://github.com/MalibuAI/malibu/issues/46
 
 Changelog:
 
+- v0.4.1 (2026-07-16): defines the authenticated `join_base_url` projection,
+  keeps X challenge secrets and composer intents inside the CLI, and bounds
+  Malibu referral refresh/staleness behavior.
 - v0.4.0 (2026-07-16): recovers the archived referral authority against the
   launchd-managed CLI lifecycle. Removes preflight reservations, Malibu bearer
   custody, App-managed provider children, direct Malibu coordinator calls, and
@@ -108,8 +111,8 @@ capacity.
 | Buyer-serving display | CLI from its authoritative lifecycle | Versioned local `/v1/status` projection | Malibu | Status contract/capability + observation identity | Local-ready alone never implies reward qualification | `buyer_serving` only when CLI reports it | Malibu/CLI restart does not invent eligibility |
 | First-serving evidence | Buyer/coordinator settlement system | Closed `settlement_receipt_verdicts` row with verified outcome and valid receipt per SPEC-022 | Coordinator referral reconciler; status reads are observational | Receipt/request identity; qualification `(campaign, provider_id)` | Pending, invalid, or duplicate evidence grants nothing; reconciler retries safely | `locked_until_first_serving` until durable qualification | No invite before evidence; one invite after first verified receipt; replay no-op |
 | First-serving qualification | Coordinator reconciler | Issuer/qualification row with evidence reference and earliest qualifying time | Status, operator audit, invite service | `(campaign, provider_id)` conditional insert/update | Preserve earliest authoritative evidence under duplicates/out-of-order delivery | `eligible` with evidence-derived timestamp | Two reconcilers and duplicate evidence create one base grant |
-| Invite balance and link | Coordinator | Issuer base/bonus capacity minus committed redemptions | Authenticated CLI API, Malibu sanitized projection, `/j/<code>` resolver | Issuer/campaign and redemption IDs | Read is side-effect free; retry never decrements twice | Available, exhausted, disabled, or unavailable with exact remaining count | Referred provider redemption decrements exactly once |
-| X challenge | Coordinator | Hashed challenge, expiry, provider/campaign binding, issued/consumed times | CLI and sanitized Malibu projection; verification service | One active `(campaign, provider_id)` challenge + random digest | Replacement/expiry is explicit; retries cannot bypass rate limits | `challenge_ready`, `expired`, or retryable failure | Duplicate request and restart respect challenge and rate limits |
+| Invite balance and link | Coordinator | Issuer base/bonus capacity minus committed redemptions plus configured HTTPS `join_base_url` | Authenticated CLI API, Malibu sanitized projection, `/j/<code>` resolver | Issuer/campaign and redemption IDs | Read is side-effect free; CLI and Malibu accept only the exact `join_base_url/<code>` projection; retry never decrements twice | Available, exhausted, disabled, or unavailable with exact remaining count | A public join origin distinct from the coordinator is accepted only when coordinator status declares it; redemption decrements exactly once |
+| X challenge | Coordinator | Hashed challenge, expiry, provider/campaign binding, issued/consumed times; CLI-owned 0600 pending-challenge journal holds the raw challenge, exact invite URL, and composer intent | CLI and verification service; Malibu sees expiry/state only | One active `(campaign, provider_id)` challenge + random digest | Replacement/expiry is explicit; CLI restores or reopens only after a fresh status read confirms social rewards and the exact invite binding; raw challenge, share URL, and composer intent never cross into Malibu | `challenge_ready`, `expired`, or retryable failure | Duplicate request and restart respect challenge and rate limits; flag disable or join/code rotation clears local pending state; local frames contain no nonce or intent URL |
 | X submission | Coordinator | Canonical post ID/URL digest, provider/campaign/challenge binding | Verification/recheck worker, audit, status | Globally unique post ID plus `(campaign, provider_id)` | Duplicate same submission converges; reused post or author mismatch rejects | `pending`, `failed`, or `matured` with truthful reason | Success, bad URL, wrong author, wrong link, replay, and rate-limit cases |
 | X verification decision | Coordinator server-side verifier | Current verification row plus append-only social decision audit | Bonus transaction, status, security/operator review | Verification attempt/event UUID and expected prior state | External transient failure is retryable; terminal failure is stable; redirects and untrusted origins fail closed | Pending/retryable/terminal failure separated | Audit records challenge, submit, recheck, decision, and redacted cause |
 | X observed-author binding | Coordinator records the X API result | Numeric `author_id` in the pending verification and immutable history/audit | Recheck worker and security/operator review | Globally unique post ID + initial numeric author ID | This is continuity of the observed post author, not proof the provider owns an X account; recheck must return the same nonempty numeric author or fail terminally | No ownership badge; only pending/failed/matured reward state | Empty/non-numeric author rejects; changed author on recheck fails; exact author continuity may mature |
@@ -183,6 +186,16 @@ invite reference, and rechecks after the configured dwell. Application and edge
 rate limits bound challenge, submission, and recheck abuse; the durable decision
 audit survives process restarts and multi-replica execution.
 
+The CLI alone receives the raw challenge, share URL, and X composer intent. It
+validates the exact HTTPS intent shape, durably stores the pending challenge in
+an owner-only 0600 journal bound to the exact current invite URL, and opens the
+composer. Before restoring or reopening it, the CLI refreshes coordinator status
+and requires social rewards plus that exact invite binding to remain current;
+disablement or join/code rotation clears the journal. Malibu receives only the
+pending expiry and coordinator-authored referral state. Reopen, cancel, restart,
+response-loss recovery, and terminal verification therefore never require the
+App to possess the nonce or an authenticated coordinator secret.
+
 The initial X API lookup records the post's nonempty numeric `author_id`; every
 recheck must observe that exact author. This is post-author continuity only. It
 does not assert that the provider controls the X account and MUST NOT be rendered
@@ -214,6 +227,15 @@ sanitized projection under `referral_status_v1`. Malibu and CLI marketing versio
 independent; compatibility is negotiated by advertised protocol capabilities and
 schema versions. Missing or unknown capability means unavailable, never an
 inferred zero balance or eligibility decision.
+
+Authenticated referral status includes a credential-free HTTPS
+`join_base_url` ending in `/j`; it may intentionally use a public host different
+from the coordinator API. The CLI validates the coordinator's invite URL as the
+exact `join_base_url/<code>` value and Malibu repeats that fail-closed binding on
+the sanitized projection. Malibu refreshes status no faster than once per 60
+seconds, stops presenting it as current after 90 seconds, and clears it when the
+owner-only control connection closes. Social-only rollback suppresses advocacy
+actions without erasing a still-valid base invite projection.
 
 On registration error, the CLI preserves any working provider identity and
 credential, records a bounded recoverable attempt, and returns a typed error.

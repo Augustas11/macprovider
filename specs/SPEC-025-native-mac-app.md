@@ -1,6 +1,15 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.15 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.16 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.16 (2026-07-16, referral projection hardening).** The CLI
+projects the coordinator-authenticated public `join_base_url` and Malibu accepts
+only its exact `/j/<code>` invite, even when that public origin differs from the
+coordinator API host. Raw X challenges, share URLs, composer intents, and the
+provider bearer remain CLI-only. Malibu refreshes referral status at a bounded
+60-second cadence, expires it after 90 seconds, and clears it on control-channel
+disconnect. CLI restore/reopen refreshes coordinator status and discards pending
+X material if social rewards or the exact invite binding changed.
 
 **Change log v0.15 (2026-07-16, SPEC-034 referral recovery).** Malibu may
 collect bounded referral input and pass it to the signed installed CLI through a
@@ -351,7 +360,11 @@ time (60–240 s for the first model) in the background.
   not an in-app `switch_request`.
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
   projection and invokes typed CLI actions, but does not persist referral policy,
-  read credentials, call coordinator referral endpoints, or award capacity.
+  read credentials, call coordinator referral endpoints, or award capacity. It
+  validates invite links against the coordinator-authenticated `join_base_url`,
+  presents status for at most 90 seconds, and clears it when the owner-only
+  control connection closes. X challenge nonces, share URLs, and composer
+  intents remain in CLI custody; Malibu receives only pending expiry/state.
 - The dashboard also renders the compatible local status-contract version, exact
   process instance (role/PID/short instance ID), last CLI-authored lifecycle state and
   reason, and typed credential recovery guidance. A repair button is shown only for
