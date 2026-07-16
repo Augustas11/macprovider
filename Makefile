@@ -52,6 +52,7 @@ test-integration:
 # false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
 test-dist:
 	bash scripts/test-coordinator-advertised-version-test.sh
+	bash scripts/test-malibu-independent-release.sh
 	bash scripts/test-release-tag-target.sh
 	bash scripts/test-release-security-posture.sh
 	bash scripts/test-malibu-bootstrap-bridge.sh
