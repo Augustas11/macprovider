@@ -114,7 +114,7 @@ jobs:
           xcodebuild \
             -project Malibu.xcodeproj \
             -scheme Malibu \
-            -configuration Release \
+            -configuration Debug \
             -destination "platform=macOS" \
             test
           xcodebuild \
