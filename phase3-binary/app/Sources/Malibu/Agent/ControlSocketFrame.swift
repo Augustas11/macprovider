@@ -1,5 +1,13 @@
 import Foundation
 
+enum ReferralWireDate {
+    static func parse(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+}
+
 // Wire-format mirror of ControlSocketFrame in Sources/macprovider-cli/ControlSocket.swift.
 // Duplicated for P0. Extract to a shared `MacProviderControl` library target so the
 // CLI and the app share one source of truth (SPEC-025 §12 conflict #9 — followup).
@@ -39,6 +47,35 @@ enum ControlFrame: Sendable, Equatable {
 
     case shutdownRequest(graceSeconds: Int)
     case shutdownAck
+
+    case referralStatusRequest
+    case referralStatusResponse(ReferralStatusProjection)
+    case referralChallengeRequest
+    case referralChallengeResponse(expiresAt: String)
+    case referralChallengeReopenRequest
+    case referralChallengeReopenAck(expiresAt: String)
+    case referralVerifyRequest(postURL: String)
+    case referralChallengeCancelRequest
+    case referralChallengeCancelAck(status: ReferralStatusProjection?)
+    case referralError(operation: ReferralControlOperation, code: ReferralControlErrorCode, retryAfterSeconds: Int?)
+}
+
+enum ReferralControlOperation: String, Sendable, Equatable {
+    case status, challenge, verify, cancel
+}
+
+enum ReferralControlErrorCode: String, Sendable, Equatable {
+    case authenticationRequired = "authentication_required"
+    case featureUnavailable = "feature_unavailable"
+    case rateLimited = "rate_limited"
+    case temporarilyUnavailable = "temporarily_unavailable"
+    case invalidResponse = "invalid_response"
+    case invalidPostURL = "invalid_post_url"
+    case firstServingRequired = "first_serving_required"
+    case challengeUnavailable = "challenge_unavailable"
+    case challengeInvalid = "challenge_invalid"
+    case postNotVerified = "post_not_verified"
+    case referralLocked = "referral_locked"
 }
 
 enum ControlCodec {
@@ -129,6 +166,34 @@ enum ControlCodec {
             return obj
         case let .shutdownRequest(grace): return ["type": "shutdown_request", "grace_seconds": grace]
         case .shutdownAck: return ["type": "shutdown_ack"]
+        case .referralStatusRequest: return ["type": "referral_status_request"]
+        case let .referralStatusResponse(status):
+            var payload = referralStatusPayload(status)
+            payload["type"] = "referral_status_response"
+            return payload
+        case .referralChallengeRequest: return ["type": "referral_challenge_request"]
+        case let .referralChallengeResponse(expiresAt):
+            return ["type": "referral_challenge_response", "expires_at": expiresAt]
+        case .referralChallengeReopenRequest:
+            return ["type": "referral_challenge_reopen_request"]
+        case let .referralChallengeReopenAck(expiresAt):
+            return ["type": "referral_challenge_reopen_ack", "expires_at": expiresAt]
+        case let .referralVerifyRequest(postURL):
+            return ["type": "referral_verify_request", "post_url": postURL]
+        case .referralChallengeCancelRequest:
+            return ["type": "referral_challenge_cancel_request"]
+        case let .referralChallengeCancelAck(status):
+            var payload: [String: Any] = ["type": "referral_challenge_cancel_ack"]
+            if let status { payload["status"] = referralStatusPayload(status) }
+            return payload
+        case let .referralError(operation, code, retryAfterSeconds):
+            var payload: [String: Any] = [
+                "type": "referral_error",
+                "operation": operation.rawValue,
+                "code": code.rawValue,
+            ]
+            if let retryAfterSeconds { payload["retry_after_seconds"] = retryAfterSeconds }
+            return payload
         }
     }
 
@@ -183,8 +248,117 @@ enum ControlCodec {
                 reason: dict["reason"] as? String
             )
         case "shutdown_ack": return .shutdownAck
+        case "referral_status_request": return .referralStatusRequest
+        case "referral_status_response":
+            return .referralStatusResponse(try referralStatusValue(dict))
+        case "referral_challenge_request": return .referralChallengeRequest
+        case "referral_challenge_response":
+            guard let expiresAt = dict["expires_at"] as? String else { throw DecodeError.malformed }
+            return .referralChallengeResponse(expiresAt: expiresAt)
+        case "referral_challenge_reopen_request": return .referralChallengeReopenRequest
+        case "referral_challenge_reopen_ack":
+            guard let expiresAt = dict["expires_at"] as? String else { throw DecodeError.malformed }
+            return .referralChallengeReopenAck(expiresAt: expiresAt)
+        case "referral_verify_request":
+            guard let postURL = dict["post_url"] as? String else { throw DecodeError.malformed }
+            return .referralVerifyRequest(postURL: postURL)
+        case "referral_challenge_cancel_request": return .referralChallengeCancelRequest
+        case "referral_challenge_cancel_ack":
+            if let status = dict["status"] as? [String: Any] {
+                return .referralChallengeCancelAck(status: try referralStatusValue(status))
+            }
+            return .referralChallengeCancelAck(status: nil)
+        case "referral_error":
+            guard let operationRaw = dict["operation"] as? String,
+                  let operation = ReferralControlOperation(rawValue: operationRaw),
+                  let codeRaw = dict["code"] as? String,
+                  let code = ReferralControlErrorCode(rawValue: codeRaw) else { throw DecodeError.malformed }
+            return .referralError(
+                operation: operation,
+                code: code,
+                retryAfterSeconds: intValue(dict["retry_after_seconds"])
+            )
         default: throw DecodeError.unknownType(type)
         }
+    }
+
+    private static func referralStatusPayload(_ status: ReferralStatusProjection) -> [String: Any] {
+        var payload: [String: Any] = [
+            "campaign": status.campaign,
+            "join_base_url": status.joinBaseURL.absoluteString,
+            "social_state": status.socialState,
+            "base_capacity": status.baseCapacity,
+            "configured_bonus_capacity": status.configuredBonusCapacity,
+            "bonus_capacity": status.bonusCapacity,
+            "redemptions": status.redemptions,
+            "remaining": status.remaining,
+            "first_serving_seen": status.firstServingSeen,
+            "social_bonus_enabled": status.socialBonusEnabled,
+            "observed_at": ISO8601DateFormatter().string(from: status.observedAt),
+        ]
+        if let inviteCode = status.inviteCode { payload["invite_code"] = inviteCode }
+        if let inviteURL = status.inviteURL { payload["invite_url"] = inviteURL.absoluteString }
+        if let challenge = status.pendingChallenge {
+            payload["pending_challenge"] = [
+                "expires_at": ISO8601DateFormatter().string(from: challenge.expiresAt),
+            ]
+        }
+        return payload
+    }
+
+    private static func referralStatusValue(_ dict: [String: Any]) throws -> ReferralStatusProjection {
+        guard let campaign = dict["campaign"] as? String,
+              let joinBaseWire = dict["join_base_url"] as? String,
+              let joinBaseURL = URL(string: joinBaseWire),
+              let socialState = dict["social_state"] as? String,
+              let baseCapacity = intValue(dict["base_capacity"]),
+              let configuredBonusCapacity = intValue(dict["configured_bonus_capacity"]),
+              let bonusCapacity = intValue(dict["bonus_capacity"]),
+              let redemptions = intValue(dict["redemptions"]),
+              let remaining = intValue(dict["remaining"]),
+              let firstServingSeen = dict["first_serving_seen"] as? Bool,
+              let socialBonusEnabled = dict["social_bonus_enabled"] as? Bool,
+              let observedWire = dict["observed_at"] as? String,
+              let observedAt = ReferralWireDate.parse(observedWire) else {
+            throw DecodeError.malformed
+        }
+        let inviteCode = dict["invite_code"] as? String
+        let inviteURL: URL?
+        if let raw = dict["invite_url"] as? String {
+            guard let parsed = URL(string: raw) else { throw DecodeError.malformed }
+            inviteURL = parsed
+        } else {
+            inviteURL = nil
+        }
+        let pending: ReferralPendingChallengeProjection?
+        if let raw = dict["pending_challenge"] as? [String: Any] {
+            guard let expiresWire = raw["expires_at"] as? String,
+                  let expiresAt = ReferralWireDate.parse(expiresWire) else {
+                throw DecodeError.malformed
+            }
+            pending = ReferralPendingChallengeProjection(expiresAt: expiresAt)
+        } else {
+            pending = nil
+        }
+        guard let status = ReferralStatusProjection(
+            campaign: campaign,
+            joinBaseURL: joinBaseURL,
+            socialState: socialState,
+            baseCapacity: baseCapacity,
+            configuredBonusCapacity: configuredBonusCapacity,
+            bonusCapacity: bonusCapacity,
+            redemptions: redemptions,
+            remaining: remaining,
+            firstServingSeen: firstServingSeen,
+            socialBonusEnabled: socialBonusEnabled,
+            inviteCode: inviteCode,
+            inviteURL: inviteURL,
+            observedAt: observedAt,
+            pendingChallenge: pending
+        ) else {
+            throw DecodeError.malformed
+        }
+        return status
     }
 
     private static func doubleValue(_ value: Any?) -> Double? {

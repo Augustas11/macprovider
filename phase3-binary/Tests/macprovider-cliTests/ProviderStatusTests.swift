@@ -113,6 +113,8 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertTrue(capabilities.contains("provider_safety_telemetry_v1"))
         XCTAssertTrue(capabilities.contains("provider_safety_telemetry_v2"))
         XCTAssertTrue(capabilities.contains("referral_bootstrap_v1"))
+        XCTAssertTrue(capabilities.contains("referral_status_v1"))
+        XCTAssertTrue(capabilities.contains("referral_advocacy_v1"))
 
         let observation = try XCTUnwrap(body["observation"] as? [String: Any])
         XCTAssertNotNil(observation["id"] as? String)
