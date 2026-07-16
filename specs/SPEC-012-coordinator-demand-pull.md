@@ -1,7 +1,19 @@
-# SPEC-012 — Source spec history (Provider Model Catalog & Warm Swap, since split into SPEC-010/011/013)
+# SPEC-012 — Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility
 
 **Version:** 0.3
-**Status:** Draft (post round-2 audit, pre round-3 audit)
+**Status:** Draft (round-three audit failed; not ready to lock)
+**Owner:** @Augustas11
+**Authority:** The still-unique normative requirements in §4 own coordinator-initiated
+`set_model`, demand-pull cold wake and parked-request bounds, buyer-visible cold
+model aggregation/`model_not_warm`, and coordinator loading-state visibility.
+SPEC-010 owns model capability/catalog identity, SPEC-011 owns operator-pushed
+binary-local warm swap, and SPEC-013 owns autotune recommendations. This draft
+remains canonical because those SPEC-012 surfaces are not defined by a successor;
+its superseded split narrative is archived under `docs/spec-history/`.
+The retained authority is pending, not locked: the round-three record at
+`audits/spec-012/SPEC-012-source-audit-history.md` reports 1 CRITICAL and 12
+MAJOR findings and a NOT READY TO LOCK verdict, so `CONFORMANCE.json` records
+`DECISION_REQUIRED` rather than implementation or conformance.
 **Date drafted:** 2026-06-06
 **Companion to (LOCKED):** SPEC-001 v1.2.4, SPEC-002 v1.3.4,
 SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
@@ -12,87 +24,11 @@ active model on a running provider; (2) restart causes WS reconnect +
 cold load + red dashboard; (3) buyer console picker shows only loaded
 model; (4) no discovery of expected HF IDs.
 
-**Triage note 2026-06-26 (no version bump, no normative change):**
-- Phase 2 (§3 + §5) and Phase 3 (§3 + §6) marked RESOLVED as SUBSUMED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-012. Phase 2 → SPEC-011 v0.4; Phase 3 → SPEC-010 v1.5 + SPEC-013 v0.3.
-
-**Change log v0.3 (this revision — round-2 audit response):**
-
-- **Audit response (round 2, Codex GPT-5)**: closes all 12 MAJORs
-  and 2 PARTIAL completions from round 2. Cross-reference:
-  [SPEC-010-audit.md](SPEC-010-audit.md) (round 2 section). No
-  architectural change; all fixes are contract-tightening.
-- **B2.1 fix**: §4.4.0 (new) — `request_id` for swap messages MUST
-  be coordinator-generated `swap_<ULID>`, globally unique, namespace
-  separate from buyer `request_id`. Retention rule defined.
-- **B2.2 fix**: §4.4.6 + §4.4 failure enum — drain timeout is a
-  **per-in-flight-request outcome only**; the swap completes
-  successfully after timeout. `drain_timeout` REMOVED from
-  `set_model_complete{failed}.reason_code` enum.
-- **B2.3 / OQ-5 closure**: `swap_reason` enum reduced to two values
-  (`demand_pull`, `operator_push`); `policy` removed pending an
-  actual policy-driven swap path.
-- **B3 completion**: §4.1 — duplicate handling after NFC + ASCII
-  fold; exact `bad_request` reason strings for each rejection class.
-- **C2.1 fix**: §4.5.3.7 (new) — cold-wake swap attempts are NOT
-  billable inference attempts. SPEC-005/SPEC-006 ledger impact
-  defined.
-- **C2.2 fix**: §4.5.3.8 (new) + §4.7 — parked-request queue depth
-  cap with deterministic overflow → `503 model_not_warm`. Per-model
-  and per-account caps.
-- **C2.3 fix**: §4.7 defaults retuned (drain 20s, ETA 90s) to give
-  the retry path real runway; behavior documented.
-- **E2.1 fix**: §4.6.1.4 (new) — cold-supported `/v1/models` entries
-  under Pillar A observation MUST NOT contribute to SPEC-008 §5.7
-  `verified_provider_count` / `uncatalogued_provider_count` /
-  mismatch/invalid counts. Hash block on cold entries: omit
-  entirely.
-- **F2.1 / I1 completion**: §3 phase-plan wording — Phase 1
-  closes pain points #1 and #2; #3 closes only when
-  `publish_unwarm_models: true` (operator opt-in) or via Phase 3
-  recommended catalog.
-- **F2.2 fix**: §4.10 (new) — minimal Phase 1 coordinator status
-  contract: `loading_model` and `swap_pending` expose a `state`
-  value of `"loading"` (amber) in `/v1/status`, distinguishable from
-  `"down"` / `"ready"`. Bounds the operator-visible regression.
-- **G2.1 fix**: 7 new ACs (AC-24 through AC-30) cover R-4.1.7
-  normalized duplicates, R-4.1.8 legacy `hello`, R-4.3.4 seenModels
-  expansion, R-4.6.1.1 `warm` flag, R-4.8.* CLI flag/env/config
-  resolution, R-4.9.1 operator-pushed local refusal.
-- **G2.2 fix**: AC-31 (new) covers the `set_model_ack{rejected,
-  cooldown}` rejection branch and parked-request fallthrough.
-- **G2.3 / H2.2 fix**: §4.4.9 expanded — audit event payload schemas
-  for `model_swap_started`, `model_swap_completed`,
-  `model_swap_failed`, `cold_wake_queued`, `cold_wake_drained`. AC-32
-  asserts emission + shape.
-- **H2.1 fix**: §8.1 — incorporates §4.4, §4.8 by explicit reference
-  as normative source for SPEC-001 v1.2.5 BUILD prompt; not
-  free-floating.
-
-**Change log v0.2 (round-1 audit response):**
-
-- **Restructure**: Phase 1 absorbs former Phase 2 (`set_model` +
-  `loading_model` state + drain semantics + ETA budget). The original
-  Phase 1 — "capability advertisement only" — was net-negative UX:
-  it advertised cold-supported models in `/v1/models` but had no way
-  to serve them, so buyers got `503 model_not_warm` for entries we
-  ourselves exposed. v0.2 closes the loop: cold-supported requests
-  wake the provider and serve, subject to ETA budget.
-- **Phase numbering shift**: v0.1 Phase 2 (warm hot-swap) is now part
-  of Phase 1. v0.1 Phase 3 (recommended catalog) is now Phase 3.
-  A new **Phase 2** is split out: operator-pushed CLI swap
-  (`macprovider models switch`) — a thin wrapper over the Phase 1
-  wire, ships independently after Phase 1 lands.
-- **Audit response (round 1, Codex GPT-5)**: fixes A1, F1, C1, C2,
-  C3, B1, B2, B3, D1, D2, I1, J1. Cross-reference:
-  [SPEC-010-audit.md](SPEC-010-audit.md).
-- **Companion version anchors** corrected: was SPEC-002 v1.3.3 /
-  SPEC-008 v0.1 in v0.1; the actually-locked versions in repo are
-  SPEC-002 v1.3.4 and SPEC-008 v0.3.
-- **`hash_status: "unknown"` removed.** The Phase 1 swap window is
-  handled by the existing `loading_model` not-ready state, not a new
-  Pillar A status value. SPEC-008 §5.5 enumerates five hash states
-  (`hash_verified`, `hash_mismatch`, `hash_invalid`, `uncatalogued`,
-  `catalog_unavailable`); SPEC-010 does not add a sixth.
+Historical split, changelog, and audit-response narrative is preserved in
+[`docs/spec-history/SPEC-012-v0.3-history.md`](../docs/spec-history/SPEC-012-v0.3-history.md)
+and `audits/spec-012/SPEC-012-source-audit-history.md`. This document retains
+only the current draft contract, compatibility analysis, acceptance criteria,
+and unresolved gaps.
 
 ---
 
@@ -129,8 +65,9 @@ at the binary layer. The real gaps:
 | G-4 | Gateway dispatch rewrites `body.model` (SPEC-004 Entry 35 workaround) | Class-alias workaround for the missing capability negotiation |
 | G-5 | No discoverability surface for operators | Operators guess HF IDs |
 
-Phase 1 of this spec closes G-1, G-2, G-3 in one cut. Phase 2 closes
-operator-side CLI (G-1's UI piece). Phase 3 closes G-5.
+SPEC-010 owns G-2/G-3 capability advertisement, SPEC-011 owns the local
+operator-side CLI, and SPEC-013 owns recommendation discovery. This spec owns
+only the coordinator-driven use of those capabilities.
 
 ---
 
@@ -141,7 +78,7 @@ Non-negotiable inputs. Not subject to audit revision.
 | Lock | Decision |
 |---|---|
 | L-1 | **Backward compatible.** With all SPEC-010 fields absent AND `publish_unwarm_models: false`, coordinator behavior MUST be byte-identical to pre-SPEC-010 production. `/v1/models`, `/v1/status`, log lines, routing decisions, error envelopes — all identical. |
-| L-2 | **No closed allowlist.** Coordinator does not validate model IDs against a server-side whitelist. Any string the provider sends in `supported_models` is accepted, subject only to length/shape limits. Curation is published as guidance in Phase 3, never as a hard rule. Permissionless onboarding stays. |
+| L-2 | **No closed allowlist.** Coordinator consumes the SPEC-010 model identity set without adding a server-side whitelist. Curation remains guidance under SPEC-010/SPEC-013, never a hard rule. Permissionless onboarding stays. |
 | L-3 | **One *active* model per provider process at a time.** Multi-model serving (parallel loaded weights) is OUT OF SCOPE. A provider declares `supported_models` (willing) and `loaded_model` (warm now). The set of warm models on a provider is always exactly `{loaded_model}` while `state == ready`, and `{}` while `state == loading_model`. |
 | L-4 | **Pillar A hash semantics unchanged.** `model_hash` continues to refer ONLY to `loaded_model`. `supported_models` entries are unverified. SPEC-008 §5.5's five hash states are not extended. During the `loading_model` sub-state the provider is not routable (per L-3), so the hash predicate does not apply. |
 | L-5 | **No paid-tier gating.** Per Entry 21, advertising more models or using warm-swap does not change earnings. SPEC-005 billing is untouched. |
@@ -149,12 +86,14 @@ Non-negotiable inputs. Not subject to audit revision.
 
 ---
 
-## 3. Phase plan
+## 3. Retained demand-pull scope
 
-Three phases. Phase 1 alone closes operator pain points #1, #2, #3
-from §1.1 — i.e. the things that hurt yesterday.
+The retained coordinator-driven phase closes operator pain points #1, #2, and
+#3 from §1.1. The superseded operator-CLI and recommendation phases are owned
+by SPEC-011 and SPEC-010/SPEC-013 respectively and are preserved only in the
+linked history document.
 
-### Phase 1 — Capability advertisement + warm swap (THIS SPEC)
+### Coordinator demand-pull and buyer cold-model visibility
 
 Closes G-1 (warm-swap mechanism), G-2 and G-3 (capability protocol).
 
@@ -178,170 +117,21 @@ Closes G-1 (warm-swap mechanism), G-2 and G-3 (capability protocol).
 
 | Pain | Who | Phase 1 closure |
 |---|---|---|
-| #1 No CLI to change active model | Operator | Closed mechanically via demand-pull (operator changes effective model by directing buyer traffic; no restart). UI/CLI in Phase 2. |
+| #1 No CLI to change active model | Operator | Demand-pull provides the coordinator mechanism; SPEC-011 owns the local operator UI/CLI. |
 | #2 Restart causes red dashboard | Operator | Closed: warm swap avoids restart entirely. §4.10 defines `loading` (amber) status — bounds the operator-visible regression during swap window. |
-| #3 Buyer picker shows only loaded model | Buyer/Operator | **Closed only when `publish_unwarm_models: true`** (operator opt-in). Default deployment preserves byte-identical `/v1/models`. Phase 3 catalog covers the always-on case. |
-| #4 No HF ID discovery | Operator | Deferred to Phase 3. |
-
-### Phase 2 — Operator-pushed swap CLI (DEFERRED to v0.4)
-
-_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED — SPEC-011 v0.4 split out as the normative spec for operator-pushed warm swap and shipped the CLI + UDS control socket. No separate SPEC-012 v0.4 needed._
-
-Closes the operator-facing UX of G-1 (the CLI piece).
-
-- `macprovider models switch <id>` on the provider host. Provider
-  initiates a local load and reports the new `loaded_model` to the
-  coordinator via heartbeat (no `set_model` round-trip needed for
-  operator-initiated swaps).
-- `macprovider models list` shows the local cache + warm/idle state.
-
-Phase 2 is a thin wrapper over Phase 1 wire — it adds no new
-coordinator behavior. Splitting it lets Phase 1 ship without
-binary-CLI surface changes blocking the coordinator rollout.
-
-### Phase 3 — Recommended catalog (DEFERRED to v0.5)
-
-_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED — SPEC-010 v1.5 (catalog data) + SPEC-013 v0.3 (autotune recommends from the catalog) cover the G-5 surface. No separate SPEC-012 v0.5 needed._
-
-Closes G-5.
-
-- `GET /v1/recommended-catalog` from coordinator: curated MLX model
-  IDs with demand hints.
-- `macprovider models list-recommended` / `models pull <id>`.
-
-Phase 3 is guidance, not policy (L-2). Deferred because it requires
-coordinator-side analytics aggregation that's out of Phase 1 scope.
+| #3 Buyer picker shows only loaded model | Buyer/Operator | **Closed only when `publish_unwarm_models: true`** (operator opt-in). Default deployment preserves byte-identical `/v1/models`; SPEC-010 owns catalog identity. |
+| #4 No HF ID discovery | Operator | Owned by SPEC-010/SPEC-013, outside this contract. |
 
 ---
 
-## 4. Phase 1 wire spec (NORMATIVE)
+## 4. Demand-pull wire spec (NORMATIVE)
 
-### 4.1 Provider → coordinator: `auth` frame extension
-
-The `auth` frame (SPEC-002 v1.3.4 §7.2; Go struct
-[`AuthRequest`](../phase4-coordinator/internal/ws/messages.go) lines
-37-57) gains two optional fields:
-
-```json
-{
-  "type": "auth",
-  ...
-  "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-  "supported_models": [
-    "mlx-community/Qwen2.5-7B-Instruct-4bit",
-    "mlx-community/Llama-3.1-8B-Instruct-4bit"
-  ],
-  "publishes_supported_models": true,
-  ...
-}
-```
-
-#### Rules
-
-- **R-4.1.1** `supported_models`, when present, MUST be a JSON array
-  of strings. The array MUST contain at least one entry; a present
-  empty array (`[]`) MUST be rejected with `auth_response.error.code`
-  = `"bad_request"` and reason text containing
-  `"supported_models cannot be empty"`. (Audit fix B1.)
-- **R-4.1.2** Each entry MUST be ≤ 256 UTF-8 bytes, mirroring
-  SPEC-001 §6.1.2 model_id limit. Entries exceeding the cap MUST
-  cause `bad_request`. The coordinator MUST NOT trim or normalize
-  entries beyond Unicode NFC and ASCII case folding for comparison.
-- **R-4.1.3** Array length cap: 64 entries. Length > 64 MUST cause
-  `bad_request`. Justification: bounds coordinator memory; matches
-  the conservative end of typical M-series HF cache contents (a
-  64GB M-series with 4-bit quants typically holds 6-20 distinct
-  models; 64 leaves headroom for future quant variants).
-- **R-4.1.4** `model_id` MUST appear in `supported_models` (case-
-  insensitive compare per SPEC-001 §6.1). If not, coordinator MUST
-  reject with `bad_request` and reason text containing
-  `"model_id not in supported_models"`.
-- **R-4.1.5** When `supported_models` is **omitted** (legacy
-  provider), coordinator MUST treat as if the provider had sent
-  `supported_models: [model_id]`. No warning is logged. This is the
-  legacy compat path.
-- **R-4.1.6** `publishes_supported_models: bool`, when present and
-  `true`, signals that the provider opts in to having
-  `supported_models` echoed in the public `/v1/status` response per
-  §4.3.3. When absent or `false`, the field MUST NOT appear in
-  `/v1/status`. Legacy providers always behave as `false`.
-  (Audit fix A1.)
-- **R-4.1.7** Case-insensitivity: all containment, equality, and
-  uniqueness checks on model IDs MUST use Unicode NFC normalization
-  followed by ASCII case folding. The router uses this normalized
-  form internally; the wire format preserves the provider's chosen
-  case in responses.
-- **R-4.1.8** The same fields MAY appear in the legacy `hello`
-  frame for deployments not yet on the `auth` handshake. Rules
-  R-4.1.1 through R-4.1.7 apply identically.
-- **R-4.1.9** **Validation order (NORMATIVE).** Coordinator MUST
-  apply validation in this exact order; the first failure produces
-  the corresponding `bad_request` reason and stops further checks.
-  This ordering is exposed so implementers and tests can assert on
-  a single reason string per malformed auth:
-  1. JSON type check on `supported_models` (must be array of strings)
-     — fail reason `"supported_models must be array of strings"`.
-  2. Per-entry UTF-8 byte length ≤ 256 (R-4.1.2)
-     — fail reason `"supported_models entry exceeds 256 bytes"`
-     (no entry value or index in the message to bound log size).
-  3. Array length ≥ 1 and ≤ 64 (R-4.1.1, R-4.1.3)
-     — fail reasons `"supported_models cannot be empty"` and
-     `"supported_models exceeds 64 entries"`.
-  4. NFC + ASCII case-fold normalize (R-4.1.7), then duplicate check:
-     after normalization, duplicate entries MUST cause `bad_request`
-     with reason `"supported_models contains duplicate entries"`.
-     The pre-normalization wire array is preserved for response use.
-  5. `model_id ∈ supported_models` containment check (R-4.1.4)
-     — fail reason `"model_id not in supported_models"`.
-  (Audit fix B3 completion.)
-
-### 4.2 Heartbeat frame
-
-Unchanged for v0.2. `supported_models` and `publishes_supported_models`
-are set at `auth` and are immutable for the lifetime of the WS
-connection. To change the supported set, the provider must reconnect.
-`loaded_model` (via `model_id` field on heartbeat) changes via §4.4
-swap.
-
-Rationale: keeps heartbeat path zero-allocation; avoids racing
-mid-stream capability changes with in-flight routing.
-
-### 4.3 Coordinator: `Provider` struct extension
-
-Go struct ([`Provider`](../phase4-coordinator/internal/pool/provider.go)
-line 50) gains:
-
-```go
-type Provider struct {
-    ...
-    ModelID                   string   `json:"model_id"`                          // existing: warm model
-    SupportedModels           []string `json:"-"`                                 // SPEC-010, internal-only
-    PublishesSupportedModels  bool     `json:"-"`                                 // SPEC-010, gate for §4.3.3
-    SwapState                 SwapState `json:"swap_state,omitempty"`             // SPEC-010 §4.4
-    ...
-}
-```
-
-Note: `SupportedModels` has JSON tag `-` (not serialized in default
-serializations). §4.3.3 below specifies the one place it surfaces.
-
-#### Rules
-
-- **R-4.3.1** `SupportedModels` MUST be populated from the `auth`
-  frame per R-4.1.5 (legacy → `[model_id]`).
-- **R-4.3.2** `PublishesSupportedModels` MUST be populated from the
-  `auth` frame's `publishes_supported_models` field. Default `false`.
-- **R-4.3.3** Public coordinator `/v1/status` response MUST include
-  `"supported_models": [...]` for a provider entry IF AND ONLY IF
-  `PublishesSupportedModels == true`. Legacy providers and SPEC-010
-  providers that did not opt in produce byte-identical pre-SPEC-010
-  `/v1/status` output. (Audit fix A1.)
-- **R-4.3.4** `seenModels` index ([provider.go:174](../phase4-coordinator/internal/pool/provider.go))
-  MUST be populated from the union of `ModelID` and every entry in
-  `SupportedModels`. Existing callers of `ModelKnown()` are
-  semantically compatible: a model that some provider declared as
-  supported IS now "known," matching `ModelKnown`'s intent of
-  "could this model ever be served by this pool."
+SPEC-010 is authoritative for `supported_models`,
+`publishes_supported_models`, model-ID normalization, and the coordinator
+capability fields consumed below. SPEC-011 is authoritative for local
+operator-pushed swap control. This section defines only coordinator
+`set_model`, demand-pull parking/routing, buyer cold-model visibility, and
+loading-state integration.
 
 ### 4.4 Coordinator → provider: `set_model` (warm swap)
 
@@ -428,7 +218,7 @@ Note: `drain_timeout` is intentionally NOT in the failure
   past the retention window.
 - **R-4.4.1** Coordinator MUST NOT send `set_model` unless
   `target_model_id` is in the provider's `SupportedModels`
-  (case-folded per R-4.1.7). Sending a non-supported model is a
+  (case-folded per SPEC-010's model-ID normalization contract). Sending a non-supported model is a
   coordinator bug; provider MUST reject with
   `"not_in_supported_models"`.
 - **R-4.4.2** Coordinator MUST NOT initiate `set_model` to a
@@ -600,11 +390,11 @@ candidates(req_model) :=
         p.State == Ready AND
         p.SwapState ∈ {ready, ∅} AND
         p.SlotsFree > 0 AND
-        req_model ∈ p.SupportedModels  (case-folded per R-4.1.7)}
+        req_model ∈ p.SupportedModels  (case-folded per SPEC-010)}
 ```
 
 Note: `req_model in p.SupportedModels` subsumes the prior
-`req_model == p.ModelID` predicate, because R-4.1.4 requires
+`req_model == p.ModelID` predicate, because SPEC-010 requires
 `ModelID ∈ SupportedModels`.
 
 #### 4.5.2 Warm-first ranking (NORMATIVE for Phase 1)
@@ -867,54 +657,6 @@ swap_request_id_retention_seconds = 600
   generations) or `cold_wake_request_eta_seconds` upward (more
   patient buyers) per their workload profile.
 
-### 4.8 Provider binary CLI (SPEC-001 v1.2.5 candidate)
-
-(Audit fix B2.)
-
-- **R-4.8.1** Provider binary MUST gain `--supported-models <ids>`
-  CLI flag (comma-separated), `MACPROVIDER_SUPPORTED_MODELS` env,
-  and config-file key `supported_models: [string]`. Resolution
-  priority: CLI > ENV > config (matches existing `--model`).
-- **R-4.8.2** If `supported_models` is unset after resolution, the
-  provider MUST send `supported_models: [model_id]` (single-entry).
-  This is the wire-level equivalent of R-4.1.5.
-- **R-4.8.3** After resolution, the provider MUST validate locally
-  before opening the coordinator WS connection:
-  - `model_id` (the warm model) MUST be in `supported_models`
-    (case-folded). Mismatch → exit with code 2 and stderr message
-    `"--model <X> not in --supported-models; aborting to avoid
-    auth rejection"`.
-  - `supported_models` length MUST be ≤ 64 and each entry ≤ 256
-    bytes. Violation → exit code 2 with specific stderr message.
-  - Local validation prevents the operator from hitting a remote
-    coordinator rejection after a multi-second connect+auth round-
-    trip.
-- **R-4.8.4** Provider binary MUST gain `--publish-supported-models
-  <bool>` flag (default `false`), populating
-  `publishes_supported_models` in the `auth` frame.
-- **R-4.8.5** Provider binary MUST be able to receive `set_model`
-  WS messages and execute warm swaps per §4.4. This requires
-  async model load in the runtime; the binary's current synchronous
-  startup load remains the legacy path for `--model` at boot.
-
-### 4.9 Provider binary heartbeat update
-
-(Operator-pushed swap support, used in Phase 2 but wire path lands
-in Phase 1.)
-
-When the provider's `loaded_model` changes via operator-pushed
-mechanism (CLI in Phase 2, or admin signal mid-process), the
-provider MUST emit a heartbeat with the new `model_id` AND a new
-`model_hash`. Coordinator's existing heartbeat handler
-([provider.go:420-432](../phase4-coordinator/internal/pool/provider.go))
-already tolerates `ModelID` changes; SPEC-010 makes this path
-NORMATIVE for operator-initiated swaps.
-
-- **R-4.9.1** Operator-pushed swap MUST NOT bypass the
-  `supported_models` constraint. If the operator tries to load a
-  model not in `supported_models`, the provider MUST refuse locally
-  (exit code 2 from the operator CLI, or refuse the admin signal).
-
 ### 4.10 Provider state visibility during swap (F2.2 fix)
 
 The arm64golf canary "red dashboard during restart" pain (§1.1 #2)
@@ -953,43 +695,6 @@ status contract that bounds this risk.
 
 ---
 
-## 5. Phase 2 outline (DEFERRED; design-locked)
-
-_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED by SPEC-011 v0.4 — see §3 Phase 2 note._
-
-Phase 2 is the operator-facing CLI on the provider host. It adds no
-new coordinator behavior; the wire is Phase 1.
-
-```
-macprovider models list             # Local cache + warm state
-macprovider models switch <id>      # Local hot-swap; updates loaded_model
-macprovider models pull <hf-id>     # Download to HF cache
-```
-
-`models switch` invokes the same in-process async load path used by
-§4.4 `set_model`, then emits the §4.9 heartbeat update. The CLI is a
-local-only operation — it does NOT round-trip through the coordinator.
-
-Phase 2 spec deferred to SPEC-010 v0.3.
-
----
-
-## 6. Phase 3 outline (DEFERRED; non-normative)
-
-_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED by SPEC-010 v1.5 + SPEC-013 v0.3 — see §3 Phase 3 note._
-
-Phase 3 closes G-5: operator discovery of recommended models.
-
-- `GET /v1/recommended-catalog` from coordinator returning a curated
-  list of MLX model IDs with optional demand hints (24h request
-  counts per model).
-- `macprovider models list-recommended` fetches and pretty-prints.
-
-The recommended catalog is **guidance, not policy** (L-2). Spec
-deferred to SPEC-010 v0.4.
-
----
-
 ## 7. Backward compatibility
 
 ### 7.1 Legacy provider against SPEC-010 coordinator
@@ -997,10 +702,10 @@ deferred to SPEC-010 v0.4.
 Defined as a provider that sends `auth` with no
 `supported_models`, no `publishes_supported_models`.
 
-- Coordinator synthesizes `SupportedModels: [ModelID]` per R-4.1.5.
-- `PublishesSupportedModels = false` per R-4.3.2.
+- Coordinator synthesizes `SupportedModels: [ModelID]` per SPEC-010.
+- `PublishesSupportedModels = false` per SPEC-010.
 - `/v1/status` for this provider is byte-identical to pre-SPEC-010
-  (R-4.3.3 gates on `PublishesSupportedModels`).
+  (SPEC-010 gates it on `PublishesSupportedModels`).
 - `/v1/models` aggregation includes the model as warm (it's in
   `SupportedModels` AND is the loaded model).
 - With `publish_unwarm_models: false` (default), this provider
@@ -1040,140 +745,9 @@ Operators can opt out via `cold_wake_enabled = false`.)
 
 ---
 
-## 8. Companion-spec annotations (NORMATIVE intent, ADVISORY here)
-
-These are vNEXT candidate edits to LOCKED specs. They do NOT modify
-the locked specs; they describe what those specs would need to add
-in future revisions to fully house SPEC-010.
-
-### 8.1 SPEC-001 v1.2.5 candidate (provider binary)
-
-**Normative source for the SPEC-001 v1.2.5 BUILD prompt:** the
-candidate annotation below is intentionally a thin index; SPEC-001
-v1.2.5 MUST incorporate the following SPEC-010 sections verbatim as
-the implementation contract:
-
-- **§4.1 (auth frame extension)** — wire shape, R-4.1.1 through
-  R-4.1.9 validation order
-- **§4.4 (set_model wire)** — R-4.4.0 request_id, R-4.4.1–4.4.9
-  including drain-timeout semantics and audit event payloads
-- **§4.8 (CLI/env/config resolution + pre-flight validation)** —
-  R-4.8.1 through R-4.8.5
-- **§4.9 (operator-pushed swap heartbeat path)** — R-4.9.1
-- **§4.10 (provider state visibility)** — R-4.10.1 through R-4.10.4
-  (binary contributes `state` field via heartbeat; coordinator
-  publishes it)
-
-The SPEC-001 v1.2.5 BUILD prompt MUST cite these section references
-as binding source-of-truth; any binary-side ambiguity resolved
-during implementation MUST be filed as a SPEC-010 v0.4 audit
-finding, not silently absorbed. (H2.1 fix.)
-
-Index of binary-side surface additions:
-
-- §6.2: gain CLI `--supported-models`, env
-  `MACPROVIDER_SUPPORTED_MODELS`, config key `supported_models`.
-  CLI > ENV > config priority (matches existing `--model`).
-- §6.2: gain CLI `--publish-supported-models <bool>` (default false).
-- §6.1 `/v1/models`: response gains a sibling array
-  `supported_models: []string` alongside the existing single-entry
-  `data: []` list. Local-only field, not derived from coordinator.
-- New §6.6: async model load runtime, swap mechanism per §4.4,
-  drain semantics per R-4.4.6, rollback-on-failure (provider
-  preserves prior weights until new load succeeds), state machine
-  `ready → loading_model → ready` with `loaded_model` swap.
-- New §6.7: WS message handlers for `set_model`, `set_model_ack`,
-  `set_model_complete`. Request_id echo per R-4.4.0.
-- Local pre-flight validation per R-4.8.3 (mismatch model_id vs
-  supported_models exits with code 2 before WS connect; specific
-  stderr messages per failure class).
-- Heartbeat extension per §4.10 to contribute `state` value.
-
-### 8.2 SPEC-002 v1.3.5 candidate (coordinator)
-
-- §3 provider state machine: gain `swap_pending` and `loading_model`
-  sub-states of `ready`. State transitions per §4.4.
-- §5 routing: candidate filter per §4.5.1, warm-first ranking per
-  §4.5.2, cold-wake path per §4.5.3.
-- §7.2 auth: gain optional `supported_models[]` and
-  `publishes_supported_models: bool`.
-- §11 audit-log: gain event types `model_swap_started`,
-  `model_swap_completed`, `model_swap_failed`, `cold_wake_queued`,
-  `cold_wake_drained`. Namespace under existing SPEC-002 §11.
-
-### 8.3 SPEC-004 v0.4 candidate (smart router)
-
-- §4 candidate selection: explicit `req_model ∈ p.SupportedModels`
-  predicate added before existing ranking. Warm-first partition
-  added.
-- §4: cold-wake path per §4.5.3 as a new dispatch outcome
-  alongside existing successful-dispatch / no-eligible / one-shot
-  failover outcomes.
-- §4 sticky-affinity: explicit rule that a sticky pointing at a
-  provider whose `ModelID` is no longer the requested model breaks
-  sticky and re-runs candidate selection.
-
-### 8.4 SPEC-008 v0.4 compatibility note
-
-- §5.5 hash state enumeration is UNCHANGED. SPEC-010 does NOT add a
-  sixth state. The swap window is handled via the not-ready
-  `loading_model` sub-state in SPEC-002, not via hash state.
-- §5.6 routing predicate is UNCHANGED. SPEC-010 §4.5.1 candidate
-  filter precedes SPEC-008's hash predicate; a cold-supported
-  provider is non-candidate, so hash predicate is skipped
-  trivially.
-- Post-swap re-verification: SPEC-008 §5.3 hash computation re-runs
-  on `set_model_complete{result: "succeeded"}` with the new
-  `model_hash`. No SPEC-008 spec change required — the verification
-  flow already triggers on hash arrival.
-- F-1.5 invariants preserved per L-6 / R-4.4.8.
-
----
-
 ## 9. Acceptance criteria
 
 Phase 1 (gates v0.2 implementation):
-
-### Wire correctness
-
-- **AC-1** SPEC-010 provider sending
-  `supported_models: [A, B, C]` with `model_id: A` and
-  `publishes_supported_models: true` registers successfully.
-  Coordinator `/v1/status` shows `supported_models: [A, B, C]` and
-  `model_id: A`.
-- **AC-2** Legacy provider (no `supported_models`, no
-  `publishes_supported_models`) registers successfully. Coordinator
-  stores `SupportedModels: [A]` internally. `/v1/status` for this
-  provider is byte-identical to pre-SPEC-010 output. No
-  `supported_models` field appears. (Audit fix A1.)
-- **AC-3** Provider sending `supported_models: []` (present empty
-  array) is rejected with `bad_request` and reason text containing
-  `"supported_models cannot be empty"`. (Audit fix B1.)
-- **AC-4** Provider sending `supported_models: [A, B, C]` with
-  `model_id: D` is rejected with `bad_request` and reason text
-  containing `"model_id not in supported_models"`.
-- **AC-5** Provider sending `supported_models` with 65 entries is
-  rejected with `bad_request`. Rejection log entry MUST NOT dump
-  the full list.
-- **AC-6** Provider sending `supported_models` with an entry > 256
-  bytes is rejected with `bad_request`.
-- **AC-7** Provider binary CLI: invoking with `--model A
-  --supported-models B,C` exits with code 2 and stderr message
-  containing `"--model A not in --supported-models"` BEFORE
-  attempting a WS connect. (Audit fix B2.)
-
-### Backward-compat
-
-- **AC-8** Coordinator at SPEC-010 with all `[catalog]` defaults
-  AND only legacy providers in pool produces byte-identical
-  `/v1/models`, `/v1/status`, and log lines to pre-SPEC-010
-  coordinator. Verified by diffing JSON responses and log streams.
-  (Audit fix D1.)
-- **AC-9** SPEC-010 provider against a legacy (pre-SPEC-010)
-  coordinator is admitted normally; the legacy coordinator silently
-  ignores `supported_models` and `publishes_supported_models`
-  fields. Provider's swap capability is dormant but does not cause
-  errors.
 
 ### Routing
 
@@ -1246,73 +820,6 @@ Phase 1 (gates v0.2 implementation):
   validates against OpenAI SDK error envelope schema. (Audit fix
   D2.)
 
-### Operator UX
-
-- **AC-22** Phase 1 closes operator pain points #1, #2 from §1.1
-  via demand-pull: operator changes the *effective* served model
-  by directing buyer traffic to a new model ID; provider warm-swaps
-  automatically. Verified end-to-end: start provider with
-  `supported_models: [A, B]`, `model_id: A`. Send buyer request
-  for B. Provider swaps to B (no restart, no WS reconnect).
-  Throughout the swap window, `/v1/status` returns `state:
-  "loading"` for the swapping provider (NOT `state: "down"`)
-  per R-4.10.4. Second buyer request for A swaps back (subject
-  to cooldown). (Audit fix I1, F2.2.)
-- **AC-23** SPEC-008 F-1.5 audit: no sticky-derivation input
-  changes; `set_model`, `set_model_ack`, `set_model_complete`
-  messages don't include `conv:`, `account_id`, or sticky
-  identifiers. Audit-log event payloads in R-4.4.9 likewise
-  contain no buyer prompt text, raw `account_id`, or `conv:`.
-  Verified by code-level audit and grep.
-
-### G2.1 — R-4 rule coverage (new in v0.3)
-
-- **AC-24** R-4.1.7 + R-4.1.9 duplicate handling: provider sends
-  `supported_models: ["mlx-community/Qwen2.5-7B", "Mlx-Community/
-  Qwen2.5-7B"]` (case-variant duplicate). After NFC + ASCII fold,
-  these collide; coordinator MUST reject with `bad_request` and
-  reason `"supported_models contains duplicate entries"`. (B3
-  completion verified.)
-- **AC-25** R-4.1.8 legacy `hello` frame: provider on the legacy
-  `hello` handshake (not `auth`) sends `supported_models` and
-  `publishes_supported_models`. Coordinator MUST apply R-4.1.1
-  through R-4.1.7 identically; admission and `/v1/status` behavior
-  are identical to the `auth` path.
-- **AC-26** R-4.3.4 `seenModels` expansion: provider P registers
-  with `supported_models: [A, B]` and `model_id: A`. Coordinator's
-  `ModelKnown(B)` MUST return `true` even though no provider
-  currently has B as `model_id`. A subsequent buyer query for B
-  (with `cold_wake_enabled: false`) MUST return
-  `503 model_not_warm`, not `404 model_not_found`. (Confirms
-  seenModels semantic: "known" = "could be served," not
-  "currently warm.")
-- **AC-27** R-4.6.1.1 `warm` flag with `publish_unwarm_models:
-  true`: two providers, P1 has `model_id: A`, P2 has `model_id:
-  B`, both list `supported_models: [A, B]`. `/v1/models` returns
-  two entries: A with `warm: true`, B with `warm: true`. If P2
-  disconnects, A remains `warm: true` and B becomes `warm: false`
-  (still in P1's supported set). Cold-supported B's entry has NO
-  `hash_verified` field or `hash_verification` block per
-  R-4.6.1.4.
-- **AC-28** R-4.8.1, R-4.8.4 CLI flag/env/config resolution
-  priority: provider binary started with `--supported-models
-  A,B,C`, env `MACPROVIDER_SUPPORTED_MODELS=D,E`, config file
-  `supported_models: [F]`. Effective `supported_models` is
-  `[A, B, C]` (CLI wins). Same priority for `--publish-supported-
-  models`.
-- **AC-29** R-4.8.5 provider binary swap path: provider binary
-  receives `set_model{target_model_id: B}` over WS. Provider
-  performs async load WITHOUT blocking the WS receive loop
-  (heartbeats continue at the existing cadence during load).
-  On success, provider emits `set_model_complete{succeeded}`
-  with the new `model_hash`.
-- **AC-30** R-4.9.1 operator-pushed local refusal: operator
-  invokes `macprovider models switch X` where X is NOT in the
-  provider's `supported_models` set. CLI exits with code 2 and
-  stderr message indicating the supported-models constraint
-  violation. Provider does NOT emit any heartbeat with `model_id:
-  X`; coordinator state is unchanged.
-
 ### G2.2 — Cold-wake rejection branches (new in v0.3)
 
 - **AC-31** Cold-wake retry on `cooldown` rejection: pool has two
@@ -1365,28 +872,8 @@ Phase 1 (gates v0.2 implementation):
 
 ---
 
-## 10. Open questions for round-3 audit
+## 10. Open gap from round-three audit
 
-Closed in v0.3:
-
-- **OQ-1 (CLOSED)** `cold_wake_request_eta_seconds` retuned from
-  60s to 90s per C2.3 fix — accommodates drain (20s) + load (15-25s)
-  + retry margin.
-- **OQ-3 (CLOSED)** v0.3 keeps `cold_wake_enabled: true` default.
-  With v0.3's `publish_unwarm_models: false` default, buyers don't
-  see cold-supported entries in `/v1/models`, so cold-wake only
-  fires for out-of-band requests where buyer already knows the
-  model exists. Risk surface is bounded.
-- **OQ-5 (CLOSED, B2.3 fix)** `swap_reason` enum reduced to two
-  values (`demand_pull`, `operator_push`). `policy` removed pending
-  an actual policy-driven path.
-
-Open for round 3:
-
-- **OQ-2** `swap_cooldown_seconds` default 60s prevents thrash but
-  blocks operator A→B→A testing workflows. Phase 2 CLI may want a
-  bypass that's only available to operator-pushed swaps, not to
-  demand-pulled ones. v0.4 question, not blocking Phase 1.
 - **OQ-4** `set_model_ack.estimated_load_seconds`: v0.3 specifies
   optional (provider can return 0 if unknown), coordinator falls
   back to `model_not_warm_retry_after_seconds` for `Retry-After`.
@@ -1403,11 +890,10 @@ Open for round 3:
 - GPU/CPU memory accounting per advertised supported model.
   Provider self-reports `supported_models`; coordinator does not
   audit memory feasibility.
-- Catalog signing. The Phase 3 recommended catalog is a snapshot,
-  not a security boundary.
+- Catalog signing; model catalog identity is owned by SPEC-010.
 - Billing or earnings differences per model (L-5).
 - Buyer-side model recommendation ("you might also try …").
-- Operator UI/dashboard for swap monitoring (Phase 3+).
+- Operator UI/dashboard for swap monitoring.
 
 ---
 
@@ -1418,7 +904,7 @@ Open for round 3:
 - [SPEC-004 v0.3.1](SPEC-004-smart-router.md) §4
 - [SPEC-008 v0.3](SPEC-008-tier2.md) §5 (Pillar A), §2 (F-1.5)
 - [SPEC-006 v0.8.1](SPEC-006-buyer-api.md) §F-1.5
-- [SPEC-010 round-1 audit](SPEC-010-audit.md) (Codex GPT-5,
+- [SPEC-010 round-1 audit](../audits/spec-010/SPEC-010-audit.md) (Codex GPT-5,
   2026-06-06)
 - [phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)
 - [phase3-binary/Sources/macprovider-cli/ModelRuntime.swift](../phase3-binary/Sources/macprovider-cli/ModelRuntime.swift)

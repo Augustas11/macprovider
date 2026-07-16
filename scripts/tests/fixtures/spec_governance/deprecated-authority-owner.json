@@ -1,0 +1,6 @@
+{
+  "mutation": {
+    "operation": "deprecated_authority_owner"
+  },
+  "expected": "must not retain authority domains"
+}

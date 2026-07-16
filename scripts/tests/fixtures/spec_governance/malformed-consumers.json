@@ -1,0 +1,1 @@
+{"mutation":{"operation":"malformed_consumers"},"expected":"field 'consumers' must be an array"}

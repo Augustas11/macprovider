@@ -1,0 +1,1 @@
+{"mutation":{"operation":"drop_authority_schema_version"},"expected":"missing required field 'schema_version'"}

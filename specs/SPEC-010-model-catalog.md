@@ -21,7 +21,7 @@ SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
 
 **Change log v1.5 (round-5 polish pass — lock candidate):**
 Round-5 verdict was READY TO LOCK with 0 CRITICAL / 0 MAJOR /
-3 MINOR / 0 QUESTION (specs/SPEC-010-audit.md round 5). v1.5
+3 MINOR / 0 QUESTION (`audits/spec-010/SPEC-010-audit.md` round 5). v1.5
 closes the 3 MINORs as a final polish pass before lock:
 - **A5.1 MINOR fix** (retention/defer creation should
   explicitly gate on SPEC-010 field presence): R-3.1.10
@@ -48,7 +48,7 @@ closes the 3 MINORs as a final polish pass before lock:
 
 **Change log v1.4 (round-4 audit response):** Round-4 produced
 0 CRITICAL / 2 MAJOR / 5 MINOR findings
-(specs/SPEC-010-audit.md round 4). v1.4 closes all 7. Both
+(`audits/spec-010/SPEC-010-audit.md` round 4). v1.4 closes all 7. Both
 MAJORs were code-precision items at the same boundary as v1.3
 focus (initial-stage table accuracy + R-3.1.10 cleanup
 mechanism).
@@ -111,7 +111,7 @@ mechanism).
 
 **Change log v1.3 (round-3 audit response — code-grounding
 pass):** Round-3 produced 0 CRITICAL / 5 MAJOR / 0 MINOR
-findings (specs/SPEC-010-audit.md round 3). All 5 MAJORs were
+findings (`audits/spec-010/SPEC-010-audit.md` round 3). All 5 MAJORs were
 one logical cluster: v1.2 §3.1.A field table and R-3.1.10
 retention contract were written without spot-checking the
 actual `parseAuthInitial` parser and `server.go` auth-attempt
@@ -165,7 +165,7 @@ flow. v1.3 closes all 5 by code-grounding §3.1.A against
 
 **Change log v1.2 (round-2 audit response):** Round-2 produced
 0 CRITICAL / 3 MAJOR / 2 MINOR findings
-(specs/SPEC-010-audit.md round 2). v1.2 closes all 5. The 3
+(`audits/spec-010/SPEC-010-audit.md` round 2). v1.2 closes all 5. The 3
 MAJORs were one logical cluster — B.1 round 2, B2.1, B2.2 — all
 rooted in the same issue: the v2 `auth_request` flow exists in
 code but no locked spec normatively documents it, so v1.1's
@@ -199,7 +199,7 @@ contract" rather than "must extend existing v2 text."
 
 **Change log v1.1 (round-1 audit response on the narrow-scope
 SPEC-010 v1.0):** Round-1 produced 0 CRITICAL / 3 MAJOR / 1 MINOR
-findings (specs/SPEC-010-audit.md round 1). v1.1 closes all
+findings (`audits/spec-010/SPEC-010-audit.md` round 1). v1.1 closes all
 four.
 - **B.1 fix** (wire frame name + wrong SPEC-002 section): §3.1
   example now uses the correct `auth_request` frame shape with
@@ -230,11 +230,11 @@ through v0.3 of SPEC-010 bundled
 capability advertisement, warm-swap mechanism, demand-pull cold
 wake, buyer catalog visibility, and operator state visibility into
 a single ~1400-line spec. Three audit rounds (rounds 1-3 in
-`specs/SPEC-012-source-audit-history.md`) showed the wide scope
+`audits/spec-012/SPEC-012-source-audit-history.md`) showed the wide scope
 generates 12+ audit findings per round driven by cross-feature
 collisions across 5 locked specs. **SPEC-010 v1.0 is the result of
 splitting that work.** The wide-scope draft is preserved at
-`specs/SPEC-012-source.md`; warm-swap mechanism becomes SPEC-011;
+`specs/SPEC-012-coordinator-demand-pull.md`; warm-swap mechanism becomes SPEC-011;
 demand-pull + catalog visibility becomes SPEC-012 (paired with a
 SPEC-008 v0.4 normative edit).
 
@@ -1409,10 +1409,11 @@ predicate available for SPEC-011 / SPEC-012 to consume.
   v1.3.5 candidate per §6.2 above MUST ADD that section
 - [SPEC-004 v0.3.1](SPEC-004-smart-router.md) §4
 - [SPEC-008 v0.3](SPEC-008-tier2.md) (no interaction — see §6.3)
-- [SPEC-012 source draft](SPEC-012-source.md) — wide-scope v0.3
-  spec that produced 3 audit rounds; basis for SPEC-011 +
-  SPEC-012 split
-- [SPEC-012 source audit history](SPEC-012-source-audit-history.md)
+- [SPEC-012 coordinator demand-pull draft](SPEC-012-coordinator-demand-pull.md)
+  — retained unique coordinator-driven contract
+- [SPEC-012 split history](../docs/spec-history/SPEC-012-v0.3-history.md)
+  — wide-scope predecessor and split rationale
+- [SPEC-012 source audit history](../audits/spec-012/SPEC-012-source-audit-history.md)
   — rounds 1-3 against the wide-scope v0.1, v0.2, v0.3
 - [phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)
 - [phase4-coordinator/internal/ws/messages.go](../phase4-coordinator/internal/ws/messages.go)

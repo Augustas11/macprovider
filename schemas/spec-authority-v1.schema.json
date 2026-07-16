@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/schemas/spec-authority-v1.schema.json",
+  "title": "Macprovider SPEC authority manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "baseline", "domains"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": "spec-authority-v1"},
+    "baseline": {"$ref": "#/$defs/baseline"},
+    "domains": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/domain"}
+    }
+  },
+  "$defs": {
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "captured_at"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "captured_at": {"type": "string", "format": "date"}
+      }
+    },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "owner_spec", "consumers", "status", "owner", "issue"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "owner_spec": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"},
+        "consumers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
+        "status": {"enum": ["declared", "pending-reconciliation", "deprecated"]},
+        "owner": {"type": "string", "pattern": "^@[A-Za-z0-9-]+$"},
+        "issue": {"type": "string", "pattern": "^https://github\\.com/Augustas11/macprovider/issues/[0-9]+$"}
+      }
+    }
+  }
+}

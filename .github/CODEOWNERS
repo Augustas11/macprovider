@@ -9,4 +9,20 @@ phase5-gateway/internal/auth/** @Augustas11
 # CI gate controls for the sensitive paths.
 .github/CODEOWNERS @Augustas11
 .github/workflows/ci.yml @Augustas11
+.github/workflows/spec-index.yml @Augustas11
 Makefile @Augustas11
+
+# SPEC governance controls are one review boundary; weakening code and its
+# fixtures together still requires repository-owner review.
+specs/AUTHORITY.json @Augustas11
+specs/CONFORMANCE.json @Augustas11
+specs/PROCESS.md @Augustas11
+specs/TEMPLATE.md @Augustas11
+schemas/spec-authority-v1.schema.json @Augustas11
+schemas/spec-conformance-v1.schema.json @Augustas11
+scripts/check_spec_governance.py @Augustas11
+scripts/check_spec_pr_declaration.py @Augustas11
+scripts/gen_spec_index.py @Augustas11
+scripts/tests/test_spec_governance.py @Augustas11
+scripts/tests/test_spec_pr_declaration.py @Augustas11
+scripts/tests/fixtures/spec_governance/** @Augustas11

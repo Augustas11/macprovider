@@ -1,0 +1,4 @@
+{
+  "mutation": {"operation": "implemented_unverified_without_requirements"},
+  "expected": "implemented-unverified requires at least one owned requirement"
+}

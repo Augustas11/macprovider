@@ -1,0 +1,997 @@
+{
+  "$schema": "../schemas/spec-conformance-v1.schema.json",
+  "schema_version": "spec-conformance-v1",
+  "baseline": {
+    "commit": "1df5f76c3fbde1b84619b717fcc28ef1e2c05bc3",
+    "captured_at": "2026-07-16"
+  },
+  "specs": [
+    {
+      "spec_id": "SPEC-001",
+      "title": "Phase 3 Binary: Mac Provider Inference CLI",
+      "version": "1.8.4",
+      "path": "specs/SPEC-001-phase3-binary.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-wire-protocol"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:4022cf2efca338cf1710ef55114ed5f61d8fa0ee243928096d0038edd092b03d",
+      "legacy_requirement_count": 172,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-002",
+      "title": "Phase 4 Coordinator: Mac Provider Request Router",
+      "version": "1.5.4",
+      "path": "specs/SPEC-002-coordinator.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "coordinator-admission-routing"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:8f1848dc9bf9682b9b2b907c57e40dba5dc1d1f0656ba7783ea1c0b2f30388d7",
+      "legacy_requirement_count": 250,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-003",
+      "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
+      "version": "0.10.3",
+      "path": "specs/SPEC-003-open-onboarding.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-onboarding-identity"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:b1b75b8401c5b1cb0d85c310d3d83d792aa20a708c73f0d1f19c52b9e7653fe3",
+      "legacy_requirement_count": 72,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-004",
+      "title": "Smart Router",
+      "version": "0.3.2",
+      "path": "specs/SPEC-004-smart-router.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "sticky-routing-identity"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-006",
+        "SPEC-008"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:5cb643b19ca4c197d37d9c3eb5aa8cc3226148ab277ab61aad8fbb88bbc27e4c",
+      "legacy_requirement_count": 98,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-005",
+      "title": "Billing, Settlement, and Provider Rewards",
+      "version": "0.6",
+      "path": "specs/SPEC-005-billing.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "billing-settlement-formula"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-004",
+        "SPEC-006",
+        "SPEC-024"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:ccd2cd83dbc49b2b7f37895a17406a9c6d61415045290989da2b292adee120f6",
+      "legacy_requirement_count": 222,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-006",
+      "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
+      "version": "0.9.12",
+      "path": "specs/SPEC-006-buyer-api.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "buyer-api-error-contract"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-004"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:2cdd0455edb36fef3c515aafa01e38e8b47faf8bda57252dbde91b542a09ac39",
+      "legacy_requirement_count": 472,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-007",
+      "title": "Internal Operator Protocol Explorer",
+      "version": "0.5",
+      "path": "specs/SPEC-007-explorer.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "operator-protocol-explorer"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:b8c5e07655c8247a68530cffc4508d23c72fa15cfeb5b8bdf1607db76ae34f31",
+      "legacy_requirement_count": 204,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-008",
+      "title": "Tier-2 Trust Layer",
+      "version": "0.5",
+      "path": "specs/SPEC-008-tier2.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "tier2-trust-evidence"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-004",
+        "SPEC-006"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:996b022a4bee7cdc7257552149582a00d63cbfc75361d9c6b820b60435c8cabd",
+      "legacy_requirement_count": 244,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-009",
+      "title": "MacProvider Console v2",
+      "version": "0.1",
+      "path": "specs/SPEC-009-console-v2.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-console"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "legacy_requirement_count": 0,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-010",
+      "title": "Provider Model Catalog",
+      "version": "1.5",
+      "path": "specs/SPEC-010-model-catalog.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "model-catalog-identity"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:8a1669f4f8f1dcba12af277e81717a0df927edf907bf7549f1cd0ec95acf13ff",
+      "legacy_requirement_count": 73,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/608"
+      }
+    },
+    {
+      "spec_id": "SPEC-011",
+      "title": "Operator-Pushed Warm Swap",
+      "version": "0.5",
+      "path": "specs/SPEC-011-operator-pushed-warm-swap.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "operator-pushed-warm-swap"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:8c397f015215ca490871f9cd3ec28b8d0f152fae4547d434c6c9f514bbe0f829",
+      "legacy_requirement_count": 98,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-012",
+      "title": "Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility",
+      "version": "0.3",
+      "path": "specs/SPEC-012-coordinator-demand-pull.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "coordinator-demand-pull-model-swap",
+        "buyer-cold-model-visibility"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-004",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:869dc3b894b4cd9cce78cccf892e49e228f912c9c25e0800df7855af6ca49a0a",
+      "legacy_requirement_count": 92,
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-013",
+      "title": "`macprovider-cli autotune` subcommand",
+      "version": "0.3",
+      "path": "specs/SPEC-013-cli-autotune.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "autotune-recommendation"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-010",
+        "SPEC-011"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:04f231465dd023a0db8ccf197e1d1304617342bc0f7e666923bed1775774a473",
+      "legacy_requirement_count": 111,
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/612"
+      }
+    },
+    {
+      "spec_id": "SPEC-014",
+      "title": "Provider Portal (seller-facing web surface)",
+      "version": "0.9",
+      "path": "specs/SPEC-014-provider-portal.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-portal"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:87dcc6b156b461883f4478fab7e237a3f83ac32ac544d2d57e8e00701e1d7329",
+      "legacy_requirement_count": 61,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-015",
+      "title": "Verifiable inference receipts",
+      "version": "0.4.2",
+      "path": "specs/SPEC-015-receipts.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "inference-receipts"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013",
+        "SPEC-022"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:6fb68af2a9545f704fbaf1345ad3b7d8e856e19c8dc168ad4e63eb66d30ca6f9",
+      "legacy_requirement_count": 326,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-016",
+      "title": "Provider payout pipeline (USDC on Base)",
+      "version": "0.1.20",
+      "path": "specs/SPEC-016-payout-pipeline.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "payout-lifecycle"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-014"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:25ef56e7937ab8aeb2f29b23845575c7cec2188d74fcbaa3e75c403de52f32a1",
+      "legacy_requirement_count": 209,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-017",
+      "title": "Network Stats API",
+      "version": "0.1.8",
+      "path": "specs/SPEC-017-network-stats-api.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "network-stats"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-014",
+        "SPEC-016"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:1a03dbcddd3fd4048a56f22971dbae3172884366671590d29ed4c1705520839d",
+      "legacy_requirement_count": 149,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-018",
+      "title": "Agentic tool calling (provider-side response synthesis)",
+      "version": "0.2.4",
+      "path": "specs/SPEC-018-agentic-tool-calling.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "agentic-tool-calling"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-011",
+        "SPEC-015"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:f68f43b59ba37c95e8056a51074d6cec5cb00a3dbf93ad51b884df63e486b81b",
+      "legacy_requirement_count": 138,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-019",
+      "title": "Structured output (`response_format: json_schema`)",
+      "version": "0.2.5",
+      "path": "specs/SPEC-019-structured-output.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "structured-output"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-006",
+        "SPEC-015",
+        "SPEC-018"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:4f0fb57341735609416e67b2a738be8a330dc47c135a16bb4cd0e1dfe24ceec8",
+      "legacy_requirement_count": 133,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-020",
+      "title": "Provider autoupdate",
+      "version": "v0.1.7",
+      "path": "specs/SPEC-020-provider-autoupdate.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-autoupdate"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:2433217c28e3842c2e6a765c677888536a422855ef885b133aca998c53afdeee",
+      "legacy_requirement_count": 156,
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/610"
+      }
+    },
+    {
+      "spec_id": "SPEC-021",
+      "title": "MALIBU bootstrap rewards emission ledger",
+      "version": "0.1.0",
+      "path": "specs/SPEC-021-malibu-emission-ledger.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "malibu-emission-ledger"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-016",
+        "SPEC-017",
+        "SPEC-022",
+        "SPEC-026"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:753ecc962609420ad773edfda387ee444f282ad2914378a16a27d54e390d9d2b",
+      "legacy_requirement_count": 5,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-022",
+      "title": "Verified model settlement",
+      "version": "v0.1.5",
+      "path": "specs/SPEC-022-verified-model-settlement.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "verified-model-settlement"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-015",
+        "SPEC-016"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:fdc9050124a3cef6f437b57149a44e2dad6b8d680d5355cdf2f2988e1dddad0d",
+      "legacy_requirement_count": 96,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-023",
+      "title": "Installer-Integrated Autotune Recommend",
+      "version": "v0.6",
+      "path": "specs/SPEC-023-installer-autotune-recommend.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "installer-autotune-policy"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:2f5637c6e243b759401ef1e50ce998c497d6f924533d54b15c3118426d69d0f1",
+      "legacy_requirement_count": 27,
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/612"
+      }
+    },
+    {
+      "spec_id": "SPEC-024",
+      "title": "Prefix-cache billing and provider-local cache isolation",
+      "version": "0.2.1",
+      "path": "specs/SPEC-024-prefix-cache-billing.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "prefix-cache-billing-isolation"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-004",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-018"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:82038c2fa0d51e9fb9666ac056d873175fff44cd46f8997d89c9d8d2f43aebb8",
+      "legacy_requirement_count": 69,
+      "gap": {
+        "verdict": "DUPLICATE_AUTHORITY",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-025",
+      "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
+      "version": "v0.14",
+      "path": "specs/SPEC-025-native-mac-app.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "native-app-lifecycle"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "legacy_requirement_count": 0,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/611"
+      }
+    },
+    {
+      "spec_id": "SPEC-026",
+      "title": "Browserless Provider Onboarding (one-click Launch Provider)",
+      "version": "v0.24",
+      "path": "specs/SPEC-026-browserless-provider-onboarding.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "browserless-onboarding"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:67e255db37275bf42acde8f8db4b296a95ab20f5a988942a0d256f28d4fee6ac",
+      "legacy_requirement_count": 58,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-027",
+      "title": "Provider Proof of Ownership for App-Track Wallet Changes",
+      "version": "v0.1",
+      "path": "specs/SPEC-027-provider-proof-of-ownership.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-wallet-proof"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:11a45b6c0bc76c693a4686f02b9dc2a5e9bbea3ff7f2c5345648ce9c9d836506",
+      "legacy_requirement_count": 5,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-028",
+      "title": "MLX Speculative Decoding for Provider Serve",
+      "version": "0.2-draft",
+      "path": "specs/SPEC-028-mlx-speculative-decoding.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "speculative-decoding"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013",
+        "SPEC-015"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:1b6a308a7eaff0b65dad0360c3c2223c9b8758017b4ed4cc86ed03fdc6649083",
+      "legacy_requirement_count": 47,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-029",
+      "title": "Sweep Workload-Class Stratification",
+      "version": "0.1-draft",
+      "path": "specs/SPEC-029-sweep-workload-class-stratification.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "sweep-workload-stratification"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-013",
+        "SPEC-023",
+        "SPEC-028"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:e1cd3da71065ff00a587286c376fd8a71ddddd6cf4274de7552e62805a9620a9",
+      "legacy_requirement_count": 41,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-030",
+      "title": "Losslessness Probe",
+      "version": "v0.1",
+      "path": "specs/SPEC-030-losslessness-probe.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "losslessness-probe"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-028"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:d4b0016d74ce86e0f49e65483b512ea596d8101b490d5337f2c3046492c278c5",
+      "legacy_requirement_count": 83,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-031",
+      "title": "Canary Probe, Degrade & Sanction Lifecycle",
+      "version": "v0.1",
+      "path": "specs/SPEC-031-canary-degrade-sanctions.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "canary-sanction-lifecycle"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-018"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:ee2ce1dffd31f905d102b9b2a177986a59f90a41a9c9b9ec02c90252e15be503",
+      "legacy_requirement_count": 102,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-032",
+      "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
+      "version": "v0.1",
+      "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "hardware-evidence-admission"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-008",
+        "SPEC-020",
+        "SPEC-030",
+        "SPEC-031"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:0d82ee2be882f326af761fc1a6ac195173a0b73ddcfb6e99d1d792a9ed1927f0",
+      "legacy_requirement_count": 40,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-033",
+      "title": "Hardware-Evidence Verifier (`hardware-verifier.v2`)",
+      "version": "v0.6",
+      "path": "specs/SPEC-033-hardware-verifier.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "hardware-evidence-verifier"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-023",
+        "SPEC-032"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:08829493d5f5e38c817ffc9f7a03d7b2954ddd01c69873af3ba848decec25f0d",
+      "legacy_requirement_count": 28,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    }
+  ],
+  "requirements": []
+}
