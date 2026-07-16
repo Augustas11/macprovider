@@ -1,15 +1,18 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.6
+Version: v0.1.7
 Status: Implemented on branch; v1.8.31 rollout pending. The production path ran
 the 2026-07-10 incident-recovery
 autoupdate to CLI 1.8.21. Trust-table drift remains resolved as documented in
 v0.1.5. v0.1.6 adds the complete-payload, shared-mutation-ownership, and
 coordinator-authoritative buyer-serving commit gates required by Entry 133.
+v0.1.7 (runbook item 23) closes the tokenless race-loser residual: the
+coordinator propagates its `auth_state` admission verdict on the accept ack so
+the bearerless-duplicate notify-only row is client-enforceable.
 
 ## Goal
 
-SPEC-020 v0.1.6 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.7 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -99,33 +102,38 @@ issuer-less coordinator deployment, where `s.issuer == nil` and
 state before any token logic runs
 (`phase4-coordinator/internal/ws/server.go:810-811`) — an explicit operator
 deployment choice, not an attack corner; and (b) the tokenless race-loser
-corner described immediately below, which is a residual gap. The production
-`mac` provider holds a validated `provider_token` and reaches `.eligible` via
-the bearer-validated path.
+corner described immediately below, which WAS a residual gap and is RESOLVED in
+v0.1.7 (the coordinator now propagates `auth_state` so the notify-only floor is
+client-enforceable). The production `mac` provider holds a validated
+`provider_token` and reaches `.eligible` via the bearer-validated path.
 
-**Known residual: tokenless race-loser corner.** The bearerless-duplicate
-notify-only row is coordinator-side intent, not currently a client-enforceable
-guarantee in every case. When two tokenless connects race for the same
-`provider_id`, `resolveProvisionalToken` marks the loser
-`pool.AuthBearerlessDuplicate` at the auth layer
-(`phase4-coordinator/internal/ws/server.go:838` and `:851`); the registry then
-admits that session into the pool only if it registers before any existing
-session for the same `provider_id` is already registered —
-`RegisterAtDetailed` refuses registration for an `AuthBearerlessDuplicate`
-connection when an existing session for that `provider_id` is present
-(`phase4-coordinator/internal/pool/provider.go:658-668`), closing the
-pool-slot-capture vector. In the admitted (registers-first) case, the
-`provisionalTokenSkip` outcome sends the CLI neither `assigned_provider_token`
-nor any `auth_state` field for that session. Client-side,
-`AutoUpdateTrustState.fromCoordinatorPayload` therefore computes
-`tokenConfigured=false` and `bearerlessDuplicate=false` for that connection,
-and — if tier, encrypted-leg, and attestation otherwise qualify — it can reach
-`.eligible` rather than the table's intended notify-only verdict. This corner
-does not affect the production `mac` provider, which holds a validated
-`provider_token` and is genuinely bearer-validated. Closing this gap requires
-the coordinator to propagate an explicit `auth_state` (or equivalent signal)
-to the client for the race-loss outcome; that is a coordinator-side change and
-is out of scope for this v0.1.5 spec amendment. Carried as a follow-up.
+**Tokenless race-loser corner (RESOLVED v0.1.7, runbook item 23).** The
+bearerless-duplicate notify-only row is now a client-enforceable guarantee. When
+two tokenless connects race for the same `provider_id`, `resolveProvisionalToken`
+marks the loser `pool.AuthBearerlessDuplicate` at the auth layer
+(`phase4-coordinator/internal/ws/server.go`); the registry admits that session
+into the pool only if it registers before any existing session for the same
+`provider_id` — `RegisterAtDetailed` refuses registration for an
+`AuthBearerlessDuplicate` connection when an existing session is present
+(`phase4-coordinator/internal/pool/provider.go`), closing the pool-slot-capture
+vector. In the admitted (registers-first) case, the coordinator now propagates
+its admission verdict on the accept ack via the OPTIONAL `auth_state` field —
+field shape/domain owned by SPEC-001 §6.5.1, emission by SPEC-003 FR-C9.2a; the
+ack values are `bearer_validated` / `self_minted` / `bearerless_duplicate`
+(`mint_failed` and rejects close the connection and never ride an ack). SPEC-020
+owns only the autoupdate INTERPRETATION of that field, defined here.
+Client-side, `AutoUpdateTrustState.fromCoordinatorPayload` reads `auth_state`
+authoritatively: `auth_state == "bearerless_duplicate"` sets
+`bearerlessDuplicate=true` regardless of the (tokenless) heuristic, so the
+verdict is `.bearerlessDuplicate` (notify-only), not `.eligible`. An
+UNRECOGNIZED non-empty `auth_state` (enum evolution / malformed) is handled
+FAIL-CLOSED — treated as the notify-only floor, never relaxed to `.eligible`. A
+coordinator that omits `auth_state` (legacy, or no token issuer configured) falls
+back to the pre-existing inference, so behavior against old coordinators is
+unchanged. The client uses `auth_state` only to hold a MORE restrictive floor;
+it never relaxes a verdict on a coordinator claim (e.g. `tokenValidated` is
+unchanged and still requires a genuinely held or adopted token). This corner never affected the production `mac` provider, which
+holds a validated `provider_token` and is genuinely bearer-validated.
 
 Implementations MUST store an explicit current `autoupdate_trust_state` field
 per coordinator session and MUST NOT derive eligibility from
@@ -1014,6 +1022,21 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.7 (2026-07-15, runbook item 23): Closed the tokenless race-loser residual
+  (the "Tokenless race-loser corner" note above). The coordinator propagates its
+  admission verdict via the OPTIONAL `auth_state` ack field — wire shape/domain
+  owned by **SPEC-001 §6.5.1 (v1.8.4)**, emission by **SPEC-003 FR-C9.2a
+  (v0.10.3)**; SPEC-020 v0.1.7 owns only the autoupdate INTERPRETATION here. The
+  CLI's `AutoUpdateTrustState.fromCoordinatorPayload` reads it authoritatively so
+  a bearerless-duplicate race-loser is client-enforceable notify-only rather than
+  heuristically inferred (and reachably `.eligible`); an unrecognized value is
+  FAIL-CLOSED to the notify-only floor. Legacy coordinators that omit `auth_state`
+  fall back to the prior inference (no behavior change). The client uses the
+  signal only to hold a more-restrictive floor, never to relax a verdict.
+  Coordinator: `internal/ws/messages.go` / `internal/ws/server.go` (both accept
+  sites). Binary: `AutoUpdateTrustState.swift`. Two-module code + docs; no
+  production behavior change for bearer-validated providers (prod `mac`
+  unaffected).
 - v0.1.6 (2026-07-11): Bound autoupdate to the complete manifest-backed binary
   plus catalog payload; replaced local-health/WebSocket-rejoin success with the
   coordinator-authoritative exact-provider `buyer_serving:true` and

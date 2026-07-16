@@ -99,6 +99,54 @@ struct AutoUpdateTrustState: Sendable {
         let tier = payload["tier"] as? String
         let attestationStatus = (((payload["tier2_session"] as? [String: Any])?["attestation"] as? [String: Any])?["status"] as? String)
         let tokenConfigured = providerToken?.isEmpty == false || (payload["assigned_provider_token"] as? String)?.isEmpty == false
+        // Runbook item 23 / SPEC-020 v0.1.7: prefer the coordinator's EXPLICIT
+        // admission verdict (`auth_state`) over the client-side heuristic. The
+        // coordinator propagates one of bearer_validated / self_minted /
+        // bearerless_duplicate on the accept ack (mint_failed / rejects close the
+        // connection and never ride an ack — the switch handles it defensively),
+        // so a bearerless_duplicate race-loser is client-enforceable rather than
+        // inferred. A legacy coordinator omits `auth_state` (empty) — fall back
+        // to the pre-existing inference so behavior is unchanged against old
+        // coordinators. The client uses this only to hold a MORE restrictive
+        // floor (bearerless_duplicate → notify-only); it never relaxes the
+        // verdict based on a coordinator claim.
+        // Distinguish the key being ABSENT (legacy coordinator → heuristic
+        // fallback, behavior unchanged) from the key being PRESENT-but-malformed
+        // (empty, non-string null/number/object, or an unrecognized string). The
+        // coordinator uses omitempty, so a legitimately "no verdict" ack omits the
+        // key entirely; any present value that is not a recognized non-empty
+        // string is anomalous and MUST fail closed to the notify-only floor rather
+        // than fall through to the heuristic (which could reach .eligible).
+        let bearerlessDuplicate: Bool
+        if let rawAuthState = payload["auth_state"] {
+            if let authState = rawAuthState as? String, !authState.isEmpty {
+                switch authState {
+                case "bearer_validated", "self_minted":
+                    // The closed wire domain of ack auth_state (SPEC-001 §6.5.1):
+                    // known non-duplicate verdicts — the verdict pipeline still
+                    // applies its own tier/token/attestation guards. (Reserved
+                    // states like self_minted_verified are NOT in the emitted
+                    // domain; if one ever appears it takes the fail-closed default
+                    // below until a coordinated SPEC-001/003/020 bump defines it.)
+                    bearerlessDuplicate = false
+                case "bearerless_duplicate", "mint_failed":
+                    // Race-loser holds the notify-only floor. mint_failed does not
+                    // normally ride an ack (the coordinator closes the connection),
+                    // but if ever seen it is treated as notify-only, defensively.
+                    bearerlessDuplicate = true
+                default:
+                    // Unrecognized string (enum evolution) — FAIL CLOSED.
+                    bearerlessDuplicate = true
+                }
+            } else {
+                // Present but empty / non-string (NSNull, number, bool, object):
+                // malformed — FAIL CLOSED to the notify-only floor.
+                bearerlessDuplicate = true
+            }
+        } else {
+            // Key absent → legacy coordinator; use the pre-existing inference.
+            bearerlessDuplicate = tokenConfigured && providerToken == nil && !assignedProviderTokenAdopted
+        }
         return AutoUpdateTrustState(
             v2Accepted: isV2,
             tier: tier,
@@ -107,7 +155,7 @@ struct AutoUpdateTrustState: Sendable {
             attestationSatisfied: attestationStatus == nil || attestationStatus == "attested" || attestationStatus == "not_required",
             tokenConfigured: tokenConfigured,
             tokenValidated: !tokenConfigured || providerToken?.isEmpty == false || assignedProviderTokenAdopted,
-            bearerlessDuplicate: tokenConfigured && providerToken == nil && !assignedProviderTokenAdopted,
+            bearerlessDuplicate: bearerlessDuplicate,
             connected: true,
             acceptProvisional: acceptProvisional
         )

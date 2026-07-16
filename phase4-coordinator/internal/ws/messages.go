@@ -65,6 +65,16 @@ type HelloAck struct {
 	AssignedProviderToken         string `json:"assigned_provider_token,omitempty"`
 	PairOT                        string `json:"pair_ot,omitempty"`
 	ClaimURL                      string `json:"claim_url,omitempty"`
+	// The coordinator's admission verdict on this ACCEPT ack — one of
+	// bearer_validated / self_minted / bearerless_duplicate (pool.AuthState).
+	// mint_failed and the reject paths CLOSE the connection, so they never ride
+	// an ack. Emission owner: SPEC-003 FR-C9.2a; field shape: SPEC-001 §6.5.1;
+	// autoupdate interpretation: SPEC-020 v0.1.7 (runbook item 23). Propagated so
+	// the provider enforces the SPEC-020 trust floor client-side (a
+	// bearerless_duplicate race-loser stays notify-only) instead of inferring it.
+	// Omitted (empty) by a coordinator with no token issuer → client falls back
+	// to its inference.
+	AuthState                     string `json:"auth_state,omitempty"`
 	CatalogCompatible             bool   `json:"catalog_compatible,omitempty"`
 	CatalogReleaseID              string `json:"catalog_release_id,omitempty"`
 	CatalogPolicyVersion          string `json:"catalog_policy_version,omitempty"`
@@ -163,6 +173,11 @@ type AuthResponse struct {
 	AssignedProviderToken               string `json:"assigned_provider_token,omitempty"`
 	PairOT                              string `json:"pair_ot,omitempty"`
 	ClaimURL                            string `json:"claim_url,omitempty"`
+	// Coordinator admission verdict on this ACCEPT ack; see the
+	// HelloAck.AuthState note (emission SPEC-003 FR-C9.2a, shape SPEC-001 §6.5.1,
+	// interpretation SPEC-020 v0.1.7). mint_failed / rejects close the
+	// connection and never ride an ack.
+	AuthState                           string `json:"auth_state,omitempty"`
 	CatalogCompatible                   bool   `json:"catalog_compatible,omitempty"`
 	CatalogReleaseID                    string `json:"catalog_release_id,omitempty"`
 	CatalogPolicyVersion                string `json:"catalog_policy_version,omitempty"`

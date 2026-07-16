@@ -78,6 +78,10 @@ func TestSelfServeProvisionalTokenMintedOnHelloAck(t *testing.T) {
 	if len(ack.AssignedProviderToken) != 64 {
 		t.Fatalf("assigned_provider_token len = %d, want 64 hex chars: %q", len(ack.AssignedProviderToken), ack.AssignedProviderToken)
 	}
+	// Runbook item 23: the coordinator propagates its admission verdict.
+	if ack.AuthState != string(pool.AuthSelfMinted) {
+		t.Fatalf("hello_ack auth_state = %q, want %q (self-minted admission)", ack.AuthState, pool.AuthSelfMinted)
+	}
 
 	// The cleartext returned to the binary MUST validate through the
 	// same store and resolve back to the declared provider_id.
@@ -275,6 +279,10 @@ func TestSelfServeProvisionalTokenNotMintedWhenBearerValidated(t *testing.T) {
 	}
 	if ack.AssignedProviderToken != "" {
 		t.Fatalf("assigned_provider_token = %q, want empty when bearer validated", ack.AssignedProviderToken)
+	}
+	// Runbook item 23: bearer-validated admission propagates auth_state.
+	if ack.AuthState != string(pool.AuthBearerValidated) {
+		t.Fatalf("hello_ack auth_state = %q, want %q (bearer-validated admission)", ack.AuthState, pool.AuthBearerValidated)
 	}
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
