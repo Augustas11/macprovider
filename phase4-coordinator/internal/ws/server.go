@@ -1724,6 +1724,8 @@ func referralCloseReason(err error) string {
 		return "referral_revoked"
 	case errors.Is(err, auth.ErrReferralExhausted):
 		return "referral_exhausted"
+	case errors.Is(err, auth.ErrReferralConflict):
+		return "referral_conflict"
 	default:
 		return "referral_invalid"
 	}

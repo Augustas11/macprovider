@@ -17,7 +17,7 @@ func TestReferralCloseReasonPreservesLifecycleToken(t *testing.T) {
 		auth.ErrReferralExpired:   "referral_expired",
 		auth.ErrReferralRevoked:   "referral_revoked",
 		auth.ErrReferralExhausted: "referral_exhausted",
-		auth.ErrReferralConflict:  "referral_invalid",
+		auth.ErrReferralConflict:  "referral_conflict",
 	}
 	for err, want := range cases {
 		if got := referralCloseReason(err); got != want {
