@@ -71,6 +71,6 @@ distinguishes:
 | Malibu app suite | 171 tests, 0 failures | 2026-07-15 |
 | Installer rollback matrix | contents/absence/interrupted/forward cases green | 2026-07-15 |
 | distribution suite | `make test-dist` full chain green | 2026-07-15 |
-| Three-lane codex audit R1 | 0C/4H/5M/2L — fixes in progress | 2026-07-15 |
+| Three-lane codex audit loop | CONVERGED: SECURITY 0/0/0 (R3), ARCHITECT 0/0/0 (R3), CODE 0/0/0/0 clean approval (R9) — funnel R1:11 → R2:3 → R3:1 → … → R9:0; along the way eliminated the last fail-open divergence (exact-microsecond owner identity, kernel-byte-identical to Swift) and fixed a pre-existing startup restart-loop (leaseNotValid fallback) | 2026-07-16 |
 | G2 candidate run | — | pending |
 | G3 rollout + soak | — | pending |
