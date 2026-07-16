@@ -251,12 +251,12 @@ func (s *Store) RevokeReferralIssuerAudited(ctx context.Context, campaign, issue
 	out := ReferralRevocation{Campaign: campaign, IssuerID: issuerID}
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		var providerID, revokedAt sql.NullString
-		var baseCapacity, bonusCapacity int
+		var baseCapacity, bonusCapacity, carriedRedemptions int
 		if err := conn.QueryRowContext(ctx, `
-SELECT code_type, provider_id, revoked_at, base_capacity, bonus_capacity
+SELECT code_type, provider_id, revoked_at, base_capacity, bonus_capacity, carried_redemptions
   FROM referral_issuers
  WHERE campaign = ? AND issuer_id = ?`, campaign, issuerID).Scan(
-			&out.CodeType, &providerID, &revokedAt, &baseCapacity, &bonusCapacity,
+			&out.CodeType, &providerID, &revokedAt, &baseCapacity, &bonusCapacity, &carriedRedemptions,
 		); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrReferralInvalid
@@ -272,6 +272,7 @@ SELECT code_type, provider_id, revoked_at, base_capacity, bonus_capacity
 		).Scan(&out.Redeemed); err != nil {
 			return err
 		}
+		out.Redeemed += carriedRedemptions
 		out.RemainingCapacity = baseCapacity + bonusCapacity - out.Redeemed
 		if out.RemainingCapacity < 0 {
 			out.RemainingCapacity = 0

@@ -703,26 +703,27 @@ type AuthConfig struct {
 	GitHubOAuth                           GitHubOAuthConfig `yaml:"github_oauth"`
 }
 
-// ReferralConfig owns pre-beta admission policy. Both launch flags default
+// ReferralConfig owns pre-beta admission policy. All launch flags default
 // off; HMAC material supports env:NAME indirection and never needs to be
 // written to the credential database.
 type ReferralConfig struct {
-	RequireForRegistration  bool              `yaml:"require_for_registration"`
-	EnablePublicValidation  bool              `yaml:"enable_public_validation"`
-	EnableJoinLinks         bool              `yaml:"enable_join_links"`
-	EnableSocialInviteBonus bool              `yaml:"enable_social_invite_bonus"`
-	Campaign                string            `yaml:"campaign"`
-	PolicyVersion           string            `yaml:"policy_version"`
-	GrandfatherBefore       string            `yaml:"grandfather_before"`
-	CurrentKeyID            string            `yaml:"current_key_id"`
-	HMACKeys                map[string]string `yaml:"hmac_keys"`
-	ProviderBaseUses        int               `yaml:"provider_base_uses"`
-	SocialBonusUses         int               `yaml:"social_bonus_uses"`
-	ChallengeTTLS           int               `yaml:"challenge_ttl_s"`
-	JoinBaseURL             string            `yaml:"join_base_url"`
-	JoinDownloadURL         string            `yaml:"join_download_url"`
-	XAPIBearerToken         string            `yaml:"x_api_bearer_token"`
-	RequestAccessURL        string            `yaml:"request_access_url"`
+	RequireForRegistration   bool              `yaml:"require_for_registration"`
+	EnablePublicValidation   bool              `yaml:"enable_public_validation"`
+	EnableJoinLinks          bool              `yaml:"enable_join_links"`
+	EnableSocialInviteBonus  bool              `yaml:"enable_social_invite_bonus"`
+	Campaign                 string            `yaml:"campaign"`
+	PolicyVersion            string            `yaml:"policy_version"`
+	GrandfatherBefore        string            `yaml:"grandfather_before"`
+	CurrentKeyID             string            `yaml:"current_key_id"`
+	HMACKeys                 map[string]string `yaml:"hmac_keys"`
+	ProviderBaseUses         int               `yaml:"provider_base_uses"`
+	SocialBonusUses          int               `yaml:"social_bonus_uses"`
+	ChallengeTTLS            int               `yaml:"challenge_ttl_s"`
+	SocialVerificationDwellS int               `yaml:"social_verification_dwell_s"`
+	JoinBaseURL              string            `yaml:"join_base_url"`
+	JoinDownloadURL          string            `yaml:"join_download_url"`
+	XAPIBearerToken          string            `yaml:"x_api_bearer_token"`
+	RequestAccessURL         string            `yaml:"request_access_url"`
 }
 
 type GitHubOAuthConfig struct {
@@ -1148,12 +1149,13 @@ func Default() Config {
 			CredentialBootstrapIdentityRetentionS: 604800,
 		},
 		Referrals: ReferralConfig{
-			ProviderBaseUses: 1,
-			SocialBonusUses:  2,
-			ChallengeTTLS:    900,
-			JoinBaseURL:      "https://coordinator.streamvc.live/j",
-			PolicyVersion:    "v1",
-			HMACKeys:         map[string]string{},
+			ProviderBaseUses:         1,
+			SocialBonusUses:          2,
+			ChallengeTTLS:            900,
+			SocialVerificationDwellS: 1800,
+			JoinBaseURL:              "https://coordinator.streamvc.live/j",
+			PolicyVersion:            "v1",
+			HMACKeys:                 map[string]string{},
 		},
 		Proxy: ProxyConfig{
 			// Default trusts loopback only. Production sits behind nginx on
@@ -1884,6 +1886,9 @@ func (c Config) validateReferrals() error {
 			return fmt.Errorf("referrals.join_download_url must be set when join links are enabled")
 		}
 	}
+	if r.EnableSocialInviteBonus && (!r.RequireForRegistration || !r.EnableJoinLinks) {
+		return fmt.Errorf("referrals.enable_social_invite_bonus requires referral admission and join links")
+	}
 	if !r.RequireForRegistration && !r.EnablePublicValidation && !r.EnableJoinLinks && !r.EnableSocialInviteBonus {
 		return nil
 	}
@@ -1914,16 +1919,16 @@ func (c Config) validateReferrals() error {
 		return fmt.Errorf("referrals.provider_base_uses must be > 0")
 	}
 	if r.EnableSocialInviteBonus {
-		if r.SocialBonusUses <= 0 || r.ChallengeTTLS <= 0 {
-			return fmt.Errorf("referrals social_bonus_uses and challenge_ttl_s must be > 0")
+		if r.SocialBonusUses <= 0 || r.ChallengeTTLS <= 0 || r.SocialVerificationDwellS <= 0 {
+			return fmt.Errorf("referrals social_bonus_uses, challenge_ttl_s, and social_verification_dwell_s must be > 0")
 		}
 		if strings.TrimSpace(r.XAPIBearerToken) == "" {
 			return fmt.Errorf("referrals.x_api_bearer_token must be set when social invite bonus is enabled")
 		}
 	}
 	joinURL, err := url.Parse(strings.TrimSpace(r.JoinBaseURL))
-	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.RawQuery != "" || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
-		return fmt.Errorf("referrals.join_base_url must be an absolute https URL ending in /j")
+	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.User != nil || joinURL.RawQuery != "" || joinURL.ForceQuery || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
+		return fmt.Errorf("referrals.join_base_url must be a credential-free absolute https URL ending in /j")
 	}
 	return nil
 }

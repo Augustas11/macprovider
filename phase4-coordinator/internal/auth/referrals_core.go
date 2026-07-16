@@ -34,17 +34,18 @@ var referralEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 // ReferralPolicy is a caller-owned immutable snapshot. Secrets remain in
 // memory; issuer rows persist only the key id needed for explicit rotation.
 type ReferralPolicy struct {
-	RequireForRegistration bool
-	EnableSocialBonus      bool
-	Campaign               string
-	PolicyVersion          string
-	GrandfatherBefore      *time.Time
-	GrandfatherProof       bool
-	CurrentKeyID           string
-	HMACKeys               map[string]string
-	ProviderBaseUses       int
-	SocialBonusUses        int
-	ChallengeTTL           time.Duration
+	RequireForRegistration  bool
+	EnableSocialBonus       bool
+	Campaign                string
+	PolicyVersion           string
+	GrandfatherBefore       *time.Time
+	GrandfatherProof        bool
+	CurrentKeyID            string
+	HMACKeys                map[string]string
+	ProviderBaseUses        int
+	SocialBonusUses         int
+	ChallengeTTL            time.Duration
+	SocialVerificationDwell time.Duration
 }
 
 func (p ReferralPolicy) Validate() error {
@@ -72,8 +73,8 @@ func (p ReferralPolicy) Validate() error {
 	if p.ProviderBaseUses <= 0 {
 		return fmt.Errorf("referral provider capacity must be positive")
 	}
-	if p.EnableSocialBonus && (p.SocialBonusUses <= 0 || p.ChallengeTTL <= 0) {
-		return fmt.Errorf("referral social capacity and challenge ttl must be positive")
+	if p.EnableSocialBonus && (p.SocialBonusUses <= 0 || p.ChallengeTTL <= 0 || p.SocialVerificationDwell <= 0) {
+		return fmt.Errorf("referral social capacity, challenge ttl, and verification dwell must be positive")
 	}
 	return nil
 }
@@ -161,14 +162,15 @@ func validateReferralTx(ctx context.Context, conn referralQueryRower, policy Ref
 		Campaign  string
 		Base      int
 		Bonus     int
+		Carried   int
 		ExpiresAt sql.NullString
 		RevokedAt sql.NullString
 	}
 	err = conn.QueryRowContext(ctx, `
-SELECT code_type, key_id, campaign, base_capacity, bonus_capacity, expires_at, revoked_at
+SELECT code_type, key_id, campaign, base_capacity, bonus_capacity, carried_redemptions, expires_at, revoked_at
   FROM referral_issuers
  WHERE issuer_id = ?`, parsed.IssuerID).Scan(
-		&issuer.Type, &issuer.KeyID, &issuer.Campaign, &issuer.Base, &issuer.Bonus,
+		&issuer.Type, &issuer.KeyID, &issuer.Campaign, &issuer.Base, &issuer.Bonus, &issuer.Carried,
 		&issuer.ExpiresAt, &issuer.RevokedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -196,7 +198,7 @@ SELECT code_type, key_id, campaign, base_capacity, bonus_capacity, expires_at, r
 	).Scan(&used); err != nil {
 		return ReferralValidation{}, err
 	}
-	remaining := issuer.Base + issuer.Bonus - used
+	remaining := issuer.Base + issuer.Bonus - issuer.Carried - used
 	if remaining <= 0 {
 		return ReferralValidation{
 			Reason: "exhausted", Type: parsed.Type, IssuerID: parsed.IssuerID, Campaign: issuer.Campaign,

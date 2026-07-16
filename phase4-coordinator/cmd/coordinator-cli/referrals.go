@@ -162,6 +162,106 @@ func revokeReferral(args []string, stdout io.Writer) error {
 	return err
 }
 
+func replaceProviderReferral(args []string, getenv func(string) string, stdout io.Writer) error {
+	fs := newReferralFlagSet("replace-provider-referral")
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	campaign := fs.String("campaign", "", "referral campaign identifier")
+	keyID := fs.String("key-id", "", "HMAC key identifier for the replacement code")
+	secretEnv := fs.String("secret-env", "", "environment variable containing the HMAC secret")
+	issuerID := fs.String("issuer-id", "", "revoked provider invite issuer identifier")
+	apply := fs.Bool("apply", false, "replace the issuer (default is a dry-run preview)")
+	actor := fs.String("actor", "", "operator identity recorded in the audit log (required with --apply)")
+	reason := fs.String("reason", "", "reason recorded in the audit log (required with --apply)")
+	expectProviderID := fs.String("expect-provider-id", "", "provider ID from the dry-run (required with --apply)")
+	expectBaseCapacity := fs.Int("expect-base-capacity", -1, "current base capacity from the dry-run (required with --apply)")
+	expectBonusCapacity := fs.Int("expect-bonus-capacity", -1, "current bonus capacity from the dry-run (required with --apply)")
+	expectRedeemed := fs.Int("expect-redeemed", -1, "carried and current redemptions from the dry-run (required with --apply)")
+	expectPendingSocial := fs.String("expect-pending-social-review", "", "pending social review state from the dry-run: true or false (required with --apply)")
+	setReferralUsage(fs, "replace-provider-referral", "coordinator-cli replace-provider-referral --db coordinator.db --campaign prebeta --key-id k1 --secret-env MAL_REFERRAL_SECRET --issuer-id oldissuer --apply --actor ops@malibu --reason 'rotate compromised link' --expect-provider-id provider-123 --expect-base-capacity 1 --expect-bonus-capacity 0 --expect-redeemed 0 --expect-pending-social-review=false")
+	if err := fs.Parse(args); err != nil {
+		return referralParseError(err)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments")
+	}
+	actorValue := strings.TrimSpace(*actor)
+	reasonValue := strings.TrimSpace(*reason)
+	providerExpectation := strings.TrimSpace(*expectProviderID)
+	var pendingExpectation bool
+	if *apply {
+		if actorValue == "" || reasonValue == "" {
+			return fmt.Errorf("--actor and --reason are required with --apply")
+		}
+		if providerExpectation == "" || *expectBaseCapacity < 0 || *expectBonusCapacity < 0 || *expectRedeemed < 0 || strings.TrimSpace(*expectPendingSocial) == "" {
+			return fmt.Errorf("--expect-provider-id, --expect-base-capacity, --expect-bonus-capacity, --expect-redeemed, and --expect-pending-social-review are required with --apply (run the dry-run first)")
+		}
+		parsed, err := parseExpectedBool("--expect-pending-social-review", *expectPendingSocial)
+		if err != nil {
+			return err
+		}
+		pendingExpectation = parsed
+	}
+
+	policy, err := referralCLIPolicy(*campaign, *keyID, *secretEnv, getenv)
+	if err != nil {
+		return err
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	// Always re-read the durable state immediately before an apply. The
+	// expectation flags bind the operator's earlier preview to this run; the
+	// store then performs its own revoked-issuer CAS inside the transaction.
+	preview, err := store.ReplaceReferralIssuer(context.Background(), policy, strings.TrimSpace(*issuerID), "", "", false, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if !*apply {
+		_, err = fmt.Fprintf(stdout, "mode=dry-run\ncampaign=%s\nprovider_id=%s\nold_issuer_id=%s\ncurrent_base_capacity=%d\ncurrent_bonus_capacity=%d\nredeemed=%d\nremaining=%d\npending_social_review=%t\nreplacement_base_capacity=%d\n",
+			policy.Campaign, preview.ProviderID, preview.OldIssuerID, preview.OldBaseCapacity, preview.OldBonusCapacity, preview.Redeemed, preview.Remaining, preview.PendingSocialReview, preview.BaseCapacity)
+		return err
+	}
+	if providerExpectation != preview.ProviderID || *expectBaseCapacity != preview.OldBaseCapacity || *expectBonusCapacity != preview.OldBonusCapacity || *expectRedeemed != preview.Redeemed || pendingExpectation != preview.PendingSocialReview {
+		return fmt.Errorf("replacement snapshot drift: expected provider_id=%s base_capacity=%d bonus_capacity=%d redeemed=%d pending_social_review=%t but live provider_id=%s base_capacity=%d bonus_capacity=%d redeemed=%d pending_social_review=%t; re-run the dry-run",
+			providerExpectation, *expectBaseCapacity, *expectBonusCapacity, *expectRedeemed, pendingExpectation,
+			preview.ProviderID, preview.OldBaseCapacity, preview.OldBonusCapacity, preview.Redeemed, preview.PendingSocialReview)
+	}
+	result, err := store.ReplaceReferralIssuerExpected(
+		context.Background(), policy, preview.OldIssuerID, actorValue, reasonValue,
+		&auth.ReferralReplacementExpectation{
+			ProviderID:          providerExpectation,
+			OldBaseCapacity:     *expectBaseCapacity,
+			OldBonusCapacity:    *expectBonusCapacity,
+			Redeemed:            *expectRedeemed,
+			PendingSocialReview: pendingExpectation,
+		},
+		true, time.Now().UTC(),
+	)
+	if err != nil {
+		return err
+	}
+	if !result.Applied || result.NewIssuerID == "" || result.NewCode == "" {
+		return fmt.Errorf("replacement did not produce a new issuer and referral code")
+	}
+	_, err = fmt.Fprintf(stdout, "mode=applied\nprovider_id=%s\nold_issuer_id=%s\nnew_issuer_id=%s\nnew_referral_code=%s\n",
+		result.ProviderID, result.OldIssuerID, result.NewIssuerID, result.NewCode)
+	return err
+}
+
+func parseExpectedBool(name, value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
+}
+
 func referralCLIPolicy(campaign, keyID, secretEnv string, getenv func(string) string) (auth.ReferralPolicy, error) {
 	secretEnv = strings.TrimSpace(secretEnv)
 	if secretEnv == "" {

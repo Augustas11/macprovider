@@ -90,6 +90,42 @@ func TestWithReferralValidationMountsJoinRouteOnlyWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestWithReferralAdvocacyKeepsMutationRoutesAbsentWhenDisabled(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.NotFound(w, nil) })
+	status := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+	challenge := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) }
+	verify := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }
+
+	statusOnly := withReferralAdvocacy(base, status, nil, nil)
+	for _, test := range []struct {
+		path string
+		want int
+	}{
+		{path: "/v1/provider/referrals", want: http.StatusOK},
+		{path: "/v1/provider/referrals/x/challenge", want: http.StatusNotFound},
+		{path: "/v1/provider/referrals/x/verify", want: http.StatusNotFound},
+	} {
+		response := httptest.NewRecorder()
+		statusOnly.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, nil))
+		if response.Code != test.want {
+			t.Fatalf("status-only path=%s status=%d want=%d", test.path, response.Code, test.want)
+		}
+	}
+
+	fullyEnabled := withReferralAdvocacy(base, status, challenge, verify)
+	for path, want := range map[string]int{
+		"/v1/provider/referrals":             http.StatusOK,
+		"/v1/provider/referrals/x/challenge": http.StatusCreated,
+		"/v1/provider/referrals/x/verify":    http.StatusAccepted,
+	} {
+		response := httptest.NewRecorder()
+		fullyEnabled.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != want {
+			t.Fatalf("enabled path=%s status=%d want=%d", path, response.Code, want)
+		}
+	}
+}
+
 func TestNewReferralValidationHandlerWiresOperatorRecoveryURL(t *testing.T) {
 	handler := newReferralValidationHandler(nil, auth.ReferralPolicy{}, nil, "  https://access.example.test/waitlist  ")
 	if handler.RequestAccessURL != "https://access.example.test/waitlist" {

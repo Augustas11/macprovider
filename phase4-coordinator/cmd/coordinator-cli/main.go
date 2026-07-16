@@ -47,6 +47,8 @@ func main() {
 		err = adjustSeedReferral(os.Args[2:], os.Getenv, os.Stdout)
 	case "revoke-referral":
 		err = revokeReferral(os.Args[2:], os.Stdout)
+	case "replace-provider-referral":
+		err = replaceProviderReferral(os.Args[2:], os.Getenv, os.Stdout)
 	default:
 		usage()
 		os.Exit(2)
@@ -619,5 +621,5 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|revoke-referral> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|revoke-referral|replace-provider-referral> [flags]")
 }
