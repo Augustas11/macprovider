@@ -42,17 +42,29 @@ func TestAdmissionReservationIsNotDurableUntilCredentialCommit(t *testing.T) {
 		ProvisionalPoolMax:              1,
 	}, func() time.Time { return now })
 	manager.SetPersistence(store, func(err error) { t.Fatalf("persist admission: %v", err) })
-	hello := Hello{ProviderID: "provider-a", Hostname: "host", ModelID: "model", BinaryVersion: "1.2.0"}
-	if tier, code, reason := manager.ReserveAdmission(hello, false, 0); tier != pool.TierProvisional || code != 0 || reason != "" {
+	failedHello := Hello{ProviderID: "provider-a", Hostname: "host-a", ModelID: "model", BinaryVersion: "1.2.0"}
+	if tier, code, reason := manager.ReserveAdmission(failedHello, false, 0); tier != pool.TierProvisional || code != 0 || reason != "" {
 		t.Fatalf("reserve tier=%s code=%d reason=%q", tier, code, reason)
 	}
 	if records := manager.Records(nil); len(records) != 0 {
 		t.Fatalf("reservation created durable records: %+v", records)
 	}
-	if tier := manager.CommitReservedAdmission(hello, false); tier != pool.TierProvisional {
+
+	committedHello := Hello{ProviderID: "provider-b", Hostname: "host-b", ModelID: "model", BinaryVersion: "1.2.0"}
+	if _, code, _ := manager.ReserveAdmission(committedHello, false, 0); code != CloseProvisionalPoolFull {
+		t.Fatalf("reserve while credential pending code=%d, want %d", code, CloseProvisionalPoolFull)
+	}
+	manager.ReleasePendingProvisional()
+	if records := manager.Records(nil); len(records) != 0 {
+		t.Fatalf("failed credential reservation created durable records: %+v", records)
+	}
+	if tier, code, reason := manager.ReserveAdmission(committedHello, false, 0); tier != pool.TierProvisional || code != 0 || reason != "" {
+		t.Fatalf("reserve after failure release tier=%s code=%d reason=%q", tier, code, reason)
+	}
+	if tier := manager.CommitReservedAdmission(committedHello, false); tier != pool.TierProvisional {
 		t.Fatalf("commit tier=%s", tier)
 	}
-	if records := manager.Records(nil); len(records) != 1 || records[0].ProviderID != hello.ProviderID {
+	if records := manager.Records(nil); len(records) != 1 || records[0].ProviderID != committedHello.ProviderID {
 		t.Fatalf("committed records=%+v", records)
 	}
 	manager.ReleasePendingProvisional()
