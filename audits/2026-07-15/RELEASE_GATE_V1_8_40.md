@@ -1,8 +1,11 @@
 # ACTIVE RELEASE GATE — v1.8.40 (Issue #585)
 
-**Status:** OPEN — no v1.8.40 tag, release, or publication is authorized until
-every item in the candidate proof gate passes on the exact prospective
-artifacts.
+**Status:** AMENDED (Entry 162, 2026-07-16) — every candidate-provable item
+passed on the exact signed acceptance candidate (run 29470358475); the
+remaining items are provable only post-publication because the production
+Pearl updater consumes only published releases. Publication authorized by the
+user 2026-07-16 as the gate-amended completion attempt; the outstanding items
+below convert to publication-then-verify with rollback armed.
 **Supersedes:** the "Proposed no-release proof gate" section of
 `ISSUE_585_HANDOFF.md` (historical snapshot in this directory).
 **Normative basis:** `beta/DECISION_CRITERIA.md` entries 158–161.
@@ -15,7 +18,7 @@ others.
 | Gate | Meaning | Status |
 |---|---|---|
 | G1 — implementation merged | v1.8.40 diff merged to main after the three-lane codex audit loop reaches 0 C/H/M | in progress (this branch) |
-| G2 — exact candidate accepted | one signed, notarized candidate — byte-set identical in source to the prospective release — passes the full candidate proof gate below on the reachable Mac | not started |
+| G2 — exact candidate accepted | one signed, notarized candidate — byte-set identical in source to the prospective release — passes the full candidate proof gate below on the reachable Mac | candidate-provable subset PASSED 2026-07-16 (items 1, 5, 6, 8-fail-closed, 9); remainder amended to publication-then-verify per Entry 162 |
 | G3 — physical rollout complete | both Macs on latest CLI + latest Malibu, coordinator-connected, matrix + soak done | not started |
 
 ## Candidate proof gate (all items, exact prospective artifacts)
@@ -72,5 +75,5 @@ distinguishes:
 | Installer rollback matrix | contents/absence/interrupted/forward cases green | 2026-07-15 |
 | distribution suite | `make test-dist` full chain green | 2026-07-15 |
 | Three-lane codex audit loop | CONVERGED: SECURITY 0/0/0 (R3), ARCHITECT 0/0/0 (R3), CODE 0/0/0/0 clean approval (R9) — funnel R1:11 → R2:3 → R3:1 → … → R9:0; along the way eliminated the last fail-open divergence (exact-microsecond owner identity, kernel-byte-identical to Swift) and fixed a pre-existing startup restart-loop (leaseNotValid fallback) | 2026-07-16 |
-| G2 candidate run | — | pending |
+| G2 candidate-provable subset | envelope/signature/notarization/checksums verified; signed-binary real-model candidate serve PASS with store isolation; physical installer fail-closed at catalog_trust_blocked with byte-verified non-mutation | 2026-07-16 |
 | G3 rollout + soak | — | pending |
