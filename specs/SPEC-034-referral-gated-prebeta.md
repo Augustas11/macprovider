@@ -223,10 +223,13 @@ has no capability field and MUST NOT be extended in place. For an existing insta
 requires `referral_bootstrap_v1` in the CLI-authored local status contract before
 offering input. It invokes later typed referral actions over an owner-only local
 interface. The CLI owns all authenticated coordinator calls and exposes only a
-sanitized projection under `referral_status_v1`. Malibu and CLI marketing versions are
-independent; compatibility is negotiated by advertised protocol capabilities and
-schema versions. Missing or unknown capability means unavailable, never an
-inferred zero balance or eligibility decision.
+sanitized owner-only control-socket projection under `referral_status_v1`.
+Typed challenge/verify/cancel/reopen actions additionally require
+`referral_advocacy_v1`; a status-capable CLI without that capability remains
+read-only. Malibu and CLI marketing versions are independent;
+compatibility is negotiated by advertised protocol capabilities and schema
+versions. Missing or unknown capability means unavailable, never an inferred
+zero balance or eligibility decision.
 
 Authenticated referral status includes a credential-free HTTPS
 `join_base_url` ending in `/j`; it may intentionally use a public host different

@@ -16,7 +16,8 @@ collect bounded referral input and pass it to the signed installed CLI through a
 supported versioned onboarding request. The CLI performs registration and all
 authenticated coordinator referral operations, retains identity and bearer
 custody, and projects sanitized coordinator-authored referral state under a
-capability such as `referral_status_v1`. Malibu never receives the bearer, calls
+`referral_status_v1` capability; typed social actions additionally require
+`referral_advocacy_v1`. Malibu never receives the bearer, calls
 referral coordinator APIs directly, infers serving/invite eligibility, or starts
 a provider child. Malibu and CLI marketing versions are independent; local
 protocol capabilities and schema versions, not marketing-version equality,
@@ -359,8 +360,11 @@ time (60–240 s for the first model) in the background.
   connected, §5.2); model selection is owned by `install.sh` / autotune and the CLI,
   not an in-app `switch_request`.
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
-  projection and invokes typed CLI actions, but does not persist referral policy,
-  read credentials, call coordinator referral endpoints, or award capacity. It
+  control-socket projection only when the CLI advertises `referral_status_v1`.
+  Typed challenge/verify/cancel/reopen actions additionally require
+  `referral_advocacy_v1`; a status-capable CLI without that capability remains
+  read-only. Malibu does not persist referral policy, read credentials, call
+  coordinator referral endpoints, or award capacity. It
   validates invite links against the coordinator-authenticated `join_base_url`,
   presents status for at most 90 seconds, and clears it when the owner-only
   control connection closes. X challenge nonces, share URLs, and composer
