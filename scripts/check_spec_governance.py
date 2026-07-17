@@ -152,6 +152,38 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _paragraph_remains_open(line: str, was_open: bool) -> bool:
+    """Track enough container state to apply CommonMark type-7 start rules."""
+    content = line
+    while True:
+        quote = re.match(r" {0,3}>[ \t]?", content)
+        if quote is None:
+            break
+        content = content[quote.end():]
+
+    list_item = re.match(
+        r" {0,3}(?:[*+-]|\d{1,9}[.)])(?:[ \t]+|$)",
+        content,
+    )
+    if list_item is not None:
+        content = content[list_item.end():]
+
+    stripped = content.strip()
+    if not stripped:
+        return False
+    if (
+        re.match(r" {0,3}#{1,6}(?:\s|$)", content)
+        or re.match(r" {0,3}(?:`{3,}|~{3,})", content)
+        or re.fullmatch(
+            r" {0,3}(?:=+|-+|\*\s*\*\s*\*[\s*]*|_\s*_\s*_[\s_]*)",
+            content,
+        )
+        or (not was_open and content.startswith(("    ", "\t")))
+    ):
+        return False
+    return True
+
+
 def _contract_markdown(text: str) -> str:
     """Return Markdown contract text without examples or HTML comments."""
     raw_lines = text.splitlines()
@@ -191,6 +223,10 @@ def _contract_markdown(text: str) -> str:
             continue
 
         if code_span is None and not in_comment:
+            if not paragraph_open and raw_line.startswith(("    ", "\t")):
+                paragraph_open = False
+                lines.append(raw_line)
+                continue
             raw_html_opening = re.match(
                 r" {0,3}<(pre|script|style|textarea)(?:\s|>|$)",
                 raw_line,
@@ -283,7 +319,14 @@ def _contract_markdown(text: str) -> str:
                 visible.append(raw_line[cursor:end])
                 cursor = end
                 continue
-            if raw_line.startswith("<!--", cursor):
+            if (
+                raw_line.startswith("<!--", cursor)
+                and _has_inline_comment_closer(
+                    raw_lines,
+                    line_index,
+                    cursor + 4,
+                )
+            ):
                 in_comment = True
                 cursor += 4
                 continue
@@ -291,16 +334,7 @@ def _contract_markdown(text: str) -> str:
             cursor += 1
         line = "".join(visible)
         lines.append(line)
-        stripped = raw_line.strip()
-        if (
-            not stripped
-            or re.match(r" {0,3}#{1,6}(?:\s|$)", raw_line)
-            or re.fullmatch(r" {0,3}(?:=+|-+|\*\s*\*\s*\*[\s*]*|_\s*_\s*_[\s_]*)", raw_line)
-            or (not paragraph_open and raw_line.startswith(("    ", "\t")))
-        ):
-            paragraph_open = False
-        else:
-            paragraph_open = True
+        paragraph_open = _paragraph_remains_open(raw_line, paragraph_open)
     return "\n".join(lines)
 
 
@@ -327,6 +361,24 @@ def _has_code_span_closer(
             if end - start == run_length:
                 return True
             cursor = end
+    return False
+
+
+def _has_inline_comment_closer(
+    lines: list[str],
+    line_index: int,
+    cursor: int,
+) -> bool:
+    """Return whether an inline HTML comment closes inside this paragraph."""
+    for candidate_index in range(line_index, len(lines)):
+        candidate = lines[candidate_index]
+        if candidate_index != line_index:
+            if not candidate.strip():
+                return False
+            cursor = 0
+        end = candidate.find("-->", cursor)
+        if end != -1:
+            return True
     return False
 
 

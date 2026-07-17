@@ -491,7 +491,12 @@ class GovernanceValidatorTests(unittest.TestCase):
                 self.assertEqual(1, count)
 
     def test_literal_comment_syntax_cannot_hide_later_obligations(self) -> None:
-        for literal in ("`<!--` is inline code.", r"\<!-- is escaped syntax."):
+        for literal in (
+            "`<!--` is inline code.",
+            r"\<!-- is escaped syntax.",
+            "    <!-- is indented code.",
+            "Visible prose mentions <!-- literally.",
+        ):
             with self.subTest(literal=literal):
                 text = (
                     f"{literal}\n"
@@ -508,6 +513,22 @@ class GovernanceValidatorTests(unittest.TestCase):
         )
         _, count = legacy_requirement_fingerprint(text)
         self.assertEqual(1, count)
+
+    def test_type_seven_html_starts_after_nonparagraph_blockquotes(self) -> None:
+        prefixes = (
+            ">\n",
+            "> # Heading\n",
+            "> ```\n> example\n> ```\n",
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                text = (
+                    prefix
+                    + "<widget>\n"
+                    + "The provider MUST not count hidden raw HTML.\n\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(0, count)
 
     def test_malformed_nested_values_never_crash(self) -> None:
         mutations = [

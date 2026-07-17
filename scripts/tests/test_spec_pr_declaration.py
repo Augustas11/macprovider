@@ -99,6 +99,9 @@ class SpecPRDeclarationTests(unittest.TestCase):
             "<?example\n  behavior-change: none\n?>\n",
             "<![CDATA[\n  behavior-change: none\n]]>\n",
             "\n<widget title=\">\">\n  behavior-change: none\n\n",
+            "> # Heading\n<widget>\n  behavior-change: none\n\n",
+            ">\n<widget>\n  behavior-change: none\n\n",
+            "> ```\n> example\n> ```\n<widget>\n  behavior-change: none\n\n",
             "    behavior-change: none\n",
             "<!--\n  behavior-change: none\n-->\n",
         )
@@ -108,7 +111,12 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 self.assertTrue(any("behavior-change" in error for error in errors))
 
     def test_literal_comment_syntax_does_not_hide_real_declarations(self) -> None:
-        for literal in ("`<!--` is inline code.", r"\<!-- is escaped syntax."):
+        for literal in (
+            "`<!--` is inline code.",
+            r"\<!-- is escaped syntax.",
+            "    <!-- is indented code.",
+            "Visible prose mentions <!-- literally.",
+        ):
             with self.subTest(literal=literal):
                 body = (
                     f"{literal}\n"
