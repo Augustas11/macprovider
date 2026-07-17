@@ -94,6 +94,179 @@ class SpecPRDeclarationTests(unittest.TestCase):
             with self.subTest(opener=body.splitlines()[0]):
                 self.assertIn("missing", "\n".join(validate_body(body)))
 
+    def test_root_html_keeps_list_looking_content_hidden(self) -> None:
+        body = (
+            "<div>\n"
+            "-\n"
+            "spec-governance:\n"
+            "behavior-change: none\n\n"
+        )
+        self.assertIn("missing", "\n".join(validate_body(body)))
+
+    def test_container_exit_exposes_real_declarations(self) -> None:
+        prefixes = (
+            "> ```text\n> example\n",
+            "- ```text\n  example\n",
+            "> <script>\n> example\n",
+            "- <script>\n  example\n",
+            "> <div>\n> example\n",
+            "- <div>\n  example\n",
+        )
+        for prefix in prefixes:
+            with self.subTest(opener=prefix.splitlines()[0]):
+                body = prefix + "spec-governance:\n  behavior-change: none\n"
+                self.assertEqual([], validate_body(body))
+
+    def test_valid_multiline_references_hide_following_type_seven_examples(self) -> None:
+        prefixes = (
+            '[label]: /url\n  "title"\n',
+            "[label]: /url '\ntitle\nline\n'\n",
+            "[\nfoo\n]: /url\n",
+            '> [label]:\n> /url\n',
+            '- [label]:\n  /url\n',
+            '> [label]: /url\n> "title"\n',
+            '- [label]: /url\n  "title"\n',
+            '> [label]:\n/url\n',
+            '> [\nfoo\n]: /url\n',
+            '- [\nfoo\n]: /url\n',
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                body = (
+                    prefix
+                    + "<widget>\n"
+                    + "spec-governance:\n"
+                    + "behavior-change: none\n\n"
+                )
+                self.assertIn("missing", "\n".join(validate_body(body)))
+
+    def test_invalid_references_cannot_hide_real_declarations(self) -> None:
+        prefixes = (
+            '[label]: MUST\\ "title"\n',
+            '[label]: <url>()\n',
+            '[label]: /url "escaped close\\"\n',
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                body = (
+                    prefix
+                    + "<widget>\n"
+                    + "spec-governance:\n"
+                    + "behavior-change: none\n\n"
+                )
+                self.assertEqual([], validate_body(body))
+
+    def test_reference_continuations_stop_at_interrupting_blocks(self) -> None:
+        prefixes = (
+            '[label]:\n  >M "title"\n',
+            '[label]:\n  - M "title"\n',
+            '[label]:\n  1. M "title"\n',
+            '[label]:\n  # "title"\n',
+            '[label]:\n  ```text\n  hidden\n  ```\n',
+            '[label]: /url\n  > "title"\n',
+            '[label]: /url\n  - "title"\n',
+            '[\n> title\n]: /url\n',
+            '[label]: /url "\n# title\n"\n',
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                body = (
+                    prefix
+                    + "\n"
+                    + "spec-governance:\n"
+                    + "  behavior-change: none\n"
+                )
+                self.assertEqual([], validate_body(body))
+
+    def test_code_span_cannot_cross_html_block_boundary(self) -> None:
+        body = (
+            "Visible ` opener\n"
+            "<script>\n"
+            "spec-governance:\n"
+            "behavior-change: none\n"
+            "</script>\n"
+            "`\n"
+        )
+        self.assertIn("missing", "\n".join(validate_body(body)))
+
+    def test_multiline_code_span_hides_declaration_payload(self) -> None:
+        body = (
+            "`example\n"
+            "spec-governance:\n"
+            "  behavior-change: none\n"
+            "`\n"
+        )
+        self.assertIn("missing", "\n".join(validate_body(body)))
+
+    def test_inline_details_hide_declaration_payload(self) -> None:
+        bodies = (
+            (
+                "Example follows <details>\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "Example follows <details>\n"
+                "[x](</details>)\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "Example follows <details>\n"
+                "\\</details>\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "Example \\\\<details>\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertIn("missing", "\n".join(validate_body(body)))
+
+    def test_closed_or_escaped_inline_details_do_not_hide_later_declaration(self) -> None:
+        bodies = (
+            (
+                "Example follows <details>\n"
+                "ordinary example\n"
+                "</details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+            ),
+            (
+                "Example follows \\<details>\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+            ),
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertEqual([], validate_body(body))
+
+    def test_lazy_container_continuations_are_not_top_level_declarations(self) -> None:
+        prefixes = (
+            "> text\n",
+            "- text\n",
+            "1. text\n",
+            "> text\n<widget>\n",
+            "- text\n<widget>\n",
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                body = (
+                    prefix
+                    + "spec-governance:\n"
+                    + "  behavior-change: none\n\n"
+                )
+                self.assertIn("missing", "\n".join(validate_body(body)))
+
     def test_shorter_fence_runs_do_not_expose_example_declarations(self) -> None:
         for opener, shorter, closer in (
             ("````text", "```", "````"),

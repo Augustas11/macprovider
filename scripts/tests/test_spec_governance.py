@@ -9,7 +9,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from scripts.check_spec_governance import BOOTSTRAP_BASELINE_COMMIT, legacy_requirement_fingerprint, validate_repository
+from scripts.check_spec_governance import BOOTSTRAP_BASELINE_COMMIT, CODE_SPAN_START, REQUIREMENT_DEFINITION_RE, _contract_markdown, legacy_requirement_fingerprint, validate_repository
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -696,6 +696,96 @@ class GovernanceValidatorTests(unittest.TestCase):
                 _, count = legacy_requirement_fingerprint(text)
                 self.assertEqual(1, count)
 
+    def test_block_suppression_ends_when_its_container_ends(self) -> None:
+        prefixes = (
+            "> ```text\n> example\n",
+            "- ```text\n  example\n",
+            "> <script>\n> example\n",
+            "- <script>\n  example\n",
+            "> <div>\n> example\n",
+            "- <div>\n  example\n",
+        )
+        for prefix in prefixes:
+            with self.subTest(opener=prefix.splitlines()[0]):
+                text = (
+                    prefix
+                    + "The provider MUST preserve the visible contract.\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
+
+    def test_root_html_does_not_treat_list_looking_content_as_container_blank(self) -> None:
+        text = (
+            "<div>\n"
+            "-\n"
+            "**SPEC-001-R999 — Example only.** It MUST not count.\n\n"
+        )
+        _, count = legacy_requirement_fingerprint(text)
+        self.assertEqual(0, count)
+
+    def test_type_six_source_tag_interrupts_visible_paragraphs(self) -> None:
+        text = (
+            "Visible paragraph.\n"
+            "<source>\n"
+            "**SPEC-001-R999 — Example only.** It MUST not count.\n\n"
+        )
+        _, count = legacy_requirement_fingerprint(text)
+        self.assertEqual(0, count)
+
+    def test_code_spans_cannot_cross_interrupting_block_boundaries(self) -> None:
+        blocks = (
+            "<script>\n**SPEC-001-R999 — Example only.** It MUST not count.\n</script>\n",
+            "```text\n**SPEC-001-R999 — Example only.** It MUST not count.\n```\n",
+        )
+        for block in blocks:
+            with self.subTest(opener=block.splitlines()[0]):
+                text = "Visible ` opener\n" + block + "`\n"
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(0, count)
+
+    def test_inline_details_do_not_hide_normative_requirements(self) -> None:
+        text = (
+            "Visible prefix <details>\n"
+            "**SPEC-001-R999 — Normative.** It MUST remain counted.\n"
+            "</details>\n"
+        )
+        definitions = REQUIREMENT_DEFINITION_RE.findall(_contract_markdown(text))
+        self.assertEqual(["SPEC-001-R999"], definitions)
+
+    def test_source_cannot_impersonate_internal_code_span_markers(self) -> None:
+        unnumbered = CODE_SPAN_START + "\nThe provider MUST preserve behavior.\n"
+        _, count = legacy_requirement_fingerprint(unnumbered)
+        self.assertEqual(1, count)
+        numbered = (
+            CODE_SPAN_START
+            + "\n**SPEC-001-R999 — Normative.** It MUST preserve behavior.\n"
+        )
+        definitions = REQUIREMENT_DEFINITION_RE.findall(_contract_markdown(numbered))
+        self.assertEqual(["SPEC-001-R999"], definitions)
+
+    def test_valid_multiline_link_definitions_start_type_seven_html(self) -> None:
+        prefixes = (
+            '[label]: /url\n  "title"\n',
+            "[label]: /url '\ntitle\nline\n'\n",
+            "[\nfoo\n]: /url\n",
+            '> [label]:\n> /url\n',
+            '- [label]:\n  /url\n',
+            '> [label]: /url\n> "title"\n',
+            '- [label]: /url\n  "title"\n',
+            '> [label]:\n/url\n',
+            '> [\nfoo\n]: /url\n',
+            '- [\nfoo\n]: /url\n',
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                text = (
+                    prefix
+                    + "<widget>\n"
+                    + "**SPEC-001-R999 — Example only.** It MUST not count.\n\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(0, count)
+
     def test_invalid_link_definitions_cannot_hide_type_seven_content(self) -> None:
         invalid_prefixes = (
             "[label]: (\n",
@@ -703,9 +793,22 @@ class GovernanceValidatorTests(unittest.TestCase):
             '[label]: /url "unterminated\n',
             "[label]:\n  (\n",
             "[label]:\n  /url garbage\n",
+            '[label]:\n  >M "The provider MUST preserve behavior"\n',
+            '[label]:\n  - M "The provider MUST preserve behavior"\n',
+            '[label]:\n  1. M "The provider MUST preserve behavior"\n',
+            '[label]:\n  # "The provider MUST preserve behavior"\n',
+            '[label]: /url\n  > "The provider MUST preserve behavior"\n',
+            '[label]: /url\n  - "The provider MUST preserve behavior"\n',
+            '[\n> The provider MUST preserve behavior\n]: /url\n',
             "[   ]: /url\n",
             "[[bad]: /url\n",
             f"[{'x' * 1000}]: /url\n",
+            '[label]: MUST\\ "The provider MUST preserve behavior"\n',
+            '[label]: <MUST>()\n',
+            '[label]: <MUST>"title"\n',
+            '[label]: /url "The provider MUST\\"\n',
+            "[label]: /url 'The provider MUST\\'\n",
+            "[label]: /url (The provider MUST\\)\n",
         )
         for prefix in invalid_prefixes:
             with self.subTest(prefix=prefix[:40]):
@@ -715,7 +818,25 @@ class GovernanceValidatorTests(unittest.TestCase):
                     + "The provider MUST preserve the visible contract.\n\n"
                 )
                 _, count = legacy_requirement_fingerprint(text)
-                self.assertEqual(1, count)
+                boundary_interrupt = (
+                    "\n  >" in prefix
+                    or "\n  -" in prefix
+                    or "\n  1." in prefix
+                    or "\n  #" in prefix
+                    or "\n>" in prefix
+                    or "\n# " in prefix
+                )
+                expected = 1 if boundary_interrupt else (2 if "MUST" in prefix else 1)
+                self.assertEqual(expected, count)
+
+    def test_terminal_backslash_destination_does_not_consume_next_line_title(self) -> None:
+        text = (
+            "[label]:\n"
+            "  MUST\\\n"
+            '  "The provider MUST preserve behavior"\n'
+        )
+        _, count = legacy_requirement_fingerprint(text)
+        self.assertEqual(1, count)
 
     def test_malformed_nested_values_never_crash(self) -> None:
         mutations = [

@@ -55,8 +55,8 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:8f1848dc9bf9682b9b2b907c57e40dba5dc1d1f0656ba7783ea1c0b2f30388d7",
-      "legacy_requirement_count": 250,
+      "legacy_requirement_fingerprint": "sha256:8b22dca7f2803577a143f8bc92af6837f2cc7157a531c1871c0c18336a9c4046",
+      "legacy_requirement_count": 249,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -206,7 +206,7 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:b8c5e07655c8247a68530cffc4508d23c72fa15cfeb5b8bdf1607db76ae34f31",
+      "legacy_requirement_fingerprint": "sha256:688598768262cdd980f0b48d83cbd6427404ab4d0fd97d82c933dd04613b6c38",
       "legacy_requirement_count": 204,
       "gap": {
         "verdict": "UNKNOWN",
@@ -289,8 +289,8 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:8a1669f4f8f1dcba12af277e81717a0df927edf907bf7549f1cd0ec95acf13ff",
-      "legacy_requirement_count": 73,
+      "legacy_requirement_fingerprint": "sha256:35dd8cdf06bbc7aa08c112aaa72db571e6360d564ff83c18f58cdafc393c3d7a",
+      "legacy_requirement_count": 71,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -315,8 +315,8 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:8c397f015215ca490871f9cd3ec28b8d0f152fae4547d434c6c9f514bbe0f829",
-      "legacy_requirement_count": 98,
+      "legacy_requirement_fingerprint": "sha256:80a0b9602cf5b7f39e860925873d2211e68aacc20345603b1a083807f04587db",
+      "legacy_requirement_count": 97,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -779,7 +779,7 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:c7252f94e334eb410a89a014cddd317e160676cdafb8fd267193c3c7ea75c026",
+      "legacy_requirement_fingerprint": "sha256:167886f2a9467c52f9abfb380ee7aa59b95a5adb3c9bd053f56bdecdc44a40b8",
       "legacy_requirement_count": 62,
       "gap": {
         "verdict": "UNKNOWN",
@@ -929,8 +929,8 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:ee2ce1dffd31f905d102b9b2a177986a59f90a41a9c9b9ec02c90252e15be503",
-      "legacy_requirement_count": 102,
+      "legacy_requirement_fingerprint": "sha256:b23dd155943a22279f987cad4a65a76e35a0d02ae7f7cbf67a5e5556049effc5",
+      "legacy_requirement_count": 98,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",

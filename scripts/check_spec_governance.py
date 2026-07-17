@@ -43,6 +43,8 @@ ARTIFACT_RE = re.compile(
 JOURNEY_RE = re.compile(r"^JOURNEY-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
 NORMATIVE_KEYWORD_RE = re.compile(r"\b(?:MUST(?:\s+NOT)?|SHOULD)\b")
 MARKDOWN_LINK_RE = re.compile(r"\]\(([^)]+)\)")
+CODE_SPAN_START = "\x00code-span-start\x00"
+CODE_SPAN_END = "\x00code-span-end\x00"
 
 AUTHORITY_SCHEMA_PATH = "../schemas/spec-authority-v1.schema.json"
 CONFORMANCE_SCHEMA_PATH = "../schemas/spec-conformance-v1.schema.json"
@@ -106,7 +108,7 @@ RAW_HTML_BLOCK_TAGS = (
     "colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
     "footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|"
     "li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|"
-    "search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
+    "search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
 )
 RAW_HTML_BLOCK_TAG_RE = re.compile(
     rf" {{0,3}}</?(?:{RAW_HTML_BLOCK_TAGS})(?:\s|/?>|$)",
@@ -155,23 +157,87 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _strip_container_markers(line: str) -> str:
     """Remove explicit nested blockquote/list markers from one block-start line."""
+    return _block_line_context(line)[0]
+
+
+ContainerContext = tuple[tuple[str, int], ...]
+
+
+def _block_line_context(line: str) -> tuple[str, ContainerContext]:
+    """Return block content and the explicit containers that own its opener."""
     content = line
+    containers: list[tuple[str, int]] = []
     while True:
         consumed = False
         quote = re.match(r" {0,3}>[ \t]?", content)
         if quote is not None:
             content = content[quote.end():]
+            containers.append(("quote", 0))
             consumed = True
 
         list_item = re.match(
-            r" {0,3}(?:[*+-]|\d{1,9}[.)])(?:[ \t]+|$)",
+            r"( {0,3})(?:[*+-]|\d{1,9}[.)])([ \t]+|$)",
             content,
         )
         if list_item is not None:
+            prefix = list_item.group(0)
             content = content[list_item.end():]
+            containers.append(("list", len(prefix.expandtabs(4))))
             consumed = True
         if not consumed:
             break
+    return content, tuple(containers)
+
+
+def _line_in_container(line: str, container: ContainerContext) -> str | None:
+    """Return content relative to an opener's container, or None after exit."""
+    content = line
+    for kind, width in container:
+        if kind == "quote":
+            quote = re.match(r" {0,3}>[ \t]?", content)
+            if quote is None:
+                return None
+            content = content[quote.end():]
+            continue
+
+        if not content.strip():
+            content = ""
+            continue
+        cursor = 0
+        columns = 0
+        while cursor < len(content) and columns < width:
+            character = content[cursor]
+            if character == " ":
+                columns += 1
+            elif character == "\t":
+                columns += 4 - (columns % 4)
+            else:
+                break
+            cursor += 1
+        if columns < width:
+            return None
+        content = content[cursor:]
+    return content
+
+
+def _link_continuation_content(
+    line: str,
+    container: ContainerContext,
+) -> str | None:
+    """Return continuation content unless a new block container interrupts it."""
+    content = _line_in_container(line, container)
+    if content is None:
+        if not container:
+            return None
+        content = line
+    if re.match(
+        r" {0,3}(?:>|[*+-](?:[ \t]+|$)|\d{1,9}[.)](?:[ \t]+|$))",
+        content,
+    ) or _starts_interrupting_raw_html(content) or not _paragraph_remains_open(
+        content,
+        True,
+    ):
+        return None
     return content
 
 
@@ -216,6 +282,9 @@ def _valid_link_title(value: str) -> bool:
     closing = {'"': '"', "'": "'", "(": ")"}.get(value[0])
     if closing is None or value[-1] != closing:
         return False
+    trailing_backslashes = len(value[:-1]) - len(value[:-1].rstrip("\\"))
+    if trailing_backslashes % 2:
+        return False
     inner = value[1:-1]
     cursor = 0
     while cursor < len(inner):
@@ -229,7 +298,7 @@ def _valid_link_title(value: str) -> bool:
             continue
         if character == closing or (value[0] == "(" and character == "("):
             return False
-        if ord(character) < 0x20 and character != "\t":
+        if ord(character) < 0x20 and character not in "\t\n":
             return False
         cursor += 1
     return True
@@ -263,11 +332,11 @@ def _valid_bare_link_destination(value: str) -> bool:
     return depth == 0
 
 
-def _parse_link_destination_line(value: str) -> tuple[bool, bool]:
-    """Return validity and whether a destination line includes a title."""
+def _link_destination_parts(value: str) -> tuple[bool, str | None, bool]:
+    """Return destination validity, optional title text, and title eligibility."""
     text = value.strip()
     if not text:
-        return False, False
+        return False, None, False
     if text.startswith("<"):
         cursor = 1
         while cursor < len(text):
@@ -280,21 +349,42 @@ def _parse_link_destination_line(value: str) -> tuple[bool, bool]:
                 cursor += 2
                 continue
             if character == "<" or ord(character) < 0x20:
-                return False, False
+                return False, None, False
             if character == ">":
                 break
             cursor += 1
         if cursor >= len(text) or text[cursor] != ">":
-            return False, False
-        remainder = text[cursor + 1:].strip()
+            return False, None, False
+        raw_remainder = text[cursor + 1:]
+        if raw_remainder and not raw_remainder[0].isspace():
+            return False, None, False
+        remainder = raw_remainder.strip()
+        return True, remainder or None, True
     else:
-        parts = text.split(maxsplit=1)
-        if not _valid_bare_link_destination(parts[0]):
-            return False, False
-        remainder = parts[1].strip() if len(parts) == 2 else ""
-    if remainder and not _valid_link_title(remainder):
+        separator = re.search(r"\s", text)
+        if separator is None:
+            destination = text
+            remainder = ""
+        else:
+            destination = text[:separator.start()]
+            remainder = text[separator.end():].strip()
+        if not _valid_bare_link_destination(destination):
+            return False, None, False
+        trailing_backslashes = len(destination) - len(destination.rstrip("\\"))
+        allows_title = trailing_backslashes % 2 == 0
+        if remainder and not allows_title:
+            return False, None, False
+        return True, remainder or None, allows_title
+
+
+def _parse_link_destination_line(value: str) -> tuple[bool, bool]:
+    """Return validity and whether a destination line includes a complete title."""
+    valid, title, _ = _link_destination_parts(value)
+    if not valid:
         return False, False
-    return True, bool(remainder)
+    if title is not None and not _valid_link_title(title):
+        return False, False
+    return True, title is not None
 
 
 def _valid_link_destination_line(value: str) -> bool:
@@ -348,70 +438,250 @@ def _starts_interrupting_raw_html(line: str) -> bool:
     )
 
 
-def _multiline_link_definition_span(lines: list[str], line_index: int) -> int:
-    """Return the validated line span of a multiline reference definition."""
-    first = _strip_container_markers(lines[line_index])
-    remainder = _link_definition_remainder(first)
-    if remainder is None or remainder.strip():
+def _breaks_lazy_container_paragraph(line: str) -> bool:
+    """Return whether an uncontained line ends a quote/list paragraph."""
+    content = line
+    return bool(
+        not content.strip()
+        or re.match(
+            r" {0,3}(?:>|[*+-](?:[ \t]+|$)|\d{1,9}[.)](?:[ \t]+|$))",
+            content,
+        )
+        or _starts_interrupting_raw_html(content)
+        or RAW_HTML_COMPLETE_TAG_RE.fullmatch(content)
+        or not _paragraph_remains_open(content, True)
+    )
+
+
+def _multiline_link_label(
+    lines: list[str],
+    line_index: int,
+) -> tuple[int, str, ContainerContext] | None:
+    """Return the closing-label line and text after its colon."""
+    content, container = _block_line_context(lines[line_index])
+    leading = re.match(r" {0,3}", content)
+    cursor = leading.end() if leading is not None else 0
+    if cursor >= len(content) or content[cursor] != "[":
+        return None
+    cursor += 1
+    label_length = 0
+    visible_label: list[str] = []
+    candidate_index = line_index
+    while candidate_index < len(lines):
+        if candidate_index != line_index:
+            content = _link_continuation_content(
+                lines[candidate_index],
+                container,
+            )
+            if content is None:
+                return None
+            cursor = 0
+            if not content.strip():
+                return None
+            label_length += 1
+            visible_label.append("\n")
+        while cursor < len(content):
+            character = content[cursor]
+            if (
+                character == "\\"
+                and cursor + 1 < len(content)
+                and content[cursor + 1] in string.punctuation
+            ):
+                label_length += 2
+                visible_label.append(content[cursor + 1])
+                cursor += 2
+                continue
+            if character == "[":
+                return None
+            if character == "]":
+                if cursor + 1 >= len(content) or content[cursor + 1] != ":":
+                    return None
+                if (
+                    label_length == 0
+                    or label_length > 999
+                    or not "".join(visible_label).strip()
+                ):
+                    return None
+                return candidate_index, content[cursor + 2:], container
+            label_length += 1
+            visible_label.append(character)
+            if label_length > 999:
+                return None
+            cursor += 1
+        candidate_index += 1
+    return None
+
+
+def _link_title_span(
+    lines: list[str],
+    line_index: int,
+    initial: str,
+    container: ContainerContext,
+) -> int:
+    """Return the line span of a complete title beginning at line_index."""
+    candidate = initial.strip()
+    if not candidate or candidate[0] not in "\"'(":
         return 0
-    if line_index + 1 >= len(lines):
+    candidate_index = line_index
+    while True:
+        if _valid_link_title(candidate):
+            return candidate_index - line_index + 1
+        closing = {'"': '"', "'": "'", "(": ")"}[candidate[0]]
+        cursor = 1
+        while cursor < len(candidate):
+            character = candidate[cursor]
+            if (
+                character == "\\"
+                and cursor + 1 < len(candidate)
+                and candidate[cursor + 1] in string.punctuation
+            ):
+                cursor += 2
+                continue
+            if character == closing or (candidate[0] == "(" and character == "("):
+                return 0
+            cursor += 1
+        candidate_index += 1
+        if candidate_index >= len(lines):
+            return 0
+        continuation = _link_continuation_content(
+            lines[candidate_index],
+            container,
+        )
+        if continuation is None:
+            return 0
+        if not continuation.strip():
+            return 0
+        candidate += "\n" + continuation.strip()
+
+
+def _link_definition_span(lines: list[str], line_index: int) -> int:
+    """Return the validated line span of a CommonMark reference definition."""
+    label = _multiline_link_label(lines, line_index)
+    if label is None:
         return 0
-    destination = _strip_container_markers(lines[line_index + 1])
-    valid_destination, has_inline_title = _parse_link_destination_line(destination)
+    label_line, remainder, container = label
+    destination_line = label_line
+    destination = remainder
+    if not destination.strip():
+        destination_line += 1
+        if destination_line >= len(lines):
+            return 0
+        destination = _link_continuation_content(
+            lines[destination_line],
+            container,
+        )
+        if destination is None:
+            return 0
+
+    valid_destination, inline_title, allows_title = _link_destination_parts(
+        destination,
+    )
     if not valid_destination:
         return 0
-    if not has_inline_title and line_index + 2 < len(lines):
-        title = _strip_container_markers(lines[line_index + 2]).strip()
-        if _valid_link_title(title):
-            return 3
-    return 2
+    if inline_title is not None:
+        title_span = _link_title_span(
+            lines,
+            destination_line,
+            inline_title,
+            container,
+        )
+        if not title_span:
+            return 0
+        return destination_line + title_span - line_index
+
+    definition_span = destination_line - line_index + 1
+    title_line = destination_line + 1
+    if allows_title and title_line < len(lines):
+        title_content = _link_continuation_content(
+            lines[title_line],
+            container,
+        )
+        title = title_content.strip() if title_content is not None else ""
+        title_span = _link_title_span(lines, title_line, title, container)
+        if title_span:
+            definition_span += title_span
+    return definition_span
 
 
-def _contract_markdown(text: str) -> str:
-    """Return Markdown contract text without examples or HTML comments."""
+def _multiline_link_definition_span(lines: list[str], line_index: int) -> int:
+    """Compatibility wrapper for callers and focused parser tests."""
+    return _link_definition_span(lines, line_index)
+
+
+def _contract_markdown(
+    text: str,
+    *,
+    preserve_code_payload: bool = False,
+    preserve_details_closers: bool = False,
+) -> str:
+    """Return contract text with nonnormative block and inline syntax removed."""
+    text = text.replace("\x00", "\ufffd")
     raw_lines = text.splitlines()
     lines: list[str] = []
-    fence: tuple[str, int, bool] | None = None
+    fence: tuple[str, int, ContainerContext] | None = None
     code_span: int | None = None
-    raw_html_end: re.Pattern[str] | None = None
-    raw_html_until_blank = False
+    raw_html_end: tuple[re.Pattern[str], ContainerContext] | None = None
+    raw_html_blank_container: ContainerContext | None = None
     in_comment = False
     paragraph_open = False
+    paragraph_container: ContainerContext | None = None
     link_definition_remaining = 0
     for line_index, raw_line in enumerate(raw_lines):
-        block_line = _strip_container_markers(raw_line)
+        block_line, line_container = _block_line_context(raw_line)
+        lazy_container_line = False
         if link_definition_remaining:
             link_definition_remaining -= 1
             paragraph_open = False
             lines.append("")
             continue
         if fence is not None:
-            delimiter, minimum_length, containerized = fence
-            closing_line = block_line if containerized else raw_line
-            closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", closing_line)
-            if (
-                closing is not None
-                and closing.group(1)[0] == delimiter
-                and len(closing.group(1)) >= minimum_length
-                and set(closing.group(1)) == {delimiter}
-            ):
-                fence = None
-            paragraph_open = False
-            lines.append("")
-            continue
+            delimiter, minimum_length, container = fence
+            closing_line = _line_in_container(raw_line, container)
+            if closing_line is not None:
+                closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", closing_line)
+                if (
+                    closing is not None
+                    and closing.group(1)[0] == delimiter
+                    and len(closing.group(1)) >= minimum_length
+                    and set(closing.group(1)) == {delimiter}
+                ):
+                    fence = None
+                paragraph_open = False
+                lines.append("")
+                continue
+            fence = None
 
         if raw_html_end is not None:
-            if raw_html_end.search(raw_line):
-                raw_html_end = None
-            paragraph_open = False
-            lines.append("")
-            continue
-        if raw_html_until_blank:
-            if not block_line.strip():
-                raw_html_until_blank = False
-            paragraph_open = False
-            lines.append("")
-            continue
+            closing_pattern, container = raw_html_end
+            html_line = _line_in_container(raw_line, container)
+            if html_line is not None:
+                if closing_pattern.search(html_line):
+                    raw_html_end = None
+                paragraph_open = False
+                lines.append("")
+                continue
+            raw_html_end = None
+        if raw_html_blank_container is not None:
+            html_line = _line_in_container(raw_line, raw_html_blank_container)
+            if html_line is not None:
+                if not html_line.strip():
+                    raw_html_blank_container = None
+                paragraph_open = False
+                lines.append("")
+                continue
+            raw_html_blank_container = None
+
+        if paragraph_open and paragraph_container is not None:
+            if paragraph_container:
+                if _line_in_container(raw_line, paragraph_container) is None:
+                    if _breaks_lazy_container_paragraph(raw_line):
+                        paragraph_open = False
+                        paragraph_container = None
+                    else:
+                        lazy_container_line = True
+            elif line_container:
+                paragraph_open = False
+                paragraph_container = None
 
         if code_span is None and not in_comment:
             link_definition_span = (
@@ -435,7 +705,10 @@ def _contract_markdown(text: str) -> str:
             if raw_html_opening is not None:
                 tag = raw_html_opening.group(1)
                 if re.search(rf"</{tag}\s*>", block_line, re.IGNORECASE) is None:
-                    raw_html_end = re.compile(rf"</{tag}\s*>", re.IGNORECASE)
+                    raw_html_end = (
+                        re.compile(rf"</{tag}\s*>", re.IGNORECASE),
+                        line_container,
+                    )
                 paragraph_open = False
                 lines.append("")
                 continue
@@ -450,7 +723,7 @@ def _contract_markdown(text: str) -> str:
                 if re.match(opening_pattern, block_line) is None:
                     continue
                 if closing_pattern.search(block_line) is None:
-                    raw_html_end = closing_pattern
+                    raw_html_end = (closing_pattern, line_container)
                 matched_special = True
                 break
             if matched_special:
@@ -458,13 +731,24 @@ def _contract_markdown(text: str) -> str:
                 lines.append("")
                 continue
             if (
-                RAW_HTML_BLOCK_TAG_RE.match(block_line) is not None
-                or (
-                    not paragraph_open
-                    and RAW_HTML_COMPLETE_TAG_RE.fullmatch(block_line) is not None
+                not (
+                    preserve_details_closers
+                    and re.fullmatch(
+                        r" {0,3}</details\s*>[ \t]*",
+                        block_line,
+                        re.IGNORECASE,
+                    )
+                )
+                and (
+                    RAW_HTML_BLOCK_TAG_RE.match(block_line) is not None
+                    or (
+                        not paragraph_open
+                        and RAW_HTML_COMPLETE_TAG_RE.fullmatch(block_line)
+                        is not None
+                    )
                 )
             ):
-                raw_html_until_blank = True
+                raw_html_blank_container = line_container
                 paragraph_open = False
                 lines.append("")
                 continue
@@ -475,7 +759,7 @@ def _contract_markdown(text: str) -> str:
                     fence = (
                         marker[0],
                         len(marker),
-                        block_line != raw_line,
+                        line_container,
                     )
                     paragraph_open = False
                     lines.append("")
@@ -486,14 +770,21 @@ def _contract_markdown(text: str) -> str:
         while cursor < len(raw_line):
             if code_span is not None:
                 if raw_line[cursor] != "`":
-                    visible.append(raw_line[cursor])
+                    visible.append(raw_line[cursor] if preserve_code_payload else " ")
                     cursor += 1
                     continue
                 end = cursor
                 while end < len(raw_line) and raw_line[end] == "`":
                     end += 1
-                visible.append(raw_line[cursor:end])
-                if end - cursor == code_span:
+                closes_span = end - cursor == code_span
+                if preserve_code_payload and closes_span:
+                    visible.append(CODE_SPAN_END)
+                visible.append(
+                    raw_line[cursor:end]
+                    if closes_span or preserve_code_payload
+                    else " " * (end - cursor)
+                )
+                if closes_span:
                     code_span = None
                 cursor = end
                 continue
@@ -521,6 +812,8 @@ def _contract_markdown(text: str) -> str:
                 if _has_code_span_closer(raw_lines, line_index, end, run_length):
                     code_span = run_length
                 visible.append(raw_line[cursor:end])
+                if code_span is not None and preserve_code_payload:
+                    visible.append(CODE_SPAN_START)
                 cursor = end
                 continue
             if (
@@ -538,8 +831,15 @@ def _contract_markdown(text: str) -> str:
             visible.append(raw_line[cursor])
             cursor += 1
         line = "".join(visible)
+        if lazy_container_line:
+            line = "> " + line
         lines.append(line)
+        was_open = paragraph_open
         paragraph_open = _paragraph_remains_open(raw_line, paragraph_open)
+        if paragraph_open and not was_open:
+            paragraph_container = line_container
+        elif not paragraph_open:
+            paragraph_container = None
     return "\n".join(lines)
 
 
@@ -554,6 +854,15 @@ def _has_code_span_closer(
         candidate = lines[candidate_index]
         if candidate_index != line_index:
             if not candidate.strip():
+                return False
+            if (
+                re.match(
+                    r" {0,3}(?:>|[*+-](?:[ \t]+|$)|\d{1,9}[.)](?:[ \t]+|$))",
+                    candidate,
+                )
+                or _starts_interrupting_raw_html(candidate)
+                or not _paragraph_remains_open(candidate, True)
+            ):
                 return False
             cursor = 0
         while cursor < len(candidate):
@@ -609,9 +918,29 @@ def _has_inline_comment_closer(
 def _legacy_normative_lines(text: str) -> list[str]:
     """Return frozen, unnumbered normative lines from contract Markdown."""
     lines: list[str] = []
-    for raw_line in _contract_markdown(text).splitlines():
-        stripped = raw_line.strip()
-        if not NORMATIVE_KEYWORD_RE.search(stripped):
+    in_code_span = False
+    for raw_line in _contract_markdown(
+        text,
+        preserve_code_payload=True,
+    ).splitlines():
+        visible: list[str] = []
+        fingerprint: list[str] = []
+        cursor = 0
+        while cursor < len(raw_line):
+            if raw_line.startswith(CODE_SPAN_START, cursor):
+                in_code_span = True
+                cursor += len(CODE_SPAN_START)
+                continue
+            if raw_line.startswith(CODE_SPAN_END, cursor):
+                in_code_span = False
+                cursor += len(CODE_SPAN_END)
+                continue
+            fingerprint.append(raw_line[cursor])
+            if not in_code_span:
+                visible.append(raw_line[cursor])
+            cursor += 1
+        stripped = "".join(fingerprint).strip()
+        if not NORMATIVE_KEYWORD_RE.search("".join(visible).strip()):
             continue
         if REQUIREMENT_DEFINITION_RE.match(stripped):
             continue

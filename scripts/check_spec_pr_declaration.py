@@ -37,6 +37,7 @@ FIELD_RE = re.compile(
     r"authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$",
     re.IGNORECASE,
 )
+DETAILS_TAG_RE = re.compile(r"</?details(?:\s[^<>]*)?>", re.IGNORECASE)
 CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
@@ -65,6 +66,48 @@ def _declaration_marker(lines: list[str]) -> int | None:
         if re.fullmatch(r" {0,3}spec-governance:", line, re.IGNORECASE):
             return index
     return None
+
+
+def _inside_inline_details(lines: list[str], marker: int) -> bool:
+    depth = 0
+    for line in lines[:marker]:
+        cursor = 0
+        while cursor < len(line):
+            if (
+                line[cursor] == "\\"
+                and cursor + 1 < len(line)
+                and line[cursor + 1] in r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""
+            ):
+                cursor += 2
+                continue
+            if line.startswith("](", cursor):
+                cursor += 2
+                nesting = 1
+                while cursor < len(line) and nesting:
+                    if (
+                        line[cursor] == "\\"
+                        and cursor + 1 < len(line)
+                        and line[cursor + 1]
+                        in r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""
+                    ):
+                        cursor += 2
+                        continue
+                    if line[cursor] == "(":
+                        nesting += 1
+                    elif line[cursor] == ")":
+                        nesting -= 1
+                    cursor += 1
+                continue
+            tag = DETAILS_TAG_RE.match(line, cursor)
+            if tag is not None:
+                if tag.group(0).lower().startswith("</"):
+                    depth = max(0, depth - 1)
+                else:
+                    depth += 1
+                cursor = tag.end()
+                continue
+            cursor += 1
+    return depth > 0
 
 
 def _manifest_ids(root: Path) -> tuple[set[str], set[str], set[str]]:
@@ -98,10 +141,15 @@ def validate_body(body: str, root: Path | None = None, changed_paths: list[str] 
         for line in raw_lines
     ):
         return ["missing top-level 'spec-governance:' declaration block"]
-    lines = _contract_markdown(body).splitlines()
+    lines = _contract_markdown(
+        body,
+        preserve_details_closers=True,
+    ).splitlines()
     marker = _declaration_marker(lines)
     if marker is None:
         return ["missing 'spec-governance:' declaration block"]
+    if _inside_inline_details(lines, marker):
+        return ["missing top-level 'spec-governance:' declaration block"]
     fields: dict[str, str] = {}
     for line in lines[marker + 1:]:
         if line.strip().startswith("#") or (not line.strip() and fields):
