@@ -180,7 +180,7 @@ The 5 MAJORs + 3 MINORs:
 
 **Outline history (preserved in git):** SPEC-011 v0.1 + v0.1.1
 were OUTLINE versions reviewed in two pre-draft outline-audit
-rounds at `specs/SPEC-011-outline-audit.md`. v0.2 was the first
+rounds at `audits/spec-011/SPEC-011-outline-audit.md`. v0.2 was the first
 full normative draft. v0.2 incorporated:
 - **C2.1 fix** (outline round 2 MAJOR): §3.8 WS drop mid-load
   reconnect uses **`hello`** (locked SPEC-001 §6.5 / SPEC-002
@@ -1752,11 +1752,12 @@ Open for v0.5 (if pursued):
   foundation; R-3.6.3, R-3.1.4 are SPEC-011 dependencies)
 - [SPEC-011 v0.1 / v0.1.1 outline](../docs/) (preserved in
   git history; archived)
-- [SPEC-011 outline audit history](SPEC-011-outline-audit.md)
+- [SPEC-011 outline audit history](../audits/spec-011/SPEC-011-outline-audit.md)
   rounds 1-2 — drove the v0.2 normative shape
-- [SPEC-012 source draft](SPEC-012-source.md) — wide-scope
-  predecessor; SPEC-011 + SPEC-012 split is documented in
-  SPEC-010 v1.x history
+- [SPEC-012 coordinator demand-pull draft](SPEC-012-coordinator-demand-pull.md)
+  — retained coordinator-driven contract
+- [SPEC-012 split history](../docs/spec-history/SPEC-012-v0.3-history.md)
+  — wide-scope predecessor and split rationale
 - [SPEC-001 v1.2.4](SPEC-001-phase3-binary.md) — provider
   binary (SPEC-011 drives v1.2.5 candidate per §6.1)
 - [SPEC-002 v1.3.4](SPEC-002-coordinator.md) — coordinator

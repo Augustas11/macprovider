@@ -1,0 +1,1 @@
+{"mutation":{"operation":"drop_authority_owner_listing"},"expected":"must be listed exactly on owner_spec SPEC-001"}

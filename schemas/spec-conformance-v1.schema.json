@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/schemas/spec-conformance-v1.schema.json",
+  "title": "Macprovider SPEC conformance manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "baseline", "specs", "requirements"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": "spec-conformance-v1"},
+    "baseline": {"$ref": "spec-authority-v1.schema.json#/$defs/baseline"},
+    "specs": {"type": "array", "items": {"$ref": "#/$defs/spec"}},
+    "requirements": {"type": "array", "items": {"$ref": "#/$defs/requirement"}}
+  },
+  "$defs": {
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "owner", "issue"],
+      "properties": {
+        "verdict": {"enum": ["CODE_BUG", "SPEC_BUG", "DECISION_REQUIRED", "DUPLICATE_AUTHORITY", "UNKNOWN"]},
+        "owner": {"type": "string", "pattern": "^@[A-Za-z0-9-]+$"},
+        "issue": {"type": "string", "pattern": "^https://github\\.com/Augustas11/macprovider/issues/[0-9]+$"},
+        "rationale": {"type": "string", "minLength": 1}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spec_id", "title", "version", "path", "status", "owner", "authority_domains", "supersedes", "depends_on", "implementation_status", "production_status", "last_reconciled_commit", "last_reconciled_at", "evidence", "requirement_id_migration", "gap"],
+      "properties": {
+        "spec_id": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"},
+        "title": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "pattern": "^specs/SPEC-[0-9]{3}-[a-z0-9-]+\\.md$"},
+        "status": {"enum": ["draft", "normative", "implemented-unverified", "physically-verified", "deprecated"]},
+        "owner": {"type": "string", "pattern": "^@[A-Za-z0-9-]+$"},
+        "authority_domains": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"}},
+        "supersedes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
+        "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
+        "superseded_by": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
+        "deprecation_rationale": {"type": "string", "minLength": 1},
+        "implementation_status": {"enum": ["pending-reconciliation", "partial", "implemented", "not-applicable"]},
+        "production_status": {"enum": ["pending-verification", "not-deployed", "partially-deployed", "physically-verified", "not-applicable"]},
+        "last_reconciled_commit": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{40}$"}, {"type": "null"}]},
+        "last_reconciled_at": {"oneOf": [{"type": "string", "format": "date"}, {"type": "null"}]},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "requirement_id_migration": {"enum": ["pending", "complete"]},
+        "gap": {"oneOf": [{"$ref": "#/$defs/gap"}, {"type": "null"}]}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "source", "captured_at", "expires_at"],
+      "allOf": [
+        {
+          "if": {"properties": {"artifact": {"pattern": "^sha256:"}}},
+          "then": {"properties": {"source": {"type": "string", "minLength": 1}}}
+        }
+      ],
+      "properties": {
+        "artifact": {"type": "string", "pattern": "^(commit:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"},
+        "source": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "captured_at": {"type": "string", "format": "date"},
+        "expires_at": {"type": "string", "format": "date"}
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirement_id", "spec_id", "state", "implementation", "tests", "journeys", "evidence", "gap"],
+      "properties": {
+        "requirement_id": {"type": "string", "pattern": "^SPEC-[0-9]{3}-R[0-9]{3}$"},
+        "spec_id": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"},
+        "state": {"enum": ["pending", "blocked", "conformant", "nonconformant", "not-applicable"]},
+        "implementation": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "tests": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "journeys": {"type": "array", "items": {"type": "string", "pattern": "^JOURNEY-[A-Z0-9]+(?:-[A-Z0-9]+)*$"}},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "gap": {"oneOf": [{"$ref": "#/$defs/gap"}, {"type": "null"}]}
+      }
+    }
+  }
+}

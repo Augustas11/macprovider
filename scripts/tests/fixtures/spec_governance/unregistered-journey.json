@@ -1,0 +1,4 @@
+{
+  "mutation": {"operation": "unregistered_journey"},
+  "expected": "journey mapping has no tracked record"
+}

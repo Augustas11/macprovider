@@ -22,10 +22,11 @@ human-authored prose intact:
   <!-- AUTOGEN:spec-index END -->
 """
 from __future__ import annotations
-import glob, os, re, sys
+import glob, json, os, re, sys
 
 SPECS_DIR = os.path.join(os.path.dirname(__file__), "..", "specs")
 README = os.path.join(SPECS_DIR, "README.md")
+CONFORMANCE = os.path.join(SPECS_DIR, "CONFORMANCE.json")
 BEGIN = "<!-- AUTOGEN:spec-index START"
 END = "<!-- AUTOGEN:spec-index END -->"
 
@@ -101,10 +102,48 @@ def collect():
     return specs
 
 
-def render(specs) -> str:
-    rows = ["| SPEC | Title | Version | Link |", "|---|---|---|---|"]
+def load_governance():
+    try:
+        with open(CONFORMANCE, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        sys.exit(f"error: cannot read {CONFORMANCE}: {exc}")
+    if not isinstance(manifest, dict):
+        sys.exit(f"error: {CONFORMANCE} root must be an object")
+    spec_records = manifest.get("specs")
+    requirement_records = manifest.get("requirements")
+    if not isinstance(spec_records, list) or not isinstance(requirement_records, list):
+        sys.exit(f"error: {CONFORMANCE} specs and requirements must be arrays")
+    metadata = {}
+    for index, record in enumerate(spec_records):
+        if not isinstance(record, dict) or not isinstance(record.get("spec_id"), str):
+            sys.exit(f"error: {CONFORMANCE} specs[{index}] must be an object with spec_id")
+        metadata[record["spec_id"]] = record
+    states = {}
+    for index, requirement in enumerate(requirement_records):
+        if not isinstance(requirement, dict) or not isinstance(requirement.get("spec_id"), str) or not isinstance(requirement.get("state"), str):
+            sys.exit(f"error: {CONFORMANCE} requirements[{index}] must contain string spec_id and state")
+        states.setdefault(requirement["spec_id"], {}).setdefault(requirement["state"], 0)
+        states[requirement["spec_id"]][requirement["state"]] += 1
+    return metadata, states
+
+
+def render(specs, metadata, states) -> str:
+    rows = [
+        "| SPEC | Title | Version | Lifecycle | ID migration | Conformance | Link |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for num, title, version, rel in specs:
-        rows.append(f"| SPEC-{num:03d} | {title} | {version} | [{rel}]({rel}) |")
+        spec_id = f"SPEC-{num:03d}"
+        record = metadata.get(spec_id, {})
+        requirement_states = states.get(spec_id, {})
+        summary = ", ".join(f"{name}: {count}" for name, count in sorted(requirement_states.items()))
+        if not summary:
+            summary = "pending corpus migration"
+        rows.append(
+            f"| {spec_id} | {title} | {version} | {record.get('status', 'untracked')} | "
+            f"{record.get('requirement_id_migration', 'untracked')} | {summary} | [{rel}]({rel}) |"
+        )
     return "\n".join(rows)
 
 
@@ -150,9 +189,13 @@ def main() -> int:
         return lint_root()
     check = "--check" in sys.argv[1:]
     specs = collect()
+    metadata, states = load_governance()
     print(f"canonical specs: {len(specs)}", file=sys.stderr)
-    current = open(README, encoding="utf-8").read()
-    updated = splice(current, render(specs))
+    try:
+        current = open(README, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError) as exc:
+        sys.exit(f"error: cannot read {README}: {exc}")
+    updated = splice(current, render(specs, metadata, states))
     if check:
         if current != updated:
             sys.exit("error: specs/README.md is stale — run "
