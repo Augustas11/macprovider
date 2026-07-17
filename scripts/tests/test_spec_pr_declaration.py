@@ -245,12 +245,30 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "  behavior-change: none\n"
                 "</details>\n"
             ),
+            (
+                "Example [x](bad <details>)\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "Example [x](<bad <details>>)\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "Example [x](bad\\ <details>)\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
         )
         for body in bodies:
             with self.subTest(body=body):
                 self.assertIn("missing", "\n".join(validate_body(body)))
 
-    def test_closed_or_escaped_inline_details_do_not_hide_later_declaration(self) -> None:
+    def test_declaration_must_precede_inline_details_markup(self) -> None:
         bodies = (
             (
                 "Example follows <details>\n"
@@ -264,10 +282,17 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "spec-governance:\n"
                 "  behavior-change: none\n"
             ),
+            (
+                "Example <details>\n"
+                '[x](</details> "title")\n'
+                "</details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+            ),
         )
         for body in bodies:
             with self.subTest(body=body):
-                self.assertEqual([], validate_body(body))
+                self.assertIn("missing", "\n".join(validate_body(body)))
 
     def test_lazy_container_continuations_are_not_top_level_declarations(self) -> None:
         prefixes = (

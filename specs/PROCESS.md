@@ -148,6 +148,10 @@ spec-governance:
   contract-change: none
 ```
 
+The declaration block precedes any `<details>` disclosure markup in the PR
+body. The validator rejects a later declaration rather than attempting to
+infer whether presentation-layer disclosure content is open or closed.
+
 Use `contract-change: yes` whenever the canonical contract paths above change,
 even when product behavior remains unchanged. For a behavior change, use
 `behavior-change: yes` and add non-empty `specs:`, `requirements:`,
