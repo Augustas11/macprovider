@@ -90,6 +90,18 @@ func referralSocialSchemaStatements() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_referral_social_challenges_expiry
 			ON referral_social_challenges(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS referral_social_failures (
+			provider_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			issuer_id TEXT NOT NULL REFERENCES referral_issuers(issuer_id),
+			challenge_hash TEXT NOT NULL UNIQUE,
+			post_id TEXT NOT NULL,
+			author_id TEXT NOT NULL,
+			share_url_hash TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			failed_at TEXT NOT NULL,
+			PRIMARY KEY(provider_id, campaign)
+		)`,
 		`CREATE TABLE IF NOT EXISTS referral_social_verifications (
 			provider_id TEXT NOT NULL,
 			campaign TEXT NOT NULL,
@@ -324,7 +336,19 @@ SELECT granted_at, failed_at FROM referral_social_verifications
  WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(&grantedAt, &failedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		out.SocialState = SocialStateEligible
+		var terminalFailure bool
+		if err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM referral_social_failures
+     WHERE provider_id = ? AND campaign = ?
+)`, providerID, policy.Campaign).Scan(&terminalFailure); err != nil {
+			return ProviderReferral{}, err
+		}
+		if terminalFailure {
+			out.SocialState = SocialStateFailed
+		} else {
+			out.SocialState = SocialStateEligible
+		}
 	case err != nil:
 		return ProviderReferral{}, err
 	case grantedAt.Valid:
@@ -427,6 +451,11 @@ SELECT i.issuer_id, i.key_id
 			if err := archiveFailedVerificationTx(ctx, conn, providerID, policy.Campaign, now); err != nil {
 				return err
 			}
+		}
+		if _, err := conn.ExecContext(ctx, `
+DELETE FROM referral_social_failures
+ WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign); err != nil {
+			return err
 		}
 		if _, err := conn.ExecContext(ctx, `DELETE FROM referral_social_challenges WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign); err != nil {
 			return err
@@ -537,6 +566,12 @@ SELECT c.issuer_id, c.expires_at, c.consumed_at
 SELECT issuer_id, challenge_hash, post_id
   FROM referral_social_verifications
  WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(&storedIssuer, &storedChallenge, &storedPost)
+			if errors.Is(err, sql.ErrNoRows) {
+				err = conn.QueryRowContext(ctx, `
+SELECT issuer_id, challenge_hash, post_id
+  FROM referral_social_failures
+ WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(&storedIssuer, &storedChallenge, &storedPost)
+			}
 			if err != nil || storedIssuer != issuerID || storedChallenge != digestText || storedPost != postID {
 				return ErrSocialChallenge
 			}
@@ -674,14 +709,13 @@ SELECT c.issuer_id, c.expires_at, c.consumed_at
 		}
 		if consumedAt.Valid {
 			var storedIssuer, storedChallenge, storedPost, storedAuthor, storedShare string
-			var failedAt sql.NullString
 			err := conn.QueryRowContext(ctx, `
-SELECT issuer_id, challenge_hash, post_id, author_id, share_url_hash, failed_at
-  FROM referral_social_verifications
+SELECT issuer_id, challenge_hash, post_id, author_id, share_url_hash
+  FROM referral_social_failures
  WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(
-				&storedIssuer, &storedChallenge, &storedPost, &storedAuthor, &storedShare, &failedAt,
+				&storedIssuer, &storedChallenge, &storedPost, &storedAuthor, &storedShare,
 			)
-			if err == nil && failedAt.Valid && storedIssuer == issuerID && storedChallenge == digestText &&
+			if err == nil && storedIssuer == issuerID && storedChallenge == digestText &&
 				storedPost == postID && storedAuthor == authorID && storedShare == shareURLHash {
 				return nil
 			}
@@ -691,20 +725,13 @@ SELECT issuer_id, challenge_hash, post_id, author_id, share_url_hash, failed_at
 		if err != nil || !expires.After(now.UTC()) {
 			return ErrSocialChallenge
 		}
-		var archivedPost bool
-		if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM referral_social_verification_history WHERE post_id = ?)`, postID).Scan(&archivedPost); err != nil {
-			return err
-		}
-		if archivedPost {
-			return ErrSocialChallenge
-		}
 		if _, err := conn.ExecContext(ctx, `
-INSERT INTO referral_social_verifications (
-    provider_id, campaign, issuer_id, challenge_hash, post_id, author_id, share_url_hash,
-    verification_method, submitted_at, pending_since, next_check_at, failed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, 'x_api', ?, ?, ?, ?)`,
-			providerID, policy.Campaign, issuerID, digestText, postID, authorID, shareURLHash,
-			timeText(now.UTC()), timeText(now.UTC()), timeText(now.UTC()), timeText(now.UTC())); err != nil {
+INSERT INTO referral_social_failures (
+    provider_id, campaign, issuer_id, challenge_hash, post_id, author_id,
+    share_url_hash, reason, failed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			providerID, policy.Campaign, issuerID, digestText, postID, authorID,
+			shareURLHash, reason, timeText(now.UTC())); err != nil {
 			if isConstraintFailure(err) {
 				return ErrSocialChallenge
 			}

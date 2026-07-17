@@ -320,6 +320,31 @@ func TestAdvocacyExternalDecisionsAreAuditedAndTransientRetryUsesSameChallenge(t
 	if terminalVerifier.calls != 1 {
 		t.Fatalf("terminal replay external calls=%d", terminalVerifier.calls)
 	}
+	var failedRows, attackerVerificationRows int
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM referral_social_failures WHERE provider_id = ? AND post_id = ?`, "provider-terminal", "456").Scan(&failedRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM referral_social_verifications WHERE provider_id = ?`, "provider-terminal").Scan(&attackerVerificationRows); err != nil {
+		t.Fatal(err)
+	}
+	if failedRows != 1 || attackerVerificationRows != 0 {
+		t.Fatalf("terminal failure rows=%d verification rows=%d", failedRows, attackerVerificationRows)
+	}
+
+	// A terminally rejected post was never positively bound to the first
+	// provider, so it must not reserve the global replay key and deny a later
+	// legitimate verification.
+	qualifyAdvocacyProvider(t, store, advocacyPolicy(), "provider-legitimate", now)
+	legitimateVerifier := &advocacyVerifier{authorID: "789"}
+	legitimateHandler := newAdvocacyHandler(store, "provider-legitimate", now)
+	legitimateHandler.PostVerifier = legitimateVerifier
+	_, legitimateChallenge := createAdvocacyChallenge(t, &legitimateHandler)
+	legitimateBody := `{"post_url":"https://x.com/malibu/status/456","challenge":"` + legitimateChallenge + `"}`
+	legitimate := httptest.NewRecorder()
+	legitimateHandler.HandleVerify(legitimate, bearerRequest(http.MethodPost, "/v1/provider/referrals/x/verify", legitimateBody))
+	if legitimate.Code != http.StatusOK || !strings.Contains(legitimate.Body.String(), `"social_state":"pending"`) {
+		t.Fatalf("legitimate reuse status=%d body=%s", legitimate.Code, legitimate.Body.String())
+	}
 }
 
 func TestAdvocacyStatusDoesNotAdvertiseDisabledJoinLink(t *testing.T) {

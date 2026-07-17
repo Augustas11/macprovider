@@ -134,6 +134,10 @@ CREATE TABLE referral_social_verification_history (
 			}
 		}
 	}
+	var failureTableCount int
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'referral_social_failures'`).Scan(&failureTableCount); err != nil || failureTableCount != 1 {
+		t.Fatalf("social failure table count=%d err=%v", failureTableCount, err)
+	}
 	var indexCount int
 	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_referral_social_recheck_pending'`).Scan(&indexCount); err != nil || indexCount != 1 {
 		t.Fatalf("recheck index count=%d err=%v", indexCount, err)
