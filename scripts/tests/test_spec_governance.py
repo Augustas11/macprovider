@@ -144,6 +144,39 @@ def write_repository(root: Path, repository: dict[str, object]) -> None:
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
 
 
+def apply_post_write_mutation(root: Path, repository: dict[str, object]) -> None:
+    operation = repository.pop("_post_write_operation", None)
+    if operation is None:
+        return
+
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    conformance_path = root / "specs" / "CONFORMANCE.json"
+    conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+    requirement = conformance["requirements"][0]
+    requirement["state"] = "conformant"
+    requirement["gap"] = None
+
+    if operation == "future_evidence":
+        requirement["evidence"] = [{
+            "artifact": f"commit:{commit}",
+            "source": None,
+            "captured_at": "2099-01-01",
+            "expires_at": "2099-12-31",
+        }]
+    elif operation == "stale_commit_evidence":
+        requirement["evidence"] = [{
+            "artifact": f"commit:{commit}",
+            "source": None,
+            "captured_at": "2026-01-01",
+            "expires_at": "2027-01-01",
+        }]
+        (root / "src" / "example.py").write_text("def example():\n    return False\n", encoding="utf-8")
+    else:
+        raise AssertionError(f"unknown post-write fixture operation {operation!r}")
+
+    conformance_path.write_text(json.dumps(conformance, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+
 def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -> None:
     operation = mutation["operation"]
     authority = repository["authority"]
@@ -210,6 +243,14 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
             "expires_at": "2027-01-01",
         }]
         requirements[0]["gap"] = None
+    elif operation == "future_evidence":
+        repository["_post_write_operation"] = "future_evidence"
+    elif operation == "stale_commit_evidence":
+        repository["_post_write_operation"] = "stale_commit_evidence"
+    elif operation == "mismatched_spec_header_id":
+        repository["files"]["specs/SPEC-001-one.md"] = (
+            "# SPEC-999 - One\n\n**Version:** 0.1.0\n\nHuman contract text.\n"
+        )
     elif operation == "normalized_spec_mapping":
         requirements[0]["implementation"] = ["specs/SPEC-002-two.md"]
     elif operation == "deprecated_authority_owner":
@@ -251,6 +292,7 @@ class GovernanceValidatorTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     write_repository(root, repository)
+                    apply_post_write_mutation(root, repository)
                     errors = validate_repository(root).errors
                 self.assertIn(payload["expected"], "\n".join(errors))
 

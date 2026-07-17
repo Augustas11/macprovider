@@ -257,6 +257,8 @@ def _validate_evidence(root: Path, value: Any, location: str, result: Validation
     expires_at = _date(value.get("expires_at"), f"{location}.expires_at", result)
     if captured_at and expires_at and expires_at < captured_at:
         result.error(location, "evidence expires before it is captured")
+    if captured_at and captured_at > date.today():
+        result.error(location, f"evidence captured_at is in the future: {captured_at.isoformat()}")
     if expires_at and expires_at < date.today():
         result.error(location, f"evidence expired on {expires_at.isoformat()}")
     if artifact and artifact.startswith("commit:"):
@@ -292,6 +294,22 @@ def _source_under_journey_evidence(root: Path, source: str) -> bool:
     return True
 
 
+def _commit_file_matches_current(root: Path, commit: str, relative: str) -> bool:
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{relative}"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return False
+    try:
+        current = (root / relative).read_bytes()
+    except OSError:
+        return False
+    return completed.stdout == current
+
+
 def _validate_evidence_list(root: Path, value: Any, location: str, result: ValidationResult) -> None:
     if not isinstance(value, list):
         result.error(location, "field 'evidence' must be an array")
@@ -300,7 +318,7 @@ def _validate_evidence_list(root: Path, value: Any, location: str, result: Valid
         _validate_evidence(root, item, f"{location}[{index}]", result)
 
 
-def _parse_spec_header(path: Path, result: ValidationResult) -> tuple[str, str] | None:
+def _parse_spec_header(path: Path, result: ValidationResult) -> tuple[str, str, str] | None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except UnicodeDecodeError as exc:
@@ -326,7 +344,7 @@ def _parse_spec_header(path: Path, result: ValidationResult) -> tuple[str, str] 
     if version is None:
         result.error(str(path), "missing version header in first 15 lines")
         return None
-    return title_match.group(2).strip(), version
+    return title_match.group(1), title_match.group(2).strip(), version
 
 
 def _git_show_json(root: Path, commit: str, relative: str) -> Any | None:
@@ -419,6 +437,9 @@ def _canonical_spec_files(root: Path, result: ValidationResult) -> dict[str, Pat
             result.error(str(path), "canonical SPEC filename must start with SPEC-NNN-")
             continue
         spec_id = f"SPEC-{match.group(1)}"
+        header_spec_id = header[0]
+        if header_spec_id != spec_id:
+            result.error(str(path.relative_to(root)), f"header spec ID {header_spec_id} does not match filename {spec_id}")
         if spec_id in specs:
             result.error("specs", f"duplicate canonical SPEC file for {spec_id}")
         specs[spec_id] = path
@@ -605,6 +626,21 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
             _validate_gap(requirement.get("gap"), f"{loc}.gap", result)
         if state == "conformant" and not (implementation and (tests or journeys) and requirement.get("evidence")):
             result.error(loc, "conformant requirement requires implementation, test or journey, and evidence")
+        if state == "conformant":
+            commits = [
+                evidence.get("artifact", "").split(":", 1)[1]
+                for evidence in requirement.get("evidence", [])
+                if isinstance(evidence, dict)
+                and isinstance(evidence.get("artifact"), str)
+                and evidence["artifact"].startswith("commit:")
+            ]
+            if not commits:
+                result.error(loc, "conformant requirement requires commit evidence for mapped implementation and test files")
+            for commit in commits:
+                for mapping in implementation + tests:
+                    mapped_file = _mapping_file(mapping)
+                    if not _commit_file_matches_current(root, commit, mapped_file):
+                        result.error(loc, f"commit evidence {commit} does not match current mapped file {mapped_file!r}")
     return [item for item in specs if isinstance(item, dict)], [item for item in requirements if isinstance(item, dict)]
 
 
@@ -651,7 +687,9 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
                 else:
                     header = _parse_spec_header(path, result)
                     if header is not None:
-                        title, version = header
+                        header_spec_id, title, version = header
+                        if spec_id != header_spec_id:
+                            result.error(f"{spec_id}.path", f"header spec ID {header_spec_id} does not match manifest spec_id {spec_id}")
                         if spec.get("title") != title:
                             result.error(f"{spec_id}.title", f"does not match SPEC header title {title!r}")
                         if spec.get("version") != version:
@@ -763,7 +801,7 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", help="repository root")
-    parser.add_argument("--base-ref", default=None, help="accepted for CI compatibility; structured validation is head-only")
+    parser.add_argument("--base-ref", default=None, help="trusted base ref for structured identity immutability checks")
     args = parser.parse_args(argv)
     result = validate_repository(Path(args.root), args.base_ref)
     if result.errors:
