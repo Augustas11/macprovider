@@ -18,7 +18,9 @@ try:
         REQUIREMENT_ID_RE,
         SPEC_ID_RE,
         VERDICTS,
+        DuplicateJSONKeyError,
         _load_json,
+        _unique_json_object,
         ValidationResult,
     )
 except ModuleNotFoundError:
@@ -28,7 +30,9 @@ except ModuleNotFoundError:
         REQUIREMENT_ID_RE,
         SPEC_ID_RE,
         VERDICTS,
+        DuplicateJSONKeyError,
         _load_json,
+        _unique_json_object,
         ValidationResult,
     )
 
@@ -78,7 +82,9 @@ def _extract_declaration(body: str) -> tuple[dict[str, Any] | None, list[str]]:
         return None, ["declaration end marker must follow begin marker"]
     payload = body[start:stop].strip()
     try:
-        value = json.loads(payload)
+        value = json.loads(payload, object_pairs_hook=_unique_json_object)
+    except DuplicateJSONKeyError as exc:
+        return None, [f"declaration JSON has duplicate object key {exc.args[0]!r}"]
     except json.JSONDecodeError as exc:
         return None, [f"declaration JSON is invalid: {exc}"]
     if not isinstance(value, dict):

@@ -53,6 +53,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["artifact", "source", "captured_at", "expires_at"],
+      "allOf": [
+        {
+          "if": {"properties": {"artifact": {"pattern": "^sha256:"}}},
+          "then": {"properties": {"source": {"type": "string", "minLength": 1}}}
+        }
+      ],
       "properties": {
         "artifact": {"type": "string", "pattern": "^(commit:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"},
         "source": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},

@@ -95,6 +95,17 @@ class SpecPRDeclarationTests(unittest.TestCase):
         body = f"{BEGIN}\n{{not json}}\n{END}\n"
         self.assertIn("declaration JSON is invalid", "\n".join(validate_body(body)))
 
+    def test_duplicate_json_keys_fail(self) -> None:
+        body = (
+            f"{BEGIN}\n"
+            '{"schema_version":"spec-pr-governance-v1",'
+            '"behavior_change":"none","behavior_change":"yes",'
+            '"contract_change":"none","specs":[],"requirements":[],'
+            '"authority_domains":[],"arbitration":[],"tests":[],"journeys":[]}'
+            f"\n{END}\n"
+        )
+        self.assertIn("duplicate object key 'behavior_change'", "\n".join(validate_body(body)))
+
     def test_unexpected_field_fails(self) -> None:
         errors = validate_body(declaration(extra="nope"))
         self.assertIn("unexpected field 'extra'", "\n".join(errors))

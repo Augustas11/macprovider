@@ -191,12 +191,21 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
     elif operation == "unregistered_journey":
         requirements[0]["journeys"] = ["JOURNEY-MISSING"]
     elif operation == "physical_evidence_path_traversal":
-        digest = hashlib.sha256(b"proof\n").hexdigest()
+        digest = hashlib.sha256(b"# JOURNEY-BOOT\n").hexdigest()
         requirements[0]["state"] = "conformant"
         requirements[0]["journeys"] = ["JOURNEY-BOOT"]
         requirements[0]["evidence"] = [{
             "artifact": f"sha256:{digest}",
-            "source": "src/example.py",
+            "source": "journeys/evidence/../JOURNEY-BOOT.md",
+            "captured_at": "2026-01-01",
+            "expires_at": "2027-01-01",
+        }]
+        requirements[0]["gap"] = None
+    elif operation == "sha_evidence_without_source":
+        requirements[0]["state"] = "conformant"
+        requirements[0]["evidence"] = [{
+            "artifact": "sha256:" + "0" * 64,
+            "source": None,
             "captured_at": "2026-01-01",
             "expires_at": "2027-01-01",
         }]
@@ -256,6 +265,21 @@ class GovernanceValidatorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertIn("duplicate JSON object key", "\n".join(validate_repository(root).errors))
+
+    def test_base_manifest_prevents_authority_owner_reassignment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            write_repository(root, repository)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            authority = repository["authority"]
+            conformance = repository["conformance"]
+            authority["domains"][0]["owner_spec"] = "SPEC-002"
+            conformance["specs"][0]["authority_domains"] = []
+            conformance["specs"][1]["authority_domains"].append("provider-wire-protocol")
+            write_repository(root, repository)
+            errors = "\n".join(validate_repository(root, base_ref=base).errors)
+            self.assertIn("authority domain 'provider-wire-protocol' owner changed", errors)
 
 
 if __name__ == "__main__":

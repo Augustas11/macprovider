@@ -269,6 +269,8 @@ def _validate_evidence(root: Path, value: Any, location: str, result: Validation
         ).returncode != 0:
             result.error(f"{location}.artifact", f"commit evidence is not reachable: {commit}")
     match = SHA256_RE.fullmatch(artifact or "")
+    if match and not isinstance(source, str):
+        result.error(f"{location}.source", "sha256 evidence requires a non-empty source path")
     if match and isinstance(source, str):
         path = _repository_path(root, source, f"{location}.source", result)
         if path is not None:
@@ -279,6 +281,15 @@ def _validate_evidence(root: Path, value: Any, location: str, result: Validation
             else:
                 if digest != match.group(1):
                     result.error(f"{location}.artifact", "sha256 artifact does not match source bytes")
+
+
+def _source_under_journey_evidence(root: Path, source: str) -> bool:
+    try:
+        resolved = (root / source).resolve()
+        resolved.relative_to((root / "journeys" / "evidence").resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _validate_evidence_list(root: Path, value: Any, location: str, result: ValidationResult) -> None:
@@ -316,6 +327,85 @@ def _parse_spec_header(path: Path, result: ValidationResult) -> tuple[str, str] 
         result.error(str(path), "missing version header in first 15 lines")
         return None
     return title_match.group(2).strip(), version
+
+
+def _git_show_json(root: Path, commit: str, relative: str) -> Any | None:
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{relative}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        return json.loads(completed.stdout, object_pairs_hook=_unique_json_object)
+    except (DuplicateJSONKeyError, json.JSONDecodeError):
+        return None
+
+
+def _validate_base_manifest_immutability(
+    root: Path,
+    base_ref: str | None,
+    authority: dict[str, Any],
+    conformance: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    if not base_ref:
+        return
+    base_authority = _git_show_json(root, base_ref, "specs/AUTHORITY.json")
+    base_conformance = _git_show_json(root, base_ref, "specs/CONFORMANCE.json")
+    if not isinstance(base_authority, dict) or not isinstance(base_conformance, dict):
+        return
+
+    head_domains = {
+        item.get("id"): item
+        for item in authority.get("domains", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for item in base_authority.get("domains", []):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        domain_id = item["id"]
+        head = head_domains.get(domain_id)
+        if head is None:
+            result.error("specs/AUTHORITY.json", f"authority domain {domain_id!r} removed from structured tombstone ledger")
+            continue
+        if head.get("owner_spec") != item.get("owner_spec"):
+            result.error("specs/AUTHORITY.json", f"authority domain {domain_id!r} owner changed from {item.get('owner_spec')} to {head.get('owner_spec')}")
+
+    head_specs = {
+        item.get("spec_id"): item
+        for item in conformance.get("specs", [])
+        if isinstance(item, dict) and isinstance(item.get("spec_id"), str)
+    }
+    for item in base_conformance.get("specs", []):
+        if not isinstance(item, dict) or not isinstance(item.get("spec_id"), str):
+            continue
+        spec_id = item["spec_id"]
+        head = head_specs.get(spec_id)
+        if head is None:
+            result.error("specs/CONFORMANCE.json", f"SPEC record {spec_id} removed from structured tombstone ledger")
+            continue
+        if head.get("owner") != item.get("owner"):
+            result.error("specs/CONFORMANCE.json", f"SPEC record {spec_id} owner changed from {item.get('owner')} to {head.get('owner')}")
+
+    head_requirements = {
+        item.get("requirement_id"): item
+        for item in conformance.get("requirements", [])
+        if isinstance(item, dict) and isinstance(item.get("requirement_id"), str)
+    }
+    for item in base_conformance.get("requirements", []):
+        if not isinstance(item, dict) or not isinstance(item.get("requirement_id"), str):
+            continue
+        requirement_id = item["requirement_id"]
+        head = head_requirements.get(requirement_id)
+        if head is None:
+            result.error("specs/CONFORMANCE.json", f"requirement ID {requirement_id} removed from structured tombstone ledger")
+            continue
+        if head.get("spec_id") != item.get("spec_id"):
+            result.error("specs/CONFORMANCE.json", f"requirement ID {requirement_id} moved from {item.get('spec_id')} to {head.get('spec_id')}")
 
 
 def _canonical_spec_files(root: Path, result: ValidationResult) -> dict[str, Path]:
@@ -519,7 +609,6 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
 
 
 def validate_repository(root: Path, base_ref: str | None = None) -> ValidationResult:
-    del base_ref  # Base-aware prose diffing is intentionally outside this checker.
     root = root.resolve()
     result = ValidationResult()
     authority = _load_json(root / "specs" / "AUTHORITY.json", result)
@@ -542,6 +631,7 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
     if isinstance(authority.get("baseline"), dict) and isinstance(conformance.get("baseline"), dict):
         if authority["baseline"] != conformance["baseline"]:
             result.error("specs", "baselines must match exactly")
+    _validate_base_manifest_immutability(root, base_ref, authority, conformance, result)
 
     canonical_specs = _canonical_spec_files(root, result)
     spec_records: dict[str, dict[str, Any]] = {}
@@ -659,7 +749,7 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
                     artifact = evidence.get("artifact")
                     if (
                         isinstance(source, str)
-                        and source.startswith("journeys/evidence/")
+                        and _source_under_journey_evidence(root, source)
                         and isinstance(artifact, str)
                         and artifact.startswith("sha256:")
                     ):
