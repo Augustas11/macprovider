@@ -2924,7 +2924,9 @@ actor CoordinatorClient {
     }
 
     private func runStartupAutoupdateRecovery() async {
-        guard let binaryURL = Bundle.main.executableURL else { return }
+        guard let binaryURL = CompatibilitySetManifest.resolvedExecutableURL(
+            Bundle.main.executableURL
+        ) else { return }
         await runStartupAutoupdateRecovery(binaryURL: binaryURL, markerStore: autoupdateMarkerStore)
     }
 

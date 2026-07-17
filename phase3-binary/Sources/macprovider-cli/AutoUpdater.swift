@@ -62,7 +62,9 @@ struct AutoUpdater: Sendable {
         drain: @escaping Drain,
         sendReady: @escaping SendReady,
         restartLaunchd: @escaping Restart = { try AutoUpdater.restartLaunchdIfInstalled() },
-        currentBinaryURL: @escaping @Sendable () -> URL? = { Bundle.main.executableURL },
+        currentBinaryURL: @escaping @Sendable () -> URL? = {
+            CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
+        },
         rollbackObserverAvailable: @escaping Availability = { AutoUpdater.defaultRollbackObserverAvailable() },
         launchdProviderAvailable: @escaping Availability = { AutoUpdater.defaultLaunchdProviderAvailable() },
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore()

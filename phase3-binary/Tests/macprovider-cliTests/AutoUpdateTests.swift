@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import MacProviderCore
@@ -563,7 +564,12 @@ final class AutoUpdateTests: XCTestCase {
     func testInterruptedCompatibilitySetCutoverRecoversAtEveryDestructivePhase() throws {
         for phase in CompatibilitySetCutoverPhase.allCases {
             let fixture = try TempHome()
-            let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+            let manifestSigningKey = P256.Signing.PrivateKey()
+            let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+            let store = AutoUpdateMarkerStore(
+                homeDirectory: fixture.url,
+                compatibilityManifestPublicKeyPEM: manifestPublicKey
+            )
             try store.ensureTrustedRoot()
             let live = fixture.url.appendingPathComponent("bin", isDirectory: true)
             let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
@@ -577,6 +583,46 @@ final class AutoUpdateTests: XCTestCase {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
             try writeOwnedReleaseResources(in: live, prefix: "old")
             try writeOwnedReleaseResources(in: payload, prefix: "new")
+            let priorManifestFixture = try CompatibilityManifestFixture(
+                root: live,
+                privateKey: manifestSigningKey,
+                version: "1.8.40",
+                providerCLIVersion: "1.8.40",
+                malibuAppVersion: "1.8.40",
+                commit: "1111111111111111111111111111111111111111",
+                populateResources: false
+            )
+            let targetManifestFixture = try CompatibilityManifestFixture(
+                root: payload,
+                privateKey: manifestSigningKey,
+                version: "1.8.42",
+                providerCLIVersion: "1.8.40",
+                malibuAppVersion: "1.8.41",
+                commit: "2222222222222222222222222222222222222222",
+                populateResources: false
+            )
+            let priorManifestData = try Data(
+                contentsOf: live.appendingPathComponent(CompatibilitySetManifest.fileName)
+            )
+            let targetManifestData = try Data(
+                contentsOf: payload.appendingPathComponent(CompatibilitySetManifest.fileName)
+            )
+            let priorManifest = try CompatibilitySetManifest.loadValidated(
+                from: live,
+                expectedProviderVersion: "1.8.40",
+                publicKeyPEM: manifestPublicKey
+            )
+            XCTAssertEqual(priorManifest.compatibilitySetID, priorManifestFixture.compatibilitySetID)
+            XCTAssertEqual(priorManifest.malibuAppVersion, "1.8.40")
+            let targetManifest = try CompatibilitySetManifest.loadValidated(
+                from: payload,
+                expectedProviderVersion: "1.8.40",
+                publicKeyPEM: manifestPublicKey
+            )
+            XCTAssertEqual(targetManifest.compatibilitySetID, targetManifestFixture.compatibilitySetID)
+            XCTAssertEqual(targetManifest.version, "1.8.42")
+            XCTAssertEqual(targetManifest.providerCLIVersion, "1.8.40")
+            XCTAssertEqual(targetManifest.malibuAppVersion, "1.8.41")
             let applications = fixture.url.appendingPathComponent("Applications", isDirectory: true)
             try FileManager.default.createDirectory(
                 at: applications,
@@ -586,15 +632,15 @@ final class AutoUpdateTests: XCTestCase {
             let installedMalibu = applications.appendingPathComponent("Malibu.app", isDirectory: true)
             try writeMalibuAppFixture(
                 at: installedMalibu,
-                version: "1.6.0",
-                compatibilityManifest: "old-compatibility-set",
+                version: "1.8.40",
+                compatibilityManifest: priorManifestData,
                 marker: "old-app"
             )
             let stagedMalibu = fixture.url.appendingPathComponent("staged/Malibu.app", isDirectory: true)
             try writeMalibuAppFixture(
                 at: stagedMalibu,
-                version: "1.7.0",
-                compatibilityManifest: "new-compatibility-set",
+                version: "1.8.41",
+                compatibilityManifest: targetManifestData,
                 marker: "new-app"
             )
 
@@ -613,10 +659,14 @@ final class AutoUpdateTests: XCTestCase {
             let marker = try store.preserveReleaseRollbackBackup(
                 binaryURL: liveBinary,
                 updateID: UUID().uuidString.lowercased(),
-                targetVersion: "1.7.0"
+                targetVersion: "1.8.40",
+                previousVersion: "1.8.40",
+                targetCompatibilitySetID: targetManifest.compatibilitySetID,
+                targetCompatibilitySetSHA256: targetManifest.envelopeSHA256
             )
             try store.writePending(marker)
 
+            var observedCheckpoint: CompatibilitySetCutoverPhase?
             XCTAssertThrowsError(
                 try store.activateReleasePayload(
                     from: payload,
@@ -626,24 +676,62 @@ final class AutoUpdateTests: XCTestCase {
                     rollbackMarker: marker,
                     cutoverCheckpoint: { checkpoint in
                         if checkpoint == phase {
+                            observedCheckpoint = checkpoint
                             throw SimulatedCutoverInterruption.stop
                         }
                     }
                 ),
                 "phase \(phase.rawValue)"
+            ) { error in
+                XCTAssertEqual(
+                    error as? SimulatedCutoverInterruption,
+                    .stop,
+                    "phase \(phase.rawValue)"
+                )
+                XCTAssertEqual(observedCheckpoint, phase, "phase \(phase.rawValue)")
+            }
+            let restartedStore = AutoUpdateMarkerStore(
+                homeDirectory: fixture.url,
+                compatibilityManifestPublicKeyPEM: manifestPublicKey
             )
-            let restartedStore = AutoUpdateMarkerStore(homeDirectory: fixture.url)
             let persistedMarker = try XCTUnwrap(restartedStore.readPending(), "phase \(phase.rawValue)")
 
-            XCTAssertEqual(restartedStore.recoverOrphanedMarker(persistedMarker), .restored(marker), "phase \(phase.rawValue)")
+            let recovery = restartedStore.recoverOrphanedMarker(persistedMarker)
+            guard case .restoredAwaitingReadiness(let awaitingPrevious) = recovery else {
+                XCTFail(
+                    "expected restoredAwaitingReadiness for phase \(phase.rawValue), got \(recovery)"
+                )
+                continue
+            }
+            XCTAssertEqual(
+                awaitingPrevious.transactionState,
+                .awaitingPreviousReadiness,
+                "phase \(phase.rawValue)"
+            )
+            XCTAssertEqual(
+                awaitingPrevious.previousCompatibilitySetID,
+                priorManifestFixture.compatibilitySetID,
+                "phase \(phase.rawValue)"
+            )
             XCTAssertEqual(try String(contentsOf: liveBinary), "old-binary", "phase \(phase.rawValue)")
             XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("mlx.metallib")), "old-metal", "phase \(phase.rawValue)")
             XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("catalog-release/release.json")), "old-catalog", "phase \(phase.rawValue)")
             XCTAssertEqual(
-                try String(contentsOf: live.appendingPathComponent(CompatibilitySetManifest.fileName)),
-                "old-compatibility-set",
+                try Data(contentsOf: live.appendingPathComponent(CompatibilitySetManifest.fileName)),
+                priorManifestData,
                 "phase \(phase.rawValue)"
             )
+            let restoredManifest = try CompatibilitySetManifest.loadValidated(
+                from: live,
+                expectedProviderVersion: "1.8.40",
+                publicKeyPEM: manifestPublicKey
+            )
+            XCTAssertEqual(
+                restoredManifest.compatibilitySetID,
+                priorManifestFixture.compatibilitySetID,
+                "phase \(phase.rawValue)"
+            )
+            XCTAssertEqual(restoredManifest.malibuAppVersion, "1.8.40", "phase \(phase.rawValue)")
             XCTAssertEqual(try String(contentsOf: providerPlist), "old-provider-plist", "phase \(phase.rawValue)")
             XCTAssertEqual(try String(contentsOf: watchdogScript), "old-watchdog", "phase \(phase.rawValue)")
             XCTAssertEqual(try Data(contentsOf: watchdogPlist), oldWatchdogPlist, "phase \(phase.rawValue)")
@@ -652,8 +740,35 @@ final class AutoUpdateTests: XCTestCase {
                 "old-app",
                 "phase \(phase.rawValue)"
             )
-            XCTAssertFalse(FileManager.default.fileExists(atPath: restartedStore.pendingURL.path), "phase \(phase.rawValue)")
+            XCTAssertEqual(
+                try Data(
+                    contentsOf: installedMalibu.appendingPathComponent(
+                        "Contents/Resources/\(CompatibilitySetManifest.fileName)"
+                    )
+                ),
+                priorManifestData,
+                "phase \(phase.rawValue)"
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: restartedStore.pendingURL.path),
+                "phase \(phase.rawValue)"
+            )
+            try restartedStore.completeRestoredPreviousSet(awaitingPrevious)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: restartedStore.pendingURL.path),
+                "phase \(phase.rawValue)"
+            )
         }
+    }
+
+    func testAutoUpdateMarkerStoreDefaultsCompatibilityManifestTrustToReleaseKey() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+
+        XCTAssertEqual(
+            store.compatibilityManifestPublicKeyPEM,
+            SelfUpdate.checksumPublicKeyPEM
+        )
     }
 
     func testLegacyBinaryOnlyPendingMarkerEncodingOmitsReleaseSnapshotFields() throws {
@@ -1192,7 +1307,7 @@ final class AutoUpdateTests: XCTestCase {
     private func writeMalibuAppFixture(
         at app: URL,
         version: String,
-        compatibilityManifest: String,
+        compatibilityManifest: Data,
         marker: String
     ) throws {
         let contents = app.appendingPathComponent("Contents", isDirectory: true)
@@ -1210,7 +1325,7 @@ final class AutoUpdateTests: XCTestCase {
             options: 0
         )
         try info.write(to: contents.appendingPathComponent("Info.plist"))
-        try Data(compatibilityManifest.utf8).write(
+        try compatibilityManifest.write(
             to: resources.appendingPathComponent(CompatibilitySetManifest.fileName)
         )
         try Data(marker.utf8).write(to: resources.appendingPathComponent("test-marker"))
@@ -1743,7 +1858,7 @@ private extension ISO8601DateFormatter {
     }()
 }
 
-private enum SimulatedCutoverInterruption: Error {
+private enum SimulatedCutoverInterruption: Error, Equatable {
     case stop
 }
 

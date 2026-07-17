@@ -226,10 +226,34 @@ struct CompatibilitySetManifest: Equatable, Sendable {
     let compatibilitySetID: String
     let envelopeSHA256: String
     let version: String
+    let malibuAppVersion: String
+    let providerCLIVersion: String
     let catalogReleaseID: String
     let catalogPolicyVersion: String
     let maintenanceLeaseSeconds: Int
     let readinessTimeoutSeconds: Int
+
+    init(
+        compatibilitySetID: String,
+        envelopeSHA256: String,
+        version: String,
+        catalogReleaseID: String,
+        catalogPolicyVersion: String,
+        maintenanceLeaseSeconds: Int,
+        readinessTimeoutSeconds: Int,
+        malibuAppVersion: String? = nil,
+        providerCLIVersion: String? = nil
+    ) {
+        self.compatibilitySetID = compatibilitySetID
+        self.envelopeSHA256 = envelopeSHA256
+        self.version = version
+        self.malibuAppVersion = malibuAppVersion ?? version
+        self.providerCLIVersion = providerCLIVersion ?? version
+        self.catalogReleaseID = catalogReleaseID
+        self.catalogPolicyVersion = catalogPolicyVersion
+        self.maintenanceLeaseSeconds = maintenanceLeaseSeconds
+        self.readinessTimeoutSeconds = readinessTimeoutSeconds
+    }
 
     static func isCanonicalCompatibilitySetID(_ value: String) -> Bool {
         guard value.utf8.count <= 256 else { return false }
@@ -241,7 +265,7 @@ struct CompatibilitySetManifest: Equatable, Sendable {
 
     static func loadValidated(
         from payloadDirectory: URL,
-        expectedVersion: String,
+        expectedProviderVersion: String? = nil,
         publicKeyPEM: String = SelfUpdate.checksumPublicKeyPEM
     ) throws -> CompatibilitySetManifest {
         let url = payloadDirectory.appendingPathComponent(fileName)
@@ -319,8 +343,8 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         let tag = try requirePattern(release["tag"], #"^v[0-9]+\.[0-9]+\.[0-9]+$"#, "release_tag")
         let commit = try requirePattern(release["commit"], #"^[0-9a-f]{40}$"#, "release_commit")
         let repository = try requirePattern(release["repository"], #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, "release_repository")
-        guard version == expectedVersion, tag == "v\(version)" else {
-            throw UpdateError.compatibilityManifestVersionMismatch(expected: expectedVersion, actual: version)
+        guard tag == "v\(version)" else {
+            throw UpdateError.compatibilityManifestInvalid("release_tag_version")
         }
         let compatibilitySetID = try requireTrimmedString(signed["compatibility_set_id"], "compatibility_set_id")
         guard compatibilitySetID == "\(repository):\(tag)@\(commit)",
@@ -344,8 +368,14 @@ struct CompatibilitySetManifest: Equatable, Sendable {
             "components"
         )
         let catalog = try validateCatalog(components["catalog"], payloadDirectory: payloadDirectory)
-        try validateMalibu(components["malibu_app"], version: version)
-        try validateCLI(components["provider_cli"], version: version)
+        let malibuAppVersion = try validateMalibu(components["malibu_app"])
+        let providerCLIVersion = try validateCLI(components["provider_cli"])
+        if let expectedProviderVersion, providerCLIVersion != expectedProviderVersion {
+            throw UpdateError.compatibilityManifestVersionMismatch(
+                expected: expectedProviderVersion,
+                actual: providerCLIVersion
+            )
+        }
         try validateLaunchd(components["launchd"], payloadDirectory: payloadDirectory)
         try validateWatchdog(components["watchdog"], payloadDirectory: payloadDirectory)
         try validateAdmission(components["coordinator_admission"], version: version)
@@ -360,16 +390,34 @@ struct CompatibilitySetManifest: Equatable, Sendable {
             catalogReleaseID: catalog.releaseID,
             catalogPolicyVersion: catalog.policyVersion,
             maintenanceLeaseSeconds: transaction.leaseSeconds,
-            readinessTimeoutSeconds: transaction.readinessSeconds
+            readinessTimeoutSeconds: transaction.readinessSeconds,
+            malibuAppVersion: malibuAppVersion,
+            providerCLIVersion: providerCLIVersion
         )
     }
 
-    static func loadInstalled(executableURL: URL?, expectedVersion: String) -> CompatibilitySetManifest? {
-        guard let executableURL else { return nil }
+    static func loadInstalled(
+        executableURL: URL?,
+        expectedVersion: String,
+        publicKeyPEM: String = SelfUpdate.checksumPublicKeyPEM
+    ) -> CompatibilitySetManifest? {
+        guard let payloadDirectory = payloadDirectory(for: executableURL) else { return nil }
         return try? loadValidated(
-            from: executableURL.deletingLastPathComponent(),
-            expectedVersion: expectedVersion
+            from: payloadDirectory,
+            expectedProviderVersion: expectedVersion,
+            publicKeyPEM: publicKeyPEM
         )
+    }
+
+    static func resolvedExecutableURL(_ executableURL: URL?) -> URL? {
+        executableURL?
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+    }
+
+    static func payloadDirectory(for executableURL: URL?) -> URL? {
+        resolvedExecutableURL(executableURL)?.deletingLastPathComponent()
     }
 
     private static func validateCatalog(
@@ -398,12 +446,12 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         return (releaseID, policyVersion)
     }
 
-    private static func validateMalibu(_ raw: Any?, version: String) throws {
+    private static func validateMalibu(_ raw: Any?) throws -> String {
         guard let value = raw as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("malibu") }
         try requireExactKeys(value, ["activation", "bundle_id", "compatibility_handoff", "minimum_status_reader", "version"], "malibu")
         try requireString(value["activation"], equals: "cli_owned_if_installed", "malibu_activation")
         try requireString(value["bundle_id"], equals: "tech.malibu.app", "malibu_bundle")
-        try requireString(value["version"], equals: version, "malibu_version")
+        let version = try requirePattern(value["version"], #"^[0-9]+\.[0-9]+\.[0-9]+$"#, "malibu_version")
         try requireInteger(value["minimum_status_reader"], in: 1...1, "minimum_status_reader")
         guard let handoff = value["compatibility_handoff"] as? [String: Any] else {
             throw UpdateError.compatibilityManifestInvalid("malibu_handoff")
@@ -417,16 +465,17 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         )
         try requireString(handoff["provider_mutation"], equals: "forbidden", "malibu_provider_mutation")
         try requireString(handoff["reader_compatibility"], equals: "backward_compatible", "malibu_reader_compatibility")
+        return version
     }
 
-    private static func validateCLI(_ raw: Any?, version: String) throws {
+    private static func validateCLI(_ raw: Any?) throws -> String {
         guard let value = raw as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("provider_cli") }
         try requireExactKeys(value, ["activation", "designated_identifier", "platform", "status_contract", "version"], "provider_cli")
         try requireString(value["activation"], equals: "local", "cli_activation")
         try requireString(value["designated_identifier"], equals: "live.streamvc.macprovider.cli", "cli_identifier")
         try requireString(value["platform"], equals: "darwin-arm64", "cli_platform")
         try requireString(value["status_contract"], equals: "macprovider.local-status.v1", "cli_status_contract")
-        try requireString(value["version"], equals: version, "cli_version")
+        return try requirePattern(value["version"], #"^[0-9]+\.[0-9]+\.[0-9]+$"#, "cli_version")
     }
 
     private static func validateLaunchd(_ raw: Any?, payloadDirectory: URL) throws {

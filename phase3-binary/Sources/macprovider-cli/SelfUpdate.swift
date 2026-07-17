@@ -129,8 +129,12 @@ struct SelfUpdate {
         expectedRunAttempt: Int
     ) async throws {
         let target = try Self.validateReleaseTag(tag)
-        guard Self.compareSemver(currentVersion, target) == .orderedAscending else {
-            throw UpdateError.acceptanceCandidateNotNewer(current: currentVersion, target: target)
+        let installedReleaseVersion = try installedCompatibilitySetReleaseVersion()
+        guard Self.compareSemver(installedReleaseVersion, target) == .orderedAscending else {
+            throw UpdateError.acceptanceCandidateNotNewer(
+                current: installedReleaseVersion,
+                target: target
+            )
         }
         let prepared = try prepareValidatedUpdate(
             fromAcceptanceDirectory: directory,
@@ -141,14 +145,37 @@ struct SelfUpdate {
             expectedRunAttempt: expectedRunAttempt
         )
         defer { prepared.cleanup() }
+        try Self.requireAcceptanceProviderVersion(
+            current: currentVersion,
+            target: prepared.compatibilityManifest.providerCLIVersion
+        )
         try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
             stagedMalibuApp: prepared.stagedMalibuApp,
-            targetVersion: target,
+            targetVersion: prepared.compatibilityManifest.providerCLIVersion,
             compatibilityManifest: prepared.compatibilityManifest
         )
-        print("Acceptance candidate applied. Restart macprovider-cli to use v\(target).")
+        print(
+            "Acceptance candidate v\(target) applied with provider CLI "
+                + "v\(prepared.compatibilityManifest.providerCLIVersion). Restart macprovider-cli."
+        )
+    }
+
+    private func installedCompatibilitySetReleaseVersion() throws -> String {
+        guard let payloadDirectory = CompatibilitySetManifest.payloadDirectory(
+            for: Bundle.main.executableURL
+        ) else {
+            return currentVersion
+        }
+        let manifestURL = payloadDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            return currentVersion
+        }
+        return try CompatibilitySetManifest.loadValidated(
+            from: payloadDirectory,
+            expectedProviderVersion: currentVersion
+        ).version
     }
 
     func resolveReleaseByTags(normalizedTarget: String) async throws -> GitHubRelease {
@@ -310,7 +337,8 @@ struct SelfUpdate {
                 expectedMalibuSHA: Self.expectedSHA256(for: malibuDMGName, in: checksumsText),
                 signedPolicy: nil,
                 targetVersion: targetVersion,
-                expectedCompatibilitySetID: acceptanceMetadata.compatibilitySetID
+                expectedCompatibilitySetID: acceptanceMetadata.compatibilitySetID,
+                allowIndependentProviderVersion: true
             )
         } catch {
             try? FileManager.default.removeItem(at: tempDir)
@@ -329,7 +357,8 @@ struct SelfUpdate {
         expectedMalibuSHA: String,
         signedPolicy: GitHubSignedPolicy?,
         targetVersion: String,
-        expectedCompatibilitySetID: String? = nil
+        expectedCompatibilitySetID: String? = nil,
+        allowIndependentProviderVersion: Bool = false
     ) throws -> PreparedSelfUpdate {
         try validateFreeSpace(for: tempDir, requiredForKnownTarballAt: tarballURL)
         let actualSHA = try Self.sha256(file: tarballURL)
@@ -353,7 +382,7 @@ struct SelfUpdate {
         )
         let compatibilityManifest = try CompatibilitySetManifest.loadValidated(
             from: newBinary.deletingLastPathComponent(),
-            expectedVersion: targetVersion
+            expectedProviderVersion: allowIndependentProviderVersion ? nil : targetVersion
         )
         let artifactIndex = try CompatibilityArtifactIndex.loadValidated(
             from: artifactIndexURL,
@@ -376,7 +405,10 @@ struct SelfUpdate {
             newBinary.path,
             arguments: Self.stagedCLIPreflightArguments
         )
-        try Self.requireStagedBinaryVersion(stagedVersionOutput, targetVersion: targetVersion)
+        try Self.requireStagedBinaryVersion(
+            stagedVersionOutput,
+            targetVersion: compatibilityManifest.providerCLIVersion
+        )
         let stagedMalibuApp = if let malibuBundleStager {
             try malibuBundleStager(malibuDMGURL, tempDir, compatibilityManifest, newBinary)
         } else {
@@ -568,7 +600,9 @@ struct SelfUpdate {
         var pendingMarker: AutoUpdatePendingMarker?
         var updateLock: AutoUpdateLock?
         defer { withExtendedLifetime(updateLock) {} }
-        let current = replaceBinary == nil ? Bundle.main.executableURL : nil
+        let current = replaceBinary == nil
+            ? CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
+            : nil
         if replaceBinary == nil {
             guard let current else { throw UpdateError.currentBinaryUnknown }
             updateLock = try markerStore.acquireLock()
@@ -1116,7 +1150,7 @@ struct SelfUpdate {
             format: nil
         ) as? [String: Any],
               info["CFBundleIdentifier"] as? String == "tech.malibu.app",
-              info["CFBundleShortVersionString"] as? String == compatibilityManifest.version
+              info["CFBundleShortVersionString"] as? String == compatibilityManifest.malibuAppVersion
         else {
             throw UpdateError.malibuBundleInvalid("bundle_identity_or_version_mismatch")
         }
@@ -1358,6 +1392,17 @@ struct SelfUpdate {
         }
         guard staged == targetVersion else {
             throw UpdateError.stagedVersionMismatch(expected: targetVersion, actual: staged)
+        }
+    }
+
+    static func requireAcceptanceProviderVersion(current: String, target: String) throws {
+        let normalizedCurrent = try validateReleaseTag(current)
+        let normalizedTarget = try validateReleaseTag(target)
+        guard compareSemver(normalizedCurrent, normalizedTarget) != .orderedDescending else {
+            throw UpdateError.acceptanceProviderDowngrade(
+                current: normalizedCurrent,
+                target: normalizedTarget
+            )
         }
     }
 
@@ -1689,6 +1734,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case compatibilityArtifactIndexInvalid(String)
     case unsafeAcceptanceDirectory(String)
     case acceptanceCandidateNotNewer(current: String, target: String)
+    case acceptanceProviderDowngrade(current: String, target: String)
     case stagedCLIIdentityInvalid(String)
     case rollbackUnavailable
     case activationFailedRollbackFailed(update: String, rollback: String)
@@ -1749,6 +1795,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Acceptance-candidate directory is unsafe: \(reason)"
         case let .acceptanceCandidateNotNewer(current, target):
             return "Acceptance candidate must advance the installed version: current \(current), target \(target)"
+        case let .acceptanceProviderDowngrade(current, target):
+            return "Acceptance candidate must not downgrade the provider CLI outside emergency rollback: current \(current), target \(target)"
         case .stagedCLIIdentityInvalid(let reason):
             return "Signed provider CLI validation failed: \(reason)"
         case .rollbackUnavailable:

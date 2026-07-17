@@ -7794,22 +7794,91 @@ print_autotune_handoff() {
   printf "  macprovider-cli autotune --recommend --apply\n"
 }
 
+installed_provider_binary_path() {
+  if [ -x "$INSTALL_DIR/macprovider-cli" ]; then
+    printf '%s\n' "$INSTALL_DIR/macprovider-cli"
+  elif [ -x "$BINARY_PATH" ]; then
+    printf '%s\n' "$BINARY_PATH"
+  fi
+}
+
 validate_acceptance_upgrade_target() {
   target="$1"
   [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 0
-  [ -x "$BINARY_PATH" ] || return 0
+  installed_binary="$(installed_provider_binary_path)"
+  [ -n "$installed_binary" ] || return 0
   # Downgrades are never an acceptance shortcut. They continue only through
   # the existing emergency path, which supplies coordinator/config/readiness gates.
   [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && return 0
-  installed_version="$($BINARY_PATH --version 2>/dev/null | tr -d '\r\n')"
+  installed_manifest="$INSTALL_DIR/compatibility-set.json"
+  if [ -f "$installed_manifest" ]; then
+    installed_preflight="$("$installed_binary" release-payload-preflight 2>/dev/null)" \
+      || die 7 "installed compatibility set failed preflight before acceptance upgrade"
+    installed_version="$(python3 - "$installed_preflight" <<'PY'
+import json
+import re
+import sys
+
+value = json.loads(sys.argv[1])
+version = value.get("version")
+if set(value) != {"compatibility_set_id", "status", "version"} \
+        or value.get("status") != "valid" \
+        or not isinstance(version, str) \
+        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit(1)
+print(version)
+PY
+    )" || die 7 "installed compatibility set returned invalid preflight identity"
+    installed_tag="v$installed_version"
+  else
+    installed_version="$("$installed_binary" --version 2>/dev/null | tr -d '\r\n')"
+    case "$installed_version" in
+      v*) installed_tag="$installed_version" ;;
+      *) installed_tag="v$installed_version" ;;
+    esac
+  fi
+  validate_macprovider_version_tag "$installed_tag"
+  if version_at_least "$installed_tag" "$target"; then
+    die 7 "acceptance candidate $target must be newer than installed $installed_tag"
+  fi
+}
+
+validate_acceptance_provider_component_target() {
+  local provider_target="$1"
+  local installed_binary provider_target_tag installed_version installed_tag
+  [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 0
+  [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && return 0
+  installed_binary="$(installed_provider_binary_path)"
+  [ -n "$installed_binary" ] || return 0
+
+  case "$provider_target" in
+    v*) provider_target_tag="$provider_target" ;;
+    *) provider_target_tag="v$provider_target" ;;
+  esac
+  validate_macprovider_version_tag "$provider_target_tag"
+  installed_version="$("$installed_binary" --version 2>/dev/null | tr -d '\r\n')" \
+    || die 7 "installed provider CLI version preflight failed before acceptance upgrade"
   case "$installed_version" in
     v*) installed_tag="$installed_version" ;;
     *) installed_tag="v$installed_version" ;;
   esac
   validate_macprovider_version_tag "$installed_tag"
-  if version_at_least "$installed_tag" "$target"; then
-    die 7 "acceptance candidate $target must be newer than installed $installed_tag"
+  if [ "$installed_tag" != "$provider_target_tag" ] \
+      && version_at_least "$installed_tag" "$provider_target_tag"; then
+    die 7 "acceptance provider component $provider_target_tag must not downgrade installed $installed_tag"
   fi
+}
+
+validate_staged_acceptance_provider_component() {
+  local provider_target="$1"
+  local staged_provider_version
+  staged_provider_version="$("$staging_dir/macprovider-cli" --version 2>/dev/null | tr -d '\r\n')" \
+    || die 5 "staged acceptance provider CLI version preflight failed"
+  case "$staged_provider_version" in
+    v*) staged_provider_version="${staged_provider_version#v}" ;;
+  esac
+  [ "$staged_provider_version" = "$provider_target" ] \
+    || die 5 "staged acceptance provider CLI version does not match signed provider component"
 }
 
 validate_non_emergency_pinned_target() {
@@ -7836,15 +7905,17 @@ validate_acceptance_staged_identity() {
   [ -f "$manifest" ] || die 5 "acceptance payload is missing compatibility-set.json"
   signed_payload="$TMPDIR_PATH/acceptance-compatibility-set.signed.json"
   manifest_signature="$TMPDIR_PATH/acceptance-compatibility-set.signature.der"
+  provider_component_version_file="$TMPDIR_PATH/acceptance-provider-component-version"
   python3 - "$manifest" "$GITHUB_REPO" "$tag" "$MACPROVIDER_ACCEPTANCE_COMMIT" \
-    "$signed_payload" "$manifest_signature" <<'PY' \
+    "$signed_payload" "$manifest_signature" "$provider_component_version_file" <<'PY' \
     || die 5 "acceptance compatibility-set identity is invalid"
 import base64
 import json
 import pathlib
+import re
 import sys
 
-manifest_path, repository, tag, commit, payload_path, signature_path = sys.argv[1:]
+manifest_path, repository, tag, commit, payload_path, signature_path, provider_version_path = sys.argv[1:]
 data = pathlib.Path(manifest_path).read_bytes()
 
 def pairs(values):
@@ -7881,18 +7952,30 @@ if not isinstance(release, dict) or release != {
     "version": tag.removeprefix("v"),
 } or signed.get("compatibility_set_id") != set_id:
     raise SystemExit("wrong acceptance release identity")
+components = signed.get("components")
+provider = components.get("provider_cli") if isinstance(components, dict) else None
+provider_version = provider.get("version") if isinstance(provider, dict) else None
+if not isinstance(provider_version, str) or re.fullmatch(
+    r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})",
+    provider_version,
+) is None:
+    raise SystemExit("invalid provider component version")
 signed_bytes = (json.dumps(signed, sort_keys=True, separators=(",", ":")) + "\n").encode()
 signature_bytes = base64.b64decode(signature["signature"], validate=True)
 if not 64 <= len(signature_bytes) <= 80:
     raise SystemExit("invalid signature encoding")
 pathlib.Path(payload_path).write_bytes(signed_bytes)
 pathlib.Path(signature_path).write_bytes(signature_bytes)
+pathlib.Path(provider_version_path).write_text(provider_version + "\n", encoding="utf-8")
 PY
   compatibility_public_key="$TMPDIR_PATH/acceptance-compatibility-public.pem"
   write_checksum_public_key > "$compatibility_public_key"
   openssl dgst -sha256 -verify "$compatibility_public_key" \
     -signature "$manifest_signature" "$signed_payload" >/dev/null \
     || die 5 "acceptance compatibility-set signature verification failed"
+  provider_component_version="$(tr -d '\r\n' < "$provider_component_version_file")"
+  validate_staged_acceptance_provider_component "$provider_component_version"
+  validate_acceptance_provider_component_target "$provider_component_version"
   log "Acceptance compatibility-set signature and exact candidate identity verified."
 }
 

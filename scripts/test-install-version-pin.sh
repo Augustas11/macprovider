@@ -81,9 +81,9 @@ awk '
 ' "$INSTALL_SH" >> "$lib"
 
 awk '
-  /^validate_acceptance_upgrade_target\(\)/ { emit = 1 }
+  /^installed_provider_binary_path\(\)/ { emit = 1 }
+  /^validate_non_emergency_pinned_target\(\)/ { emit = 0 }
   emit { print }
-  emit && /^\}$/ { exit }
 ' "$INSTALL_SH" >> "$lib"
 
 awk '
@@ -92,7 +92,7 @@ awk '
   emit && /^\}$/ { exit }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries validate_acceptance_upgrade_target validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
+for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries installed_provider_binary_path validate_acceptance_upgrade_target validate_acceptance_provider_component_target validate_staged_acceptance_provider_component validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
@@ -109,6 +109,7 @@ ACCEPTANCE_METADATA_SIGNATURE_PATH=""
 DOWNLOAD_LOG="$workdir/downloads.log"
 LOG_FILE="$workdir/log.out"
 BINARY_PATH="$workdir/installed-macprovider-cli"
+INSTALL_DIR="$workdir"
 
 log() { printf '%s\n' "$*" >> "$LOG_FILE"; }
 die() {
@@ -644,6 +645,78 @@ observed_tag="$(
 )" || rc=$?
 report "case21-older-install-accepts-newer-candidate" 0 "$rc"
 report "case21-installed-version-does-not-rewrite-target" "v1.8.33" "$observed_tag"
+
+################################################################
+# Case 21b — the installed compatibility preflight follows the normal
+# ~/.local/bin symlink to the real support-directory provider binary.
+################################################################
+REAL_INSTALLED_BINARY="$INSTALL_DIR/macprovider-cli"
+cat > "$REAL_INSTALLED_BINARY" <<'SCRIPT'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '1.8.40\n'
+    ;;
+  release-payload-preflight)
+    printf '{"compatibility_set_id":"Augustas11/macprovider:v1.8.41@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"valid","version":"1.8.41"}\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SCRIPT
+chmod +x "$REAL_INSTALLED_BINARY"
+rm -f "$BINARY_PATH"
+ln -s "$REAL_INSTALLED_BINARY" "$BINARY_PATH"
+printf '{}\n' > "$INSTALL_DIR/compatibility-set.json"
+reset_mocks
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+rc=0
+( validate_acceptance_upgrade_target v1.8.42 ) >/dev/null 2>&1 || rc=$?
+report "case21b-newer-set-release-accepted" 0 "$rc"
+rc=0
+( validate_acceptance_upgrade_target v1.8.41 ) >/dev/null 2>&1 || rc=$?
+report "case21b-equal-set-release-rejected" 7 "$rc"
+rm -f "$INSTALL_DIR/compatibility-set.json"
+
+################################################################
+# Case 21c — an independent provider component may stay equal or advance,
+# but cannot downgrade outside the separately gated emergency rollback path.
+################################################################
+EMERGENCY_ROLLBACK=0
+rc=0
+( validate_acceptance_provider_component_target 1.8.40 ) >/dev/null 2>&1 || rc=$?
+report "case21c-equal-provider-component-accepted" 0 "$rc"
+rc=0
+( validate_acceptance_provider_component_target 1.8.41 ) >/dev/null 2>&1 || rc=$?
+report "case21c-newer-provider-component-accepted" 0 "$rc"
+rc=0
+( validate_acceptance_provider_component_target 1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case21c-provider-component-downgrade-rejected" 7 "$rc"
+EMERGENCY_ROLLBACK=1
+rc=0
+( validate_acceptance_provider_component_target 1.8.39 ) >/dev/null 2>&1 || rc=$?
+report "case21c-emergency-provider-downgrade-reaches-existing-gates" 0 "$rc"
+rm -f "$BINARY_PATH" "$REAL_INSTALLED_BINARY"
+
+################################################################
+# Case 21d — the staged executable must report the exact provider component
+# version extracted from the verified signed compatibility manifest.
+################################################################
+staging_dir="$workdir/staging"
+mkdir -p "$staging_dir"
+cat > "$staging_dir/macprovider-cli" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '1.8.40\n'
+SCRIPT
+chmod +x "$staging_dir/macprovider-cli"
+rc=0
+( validate_staged_acceptance_provider_component 1.8.40 ) >/dev/null 2>&1 || rc=$?
+report "case21d-staged-provider-matches-signed-component" 0 "$rc"
+rc=0
+( validate_staged_acceptance_provider_component 1.8.41 ) >/dev/null 2>&1 || rc=$?
+report "case21d-staged-provider-mismatch-rejected" 5 "$rc"
+rm -rf "$staging_dir"
 
 ################################################################
 # Case 22 — the locked transaction rejects stale-snapshot pinned

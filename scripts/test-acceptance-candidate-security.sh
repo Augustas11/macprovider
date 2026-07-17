@@ -65,6 +65,9 @@ for value in (
     'strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-strings.txt"',
     'grep -Fq "$TAG" "$RUNNER_TEMP/coordinator-strings.txt"',
     'grep -Fq "$TAG" "$RUNNER_TEMP/gateway-strings.txt"',
+    'provider_version="$("$payload/macprovider-cli" --version)"',
+    '--expected-provider-cli-version "$provider_version"',
+    '--expected-malibu-app-version "$malibu_version"',
 ):
     if value not in build:
         raise SystemExit(f"candidate binary version check is incomplete: {value}")
@@ -94,6 +97,8 @@ if "--private-key \"$release_private_key\"" not in signer or "--public-key \"$re
     raise SystemExit("inner compatibility manifest is not main-owned and production-key verified")
 if "pearl-release.json.sig" not in signer or "-sign \"$private_key\"" not in signer:
     raise SystemExit("acceptance-only Pearl metadata is not separately signed")
+if '--compatibility-manifest "$output_dir/compatibility-set.json"' not in signer:
+    raise SystemExit("acceptance-only Pearl metadata is not bound to the signed compatibility manifest")
 if 'tar -czf "$provider_asset" -C "$cli_work" .' in signer:
     raise SystemExit("acceptance signer can emit an ambiguous provider archive root")
 for value in (
@@ -334,10 +339,22 @@ cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/dist/static/demand-rank.json" \
   "$root/phase3-binary/dist/static/demand-rank.json.sig" \
   "$work/pearl-catalog/"
+cat > "$work/pearl-compatibility.json.tmp" <<EOF
+{"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[{"algorithm":"fixture"}],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","components":{"provider_cli":{"version":"1.8.31"}},"release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}
+EOF
+python3 - "$work/pearl-compatibility.json.tmp" "$work/pearl-compatibility.json" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+pathlib.Path(sys.argv[2]).write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
 python3 "$metadata" build-pearl \
   --repository Augustas11/macprovider \
   --tag "$tag" \
   --commit "$candidate_commit" \
+  --compatibility-manifest "$work/pearl-compatibility.json" \
   --provider-admission-policy strict_post_migration \
   --catalog-directory "$work/pearl-catalog" \
   --coordinator "$work/assets/coordinator-linux-amd64" \
@@ -353,6 +370,10 @@ catalog = json.loads(pathlib.Path(sys.argv[1]).read_text())
 pearl = json.loads(pathlib.Path(sys.argv[2]).read_text())
 if pearl["catalog"]["release_id"] != catalog["release_id"]:
     raise SystemExit("Pearl metadata did not preserve the verified catalog release ID")
+if pearl.get("channel") != "private_acceptance":
+    raise SystemExit("Pearl metadata did not declare the private acceptance channel")
+if pearl["provider_advertised_version"] != "1.8.31":
+    raise SystemExit("Pearl metadata did not use the signed provider CLI component version")
 PY
 python3 - "$work/pearl-catalog/release.json" <<'PY'
 import json
@@ -366,6 +387,7 @@ if python3 "$metadata" build-pearl \
   --repository Augustas11/macprovider \
   --tag "$tag" \
   --commit "$candidate_commit" \
+  --compatibility-manifest "$work/pearl-compatibility.json" \
   --provider-admission-policy strict_post_migration \
   --catalog-directory "$work/pearl-catalog" \
   --coordinator "$work/assets/coordinator-linux-amd64" \

@@ -53,11 +53,31 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(SelfUpdate.compareSemver("1.2", "1.2.0"), .orderedSame)
     }
 
-    func testReleaseTagAndStagedBinaryVersionAreStrictlyBound() throws {
+    func testReleaseTagAndStagedBinaryComponentVersionAreValidatedIndependently() throws {
         XCTAssertEqual(try SelfUpdate.validateReleaseTag("v1.2.1"), "1.2.1")
         XCTAssertThrowsError(try SelfUpdate.validateReleaseTag(" v1.2.1 "))
         XCTAssertThrowsError(try SelfUpdate.validateReleaseTag("release-1.2.1"))
-        XCTAssertNoThrow(try SelfUpdate.requireStagedBinaryVersion("1.2.1\n", targetVersion: "1.2.1"))
+        XCTAssertNoThrow(try SelfUpdate.requireStagedBinaryVersion("1.8.40\n", targetVersion: "1.8.40"))
+    }
+
+    func testAcceptanceProviderComponentAllowsEqualityAndUpgradeButRejectsDowngrade() throws {
+        XCTAssertNoThrow(
+            try SelfUpdate.requireAcceptanceProviderVersion(current: "1.8.40", target: "1.8.40")
+        )
+        XCTAssertNoThrow(
+            try SelfUpdate.requireAcceptanceProviderVersion(current: "1.8.40", target: "1.8.41")
+        )
+        XCTAssertThrowsError(
+            try SelfUpdate.requireAcceptanceProviderVersion(current: "1.8.40", target: "1.8.39")
+        ) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.acceptanceProviderDowngrade(
+                    current: "1.8.40",
+                    target: "1.8.39"
+                ).description
+            )
+        }
     }
 
     func testStagedCLIPreflightCannotLoadTheServingModel() {

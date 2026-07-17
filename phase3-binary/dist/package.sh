@@ -17,17 +17,21 @@ REPO_ROOT=$(cd "$PHASE3_DIR/.." && pwd)
 cd "$PHASE3_DIR"
 
 TAG=${1:-$(git rev-parse --short HEAD)}
+PROVIDER_CLI_VERSION=$(sed -n 's/^[[:space:]]*static let binaryVersion = "\([0-9][0-9.]*\)"$/\1/p' \
+  "$PHASE3_DIR/Sources/macprovider-cli/CoordinatorClient.swift" | head -1)
+MALIBU_APP_VERSION=$(sed -n 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*"\([0-9][0-9.]*\)"$/\1/p' \
+  "$PHASE3_DIR/app/project.yml" | head -1)
+[ -n "$PROVIDER_CLI_VERSION" ] || {
+  echo "FATAL: could not resolve provider CLI component version" >&2
+  exit 1
+}
+[ -n "$MALIBU_APP_VERSION" ] || {
+  echo "FATAL: could not resolve Malibu app component version" >&2
+  exit 1
+}
 case "$TAG" in
   v[0-9]*.[0-9]*.[0-9]*) MANIFEST_TAG="$TAG" ;;
-  *)
-    MANIFEST_VERSION=$(sed -n 's/^[[:space:]]*static let binaryVersion = "\([0-9][0-9.]*\)"$/\1/p' \
-      "$PHASE3_DIR/Sources/macprovider-cli/CoordinatorClient.swift" | head -1)
-    [ -n "$MANIFEST_VERSION" ] || {
-      echo "FATAL: could not resolve compatibility-set version" >&2
-      exit 1
-    }
-    MANIFEST_TAG="v$MANIFEST_VERSION"
-    ;;
+  *) MANIFEST_TAG="v$PROVIDER_CLI_VERSION" ;;
 esac
 RELEASE_DIR="./build-release"
 OUT_DIR="./dist"
@@ -65,6 +69,8 @@ python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" generate \
   --tag "$MANIFEST_TAG" \
   --commit "$(git rev-parse HEAD)" \
   --repository "Augustas11/macprovider" \
+  --malibu-app-version "$MALIBU_APP_VERSION" \
+  --provider-cli-version "$PROVIDER_CLI_VERSION" \
   --provider-admission-policy "$PROVIDER_ADMISSION_POLICY" \
   --catalog-directory "$PHASE3_DIR/catalog/autotune" \
   --catalog-feed-directory "$PHASE3_DIR/dist/static" \
@@ -74,6 +80,8 @@ python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
   --input "$COMPATIBILITY_SET_MANIFEST" \
   --expected-tag "$MANIFEST_TAG" \
   --expected-commit "$(git rev-parse HEAD)" \
+  --expected-malibu-app-version "$MALIBU_APP_VERSION" \
+  --expected-provider-cli-version "$PROVIDER_CLI_VERSION" \
   --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY"
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
@@ -100,6 +108,11 @@ if [ ! -x "$PRODUCTS/macprovider-cli" ]; then
   echo "FATAL: macprovider-cli not found at $PRODUCTS"
   exit 1
 fi
+ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/macprovider-cli" --version | tr -d '\r\n')
+[ "$ACTUAL_PROVIDER_CLI_VERSION" = "$PROVIDER_CLI_VERSION" ] || {
+  echo "FATAL: built provider CLI version $ACTUAL_PROVIDER_CLI_VERSION does not match declared component $PROVIDER_CLI_VERSION" >&2
+  exit 1
+}
 if [ ! -f "$PRODUCTS/mlx.metallib" ]; then
   if [ -f "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
     cp "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" "$PRODUCTS/mlx.metallib"
@@ -149,6 +162,8 @@ python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
   --payload-directory "$STAGE_DIR" \
   --expected-tag "$MANIFEST_TAG" \
   --expected-commit "$(git rev-parse HEAD)" \
+  --expected-malibu-app-version "$MALIBU_APP_VERSION" \
+  --expected-provider-cli-version "$PROVIDER_CLI_VERSION" \
   --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY"
 
 echo "==> Packaging tarball: $TARBALL"

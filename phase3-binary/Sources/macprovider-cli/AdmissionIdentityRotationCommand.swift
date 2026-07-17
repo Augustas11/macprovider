@@ -258,7 +258,9 @@ enum AdmissionIdentityRotationCommandRunner {
         previousServiceInstance: String?,
         store: any AdmissionIdentityRotationKeyStoring,
         leaseStore: ProviderLifecycleLeaseStore,
-        startupHandoffExecutableURL: @escaping () -> URL? = { Bundle.main.executableURL },
+        startupHandoffExecutableURL: @escaping () -> URL? = {
+            CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
+        },
         startupHandoffExecutableSHA256: @escaping (URL) throws -> String = {
             try AutoUpdateMarkerStore.sha256(file: $0)
         },
@@ -328,7 +330,9 @@ enum AdmissionIdentityRotationCommandRunner {
         listenerOwnerPID: @escaping (Int) -> Int? = CredentialRestartProver.currentListenerOwnerPID,
         bootSession: @escaping () -> String? = CredentialRestartProver.currentBootSessionUUID,
         expectedCandidatePublicKeySHA256: String? = nil,
-        startupHandoffExecutableURL: @escaping () -> URL? = { Bundle.main.executableURL },
+        startupHandoffExecutableURL: @escaping () -> URL? = {
+            CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
+        },
         startupHandoffExecutableSHA256: @escaping (URL) throws -> String = {
             try AutoUpdateMarkerStore.sha256(file: $0)
         },
@@ -397,7 +401,9 @@ enum AdmissionIdentityRotationCommandRunner {
         executableURL: () -> URL?,
         executableSHA256: (URL) throws -> String
     ) throws {
-        guard let targetExecutableURL = executableURL() else {
+        guard let targetExecutableURL = CompatibilitySetManifest.resolvedExecutableURL(
+            executableURL()
+        ) else {
             throw ProviderLifecycleLeaseError.invalidHandoffField("target_executable_path")
         }
         _ = try leaseStore.prepareStartupHandoff(

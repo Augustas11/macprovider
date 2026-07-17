@@ -291,17 +291,20 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
 
     let homeDirectory: URL
     let fileManager: FileManager
+    let compatibilityManifestPublicKeyPEM: String
     private let installerOwnerLiveOverride: (@Sendable () -> Bool)?
     private let malibuAppCandidateOverride: [URL]?
 
     init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default,
+        compatibilityManifestPublicKeyPEM: String = SelfUpdate.checksumPublicKeyPEM,
         installerOwnerLiveOverride: (@Sendable () -> Bool)? = nil,
         malibuAppCandidateOverride: [URL]? = nil
     ) {
         self.homeDirectory = homeDirectory
         self.fileManager = fileManager
+        self.compatibilityManifestPublicKeyPEM = compatibilityManifestPublicKeyPEM
         self.installerOwnerLiveOverride = installerOwnerLiveOverride
         self.malibuAppCandidateOverride = malibuAppCandidateOverride
     }
@@ -712,7 +715,8 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             }
             previousCompatibilityManifest = try CompatibilitySetManifest.loadValidated(
                 from: installDirectory,
-                expectedVersion: previousVersion
+                expectedProviderVersion: previousVersion,
+                publicKeyPEM: compatibilityManifestPublicKeyPEM
             )
         default:
             throw AutoUpdateMarkerError.invalidMarker
@@ -758,7 +762,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                 commitOwner: commitOwner,
                 targetCompatibilitySetID: targetCompatibilitySetID,
                 targetCompatibilitySetSHA256: targetCompatibilitySetSHA256,
-                previousVersion: previousCompatibilityManifest?.version,
+                previousVersion: previousCompatibilityManifest?.providerCLIVersion,
                 previousCompatibilitySetID: previousCompatibilityManifest?.compatibilitySetID,
                 previousCompatibilitySetSHA256: previousCompatibilityManifest?.envelopeSHA256,
                 transactionState: previousCompatibilityManifest == nil ? nil : .activatingTarget
@@ -1393,6 +1397,14 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         guard let stagedMalibuApp else {
             throw AutoUpdateMarkerError.trustedRootInvalid("malibu_staged_bundle_missing")
         }
+        guard let targetProviderVersion = rollbackMarker?.targetVersion else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        let targetManifest = try CompatibilitySetManifest.loadValidated(
+            from: liveDirectory,
+            expectedProviderVersion: targetProviderVersion,
+            publicKeyPEM: compatibilityManifestPublicKeyPEM
+        )
         let target = URL(fileURLWithPath: record.targetPath, isDirectory: true)
         guard try installedMalibuAppURL()?.standardizedFileURL == target.standardizedFileURL else {
             throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_changed_after_snapshot")
@@ -1401,7 +1413,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         try validateMalibuBundle(
             stagedMalibuApp,
             requireCurrentOwner: true,
-            expectedVersion: rollbackMarker?.targetVersion,
+            expectedVersion: targetManifest.malibuAppVersion,
             expectedManifest: liveDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
         )
 
@@ -1414,7 +1426,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         try validateMalibuBundle(
             staging,
             requireCurrentOwner: true,
-            expectedVersion: rollbackMarker?.targetVersion,
+            expectedVersion: targetManifest.malibuAppVersion,
             expectedManifest: liveDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
         )
         try atomicReplaceMalibuApp(staged: staging, target: target)
