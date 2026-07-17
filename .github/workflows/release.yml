@@ -1445,6 +1445,25 @@ jobs:
             "$release_id" "$PRERELEASE_INPUT" \
             immutable-release-by-id.json immutable-release-by-tag.json \
             stable-latest-release.json
+          if [ "$PRERELEASE_INPUT" = false ]; then
+            discovery_tag="release-discovery"
+            if ! gh release view "$discovery_tag" >/dev/null 2>&1; then
+              gh release create "$discovery_tag" \
+                macprovider-release-discovery.json macprovider-release-discovery.json.sig \
+                --title "macprovider signed release discovery" \
+                --notes "Signed monotonic release-discovery transport. Not an installable release." \
+                --target "${{ needs.build.outputs.commit }}" \
+                --latest=false
+            else
+              gh release upload "$discovery_tag" \
+                macprovider-release-discovery.json macprovider-release-discovery.json.sig \
+                --clobber
+              discovery_release_id="$(gh release view "$discovery_tag" --json databaseId --jq .databaseId)"
+              gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/$GITHUB_REPOSITORY/releases/$discovery_release_id" \
+                -f make_latest=false >/dev/null
+            fi
+          fi
           python3 scripts/capture-release-publication.py --notes-file release-notes.md \
             immutable-release-by-id.json release-provenance.json publication-manifest.json \
             "${release_assets[@]}" checksums.txt checksums.txt.sig

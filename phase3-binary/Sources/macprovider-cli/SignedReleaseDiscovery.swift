@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 
 struct SignedReleaseDiscoveryHead: Equatable, Sendable {
+    static let transportReleaseTag = "release-discovery"
     static let assetName = "macprovider-release-discovery.json"
     static let signatureAssetName = "macprovider-release-discovery.json.sig"
     static let envelopeSchema = "macprovider.release-discovery-envelope.v1"

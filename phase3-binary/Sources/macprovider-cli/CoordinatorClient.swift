@@ -3655,8 +3655,10 @@ actor CoordinatorClient {
             providerStatus: providerStatus,
             markerStore: autoupdateMarkerStore,
             trustProvider: { await self.currentAutoupdateTrustState() },
-            drain: { target in try await self.autoupdateDrain(target: target) },
-            sendReady: { try await self.sendStateUpdate(state: .ready, reason: "autoupdate_timeout_skipped_ready") }
+            drain: { target in await self.autoupdateLocalDrain(target: target) },
+            sendReady: {
+                await self.providerStatus.setState(.ready, reason: "autoupdate_timeout_skipped_ready")
+            }
         )
         await updater.handleSignedReleaseDiscovery()
     }
@@ -3829,6 +3831,38 @@ actor CoordinatorClient {
         }
         try await sendDrainStatus(phase: autoupdateDrainExtensions ? "timeout_skipped" : "complete")
         return false
+    }
+
+    private func autoupdateLocalDrain(target: String) async -> Bool {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        heartbeatWatchdogTask?.cancel()
+        heartbeatWatchdogTask = nil
+        await providerStatus.setState(.draining, reason: "autoupdate_to_\(target)")
+        let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120)
+        if softDrained {
+            return true
+        }
+        let snapshot = await providerStatus.snapshot()
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: UUID().uuidString.lowercased(),
+            currentVersion: Self.binaryVersion,
+            targetVersion: target,
+            phase: .drain,
+            outcome: .inProgress,
+            reason: "soft_drain_timeout",
+            attempt: 1,
+            inflightRequests: snapshot.requestsInFlight
+        ))
+        let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30)
+        if !hardDrained {
+            await providerStatus.setState(.ready, reason: "autoupdate_drain_timeout")
+        }
+        return hardDrained
+    }
+
+    func autoupdateLocalDrainForTest(target: String) async -> Bool {
+        await autoupdateLocalDrain(target: target)
     }
 
     // resetWindow=true rolls the since-last metrics window (the coordinator-

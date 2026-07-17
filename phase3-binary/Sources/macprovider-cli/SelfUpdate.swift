@@ -167,13 +167,16 @@ struct SelfUpdate {
             current: currentVersion,
             target: prepared.compatibilityManifest.providerCLIVersion
         )
+        let discoveryHead = try await acceptanceDiscoveryHeadIfPresent(
+            prepared: prepared
+        )
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
             stagedMalibuApp: prepared.stagedMalibuApp,
             targetVersion: prepared.compatibilityManifest.providerCLIVersion,
             compatibilityManifest: prepared.compatibilityManifest,
-            authorityMode: nil,
-            discoveryHead: nil
+            authorityMode: discoveryHead == nil ? nil : "signed_release",
+            discoveryHead: discoveryHead
         )
         print(
             "Acceptance candidate v\(target) applied with provider CLI "
@@ -301,6 +304,16 @@ struct SelfUpdate {
         else {
             throw UpdateError.missingAsset
         }
+        let hasDiscoveryHead = assetNames.contains(SignedReleaseDiscoveryHead.assetName)
+        let hasDiscoverySignature = assetNames.contains(SignedReleaseDiscoveryHead.signatureAssetName)
+        guard hasDiscoveryHead == hasDiscoverySignature else {
+            throw UpdateError.discoveryHeadInvalid("acceptance_asset_pair")
+        }
+        var copiedNames = requiredNames
+        if hasDiscoveryHead {
+            copiedNames.append(SignedReleaseDiscoveryHead.assetName)
+            copiedNames.append(SignedReleaseDiscoveryHead.signatureAssetName)
+        }
 
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("macprovider-acceptance-update-\(UUID().uuidString)", isDirectory: true)
@@ -310,7 +323,7 @@ struct SelfUpdate {
             attributes: [.posixPermissions: 0o700]
         )
         do {
-            for name in requiredNames {
+            for name in copiedNames {
                 try FileManager.default.copyItem(
                     at: directory.appendingPathComponent(name),
                     to: tempDir.appendingPathComponent(name)
@@ -370,6 +383,32 @@ struct SelfUpdate {
             try? FileManager.default.removeItem(at: tempDir)
             throw error
         }
+    }
+
+    private func acceptanceDiscoveryHeadIfPresent(
+        prepared: PreparedSelfUpdate,
+        now: Date = Date()
+    ) async throws -> SignedReleaseDiscoveryHead? {
+        let headURL = prepared.tempDir.appendingPathComponent(SignedReleaseDiscoveryHead.assetName)
+        let signatureURL = prepared.tempDir.appendingPathComponent(SignedReleaseDiscoveryHead.signatureAssetName)
+        let hasDiscoveryHead = FileManager.default.fileExists(atPath: headURL.path)
+        let hasDiscoverySignature = FileManager.default.fileExists(atPath: signatureURL.path)
+        guard hasDiscoveryHead || hasDiscoverySignature else { return nil }
+        guard hasDiscoveryHead && hasDiscoverySignature else {
+            throw UpdateError.discoveryHeadInvalid("acceptance_asset_pair")
+        }
+        let head = try SignedReleaseDiscoveryHead.loadVerified(
+            headData: Data(contentsOf: headURL),
+            signatureData: Data(contentsOf: signatureURL),
+            now: now
+        )
+        try markerStore.acceptDiscoveryHead(head)
+        try await markerStore.updateSignedPolicy(
+            minimum: head.signedPolicyMinimum,
+            revoked: head.signedPolicyRevoked
+        )
+        try Self.requireDiscoveryHead(head, matches: prepared)
+        return head
     }
 
     private func prepareValidatedUpdateAssets(
@@ -535,7 +574,7 @@ struct SelfUpdate {
     }
 
     func discoverSignedReleaseHead(now: Date = Date()) async throws -> SignedReleaseDiscoveryHead {
-        let release = try await latestRelease()
+        let release = try await releaseByTag(SignedReleaseDiscoveryHead.transportReleaseTag)
         guard let headAsset = release.assets.first(where: { $0.name == SignedReleaseDiscoveryHead.assetName }),
               let signatureAsset = release.assets.first(where: { $0.name == SignedReleaseDiscoveryHead.signatureAssetName })
         else {
