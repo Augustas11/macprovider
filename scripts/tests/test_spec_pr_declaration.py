@@ -51,6 +51,8 @@ class SpecPRDeclarationTests(unittest.TestCase):
         errors = validate_body(declaration(behavior_change="yes"))
         joined = "\n".join(errors)
         self.assertIn("behavior_change yes requires at least one spec", joined)
+        self.assertIn("behavior_change yes requires at least one requirement", joined)
+        self.assertIn("behavior_change yes requires at least one authority domain", joined)
         self.assertIn("behavior_change yes requires tests", joined)
 
     def test_behavior_change_yes_resolves_manifest_ids(self) -> None:

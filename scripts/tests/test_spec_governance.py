@@ -224,6 +224,9 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         del repository["files"][mutation["path"]]
     elif operation == "fake_evidence_mappings":
         requirements[0]["implementation"] = ["src/missing.py:example"]
+    elif operation == "missing_mapping_selector":
+        requirements[0]["implementation"] = ["src/example.py:missing"]
+        requirements[0]["tests"] = ["tests/test_example.py::missing"]
     elif operation == "hostile_schema_pointer":
         authority["$schema"] = "../schemas/other.json"
     elif operation == "implemented_unverified_without_requirements":
@@ -366,6 +369,20 @@ class GovernanceValidatorTests(unittest.TestCase):
             write_repository(root, repository)
             errors = "\n".join(validate_repository(root, base_ref=base).errors)
             self.assertIn("SPEC record SPEC-001 lifecycle regressed from normative to draft", errors)
+
+    def test_base_manifest_prevents_deprecated_authority_revival(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            repository["authority"]["domains"][0]["status"] = "deprecated"
+            repository["conformance"]["specs"][0]["authority_domains"] = []
+            write_repository(root, repository)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            repository["authority"]["domains"][0]["status"] = "pending-reconciliation"
+            repository["conformance"]["specs"][0]["authority_domains"] = ["provider-wire-protocol"]
+            write_repository(root, repository)
+            errors = "\n".join(validate_repository(root, base_ref=base).errors)
+            self.assertIn("authority domain 'provider-wire-protocol' revived from deprecated", errors)
 
 
 if __name__ == "__main__":

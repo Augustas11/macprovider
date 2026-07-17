@@ -223,9 +223,20 @@ def _mapping_file(value: str) -> str:
     return value
 
 
+def _mapping_selector(value: str) -> str | None:
+    if "::" in value:
+        return value.split("::", 1)[1]
+    if ":" in value:
+        return value.split(":", 1)[1]
+    return None
+
+
 def _validate_mapping_paths(root: Path, mappings: list[str], location: str, result: ValidationResult) -> None:
     for index, mapping in enumerate(mappings):
         file_part = _mapping_file(mapping)
+        selector = _mapping_selector(mapping)
+        if not selector:
+            result.error(f"{location}[{index}]", "mapping selector is required")
         path = _repository_path(root, file_part, f"{location}[{index}]", result)
         if path is None:
             continue
@@ -233,6 +244,14 @@ def _validate_mapping_paths(root: Path, mappings: list[str], location: str, resu
             result.error(f"{location}[{index}]", f"mapping path does not exist: {file_part!r}")
         elif path.is_dir():
             result.error(f"{location}[{index}]", f"mapping path must be a file: {file_part!r}")
+        elif selector:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                result.error(f"{location}[{index}]", f"mapped file is not UTF-8 text: {exc}")
+            else:
+                if selector not in text:
+                    result.error(f"{location}[{index}]", f"mapping selector {selector!r} does not resolve in {file_part!r}")
 
 
 def _validate_evidence(root: Path, value: Any, location: str, result: ValidationResult) -> None:
@@ -383,6 +402,8 @@ def _validate_base_manifest_immutability(
             continue
         if head.get("owner_spec") != item.get("owner_spec"):
             result.error("specs/AUTHORITY.json", f"authority domain {domain_id!r} owner changed from {item.get('owner_spec')} to {head.get('owner_spec')}")
+        if item.get("status") == "deprecated" and head.get("status") != "deprecated":
+            result.error("specs/AUTHORITY.json", f"authority domain {domain_id!r} revived from deprecated to {head.get('status')}")
 
     head_specs = {
         item.get("spec_id"): item

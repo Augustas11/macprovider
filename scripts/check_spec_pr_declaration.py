@@ -202,6 +202,10 @@ def validate_body(
     if behavior == "yes":
         if not specs:
             errors.append("behavior_change yes requires at least one spec")
+        if not requirements:
+            errors.append("behavior_change yes requires at least one requirement")
+        if not domains:
+            errors.append("behavior_change yes requires at least one authority domain")
         if not arbitration:
             errors.append("behavior_change yes requires at least one arbitration verdict")
         if not tests:
