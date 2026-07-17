@@ -7,6 +7,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,5 +80,121 @@ func TestProviderRegistrationPreparedSurvivesNoncePrune(t *testing.T) {
 	}
 	if missing, err := store.ProviderRegistrationPrepared(ctx, "provider-missing", "nonce-z", attemptTS); err != nil || missing {
 		t.Fatalf("missing attempt prepared=%v err=%v", missing, err)
+	}
+}
+
+func TestProviderHardwareUpsertsRespectColumnLimitedGrants(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	container, err := tcpg.Run(ctx, referralAttemptPGImage,
+		tcpg.WithDatabase("hardware_upsert"),
+		tcpg.WithUsername("postgres"),
+		tcpg.WithPassword(referralAttemptPGPass),
+		tc.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(60*time.Second)),
+	)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanup, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		_ = container.Terminate(cleanup)
+	})
+	adminDSN, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminDB, err := sql.Open("postgres", adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adminDB.Close() })
+	if err := statsmigrations.Apply(ctx, adminDB); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	const onboardingPassword = "hardware-upsert-test-password"
+	if _, err := adminDB.ExecContext(ctx, `ALTER ROLE provider_onboarding PASSWORD '`+onboardingPassword+`'`); err != nil {
+		t.Fatalf("set provider_onboarding password: %v", err)
+	}
+	onboardingURL, err := url.Parse(adminDSN)
+	if err != nil {
+		t.Fatalf("parse admin DSN: %v", err)
+	}
+	onboardingURL.User = url.UserPassword("provider_onboarding", onboardingPassword)
+	onboardingDB, err := sql.Open("postgres", onboardingURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = onboardingDB.Close() })
+	if err := onboardingDB.PingContext(ctx); err != nil {
+		t.Fatalf("connect as provider_onboarding: %v", err)
+	}
+	store := &PGStore{db: onboardingDB}
+
+	observedAt := time.Now().UTC().Truncate(time.Second)
+	if err := store.UpsertProviderHardwareProfile(ctx, "provider-app", HardwareSummary{
+		Chip:            "Apple M5",
+		UnifiedMemoryGB: 32,
+		MacOSVersion:    "26.5",
+		AppVersion:      "1.8.42",
+	}, observedAt); err != nil {
+		t.Fatalf("initial app-track hardware upsert: %v", err)
+	}
+	if err := store.UpsertProviderHardwareProfile(ctx, "provider-app", HardwareSummary{
+		Chip:            "Apple M5",
+		UnifiedMemoryGB: 32,
+		MacOSVersion:    "26.5.1",
+		AppVersion:      "1.8.43",
+	}, observedAt.Add(time.Second)); err != nil {
+		t.Fatalf("conflicting app-track hardware upsert: %v", err)
+	}
+
+	if err := store.UpsertProviderHardwareProfile(ctx, "provider-cli", HardwareSummary{
+		Chip:            "Apple M5",
+		UnifiedMemoryGB: 32,
+		MacOSVersion:    "26.5",
+		AppVersion:      "1.8.42",
+	}, observedAt.Add(-time.Second)); err != nil {
+		t.Fatalf("seed CLI hardware profile: %v", err)
+	}
+	evidence := HardwareEvidenceRequest{
+		SchemaVersion:          hardwareEvidenceSchemaVersion,
+		ProviderID:             "provider-cli",
+		GeneratedAt:            observedAt.Format(time.RFC3339),
+		CandidateCatalogSHA256: "catalog-sha",
+		RecommendedModel:       "model-a",
+		Hardware: HardwareEvidenceHardware{
+			Chip:                 "Apple M5",
+			MemoryGB:             32,
+			BandwidthTier:        "C",
+			Detected:             true,
+			OSVersion:            "26.5",
+			BinaryVersion:        "1.8.42",
+			HardwareIdentityHash: "hardware-hash",
+		},
+		Benchmarks: []HardwareEvidenceBenchmark{{
+			ModelKey:               "model-a",
+			ModelID:                "mlx-community/model-a",
+			SustainedTPS:           12.5,
+			ArtifactSHA256:         "artifact-sha",
+			CandidateCatalogSHA256: "catalog-sha",
+			GeneratedAt:            observedAt.Format(time.RFC3339),
+			BinaryVersion:          "1.8.42",
+			HardwareIdentityHash:   "hardware-hash",
+		}},
+	}
+	record, err := store.InsertHardwareVerificationJob(ctx, "provider-cli", evidence, observedAt)
+	if err != nil {
+		t.Fatalf("conflicting CLI hardware upsert: %v", err)
+	}
+	if record.JobID == 0 || record.Status != hardwareEvidenceJobPending {
+		t.Fatalf("hardware evidence record = %+v, want queued pending job", record)
+	}
+
+	if _, err := onboardingDB.QueryContext(ctx, `SELECT source FROM provider_hardware_profiles LIMIT 1`); err == nil {
+		t.Fatal("provider_onboarding unexpectedly gained direct source read")
+	} else if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("provider_onboarding source read error = %q, want permission denied", err)
 	}
 }
