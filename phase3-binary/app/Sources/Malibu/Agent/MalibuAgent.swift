@@ -1050,6 +1050,8 @@ final class MalibuAgent: ObservableObject {
             snapshot.referralLastError = nil
         case let .referralError(operation, code, retryAfterSeconds):
             finishReferralAction()
+            let staleStatusRequestFailed = operation == .status
+                && snapshot.referralStatus?.isCurrent() == false
             if code == .featureUnavailable, operation == .status {
                 referralStatusExpiryTask?.cancel()
                 referralStatusExpiryTask = nil
@@ -1066,7 +1068,16 @@ final class MalibuAgent: ObservableObject {
             if [.challengeInvalid, .postNotVerified].contains(code) {
                 snapshot.referralStatus = snapshot.referralStatus?.withPendingChallenge(nil)
             }
-            resumeReferralStatusExpiryOrRefresh()
+            if staleStatusRequestFailed {
+                referralStatusExpiryTask?.cancel()
+                referralStatusExpiryTask = nil
+                snapshot.referralStatus = nil
+                snapshot.referralAvailability = snapshot.hasTrustedReferralBoundary()
+                    ? .unavailable
+                    : .unsupported
+            } else {
+                resumeReferralStatusExpiryOrRefresh()
+            }
             snapshot.referralLastError = referralErrorMessage(
                 operation,
                 code,

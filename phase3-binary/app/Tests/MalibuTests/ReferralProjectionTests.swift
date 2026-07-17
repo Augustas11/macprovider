@@ -125,19 +125,7 @@ final class ReferralProjectionTests: XCTestCase {
 
     @MainActor
     func testNearExpiryStatusDoesNotInvalidateDelayedChallengeResponse() async throws {
-        var initial = AgentSnapshot.empty
-        initial.localStatusContractCompatible = true
-        initial.localStatusLifecycleOwner = "macprovider_cli"
-        initial.localStatusCapabilities = [
-            "referral_status_v1",
-            "referral_advocacy_v1",
-            "service_instance_v1",
-            "status_observation_v1",
-        ]
-        initial.localProviderID = "provider-1"
-        initial.serviceRole = "serve"
-        initial.statusObservationID = "obs-1"
-        let agent = MalibuAgent(initialSnapshot: initial)
+        let agent = MalibuAgent(initialSnapshot: trustedReferralSnapshot())
         let status = try XCTUnwrap(makeStatus(
             observedAt: Date().addingTimeInterval(-ReferralRefreshPolicy.statusLifetime + 0.02)
         ))
@@ -154,6 +142,30 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertEqual(agent.snapshot.referralStatus?.pendingChallenge?.expiresAt.timeIntervalSinceNow ?? 0, 600, accuracy: 1)
         XCTAssertEqual(agent.snapshot.referralAvailability, .available)
         XCTAssertFalse(agent.snapshot.referralActionInProgress)
+    }
+
+    @MainActor
+    func testStaleStatusRateLimitStopsAutomaticRefreshLoop() async throws {
+        let agent = MalibuAgent(initialSnapshot: trustedReferralSnapshot())
+        let status = try XCTUnwrap(makeStatus(
+            observedAt: Date().addingTimeInterval(-ReferralRefreshPolicy.statusLifetime + 0.02)
+        ))
+        agent.consume(.referralStatusResponse(status))
+        agent.beginReferralAction()
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        for _ in 0..<2 {
+            agent.consume(.referralError(
+                operation: .status,
+                code: .rateLimited,
+                retryAfterSeconds: 30
+            ))
+        }
+
+        XCTAssertNil(agent.snapshot.referralStatus)
+        XCTAssertEqual(agent.snapshot.referralAvailability, .unavailable)
+        XCTAssertFalse(agent.snapshot.referralActionInProgress)
+        XCTAssertEqual(agent.snapshot.referralLastError, "Too many referral requests. Retry in 30 seconds.")
     }
 
     func testSocialRollbackSuppressesOnlyAdvocacyActions() throws {
@@ -181,6 +193,22 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertTrue(snapshot.hasTrustedReferralBoundary())
         snapshot.localStatusCapabilities.remove("referral_status_v1")
         XCTAssertFalse(snapshot.hasTrustedReferralBoundary())
+    }
+
+    private func trustedReferralSnapshot() -> AgentSnapshot {
+        var snapshot = AgentSnapshot.empty
+        snapshot.localStatusContractCompatible = true
+        snapshot.localStatusLifecycleOwner = "macprovider_cli"
+        snapshot.localStatusCapabilities = [
+            "referral_status_v1",
+            "referral_advocacy_v1",
+            "service_instance_v1",
+            "status_observation_v1",
+        ]
+        snapshot.localProviderID = "provider-1"
+        snapshot.serviceRole = "serve"
+        snapshot.statusObservationID = "obs-1"
+        return snapshot
     }
 
     private func makeStatus(
