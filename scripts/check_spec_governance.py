@@ -152,21 +152,31 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _paragraph_remains_open(line: str, was_open: bool) -> bool:
-    """Track enough container state to apply CommonMark type-7 start rules."""
+def _strip_container_markers(line: str) -> str:
+    """Remove explicit nested blockquote/list markers from one block-start line."""
     content = line
     while True:
+        consumed = False
         quote = re.match(r" {0,3}>[ \t]?", content)
-        if quote is None:
-            break
-        content = content[quote.end():]
+        if quote is not None:
+            content = content[quote.end():]
+            consumed = True
 
-    list_item = re.match(
-        r" {0,3}(?:[*+-]|\d{1,9}[.)])(?:[ \t]+|$)",
-        content,
-    )
-    if list_item is not None:
-        content = content[list_item.end():]
+        list_item = re.match(
+            r" {0,3}(?:[*+-]|\d{1,9}[.)])(?:[ \t]+|$)",
+            content,
+        )
+        if list_item is not None:
+            content = content[list_item.end():]
+            consumed = True
+        if not consumed:
+            break
+    return content
+
+
+def _paragraph_remains_open(line: str, was_open: bool) -> bool:
+    """Track enough container state to apply CommonMark type-7 start rules."""
+    content = _strip_container_markers(line)
 
     stripped = content.strip()
     if not stripped:
@@ -174,9 +184,17 @@ def _paragraph_remains_open(line: str, was_open: bool) -> bool:
     if (
         re.match(r" {0,3}#{1,6}(?:\s|$)", content)
         or re.match(r" {0,3}(?:`{3,}|~{3,})", content)
-        or re.fullmatch(
-            r" {0,3}(?:=+|-+|\*\s*\*\s*\*[\s*]*|_\s*_\s*_[\s_]*)",
-            content,
+        or re.fullmatch(r" {0,3}(?:-\s*-\s*-[-\s]*|\*\s*\*\s*\*[\s*]*|_\s*_\s*_[\s_]*)", content)
+        or (
+            was_open
+            and re.fullmatch(r" {0,3}(?:=+|-+)[ \t]*", content)
+        )
+        or (
+            not was_open
+            and re.fullmatch(
+                r" {0,3}\[[^\]\n]+\]:[ \t]*(?:<[^>\n]+>|\S+)(?:[ \t]+.*)?",
+                content,
+            )
         )
         or (not was_open and content.startswith(("    ", "\t")))
     ):
@@ -195,9 +213,10 @@ def _contract_markdown(text: str) -> str:
     in_comment = False
     paragraph_open = False
     for line_index, raw_line in enumerate(raw_lines):
+        block_line = _strip_container_markers(raw_line)
         if fence is not None:
             delimiter, minimum_length = fence
-            closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", raw_line)
+            closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", block_line)
             if (
                 closing is not None
                 and closing.group(1)[0] == delimiter
@@ -229,12 +248,12 @@ def _contract_markdown(text: str) -> str:
                 continue
             raw_html_opening = re.match(
                 r" {0,3}<(pre|script|style|textarea)(?:\s|>|$)",
-                raw_line,
+                block_line,
                 re.IGNORECASE,
             )
             if raw_html_opening is not None:
                 tag = raw_html_opening.group(1)
-                if re.search(rf"</{tag}\s*>", raw_line, re.IGNORECASE) is None:
+                if re.search(rf"</{tag}\s*>", block_line, re.IGNORECASE) is None:
                     raw_html_end = re.compile(rf"</{tag}\s*>", re.IGNORECASE)
                 paragraph_open = False
                 lines.append("")
@@ -247,9 +266,9 @@ def _contract_markdown(text: str) -> str:
             )
             matched_special = False
             for opening_pattern, closing_pattern in raw_html_special:
-                if re.match(opening_pattern, raw_line) is None:
+                if re.match(opening_pattern, block_line) is None:
                     continue
-                if closing_pattern.search(raw_line) is None:
+                if closing_pattern.search(block_line) is None:
                     raw_html_end = closing_pattern
                 matched_special = True
                 break
@@ -258,17 +277,17 @@ def _contract_markdown(text: str) -> str:
                 lines.append("")
                 continue
             if (
-                RAW_HTML_BLOCK_TAG_RE.match(raw_line) is not None
+                RAW_HTML_BLOCK_TAG_RE.match(block_line) is not None
                 or (
                     not paragraph_open
-                    and RAW_HTML_COMPLETE_TAG_RE.fullmatch(raw_line) is not None
+                    and RAW_HTML_COMPLETE_TAG_RE.fullmatch(block_line) is not None
                 )
             ):
                 raw_html_until_blank = True
                 paragraph_open = False
                 lines.append("")
                 continue
-            opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", raw_line)
+            opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", block_line)
             if opening is not None:
                 marker, info = opening.groups()
                 if marker[0] == "~" or "`" not in info:
@@ -370,12 +389,21 @@ def _has_inline_comment_closer(
     cursor: int,
 ) -> bool:
     """Return whether an inline HTML comment closes inside this paragraph."""
+    if lines[line_index].find("-->", cursor) != -1:
+        return True
+    if not _paragraph_remains_open(lines[line_index], True):
+        return False
     for candidate_index in range(line_index, len(lines)):
         candidate = lines[candidate_index]
-        if candidate_index != line_index:
-            if not candidate.strip():
-                return False
-            cursor = 0
+        if candidate_index == line_index:
+            continue
+        if not candidate.strip():
+            return False
+        if re.match(r" {0,3}(?:>|[*+-](?:[ \t]+|$)|\d{1,9}[.)](?:[ \t]+|$))", candidate):
+            return False
+        if not _paragraph_remains_open(candidate, True):
+            return False
+        cursor = 0
         end = candidate.find("-->", cursor)
         if end != -1:
             return True
@@ -1108,6 +1136,35 @@ def validate_repository(
                 continue
             baseline_legacy[match.group(1)] = Counter(_legacy_normative_lines(text))
             baseline_fingerprints[match.group(1)] = legacy_requirement_fingerprint(text)
+        base_conformance_text = _git_show(
+            root, base_commit, "specs/CONFORMANCE.json",
+        )
+        if base_conformance_text is not None:
+            try:
+                base_conformance = json.loads(
+                    base_conformance_text,
+                    object_pairs_hook=_unique_json_object,
+                )
+            except (json.JSONDecodeError, DuplicateJSONKeyError):
+                base_conformance = None
+            if isinstance(base_conformance, dict):
+                base_specs = base_conformance.get("specs")
+                for base_record in base_specs if isinstance(base_specs, list) else []:
+                    if not isinstance(base_record, dict):
+                        continue
+                    spec_id = base_record.get("spec_id")
+                    fingerprint = base_record.get("legacy_requirement_fingerprint")
+                    count = base_record.get("legacy_requirement_count")
+                    if (
+                        isinstance(spec_id, str)
+                        and base_record.get("requirement_id_migration") == "pending"
+                        and isinstance(fingerprint, str)
+                        and FINGERPRINT_RE.fullmatch(fingerprint)
+                        and isinstance(count, int)
+                        and not isinstance(count, bool)
+                        and count >= 0
+                    ):
+                        baseline_fingerprints[spec_id] = (fingerprint, count)
     canonical = _canonical_specs(root, result)
 
     spec_records: dict[str, dict[str, Any]] = {}

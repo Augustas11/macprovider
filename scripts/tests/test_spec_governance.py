@@ -383,6 +383,62 @@ class GovernanceValidatorTests(unittest.TestCase):
             "\n".join(result.errors),
         )
 
+    def test_partial_migration_keeps_frozen_ledger_across_next_base(self) -> None:
+        repository = base_repository()
+        repository["specs"]["specs/SPEC-001-one.md"] += (
+            "\nThe provider MUST preserve the first legacy behavior.\n"
+            "The provider MUST preserve the second legacy behavior.\n"
+        )
+        frozen_fingerprint, frozen_count = legacy_requirement_fingerprint(
+            repository["specs"]["specs/SPEC-001-one.md"]
+        )
+        repository["conformance"]["specs"][0]["legacy_requirement_fingerprint"] = (
+            frozen_fingerprint
+        )
+        repository["conformance"]["specs"][0]["legacy_requirement_count"] = frozen_count
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            first_base = self._commit_repository(root)
+
+            repository["specs"]["specs/SPEC-001-one.md"] = repository["specs"][
+                "specs/SPEC-001-one.md"
+            ].replace(
+                "The provider MUST preserve the first legacy behavior.",
+                "**SPEC-001-R002 — Preserve the first legacy behavior.** "
+                "The provider MUST preserve it.",
+            )
+            repository["conformance"]["requirements"].append({
+                "requirement_id": "SPEC-001-R002",
+                "spec_id": "SPEC-001",
+                "state": "pending",
+                "implementation": [],
+                "tests": [],
+                "journeys": [],
+                "evidence": [],
+                "gap": copy.deepcopy(repository["conformance"]["specs"][0]["gap"]),
+            })
+            write_repository(root, repository)
+            result = validate_repository(root, date(2026, 7, 16), base_ref=first_base)
+            self.assertEqual([], result.errors)
+
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-qm", "partial migration"],
+                cwd=root,
+                check=True,
+            )
+            next_base = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            result = validate_repository(root, date(2026, 7, 16), base_ref=next_base)
+
+        self.assertEqual([], result.errors)
+
     def test_stable_requirement_cannot_be_deleted_from_base(self) -> None:
         repository = base_repository()
         with tempfile.TemporaryDirectory() as directory:
@@ -468,6 +524,9 @@ class GovernanceValidatorTests(unittest.TestCase):
             "<?example\n**SPEC-001-R999 — Example only.** It MUST not count.\n?>\n",
             "<![CDATA[\n**SPEC-001-R999 — Example only.** It MUST not count.\n]]>\n",
             "<widget title=\">\">\n**SPEC-001-R999 — Example only.** It MUST not count.\n\n",
+            "- ```text\n  **SPEC-001-R999 — Example only.** It MUST not count.\n  ```\n",
+            "1. ```text\n   **SPEC-001-R999 — Example only.** It MUST not count.\n   ```\n",
+            "- <details>\n  **SPEC-001-R999 — Example only.** It MUST not count.\n\n",
             "<!-- **SPEC-001-R999 — Comment only.** It MUST not count. -->\n",
         )
         for example in examples:
@@ -534,20 +593,43 @@ class GovernanceValidatorTests(unittest.TestCase):
                 _, count = legacy_requirement_fingerprint(text)
                 self.assertEqual(1, count)
 
+    def test_inline_comments_cannot_cross_heading_boundaries(self) -> None:
+        for heading in (
+            "# Heading <!--",
+            "> # Heading <!--",
+        ):
+            with self.subTest(heading=heading):
+                text = (
+                    f"{heading}\n"
+                    "The provider MUST preserve the visible contract.\n"
+                    "-->\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
+
     def test_type_seven_html_cannot_interrupt_a_visible_paragraph(self) -> None:
-        text = (
-            "Visible paragraph.\n"
-            "<widget>\n"
-            "The provider MUST preserve the visible contract.\n"
+        prefixes = (
+            "Visible paragraph.\n",
+            "===\n",
         )
-        _, count = legacy_requirement_fingerprint(text)
-        self.assertEqual(1, count)
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix.rstrip()):
+                text = (
+                    prefix
+                    + "<widget>\n"
+                    + "The provider MUST preserve the visible contract.\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
 
     def test_type_seven_html_starts_after_nonparagraph_blockquotes(self) -> None:
         prefixes = (
             ">\n",
             "> # Heading\n",
             "> ```\n> example\n> ```\n",
+            "- >\n",
+            "- > # Heading\n",
+            "[label]: /url\n",
         )
         for prefix in prefixes:
             with self.subTest(prefix=prefix):

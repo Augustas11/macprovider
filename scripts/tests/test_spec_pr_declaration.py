@@ -62,6 +62,16 @@ class SpecPRDeclarationTests(unittest.TestCase):
         indented = "    spec-governance:\n      behavior-change: none\n"
         self.assertIn("missing", "\n".join(validate_body(indented)))
 
+    def test_list_contained_examples_are_not_declarations(self) -> None:
+        examples = (
+            "- ```text\n  spec-governance:\n  behavior-change: none\n  ```\n",
+            "1. ```text\n   spec-governance:\n   behavior-change: none\n   ```\n",
+            "- <details>\n  spec-governance:\n  behavior-change: none\n\n",
+        )
+        for body in examples:
+            with self.subTest(opener=body.splitlines()[0]):
+                self.assertIn("missing", "\n".join(validate_body(body)))
+
     def test_shorter_fence_runs_do_not_expose_example_declarations(self) -> None:
         for opener, shorter, closer in (
             ("````text", "```", "````"),

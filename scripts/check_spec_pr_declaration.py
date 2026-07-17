@@ -92,6 +92,12 @@ def _contract_path(path: str) -> bool:
 
 def validate_body(body: str, root: Path | None = None, changed_paths: list[str] | None = None) -> list[str]:
     errors: list[str] = []
+    raw_lines = body.splitlines()
+    if not any(
+        re.fullmatch(r"spec-governance:", line, re.IGNORECASE)
+        for line in raw_lines
+    ):
+        return ["missing top-level 'spec-governance:' declaration block"]
     lines = _contract_markdown(body).splitlines()
     marker = _declaration_marker(lines)
     if marker is None:
@@ -103,6 +109,8 @@ def validate_body(body: str, root: Path | None = None, changed_paths: list[str] 
         match = FIELD_RE.match(line)
         if match:
             fields[match.group(1).lower()] = match.group(2)
+        elif line.strip():
+            break
     behavior = fields.get("behavior-change")
     if behavior not in {"none", "yes"}:
         errors.append("behavior-change must be exactly 'none' or 'yes'")
