@@ -278,6 +278,20 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.url.path))
     }
 
+    func testProviderMismatchFailsClosedWhenDurableChallengeCannotBeRemoved() throws {
+        let store = ReferralChallengeStore(url: temporaryStoreURL())
+        try store.save(providerID: "provider-a", payload: payload(challenge: String(repeating: "e", count: 64)))
+        let parent = store.url.deletingLastPathComponent()
+        XCTAssertEqual(chmod(parent.path, S_IRUSR | S_IXUSR), 0)
+        defer {
+            _ = chmod(parent.path, S_IRWXU)
+            try? FileManager.default.removeItem(at: parent)
+        }
+
+        XCTAssertThrowsError(try store.load(providerID: "provider-b", now: now))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.url.path))
+    }
+
     func testHTTPStatusesMapToSanitizedTypedErrors() async throws {
         let cases: [(Int, String?, ReferralCoordinatorClientError)] = [
             (401, nil, .control(code: .authenticationRequired, retryAfterSeconds: nil, terminalVerify: false)),

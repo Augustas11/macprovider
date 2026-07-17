@@ -794,6 +794,7 @@ final class MalibuAgent: ObservableObject {
             for await frame in client.stream {
                 self?.consume(frame)
             }
+            await client.close()
             guard let self, self.control === client else { return }
             if self.monitorsLaunchdProvider { self.control = nil }
             self.markReferralControlDisconnected()
@@ -838,6 +839,7 @@ final class MalibuAgent: ObservableObject {
             for await frame in client.stream {
                 self?.consume(frame)
             }
+            await client.close()
             guard let self, self.control === client else { return }
             if self.monitorsLaunchdProvider { self.control = nil }
             self.markReferralControlDisconnected()

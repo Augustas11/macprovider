@@ -95,6 +95,11 @@ final class ReferralProjectionTests: XCTestCase {
 
     @MainActor
     func testReferralActionWatchdogTimesOutAndCanBeCancelled() async {
+        XCTAssertGreaterThan(
+            ReferralRefreshPolicy.actionResponseTimeout,
+            2 * 20,
+            "challenge watchdog must exceed both sequential coordinator resource budgets"
+        )
         let fired = expectation(description: "watchdog fired")
         let watchdog = ReferralActionWatchdog(timeout: 0.01)
         watchdog.arm { fired.fulfill() }
@@ -105,6 +110,17 @@ final class ReferralProjectionTests: XCTestCase {
         watchdog.arm { cancelled.fulfill() }
         watchdog.cancel()
         await fulfillment(of: [cancelled], timeout: 0.05)
+    }
+
+    @MainActor
+    func testReferralActionWatchdogAllowsAValidDelayedResponse() async {
+        let timedOut = expectation(description: "valid delayed response stayed inside watchdog")
+        timedOut.isInverted = true
+        let watchdog = ReferralActionWatchdog(timeout: 0.1)
+        watchdog.arm { timedOut.fulfill() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        watchdog.cancel()
+        await fulfillment(of: [timedOut], timeout: 0.15)
     }
 
     func testSocialRollbackSuppressesOnlyAdvocacyActions() throws {

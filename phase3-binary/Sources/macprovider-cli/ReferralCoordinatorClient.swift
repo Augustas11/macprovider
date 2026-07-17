@@ -562,7 +562,7 @@ struct ReferralChallengeStore: Sendable {
                       inviteURL: record.inviteURL
                   ),
                   let expiresAt = Self.parseDate(record.expiresAt), expiresAt > now else {
-                try? clear()
+                try clear()
                 return nil
             }
             return ReferralChallengePayload(
@@ -572,9 +572,13 @@ struct ReferralChallengeStore: Sendable {
                 expiresAt: expiresAt,
                 expiresAtWire: record.expiresAt
             )
-        } catch {
-            try? clear()
-            throw error
+        } catch let loadError {
+            do {
+                try clear()
+            } catch let clearError {
+                throw clearError
+            }
+            throw loadError
         }
     }
 

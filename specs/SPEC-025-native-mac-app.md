@@ -458,8 +458,9 @@ Ship `.dmg` for v1. **Reconciled v0.4:** the pipeline already emits an **optiona
 **Shipped model:** `Malibu.app` is a **thin monitor wrapper**. `install.sh` (bundled
 in `Contents/Resources/`) sets up a **launchd provider-service-managed** `macprovider-cli`
 (`live.streamvc.macprovider`, `KeepAlive`) plus a companion health watchdog (§8);
-the app then adopts and **observes** it over local HTTP. The app never spawns the CLI
-and never opens the control socket in the live flow.
+the app then adopts and **observes** it over local HTTP plus a capability-gated,
+owner-only control socket. The app never spawns the CLI; the socket carries typed,
+sanitized CLI-authenticated projections and never transfers provider credentials.
 
 ```
 ┌───────────────────────────── Malibu.app ─────────────────────────────┐
@@ -468,8 +469,9 @@ and never opens the control socket in the live flow.
 │                    └──────────┬───────────────┘                       │
 │                               ▼                                       │
 │   LaunchProviderController (onboarding)   MalibuAgent (steady state)  │
-│    · runs Contents/Resources/install.sh    · MONITORS via HTTP poll   │
-│    · imports token → Keychain              · never spawns a child     │
+│    · runs Contents/Resources/install.sh    · HTTP health/status poll  │
+│                                             · typed control projection │
+│    · invokes CLI-owned registration         · never spawns a child     │
 │    · registers SMAppService (APP login item)                         │
 │                               │ GET /v1/health + /v1/status           │
 │                               ▼ (127.0.0.1:<port from config.yaml>)   │
@@ -518,23 +520,22 @@ v0.3 — required, not optional). The bundled copy is the signed transaction inv
 installation source; the live daemon remains the launchd install. `Info.plist` carries **no**
 `malibu://` URL scheme (removed by PR #418; tombstone at `MalibuApp.swift:35-38`).
 
-### 5.2 IPC: the shipped monitor path is HTTP-poll only
+### 5.2 IPC: HTTP lifecycle monitoring plus a bounded control projection
 
-**Reconciled v0.2 — the control socket is NOT used in the shipped flow.** Steady-state
-monitoring is entirely `GET http://127.0.0.1:<port>/v1/health` +
-`GET /v1/status` against the launchd-managed CLI (`InstalledProviderMonitor.swift:39-117`;
-port from `config.yaml`). Health readiness = `status ∈ {ready, busy}`; "serving"
-additionally requires `/v1/status.network_state == "buyer_serving"`
-(`MalibuAgent.swift:307-322`).
+Steady-state lifecycle monitoring uses
+`GET http://127.0.0.1:<port>/v1/health` + `GET /v1/status` against the
+launchd-managed CLI (`InstalledProviderMonitor.swift`; port from `config.yaml`).
+Health readiness = `status ∈ {ready, busy}`; "serving" additionally requires
+`/v1/status.network_state == "buyer_serving"`.
 
-The v0.1 design — the wrapper as a `ControlSocket` **client** using
-`status_request` / `switch_request` / `rotate_receipt_key_request` and new
-`metrics_request` / `pause_request` / `shutdown_request` frames — **did not ship as a
-live path.** `ControlSocketClient` and `MalibuAgent.connectControl(...)` compile and
-are unit-tested but have **no production call site** (`MalibuAgent.swift:409-463`, no
-callers). Treat those frames and the "unix socket over HTTP for metrics" rationale as
-**legacy/test surface**, superseded by the HTTP-poll monitor. (The `agent.sock` path
-is still reserved under the app support dir, `ProviderPaths.swift`, but not connected.)
+Malibu also attaches to the launchd-owned CLI's owner-only control socket when
+the CLI advertises compatible typed capabilities. That socket supplies bounded
+status, metrics, earnings, and referral projections and accepts supported
+operator/UI requests. It does not make Malibu a lifecycle owner: Malibu never
+receives the provider bearer, never talks directly to the coordinator, and
+never launches or supervises a second provider process. Unknown or malformed
+frames terminate the local connection and are recovered by capability
+negotiation and reattachment.
 
 ### 5.3 CLI lifecycle: launchd owns it, the app monitors
 

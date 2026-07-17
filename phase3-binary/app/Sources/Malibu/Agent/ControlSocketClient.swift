@@ -114,9 +114,22 @@ actor ControlSocketClient {
         // the fd and the Sendable continuation; do the blocking read + parse
         // on a background thread without ever awaiting the actor.
         let capturedContinuation = self.streamContinuation
-        readerTask = Task.detached(priority: .utility) {
+        readerTask = Task.detached(priority: .utility) { [weak self] in
             Self.blockingReadLoop(fd: fd, continuation: capturedContinuation)
+            await self?.readerDidTerminate(fd: fd)
         }
+    }
+
+    private func readerDidTerminate(fd terminatedFD: Int32) {
+        guard fd == terminatedFD else { return }
+        _ = Darwin.shutdown(fd, SHUT_RDWR)
+        Darwin.close(fd)
+        fd = -1
+        readerTask = nil
+    }
+
+    func hasOpenFileDescriptorForTesting() -> Bool {
+        fd >= 0
     }
 
     static func blockingReadLoop(

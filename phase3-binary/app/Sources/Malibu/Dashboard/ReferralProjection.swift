@@ -3,7 +3,10 @@ import Foundation
 enum ReferralRefreshPolicy {
     static let minimumInterval: TimeInterval = 60
     static let statusLifetime: TimeInterval = 90
-    static let actionResponseTimeout: TimeInterval = 15
+    // Challenge creation performs two sequential coordinator requests, each
+    // with a 20-second resource budget, before persisting and opening the X
+    // intent. Keep the UI watchdog beyond that complete valid path.
+    static let actionResponseTimeout: TimeInterval = 45
 
     static func shouldRequest(now: Date, lastRequestedAt: Date?) -> Bool {
         lastRequestedAt.map { now.timeIntervalSince($0) >= minimumInterval } != false
