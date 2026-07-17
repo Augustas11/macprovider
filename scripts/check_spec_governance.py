@@ -13,6 +13,7 @@ from collections import Counter
 import hashlib
 import json
 import re
+import string
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -174,6 +175,137 @@ def _strip_container_markers(line: str) -> str:
     return content
 
 
+def _link_definition_remainder(content: str) -> str | None:
+    """Return text after a valid CommonMark link label and colon."""
+    leading = re.match(r" {0,3}", content)
+    cursor = leading.end() if leading is not None else 0
+    if cursor >= len(content) or content[cursor] != "[":
+        return None
+    cursor += 1
+    label_start = cursor
+    visible_label: list[str] = []
+    while cursor < len(content):
+        character = content[cursor]
+        if (
+            character == "\\"
+            and cursor + 1 < len(content)
+            and content[cursor + 1] in string.punctuation
+        ):
+            visible_label.append(content[cursor + 1])
+            cursor += 2
+            continue
+        if character == "[":
+            return None
+        if character == "]":
+            break
+        visible_label.append(character)
+        cursor += 1
+    if cursor >= len(content) or content[cursor] != "]":
+        return None
+    if cursor - label_start > 999 or not "".join(visible_label).strip():
+        return None
+    cursor += 1
+    if cursor >= len(content) or content[cursor] != ":":
+        return None
+    return content[cursor + 1:]
+
+
+def _valid_link_title(value: str) -> bool:
+    if len(value) < 2:
+        return False
+    closing = {'"': '"', "'": "'", "(": ")"}.get(value[0])
+    if closing is None or value[-1] != closing:
+        return False
+    inner = value[1:-1]
+    cursor = 0
+    while cursor < len(inner):
+        character = inner[cursor]
+        if (
+            character == "\\"
+            and cursor + 1 < len(inner)
+            and inner[cursor + 1] in string.punctuation
+        ):
+            cursor += 2
+            continue
+        if character == closing or (value[0] == "(" and character == "("):
+            return False
+        if ord(character) < 0x20 and character != "\t":
+            return False
+        cursor += 1
+    return True
+
+
+def _valid_bare_link_destination(value: str) -> bool:
+    if not value:
+        return False
+    depth = 0
+    cursor = 0
+    while cursor < len(value):
+        character = value[cursor]
+        if (
+            character == "\\"
+            and cursor + 1 < len(value)
+            and value[cursor + 1] in string.punctuation
+        ):
+            cursor += 2
+            continue
+        if character in "<>" or character.isspace() or ord(character) < 0x20:
+            return False
+        if character == "(":
+            depth += 1
+            if depth > 32:
+                return False
+        elif character == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+        cursor += 1
+    return depth == 0
+
+
+def _parse_link_destination_line(value: str) -> tuple[bool, bool]:
+    """Return validity and whether a destination line includes a title."""
+    text = value.strip()
+    if not text:
+        return False, False
+    if text.startswith("<"):
+        cursor = 1
+        while cursor < len(text):
+            character = text[cursor]
+            if (
+                character == "\\"
+                and cursor + 1 < len(text)
+                and text[cursor + 1] in string.punctuation
+            ):
+                cursor += 2
+                continue
+            if character == "<" or ord(character) < 0x20:
+                return False, False
+            if character == ">":
+                break
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != ">":
+            return False, False
+        remainder = text[cursor + 1:].strip()
+    else:
+        parts = text.split(maxsplit=1)
+        if not _valid_bare_link_destination(parts[0]):
+            return False, False
+        remainder = parts[1].strip() if len(parts) == 2 else ""
+    if remainder and not _valid_link_title(remainder):
+        return False, False
+    return True, bool(remainder)
+
+
+def _valid_link_destination_line(value: str) -> bool:
+    return _parse_link_destination_line(value)[0]
+
+
+def _is_single_line_link_definition(content: str) -> bool:
+    remainder = _link_definition_remainder(content)
+    return remainder is not None and _valid_link_destination_line(remainder)
+
+
 def _paragraph_remains_open(line: str, was_open: bool) -> bool:
     """Track enough container state to apply CommonMark type-7 start rules."""
     content = _strip_container_markers(line)
@@ -191,10 +323,7 @@ def _paragraph_remains_open(line: str, was_open: bool) -> bool:
         )
         or (
             not was_open
-            and re.fullmatch(
-                r" {0,3}\[[^\]\n]+\]:[ \t]*(?:<[^>\n]+>|\S+)(?:[ \t]+.*)?",
-                content,
-            )
+            and _is_single_line_link_definition(content)
         )
         or (not was_open and content.startswith(("    ", "\t")))
     ):
@@ -222,23 +351,18 @@ def _starts_interrupting_raw_html(line: str) -> bool:
 def _multiline_link_definition_span(lines: list[str], line_index: int) -> int:
     """Return the validated line span of a multiline reference definition."""
     first = _strip_container_markers(lines[line_index])
-    if re.fullmatch(r" {0,3}\[[^\]\n]+\]:[ \t]*", first) is None:
+    remainder = _link_definition_remainder(first)
+    if remainder is None or remainder.strip():
         return 0
     if line_index + 1 >= len(lines):
         return 0
     destination = _strip_container_markers(lines[line_index + 1])
-    if re.fullmatch(
-        r" {1,3}(?:<[^>\n]+>|\S+)"
-        r"(?:[ \t]+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?[ \t]*",
-        destination,
-    ) is None:
+    valid_destination, has_inline_title = _parse_link_destination_line(destination)
+    if not valid_destination:
         return 0
-    if line_index + 2 < len(lines):
-        title = _strip_container_markers(lines[line_index + 2])
-        if re.fullmatch(
-            r" {1,3}(?:\"[^\"]*\"|'[^']*'|\([^)]*\))[ \t]*",
-            title,
-        ):
+    if not has_inline_title and line_index + 2 < len(lines):
+        title = _strip_container_markers(lines[line_index + 2]).strip()
+        if _valid_link_title(title):
             return 3
     return 2
 
@@ -247,7 +371,7 @@ def _contract_markdown(text: str) -> str:
     """Return Markdown contract text without examples or HTML comments."""
     raw_lines = text.splitlines()
     lines: list[str] = []
-    fence: tuple[str, int] | None = None
+    fence: tuple[str, int, bool] | None = None
     code_span: int | None = None
     raw_html_end: re.Pattern[str] | None = None
     raw_html_until_blank = False
@@ -262,8 +386,9 @@ def _contract_markdown(text: str) -> str:
             lines.append("")
             continue
         if fence is not None:
-            delimiter, minimum_length = fence
-            closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", block_line)
+            delimiter, minimum_length, containerized = fence
+            closing_line = block_line if containerized else raw_line
+            closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", closing_line)
             if (
                 closing is not None
                 and closing.group(1)[0] == delimiter
@@ -282,7 +407,7 @@ def _contract_markdown(text: str) -> str:
             lines.append("")
             continue
         if raw_html_until_blank:
-            if not raw_line.strip():
+            if not block_line.strip():
                 raw_html_until_blank = False
             paragraph_open = False
             lines.append("")
@@ -347,7 +472,11 @@ def _contract_markdown(text: str) -> str:
             if opening is not None:
                 marker, info = opening.groups()
                 if marker[0] == "~" or "`" not in info:
-                    fence = (marker[0], len(marker))
+                    fence = (
+                        marker[0],
+                        len(marker),
+                        block_line != raw_line,
+                    )
                     paragraph_open = False
                     lines.append("")
                     continue
@@ -446,8 +575,13 @@ def _has_inline_comment_closer(
     cursor: int,
 ) -> bool:
     """Return whether an inline HTML comment closes inside this paragraph."""
-    if lines[line_index].find("-->", cursor) != -1:
-        return True
+    content: list[str] = []
+    first = lines[line_index][cursor:]
+    first_end = first.find("-->")
+    if first_end != -1:
+        candidate = first[:first_end]
+        return "--" not in candidate and not candidate.endswith("-")
+    content.append(first)
     if not _paragraph_remains_open(lines[line_index], True):
         return False
     for candidate_index in range(line_index, len(lines)):
@@ -465,7 +599,10 @@ def _has_inline_comment_closer(
         cursor = 0
         end = candidate.find("-->", cursor)
         if end != -1:
-            return True
+            content.append(candidate[:end])
+            joined = "\n".join(content)
+            return "--" not in joined and not joined.endswith("-")
+        content.append(candidate)
     return False
 
 

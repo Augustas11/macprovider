@@ -61,6 +61,28 @@ class SpecPRDeclarationTests(unittest.TestCase):
         self.assertIn("missing", "\n".join(validate_body(comment)))
         indented = "    spec-governance:\n      behavior-change: none\n"
         self.assertIn("missing", "\n".join(validate_body(indented)))
+        root_fence_with_list_text = (
+            "````text\n"
+            "- ````\n"
+            "spec-governance:\n"
+            "  behavior-change: none\n"
+            "````\n"
+        )
+        self.assertIn(
+            "missing",
+            "\n".join(validate_body(root_fence_with_list_text)),
+        )
+        root_tilde_fence_with_list_text = (
+            "~~~~text\n"
+            "- ~~~~\n"
+            "spec-governance:\n"
+            "  behavior-change: none\n"
+            "~~~~\n"
+        )
+        self.assertIn(
+            "missing",
+            "\n".join(validate_body(root_tilde_fence_with_list_text)),
+        )
 
     def test_list_contained_examples_are_not_declarations(self) -> None:
         examples = (
@@ -137,6 +159,15 @@ class SpecPRDeclarationTests(unittest.TestCase):
                     "spec-governance:\n  behavior-change: none\n"
                 )
                 self.assertEqual([], validate_body(body))
+
+    def test_malformed_inline_comment_does_not_hide_real_declaration(self) -> None:
+        body = (
+            "Visible prose <!-- invalid -- content\n"
+            "spec-governance:\n"
+            "  behavior-change: none\n"
+            "-->\n"
+        )
+        self.assertEqual([], validate_body(body))
 
     def test_behavior_none_rejects_product_paths(self) -> None:
         errors = validate_body(

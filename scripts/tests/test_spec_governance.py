@@ -527,6 +527,8 @@ class GovernanceValidatorTests(unittest.TestCase):
             "- ```text\n  **SPEC-001-R999 — Example only.** It MUST not count.\n  ```\n",
             "1. ```text\n   **SPEC-001-R999 — Example only.** It MUST not count.\n   ```\n",
             "- <details>\n  **SPEC-001-R999 — Example only.** It MUST not count.\n\n",
+            "````text\n- ````\n**SPEC-001-R999 — Example only.** It MUST not count.\n````\n",
+            "~~~~text\n- ~~~~\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~~\n",
             "<!-- **SPEC-001-R999 — Comment only.** It MUST not count. -->\n",
         )
         for example in examples:
@@ -633,6 +635,15 @@ class GovernanceValidatorTests(unittest.TestCase):
                 _, count = legacy_requirement_fingerprint(text)
                 self.assertEqual(1, count)
 
+    def test_malformed_inline_comments_cannot_hide_obligations(self) -> None:
+        text = (
+            "Visible prose <!-- invalid -- content\n"
+            "The provider MUST preserve the visible contract.\n"
+            "-->\n"
+        )
+        _, count = legacy_requirement_fingerprint(text)
+        self.assertEqual(1, count)
+
     def test_type_seven_html_cannot_interrupt_a_visible_paragraph(self) -> None:
         prefixes = (
             "Visible paragraph.\n",
@@ -656,7 +667,10 @@ class GovernanceValidatorTests(unittest.TestCase):
             "- >\n",
             "- > # Heading\n",
             "[label]: /url\n",
+            "[label]:\n/url\n",
             "[label]:\n  /url\n",
+            "[label]:\n    /url\n",
+            "[label]:\n\t/url\n",
         )
         for prefix in prefixes:
             with self.subTest(prefix=prefix):
@@ -667,6 +681,41 @@ class GovernanceValidatorTests(unittest.TestCase):
                 )
                 _, count = legacy_requirement_fingerprint(text)
                 self.assertEqual(0, count)
+
+    def test_container_blank_lines_end_type_six_html(self) -> None:
+        prefixes = (
+            "> <div>\n>\n",
+            "- > <div>\n- >\n",
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix.splitlines()[0]):
+                text = (
+                    prefix
+                    + "The provider MUST preserve the visible contract.\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
+
+    def test_invalid_link_definitions_cannot_hide_type_seven_content(self) -> None:
+        invalid_prefixes = (
+            "[label]: (\n",
+            "[label]: /url garbage\n",
+            '[label]: /url "unterminated\n',
+            "[label]:\n  (\n",
+            "[label]:\n  /url garbage\n",
+            "[   ]: /url\n",
+            "[[bad]: /url\n",
+            f"[{'x' * 1000}]: /url\n",
+        )
+        for prefix in invalid_prefixes:
+            with self.subTest(prefix=prefix[:40]):
+                text = (
+                    prefix
+                    + "<widget>\n"
+                    + "The provider MUST preserve the visible contract.\n\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
 
     def test_malformed_nested_values_never_crash(self) -> None:
         mutations = [
