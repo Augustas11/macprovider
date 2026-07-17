@@ -47,6 +47,12 @@ var (
 		"rejected_identity": true, "rejected_used": true, "rejected_expired": true,
 		"rejected_rate": true, "rejected_outstanding": true, "store_error": true,
 	}
+	allowReferralOutcome = map[string]bool{
+		"disabled": true, "busy": true, "rate_limited": true,
+		"unavailable": true, "bad_request": true, "missing": true,
+		"expired": true, "revoked": true, "exhausted": true,
+		"conflict": true, "invalid": true, "valid": true,
+	}
 	// Round-1 ARCH M1 / CODE M1 fix: also scan for an
 	// Origin-fragment to prove no attacker-controlled string
 	// from the request `Origin` header lands in a label value.
@@ -87,6 +93,11 @@ func TestLabelHygiene(t *testing.T) {
 		m.IncCredentialBootstrap(outcome)
 	}
 	m.IncCredentialBootstrap("raw-attacker-value")
+	for outcome := range allowReferralOutcome {
+		m.IncReferralEvent("validate", outcome)
+	}
+	m.IncReferralEvent("validate", "raw-attacker-value")
+	m.IncReferralEvent("raw-attacker-value", "valid")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -143,7 +154,11 @@ func TestLabelHygiene(t *testing.T) {
 						t.Errorf("metric %s track=%q not in allowed set", mf.GetName(), val)
 					}
 				case "event":
-					if !allowIdlePrewarmEvent[val] {
+					if mf.GetName() == "referral_event_total" {
+						if val != "validate" {
+							t.Errorf("metric %s event=%q not in referral allowed set", mf.GetName(), val)
+						}
+					} else if !allowIdlePrewarmEvent[val] {
 						t.Errorf("metric %s event=%q not in allowed set", mf.GetName(), val)
 					}
 				case "reason":
@@ -151,7 +166,11 @@ func TestLabelHygiene(t *testing.T) {
 						t.Errorf("metric %s reason=%q not in allowed set", mf.GetName(), val)
 					}
 				case "outcome":
-					if !allowCredentialBootstrapOutcome[val] {
+					if mf.GetName() == "referral_event_total" {
+						if !allowReferralOutcome[val] {
+							t.Errorf("metric %s outcome=%q not in referral allowed set", mf.GetName(), val)
+						}
+					} else if !allowCredentialBootstrapOutcome[val] {
 						t.Errorf("metric %s outcome=%q not in allowed set", mf.GetName(), val)
 					}
 				}

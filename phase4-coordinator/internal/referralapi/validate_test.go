@@ -89,6 +89,7 @@ func TestValidationHandlerOptionalAccessURLCoversDisabledAndCanBeOmitted(t *test
 	t.Run("disabled includes configured URL", func(t *testing.T) {
 		h := &ValidationHandler{
 			Policy:           auth.ReferralPolicy{RequireForRegistration: false},
+			PublicLimiter:    NewBoundedLimiter(10, time.Minute, 10),
 			RequestAccessURL: " https://access.example.test/waitlist ",
 		}
 		response := httptest.NewRecorder()
@@ -117,6 +118,23 @@ func TestValidationHandlerOptionalAccessURLCoversDisabledAndCanBeOmitted(t *test
 			t.Fatalf("absent access URL was serialized: %s", response.Body.String())
 		}
 	})
+}
+
+func TestValidationHandlerKeepsDisabledRouteBounded(t *testing.T) {
+	h := &ValidationHandler{
+		Policy:        auth.ReferralPolicy{RequireForRegistration: false},
+		PublicLimiter: NewBoundedLimiter(1, time.Minute, 1),
+	}
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":""}`)))
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"reason":"disabled"`) {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":""}`)))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
+	}
 }
 
 func TestValidationHandlerFailsClosedWhenAuthorityMissing(t *testing.T) {

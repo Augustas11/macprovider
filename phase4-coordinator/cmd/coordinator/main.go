@@ -939,7 +939,7 @@ func main() {
 	}
 	var referralValidationHandler http.HandlerFunc
 	if cfg.Referrals.EnablePublicValidation {
-		referralValidation := newReferralValidationHandler(tokenStore, referralPolicy, trustedReferralProxies, cfg.Referrals.RequestAccessURL)
+		referralValidation := newReferralValidationHandler(tokenStore, referralPolicy, trustedReferralProxies, cfg.Referrals.RequestAccessURL, metricsHandle)
 		referralValidationHandler = referralValidation.ServeHTTP
 	}
 	var referralJoinHandler http.HandlerFunc
@@ -1361,13 +1361,14 @@ func withReferralValidation(base http.Handler, validate, join http.HandlerFunc) 
 	return mux
 }
 
-func newReferralValidationHandler(store referralapi.ValidationStore, policy auth.ReferralPolicy, trustedProxies []netip.Prefix, requestAccessURL string) *referralapi.ValidationHandler {
+func newReferralValidationHandler(store referralapi.ValidationStore, policy auth.ReferralPolicy, trustedProxies []netip.Prefix, requestAccessURL string, metrics referralapi.ReferralMetrics) *referralapi.ValidationHandler {
 	return &referralapi.ValidationHandler{
 		Store:            store,
 		Policy:           policy,
 		PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
 		ValidateSlots:    make(chan struct{}, 4),
 		RequestAccessURL: strings.TrimSpace(requestAccessURL),
+		Metrics:          metrics,
 		SourceIP: func(r *http.Request) string {
 			return onboarding.ClientIP(r, trustedProxies)
 		},

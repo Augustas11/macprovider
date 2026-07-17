@@ -126,7 +126,7 @@ func TestWithReferralValidationMountsJoinRouteOnlyWhenEnabled(t *testing.T) {
 }
 
 func TestNewReferralValidationHandlerWiresOperatorRecoveryURL(t *testing.T) {
-	handler := newReferralValidationHandler(nil, auth.ReferralPolicy{}, nil, "  https://access.example.test/waitlist  ")
+	handler := newReferralValidationHandler(nil, auth.ReferralPolicy{}, nil, "  https://access.example.test/waitlist  ", nil)
 	if handler.RequestAccessURL != "https://access.example.test/waitlist" {
 		t.Fatalf("request access URL=%q", handler.RequestAccessURL)
 	}

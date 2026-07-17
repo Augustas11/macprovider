@@ -56,11 +56,6 @@ func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if !h.Policy.RequireForRegistration {
-		h.observe("disabled")
-		h.writeValidation(w, true, false, "disabled")
-		return
-	}
 	key := r.RemoteAddr
 	if h.SourceIP != nil {
 		key = h.SourceIP(r)
@@ -82,17 +77,24 @@ func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many referral checks")
 		return
 	}
-	if h.Store == nil {
-		h.observe("unavailable")
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
-		return
-	}
+	// Decode and bound the request before consulting policy or authority so a
+	// temporarily disabled public route retains the same abuse posture.
 	var request struct {
 		Code string `json:"code"`
 	}
 	if err := decodeBoundedJSON(r, &request, 1024); err != nil || len([]byte(request.Code)) > 256 {
 		h.observe("bad_request")
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid request")
+		return
+	}
+	if !h.Policy.RequireForRegistration {
+		h.observe("disabled")
+		h.writeValidation(w, true, false, "disabled")
+		return
+	}
+	if h.Store == nil {
+		h.observe("unavailable")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
 		return
 	}
 	validation, err := h.Store.ValidateReferral(r.Context(), h.Policy, request.Code, h.now())
