@@ -27,6 +27,8 @@ state/
 phase4-coordinator/coordinator
 phase4-coordinator/coordinator-cli
 phase4-coordinator/mockprovider
+phase4-coordinator/stats-inventory-sync
+phase4-coordinator/stats-hardware-verifier
 phase4-coordinator/*.db
 phase4-coordinator/*.db-shm
 phase4-coordinator/*.db-wal

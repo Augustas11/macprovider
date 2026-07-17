@@ -39,6 +39,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{16, "hardware_profile_memory_reverification"},
 		{17, "autotune_current_hardware_gate_grants"},
 		{18, "apptrack_register_attempts"},
+		{19, "hardware_trust_operator_approval"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -75,7 +76,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants, hardwareTrustApproval string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -100,6 +101,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			hardwareMemoryReverification = m.SQL
 		case "autotune_current_hardware_gate_grants":
 			autotuneCurrentHardwareGateGrants = m.SQL
+		case "hardware_trust_operator_approval":
+			hardwareTrustApproval = m.SQL
 		}
 	}
 	if schema == "" {
@@ -477,6 +480,224 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	mustContain(t, powW2HelloGateGrants,
 		"GRANT SELECT (\n    generated_at,\n    evidence\n) ON hardware_verification_jobs TO provider_onboarding",
 		"provider_onboarding hello gate read grants")
+	if hardwareTrustApproval == "" {
+		t.Fatal("hardware_trust_operator_approval migration body is empty")
+	}
+	hardwareTrustApprovalCode := stripSQLComments(hardwareTrustApproval)
+	for _, needle := range []string{
+		"ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'inventory'",
+		"CHECK (source IN ('inventory', 'operator_api'))",
+		// Terminal structural fix: the trust table PK is widened to include source so
+		// the operator-approval and inventory-sync authorities own independent rows.
+		"DROP CONSTRAINT hardware_verification_trust_pkey",
+		"ADD PRIMARY KEY (provider_id, hardware_identity_hash, source)",
+		"CREATE ROLE hardware_trust_definer NOLOGIN",
+		"CREATE ROLE hardware_trust_requester NOLOGIN",
+		"CREATE ROLE hardware_trust_approver NOLOGIN",
+		"ALTER ROLE hardware_trust_definer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+		"CREATE TABLE IF NOT EXISTS hardware_trust_pending",
+		"CREATE TABLE IF NOT EXISTS hardware_trust_grants",
+		"job_id",
+		"cancelled_at",
+		"CHECK (action IN ('grant', 'revoke'))",
+		"CHECK (approved_by IS NULL OR approved_by <> requested_by)",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_hardware_trust_pending_open_incident",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_hardware_trust_pending_open_identity",
+		"WHERE committed_at IS NULL AND cancelled_at IS NULL",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_hardware_trust_grants_incident",
+		"CREATE OR REPLACE FUNCTION request_hardware_trust_approval",
+		"CREATE OR REPLACE FUNCTION approve_hardware_trust_approval",
+		"CREATE OR REPLACE FUNCTION revoke_hardware_trust_approval",
+		// FIX 1 (round-12): revoke reports whether the tuple is now FULLY untrusted
+		// (no active trust root of any source) so the handler evicts the live session
+		// only then — a still-active inventory root leaves the session connected.
+		"out_now_untrusted BOOLEAN",
+		"now_untrusted := NOT EXISTS (",
+		"SET search_path = pg_catalog, public, pg_temp",
+		"dual_control_required",
+		"job not waiting_trust",
+		"job no longer waiting_trust",
+		"hardware_trust_pending_expired",
+		// Approval upserts ONLY the operator_api row via the 3-column conflict target;
+		// it never rides or clobbers an inventory row (terminal structural fix #582).
+		"ON CONFLICT (provider_id, hardware_identity_hash, source) DO UPDATE",
+		"'operator_api'",
+		"job not approvable via hardware trust",
+		// FIX 1: both job reads lock FOR SHARE to serialize against the verifier,
+		// permitted by a LOCK-ONLY column-level UPDATE(status) grant.
+		"FOR SHARE",
+		"GRANT UPDATE (status) ON hardware_verification_jobs TO hardware_trust_definer",
+		// FIX 1: the profile-promotion guard trigger and the SQL functions compare
+		// trust activity against clock_timestamp() (real time, advances mid-tx),
+		// not the frozen now(), so a mid-transaction revocation is seen as inactive.
+		"AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())",
+		"revoke_time := clock_timestamp();",
+		"approval_time := clock_timestamp();",
+		// FIX 3 (round-8): approval re-checks a chip profile exists for the job's chip
+		// so the verifier cannot re-park an approved job for missing_trusted_chip_profile.
+		"hardware_trust_chip_profile_missing",
+		"FROM chip_hardware_profiles ch",
+		"GRANT SELECT (chip_normalized) ON chip_hardware_profiles TO hardware_trust_definer",
+		// FIX 4 (round-8): approval gates the OLDEST benchmark timestamp on the same
+		// evidence-age boundary the verifier's stale_benchmark check uses.
+		"SELECT min((b->>'generated_at')::timestamptz)",
+		"FROM jsonb_array_elements(COALESCE(job.evidence->'benchmarks', '[]'::jsonb)) b",
+		// Approval returns source/effective-expiry columns (retained; scanned
+		// positionally by the Go store). Post terminal fix these are always
+		// 'operator_api' and the operator_api row's expiry.
+		"out_source TEXT",
+		"out_effective_expires_at TIMESTAMPTZ",
+		// FIX 5 (round-6): approval rejects a job whose evidence aged past the
+		// verifier's limit with a distinct error. The 7-day window is HARDCODED as a
+		// definer-owned invariant (kept in sync with hardwareverify.MaxEvidenceAgeDays)
+		// rather than a caller parameter, so it cannot be bypassed.
+		"IF job.generated_at < approval_time - interval '7 days' THEN",
+		"hardware_trust_job_evidence_stale",
+		// FIX 6 (round-6): approval rejects up front when the effective trust root
+		// lacks a small (5-minute) promotion runway, so a "success" cannot re-park or
+		// reject moments later on the next verifier tick.
+		"hardware_trust_promotion_runway_insufficient",
+		// FIX 4: revoke atomically demotes, so the definer reads the job evidence
+		// tuple and flips the profile verified bit.
+		"GRANT UPDATE (verified) ON provider_hardware_profiles TO hardware_trust_definer",
+		"GRANT SELECT (chip) ON hardware_verification_jobs TO provider_onboarding",
+		// FIX 4 (round-6): the autotune admission gate (LatestVerified) now joins
+		// hardware_verification_trust to re-check live trust, so provider_onboarding
+		// needs a READ-ONLY SELECT on the trust table (re-added; round-3 had removed
+		// it). Write boundary preserved — still no INSERT/UPDATE/DELETE or EXECUTE.
+		"GRANT SELECT ON hardware_verification_trust TO provider_onboarding",
+		"GRANT SELECT (id, provider_id, status, chip_normalized, unified_memory_gb, os_version, binary_version, generated_at, evidence, decision_reason) ON hardware_verification_jobs TO hardware_trust_definer",
+		"GRANT SELECT, INSERT, UPDATE ON hardware_verification_trust TO hardware_trust_definer",
+		"GRANT EXECUTE ON FUNCTION request_hardware_trust_approval(UUID, BIGINT, TEXT, TIMESTAMPTZ, TEXT, TEXT) TO hardware_trust_requester",
+		"GRANT EXECUTE ON FUNCTION approve_hardware_trust_approval(UUID, TEXT) TO hardware_trust_approver",
+		"GRANT EXECUTE ON FUNCTION revoke_hardware_trust_approval(UUID, TEXT, TEXT, TEXT, TEXT) TO hardware_trust_approver",
+		"ALTER FUNCTION request_hardware_trust_approval(UUID, BIGINT, TEXT, TIMESTAMPTZ, TEXT, TEXT) OWNER TO hardware_trust_definer",
+		"ALTER FUNCTION approve_hardware_trust_approval(UUID, TEXT) OWNER TO hardware_trust_definer",
+		"ALTER FUNCTION revoke_hardware_trust_approval(UUID, TEXT, TEXT, TEXT, TEXT) OWNER TO hardware_trust_definer",
+		"REVOKE CREATE ON SCHEMA public FROM hardware_trust_definer",
+	} {
+		mustContain(t, hardwareTrustApprovalCode, needle, "hardware trust operator approval schema/grant shape")
+	}
+	// Anti-fraud boundary: provider_onboarding must never write the trust root.
+	mustNotContain(t, hardwareTrustApprovalCode,
+		"INSERT, UPDATE ON hardware_verification_trust TO provider_onboarding",
+		"provider_onboarding must not receive trust-table writes")
+	mustNotContain(t, hardwareTrustApprovalCode,
+		"GRANT INSERT ON hardware_verification_trust TO provider_onboarding",
+		"provider_onboarding must not receive trust-table inserts")
+	mustNotContain(t, hardwareTrustApprovalCode,
+		"GRANT UPDATE ON hardware_verification_trust TO provider_onboarding",
+		"provider_onboarding must not receive trust-table updates")
+	// FIX 4 (round-6): provider_onboarding now DOES hold a READ-ONLY SELECT on
+	// hardware_verification_trust (asserted positively above) so the LatestVerified
+	// admission gate can re-check live trust. The anti-fraud boundary is the WRITE
+	// grants only (mustNotContain above), never the read.
+	hardwareTrustApprovalDown, err := os.ReadFile("019_hardware_trust_operator_approval.down.sql")
+	if err != nil {
+		t.Fatalf("read hardware trust approval rollback artifact: %v", err)
+	}
+	hardwareTrustApprovalDownSQL := string(hardwareTrustApprovalDown)
+	for _, needle := range []string{
+		"DROP FUNCTION IF EXISTS revoke_hardware_trust_approval(UUID, TEXT, TEXT, TEXT, TEXT)",
+		"DROP FUNCTION IF EXISTS approve_hardware_trust_approval(UUID, TEXT)",
+		"DROP FUNCTION IF EXISTS request_hardware_trust_approval(UUID, BIGINT, TEXT, TIMESTAMPTZ, TEXT, TEXT)",
+		"DROP TABLE IF EXISTS hardware_trust_grants",
+		"DROP TABLE IF EXISTS hardware_trust_pending",
+		"DELETE FROM hardware_verification_trust WHERE source = 'operator_api'",
+		"ALTER TABLE hardware_verification_trust DROP COLUMN IF EXISTS source",
+		// Rollback restores migration 008's 2-column primary key after removing the
+		// operator_api rows (duplicate resolution) and dropping the source column.
+		"DROP CONSTRAINT hardware_verification_trust_pkey",
+		"ADD PRIMARY KEY (provider_id, hardware_identity_hash)",
+		"DROP ROLE IF EXISTS hardware_trust_approver",
+		"DROP ROLE IF EXISTS hardware_trust_requester",
+		"DROP ROLE IF EXISTS hardware_trust_definer",
+		// FIX 4: atomic + fail-fast so a mid-script failure rolls back the whole
+		// rollback and the script is re-runnable.
+		"\\set ON_ERROR_STOP on",
+		"BEGIN;",
+		"COMMIT;",
+		// FIX 4(a): demote profiles backed only by operator_api roots BEFORE the
+		// roots are deleted, so rollback never strands admission trusting a
+		// removed root.
+		"SET verified = FALSE",
+		"AND t.source <> 'operator_api'",
+		// rollback removes 019's recorded version row so a later migrate re-applies
+		// 019 rather than leaving 19 recorded while the feature is gone. Scoped to 19
+		// only — must never touch version 18 (018_apptrack_register_attempts).
+		"DELETE FROM schema_migrations_spec017 WHERE version = 19;",
+		// FIX 1: rollback restores migration 016's guard body (trust activity on
+		// now()) so the trigger returns to its exact pre-019 definition.
+		"AND (t.expires_at IS NULL OR t.expires_at > now())",
+		// FIX 4 (round-6): rollback also revokes the read-only trust SELECT that the
+		// up migration re-added to provider_onboarding for the admission re-check.
+		"REVOKE SELECT ON hardware_verification_trust FROM provider_onboarding",
+	} {
+		mustContain(t, hardwareTrustApprovalDownSQL, needle, "hardware trust operator approval rollback artifact")
+	}
+}
+
+// TestValidateNoDuplicateVersions covers the FIX D (issue #582) runner guard
+// that rejects two embedded migrations sharing one integer version — the
+// duplicate-018 collision class — so the second cannot be silently skipped by
+// Apply's already-applied guard.
+func TestValidateNoDuplicateVersions(t *testing.T) {
+	if err := validateNoDuplicateVersions([]Migration{
+		{Version: 1, Name: "a"},
+		{Version: 2, Name: "b"},
+		{Version: 3, Name: "c"},
+	}); err != nil {
+		t.Fatalf("distinct versions rejected: %v", err)
+	}
+	err := validateNoDuplicateVersions([]Migration{
+		{Version: 18, Name: "apptrack_register_attempts"},
+		{Version: 18, Name: "hardware_trust_operator_approval"},
+	})
+	if err == nil {
+		t.Fatal("duplicate version accepted, want error")
+	}
+	if !strings.Contains(err.Error(), "duplicate migration version 18") {
+		t.Fatalf("error = %q, want it to name the duplicate version", err)
+	}
+	// The real embedded set must be collision-free.
+	if _, err := All(); err != nil {
+		t.Fatalf("embedded migrations failed duplicate-version guard: %v", err)
+	}
+}
+
+// TestValidateAppliedNames covers the FIX D (issue #582) Apply guard that rejects
+// a recorded schema_migrations_spec017 row whose name differs from the embedded
+// migration of the same version (a diverged-history / renumber-on-one-side drift),
+// while ignoring recorded versions that no longer have an embedded counterpart
+// (a normal rollback/removal).
+func TestValidateAppliedNames(t *testing.T) {
+	embedded := []Migration{
+		{Version: 18, Name: "apptrack_register_attempts"},
+		{Version: 19, Name: "hardware_trust_operator_approval"},
+	}
+	// Matching recorded names → no error.
+	if err := validateAppliedNames(map[int]string{
+		18: "apptrack_register_attempts",
+		19: "hardware_trust_operator_approval",
+	}, embedded); err != nil {
+		t.Fatalf("matching applied names rejected: %v", err)
+	}
+	// Name drift on a recorded version → error.
+	err := validateAppliedNames(map[int]string{
+		18: "hardware_trust_operator_approval",
+	}, embedded)
+	if err == nil {
+		t.Fatal("applied-version name mismatch accepted, want error")
+	}
+	if !strings.Contains(err.Error(), "version 18") {
+		t.Fatalf("error = %q, want it to name the drifted version", err)
+	}
+	// Recorded version with no embedded counterpart (rollback/removal) → ignored.
+	if err := validateAppliedNames(map[int]string{
+		17: "some_removed_migration",
+	}, embedded); err != nil {
+		t.Fatalf("recorded-only version treated as drift: %v", err)
+	}
 }
 
 func mustContain(t *testing.T, body, needle, why string) {

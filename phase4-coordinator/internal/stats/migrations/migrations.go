@@ -74,7 +74,52 @@ func All() ([]Migration, error) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	// FIX D (issue #582 HIGH #1 hardening): reject two embedded migrations that
+	// share the same integer version. Without this a future duplicate-018-style
+	// collision would be sorted adjacent and the second silently SKIPPED by the
+	// already-applied guard in Apply (both map to the same version key), so its
+	// DDL never runs. Failing loudly here turns that latent data-loss bug into a
+	// hard boot/test failure.
+	if err := validateNoDuplicateVersions(out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// validateNoDuplicateVersions returns an error if any two migrations share the
+// same integer version. Extracted so it is unit-testable without a filesystem
+// duplicate (FIX D, issue #582).
+func validateNoDuplicateVersions(ms []Migration) error {
+	seen := make(map[int]string, len(ms))
+	for _, m := range ms {
+		if prev, dup := seen[m.Version]; dup {
+			return fmt.Errorf("duplicate migration version %d: %q and %q", m.Version, prev, m.Name)
+		}
+		seen[m.Version] = m.Name
+	}
+	return nil
+}
+
+// validateAppliedNames returns an error if a recorded schema_migrations_spec017
+// row's name differs from the embedded migration of the same version. A version
+// is an immutable identity for a specific migration body; a name drift means the
+// recorded version was applied from a DIFFERENT migration than the one now
+// embedded (e.g. a duplicate-018 collision resolved by renumbering on one side
+// only), so the already-applied skip would silently run the wrong DDL history.
+// Failing loudly forces operator reconciliation (FIX D, issue #582). Recorded
+// versions with no matching embedded migration are ignored — that is a normal
+// rollback/removal, not a drift.
+func validateAppliedNames(applied map[int]string, ms []Migration) error {
+	byVer := make(map[int]string, len(ms))
+	for _, m := range ms {
+		byVer[m.Version] = m.Name
+	}
+	for ver, recordedName := range applied {
+		if embedded, ok := byVer[ver]; ok && embedded != recordedName {
+			return fmt.Errorf("migration version %d recorded as %q but embedded migration of that version is %q; refusing to proceed", ver, recordedName, embedded)
+		}
+	}
+	return nil
 }
 
 func parseFilename(name string) (int, string, error) {
@@ -169,6 +214,14 @@ func Apply(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 
+	// FIX D (issue #582): reject an applied-version/name mismatch before running
+	// anything. A recorded version whose name no longer matches the embedded
+	// migration of that version means the recorded history diverged from the
+	// embedded set; the already-applied skip would then run the wrong DDL lineage.
+	if err := validateAppliedNames(applied, migrations); err != nil {
+		return err
+	}
+
 	for _, m := range migrations {
 		if _, ok := applied[m.Version]; ok {
 			continue
@@ -180,19 +233,22 @@ func Apply(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func loadAppliedConn(ctx context.Context, conn *sql.Conn) (map[int]struct{}, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT version FROM schema_migrations_spec017`)
+func loadAppliedConn(ctx context.Context, conn *sql.Conn) (map[int]string, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT version, name FROM schema_migrations_spec017`)
 	if err != nil {
 		return nil, fmt.Errorf("query schema_migrations_spec017: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[int]struct{})
+	out := make(map[int]string)
 	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
+		var (
+			v    int
+			name string
+		)
+		if err := rows.Scan(&v, &name); err != nil {
 			return nil, fmt.Errorf("scan applied row: %w", err)
 		}
-		out[v] = struct{}{}
+		out[v] = name
 	}
 	return out, rows.Err()
 }

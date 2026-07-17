@@ -15,11 +15,18 @@ import (
 
 func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 	generatedAt := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	// The verified job's evidence carries hardware_identity_hash = c*64 (see
+	// mustVerifiedEvidenceJSON). An ACTIVE trust root for the job tuple (apple m4
+	// max / 64 / that hash) backs the admittable cases; trustExpired parks an
+	// already-expired root so FIX 4's live-trust re-check must reject even a
+	// verified profile.
+	jobHash := strings.Repeat("c", 64)
 	tests := []struct {
 		name            string
 		profileChip     string
 		profileMemory   int
 		profileVerified bool
+		trustExpired    bool
 		wantOK          bool
 	}{
 		{
@@ -47,6 +54,15 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 			profileMemory:   64,
 			profileVerified: false,
 		},
+		{
+			// FIX 4 (round-6): verified bit is TRUE and the profile tuple matches,
+			// but the backing trust root is expired — admission must reject.
+			name:            "expired trust root rejects verified profile",
+			profileChip:     "apple m4 max",
+			profileMemory:   64,
+			profileVerified: true,
+			trustExpired:    true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -66,6 +82,19 @@ INSERT INTO hardware_verification_jobs (
 				"mp-provider", "apple m4 max", 64, generatedAt,
 				hardwareverify.VerifiedDecisionReason, mustVerifiedEvidenceJSON(t, generatedAt)); err != nil {
 				t.Fatalf("insert verified job: %v", err)
+			}
+			// Back the job tuple with a trust root: NULL expiry = active, or an
+			// already-past expiry for the expired-root case.
+			var expiresAt any
+			if tc.trustExpired {
+				expiresAt = generatedAt.Add(-time.Hour)
+			}
+			if _, err := db.Exec(`
+INSERT INTO hardware_verification_trust (
+    provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb, expires_at
+) VALUES (?, ?, ?, ?, ?)`,
+				"mp-provider", jobHash, "apple m4 max", 64, expiresAt); err != nil {
+				t.Fatalf("insert trust root: %v", err)
 			}
 
 			store := NewPGEvidenceStore(db)
@@ -107,6 +136,14 @@ func openAutotuneEvidenceTestDB(t *testing.T) *sql.DB {
             generated_at TIMESTAMP NOT NULL,
             decision_reason TEXT NOT NULL,
             evidence BLOB NOT NULL
+        )`,
+		`CREATE TABLE hardware_verification_trust (
+            provider_id TEXT NOT NULL,
+            hardware_identity_hash TEXT NOT NULL,
+            chip_normalized TEXT NOT NULL,
+            unified_memory_gb INTEGER NOT NULL,
+            expires_at TIMESTAMP NULL,
+            PRIMARY KEY (provider_id, hardware_identity_hash)
         )`,
 	} {
 		if _, err := db.Exec(statement); err != nil {

@@ -29,6 +29,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
 )
 
@@ -121,6 +122,8 @@ type Server struct {
 	telemetryDrift                 *pow.Evaluator
 	identitySignatures             IdentitySignatureStore
 	authPolicyAdmin                ProviderAuthPolicyAdminStore
+	hardwareTrustAdmin             HardwareTrustAdminStore
+	providerTrust                  ProviderTrustChecker
 	admissionIdentityRecoveryAdmin AdmissionIdentityRecoveryAdminStore
 	idlePrewarm                    IdlePrewarmRecorder
 	idlePrewarmMetrics             IdlePrewarmMetrics
@@ -135,6 +138,16 @@ type Server struct {
 	// seLivenessInFlight guards against concurrent probes for the same session.
 	seLivenessChans    sync.Map
 	seLivenessInFlight sync.Map
+
+	// Trust-revalidation sweep failure accounting (issue #582 FIX C). Bounds the
+	// remaining fail-open: a single transient sweep DB error is skipped, but N
+	// consecutive failures escalate to a degraded trust-authority signal + a
+	// bounded quarantine of established gated sessions, so the coordinator cannot
+	// serve indefinitely on an unverifiable trust store. trustSweepFailures is
+	// only touched by the single sweep goroutine; trustAuthorityDegraded is read
+	// concurrently by /healthz, hence atomic.
+	trustSweepFailures     int
+	trustAuthorityDegraded atomic.Bool
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -228,6 +241,36 @@ type ProviderAuthPolicyAdminStore interface {
 type AdmissionIdentityRecoveryAdminStore interface {
 	RequestAdmissionIdentityRecovery(ctx context.Context, authorization AdmissionIdentityRecoveryAuthorization, now time.Time) (AdmissionIdentityRecoveryAuthorization, error)
 	ApproveAdmissionIdentityRecovery(ctx context.Context, pendingID, approvedBy string, now time.Time) (AdmissionIdentityRecoveryAuthorization, error)
+}
+
+// HardwareTrustAdminStore backs the durable operator hardware-trust approval
+// path (issue #582). The request/approve methods route through separate DB
+// handles authenticated as the split hardware_trust_requester /
+// hardware_trust_approver roles so no single operator key can both request and
+// approve a trust root.
+type HardwareTrustAdminStore interface {
+	RequestHardwareTrustApproval(ctx context.Context, pendingID string, jobID int64, requestedBy string, expiresAt *time.Time, reason, incidentID string) (providerID, hardwareIdentityHash, chipNormalized string, unifiedMemoryGB int, err error)
+	ApproveHardwareTrustApproval(ctx context.Context, pendingID, approvedBy string) (providerID, hardwareIdentityHash, chipNormalized string, unifiedMemoryGB int, expiresAt *time.Time, reason, incidentID, source string, effectiveExpiresAt *time.Time, err error)
+	RevokeHardwareTrustApproval(ctx context.Context, providerID, hardwareIdentityHash, revokedBy, reason string) (chipNormalized string, unifiedMemoryGB int, nowUntrusted bool, err error)
+	ListWaitingTrustJobs(ctx context.Context, afterID int64, limit int) ([]onboarding.WaitingTrustJob, error)
+}
+
+// ProviderTrustChecker backs active-session hardware-trust enforcement (issue
+// #582 FIX B). SessionsWithoutActiveTrust is the single batched read for the
+// bounded revalidation sweep: given each active session's EXACT admitted
+// hardware tuple, it returns the subset whose tuple no longer has an active
+// trust root. It is read-only against the provider_onboarding role. Wired only
+// when the hardware trust hello gate (the admission trust join) is enabled, so
+// non-onboarding deployments run no sweep.
+//
+// There is deliberately NO registration-time re-check (issue #582 FIX A): trust
+// is authorized at the hello gate (checkAutotuneHelloGate → LatestVerified),
+// which runs BEFORE any durable mutation (token/PairOT/referral). A
+// commit-then-refuse recheck after minting is the exact onboarding/recovery
+// deadlock #582 exists to remove; the residual hello-gate→register TOCTOU is
+// covered by this bounded sweep, which evicts but NEVER refuses a committed session.
+type ProviderTrustChecker interface {
+	SessionsWithoutActiveTrust(ctx context.Context, admitted []onboarding.AdmittedTuple) ([]onboarding.AdmittedTuple, error)
 }
 
 type IdlePrewarmRecorder interface {
@@ -370,6 +413,22 @@ func WithProviderAuthPolicyAdminStore(store ProviderAuthPolicyAdminStore) Option
 func WithAdmissionIdentityRecoveryAdminStore(store AdmissionIdentityRecoveryAdminStore) Option {
 	return func(s *Server) {
 		s.admissionIdentityRecoveryAdmin = store
+	}
+}
+
+func WithHardwareTrustAdminStore(store HardwareTrustAdminStore) Option {
+	return func(s *Server) {
+		s.hardwareTrustAdmin = store
+	}
+}
+
+// WithProviderTrustChecker installs the active-session hardware-trust
+// revalidation backend (issue #582 FIX A/B). Wired alongside the hardware trust
+// hello gate; presence gates both the periodic revalidation sweep and the
+// registration-time re-check.
+func WithProviderTrustChecker(checker ProviderTrustChecker) Option {
+	return func(s *Server) {
+		s.providerTrust = checker
 	}
 }
 
@@ -549,6 +608,13 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	if cfg.Pool.LosslessnessProbe.Enabled && registry != nil {
 		go s.runLosslessnessProbeLoop()
 	}
+	// Issue #582 FIX A: bounded active-session hardware-trust revalidation.
+	// Gated on the trust checker being wired — i.e. only when the hardware
+	// trust hello gate (the admission trust join) is enabled — so non-onboarding
+	// deployments are unaffected.
+	if s.providerTrust != nil && registry != nil {
+		go s.runTrustRevalidationLoop()
+	}
 	return s
 }
 
@@ -653,6 +719,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/provider-auth-policy/seed-cutover", s.handleProviderAuthPolicySeedCutover)
 	mux.HandleFunc("/admin/provider-auth-policy/exempt", s.handleProviderAuthPolicyExemptRequest)
 	mux.HandleFunc("/admin/provider-auth-policy/exempt/", s.handleProviderAuthPolicyExemptApprove)
+	mux.HandleFunc("/admin/hardware-trust/waiting", s.handleHardwareTrustWaiting)
+	mux.HandleFunc("/admin/hardware-trust/approve", s.handleHardwareTrustApproveRequest)
+	mux.HandleFunc("/admin/hardware-trust/approve/", s.handleHardwareTrustApproveApprove)
+	mux.HandleFunc("/admin/hardware-trust/revoke", s.handleHardwareTrustRevoke)
 	mux.HandleFunc("/admin/provider-admission-identity/recover", s.handleAdmissionIdentityRecoveryRequest)
 	mux.HandleFunc("/admin/provider-admission-identity/recover/", s.handleAdmissionIdentityRecoveryApprove)
 	if s.cfg.Auth.GitHubOAuth.Enabled {
@@ -1457,12 +1527,16 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
 	// provided AuthState; eviction defense protects existing routable
 	// sessions from bearer-less duplicates.
-	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
+	maxAdmittedModelKey, maxAdmittedModelID, admittedTuple, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
 	if !gateOK {
 		return "", ""
 	}
 	entry.MaxAdmittedModelKey = maxAdmittedModelKey
 	entry.MaxAdmittedModelID = maxAdmittedModelID
+	// FIX B (issue #582): admitted hardware-trust tuple for the revalidation sweep.
+	entry.AdmittedHardwareIdentityHash = admittedTuple.HardwareIdentityHash
+	entry.AdmittedChipNormalized = admittedTuple.ChipNormalized
+	entry.AdmittedUnifiedMemoryGB = admittedTuple.UnifiedMemoryGB
 	// Reserve after the post-challenge evidence recheck, but defer the durable
 	// admission record until credential minting succeeds.
 	if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
@@ -1557,12 +1631,18 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
 	entry.AuthState = authState
+	// Issue #582 FIX A: no post-mint hardware-trust re-check. Trust was authorized
+	// at the hello gate (checkAutotuneHelloGate) BEFORE resolveProvisionalToken
+	// committed the token/PairOT/referral above; refusing here would strand a
+	// minted token. The bounded revalidation sweep evicts (never refuses) a
+	// session whose trust lapses after commit.
 	session, refusal := s.registerProviderSession(conn, entry)
 	if session == nil {
-		if refusal == pool.RegisterRefusalReceiptRotationGraceActive {
+		switch refusal {
+		case pool.RegisterRefusalReceiptRotationGraceActive:
 			s.sendAuthRejection(conn, "receipt_rotation_grace_active", "receipt key rotation already has an active previous-key grace window")
 			s.close(conn, CloseInvalidHello, "receipt_key_rotation_grace_active")
-		} else {
+		default:
 			s.close(conn, CloseInvalidToken, "invalid_token")
 		}
 		return "", ""
@@ -1812,7 +1892,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		}
 	}
-	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, hello)
+	maxAdmittedModelKey, maxAdmittedModelID, admittedTuple, gateOK := s.checkAutotuneHelloGate(conn, hello)
 	if !gateOK {
 		return nil, false
 	}
@@ -1852,24 +1932,40 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		CandidateRowIdentity:   hello.CandidateRowIdentity,
 		MaxAdmittedModelKey:    maxAdmittedModelKey,
 		MaxAdmittedModelID:     maxAdmittedModelID,
+		// FIX B (issue #582): admitted hardware-trust tuple for the sweep.
+		AdmittedHardwareIdentityHash: admittedTuple.HardwareIdentityHash,
+		AdmittedChipNormalized:       admittedTuple.ChipNormalized,
+		AdmittedUnifiedMemoryGB:      admittedTuple.UnifiedMemoryGB,
 	}, true
 }
 
-func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, string, bool) {
+// checkAutotuneHelloGate is the hardware-trust AUTHORIZATION POINT for the
+// admission path (issue #582 FIX A). LatestVerified below joins live
+// hardware_verification_trust and admits only a provider whose verified hardware
+// tuple is still backed by an active (unexpired, unrevoked) trust root. It runs
+// BEFORE resolveProvisionalToken mints the token / PairOT / redeems the referral,
+// so the "authorize before any durable mutation" requirement is satisfied here —
+// NOT by a post-mint registration re-check (which would commit-then-refuse and
+// deadlock onboarding/recovery). The returned tuple binds the admitted session
+// to the EXACT trust root that authorized it, so the bounded revalidation sweep
+// (FIX B) can later re-check that specific tuple rather than the provider_id
+// alone. The residual revoke-between-gate-and-register window is bounded (evicted,
+// never refused) by that sweep.
+func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, string, onboarding.AdmittedTuple, bool) {
 	if !s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
-		return "", "", true
+		return "", "", onboarding.AdmittedTuple{}, true
 	}
 	if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
 		s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
 		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
-		return "", "", false
+		return "", "", onboarding.AdmittedTuple{}, false
 	}
 	ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
 	if err != nil {
 		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
 		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
-		return "", "", false
+		return "", "", onboarding.AdmittedTuple{}, false
 	}
 	if !ok {
 		s.log.Info().
@@ -1878,7 +1974,7 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 			Str("model_id", hello.ModelID).
 			Msg("autotune hello gate rejected connect without verified hardware evidence")
 		s.close(conn, CloseInvalidHello, "autotune_evidence_required")
-		return "", "", false
+		return "", "", onboarding.AdmittedTuple{}, false
 	}
 	decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
 	if !decision.Allowed {
@@ -1893,9 +1989,17 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 			Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
 			Msg("autotune hello gate rejected provider model claim")
 		s.close(conn, CloseInvalidHello, decision.Reason)
-		return "", "", false
+		return "", "", onboarding.AdmittedTuple{}, false
 	}
-	return decision.MaxAdmittedModelKey, decision.MaxAdmittedModelID, true
+	// FIX B (issue #582): bind the admitted session to the exact trust tuple that
+	// authorized it, for the tuple-aware revalidation sweep.
+	tuple := onboarding.AdmittedTuple{
+		ProviderID:           hello.ProviderID,
+		HardwareIdentityHash: evidence.HardwareIdentityHash,
+		ChipNormalized:       evidence.ChipNormalized,
+		UnifiedMemoryGB:      evidence.UnifiedMemoryGB,
+	}
+	return decision.MaxAdmittedModelKey, decision.MaxAdmittedModelID, tuple, true
 }
 
 func (s *Server) catalogAdmission(hello Hello) (string, bool) {
@@ -2148,11 +2252,23 @@ func semverParts(value string) ([]int, bool) {
 }
 
 // registerProviderSession installs the WS session in the registry +
-// starts heartbeat monitoring. Returns nil when the registry refused
-// the registration, including bearer-less duplicate eviction defense
-// and receipt-key rotation grace conflicts.
-// On refusal, the caller MUST close the connection with
-// CloseInvalidToken / "invalid_token" and not advance to ack-write.
+// starts heartbeat monitoring. Returns nil with a non-empty refusal when
+// registration is refused: bearer-less duplicate eviction defense
+// (RegisterRefusalBearerlessDuplicate / BearerDowngrade) or receipt-key rotation
+// grace conflicts (RegisterRefusalReceiptRotationGraceActive).
+// On refusal the caller MUST close the connection (mapping the refusal to its
+// close code, defaulting to CloseInvalidToken / "invalid_token") and not
+// advance to ack-write.
+//
+// Issue #582 FIX A: there is deliberately NO hardware-trust re-check here.
+// resolveProvisionalToken has already minted the provider token, PairOT, and
+// redeemed any referral by the time this runs, so a trust re-check that refused
+// now would strand a durably-committed token that never reaches the provider —
+// the exact commit-then-refuse onboarding/recovery deadlock #582 removes. Trust
+// is authorized earlier, at the hello gate (checkAutotuneHelloGate →
+// LatestVerified), BEFORE any durable mutation; the residual hello-gate→register
+// TOCTOU is covered by the bounded revalidation sweep, which evicts (never
+// refuses) a session whose trust lapsed after it was committed.
 func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
 	s.autotuneCatalogBridgeMu.Lock()
 	defer s.autotuneCatalogBridgeMu.Unlock()
@@ -3974,6 +4090,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		RequestsActive           int    `json:"requests_active"`
 		Version                  string `json:"version"`
 		RecommendedBinaryVersion string `json:"recommended_binary_version"`
+		// TrustAuthorityDegraded is true when the hardware-trust revalidation
+		// sweep has failed to read the trust store for trustSweepDegradedThreshold
+		// consecutive ticks (issue #582 FIX C). It signals operators that active
+		// gated sessions are being quarantined because trust can no longer be
+		// verified — the bound on the sweep's fail-open. Always false when the
+		// hardware-trust hello gate (and thus the sweep) is not enabled.
+		TrustAuthorityDegraded bool `json:"trust_authority_degraded"`
 	}{
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
@@ -3988,6 +4111,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// field, which IS gated above. Gating this monitoring value would blind
 		// operators with no security benefit.
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		TrustAuthorityDegraded:   s.trustAuthorityDegraded.Load(),
 	}
 	for _, p := range providers {
 		switch p.State {

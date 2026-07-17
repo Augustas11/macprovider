@@ -167,6 +167,8 @@ onboarding:
   auth_policy_request_dsn: env:ONBOARDING_AUTH_POLICY_REQUEST_DSN
   auth_policy_approve_dsn: env:ONBOARDING_AUTH_POLICY_APPROVE_DSN
   auth_policy_cutover_dsn: env:ONBOARDING_AUTH_POLICY_CUTOVER_DSN
+  hardware_trust_request_dsn: env:ONBOARDING_HARDWARE_TRUST_REQUEST_DSN
+  hardware_trust_approve_dsn: env:ONBOARDING_HARDWARE_TRUST_APPROVE_DSN
   bundle_id: "tech.malibu.app"
   apple_team_id: env:APPLE_TEAM_ID
   coordinator_domain: "coordinator.streamvc.live"

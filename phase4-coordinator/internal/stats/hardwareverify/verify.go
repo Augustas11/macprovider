@@ -10,12 +10,21 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 const verifierDecisionVersion = "hardware-verifier.v2"
 const evidenceSchemaVersion = "hardware_evidence.autotune.v1"
-const maxEvidenceAge = 7 * 24 * time.Hour
+
+// MaxEvidenceAgeDays is the evidence-age limit (in whole days) the verifier
+// enforces: a job whose generated_at is older than this is rejected as
+// stale_job/stale_evidence by Evaluate. It is exported so the operator
+// hardware-trust approval path can reject an over-age job AT approval time using
+// the SAME limit (issue #582 FIX 5), instead of committing an approval the
+// verifier then rejects as stale on its next pass. maxEvidenceAge is derived
+// from it so the two never drift.
+const MaxEvidenceAgeDays = 7
+const maxEvidenceAge = MaxEvidenceAgeDays * 24 * time.Hour
 const futureSkew = 5 * time.Minute
 
 const VerifiedDecisionReason = verifierDecisionVersion + ":verified_trusted_hardware"
@@ -90,10 +99,16 @@ func Open(dsn string) (*Store, error) {
 	if dsn == "" {
 		return nil, errors.New("hardware verifier dsn is required")
 	}
-	db, err := sql.Open("postgres", dsn)
+	// lib/pq's sql.Open defers DSN parsing, so a malformed connection string only
+	// surfaces later (e.g. at Smoke) as a net/url error that echoes the
+	// credential-bearing URL into logs. Parse eagerly via pq.NewConnector so the
+	// failure is caught here, and never surface the raw DSN in the error (issue
+	// #582 FIX 6).
+	connector, err := pq.NewConnector(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open hardware verifier postgres: %w", err)
+		return nil, errors.New("open hardware verifier postgres: invalid connection string (redacted)")
 	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
@@ -207,10 +222,19 @@ SELECT j.id, j.provider_id, j.chip, j.chip_normalized, j.unified_memory_gb,
 	for _, job := range jobs {
 		decision := Evaluate(job)
 		if decision.Verified {
-			if err := promoteJob(ctx, tx, job, decision); err != nil {
+			promoted, err := promoteJob(ctx, tx, job, decision)
+			if err != nil {
 				return Processed{}, err
 			}
-			processed.Verified++
+			// FIX 2 (issue #582): promoteJob re-validates the backing trust root
+			// under this transaction and re-parks the job as waiting_trust when the
+			// root went inactive between batch selection and promotion. Count it as
+			// waiting, not verified, so the counters stay honest.
+			if promoted {
+				processed.Verified++
+			} else {
+				processed.Waiting++
+			}
 			continue
 		}
 		if decision.Reason == "missing_trusted_hardware_identity" || decision.Reason == "missing_trusted_chip_profile" {
@@ -343,7 +367,85 @@ func evaluateAt(job Job, now time.Time) Decision {
 	return Decision{Verified: true, Reason: VerifiedDecisionReason}
 }
 
-func promoteJob(ctx context.Context, tx *sql.Tx, job Job, decision Decision) error {
+// promotionDecision maps a fresh in-transaction trust re-check to the action
+// taken at promotion time (issue #582 FIX 2). A job that passed Evaluate but
+// whose backing hardware trust root was expired/revoked/deleted between batch
+// selection and this write must NOT be promoted; it is re-parked as
+// waiting_trust with a reason the operator approval path can re-drive
+// (missing_trusted_hardware_identity — the exact gate the approval endpoint and
+// request_hardware_trust_approval accept).
+func promotionDecision(trustStillActive bool) (promote bool, reparkReason string) {
+	if trustStillActive {
+		return true, ""
+	}
+	return false, "missing_trusted_hardware_identity"
+}
+
+// promoteJob promotes a verified job, but first re-validates — with a fresh read
+// inside the verifier's transaction (which already holds the job FOR UPDATE) —
+// that the backing hardware trust root is STILL active. The batch-selection scan
+// read trust_matched at an earlier snapshot; the trust root can be
+// expired/revoked/deleted (API revoke, applyTrustDemotions, inventory delete)
+// in the window before this write. Re-checking here closes the
+// revoke/demote/delete-vs-promote race uniformly at the source (issue #582
+// FIX 2). Returns whether the job was actually promoted; false means it was
+// re-parked as waiting_trust. This does NOT alter batch ordering/selection (the
+// ORDER BY id LIMIT ... FOR UPDATE SKIP LOCKED fairness residual is unchanged).
+func promoteJob(ctx context.Context, tx *sql.Tx, job Job, decision Decision) (bool, error) {
+	// FIX 1 (issue #582): serialize this promotion against the operator
+	// approve/revoke path by taking the SAME per-provider advisory lock the
+	// SECURITY DEFINER functions use — key/args (582026, hashtext(provider_id))
+	// match request/approve/revoke_hardware_trust_approval in
+	// 019_hardware_trust_operator_approval.up.sql exactly. Without it a concurrent
+	// revoke that expired the backing trust root can interleave between this
+	// re-check and the profile write.
+	//
+	// FIX 5 (round-6 deadlock fix, issue #582): use the NON-BLOCKING
+	// pg_try_advisory_xact_lock, not the blocking pg_advisory_xact_lock. This
+	// transaction already holds the job row FOR UPDATE (from the batch SELECT) and
+	// only NOW requests the provider advisory lock; approve/revoke take the advisory
+	// lock FIRST and then the job row locks. A blocking wait here would close that
+	// lock cycle into a deadlock (40P01). Instead, if the lock is already held by a
+	// concurrent approve/revoke, SKIP this job's promotion this pass and leave it
+	// parked in its current status; the next verifier tick re-selects it (this
+	// mirrors the batch's FOR UPDATE SKIP LOCKED philosophy). The job is reported as
+	// NOT promoted, so ProcessPending counts it as waiting — never verified or
+	// rejected. Taking the lock here does NOT touch the batch SELECT ordering above.
+	var lockAcquired bool
+	if err := tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(582026, hashtext($1))`, job.ProviderID).Scan(&lockAcquired); err != nil {
+		return false, err
+	}
+	if !lockAcquired {
+		return false, nil
+	}
+	var trustStillActive bool
+	// FIX 1 (issue #582): compare expires_at against clock_timestamp() (real time,
+	// advances mid-transaction) rather than now()/transaction_timestamp() (frozen
+	// at transaction start). A revoke that set expires_at = clock_timestamp() after
+	// this verifier transaction began would still satisfy `expires_at > now()`
+	// (frozen), promoting a just-revoked root; clock_timestamp() sees it inactive.
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+      FROM hardware_verification_jobs j
+      JOIN hardware_verification_trust t
+        ON t.provider_id = j.provider_id
+       AND t.hardware_identity_hash = j.evidence #>> '{hardware,hardware_identity_hash}'
+       AND t.chip_normalized = j.chip_normalized
+       AND t.unified_memory_gb = j.unified_memory_gb
+       AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
+     WHERE j.id = $1
+)`, job.ID).Scan(&trustStillActive); err != nil {
+		return false, err
+	}
+	if promote, reparkReason := promotionDecision(trustStillActive); !promote {
+		// The trust root went inactive since selection — re-park instead of
+		// promoting so a later operator approval can re-drive the job.
+		if err := waitTrustJob(ctx, tx, job.ID, reparkReason); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO provider_hardware_profiles (
     provider_id, chip, chip_normalized, unified_memory_gb,
@@ -369,15 +471,17 @@ ON CONFLICT (provider_id) DO UPDATE
 		job.BinaryVersion,
 		job.GeneratedAt.UTC(),
 	); err != nil {
-		return err
+		return false, err
 	}
-	_, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 UPDATE hardware_verification_jobs
    SET status = 'verified',
        processed_at = now(),
        decision_reason = $2
- WHERE id = $1 AND status IN ('pending', 'waiting_trust')`, job.ID, decision.Reason)
-	return err
+ WHERE id = $1 AND status IN ('pending', 'waiting_trust')`, job.ID, decision.Reason); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func waitTrustJob(ctx context.Context, tx *sql.Tx, id int64, reason string) error {

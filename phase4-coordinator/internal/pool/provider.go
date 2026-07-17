@@ -184,6 +184,17 @@ type Provider struct {
 	// or provider admitted before W2 rollout.
 	MaxAdmittedModelKey string `json:"max_admitted_model_class,omitempty"`
 	MaxAdmittedModelID  string `json:"max_admitted_model_id,omitempty"`
+	// Admitted hardware-trust tuple (issue #582 FIX B). Captured at the hello
+	// gate from the exact verified evidence that authorized this session, so the
+	// bounded trust-revalidation sweep can re-check the SAME hardware tuple that
+	// admitted the session — not merely "any active trust root for this
+	// provider_id". This closes the gap where a second Mac (different
+	// hardware_identity_hash, same provider_id) with an active root kept a
+	// session alive after the root that actually admitted it was revoked/expired.
+	// Empty when the hello gate is disabled (no trust checker wired).
+	AdmittedHardwareIdentityHash string `json:"admitted_hardware_identity_hash,omitempty"`
+	AdmittedChipNormalized       string `json:"admitted_chip_normalized,omitempty"`
+	AdmittedUnifiedMemoryGB      int    `json:"admitted_unified_memory_gb,omitempty"`
 	// Proof of Weights W3 — latest model-class OPoI probe outcome when a
 	// per-model challenge bank with optional latency gates was used.
 	// Omitted when only the global canary bank applies.
