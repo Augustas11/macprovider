@@ -584,6 +584,10 @@ class GovernanceValidatorTests(unittest.TestCase):
             r"\<!-- is escaped syntax.",
             "    <!-- is indented code.",
             "Visible prose mentions <!-- literally.",
+            "<!-->",
+            "<!--->",
+            "Visible prose includes <!--> literally.",
+            "Visible prose includes <!---> literally.",
         ):
             with self.subTest(literal=literal):
                 text = (
@@ -603,6 +607,28 @@ class GovernanceValidatorTests(unittest.TestCase):
                     f"{heading}\n"
                     "The provider MUST preserve the visible contract.\n"
                     "-->\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
+
+    def test_inline_comments_cannot_cross_raw_html_block_boundaries(self) -> None:
+        blocks = (
+            "<script>\nexample\n</script>\n",
+            "<pre>\nexample\n</pre>\n",
+            "<style>\nexample\n</style>\n",
+            "<textarea>\nexample\n</textarea>\n",
+            "<?example\n?>\n",
+            "<!DOCTYPE html>\n",
+            "<![CDATA[\nexample\n]]>\n",
+            "<div>\nexample\n</div>\n\n",
+        )
+        for block in blocks:
+            with self.subTest(opener=block.splitlines()[0]):
+                text = (
+                    "Visible prose <!--\n"
+                    + block
+                    + "The provider MUST preserve the visible contract.\n"
+                    + "-->\n"
                 )
                 _, count = legacy_requirement_fingerprint(text)
                 self.assertEqual(1, count)
@@ -630,6 +656,7 @@ class GovernanceValidatorTests(unittest.TestCase):
             "- >\n",
             "- > # Heading\n",
             "[label]: /url\n",
+            "[label]:\n  /url\n",
         )
         for prefix in prefixes:
             with self.subTest(prefix=prefix):

@@ -126,6 +126,10 @@ class SpecPRDeclarationTests(unittest.TestCase):
             r"\<!-- is escaped syntax.",
             "    <!-- is indented code.",
             "Visible prose mentions <!-- literally.",
+            "<!-->",
+            "<!--->",
+            "Visible prose includes <!--> literally.",
+            "Visible prose includes <!---> literally.",
         ):
             with self.subTest(literal=literal):
                 body = (

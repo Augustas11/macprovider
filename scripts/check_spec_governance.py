@@ -202,6 +202,47 @@ def _paragraph_remains_open(line: str, was_open: bool) -> bool:
     return True
 
 
+def _starts_interrupting_raw_html(line: str) -> bool:
+    """Return whether a CommonMark raw-HTML block can interrupt a paragraph."""
+    content = _strip_container_markers(line)
+    return bool(
+        re.match(
+            r" {0,3}<(?:pre|script|style|textarea)(?:\s|>|$)",
+            content,
+            re.IGNORECASE,
+        )
+        or re.match(r" {0,3}<!--(?!>|->)", content)
+        or re.match(r" {0,3}<\?", content)
+        or re.match(r" {0,3}<!\[CDATA\[", content)
+        or re.match(r" {0,3}<![A-Z]", content)
+        or RAW_HTML_BLOCK_TAG_RE.match(content)
+    )
+
+
+def _multiline_link_definition_span(lines: list[str], line_index: int) -> int:
+    """Return the validated line span of a multiline reference definition."""
+    first = _strip_container_markers(lines[line_index])
+    if re.fullmatch(r" {0,3}\[[^\]\n]+\]:[ \t]*", first) is None:
+        return 0
+    if line_index + 1 >= len(lines):
+        return 0
+    destination = _strip_container_markers(lines[line_index + 1])
+    if re.fullmatch(
+        r" {1,3}(?:<[^>\n]+>|\S+)"
+        r"(?:[ \t]+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?[ \t]*",
+        destination,
+    ) is None:
+        return 0
+    if line_index + 2 < len(lines):
+        title = _strip_container_markers(lines[line_index + 2])
+        if re.fullmatch(
+            r" {1,3}(?:\"[^\"]*\"|'[^']*'|\([^)]*\))[ \t]*",
+            title,
+        ):
+            return 3
+    return 2
+
+
 def _contract_markdown(text: str) -> str:
     """Return Markdown contract text without examples or HTML comments."""
     raw_lines = text.splitlines()
@@ -212,8 +253,14 @@ def _contract_markdown(text: str) -> str:
     raw_html_until_blank = False
     in_comment = False
     paragraph_open = False
+    link_definition_remaining = 0
     for line_index, raw_line in enumerate(raw_lines):
         block_line = _strip_container_markers(raw_line)
+        if link_definition_remaining:
+            link_definition_remaining -= 1
+            paragraph_open = False
+            lines.append("")
+            continue
         if fence is not None:
             delimiter, minimum_length = fence
             closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", block_line)
@@ -242,6 +289,15 @@ def _contract_markdown(text: str) -> str:
             continue
 
         if code_span is None and not in_comment:
+            link_definition_span = (
+                _multiline_link_definition_span(raw_lines, line_index)
+                if not paragraph_open else 0
+            )
+            if link_definition_span:
+                link_definition_remaining = link_definition_span - 1
+                paragraph_open = False
+                lines.append("")
+                continue
             if not paragraph_open and raw_line.startswith(("    ", "\t")):
                 paragraph_open = False
                 lines.append(raw_line)
@@ -259,7 +315,7 @@ def _contract_markdown(text: str) -> str:
                 lines.append("")
                 continue
             raw_html_special = (
-                (r" {0,3}<!--", re.compile(r"-->")),
+                (r" {0,3}<!--(?!>|->)", re.compile(r"-->")),
                 (r" {0,3}<\?", re.compile(r"\?>")),
                 (r" {0,3}<!\[CDATA\[", re.compile(r"\]\]>")),
                 (r" {0,3}<![A-Z]", re.compile(r">")),
@@ -340,6 +396,7 @@ def _contract_markdown(text: str) -> str:
                 continue
             if (
                 raw_line.startswith("<!--", cursor)
+                and not raw_line.startswith(("<!-->", "<!--->"), cursor)
                 and _has_inline_comment_closer(
                     raw_lines,
                     line_index,
@@ -400,6 +457,8 @@ def _has_inline_comment_closer(
         if not candidate.strip():
             return False
         if re.match(r" {0,3}(?:>|[*+-](?:[ \t]+|$)|\d{1,9}[.)](?:[ \t]+|$))", candidate):
+            return False
+        if _starts_interrupting_raw_html(candidate):
             return False
         if not _paragraph_remains_open(candidate, True):
             return False
