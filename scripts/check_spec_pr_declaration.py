@@ -14,6 +14,7 @@ try:
     from scripts.check_spec_governance import (
         DOMAIN_RE,
         JOURNEY_RE,
+        RAW_HTML_ATTRIBUTE,
         REQUIREMENT_ID_RE,
         SENSITIVE_PHYSICAL_DOMAINS,
         SPEC_ID_RE,
@@ -24,6 +25,7 @@ except ModuleNotFoundError:  # Direct execution sets sys.path[0] to scripts/.
     from check_spec_governance import (
         DOMAIN_RE,
         JOURNEY_RE,
+        RAW_HTML_ATTRIBUTE,
         REQUIREMENT_ID_RE,
         SENSITIVE_PHYSICAL_DOMAINS,
         SPEC_ID_RE,
@@ -37,7 +39,14 @@ FIELD_RE = re.compile(
     r"authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$",
     re.IGNORECASE,
 )
-DETAILS_TAG_RE = re.compile(r"</?details(?:\s[^<>]*)?>", re.IGNORECASE)
+INLINE_HTML_OPEN_TAG_RE = re.compile(
+    rf"<(?P<name>[A-Za-z][A-Za-z0-9-]*){RAW_HTML_ATTRIBUTE}\s*/?>",
+    re.IGNORECASE,
+)
+INLINE_HTML_CLOSE_TAG_RE = re.compile(
+    r"</(?P<name>[A-Za-z][A-Za-z0-9-]*)\s*>",
+    re.IGNORECASE,
+)
 CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
@@ -98,16 +107,28 @@ def _inside_inline_details(lines: list[str], marker: int) -> bool:
                         nesting -= 1
                     cursor += 1
                 continue
-            tag = DETAILS_TAG_RE.match(line, cursor)
+            tag = _html_tag_at(line, cursor)
             if tag is not None:
-                if tag.group(0).lower().startswith("</"):
+                end, name, closing = tag
+                if name == "details" and closing:
                     depth = max(0, depth - 1)
-                else:
+                elif name == "details":
                     depth += 1
-                cursor = tag.end()
+                cursor = end
                 continue
             cursor += 1
     return depth > 0
+
+
+def _html_tag_at(line: str, cursor: int) -> tuple[int, str, bool] | None:
+    """Return one complete inline HTML tag without inspecting attribute text."""
+    closing = INLINE_HTML_CLOSE_TAG_RE.match(line, cursor)
+    if closing is not None:
+        return closing.end(), closing.group("name").lower(), True
+    opening = INLINE_HTML_OPEN_TAG_RE.match(line, cursor)
+    if opening is not None:
+        return opening.end(), opening.group("name").lower(), False
+    return None
 
 
 def _manifest_ids(root: Path) -> tuple[set[str], set[str], set[str]]:
