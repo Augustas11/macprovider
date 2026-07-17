@@ -35,7 +35,7 @@
         "path": {"type": "string", "pattern": "^specs/SPEC-[0-9]{3}-[a-z0-9-]+\\.md$"},
         "status": {"enum": ["draft", "normative", "implemented-unverified", "physically-verified", "deprecated"]},
         "owner": {"type": "string", "pattern": "^@[A-Za-z0-9-]+$"},
-        "authority_domains": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "authority_domains": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"}},
         "supersedes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
         "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
         "superseded_by": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
@@ -76,7 +76,7 @@
         "state": {"enum": ["pending", "blocked", "conformant", "nonconformant", "not-applicable"]},
         "implementation": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "tests": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "journeys": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "journeys": {"type": "array", "items": {"type": "string", "pattern": "^JOURNEY-[A-Z0-9]+(?:-[A-Z0-9]+)*$"}},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
         "gap": {"oneOf": [{"$ref": "#/$defs/gap"}, {"type": "null"}]}
       }

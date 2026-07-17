@@ -27,12 +27,13 @@
     "domain": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "owner_spec", "consumers", "status", "owner", "issue"],
+      "required": ["id", "owner_spec", "consumers", "status", "requires_signed_journey_result", "owner", "issue"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
         "owner_spec": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"},
         "consumers": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
         "status": {"enum": ["declared", "pending-reconciliation", "deprecated"]},
+        "requires_signed_journey_result": {"type": "boolean"},
         "owner": {"type": "string", "pattern": "^@[A-Za-z0-9-]+$"},
         "issue": {"type": "string", "pattern": "^https://github\\.com/Augustas11/macprovider/issues/[0-9]+$"}
       }

@@ -230,7 +230,7 @@ def _changed_paths(root: Path, base: str | None, head: str | None) -> list[str]:
     if not base or not head:
         return []
     completed = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}..{head}"],
+        ["git", "diff", "--name-only", f"{base}...{head}"],
         cwd=root,
         capture_output=True,
         text=True,

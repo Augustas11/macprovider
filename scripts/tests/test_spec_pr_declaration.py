@@ -145,6 +145,50 @@ class SpecPRDeclarationTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_direct_cli_uses_pr_merge_base_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            branch_point = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            subprocess.run(["git", "checkout", "-qb", "feature"], cwd=root, check=True)
+            (root / "specs" / "PROCESS.md").write_text("governance\n", encoding="utf-8")
+            subprocess.run(["git", "add", "specs/PROCESS.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "governance change"], cwd=root, check=True)
+            head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            subprocess.run(["git", "checkout", "-qB", "main", branch_point], cwd=root, check=True)
+            product = root / "phase4-coordinator" / "internal" / "auth" / "session.go"
+            product.parent.mkdir(parents=True, exist_ok=True)
+            product.write_text("package auth\n", encoding="utf-8")
+            subprocess.run(["git", "add", str(product.relative_to(root))], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "base product change"], cwd=root, check=True)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            event = root / "event.json"
+            event.write_text(
+                json.dumps({"pull_request": {"body": declaration(contract_change="yes")}}),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    "python3",
+                    str(Path(__file__).resolve().parents[1] / "check_spec_pr_declaration.py"),
+                    "--event",
+                    str(event),
+                    "--base",
+                    base,
+                    "--head",
+                    head,
+                    "--root",
+                    str(root),
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

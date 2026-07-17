@@ -98,9 +98,12 @@ insufficient, a conformance state, and evidence. Allowed states are
   not evidence. Sensitive conformant requirements also carry a recomputable
   SHA-256 artifact under `journeys/evidence/`.
 - The governance foundation deliberately rejects `physically-verified` and
-  sensitive `conformant` promotion until Phase 5 defines and validates a
-  structured signed journey-result contract. A Markdown journey description
-  or digest alone cannot promote lifecycle state.
+  `production_status: physically-verified` promotion until Phase 5 defines
+  and validates a structured signed journey-result contract. Authority domains
+  that require that contract set `requires_signed_journey_result: true` in
+  `AUTHORITY.json`; requirements in those domains cannot become `conformant`
+  until the contract exists. A Markdown journey description or digest alone
+  cannot promote lifecycle state.
 - Evidence records the proving reachable commit or an immutable artifact whose
   repository source bytes reproduce its SHA-256 digest, plus capture date and
   expiry. Expired evidence fails validation rather than silently downgrading.
@@ -139,14 +142,6 @@ all required journey evidence is current. The physical release gate tracked by
 GitHub issue #613 is the execution surface; this process does not create a
 competing waiver path. Missing, stale, skipped, or failed evidence blocks
 promotion.
-
-Every PR body contains this exact block:
-
-```text
-spec-governance:
-  behavior-change: none
-  contract-change: none
-```
 
 Every PR body contains exactly one raw, marker-delimited JSON declaration:
 

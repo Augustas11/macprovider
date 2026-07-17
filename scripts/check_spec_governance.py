@@ -44,6 +44,12 @@ LIFECYCLE_STATES = {
     "physically-verified",
     "deprecated",
 }
+LIFECYCLE_RANK = {
+    "draft": 0,
+    "normative": 1,
+    "implemented-unverified": 2,
+    "physically-verified": 3,
+}
 IMPLEMENTATION_STATES = {
     "pending-reconciliation",
     "partial",
@@ -73,21 +79,6 @@ VERDICTS = {
     "UNKNOWN",
 }
 REQUIREMENT_MIGRATION_STATES = {"pending", "complete"}
-SENSITIVE_PHYSICAL_DOMAINS = {
-    "provider-wire-protocol",
-    "provider-onboarding-identity",
-    "tier2-trust-evidence",
-    "model-catalog-identity",
-    "operator-pushed-warm-swap",
-    "coordinator-demand-pull-model-swap",
-    "provider-autoupdate",
-    "installer-autotune-policy",
-    "native-app-lifecycle",
-    "browserless-onboarding",
-    "provider-wallet-proof",
-    "hardware-evidence-admission",
-    "hardware-evidence-verifier",
-}
 
 
 @dataclass
@@ -408,6 +399,15 @@ def _validate_base_manifest_immutability(
             continue
         if head.get("owner") != item.get("owner"):
             result.error("specs/CONFORMANCE.json", f"SPEC record {spec_id} owner changed from {item.get('owner')} to {head.get('owner')}")
+        base_status = item.get("status")
+        head_status = head.get("status")
+        if base_status == "deprecated" and head_status != "deprecated":
+            result.error("specs/CONFORMANCE.json", f"SPEC record {spec_id} revived from deprecated to {head_status}")
+        elif isinstance(base_status, str) and isinstance(head_status, str) and head_status != "deprecated":
+            base_rank = LIFECYCLE_RANK.get(base_status)
+            head_rank = LIFECYCLE_RANK.get(head_status)
+            if base_rank is not None and head_rank is not None and head_rank < base_rank:
+                result.error("specs/CONFORMANCE.json", f"SPEC record {spec_id} lifecycle regressed from {base_status} to {head_status}")
 
     head_requirements = {
         item.get("requirement_id"): item
@@ -471,8 +471,8 @@ def _validate_authority_schema(authority: Any, result: ValidationResult) -> list
             continue
         _expect_keys(
             domain,
-            {"id", "owner_spec", "consumers", "status", "owner", "issue"},
-            {"id", "owner_spec", "consumers", "status", "owner", "issue"},
+            {"id", "owner_spec", "consumers", "status", "requires_signed_journey_result", "owner", "issue"},
+            {"id", "owner_spec", "consumers", "status", "requires_signed_journey_result", "owner", "issue"},
             loc,
             result,
         )
@@ -481,6 +481,8 @@ def _validate_authority_schema(authority: Any, result: ValidationResult) -> list
         _string_list(domain.get("consumers"), f"{loc}.consumers", result, SPEC_ID_RE)
         if domain.get("status") not in AUTHORITY_STATES:
             result.error(f"{loc}.status", f"invalid authority status {domain.get('status')!r}")
+        if not isinstance(domain.get("requires_signed_journey_result"), bool):
+            result.error(f"{loc}.requires_signed_journey_result", "must be a boolean")
         _string(domain.get("owner"), OWNER_RE, f"{loc}.owner", result)
         _string(domain.get("issue"), ISSUE_RE, f"{loc}.issue", result)
     return [item for item in domains if isinstance(item, dict)]
@@ -622,6 +624,14 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
                 result.error(loc, f"state {state!r} requires an owned, issue-linked gap")
             else:
                 _validate_gap(requirement.get("gap"), f"{loc}.gap", result)
+        elif state == "not-applicable":
+            gap = requirement.get("gap")
+            if gap is None:
+                result.error(loc, "state 'not-applicable' requires an owned, issue-linked rationale")
+            else:
+                _validate_gap(gap, f"{loc}.gap", result)
+                if not isinstance(gap, dict) or not isinstance(gap.get("rationale"), str) or not gap.get("rationale").strip():
+                    result.error(f"{loc}.gap.rationale", "not-applicable requires a non-empty rationale")
         elif requirement.get("gap") is not None:
             _validate_gap(requirement.get("gap"), f"{loc}.gap", result)
         if state == "conformant" and not (implementation and (tests or journeys) and requirement.get("evidence")):
@@ -738,6 +748,21 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
             elif domain.get("status") != "deprecated" and domain.get("owner_spec") != spec_id:
                 result.error(spec_id, f"authority domain {domain_id!r} is owned by {domain.get('owner_spec')}")
 
+    active_domain_owners: dict[str, list[str]] = {}
+    for spec_id, spec in spec_records.items():
+        for domain_id in spec.get("authority_domains", []) if isinstance(spec.get("authority_domains"), list) else []:
+            active_domain_owners.setdefault(domain_id, []).append(spec_id)
+    for domain_id, domain in domain_records.items():
+        if domain.get("status") == "deprecated":
+            continue
+        owner_spec = domain.get("owner_spec")
+        listed_by = active_domain_owners.get(domain_id, [])
+        if listed_by != [owner_spec]:
+            result.error(
+                f"authority domain {domain_id}",
+                f"must be listed exactly on owner_spec {owner_spec}; found {listed_by or 'no owner spec listing'}",
+            )
+
     requirements_by_id: dict[str, dict[str, Any]] = {}
     requirements_by_spec: dict[str, list[dict[str, Any]]] = {}
     for requirement in requirements:
@@ -776,8 +801,9 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
                 if isinstance(mapping, str) and mapping.startswith("specs/") and not mapping.startswith(f"specs/{requirement.get('spec_id')}-"):
                     result.error(requirement_id, f"{mapping_key} mapping must not point at another SPEC as implementation")
         for domain_id in spec_records.get(requirement.get("spec_id"), {}).get("authority_domains", []):
+            domain = domain_records.get(domain_id, {})
             if (
-                domain_id in SENSITIVE_PHYSICAL_DOMAINS
+                domain.get("requires_signed_journey_result") is True
                 and requirement.get("state") == "conformant"
             ):
                 result.error(requirement_id, "sensitive conformant requirement requires signed journey-result contract before promotion")

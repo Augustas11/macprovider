@@ -40,7 +40,10 @@ constraints. Name the accepted user journeys that arbitrate this contract.
 
 List dependency spec IDs and the authority domains this spec owns. For every
 shared concept owned elsewhere, link to the owner from `AUTHORITY.json` rather
-than restating its definition.
+than restating its definition. In `AUTHORITY.json`, mark any domain that needs
+signed physical journey results with `requires_signed_journey_result: true`;
+until Phase 5 defines that result contract, those domains cannot promote
+requirements to `conformant`.
 
 ## 3. Normative requirements
 

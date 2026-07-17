@@ -51,6 +51,7 @@ def base_repository() -> dict[str, object]:
                     "owner_spec": "SPEC-001",
                     "consumers": ["SPEC-002"],
                     "status": "pending-reconciliation",
+                    "requires_signed_journey_result": True,
                     "owner": "@owner",
                     "issue": "https://github.com/Augustas11/macprovider/issues/614",
                 },
@@ -59,6 +60,7 @@ def base_repository() -> dict[str, object]:
                     "owner_spec": "SPEC-002",
                     "consumers": [],
                     "status": "pending-reconciliation",
+                    "requires_signed_journey_result": False,
                     "owner": "@owner",
                     "issue": "https://github.com/Augustas11/macprovider/issues/614",
                 },
@@ -208,6 +210,8 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         specs[0]["status"] = "locked"
     elif operation == "duplicate_authority":
         authority["domains"].append(copy.deepcopy(authority["domains"][0]))
+    elif operation == "drop_authority_owner_listing":
+        specs[0]["authority_domains"] = []
     elif operation == "duplicate_requirement_id":
         requirements.append(copy.deepcopy(requirements[0]))
     elif operation == "broken_cross_spec_reference":
@@ -272,6 +276,11 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         repository["files"]["specs/SPEC-001-one.md"] = (
             "# SPEC-999 - One\n\n**Version:** 0.1.0\n\nHuman contract text.\n"
         )
+    elif operation == "not_applicable_without_rationale":
+        requirements[0]["state"] = "not-applicable"
+        requirements[0]["implementation"] = []
+        requirements[0]["tests"] = []
+        requirements[0]["gap"] = None
     elif operation == "normalized_spec_mapping":
         requirements[0]["implementation"] = ["specs/SPEC-002-two.md"]
     elif operation == "deprecated_authority_owner":
@@ -281,6 +290,8 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         authority["domains"][0]["owner_spec"] = []
     elif operation == "malformed_consumers":
         authority["domains"][0]["consumers"] = "SPEC-002"
+    elif operation == "malformed_signed_result_flag":
+        authority["domains"][0]["requires_signed_journey_result"] = "yes"
     elif operation == "malformed_authority_domains":
         specs[0]["authority_domains"] = "provider-wire-protocol"
     elif operation == "malformed_gap":
@@ -343,6 +354,18 @@ class GovernanceValidatorTests(unittest.TestCase):
             write_repository(root, repository)
             errors = "\n".join(validate_repository(root, base_ref=base).errors)
             self.assertIn("authority domain 'provider-wire-protocol' owner changed", errors)
+
+    def test_base_manifest_prevents_lifecycle_reversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            repository["conformance"]["specs"][0]["status"] = "normative"
+            write_repository(root, repository)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            repository["conformance"]["specs"][0]["status"] = "draft"
+            write_repository(root, repository)
+            errors = "\n".join(validate_repository(root, base_ref=base).errors)
+            self.assertIn("SPEC record SPEC-001 lifecycle regressed from normative to draft", errors)
 
 
 if __name__ == "__main__":
