@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -22,12 +23,68 @@ const (
 	dsnEnvName        = "STATS_INVENTORY_DSN"
 	trustDSNEnvName   = "STATS_TRUST_INVENTORY_DSN"
 	runTimeout        = 15 * time.Second
+	// demotionBudget bounds the trust-demotion sweep on its OWN context, derived
+	// from the parent rather than the shared run context (issue #582 FIX 5). A
+	// blackholed trust DSN can exhaust the shared runTimeout during trust
+	// reconciliation; demotion must still get to run so an API-revoked root is
+	// not left effective forever. Total runtime stays bounded by
+	// runTimeout + demotionBudget.
+	demotionBudget = 10 * time.Second
 )
 
+// demotionContext derives an independent, bounded context for the trust
+// demotion sweep (issue #582 FIX 5). context.WithoutCancel drops the parent's
+// cancellation/deadline so a run context already exhausted by a blackholed
+// trust DSN cannot starve demotion; WithTimeout then re-bounds it.
+func demotionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), demotionBudget)
+}
+
 type inventory struct {
-	Chips           map[string]chipProfile               `yaml:"chips"`
-	Providers       map[string]providerProfile           `yaml:"providers"`
-	TrustedHardware map[string][]trustedHardwareIdentity `yaml:"trusted_hardware"`
+	Chips           map[string]chipProfile     `yaml:"chips"`
+	Providers       map[string]providerProfile `yaml:"providers"`
+	TrustedHardware trustedHardware            `yaml:"trusted_hardware"`
+}
+
+// trustedHardware distinguishes an ABSENT trusted_hardware section (Present=false
+// → leave every hardware_verification_trust root untouched, the pre-#582 no-op)
+// from an explicitly-written one — including an explicitly empty
+// `trusted_hardware: {}` (Present=true, Entries empty → revoke every
+// source='inventory' root). yaml.v3 only invokes UnmarshalYAML when the key is
+// present in the document, so Present flips exactly when the operator writes the
+// key, regardless of whether the value is a map, empty map, or null (issue #582
+// FIX 2). A bare `map` field could not tell an absent section from `{}`.
+type trustedHardware struct {
+	Present bool
+	Entries map[string][]trustedHardwareIdentity
+}
+
+func (t *trustedHardware) UnmarshalYAML(value *yaml.Node) error {
+	t.Present = true
+	// FIX 3(b) (issue #582): revoke-all is reserved for an EXPLICIT empty mapping
+	// (`trusted_hardware: {}`). A bare `trusted_hardware:` (YAML null), a scalar,
+	// or a sequence must not be silently treated as present-with-nil (which would
+	// trigger revoke-all). Require a non-null mapping node.
+	if value.Kind != yaml.MappingNode {
+		return errors.New("trusted_hardware must be a mapping (use {} for explicit revoke-all)")
+	}
+	// FIX 3(a) (issue #582): yaml.Node.Decode does NOT inherit the outer
+	// decoder's KnownFields(true), so a nested typo like `expires_att` under an
+	// identity would be silently dropped — turning an intended temporary trust
+	// into permanent trust. Re-decode the mapping through a strict decoder so
+	// unknown nested keys are a hard error.
+	raw, err := yaml.Marshal(value)
+	if err != nil {
+		return err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	entries := map[string][]trustedHardwareIdentity{}
+	if err := dec.Decode(&entries); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	t.Entries = entries
+	return nil
 }
 
 type chipProfile struct {
@@ -98,7 +155,7 @@ func run(parent context.Context, opts options) error {
 	}
 	if opts.dryRun {
 		fmt.Fprintf(out, "validated %d chip profiles, %d provider profiles, and %d trusted hardware identities\n",
-			len(inv.Chips), len(inv.Providers), trustedHardwareCount(inv.TrustedHardware))
+			len(inv.Chips), len(inv.Providers), trustedHardwareCount(inv.TrustedHardware.Entries))
 		return nil
 	}
 
@@ -113,8 +170,14 @@ func run(parent context.Context, opts options) error {
 	if trustDSN == "" {
 		trustDSN = strings.TrimSpace(os.Getenv(trustDSNEnvName))
 	}
-	if trustedHardwareCount(inv.TrustedHardware) > 0 && trustDSN == "" {
-		return fmt.Errorf("trust postgres dsn is required via --trust-dsn or %s when trusted_hardware is present", trustDSNEnvName)
+	// The trust DSN is required only when the YAML actually writes the
+	// trusted_hardware section (present, populated or explicitly empty): an
+	// explicitly-empty section revokes the last source='inventory' roots via
+	// applyTrustInventory's scoped DELETE, which needs the trust-writer role. When
+	// the section is OMITTED, trust reconciliation is skipped entirely so the trust
+	// DSN is not needed (issue #582 FIX 2).
+	if inv.TrustedHardware.Present && trustDSN == "" {
+		return fmt.Errorf("trust postgres dsn is required via --trust-dsn or %s when trusted_hardware is set", trustDSNEnvName)
 	}
 
 	ctx, cancel := context.WithTimeout(parent, runTimeout)
@@ -148,56 +211,97 @@ func run(parent context.Context, opts options) error {
 	}
 	committed = true
 
-	if trustedHardwareCount(inv.TrustedHardware) > 0 {
-		trustDB, err := sql.Open("postgres", trustDSN)
-		if err != nil {
-			return fmt.Errorf("open trust postgres: %w", err)
-		}
-		defer trustDB.Close()
-		trustDB.SetMaxOpenConns(1)
-		trustDB.SetMaxIdleConns(1)
-		trustDB.SetConnMaxLifetime(5 * time.Minute)
-		trustDB.SetConnMaxIdleTime(time.Minute)
+	// Reconcile trust inventory ONLY when the trusted_hardware section is present
+	// (issue #582 FIX 2). Omitted → skip reconciliation entirely (no DELETE, all
+	// roots preserved — the pre-#582 no-op). Present (populated or explicitly
+	// empty `{}`) → applyTrustInventory upserts the listed roots and its scoped
+	// DELETE removes every other source='inventory' root, so an explicit empty
+	// section revokes them all. operator_api roots are always untouched
+	// (source-scoped).
+	var trustErr error
+	if inv.TrustedHardware.Present {
+		trustErr = reconcileTrustInventory(ctx, trustDSN, inv)
+	}
 
-		trustTX, err := trustDB.BeginTx(ctx, &sql.TxOptions{})
-		if err != nil {
-			return fmt.Errorf("begin trust inventory transaction: %w", err)
-		}
-		trustCommitted := false
-		defer func() {
-			if !trustCommitted {
-				_ = trustTX.Rollback()
-			}
-		}()
-		if err := applyTrustInventory(ctx, trustTX, inv); err != nil {
-			return err
-		}
-		if err := trustTX.Commit(); err != nil {
-			return fmt.Errorf("commit trust inventory transaction: %w", err)
-		}
-		trustCommitted = true
-
-		demotionTX, err := db.BeginTx(ctx, &sql.TxOptions{})
-		if err != nil {
-			return fmt.Errorf("begin trust demotion transaction: %w", err)
-		}
-		demotionCommitted := false
-		defer func() {
-			if !demotionCommitted {
-				_ = demotionTX.Rollback()
-			}
-		}()
-		if err := applyTrustDemotions(ctx, demotionTX); err != nil {
-			return err
-		}
-		if err := demotionTX.Commit(); err != nil {
-			return fmt.Errorf("commit trust demotion transaction: %w", err)
-		}
-		demotionCommitted = true
+	// Demotions ALWAYS run, even if the trust-inventory apply above failed
+	// (issue #582 FIX 3): a broken trust-writer DSN must not strand an
+	// API-revoked root as verified. Attempt demotion against the last-committed
+	// trust state and aggregate both errors. An expired or revoked operator_api
+	// trust root (or any stale non-authoritative verified profile — cli_hello or
+	// app_register) is demoted independent of whether the YAML defines
+	// trusted_hardware.
+	//
+	// FIX 5: demotion runs on its OWN budget derived from the parent, not the
+	// shared run context. A blackholed trust DSN can exhaust `ctx` during trust
+	// reconciliation above; without an independent context, demotion would run
+	// with an already-cancelled context and execute no SQL, leaving a revoked
+	// root effective forever.
+	demotionCtx, demotionCancel := demotionContext(parent)
+	defer demotionCancel()
+	demoteErr := reconcileTrustDemotions(demotionCtx, db)
+	if err := errors.Join(trustErr, demoteErr); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(out, "upserted %d chip profiles, %d provider profiles, and %d trusted hardware identities\n",
-		len(inv.Chips), len(inv.Providers), trustedHardwareCount(inv.TrustedHardware))
+		len(inv.Chips), len(inv.Providers), trustedHardwareCount(inv.TrustedHardware.Entries))
+	return nil
+}
+
+// reconcileTrustInventory opens the trust-writer handle and applies the
+// trusted_hardware section in its own transaction. Only called when the section
+// is present (issue #582 FIX 2).
+func reconcileTrustInventory(ctx context.Context, trustDSN string, inv inventory) error {
+	trustDB, err := sql.Open("postgres", trustDSN)
+	if err != nil {
+		return fmt.Errorf("open trust postgres: %w", err)
+	}
+	defer trustDB.Close()
+	trustDB.SetMaxOpenConns(1)
+	trustDB.SetMaxIdleConns(1)
+	trustDB.SetConnMaxLifetime(5 * time.Minute)
+	trustDB.SetConnMaxIdleTime(time.Minute)
+
+	trustTX, err := trustDB.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin trust inventory transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = trustTX.Rollback()
+		}
+	}()
+	if err := applyTrustInventory(ctx, trustTX, inv); err != nil {
+		return err
+	}
+	if err := trustTX.Commit(); err != nil {
+		return fmt.Errorf("commit trust inventory transaction: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// reconcileTrustDemotions runs the demotion sweep in its own transaction on the
+// inventory-writer handle (issue #582 FIX 3).
+func reconcileTrustDemotions(ctx context.Context, db *sql.DB) error {
+	demotionTX, err := db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin trust demotion transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = demotionTX.Rollback()
+		}
+	}()
+	if err := applyTrustDemotions(ctx, demotionTX); err != nil {
+		return err
+	}
+	if err := demotionTX.Commit(); err != nil {
+		return fmt.Errorf("commit trust demotion transaction: %w", err)
+	}
+	committed = true
 	return nil
 }
 
@@ -210,6 +314,17 @@ func loadInventory(path string) (inventory, error) {
 	if err != nil {
 		return inventory{}, fmt.Errorf("read inventory config: %w", err)
 	}
+	// FIX 3(b) (issue #582): yaml.v3 does NOT invoke trustedHardware.UnmarshalYAML
+	// for a null value node, so a bare `trusted_hardware:` (YAML null) would
+	// silently decode as absent (Present=false) rather than as the reserved
+	// explicit revoke-all. Inspect the document tree up front and reject a
+	// present-but-non-mapping trusted_hardware (null/scalar/sequence); revoke-all
+	// is reserved for an explicit `{}` mapping. Scalars/sequences are also caught
+	// by UnmarshalYAML's own mapping check, but null must be caught here because
+	// UnmarshalYAML never runs for it.
+	if err := ensureTrustedHardwareMapping(raw); err != nil {
+		return inventory{}, err
+	}
 	var inv inventory
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true)
@@ -219,19 +334,47 @@ func loadInventory(path string) (inventory, error) {
 	return inv, nil
 }
 
+// ensureTrustedHardwareMapping rejects a present-but-non-mapping trusted_hardware
+// value (null/scalar/sequence) at the document level (issue #582 FIX 3(b)). It
+// returns nil on parse errors so the strict decode in loadInventory surfaces the
+// richer message.
+func ensureTrustedHardwareMapping(raw []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "trusted_hardware" {
+			continue
+		}
+		if root.Content[i+1].Kind != yaml.MappingNode {
+			return errors.New("trusted_hardware must be a mapping (use {} for explicit revoke-all)")
+		}
+	}
+	return nil
+}
+
 func validateInventory(inv inventory) error {
 	if len(inv.Chips) == 0 {
 		return errors.New("inventory must define at least one chip profile")
 	}
-	if len(inv.Providers) == 0 && len(inv.TrustedHardware) == 0 {
-		return errors.New("inventory must define at least one provider profile or trusted hardware identity")
+	if len(inv.Providers) == 0 && !inv.TrustedHardware.Present {
+		return errors.New("inventory must define at least one provider profile or a trusted_hardware section")
 	}
 	if inv.Providers != nil && len(inv.Providers) == 0 {
 		return errors.New("providers must define at least one provider; omit the section to leave provider profiles untouched")
 	}
-	if inv.TrustedHardware != nil && len(inv.TrustedHardware) == 0 {
-		return errors.New("trusted_hardware must define at least one provider; omit the section to leave trust roots untouched")
-	}
+	// trusted_hardware: an ABSENT section (Present=false) leaves every trust root
+	// untouched; an explicitly-empty section (`trusted_hardware: {}`) is the
+	// deliberate revoke-all-inventory-roots signal and is accepted (issue #582
+	// FIX 2). Only malformed non-empty entries are rejected below.
 	for key, chip := range inv.Chips {
 		if err := validateChipKey(key); err != nil {
 			return err
@@ -270,7 +413,7 @@ func validateInventory(inv inventory) error {
 			return fmt.Errorf("provider %q source must be operator", providerID)
 		}
 	}
-	for providerID, identities := range inv.TrustedHardware {
+	for providerID, identities := range inv.TrustedHardware.Entries {
 		if err := validateProviderID(providerID); err != nil {
 			return err
 		}
@@ -514,14 +657,14 @@ DELETE FROM chip_hardware_profiles
 }
 
 func applyTrustInventory(ctx context.Context, db execer, inv inventory) error {
-	trustedKeys := make([]string, 0, trustedHardwareCount(inv.TrustedHardware))
-	providerIDs := make([]string, 0, len(inv.TrustedHardware))
-	for providerID := range inv.TrustedHardware {
+	trustedKeys := make([]string, 0, trustedHardwareCount(inv.TrustedHardware.Entries))
+	providerIDs := make([]string, 0, len(inv.TrustedHardware.Entries))
+	for providerID := range inv.TrustedHardware.Entries {
 		providerIDs = append(providerIDs, providerID)
 	}
 	sort.Strings(providerIDs)
 	for _, providerID := range providerIDs {
-		identities := append([]trustedHardwareIdentity(nil), inv.TrustedHardware[providerID]...)
+		identities := append([]trustedHardwareIdentity(nil), inv.TrustedHardware.Entries[providerID]...)
 		sort.Slice(identities, func(i, j int) bool {
 			return identities[i].HardwareIdentityHash < identities[j].HardwareIdentityHash
 		})
@@ -531,14 +674,21 @@ func applyTrustInventory(ctx context.Context, db execer, inv inventory) error {
 				return fmt.Errorf("parse trusted_hardware provider %q expires_at: %w", providerID, err)
 			}
 			trustedKeys = append(trustedKeys, trustKey(providerID, identity.HardwareIdentityHash))
+			// The trust table PK is (provider_id, hardware_identity_hash, source)
+			// (migration 018), so this ON CONFLICT target isolates the inventory row:
+			// it can only ever match the existing source='inventory' row for the tuple
+			// and never an operator_api row (which is an independent row). The former
+			// WHERE hardware_verification_trust.source = 'inventory' DO UPDATE guard is
+			// therefore redundant and removed — the 3-column conflict target already
+			// guarantees the upsert touches only this authority's own row (issue #582).
 			if _, err := db.ExecContext(ctx, `
 INSERT INTO hardware_verification_trust (
     provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb,
-    trusted_by, expires_at, notes
+    trusted_by, expires_at, notes, source
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, 'inventory'
 )
-ON CONFLICT (provider_id, hardware_identity_hash) DO UPDATE
+ON CONFLICT (provider_id, hardware_identity_hash, source) DO UPDATE
    SET chip_normalized = EXCLUDED.chip_normalized,
        unified_memory_gb = EXCLUDED.unified_memory_gb,
        trusted_by = EXCLUDED.trusted_by,
@@ -567,7 +717,8 @@ ON CONFLICT (provider_id, hardware_identity_hash) DO UPDATE
 	}
 	if _, err := db.ExecContext(ctx, `
 DELETE FROM hardware_verification_trust
- WHERE NOT ((provider_id || chr(31) || hardware_identity_hash) = ANY($1))`,
+ WHERE source = 'inventory'
+   AND NOT ((provider_id || chr(31) || hardware_identity_hash) = ANY($1))`,
 		pq.Array(trustedKeys),
 	); err != nil {
 		return fmt.Errorf("delete removed trusted hardware identities: %w", err)
@@ -576,11 +727,38 @@ DELETE FROM hardware_verification_trust
 }
 
 func applyTrustDemotions(ctx context.Context, db execer) error {
+	// Step 1 — lock every candidate verified, non-authoritative profile row
+	// FOR UPDATE (issue #582 FIX 3). The verifier's promoteJob upserts
+	// provider_hardware_profiles (setting verified=TRUE) under a row lock, so this
+	// lock BLOCKS until any in-flight promotion of a candidate row commits. Taking
+	// the lock in a separate statement means step 2 runs under a fresh READ
+	// COMMITTED snapshot that observes those committed promotions — without this,
+	// step 2's NOT EXISTS could evaluate against a pre-promotion snapshot and
+	// re-demote a profile the verifier just promoted.
+	if _, err := db.ExecContext(ctx, `
+SELECT provider_id
+  FROM provider_hardware_profiles
+ WHERE verified = TRUE
+   AND source <> 'operator'
+ FOR UPDATE`); err != nil {
+		return fmt.Errorf("lock demotion candidate profiles: %w", err)
+	}
+
+	// Step 2 — demote EVERY verified profile whose active trusted-hardware root no
+	// longer matches, across all non-authoritative sources (cli_hello AND
+	// app_register), not just cli_hello. The only authoritative operator-set
+	// source is 'operator' (rows the operator YAML asserts verified directly and
+	// reconciles itself via applyInventory), so it is the sole exemption. Using
+	// NOT 'operator' is fail-safe: any future non-authoritative source is demoted
+	// by default when it lacks active trust. provider_hardware_profiles.source is
+	// CHECK-constrained to ('app_register','cli_hello','operator') by migration 007.
+	// The rows this statement re-reads are already locked from step 1, so it
+	// serializes against the verifier's promoteJob profile UPDATE (issue #582).
 	if _, err := db.ExecContext(ctx, `
 UPDATE provider_hardware_profiles ph
    SET verified = FALSE
  WHERE ph.verified = TRUE
-   AND ph.source = 'cli_hello'
+   AND ph.source <> 'operator'
    AND NOT EXISTS (
        SELECT 1
          FROM hardware_verification_jobs j

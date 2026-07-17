@@ -250,6 +250,21 @@ restore_link_or_file had-guard-dropin 10-deploy-transaction-guard.conf "$GUARD_D
 
 if [ "$MODE" = "--recover" ]; then
   $SYSTEMCTL daemon-reload
+  # Issue #582 MIGRATION-018 ROLLBACK COUPLING: the stats-inventory-sync binary
+  # restored above is the pre-018 build that reconciles with a 2-col
+  # `ON CONFLICT (provider_id, hardware_identity_hash)`. If migration 018 (the
+  # 3-col PRIMARY KEY on hardware_verification_trust) is still applied on the
+  # database, that old binary fails reconciliation. The deploy quiesced AND
+  # disabled the inventory sidecar BEFORE the migration, so its was-active marker
+  # is intentionally unset and restore_active_state below leaves it stopped — the
+  # old 2-col binary must never run against the migrated 3-col schema. Re-enable
+  # stats-inventory-sync only after schema and binary are matched: either finish
+  # rolling forward to the 3-col binary, OR run
+  # 019_hardware_trust_operator_approval.down.sql to restore the 2-col PK first
+  # and THEN re-enable the (now-matching) 2-col sidecar.
+  if [ ! -f "$ROLLBACK/stats-inventory-timer-was-active" ]; then
+    echo "note: stats-inventory-sync left stopped after rollback; verify migration-018 PK vs sidecar-binary parity before re-enabling (see 019_hardware_trust_operator_approval.down.sql)" >&2
+  fi
   restore_active_state stats-inventory-sync.timer stats-inventory-timer-was-active
   restore_active_state stats-inventory-sync.service stats-inventory-service-was-active
   restore_active_state stats-billing-mirror.timer stats-billing-timer-was-active

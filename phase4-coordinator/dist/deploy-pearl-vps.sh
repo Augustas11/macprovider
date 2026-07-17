@@ -371,6 +371,62 @@ if [ "${STATS_REQUIRED:-0}" = "1" ]; then
   fi
 fi
 
+# Issue #582 (MEDIUM #6) — stats-inventory-sync restore-on-failure state.
+# The old 2-column sidecar is quiesced (stop+disable) BEFORE migration 019
+# widens hardware_verification_trust's PRIMARY KEY, so an abort that happens
+# BEFORE the schema/binary actually become incompatible (before 019 is applied
+# and before the new 3-column sidecar binary is installed) must RESTORE the
+# sidecar to its pre-quiesce state rather than strand it stopped. These are
+# ARMED before the quiesce (search "MEDIUM #6" at the quiesce step) and consumed
+# by the EXIT trap through _sidecar_restore_on_abort.
+#   SIDECAR_QUIESCE_ATTEMPTED — set to 1 immediately before the quiesce SSH.
+#   Parity marker (/opt/macprovider/.coordinator-deploy-sidecar-parity-required,
+#   touched just before the migration apply) records that the schema may now be
+#   3-column; once set — or once the release transaction is ARMED at step 4, whose
+#   own rollback deliberately leaves the sidecar stopped — the sidecar is LEFT
+#   stopped (the old 2-column binary must never run against the migrated 3-column
+#   schema). Restore reads the pre-quiesce enable/active state captured in
+#   /opt/macprovider/.coordinator-deploy-sidecar-prior-state.
+SIDECAR_QUIESCE_ATTEMPTED=0
+_sidecar_restore_on_abort() {
+  # $1 = deploy exit code. Best-effort + idempotent; never changes _final_rc.
+  [ "${1:-0}" -ne 0 ] || return 0
+  [ "${SIDECAR_QUIESCE_ATTEMPTED:-0}" = "1" ] || return 0
+  # Once the release transaction is armed (step 4), the coordinator deploy
+  # rollback owns sidecar restoration and DELIBERATELY leaves it stopped pending
+  # schema/binary parity (see coordinator-deploy-recover.sh). Do not fight it.
+  if [ "${COORDINATOR_DEPLOY_ARMED:-0}" = "1" ]; then
+    echo "coordinator deploy: stats-inventory-sync deliberately left stopped (schema/binary parity required — the armed rollback leaves the old 2-column sidecar stopped against the migrated 3-column schema; see coordinator-deploy-recover runbook)" >&2
+    return 0
+  fi
+  # Not armed: the new 3-column sidecar binary was never installed. If migration
+  # 019 was (or may have been) applied inside the quiesced window the schema is
+  # already 3-column, so the old 2-column sidecar MUST stay stopped.
+  if $SSH 'test -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required' 2>/dev/null; then
+    echo "coordinator deploy: stats-inventory-sync deliberately left stopped (schema/binary parity required — migration 019 applied but the new 3-column sidecar binary was not installed; see coordinator-deploy-recover runbook)" >&2
+    return 0
+  fi
+  # Safe early abort: schema/binary parity never crossed. Restore the sidecar to
+  # the enable/active state captured before the quiesce.
+  if $SSH '
+    set -u
+    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock 2>/dev/null || exit 0
+    flock -s 8 2>/dev/null || true
+    _prior=/opt/macprovider/.coordinator-deploy-sidecar-prior-state
+    [ -f "$_prior" ] || exit 0
+    timer_enabled=; timer_active=; service_enabled=
+    . "$_prior"
+    [ "$service_enabled" = enabled ] && systemctl enable stats-inventory-sync.service >/dev/null 2>&1 || true
+    [ "$timer_enabled" = enabled ] && systemctl enable stats-inventory-sync.timer >/dev/null 2>&1 || true
+    [ "$timer_active" = active ] && systemctl start stats-inventory-sync.timer >/dev/null 2>&1 || true
+    rm -f "$_prior"
+  '; then
+    echo "coordinator deploy: stats-inventory-sync restored to its pre-quiesce state (safe early abort — schema/binary parity never crossed)" >&2
+  else
+    echo "coordinator deploy: WARNING could not restore stats-inventory-sync after early abort; verify its enabled/active state manually" >&2
+  fi
+}
+
 # Issue #244 R6 (CODE+SEC+ARCH convergent MED) — register the EXIT
 # cleanup trap UNCONDITIONALLY, before any temp resource is created.
 # Earlier the trap was inside the `if [ -n "$CATALOG_REMOTE_PATH" ]`
@@ -417,6 +473,7 @@ trap '
       fi
     fi
   fi
+  _sidecar_restore_on_abort "$_deploy_rc"
   rm -rf "${DEPLOY_LOCK_DIR:-}"
   exit "$_final_rc"
 ' EXIT
@@ -917,6 +974,65 @@ else
   echo "  stats.enabled is not true in $CONFIG — skipping stats env preflight"
 fi
 
+# Issue #582 MIGRATION-019 ORDERING — quiesce the OLD stats-inventory-sync
+# sidecar BEFORE the migration is exercised, ahead of the onboarding preflight.
+# Migration 019 widens hardware_verification_trust's PRIMARY KEY from
+# (provider_id, hardware_identity_hash) to (provider_id, hardware_identity_hash,
+# source). The stats-inventory-sync binary shipped BEFORE this release
+# reconciles with `ON CONFLICT (provider_id, hardware_identity_hash)` (2-col).
+# Once 019 is applied, that 2-col ON CONFLICT no longer matches a unique
+# constraint and the old binary's reconciliation fails ("no unique or exclusion
+# constraint matching the ON CONFLICT specification"). This deploy APPLIES 019
+# itself, inside the onboarding preflight below and while stats is enabled, via
+# the just-installed coordinator's embedded stats-migrate (search for
+# "MIGRATION-019 ORDERING (self-enforcing" in that block) — so the migration
+# provably FOLLOWS this quiesce. The old sidecar must therefore be stopped+
+# disabled HERE, before that self-applied migration can touch the schema, NOT at
+# the later release-window freeze (which is too late: a timer firing, or an
+# aborted deploy between the migration and the freeze, would run the old 2-col
+# binary against the 3-col schema). Stopping the .service is synchronous, so any
+# in-flight reconciliation run drains before we return; disabling the .timer
+# stops a scheduled fire (or a daemon-reload/reboot) from re-launching the old
+# binary during the migrate->install window. The NEW 3-col binary is installed
+# in step 4 and the timer is re-enabled in step 9. This quiesce runs BEFORE the
+# rollback transaction is armed, so its inactive state is what the step-4
+# snapshot records: a rollback restores the pre-019 binary but deliberately
+# leaves the sidecar stopped (see coordinator-deploy-recover.sh) so the old
+# binary never runs against the migrated schema.
+# Issue #582 (MEDIUM #6) — ARM the restore-on-failure path BEFORE quiescing:
+# record that a quiesce is being attempted (consumed by the EXIT trap), capture
+# the sidecar's prior enable/active state so a safe early abort can restore it,
+# and clear any stale parity marker so the trap does not wrongly leave the
+# sidecar stopped on this run. The capture runs INSIDE the same locked SSH, ahead
+# of the disable/stop, so the recorded state is the true pre-quiesce state.
+SIDECAR_QUIESCE_ATTEMPTED=1
+$SSH 'set -eu
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  rm -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required
+  _prior=/opt/macprovider/.coordinator-deploy-sidecar-prior-state
+  _prior_next=$_prior.next.$$
+  ( umask 077
+    {
+      printf "timer_enabled=%s\n"   "$(systemctl is-enabled stats-inventory-sync.timer   2>/dev/null || true)"
+      printf "timer_active=%s\n"    "$(systemctl is-active  stats-inventory-sync.timer   2>/dev/null || true)"
+      printf "service_enabled=%s\n" "$(systemctl is-enabled stats-inventory-sync.service 2>/dev/null || true)"
+    } > "$_prior_next"
+  )
+  mv -f "$_prior_next" "$_prior"
+  for unit in stats-inventory-sync.timer stats-inventory-sync.service; do
+    load_state=$(systemctl show -p LoadState --value "$unit")
+    [ "$load_state" = not-found ] && continue
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+    systemctl stop "$unit"
+    active_state=$(systemctl show -p ActiveState --value "$unit")
+    case "$active_state" in
+      inactive|failed) ;;
+      *) echo "stats-inventory-sync unit did not quiesce before migration: $unit state=$active_state" >&2; exit 1 ;;
+    esac
+  done
+'
+
 if [ "$ONBOARDING_ENABLED_LOCAL" = "true" ]; then
   $SSH "bash -s" <<'REMOTE_ONBOARDING_PREFLIGHT'
     set -e
@@ -1010,7 +1126,55 @@ PY
     ONBOARDING_AUTH_POLICY_REQUEST_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_REQUEST_DSN)"
     ONBOARDING_AUTH_POLICY_APPROVE_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_APPROVE_DSN)"
     ONBOARDING_AUTH_POLICY_CUTOVER_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_CUTOVER_DSN)"
+    ONBOARDING_HARDWARE_TRUST_REQUEST_DSN="$(require_env_value "$env_file" ONBOARDING_HARDWARE_TRUST_REQUEST_DSN)"
+    ONBOARDING_HARDWARE_TRUST_APPROVE_DSN="$(require_env_value "$env_file" ONBOARDING_HARDWARE_TRUST_APPROVE_DSN)"
     echo "  ok: required onboarding DSN env vars are present in coordinator.env"
+    # Issue #582 MIGRATION-019 ORDERING (self-enforcing standard path) — apply the
+    # embedded stats migrations, INCLUDING 019's hardware_verification_trust PRIMARY
+    # KEY widening, HERE: after the unconditional sidecar quiesce above (a prior,
+    # already-completed SSH stopped+disabled stats-inventory-sync.timer/.service)
+    # and BEFORE both the 019-requiring psql preflight below and the step-4 install
+    # of the new 3-column stats-inventory-sync binary. This makes the standard
+    # deploy self-consistent instead of depending on an out-of-band operator
+    # `stats-migrate` whose ordering against the quiesce the deploy cannot prove:
+    # the migration now provably FOLLOWS the quiesce and PRECEDES the new sidecar
+    # binary, so the old 2-column binary can never reconcile against the migrated
+    # 3-column schema.
+    #
+    # statsmigrations.Apply is advisory-locked and idempotent, so a schema already
+    # migrated (by a prior deploy or a manual operator run) is a safe no-op. The
+    # admin DSN is read from coordinator.env as DATA (require_env_value, never
+    # sourced) and passed via the COORDINATOR_PARTNER_KEYS_ADMIN_DSN environment
+    # variable — which the coordinator's stats-migrate resolves — rather than argv,
+    # so it never appears in `ps`. The post-apply --check is a HARD GATE: if 019 is
+    # still not applied afterward, the on-disk coordinator binary predates issue
+    # #582 and the deploy ABORTS rather than proceed to install + re-enable a
+    # 3-column sidecar against a coordinator that cannot own the operator_api rows.
+    COORDINATOR_PARTNER_KEYS_ADMIN_DSN="$(require_env_value "$env_file" COORDINATOR_PARTNER_KEYS_ADMIN_DSN)"
+    export COORDINATOR_PARTNER_KEYS_ADMIN_DSN
+    coordinator_bin=/opt/macprovider/coordinator
+    if [ ! -x "$coordinator_bin" ]; then
+      echo "aborting deploy: $coordinator_bin is not present or not executable;" >&2
+      echo "  install the signed coordinator/gateway pair (macprovider-pearl-update) before deploying" >&2
+      exit 12
+    fi
+    "$coordinator_bin" stats-migrate --check
+    # Issue #582 (MEDIUM #6) — parity crossing. The next command may apply
+    # migration 019 (hardware_verification_trust 3-column PRIMARY KEY), after which
+    # the quiesced old 2-column sidecar is INCOMPATIBLE with the schema. Mark the
+    # crossing BEFORE the apply so the controller's EXIT trap leaves the sidecar
+    # stopped on any abort during/after the apply rather than restoring an old
+    # binary against a migrated schema. (The restore path itself is also safe: it
+    # only re-activates the sidecar to its captured pre-quiesce state — but the
+    # marker gives the operator the correct "left stopped for parity" signal.)
+    touch /opt/macprovider/.coordinator-deploy-sidecar-parity-required
+    "$coordinator_bin" stats-migrate
+    if ! "$coordinator_bin" stats-migrate --check | grep -Eq '^[[:space:]]*019_hardware_trust_operator_approval applied$'; then
+      echo "aborting deploy: migration 019 (hardware_verification_trust 3-column PRIMARY KEY) is not applied after stats-migrate;" >&2
+      echo "  the on-disk $coordinator_bin predates issue #582 — install the new signed coordinator/gateway pair first" >&2
+      exit 12
+    fi
+    echo "  ok: stats migrations applied (incl. 019 hardware_verification_trust PK widening) inside the sidecar-quiesced window, before new-binary install"
     psql_preflight_service() {
       service_name="$1"
       dsn="$2"
@@ -1065,8 +1229,31 @@ SELECT generated_at, evidence
  WHERE provider_id = ''
    AND status = 'verified'
  LIMIT 0;
+-- FIX 7 (round-8, issue #582): exercise the LatestVerified admission join INCLUDING
+-- the EXISTS on hardware_verification_trust (the round-6 live-trust re-check). The
+-- provider_onboarding role must SELECT hardware_verification_trust for that join; a
+-- missing/drifted grant would otherwise pass deploy and break every gated hello.
+SELECT j.generated_at, j.evidence
+  FROM hardware_verification_jobs j
+  JOIN provider_hardware_profiles p
+    ON p.provider_id = j.provider_id
+   AND p.verified = TRUE
+   AND p.chip_normalized = j.chip_normalized
+   AND p.unified_memory_gb = j.unified_memory_gb
+ WHERE j.provider_id = ''
+   AND j.status = 'verified'
+   AND EXISTS (
+       SELECT 1
+         FROM hardware_verification_trust t
+        WHERE t.provider_id = j.provider_id
+          AND t.hardware_identity_hash = j.evidence -> 'hardware' ->> 'hardware_identity_hash'
+          AND t.chip_normalized = j.chip_normalized
+          AND t.unified_memory_gb = j.unified_memory_gb
+          AND (t.expires_at IS NULL OR t.expires_at > now())
+   )
+ LIMIT 0;
 SQL
-    echo "  ok: migration 008+013 hardware_verification_jobs visible to provider_onboarding (hello gate read path)"
+    echo "  ok: migration 008+013 hardware_verification_jobs + hardware_verification_trust admission join visible to provider_onboarding (hello gate read path)"
     psql_preflight_service auth_policy_request_preflight "$ONBOARDING_AUTH_POLICY_REQUEST_DSN" <<SQL >/dev/null
 DO \$\$
 BEGIN
@@ -1137,25 +1324,463 @@ END
 \$\$;
 SQL
     echo "  ok: auth-policy split DSN roles have expected EXECUTE privileges"
+    psql_preflight_service hardware_trust_request_preflight "$ONBOARDING_HARDWARE_TRUST_REQUEST_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'hardware_trust_requester'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('hardware_trust_pending'), ('hardware_trust_grants'), ('hardware_verification_trust')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'request_hardware_trust_approval(uuid,bigint,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'approve_hardware_trust_approval(uuid,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'revoke_hardware_trust_approval(uuid,text,text,text,text)'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'hardware trust request DSN does not map to the least-privilege requester role';
+  END IF;
+END
+\$\$;
+SQL
+    psql_preflight_service hardware_trust_approve_preflight "$ONBOARDING_HARDWARE_TRUST_APPROVE_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'hardware_trust_approver'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('hardware_trust_pending'), ('hardware_trust_grants'), ('hardware_verification_trust')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'approve_hardware_trust_approval(uuid,text)'::regprocedure, 'EXECUTE')
+    AND has_function_privilege(current_user, 'revoke_hardware_trust_approval(uuid,text,text,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'request_hardware_trust_approval(uuid,bigint,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'hardware trust approve DSN does not map to the least-privilege approver role';
+  END IF;
+END
+\$\$;
+SQL
+    echo "  ok: hardware-trust split DSN roles have expected EXECUTE privileges"
     verifier_env=/etc/macprovider-stats/stats-hardware-verifier.env
-    if [ -f "$verifier_env" ]; then
-      if grep -Eq "REPLACE_ME|<generated-password>" "$verifier_env"; then
-        echo "aborting deploy: stats-hardware-verifier.env still contains placeholder secret material" >&2
-        exit 12
-      fi
-      STATS_HARDWARE_VERIFIER_DSN="$(require_env_value "$verifier_env" STATS_HARDWARE_VERIFIER_DSN)"
-      psql_preflight_service hardware_verifier_preflight "$STATS_HARDWARE_VERIFIER_DSN" <<SQL >/dev/null
+    # FIX 8 (issue #582): reaching here means hardware-trust approval is enabled
+    # (ONBOARDING_HARDWARE_TRUST_REQUEST_DSN/APPROVE_DSN are required above), so
+    # the stats-hardware-verifier that PROMOTES approved waiting_trust jobs must
+    # be provisioned too. Without its env the verifier timer is left disabled
+    # (see step 9's `[ -f "$verifier_env" ]` enable gate), so an operator
+    # approval commits a trust root that NO timer ever promotes to verified.
+    # Fail closed rather than shipping a coordinator that accepts approvals it
+    # can never fulfil.
+    if [ ! -f "$verifier_env" ]; then
+      echo "aborting deploy: hardware-trust approval DSNs are configured but $verifier_env is absent." >&2
+      echo "  The stats-hardware-verifier timer is what promotes approved waiting_trust jobs;" >&2
+      echo "  without its env the approval path commits trust roots that never promote to verified." >&2
+      echo "  Provision /etc/macprovider-stats/stats-hardware-verifier.env before deploying." >&2
+      exit 12
+    fi
+    if grep -Eq "REPLACE_ME|<generated-password>" "$verifier_env"; then
+      echo "aborting deploy: stats-hardware-verifier.env still contains placeholder secret material" >&2
+      exit 12
+    fi
+    STATS_HARDWARE_VERIFIER_DSN="$(require_env_value "$verifier_env" STATS_HARDWARE_VERIFIER_DSN)"
+    # FIX 7 (issue #582): assert the verifier DSN maps to the exact
+    # stats_hardware_verifier promotion role (current_user/session_user) AND holds
+    # the write grants it needs to PROMOTE approved jobs — UPDATE on
+    # hardware_verification_jobs and INSERT/UPDATE on provider_hardware_profiles.
+    # A SELECT-only check would pass a mis-provisioned DSN that can never promote,
+    # so operator approvals would commit trust roots the verifier can never fulfil.
+    #
+    # FIX 3 (round-6 regression fix, issue #582): two round-6 assertions rejected a
+    # CORRECTLY-provisioned verifier:
+    #   1. The `NOT rolinherit` (NOINHERIT) check — roles default INHERIT and neither
+    #      migration 008 nor the verifier bootstrap ever sets NOINHERIT on
+    #      stats_hardware_verifier, so the assertion always failed. Dropped (nothing
+    #      provisions NOINHERIT for this role; the other role attributes still pin
+    #      least privilege).
+    #   2. Table-level has_table_privilege(...,'UPDATE'/'INSERT'). The verifier's
+    #      write grants are intentionally COLUMN-scoped (migration 008 grants
+    #      UPDATE(status,processed_at,decision_reason) on hardware_verification_jobs
+    #      and INSERT/UPDATE on specific provider_hardware_profiles columns).
+    #      has_table_privilege does NOT see column-only grants, so it wrongly
+    #      reported "no privilege". Validate the exact granted columns with
+    #      has_column_privilege instead (status on the jobs table, verified on the
+    #      profiles table — both required to promote a job to verified).
+    psql_preflight_service hardware_verifier_preflight "$STATS_HARDWARE_VERIFIER_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'stats_hardware_verifier'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls)
+    AND has_schema_privilege(current_user, 'public', 'USAGE')
+    AND has_table_privilege(current_user, 'hardware_verification_jobs', 'SELECT')
+    AND has_table_privilege(current_user, 'hardware_verification_trust', 'SELECT')
+    AND has_table_privilege(current_user, 'chip_hardware_profiles', 'SELECT')
+    AND has_table_privilege(current_user, 'provider_hardware_profiles', 'SELECT')
+    -- FIX 5 (round-8, issue #582): assert the FULL column write surface the verifier
+    -- actually writes across promoteJob/waitTrustJob/rejectJob
+    -- (internal/stats/hardwareverify/verify.go), not just status+verified. A partial
+    -- check would pass a DSN missing (e.g.) processed_at or last_reported_at that then
+    -- fails the FIRST time the verifier tries to finalize a job, after operators have
+    -- already committed approvals. Cross-checked against migration 008's grants.
+    -- hardware_verification_jobs: UPDATE(status, processed_at, decision_reason).
+    AND has_column_privilege(current_user, 'hardware_verification_jobs', 'status', 'UPDATE')
+    AND has_column_privilege(current_user, 'hardware_verification_jobs', 'processed_at', 'UPDATE')
+    AND has_column_privilege(current_user, 'hardware_verification_jobs', 'decision_reason', 'UPDATE')
+    -- provider_hardware_profiles: INSERT(provider_id, chip, chip_normalized,
+    -- unified_memory_gb, macos_version, app_version, source, verified, last_reported_at).
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'provider_id', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'chip', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'chip_normalized', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'unified_memory_gb', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'macos_version', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'app_version', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'source', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'verified', 'INSERT')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'last_reported_at', 'INSERT')
+    -- provider_hardware_profiles: UPDATE(chip, chip_normalized, unified_memory_gb,
+    -- macos_version, app_version, source, verified, last_reported_at) — the ON CONFLICT
+    -- DO UPDATE set. provider_id is the conflict key and is not in the UPDATE set.
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'chip', 'UPDATE')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'chip_normalized', 'UPDATE')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'unified_memory_gb', 'UPDATE')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'macos_version', 'UPDATE')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'app_version', 'UPDATE')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'source', 'UPDATE')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'verified', 'UPDATE')
+    AND has_column_privilege(current_user, 'provider_hardware_profiles', 'last_reported_at', 'UPDATE')
+  ) THEN
+    RAISE EXCEPTION 'verifier DSN does not map to the stats_hardware_verifier promotion role with required write grants';
+  END IF;
+END
+\$\$;
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
 SELECT 1 FROM hardware_verification_trust LIMIT 1;
 SELECT 1 FROM chip_hardware_profiles LIMIT 1;
-SELECT 1 WHERE has_schema_privilege(current_user, 'public', 'USAGE');
 SQL
-      echo "  ok: stats_hardware_verifier role can read hardware jobs/trust/chip inventory"
-    fi
+    echo "  ok: stats_hardware_verifier role identity + promotion write grants verified"
 REMOTE_ONBOARDING_PREFLIGHT
 else
   echo "  onboarding.app_track_register_enabled is not true — skipping hardware evidence migration preflight"
 fi
+
+# Issue #582 MIGRATION-019 UNIVERSAL SCHEMA GATE (ALL deploy paths) — couple the
+# new 3-column stats-inventory-sync binary to the migration-019 schema it needs.
+#
+# The new stats-inventory-sync binary is installed on EVERY deploy (step 4) and
+# its timer is re-enabled in step 9, regardless of onboarding. Its
+# trusted_hardware reconciliation upserts hardware_verification_trust with a
+# 3-column `ON CONFLICT (provider_id, hardware_identity_hash, source)`, which
+# requires migration 019 (the `source` column + the 3-column PRIMARY KEY). On the
+# ONBOARDING path the preflight above already auto-applied 019 via the
+# coordinator's stats-migrate, so this gate is a satisfied no-op there. But that
+# auto-apply is gated on ONBOARDING_ENABLED_LOCAL=true — on a NON-onboarding
+# deploy NOTHING applies 019, so a DB still at migration 017 would get the new
+# 3-column binary installed and its timer re-enabled while the schema lacks the
+# `source` column / 3-column PK. The reconciliation then fails ("no unique or
+# exclusion constraint matching the ON CONFLICT specification"), and because the
+# initial sidecar run is warning-only (step 9) the deploy would COMPLETE with
+# trust-inventory sync silently broken.
+#
+# This gate runs unconditionally (OUTSIDE the onboarding `if`), AFTER the
+# onboarding auto-apply and BEFORE the unconditional sidecar-binary install /
+# timer re-enable, and HARD-ABORTS (exit 12) when the sidecar's trusted_hardware
+# reconciliation is configured — its .timer would be re-enabled in step 9
+# (stats-hardware-inventory.yaml + stats-inventory-sync.env both present) and a
+# STATS_TRUST_INVENTORY_DSN is set — yet the live schema does not already have
+# 019's shape. Fail-closed: never install/re-enable the 3-column sidecar against a
+# pre-019 schema. The check is READ-ONLY: it uses the sidecar's own
+# STATS_TRUST_INVENTORY_DSN (the exact DSN the trust reconciliation connects with;
+# it holds privileges on hardware_verification_trust and can read
+# information_schema / pg_catalog), read from the env file as DATA (never sourced)
+# and passed to psql via a root-only PGSERVICEFILE so no password appears in `ps`
+# — mirroring the onboarding preflight's psql_preflight_service. The remedy on a
+# bare deploy is `coordinator stats-migrate` (the onboarding path runs it
+# automatically); then re-run this deploy.
+log "step 3a2/9: stats-inventory-sync migration-019 schema gate (all deploy paths)"
+$SSH "bash -s" <<'REMOTE_STATS_019_GATE'
+    set -eu
+    inventory_yaml=/etc/macprovider-stats/stats-hardware-inventory.yaml
+    inventory_env=/etc/macprovider-stats/stats-inventory-sync.env
+    # The sidecar timer is only re-enabled in step 9 when BOTH the inventory YAML
+    # and its env file are present. If either is absent the sidecar never runs, so
+    # its 019 dependency cannot bite — the gate is not applicable.
+    if [ ! -f "$inventory_yaml" ] || [ ! -f "$inventory_env" ]; then
+      echo "  ok: stats-inventory-sync not enabled (missing inventory yaml/env) — migration-019 schema gate not applicable"
+      exit 0
+    fi
+    if ! command -v psql >/dev/null 2>&1; then
+      echo "aborting deploy: psql is required for the stats-inventory-sync migration-019 schema gate" >&2
+      exit 12
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "aborting deploy: python3 is required for the stats-inventory-sync migration-019 schema gate" >&2
+      exit 12
+    fi
+    # The REAL trigger for trust reconciliation — and therefore for this gate — is
+    # whether the inventory YAML DECLARES a trusted_hardware section, NOT whether a
+    # DSN happens to be set. Mirror the sidecar's UnmarshalYAML "omitted vs explicit
+    # {}" contract (cmd/stats-inventory-sync/main.go): an OMITTED top-level
+    # `trusted_hardware` key leaves every trust root untouched (no-op); a PRESENT key
+    # — INCLUDING an explicit `trusted_hardware: {}` revoke-all, or a bare null — makes
+    # the sidecar reconcile trust and REQUIRES both STATS_TRUST_INVENTORY_DSN and the
+    # 019 schema. Key the gate's applicability on that presence: if trusted_hardware is
+    # declared, the deploy must be able to actually perform the reconciliation, else
+    # step 9 re-enables a sidecar whose reconciliation fails permanently (warning-only)
+    # and the deploy completes silently broken.
+    #
+    # Detect presence with a real YAML parser (PyYAML), never a sed/grep-for-structure
+    # hand-parse. PyYAML is not guaranteed on the VPS and the file could be malformed,
+    # so FAIL CLOSED: only a cleanly-parsed mapping that PROVABLY lacks the key is
+    # treated as omitted (no-op). Missing parser, unreadable/unparseable YAML, a
+    # non-mapping document, or any unexpected error all mean we cannot prove omission —
+    # treat trust reconciliation as declared (require DSN+019) rather than risk the
+    # silent break.
+    #   exit 0 => trusted_hardware PRESENT (or presence could not be disproven; fail-closed)
+    #   exit 1 => trusted_hardware PROVABLY OMITTED (cleanly-parsed mapping without the key)
+    trusted_hardware_present() {
+      TH_YAML_FILE="$1" python3 <<'PY'
+import os
+import sys
+
+path = os.environ["TH_YAML_FILE"]
+try:
+    try:
+        import yaml
+    except ImportError:
+        sys.stderr.write(
+            "PyYAML unavailable; cannot prove trusted_hardware is omitted in %s "
+            "— assuming present (fail-closed)\n" % path
+        )
+        sys.exit(0)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError) as exc:
+        sys.stderr.write(
+            "cannot parse %s to determine trusted_hardware presence: %s "
+            "— assuming present (fail-closed)\n" % (path, exc)
+        )
+        sys.exit(0)
+    if isinstance(doc, dict) and "trusted_hardware" in doc:
+        # Present incl. explicit {} (revoke-all) or null => reconciliation declared.
+        sys.exit(0)
+    if isinstance(doc, dict):
+        # Cleanly-parsed mapping WITHOUT the key => provably omitted => gate no-op.
+        sys.exit(1)
+    sys.stderr.write(
+        "%s is not a YAML mapping; cannot prove trusted_hardware is omitted "
+        "— assuming present (fail-closed)\n" % path
+    )
+    sys.exit(0)
+except SystemExit:
+    raise
+except Exception as exc:  # never let an unexpected error read as "omitted"
+    sys.stderr.write(
+        "unexpected error determining trusted_hardware presence in %s: %s "
+        "— assuming present (fail-closed)\n" % (path, exc)
+    )
+    sys.exit(0)
+PY
+    }
+    trusted_hardware_present_rc=0
+    trusted_hardware_present "$inventory_yaml" || trusted_hardware_present_rc=$?
+    if [ "$trusted_hardware_present_rc" -eq 1 ]; then
+      echo "  ok: inventory declares no trusted_hardware section (key omitted) — sidecar performs no trust reconciliation; migration-019 schema gate is a no-op"
+      exit 0
+    fi
+    if [ "$trusted_hardware_present_rc" -ne 0 ]; then
+      # Defensive: the parser only emits 0 (present/fail-closed) or 1 (omitted).
+      # Any other rc means it could not decide — fail closed.
+      echo "aborting deploy: could not determine whether $inventory_yaml declares a trusted_hardware section (rc=$trusted_hardware_present_rc)" >&2
+      exit 12
+    fi
+    # trusted_hardware IS declared (present, or presence could not be disproven): the
+    # sidecar will reconcile trust, so the deploy MUST be able to perform it — both a
+    # trust DSN and the 019 schema are now REQUIRED.
+    # Read the sidecar's own trust DSN from its env file as DATA (never sourced).
+    read_env_value() {
+      ENV_VALUE_FILE="$1" ENV_VALUE_NAME="$2" python3 <<'PY'
+import os
+import re
+import shlex
+import sys
+
+path = os.environ["ENV_VALUE_FILE"]
+want = os.environ["ENV_VALUE_NAME"]
+if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", want):
+    print("invalid requested env var name", file=sys.stderr)
+    sys.exit(2)
+
+found = False
+parsed_value = ""
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            if raw.endswith("\n"):
+                raw = raw[:-1]
+            if raw.endswith("\r"):
+                print(f"{path}:{lineno}: CRLF env files are not supported", file=sys.stderr)
+                sys.exit(2)
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                print(f"{path}:{lineno}: malformed env assignment", file=sys.stderr)
+                sys.exit(2)
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                print(f"{path}:{lineno}: malformed env var name", file=sys.stderr)
+                sys.exit(2)
+            if key != want:
+                continue
+            try:
+                parts = shlex.split(value.strip(), comments=False, posix=True)
+            except ValueError as exc:
+                print(f"{path}:{lineno}: malformed env value for {want}: {exc}", file=sys.stderr)
+                sys.exit(2)
+            if len(parts) != 1:
+                print(f"{path}:{lineno}: env value for {want} must be a single token", file=sys.stderr)
+                sys.exit(2)
+            parsed = parts[0]
+            if any(ch in parsed for ch in "\r\n\0"):
+                print(f"{path}:{lineno}: env value for {want} contains an invalid character", file=sys.stderr)
+                sys.exit(2)
+            found = True
+            parsed_value = parsed
+except OSError as exc:
+    print(f"cannot read env file {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if found:
+    print(parsed_value, end="")
+    sys.exit(0)
+sys.exit(1)
+PY
+    }
+    # Distinguish read_env_value's three outcomes. trusted_hardware is DECLARED at
+    # this point, so a clean-absent DSN is no longer a "no trust reconciliation" no-op
+    # — it is a hard error (reconciliation would fail permanently). A parse error must
+    # still never be mistaken for a clean-absent DSN.
+    #   exit 0 => STATS_TRUST_INVENTORY_DSN present (value on stdout)
+    #   exit 1 => cleanly absent (missing DSN while trusted_hardware is declared => abort)
+    #   exit 2 => the env file could not be parsed to decide (malformed line, etc.)
+    trust_dsn=""
+    trust_dsn_rc=0
+    trust_dsn="$(read_env_value "$inventory_env" STATS_TRUST_INVENTORY_DSN)" || trust_dsn_rc=$?
+    if [ "$trust_dsn_rc" -ne 0 ] && [ "$trust_dsn_rc" -ne 1 ]; then
+      # Parse/malformed error (exit 2) — or any other unexpected nonzero. FAIL CLOSED:
+      # a malformed unrelated line (that systemd itself tolerates) could hide a valid
+      # STATS_TRUST_INVENTORY_DSN, so we cannot safely conclude the sidecar has no 019
+      # dependency. Refusing to deploy is the only safe option.
+      echo "aborting deploy: $inventory_env could not be parsed to determine STATS_TRUST_INVENTORY_DSN (read_env_value rc=$trust_dsn_rc);" >&2
+      echo "  the stats-inventory-sync sidecar / migration-019 schema coupling cannot be safely verified — fix the env file before deploying." >&2
+      exit 12
+    fi
+    if [ "$trust_dsn_rc" -eq 1 ] || [ -z "$trust_dsn" ]; then
+      # trusted_hardware is DECLARED (present) but STATS_TRUST_INVENTORY_DSN is
+      # cleanly absent or explicitly empty. Step 9 will still re-enable the sidecar
+      # timer, and its trusted_hardware reconciliation (including an explicit {}
+      # revoke-all) will then fail PERMANENTLY for want of the trust DSN — and because
+      # that initial failure is warning-only, the deploy would complete silently
+      # broken. Refuse: the trust DSN must be set before deploying.
+      echo "aborting deploy: $inventory_yaml declares a trusted_hardware section but STATS_TRUST_INVENTORY_DSN is not set in $inventory_env." >&2
+      echo "  The stats-inventory-sync sidecar would re-enable and then fail every trusted_hardware reconciliation permanently (warning-only, silently broken)." >&2
+      echo "  Set STATS_TRUST_INVENTORY_DSN in $inventory_env (see stats-inventory-sync.env.example) before deploying." >&2
+      exit 12
+    fi
+    service_file="$(umask 077 && mktemp)"
+    trap 'rm -f "$service_file"' EXIT
+    if ! PSQL_SERVICE_FILE="$service_file" PSQL_SERVICE_DSN="$trust_dsn" python3 <<'PY'
+import os
+import sys
+from urllib.parse import parse_qsl, unquote, urlparse
+
+path = os.environ["PSQL_SERVICE_FILE"]
+dsn = os.environ["PSQL_SERVICE_DSN"]
+parsed = urlparse(dsn)
+if parsed.scheme not in ("postgres", "postgresql"):
+    print("unsupported Postgres DSN scheme", file=sys.stderr)
+    sys.exit(2)
+values = {
+    "host": parsed.hostname or "",
+    "user": unquote(parsed.username or ""),
+    "password": unquote(parsed.password or ""),
+    "dbname": unquote(parsed.path[1:] if parsed.path.startswith("/") else parsed.path),
+}
+if parsed.port is not None:
+    values["port"] = str(parsed.port)
+for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+    values[key] = value
+with open(path, "w", encoding="utf-8") as f:
+    f.write("[stats_trust_019_gate]\n")
+    for key, value in values.items():
+        if any(ch in value for ch in "\r\n"):
+            print("invalid newline in Postgres DSN value", file=sys.stderr)
+            sys.exit(2)
+        if value != "":
+            f.write(key + "=" + value + "\n")
+PY
+    then
+      echo "aborting deploy: could not parse STATS_TRUST_INVENTORY_DSN for the migration-019 schema gate" >&2
+      exit 12
+    fi
+    # Read-only probe: assert 019's shape is already live before the new 3-column
+    # sidecar binary is installed/re-enabled. Checks the `source` column via
+    # information_schema.columns and the 3-column PRIMARY KEY via pg_constraint /
+    # pg_attribute (pg_catalog is readable by any role; the trust role has
+    # privileges on hardware_verification_trust so its columns are visible in
+    # information_schema). ON_ERROR_STOP=1 turns a RAISE EXCEPTION into a nonzero exit.
+    if ! PGSERVICEFILE="$service_file" PGSERVICE=stats_trust_019_gate psql -v ON_ERROR_STOP=1 -qAt <<'SQL' >/dev/null
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'hardware_verification_trust'
+       AND column_name = 'source'
+  ) THEN
+    RAISE EXCEPTION 'hardware_verification_trust.source column is absent (migration 019 not applied)';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE c.contype = 'p'
+       AND n.nspname = 'public'
+       AND t.relname = 'hardware_verification_trust'
+       AND (
+         SELECT array_agg(a.attname ORDER BY k.ord)
+           FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+           JOIN pg_attribute a
+             ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+       ) = ARRAY['provider_id', 'hardware_identity_hash', 'source']
+  ) THEN
+    RAISE EXCEPTION 'hardware_verification_trust PRIMARY KEY is not (provider_id, hardware_identity_hash, source) (migration 019 not applied)';
+  END IF;
+END
+$$;
+SQL
+    then
+      echo "aborting deploy: the new stats-inventory-sync binary requires migration 019 (hardware_verification_trust.source column + 3-column PRIMARY KEY (provider_id, hardware_identity_hash, source)), but the live schema does not have it." >&2
+      echo "  Apply it with 'coordinator stats-migrate' before deploying (the onboarding path auto-applies it), then re-run this deploy." >&2
+      echo "  Refusing to install/re-enable the 3-column stats-inventory-sync sidecar against a pre-019 schema." >&2
+      exit 12
+    fi
+    echo "  ok: migration 019 shape present (hardware_verification_trust.source + 3-column PRIMARY KEY); safe to install/re-enable the 3-column stats-inventory-sync binary"
+REMOTE_STATS_019_GATE
 
 log "step 3b/9: install TCP sysctl overrides"
 if [ "${SKIP_TCP_TUNING:-0}" = "1" ]; then
@@ -1441,10 +2066,14 @@ COORDINATOR_DEPLOY_ARMED=1
 # Freeze sidecar execution for the release window. Their binaries and units are
 # transaction-owned, so allowing an old timer to fire after replacement could
 # create non-rollbackable database effects before the catalog canary passes.
+# NOTE: stats-inventory-sync is deliberately NOT in this loop — it is quiesced
+# earlier (before the onboarding migration preflight) because migration 019
+# makes the old inventory binary incompatible with the migrated schema, so it
+# must be down before the migration is exercised, not merely before install.
 $SSH 'set -eu
   exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
   flock -s 8
-  for unit in stats-inventory-sync.timer stats-inventory-sync.service stats-billing-mirror.timer stats-billing-mirror.service stats-hardware-verifier.timer stats-hardware-verifier.service; do
+  for unit in stats-billing-mirror.timer stats-billing-mirror.service stats-hardware-verifier.timer stats-hardware-verifier.service; do
     load_state=$(systemctl show -p LoadState --value "$unit")
     [ "$load_state" = not-found ] && continue
     systemctl stop "$unit"
@@ -2558,9 +3187,25 @@ $SSH 'set -e
   fi
   if [ -f /etc/macprovider-stats/stats-hardware-verifier.env ]; then
     systemctl enable --now stats-hardware-verifier.timer
+    # FIX 7 (issue #582): when hardware-trust approval is enabled (both onboarding
+    # trust DSNs configured), the verifier is the only thing that promotes an
+    # approved waiting_trust job to verified. A failed INITIAL run must fail the
+    # deploy (fatal) rather than be a warning, or operators could commit approvals
+    # against a coordinator whose verifier never runs. When approval is NOT enabled
+    # the initial run stays best-effort (warn), matching prior behavior.
+    hardware_trust_approval_enabled=0
+    if [ -r /etc/macprovider/coordinator.env ] \
+       && grep -Eq "^[[:space:]]*ONBOARDING_HARDWARE_TRUST_REQUEST_DSN=" /etc/macprovider/coordinator.env \
+       && grep -Eq "^[[:space:]]*ONBOARDING_HARDWARE_TRUST_APPROVE_DSN=" /etc/macprovider/coordinator.env; then
+      hardware_trust_approval_enabled=1
+    fi
     if ! systemctl start stats-hardware-verifier.service; then
-      echo "warning: stats-hardware-verifier.service failed; leaving coordinator deploy running"
       journalctl -u stats-hardware-verifier.service -n 30 --no-pager || true
+      if [ "$hardware_trust_approval_enabled" = 1 ]; then
+        echo "aborting deploy: stats-hardware-verifier.service failed its initial run and hardware-trust approval is enabled; operator approvals would commit trust roots that never promote to verified" >&2
+        exit 13
+      fi
+      echo "warning: stats-hardware-verifier.service failed; leaving coordinator deploy running"
     fi
     systemctl is-active stats-hardware-verifier.timer
   elif [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-hardware-timer-was-active ]; then

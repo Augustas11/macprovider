@@ -24,9 +24,16 @@ providers:
     source: operator
     verified: true
 
-# Optional trust-root inventory for provider hardware evidence. If present,
-# this section is authoritative for all rows in hardware_verification_trust and
-# requires STATS_TRUST_INVENTORY_DSN. Omit it to leave trust roots untouched.
+# Optional trust-root inventory for provider hardware evidence. Presence is
+# significant (issue #582):
+#   - OMIT the section entirely  -> no-op: every hardware_verification_trust root
+#     is left untouched (this is the default; operator_api roots created via the
+#     admin approval API are always preserved regardless).
+#   - trusted_hardware: {}       -> revoke-all: reconciles against an empty set,
+#     deleting every source='inventory' root. operator_api roots survive.
+#   - trusted_hardware: <entries> -> authoritative for all source='inventory'
+#     rows: upserts the listed roots and deletes any inventory root not listed.
+# Any present form (including {}) requires STATS_TRUST_INVENTORY_DSN.
 # Uncomment only when this file contains the complete live trust inventory.
 # trusted_hardware:
 #   mac:

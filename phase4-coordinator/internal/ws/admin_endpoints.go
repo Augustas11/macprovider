@@ -24,6 +24,7 @@ const (
 
 var (
 	errAuthPolicyAdminUnavailable = errors.New("provider auth policy admin store unavailable")
+	errHardwareTrustAdminUnavail  = errors.New("hardware trust admin store unavailable")
 	errDualControlRequired        = errors.New("dual_control_required")
 	errPendingExemptionNotFound   = errors.New("pending exemption not found")
 	errPendingExemptionCommitted  = errors.New("pending exemption already committed")
@@ -727,6 +728,9 @@ func writeAuthPolicyError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errAuthPolicyAdminUnavailable):
 		status = http.StatusServiceUnavailable
 		code = "auth_policy_admin_unavailable"
+	case errors.Is(err, errHardwareTrustAdminUnavail):
+		status = http.StatusServiceUnavailable
+		code = "hardware_trust_admin_unavailable"
 	case errors.Is(err, errDualControlRequired) || strings.Contains(msg, "dual_control_required"):
 		status = http.StatusForbidden
 		code = "dual_control_required"

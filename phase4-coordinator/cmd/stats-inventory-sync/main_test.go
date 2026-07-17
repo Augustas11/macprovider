@@ -50,13 +50,16 @@ func validInventory() inventory {
 				Verified:        true,
 			},
 		},
-		TrustedHardware: map[string][]trustedHardwareIdentity{
-			"mac": {
-				{
-					HardwareIdentityHash: fixtureHardwareIdentityHash,
-					ChipNormalized:       "operator fixture chip",
-					UnifiedMemoryGB:      32,
-					TrustedBy:            "operator",
+		TrustedHardware: trustedHardware{
+			Present: true,
+			Entries: map[string][]trustedHardwareIdentity{
+				"mac": {
+					{
+						HardwareIdentityHash: fixtureHardwareIdentityHash,
+						ChipNormalized:       "operator fixture chip",
+						UnifiedMemoryGB:      32,
+						TrustedBy:            "operator",
+					},
 				},
 			},
 		},
@@ -100,19 +103,32 @@ func TestValidateInventoryRejectsEmptyProviderMap(t *testing.T) {
 	}
 }
 
-func TestValidateInventoryRejectsEmptyTrustedHardwareMap(t *testing.T) {
+func TestValidateInventoryAcceptsExplicitEmptyTrustedHardware(t *testing.T) {
+	// An explicitly-empty trusted_hardware section (`trusted_hardware: {}`) is the
+	// deliberate revoke-all-inventory-roots signal and must validate; only an
+	// OMITTED section leaves roots untouched (issue #582 FIX 2).
 	inv := validInventory()
-	inv.TrustedHardware = map[string][]trustedHardwareIdentity{}
+	inv.TrustedHardware = trustedHardware{Present: true, Entries: map[string][]trustedHardwareIdentity{}}
 
-	err := validateInventory(inv)
-	if err == nil || !strings.Contains(err.Error(), "omit the section") {
-		t.Fatalf("validateInventory() error = %v, want empty trust map error", err)
+	if err := validateInventory(inv); err != nil {
+		t.Fatalf("validateInventory() error = %v, want explicit-empty trusted_hardware accepted", err)
+	}
+}
+
+func TestValidateInventoryAcceptsOmittedTrustedHardware(t *testing.T) {
+	// An omitted trusted_hardware section (Present=false) is a no-op that leaves
+	// every trust root untouched; validation must accept it (issue #582 FIX 2).
+	inv := validInventory()
+	inv.TrustedHardware = trustedHardware{}
+
+	if err := validateInventory(inv); err != nil {
+		t.Fatalf("validateInventory() error = %v, want omitted trusted_hardware accepted", err)
 	}
 }
 
 func TestValidateInventoryRejectsUnknownTrustedHardwareChip(t *testing.T) {
 	inv := validInventory()
-	inv.TrustedHardware["mac"][0].ChipNormalized = "missing"
+	inv.TrustedHardware.Entries["mac"][0].ChipNormalized = "missing"
 
 	err := validateInventory(inv)
 	if err == nil || !strings.Contains(err.Error(), "unknown chip_normalized") {
@@ -128,7 +144,7 @@ func TestValidateInventoryRejectsUnsafeTrustedHardwareHash(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			inv := validInventory()
-			inv.TrustedHardware["mac"][0].HardwareIdentityHash = hash
+			inv.TrustedHardware.Entries["mac"][0].HardwareIdentityHash = hash
 
 			err := validateInventory(inv)
 			if err == nil || !strings.Contains(err.Error(), "hardware_identity_hash") {
@@ -140,7 +156,7 @@ func TestValidateInventoryRejectsUnsafeTrustedHardwareHash(t *testing.T) {
 
 func TestValidateInventoryRejectsInvalidTrustedHardwareExpiry(t *testing.T) {
 	inv := validInventory()
-	inv.TrustedHardware["mac"][0].ExpiresAt = "tomorrow"
+	inv.TrustedHardware.Entries["mac"][0].ExpiresAt = "tomorrow"
 
 	err := validateInventory(inv)
 	if err == nil || !strings.Contains(err.Error(), "expires_at") {
@@ -172,7 +188,7 @@ func TestValidateInventoryAcceptsOnboardingNormalizedChipKey(t *testing.T) {
 	p.Chip = "Apple M4 Max"
 	p.ChipNormalized = "apple m4 max"
 	inv.Providers["mac"] = p
-	inv.TrustedHardware["mac"][0].ChipNormalized = "apple m4 max"
+	inv.TrustedHardware.Entries["mac"][0].ChipNormalized = "apple m4 max"
 
 	if err := validateInventory(inv); err != nil {
 		t.Fatalf("validateInventory() error = %v", err)
@@ -219,37 +235,140 @@ func TestApplyTrustInventoryReconcilesTrustedHardware(t *testing.T) {
 	}
 }
 
-func TestApplyTrustDemotionsOnlyDemotesCLIProfilesWithoutActiveTrust(t *testing.T) {
+func TestApplyTrustInventoryScopesUpsertAndDeleteToInventorySource(t *testing.T) {
+	inv := validInventory()
+	db := &fakeExec{}
+	if err := applyTrustInventory(context.Background(), db, inv); err != nil {
+		t.Fatalf("applyTrustInventory() error = %v", err)
+	}
+	if len(db.calls) != 2 {
+		t.Fatalf("applyTrustInventory() calls = %d, want 2", len(db.calls))
+	}
+	// The upsert tags rows as inventory-sourced so operator_api rows written by
+	// the durable approval path are never mistaken for sync-managed rows.
+	if !strings.Contains(db.calls[0].query, "'inventory'") {
+		t.Fatalf("upsert query = %q, want inventory source tag", db.calls[0].query)
+	}
+	// The trust table PK is (provider_id, hardware_identity_hash, source), so the
+	// upsert conflict target is 3-column and touches ONLY the inventory row; an
+	// operator_api row is an independent row it can never conflict with. The former
+	// WHERE source='inventory' DO UPDATE guard is redundant and removed (issue #582).
+	if !strings.Contains(db.calls[0].query, "ON CONFLICT (provider_id, hardware_identity_hash, source) DO UPDATE") {
+		t.Fatalf("upsert query = %q, want 3-column ON CONFLICT target", db.calls[0].query)
+	}
+	if strings.Contains(db.calls[0].query, "WHERE hardware_verification_trust.source = 'inventory'") {
+		t.Fatalf("upsert query = %q, redundant source-scoped DO UPDATE guard must be removed", db.calls[0].query)
+	}
+	// The reconciling DELETE must only touch inventory rows so an operator_api
+	// trust root survives a sync run that omits it from the YAML (issue #582).
+	if !strings.Contains(db.calls[1].query, "source = 'inventory'") {
+		t.Fatalf("delete query = %q, want inventory-scoped reconciliation", db.calls[1].query)
+	}
+}
+
+func TestApplyTrustDemotionsLocksCandidatesBeforeReEvaluating(t *testing.T) {
+	// FIX 3: demotion must lock candidate rows FOR UPDATE in a first statement so
+	// the re-evaluation runs under a fresh snapshot and cannot re-demote a profile
+	// the verifier's promoteJob just committed.
 	db := &fakeExec{}
 	if err := applyTrustDemotions(context.Background(), db); err != nil {
 		t.Fatalf("applyTrustDemotions() error = %v", err)
 	}
+	if len(db.calls) != 2 {
+		t.Fatalf("applyTrustDemotions() calls = %d, want 2 (lock then update)", len(db.calls))
+	}
+	if !strings.Contains(db.calls[0].query, "FOR UPDATE") {
+		t.Fatalf("first query = %q, want candidate row lock (FOR UPDATE)", db.calls[0].query)
+	}
+	if !strings.Contains(db.calls[0].query, "FROM provider_hardware_profiles") ||
+		!strings.Contains(db.calls[0].query, "source <> 'operator'") {
+		t.Fatalf("first query = %q, want verified non-operator candidate lock", db.calls[0].query)
+	}
+	if strings.Contains(db.calls[0].query, "UPDATE provider_hardware_profiles") {
+		t.Fatalf("first query = %q, lock statement must not be the UPDATE", db.calls[0].query)
+	}
+}
+
+func TestApplyTrustDemotionsDemotesExpiredTrustRegardlessOfSource(t *testing.T) {
+	db := &fakeExec{}
+	if err := applyTrustDemotions(context.Background(), db); err != nil {
+		t.Fatalf("applyTrustDemotions() error = %v", err)
+	}
+	if len(db.calls) != 2 {
+		t.Fatalf("applyTrustDemotions() calls = %d, want 2", len(db.calls))
+	}
+	// The trust-root join must NOT filter on source, so a verified profile backed
+	// only by an expired operator_api root is demoted just like an expired
+	// inventory root — its expires_at fails the active-trust predicate (#582).
+	if strings.Contains(db.calls[1].query, "t.source") {
+		t.Fatalf("query = %q, demotion trust join must be source-agnostic to catch expired operator_api roots", db.calls[1].query)
+	}
+	if !strings.Contains(db.calls[1].query, "t.expires_at IS NULL OR t.expires_at > now()") {
+		t.Fatalf("query = %q, want expired trust roots excluded from active-trust proof", db.calls[1].query)
+	}
+}
+
+func TestApplyTrustDemotionsDemotesNonAuthoritativeProfilesWithoutActiveTrust(t *testing.T) {
+	db := &fakeExec{}
+	if err := applyTrustDemotions(context.Background(), db); err != nil {
+		t.Fatalf("applyTrustDemotions() error = %v", err)
+	}
+	if len(db.calls) != 2 {
+		t.Fatalf("applyTrustDemotions() calls = %d, want 2", len(db.calls))
+	}
+	if !strings.Contains(db.calls[1].query, "UPDATE provider_hardware_profiles") {
+		t.Fatalf("query = %q, want provider profile demotion", db.calls[1].query)
+	}
+	if strings.Contains(db.calls[1].query, "last_reported_at = now()") {
+		t.Fatalf("query = %q, demotion must preserve evidence timestamp", db.calls[1].query)
+	}
+	// Every non-authoritative verified source (cli_hello AND app_register) must be
+	// demotable, so the predicate must exempt only the authoritative operator
+	// source rather than restricting to a single source.
+	if !strings.Contains(db.calls[1].query, "ph.source <> 'operator'") {
+		t.Fatalf("query = %q, want non-authoritative-source demotion (NOT operator)", db.calls[1].query)
+	}
+	if strings.Contains(db.calls[1].query, "ph.source = 'cli_hello'") {
+		t.Fatalf("query = %q, must not restrict demotion to cli_hello (app_register verified profiles must also demote)", db.calls[1].query)
+	}
+	if !strings.Contains(db.calls[1].query, "hardware_verification_jobs") {
+		t.Fatalf("query = %q, want verified job evidence check", db.calls[1].query)
+	}
+	if !strings.Contains(db.calls[1].query, "hardware_verification_trust") {
+		t.Fatalf("query = %q, want active trust-root check", db.calls[1].query)
+	}
+	if !strings.Contains(db.calls[1].query, "j.evidence #>> '{hardware,hardware_identity_hash}'") {
+		t.Fatalf("query = %q, want exact hardware identity hash proof", db.calls[1].query)
+	}
+	if !strings.Contains(db.calls[1].query, "t.expires_at IS NULL OR t.expires_at > now()") {
+		t.Fatalf("query = %q, want expired trust roots excluded", db.calls[1].query)
+	}
+	// The authoritative operator source (rows the operator YAML asserts verified
+	// directly) must never be demoted by the trust-based reconciliation.
+	if strings.Contains(db.calls[1].query, "ph.source = 'operator'") {
+		t.Fatalf("query = %q, must not demote authoritative operator inventory rows", db.calls[1].query)
+	}
+}
+
+func TestApplyTrustInventoryRevokesAllInventoryRootsWhenEmptied(t *testing.T) {
+	// An explicitly-empty trusted_hardware section still runs the
+	// source='inventory' scoped DELETE so the last inventory root is revoked.
+	// operator_api roots are untouched because the DELETE is scoped to
+	// source='inventory' (issue #582 FIX 2).
+	inv := validInventory()
+	inv.TrustedHardware = trustedHardware{Present: true, Entries: nil}
+	db := &fakeExec{}
+	if err := applyTrustInventory(context.Background(), db, inv); err != nil {
+		t.Fatalf("applyTrustInventory() error = %v", err)
+	}
 	if len(db.calls) != 1 {
-		t.Fatalf("applyTrustDemotions() calls = %d, want 1", len(db.calls))
+		t.Fatalf("applyTrustInventory() calls = %d, want 1 (scoped DELETE only)", len(db.calls))
 	}
-	if !strings.Contains(db.calls[0].query, "UPDATE provider_hardware_profiles") {
-		t.Fatalf("query = %q, want provider profile demotion", db.calls[0].query)
+	if !strings.Contains(db.calls[0].query, "DELETE FROM hardware_verification_trust") {
+		t.Fatalf("query = %q, want inventory reconciliation DELETE", db.calls[0].query)
 	}
-	if strings.Contains(db.calls[0].query, "last_reported_at = now()") {
-		t.Fatalf("query = %q, demotion must preserve evidence timestamp", db.calls[0].query)
-	}
-	if !strings.Contains(db.calls[0].query, "source = 'cli_hello'") {
-		t.Fatalf("query = %q, want cli_hello-only demotion", db.calls[0].query)
-	}
-	if !strings.Contains(db.calls[0].query, "hardware_verification_jobs") {
-		t.Fatalf("query = %q, want verified job evidence check", db.calls[0].query)
-	}
-	if !strings.Contains(db.calls[0].query, "hardware_verification_trust") {
-		t.Fatalf("query = %q, want active trust-root check", db.calls[0].query)
-	}
-	if !strings.Contains(db.calls[0].query, "j.evidence #>> '{hardware,hardware_identity_hash}'") {
-		t.Fatalf("query = %q, want exact hardware identity hash proof", db.calls[0].query)
-	}
-	if !strings.Contains(db.calls[0].query, "t.expires_at IS NULL OR t.expires_at > now()") {
-		t.Fatalf("query = %q, want expired trust roots excluded", db.calls[0].query)
-	}
-	if strings.Contains(db.calls[0].query, "source = 'operator'") {
-		t.Fatalf("query = %q, must not demote manual operator inventory rows", db.calls[0].query)
+	if !strings.Contains(db.calls[0].query, "source = 'inventory'") {
+		t.Fatalf("query = %q, want DELETE scoped to inventory source (operator_api preserved)", db.calls[0].query)
 	}
 }
 
@@ -423,6 +542,157 @@ trusted_hardware:
 	})
 	if err == nil || !strings.Contains(err.Error(), "trust postgres dsn is required") {
 		t.Fatalf("run() error = %v, want trust dsn error", err)
+	}
+}
+
+func TestLoadInventoryDetectsTrustedHardwarePresence(t *testing.T) {
+	base := `
+chips:
+  operator fixture chip:
+    display_chip: Operator Fixture
+    memory_bandwidth_gb_per_s: 120
+    network_power_kw: 0.035
+    gpu_cores: 10
+    cpu_cores: 10
+providers:
+  mac:
+    chip_normalized: operator fixture chip
+    chip: Operator Fixture
+    unified_memory_gb: 32
+    source: operator
+    verified: true
+`
+	t.Run("omitted", func(t *testing.T) {
+		inv, err := loadInventory(writeTempConfig(t, base))
+		if err != nil {
+			t.Fatalf("loadInventory() error = %v", err)
+		}
+		if inv.TrustedHardware.Present {
+			t.Fatal("omitted trusted_hardware must decode Present=false (no-op, roots untouched)")
+		}
+	})
+	t.Run("explicit_empty", func(t *testing.T) {
+		inv, err := loadInventory(writeTempConfig(t, base+"trusted_hardware: {}\n"))
+		if err != nil {
+			t.Fatalf("loadInventory() error = %v", err)
+		}
+		if !inv.TrustedHardware.Present {
+			t.Fatal("explicit empty trusted_hardware must decode Present=true (revoke-all signal)")
+		}
+		if len(inv.TrustedHardware.Entries) != 0 {
+			t.Fatalf("explicit empty trusted_hardware must decode zero entries, got %d", len(inv.TrustedHardware.Entries))
+		}
+	})
+	t.Run("populated", func(t *testing.T) {
+		inv, err := loadInventory(writeTempConfig(t, base+`trusted_hardware:
+  mac:
+    - hardware_identity_hash: `+fixtureHardwareIdentityHash+`
+      chip_normalized: operator fixture chip
+      unified_memory_gb: 32
+      trusted_by: operator
+`))
+		if err != nil {
+			t.Fatalf("loadInventory() error = %v", err)
+		}
+		if !inv.TrustedHardware.Present || len(inv.TrustedHardware.Entries) != 1 {
+			t.Fatalf("populated trusted_hardware must decode Present=true with 1 entry, got present=%t entries=%d", inv.TrustedHardware.Present, len(inv.TrustedHardware.Entries))
+		}
+	})
+}
+
+func TestLoadInventoryRejectsUnknownTrustedHardwareIdentityField(t *testing.T) {
+	// FIX 3(a) (issue #582): yaml.Node.Decode does not inherit the outer
+	// KnownFields(true), so a nested typo like expires_att would be silently
+	// dropped — turning intended temporary trust into permanent trust. The strict
+	// nested decode must make it a hard error.
+	base := `
+chips:
+  operator fixture chip:
+    display_chip: Operator Fixture
+    memory_bandwidth_gb_per_s: 120
+    network_power_kw: 0.035
+    gpu_cores: 10
+    cpu_cores: 10
+`
+	_, err := loadInventory(writeTempConfig(t, base+`trusted_hardware:
+  mac:
+    - hardware_identity_hash: `+fixtureHardwareIdentityHash+`
+      chip_normalized: operator fixture chip
+      unified_memory_gb: 32
+      trusted_by: operator
+      expires_att: 2999-01-01T00:00:00Z
+`))
+	if err == nil || !strings.Contains(err.Error(), "expires_att") {
+		t.Fatalf("loadInventory() error = %v, want nested unknown-field (expires_att) error", err)
+	}
+}
+
+func TestLoadInventoryRejectsNullTrustedHardware(t *testing.T) {
+	// FIX 3(b) (issue #582): a bare `trusted_hardware:` (YAML null) must be
+	// rejected. Revoke-all is reserved for an EXPLICIT `{}`; a null must not
+	// silently decode as present-with-nil and trigger revoke-all.
+	base := `
+chips:
+  operator fixture chip:
+    display_chip: Operator Fixture
+    memory_bandwidth_gb_per_s: 120
+    network_power_kw: 0.035
+    gpu_cores: 10
+    cpu_cores: 10
+`
+	for _, tc := range []struct {
+		name string
+		tail string
+	}{
+		{"null", "trusted_hardware:\n"},
+		{"scalar", "trusted_hardware: nope\n"},
+		{"sequence", "trusted_hardware:\n  - nope\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadInventory(writeTempConfig(t, base+tc.tail))
+			if err == nil || !strings.Contains(err.Error(), "trusted_hardware must be a mapping") {
+				t.Fatalf("loadInventory() error = %v, want non-mapping trusted_hardware rejected", err)
+			}
+		})
+	}
+}
+
+func TestLoadInventoryAcceptsExplicitEmptyTrustedHardwareAsRevokeAll(t *testing.T) {
+	// FIX 3(b): an explicit empty mapping is the ONLY accepted revoke-all signal.
+	base := `
+chips:
+  operator fixture chip:
+    display_chip: Operator Fixture
+    memory_bandwidth_gb_per_s: 120
+    network_power_kw: 0.035
+    gpu_cores: 10
+    cpu_cores: 10
+`
+	inv, err := loadInventory(writeTempConfig(t, base+"trusted_hardware: {}\n"))
+	if err != nil {
+		t.Fatalf("loadInventory() error = %v, want explicit-empty accepted", err)
+	}
+	if !inv.TrustedHardware.Present || len(inv.TrustedHardware.Entries) != 0 {
+		t.Fatalf("explicit empty must decode Present=true with zero entries, got present=%t entries=%d",
+			inv.TrustedHardware.Present, len(inv.TrustedHardware.Entries))
+	}
+}
+
+func TestDemotionContextSurvivesCancelledParent(t *testing.T) {
+	// FIX 5 (issue #582): demotion must run even when the shared run context is
+	// already cancelled/timed out (e.g. a blackholed trust DSN exhausted it), so
+	// an API-revoked root is not left effective forever. demotionContext derives
+	// an independent, bounded context via context.WithoutCancel so a cancelled
+	// parent cannot starve it.
+	parent, cancel := context.WithCancel(context.Background())
+	cancel() // parent already cancelled, mirroring an exhausted run budget
+	dctx, dcancel := demotionContext(parent)
+	defer dcancel()
+	if err := dctx.Err(); err != nil {
+		t.Fatalf("demotion context must be live despite a cancelled parent, got err=%v", err)
+	}
+	if _, ok := dctx.Deadline(); !ok {
+		t.Fatal("demotion context must carry its own bounded deadline")
 	}
 }
 

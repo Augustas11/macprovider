@@ -75,6 +75,9 @@ const (
 	roleAuthPolicyCut    = "provider_auth_policy_cutover"
 	roleAuthPolicyDef    = "provider_auth_policy_definer"
 	roleHardwareVerifier = "stats_hardware_verifier"
+	roleHWTrustRequester = "hardware_trust_requester"
+	roleHWTrustApprover  = "hardware_trust_approver"
+	roleHWTrustDefiner   = "hardware_trust_definer"
 	roleAdminPassword    = "stepone-admin-password" // local only; container is ephemeral
 	roleRuntimePassword  = "stepone-runtime-pw"
 )
@@ -1526,6 +1529,84 @@ func TestHardwareVerifierPromotionGuard(t *testing.T) {
 	}
 }
 
+// TestHardwareTrustPerSourceRowsCoexist proves the terminal structural fix
+// (issue #582) against the REAL migrations: the trust table PK is
+// (provider_id, hardware_identity_hash, source), so an inventory root and an
+// operator_api root for the SAME tuple coexist as two independent rows. Expiring
+// the operator_api row (an operator revoke) leaves the source-agnostic trust
+// match satisfied via the still-active inventory root; only when BOTH are
+// inactive does the match drop.
+func TestHardwareTrustPerSourceRowsCoexist(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Two independent rows for the SAME (provider_id, hardware_identity_hash)
+	// tuple, distinguished only by source — allowed by the 3-column primary key.
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_trust
+            (provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb, trusted_by, source)
+        VALUES
+            ('p-coexist', 'hash-coexist', 'apple m4 max', 64, 'inventory-sync', 'inventory'),
+            ('p-coexist', 'hash-coexist', 'apple m4 max', 64, 'operator:alice', 'operator_api')
+    `); err != nil {
+		t.Fatalf("insert coexisting per-source trust rows: %v", err)
+	}
+
+	activeMatch := func() bool {
+		t.Helper()
+		var matched bool
+		if err := adminDB.QueryRowContext(ctx, `
+            SELECT EXISTS (
+                SELECT 1 FROM hardware_verification_trust t
+                 WHERE t.provider_id = 'p-coexist'
+                   AND t.hardware_identity_hash = 'hash-coexist'
+                   AND t.chip_normalized = 'apple m4 max'
+                   AND t.unified_memory_gb = 64
+                   AND (t.expires_at IS NULL OR t.expires_at > now())
+            )`).Scan(&matched); err != nil {
+			t.Fatalf("source-agnostic trust match: %v", err)
+		}
+		return matched
+	}
+
+	var rowCount int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM hardware_verification_trust
+         WHERE provider_id = 'p-coexist' AND hardware_identity_hash = 'hash-coexist'`).Scan(&rowCount); err != nil {
+		t.Fatalf("count coexisting rows: %v", err)
+	}
+	if rowCount != 2 {
+		t.Fatalf("trust rows = %d, want 2 (inventory + operator_api coexist)", rowCount)
+	}
+	if !activeMatch() {
+		t.Fatal("trust match = false with both roots active, want true")
+	}
+
+	// Operator revoke: expire ONLY the operator_api row. The inventory root still
+	// backs the tuple, so the source-agnostic match stays satisfied.
+	if _, err := adminDB.ExecContext(ctx, `
+        UPDATE hardware_verification_trust SET expires_at = now() - interval '1 hour'
+         WHERE provider_id = 'p-coexist' AND hardware_identity_hash = 'hash-coexist' AND source = 'operator_api'`); err != nil {
+		t.Fatalf("expire operator_api root: %v", err)
+	}
+	if !activeMatch() {
+		t.Fatal("trust match = false after operator revoke, want true via inventory root")
+	}
+
+	// Expire the inventory root too: no active row of any source remains.
+	if _, err := adminDB.ExecContext(ctx, `
+        UPDATE hardware_verification_trust SET expires_at = now() - interval '1 hour'
+         WHERE provider_id = 'p-coexist' AND hardware_identity_hash = 'hash-coexist' AND source = 'inventory'`); err != nil {
+		t.Fatalf("expire inventory root: %v", err)
+	}
+	if activeMatch() {
+		t.Fatal("trust match = true with all roots expired, want false")
+	}
+}
+
 func TestHardwareEvidenceReplayStoreLoadsDecisionState(t *testing.T) {
 	fx := startPostgres(t)
 	adminDB := applyMigrationsAndStubOLTP(t, fx)
@@ -1655,6 +1736,689 @@ RETURNING id`, providerID, evidenceSHA).Scan(&jobID); err != nil {
 	if !found || record.JobID != jobID || record.Status != "waiting_trust" ||
 		record.DecisionReason != "hardware-verifier.v2:trust_missing" {
 		t.Fatalf("replay read after upgrade = %+v found=%v", record, found)
+	}
+}
+
+// ===========================================================================
+// Issue #582 — durable operator hardware-trust approval: executable PostgreSQL
+// acceptance for the core request -> approve -> revoke workflow, its migration
+// up/down/reapply lifecycle, split-role privileges, dual-control, per-source
+// coexistence + demotion, and the row/advisory-lock concurrency invariants.
+// All against the REAL migrations (019_hardware_trust_operator_approval) via the
+// existing adminDB harness.
+// ===========================================================================
+
+const (
+	sigHWTrustRequest = "request_hardware_trust_approval(uuid,bigint,text,timestamp with time zone,text,text)"
+	sigHWTrustApprove = "approve_hardware_trust_approval(uuid,text)"
+	sigHWTrustRevoke  = "revoke_hardware_trust_approval(uuid,text,text,text,text)"
+)
+
+// rotateHardwareTrustLoginRoles gives the split EXECUTE roles LOGIN + a password
+// so the tests can connect AS hardware_trust_requester / hardware_trust_approver.
+// The definer role is deliberately left NOLOGIN (it only owns the SECURITY
+// DEFINER functions); production provisioning does the same via the
+// hardware-trust bootstrap SQL.
+func rotateHardwareTrustLoginRoles(t *testing.T, adminDB *sql.DB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, role := range []string{roleHWTrustRequester, roleHWTrustApprover} {
+		if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
+			`ALTER ROLE %s WITH LOGIN PASSWORD '%s'`, role, roleRuntimePassword,
+		)); err != nil {
+			t.Fatalf("rotate hardware-trust role %s: %v", role, err)
+		}
+	}
+}
+
+// seedWaitingTrustJob parks a hardware_verification_jobs row in status
+// 'waiting_trust' with decision_reason missing_trusted_hardware_identity and
+// fresh benchmark evidence, plus the chip_hardware_profiles row the approve
+// function's chip-profile-existence gate requires. Returns the job id and the
+// DB-stored generated_at (used as the verified profile's last_reported_at so the
+// promotion guard's exact-timestamp join matches).
+func seedWaitingTrustJob(t *testing.T, ctx context.Context, adminDB *sql.DB, providerID, hash, evidenceSHA string) (int64, time.Time) {
+	t.Helper()
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO chip_hardware_profiles
+            (chip_normalized, display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores)
+        VALUES ('apple m4 max', 'Apple M4 Max', 546, 0.12, 40, 16)
+        ON CONFLICT (chip_normalized) DO NOTHING`); err != nil {
+		t.Fatalf("seed chip profile: %v", err)
+	}
+	generatedAt := time.Now().UTC()
+	evidence := fmt.Sprintf(
+		`{"provider_id":%q,"hardware":{"hardware_identity_hash":%q},"benchmarks":[{"model_key":"x","sustained_tps":42,"generated_at":%q}]}`,
+		providerID, hash, generatedAt.Format(time.RFC3339Nano))
+	var jobID int64
+	var storedGeneratedAt time.Time
+	if err := adminDB.QueryRowContext(ctx, `
+        INSERT INTO hardware_verification_jobs
+            (provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+             bandwidth_tier, os_version, binary_version, benchmark_count, max_sustained_tps,
+             generated_at, decision_reason, evidence, evidence_sha256)
+        VALUES
+            ($1, 'autotune', 'waiting_trust', 'Apple M4 Max', 'apple m4 max', 64,
+             'A', '15.0', '1.0.0', 1, 42,
+             $2, 'hardware-verifier.v2:missing_trusted_hardware_identity', $3::jsonb, $4)
+        RETURNING id, generated_at`, providerID, generatedAt, evidence, evidenceSHA).Scan(&jobID, &storedGeneratedAt); err != nil {
+		t.Fatalf("seed waiting_trust job: %v", err)
+	}
+	return jobID, storedGeneratedAt
+}
+
+// verifierPromote performs the verifier's promotion as it would in production:
+// insert the verified profile (guard requires the job still waiting_trust with an
+// active trust root), then finalize the job to 'verified'. Order matters — the
+// profile insert must precede the status flip or the promotion guard's
+// status IN ('pending','waiting_trust') predicate fails.
+func verifierPromote(t *testing.T, ctx context.Context, verifierDB *sql.DB, providerID string, generatedAt time.Time, jobID int64) {
+	t.Helper()
+	if _, err := verifierDB.ExecContext(ctx, `
+        INSERT INTO provider_hardware_profiles
+            (provider_id, chip, chip_normalized, unified_memory_gb, macos_version, app_version, source, verified, last_reported_at)
+        VALUES ($1, 'Apple M4 Max', 'apple m4 max', 64, '15.0', '1.0.0', 'cli_hello', TRUE, $2)`,
+		providerID, generatedAt); err != nil {
+		t.Fatalf("verifier promote profile: %v", err)
+	}
+	if _, err := verifierDB.ExecContext(ctx, `
+        UPDATE hardware_verification_jobs SET status = 'verified', processed_at = now() WHERE id = $1`,
+		jobID); err != nil {
+		t.Fatalf("verifier finalize job: %v", err)
+	}
+}
+
+func assertCanExecuteFunction(t *testing.T, ctx context.Context, db *sql.DB, role, signature string) {
+	t.Helper()
+	var allowed bool
+	if err := db.QueryRowContext(ctx, `
+SELECT has_function_privilege(current_user, $1::regprocedure, 'EXECUTE')`,
+		signature,
+	).Scan(&allowed); err != nil {
+		t.Fatalf("%s function privilege %s: %v", role, signature, err)
+	}
+	if !allowed {
+		t.Fatalf("%s unexpectedly lacks EXECUTE on %s", role, signature)
+	}
+}
+
+func assertTablePrivilege(t *testing.T, ctx context.Context, db *sql.DB, role, table, priv string, want bool) {
+	t.Helper()
+	var allowed bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT has_table_privilege(current_user, $1, $2)`, table, priv,
+	).Scan(&allowed); err != nil {
+		t.Fatalf("%s table privilege %s %s: %v", role, table, priv, err)
+	}
+	if allowed != want {
+		t.Fatalf("%s has_table_privilege(%s, %s) = %v, want %v", role, table, priv, allowed, want)
+	}
+}
+
+// TestHardwareTrustMigrationUpDownReapply proves migration 019 is a reversible,
+// idempotent lifecycle against real Postgres: apply (via the harness) -> run
+// 019_..._down.sql -> re-apply. The down artifact must remove EVERY 019 object
+// (functions, workflow tables, roles, the source column + 3-column PK) and its
+// schema_migrations_spec017 version=19 row WITHOUT touching version 18
+// (apptrack). Re-applying must restore all of it.
+func TestHardwareTrustMigrationUpDownReapply(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	funcExists := func(name string) bool {
+		var n int
+		if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pg_proc WHERE proname = $1`, name).Scan(&n); err != nil {
+			t.Fatalf("count proc %s: %v", name, err)
+		}
+		return n > 0
+	}
+	tableExists := func(qualified string) bool {
+		var exists bool
+		if err := adminDB.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, qualified).Scan(&exists); err != nil {
+			t.Fatalf("regclass %s: %v", qualified, err)
+		}
+		return exists
+	}
+	columnExists := func(table, col string) bool {
+		var n int
+		if err := adminDB.QueryRowContext(ctx, `
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_name = $1 AND column_name = $2`, table, col).Scan(&n); err != nil {
+			t.Fatalf("column lookup %s.%s: %v", table, col, err)
+		}
+		return n == 1
+	}
+	pkColumns := func() string {
+		var cols string
+		if err := adminDB.QueryRowContext(ctx, `
+            SELECT COALESCE((
+                SELECT (array_agg(a.attname ORDER BY k.ord))::text
+                  FROM pg_constraint c
+                  JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                 WHERE c.conrelid = 'hardware_verification_trust'::regclass AND c.contype = 'p'
+            ), '')`).Scan(&cols); err != nil {
+			t.Fatalf("read trust PK columns: %v", err)
+		}
+		return cols
+	}
+	roleCount := func() int {
+		var n int
+		if err := adminDB.QueryRowContext(ctx, `
+            SELECT COUNT(*) FROM pg_roles
+             WHERE rolname IN ($1, $2, $3)`, roleHWTrustRequester, roleHWTrustApprover, roleHWTrustDefiner).Scan(&n); err != nil {
+			t.Fatalf("count trust roles: %v", err)
+		}
+		return n
+	}
+	versionPresent := func(v int) bool {
+		var n int
+		if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations_spec017 WHERE version = $1`, v).Scan(&n); err != nil {
+			t.Fatalf("count migration version %d: %v", v, err)
+		}
+		return n == 1
+	}
+
+	// Post-apply (up): every 019 object present.
+	for _, fn := range []string{"request_hardware_trust_approval", "approve_hardware_trust_approval", "revoke_hardware_trust_approval"} {
+		if !funcExists(fn) {
+			t.Fatalf("post-apply: function %s missing", fn)
+		}
+	}
+	if !tableExists("public.hardware_trust_pending") || !tableExists("public.hardware_trust_grants") {
+		t.Fatal("post-apply: workflow tables missing")
+	}
+	if !columnExists("hardware_verification_trust", "source") {
+		t.Fatal("post-apply: hardware_verification_trust.source missing")
+	}
+	if got := pkColumns(); got != "{provider_id,hardware_identity_hash,source}" {
+		t.Fatalf("post-apply: trust PK = %q, want 3-column", got)
+	}
+	if roleCount() != 3 {
+		t.Fatalf("post-apply: trust roles present = %d, want 3", roleCount())
+	}
+	if !versionPresent(19) {
+		t.Fatal("post-apply: schema_migrations_spec017 missing version 19")
+	}
+	if !versionPresent(18) {
+		t.Fatal("post-apply: schema_migrations_spec017 missing version 18 (apptrack)")
+	}
+
+	// Run the down artifact. It ships psql meta-commands (\set) that database/sql
+	// cannot execute; strip backslash lines and run the remaining SQL (the
+	// BEGIN/COMMIT transaction body executes fine over the simple query protocol).
+	downRaw, err := os.ReadFile("migrations/019_hardware_trust_operator_approval.down.sql")
+	if err != nil {
+		t.Fatalf("read 019 down artifact: %v", err)
+	}
+	var downSQL strings.Builder
+	for _, line := range strings.Split(string(downRaw), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), `\`) {
+			continue
+		}
+		downSQL.WriteString(line)
+		downSQL.WriteByte('\n')
+	}
+	if _, err := adminDB.ExecContext(ctx, downSQL.String()); err != nil {
+		t.Fatalf("apply 019 down artifact: %v", err)
+	}
+
+	// Post-down: every 019 object removed; version 19 gone; version 18 untouched.
+	for _, fn := range []string{"request_hardware_trust_approval", "approve_hardware_trust_approval", "revoke_hardware_trust_approval"} {
+		if funcExists(fn) {
+			t.Fatalf("post-down: function %s still present", fn)
+		}
+	}
+	if tableExists("public.hardware_trust_pending") || tableExists("public.hardware_trust_grants") {
+		t.Fatal("post-down: workflow tables still present")
+	}
+	if columnExists("hardware_verification_trust", "source") {
+		t.Fatal("post-down: hardware_verification_trust.source still present")
+	}
+	if got := pkColumns(); got != "{provider_id,hardware_identity_hash}" {
+		t.Fatalf("post-down: trust PK = %q, want restored 2-column", got)
+	}
+	if roleCount() != 0 {
+		t.Fatalf("post-down: trust roles still present = %d, want 0", roleCount())
+	}
+	if versionPresent(19) {
+		t.Fatal("post-down: schema_migrations_spec017 still records version 19")
+	}
+	if !versionPresent(18) {
+		t.Fatal("post-down: schema_migrations_spec017 lost version 18 (apptrack) — down must not touch 18")
+	}
+	if !tableExists("public.provider_register_attempts") {
+		t.Fatal("post-down: 018 apptrack table removed — down must not touch version 18 objects")
+	}
+
+	// Re-apply: 019 restored, idempotent for the rest.
+	if err := statsmigrations.Apply(ctx, adminDB); err != nil {
+		t.Fatalf("re-apply after down: %v", err)
+	}
+	for _, fn := range []string{"request_hardware_trust_approval", "approve_hardware_trust_approval", "revoke_hardware_trust_approval"} {
+		if !funcExists(fn) {
+			t.Fatalf("post-reapply: function %s missing", fn)
+		}
+	}
+	if got := pkColumns(); got != "{provider_id,hardware_identity_hash,source}" {
+		t.Fatalf("post-reapply: trust PK = %q, want 3-column", got)
+	}
+	if !versionPresent(19) {
+		t.Fatal("post-reapply: schema_migrations_spec017 missing version 19")
+	}
+	if roleCount() != 3 {
+		t.Fatalf("post-reapply: trust roles present = %d, want 3", roleCount())
+	}
+}
+
+// TestHardwareTrustSplitRolePrivileges proves the split-EXECUTE boundary and the
+// provider_onboarding read-only anti-fraud boundary against the real grants.
+func TestHardwareTrustSplitRolePrivileges(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	requesterDB := openRoleDB(t, fx, roleHWTrustRequester)
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+	onboardingDB := openRoleDB(t, fx, roleProviderOnboard)
+
+	// Requester: request only.
+	assertCanExecuteFunction(t, ctx, requesterDB, roleHWTrustRequester, sigHWTrustRequest)
+	assertCannotExecuteFunction(t, ctx, requesterDB, roleHWTrustRequester, sigHWTrustApprove)
+	assertCannotExecuteFunction(t, ctx, requesterDB, roleHWTrustRequester, sigHWTrustRevoke)
+
+	// Approver: approve + revoke, never request.
+	assertCanExecuteFunction(t, ctx, approverDB, roleHWTrustApprover, sigHWTrustApprove)
+	assertCanExecuteFunction(t, ctx, approverDB, roleHWTrustApprover, sigHWTrustRevoke)
+	assertCannotExecuteFunction(t, ctx, approverDB, roleHWTrustApprover, sigHWTrustRequest)
+
+	// provider_onboarding: SELECT on the trust table (admission re-check), but NO
+	// write on trust/pending/grants and NO EXECUTE on any definer function.
+	assertTablePrivilege(t, ctx, onboardingDB, roleProviderOnboard, "hardware_verification_trust", "SELECT", true)
+	for _, priv := range []string{"INSERT", "UPDATE", "DELETE"} {
+		assertTablePrivilege(t, ctx, onboardingDB, roleProviderOnboard, "hardware_verification_trust", priv, false)
+	}
+	for _, table := range []string{"hardware_trust_pending", "hardware_trust_grants"} {
+		for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+			assertTablePrivilege(t, ctx, onboardingDB, roleProviderOnboard, table, priv, false)
+		}
+	}
+	assertCannotExecuteFunction(t, ctx, onboardingDB, roleProviderOnboard, sigHWTrustRequest)
+	assertCannotExecuteFunction(t, ctx, onboardingDB, roleProviderOnboard, sigHWTrustApprove)
+	assertCannotExecuteFunction(t, ctx, onboardingDB, roleProviderOnboard, sigHWTrustRevoke)
+}
+
+// TestHardwareTrustSameActorRejection proves the DB dual-control guard: the same
+// operator cannot both request and approve.
+func TestHardwareTrustSameActorRejection(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	requesterDB := openRoleDB(t, fx, roleHWTrustRequester)
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+
+	jobID, _ := seedWaitingTrustJob(t, ctx, adminDB, "p-same-actor", "hash-same-actor", "sha-same-actor")
+	pendingID := "11111111-1111-1111-1111-111111111111"
+	requestedUntil := time.Now().UTC().Add(2 * time.Hour)
+
+	var gotProvider string
+	if err := requesterDB.QueryRowContext(ctx, `
+        SELECT out_provider_id
+          FROM request_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		pendingID, jobID, "operator:alice", requestedUntil, "same-actor reason").Scan(&gotProvider); err != nil {
+		t.Fatalf("request as operator:alice: %v", err)
+	}
+
+	// Approve as the SAME operator -> dual_control_required.
+	var ignored string
+	err := approverDB.QueryRowContext(ctx, `
+        SELECT out_source FROM approve_hardware_trust_approval($1::uuid, $2)`,
+		pendingID, "operator:alice").Scan(&ignored)
+	if err == nil || !contains(err.Error(), "dual_control_required") {
+		t.Fatalf("same-actor approve err = %v, want dual_control_required", err)
+	}
+}
+
+// TestHardwareTrustRequestApproveRevokeHappyPath drives the full lifecycle end to
+// end against real Postgres: request -> approve (writes an active operator_api
+// trust root) -> verifier promotes the profile -> revoke (expires the root and
+// demotes the profile since no active root of any source remains).
+func TestHardwareTrustRequestApproveRevokeHappyPath(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	requesterDB := openRoleDB(t, fx, roleHWTrustRequester)
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+	verifierDB := openRoleDB(t, fx, roleHardwareVerifier)
+
+	const providerID = "p-happy"
+	const hash = "hash-happy"
+	jobID, generatedAt := seedWaitingTrustJob(t, ctx, adminDB, providerID, hash, "sha-happy")
+	pendingID := "11111111-1111-1111-1111-111111111111"
+	requestedUntil := time.Now().UTC().Add(2 * time.Hour)
+
+	// Request (requester role).
+	var reqProvider, reqHash, reqChip string
+	var reqMem int
+	if err := requesterDB.QueryRowContext(ctx, `
+        SELECT out_provider_id, out_hardware_identity_hash, out_chip_normalized, out_unified_memory_gb
+          FROM request_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		pendingID, jobID, "operator:alice", requestedUntil, "durable operator approval").Scan(&reqProvider, &reqHash, &reqChip, &reqMem); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if reqProvider != providerID || reqHash != hash || reqChip != "apple m4 max" || reqMem != 64 {
+		t.Fatalf("request tuple = %s/%s/%s/%d, want %s/%s/apple m4 max/64", reqProvider, reqHash, reqChip, reqMem, providerID, hash)
+	}
+
+	// Approve (approver role) -> operator_api trust root.
+	var outSource string
+	var outExpires time.Time
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_source, out_effective_expires_at
+          FROM approve_hardware_trust_approval($1::uuid, $2)`,
+		pendingID, "operator:bob").Scan(&outSource, &outExpires); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if outSource != "operator_api" {
+		t.Fatalf("approve out_source = %q, want operator_api", outSource)
+	}
+
+	// Active operator_api trust row exists for the job tuple.
+	var trustCount int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM hardware_verification_trust
+         WHERE provider_id = $1 AND hardware_identity_hash = $2 AND source = 'operator_api'
+           AND (expires_at IS NULL OR expires_at > now())`, providerID, hash).Scan(&trustCount); err != nil {
+		t.Fatalf("count operator_api trust: %v", err)
+	}
+	if trustCount != 1 {
+		t.Fatalf("active operator_api trust rows = %d, want 1", trustCount)
+	}
+
+	// Verifier promotes the profile against the new trust root.
+	verifierPromote(t, ctx, verifierDB, providerID, generatedAt, jobID)
+	var verified bool
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = $1`, providerID).Scan(&verified); err != nil {
+		t.Fatalf("read promoted profile: %v", err)
+	}
+	if !verified {
+		t.Fatal("profile not promoted after approve + verifier promotion")
+	}
+
+	// Revoke (approver role) -> expires the operator_api root and demotes the
+	// profile since no active root of any source remains.
+	revokeGrantID := "22222222-2222-2222-2222-222222222222"
+	var nowUntrusted bool
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_now_untrusted
+          FROM revoke_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		revokeGrantID, providerID, hash, "operator:bob", "operator revoke").Scan(&nowUntrusted); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if !nowUntrusted {
+		t.Fatal("revoke out_now_untrusted = false, want true (sole operator_api root removed)")
+	}
+
+	var activeAfter int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM hardware_verification_trust
+         WHERE provider_id = $1 AND hardware_identity_hash = $2
+           AND (expires_at IS NULL OR expires_at > now())`, providerID, hash).Scan(&activeAfter); err != nil {
+		t.Fatalf("count active trust after revoke: %v", err)
+	}
+	if activeAfter != 0 {
+		t.Fatalf("active trust rows after revoke = %d, want 0", activeAfter)
+	}
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = $1`, providerID).Scan(&verified); err != nil {
+		t.Fatalf("read demoted profile: %v", err)
+	}
+	if verified {
+		t.Fatal("profile still verified after revoke; demotion did not fire")
+	}
+}
+
+// TestHardwareTrustConcurrency proves the row/advisory-lock serialization the
+// migration relies on, deterministically (no sleeps): (A) while an approval holds
+// FOR SHARE on the bound job row, the verifier's FOR UPDATE SKIP LOCKED claim
+// skips it — so an approval and a verifier pass cannot both claim the job; and
+// (B) the approval holds the per-provider advisory lock so a concurrent approve/
+// request/revoke on the same provider is serialized (pg_try_advisory_xact_lock
+// on the same key returns false while held, true once released).
+func TestHardwareTrustConcurrency(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	requesterDB := openRoleDB(t, fx, roleHWTrustRequester)
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+
+	const providerID = "p-concurrency"
+	const hash = "hash-concurrency"
+	jobID, _ := seedWaitingTrustJob(t, ctx, adminDB, providerID, hash, "sha-concurrency")
+	pendingID := "11111111-1111-1111-1111-111111111111"
+	requestedUntil := time.Now().UTC().Add(2 * time.Hour)
+
+	var reqProvider string
+	if err := requesterDB.QueryRowContext(ctx, `
+        SELECT out_provider_id FROM request_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		pendingID, jobID, "operator:alice", requestedUntil, "concurrency reason").Scan(&reqProvider); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	// Open a transaction on the approver connection and run approve inside it, so
+	// its FOR SHARE (job row) + advisory (per-provider) locks are held until commit.
+	tx, err := approverDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin approve tx: %v", err)
+	}
+	var outSource string
+	if err := tx.QueryRowContext(ctx, `
+        SELECT out_source FROM approve_hardware_trust_approval($1::uuid, $2)`,
+		pendingID, "operator:bob").Scan(&outSource); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("approve inside tx: %v", err)
+	}
+
+	// (A) Competing verifier claim skips the FOR SHARE-locked job row.
+	var claimed int64
+	err = adminDB.QueryRowContext(ctx, `
+        SELECT id FROM hardware_verification_jobs
+         WHERE id = $1 AND status = 'waiting_trust'
+         FOR UPDATE SKIP LOCKED`, jobID).Scan(&claimed)
+	if err != sql.ErrNoRows {
+		_ = tx.Rollback()
+		t.Fatalf("verifier claim during held approval = (id=%d, err=%v), want skipped (ErrNoRows)", claimed, err)
+	}
+
+	// (B) Per-provider advisory lock is held (matches the function's key).
+	var lockFree bool
+	if err := adminDB.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(582026, hashtext($1))`, providerID).Scan(&lockFree); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("try advisory lock while held: %v", err)
+	}
+	if lockFree {
+		_ = tx.Rollback()
+		t.Fatal("pg_try_advisory_xact_lock succeeded while approval holds it; advisory serialization broken")
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit approve tx: %v", err)
+	}
+
+	// After commit the locks release: the job is still waiting_trust (approval does
+	// not finalize the job), so the verifier claim now succeeds, and the advisory
+	// key is free.
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT id FROM hardware_verification_jobs
+         WHERE id = $1 AND status = 'waiting_trust'
+         FOR UPDATE SKIP LOCKED`, jobID).Scan(&claimed); err != nil {
+		t.Fatalf("verifier claim after commit: %v", err)
+	}
+	if claimed != jobID {
+		t.Fatalf("verifier claim after commit = %d, want %d", claimed, jobID)
+	}
+	if err := adminDB.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(582026, hashtext($1))`, providerID).Scan(&lockFree); err != nil {
+		t.Fatalf("try advisory lock after commit: %v", err)
+	}
+	if !lockFree {
+		t.Fatal("advisory lock still held after approval committed")
+	}
+}
+
+// TestHardwareTrustDemotionAndSourceCoexistence proves per-source coexistence and
+// that demotion fires ONLY when no active trust root of ANY source remains: an
+// inventory root and an operator_api root for the same tuple coexist; revoking
+// the operator_api root while the inventory root is still active does NOT demote
+// (out_now_untrusted=false), and the source-agnostic demotion sweep (mirroring
+// applyTrustDemotions) is a no-op; only after the inventory root also lapses does
+// the sweep demote the profile — showing revoke and the sweep share one predicate
+// and neither double-demotes nor loses a demotion.
+func TestHardwareTrustDemotionAndSourceCoexistence(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	requesterDB := openRoleDB(t, fx, roleHWTrustRequester)
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+	verifierDB := openRoleDB(t, fx, roleHardwareVerifier)
+
+	const providerID = "p-coexist-demote"
+	const hash = "hash-coexist-demote"
+	jobID, generatedAt := seedWaitingTrustJob(t, ctx, adminDB, providerID, hash, "sha-coexist-demote")
+
+	// Independent inventory root for the same tuple (coexists via the 3-column PK).
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_trust
+            (provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb, trusted_by, source)
+        VALUES ($1, $2, 'apple m4 max', 64, 'inventory-sync', 'inventory')`, providerID, hash); err != nil {
+		t.Fatalf("seed inventory root: %v", err)
+	}
+
+	// Operator approval -> operator_api root; verifier promotes the profile.
+	pendingID := "11111111-1111-1111-1111-111111111111"
+	requestedUntil := time.Now().UTC().Add(2 * time.Hour)
+	var reqProvider string
+	if err := requesterDB.QueryRowContext(ctx, `
+        SELECT out_provider_id FROM request_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		pendingID, jobID, "operator:alice", requestedUntil, "coexist reason").Scan(&reqProvider); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	var outSource string
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_source FROM approve_hardware_trust_approval($1::uuid, $2)`,
+		pendingID, "operator:bob").Scan(&outSource); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	verifierPromote(t, ctx, verifierDB, providerID, generatedAt, jobID)
+
+	// Both roots coexist as two independent rows.
+	var rowCount int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM hardware_verification_trust
+         WHERE provider_id = $1 AND hardware_identity_hash = $2`, providerID, hash).Scan(&rowCount); err != nil {
+		t.Fatalf("count coexisting roots: %v", err)
+	}
+	if rowCount != 2 {
+		t.Fatalf("coexisting trust rows = %d, want 2 (inventory + operator_api)", rowCount)
+	}
+
+	// Revoke operator_api while inventory is active -> NOT untrusted, no demotion.
+	revokeGrantID := "22222222-2222-2222-2222-222222222222"
+	var nowUntrusted bool
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_now_untrusted FROM revoke_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		revokeGrantID, providerID, hash, "operator:bob", "revoke with inventory active").Scan(&nowUntrusted); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if nowUntrusted {
+		t.Fatal("revoke out_now_untrusted = true while inventory root active, want false")
+	}
+	var verified bool
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = $1`, providerID).Scan(&verified); err != nil {
+		t.Fatalf("read profile after operator revoke: %v", err)
+	}
+	if !verified {
+		t.Fatal("profile demoted after operator revoke while inventory root active; want still verified")
+	}
+
+	// The source-agnostic demotion sweep (mirrors applyTrustDemotions) is a no-op
+	// while the inventory root backs the verified job.
+	sweep := func() int64 {
+		res, err := adminDB.ExecContext(ctx, `
+            UPDATE provider_hardware_profiles ph
+               SET verified = FALSE
+             WHERE ph.provider_id = $1
+               AND ph.verified = TRUE
+               AND ph.source <> 'operator'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM hardware_verification_jobs j
+                     JOIN hardware_verification_trust t
+                       ON t.provider_id = j.provider_id
+                      AND t.hardware_identity_hash = j.evidence #>> '{hardware,hardware_identity_hash}'
+                      AND t.chip_normalized = j.chip_normalized
+                      AND t.unified_memory_gb = j.unified_memory_gb
+                      AND (t.expires_at IS NULL OR t.expires_at > now())
+                    WHERE j.status = 'verified'
+                      AND j.provider_id = ph.provider_id
+                      AND j.chip_normalized = ph.chip_normalized
+                      AND j.unified_memory_gb = ph.unified_memory_gb
+                      AND j.os_version = ph.macos_version
+                      AND j.binary_version = ph.app_version
+                      AND j.generated_at = ph.last_reported_at
+               )`, providerID)
+		if err != nil {
+			t.Fatalf("demotion sweep: %v", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			t.Fatalf("sweep rows affected: %v", err)
+		}
+		return n
+	}
+	if n := sweep(); n != 0 {
+		t.Fatalf("demotion sweep affected %d rows while inventory root active, want 0", n)
+	}
+
+	// Expire the inventory root: now no active root of any source remains, so the
+	// sweep demotes exactly once (no lost demotion, and re-running is idempotent).
+	if _, err := adminDB.ExecContext(ctx, `
+        UPDATE hardware_verification_trust SET expires_at = now() - interval '1 hour'
+         WHERE provider_id = $1 AND hardware_identity_hash = $2 AND source = 'inventory'`, providerID, hash); err != nil {
+		t.Fatalf("expire inventory root: %v", err)
+	}
+	if n := sweep(); n != 1 {
+		t.Fatalf("demotion sweep affected %d rows after all roots inactive, want 1", n)
+	}
+	if n := sweep(); n != 0 {
+		t.Fatalf("second demotion sweep affected %d rows, want 0 (idempotent, no double-demote)", n)
+	}
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = $1`, providerID).Scan(&verified); err != nil {
+		t.Fatalf("read profile after full demotion: %v", err)
+	}
+	if verified {
+		t.Fatal("profile still verified after all roots inactive; demotion did not fire")
 	}
 }
 

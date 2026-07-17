@@ -131,6 +131,8 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	t.Setenv("ONBOARDING_AUTH_POLICY_REQUEST_DSN", "postgres://requester@localhost/macprovider")
 	t.Setenv("ONBOARDING_AUTH_POLICY_APPROVE_DSN", "postgres://approver@localhost/macprovider")
 	t.Setenv("ONBOARDING_AUTH_POLICY_CUTOVER_DSN", "postgres://cutover@localhost/macprovider")
+	t.Setenv("ONBOARDING_HARDWARE_TRUST_REQUEST_DSN", "postgres://hwtrust_requester@localhost/macprovider")
+	t.Setenv("ONBOARDING_HARDWARE_TRUST_APPROVE_DSN", "postgres://hwtrust_approver@localhost/macprovider")
 	t.Setenv("APPLE_TEAM_ID", "TEAMID1234")
 
 	cfg, err := Load(filepath.Join("..", "..", "dist", "coordinator.yaml"))

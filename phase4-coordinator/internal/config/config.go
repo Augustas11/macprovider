@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
 	"gopkg.in/yaml.v3"
 )
 
@@ -150,6 +151,8 @@ type OnboardingConfig struct {
 	AuthPolicyRequestDSN    string            `yaml:"auth_policy_request_dsn"`
 	AuthPolicyApproveDSN    string            `yaml:"auth_policy_approve_dsn"`
 	AuthPolicyCutoverDSN    string            `yaml:"auth_policy_cutover_dsn"`
+	HardwareTrustRequestDSN string            `yaml:"hardware_trust_request_dsn"`
+	HardwareTrustApproveDSN string            `yaml:"hardware_trust_approve_dsn"`
 	BundleID                string            `yaml:"bundle_id"`
 	AppleTeamID             string            `yaml:"apple_team_id"`
 	CoordinatorDomain       string            `yaml:"coordinator_domain"`
@@ -1288,6 +1291,8 @@ func (c *Config) resolveEnv() error {
 		{"onboarding.auth_policy_request_dsn", &c.Onboarding.AuthPolicyRequestDSN},
 		{"onboarding.auth_policy_approve_dsn", &c.Onboarding.AuthPolicyApproveDSN},
 		{"onboarding.auth_policy_cutover_dsn", &c.Onboarding.AuthPolicyCutoverDSN},
+		{"onboarding.hardware_trust_request_dsn", &c.Onboarding.HardwareTrustRequestDSN},
+		{"onboarding.hardware_trust_approve_dsn", &c.Onboarding.HardwareTrustApproveDSN},
 		{"onboarding.apple_team_id", &c.Onboarding.AppleTeamID},
 	}
 	for _, f := range onboardingSecrets {
@@ -1942,6 +1947,17 @@ func (c Config) validateProofOfWeights() error {
 		if p.AutotuneEvidenceTTLDays <= 0 {
 			return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when require_autotune_hello_gate is true")
 		}
+		// FIX 2 (issue #582): the hello-gate admission window (LatestVerified filters
+		// evidence to AutotuneEvidenceTTLDays) must be at least as wide as the
+		// approve/verifier evidence-age limit (hardwareverify.MaxEvidenceAgeDays). If
+		// the TTL is set lower, a job whose evidence has aged past it is still
+		// approvable+promotable (approval gates on MaxEvidenceAgeDays, not the TTL) yet
+		// LatestVerified excludes it — so admission stays blocked even though every
+		// operator action "succeeded" (a false success). Requiring TTL >= the verifier
+		// limit closes that window.
+		if p.AutotuneEvidenceTTLDays < hardwareverify.MaxEvidenceAgeDays {
+			return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days (%d) must be >= hardwareverify.MaxEvidenceAgeDays (%d) when require_autotune_hello_gate is true, else evidence approvable within the verifier's %d-day window is excluded from the hello-gate admission window and admission stays blocked", p.AutotuneEvidenceTTLDays, hardwareverify.MaxEvidenceAgeDays, hardwareverify.MaxEvidenceAgeDays)
+		}
 		if err := c.requireAutotuneEvidenceFeeds(); err != nil {
 			return err
 		}
@@ -2078,6 +2094,12 @@ func (c Config) validateOnboarding() error {
 	}
 	if strings.TrimSpace(o.AuthPolicyCutoverDSN) == "" {
 		return fmt.Errorf("onboarding.auth_policy_cutover_dsn must be set when onboarding.app_track_register_enabled is true")
+	}
+	if strings.TrimSpace(o.HardwareTrustRequestDSN) == "" {
+		return fmt.Errorf("onboarding.hardware_trust_request_dsn must be set when onboarding.app_track_register_enabled is true")
+	}
+	if strings.TrimSpace(o.HardwareTrustApproveDSN) == "" {
+		return fmt.Errorf("onboarding.hardware_trust_approve_dsn must be set when onboarding.app_track_register_enabled is true")
 	}
 	if strings.TrimSpace(o.AppleTeamID) == "" {
 		return fmt.Errorf("onboarding.apple_team_id must be set when onboarding.app_track_register_enabled is true")

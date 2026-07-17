@@ -537,6 +537,8 @@ func main() {
 				cfg.Onboarding.AuthPolicyRequestDSN,
 				cfg.Onboarding.AuthPolicyApproveDSN,
 				cfg.Onboarding.AuthPolicyCutoverDSN,
+				cfg.Onboarding.HardwareTrustRequestDSN,
+				cfg.Onboarding.HardwareTrustApproveDSN,
 			)
 		} else {
 			// Keep the primary authority available to reconcile referral mints
@@ -553,6 +555,7 @@ func main() {
 		if cfg.Onboarding.AppTrackRegisterEnabled {
 			wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
 			wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+			wsOpts = append(wsOpts, providerws.WithHardwareTrustAdminStore(onboardingStore))
 		}
 	}
 	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
@@ -563,6 +566,11 @@ func main() {
 			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires onboarding postgres store")
 		}
 		wsOpts = append(wsOpts, providerws.WithAutotuneHelloGate(autotuneCatalog, autotune.NewPGEvidenceStore(onboardingStore.DB())))
+		// Issue #582 FIX A/B: active-session trust enforcement (bounded
+		// revalidation sweep + advisory-locked registration re-check) rides the
+		// same provider_onboarding handle and is wired alongside the admission
+		// trust join so it is active exactly when the hello gate is.
+		wsOpts = append(wsOpts, providerws.WithProviderTrustChecker(onboardingStore))
 		logger.Info().
 			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Str("autotune_catalog_version", autotuneCatalog.Version).

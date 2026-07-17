@@ -815,6 +815,16 @@ func TestOnboardingEnabledRequiresStartupSecrets(t *testing.T) {
 	}
 
 	cfg.Onboarding.AuthPolicyCutoverDSN = "postgres://provider_auth_policy_cutover@127.0.0.1/db?sslmode=disable"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.hardware_trust_request_dsn") {
+		t.Fatalf("enabled without hardware_trust_request_dsn err=%v", err)
+	}
+
+	cfg.Onboarding.HardwareTrustRequestDSN = "postgres://hardware_trust_requester@127.0.0.1/db?sslmode=disable"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.hardware_trust_approve_dsn") {
+		t.Fatalf("enabled without hardware_trust_approve_dsn err=%v", err)
+	}
+
+	cfg.Onboarding.HardwareTrustApproveDSN = "postgres://hardware_trust_approver@127.0.0.1/db?sslmode=disable"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.apple_team_id") {
 		t.Fatalf("enabled without apple_team_id err=%v", err)
 	}
@@ -848,6 +858,8 @@ func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
 	cfg.Onboarding.AuthPolicyRequestDSN = "postgres://provider_auth_policy_requester@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AuthPolicyApproveDSN = "postgres://provider_auth_policy_approver@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AuthPolicyCutoverDSN = "postgres://provider_auth_policy_cutover@127.0.0.1/db?sslmode=disable"
+	cfg.Onboarding.HardwareTrustRequestDSN = "postgres://hardware_trust_requester@127.0.0.1/db?sslmode=disable"
+	cfg.Onboarding.HardwareTrustApproveDSN = "postgres://hardware_trust_approver@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AppleTeamID = "TEAM12345"
 	cfg.Onboarding.ASNPrefixes = map[string]string{"198.51.100.0/24": "AS64500"}
 

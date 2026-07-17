@@ -7,6 +7,28 @@ import (
 	"time"
 )
 
+// TestPromotionDecisionReparksWhenTrustRootInactive pins FIX 2 (issue #582): a
+// job that passed Evaluate but whose backing hardware trust root went inactive
+// (expired/revoked/deleted) between batch selection and the promoting write must
+// NOT be promoted — promoteJob re-parks it as waiting_trust with a reason the
+// operator approval path can re-drive. The live SQL round-trip (the EXISTS
+// re-check against hardware_verification_trust) additionally requires a live
+// PostgreSQL smoke, which this environment cannot run; this unit test pins the
+// promote-vs-repark decision and that the re-park reason matches the approval
+// gate.
+func TestPromotionDecisionReparksWhenTrustRootInactive(t *testing.T) {
+	promote, reason := promotionDecision(false)
+	if promote {
+		t.Fatal("promotionDecision(false): an inactive trust root must NOT promote")
+	}
+	if reason != "missing_trusted_hardware_identity" {
+		t.Fatalf("re-park reason = %q, want missing_trusted_hardware_identity (must match the operator approval gate)", reason)
+	}
+	if promote, _ := promotionDecision(true); !promote {
+		t.Fatal("promotionDecision(true): an active trust root must promote")
+	}
+}
+
 func TestEvaluateVerifiesFullyBoundTrustedHardwareEvidence(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	decision := evaluateAt(validJob(t, now, "Apple M5", "C"), now)
