@@ -41,7 +41,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-030 | Losslessness Probe | v0.1 | draft | pending | pending corpus migration | [SPEC-030-losslessness-probe.md](SPEC-030-losslessness-probe.md) |
 | SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.1 | draft | pending | pending corpus migration | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
 | SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.1 | draft | pending | pending corpus migration | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
-| SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.6 | draft | pending | pending: 1 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
+| SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.6.1 | draft | pending | pending: 1 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.1 | normative | pending | pending corpus migration | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 <!-- AUTOGEN:spec-index END -->
 

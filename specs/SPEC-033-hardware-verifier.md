@@ -1,7 +1,7 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.6-draft
-**Date:** 2026-07-12
+**Status:** v0.6.1-draft
+**Date:** 2026-07-17
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
 **Producer / enqueue boundary (see §3.1):** the provider **binary** builds the evidence envelope (`phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift`) and submits it over an **authenticated HTTP `POST /v1/providers/hardware-evidence`** (`phase4-coordinator/internal/onboarding/hardware_evidence.go` `HandleHardwareEvidence`), which enqueues a `hardware_verification_jobs` row. SPEC-023 owns the *content* (benchmarks, recommended model); the HTTP envelope + enqueue + replay state machine are owned here.
@@ -251,6 +251,13 @@ authenticated bearer identity; the handler (`HandleHardwareEvidence`) binds the 
 
 The pre-job `cli_hello` profile upsert is why a later app-registration (§10.4 R1) finds an existing
 row to convert.
+
+**SPEC-033-R001 — Preserve provider hardware-profile writes under least privilege.** The
+authenticated CLI evidence-enqueue path and the signed app-registration profile path MUST execute
+under the column-limited `provider_onboarding` role without requiring `SELECT` on write-only
+profile payload columns. On conflict, each path MUST keep `source` coordinator-controlled, MUST
+NOT write `verified`, and MUST NOT replace a profile whose `last_reported_at` is newer than the
+incoming observation.
 
 ---
 
@@ -604,6 +611,12 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.6.1-draft (2026-07-17) — stable requirement mapping for physical acceptance.**
+Defines SPEC-033-R001 for the existing §2.7/§3.1 least-privilege hardware-profile write contract.
+The requirement covers both coordinator-owned onboarding paths whose conflict updates share the
+same column-limited runtime role. No provider authority, verifier decision, or production state
+changes.
 
 **v0.6-draft (2026-07-12) — audit reconciliation (SPEC-033 R5, 3-lane codex).**
 R5 confirmed the entire spec against code — all three lanes returned **0 C/H/M** except one shared

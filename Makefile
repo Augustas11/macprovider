@@ -18,12 +18,12 @@ verify-autotune-catalog:
 test-coordinator:
 	cd phase4-coordinator && go test ./...
 
-# SPEC-017 Step 1 — Postgres-dependent integration tests
-# (AC-9 / AC-10 / AC-19 / AC-20). Tagged with `integration` so
+# SPEC-017 Step 1 and provider-onboarding Postgres integration tests.
+# Tagged with `integration` so
 # `make test-coordinator` does NOT require a Docker daemon.
 # CI runs this as a separate job that provides the daemon.
 test-coordinator-integration:
-	cd phase4-coordinator && go test -tags=integration -timeout 5m ./internal/stats/... ./cmd/coordinator/...
+	cd phase4-coordinator && go test -tags=integration -timeout 5m ./internal/stats/... ./internal/onboarding/... ./cmd/coordinator/...
 
 # SPEC-017 AC-16 — golangci-lint with depguard + forbidigo.
 # Pinned version so the target is hermetic on a fresh checkout.
