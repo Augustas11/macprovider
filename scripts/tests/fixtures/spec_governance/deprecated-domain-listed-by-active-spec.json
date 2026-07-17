@@ -1,0 +1,1 @@
+{"mutation":{"operation":"deprecated_domain_listed_by_active_spec"},"expected":"authority domain 'provider-wire-protocol' is deprecated and must not be listed as active"}

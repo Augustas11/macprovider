@@ -231,6 +231,13 @@ def _mapping_selector(value: str) -> str | None:
     return None
 
 
+def _normalized_mapping_file(root: Path, value: str) -> str:
+    try:
+        return str((root / _mapping_file(value)).resolve().relative_to(root.resolve()))
+    except (OSError, ValueError):
+        return _mapping_file(value)
+
+
 def _validate_mapping_paths(root: Path, mappings: list[str], location: str, result: ValidationResult) -> None:
     for index, mapping in enumerate(mappings):
         file_part = _mapping_file(mapping)
@@ -766,7 +773,9 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
             domain = domain_records.get(domain_id)
             if domain is None:
                 result.error(spec_id, f"unknown authority domain {domain_id!r}")
-            elif domain.get("status") != "deprecated" and domain.get("owner_spec") != spec_id:
+            elif domain.get("status") == "deprecated":
+                result.error(spec_id, f"authority domain {domain_id!r} is deprecated and must not be listed as active")
+            elif domain.get("owner_spec") != spec_id:
                 result.error(spec_id, f"authority domain {domain_id!r} is owned by {domain.get('owner_spec')}")
 
     active_domain_owners: dict[str, list[str]] = {}
@@ -804,6 +813,24 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
             result.error(spec_id, "complete requirement migration requires at least one structured requirement")
         if spec.get("status") in {"implemented-unverified", "physically-verified"} and not owned_requirements:
             result.error(spec_id, f"{spec.get('status')} requires at least one owned requirement")
+        if spec.get("implementation_status") == "implemented" and not owned_requirements:
+            result.error(spec_id, "implementation_status implemented requires at least one owned requirement")
+        if spec.get("status") == "implemented-unverified":
+            nonconformant = [
+                item.get("requirement_id")
+                for item in owned_requirements
+                if item.get("state") != "conformant"
+            ]
+            if nonconformant:
+                result.error(spec_id, "implemented-unverified requires every owned requirement to be conformant")
+        if spec.get("implementation_status") == "implemented":
+            nonconformant = [
+                item.get("requirement_id")
+                for item in owned_requirements
+                if item.get("state") != "conformant"
+            ]
+            if nonconformant:
+                result.error(spec_id, "implementation_status implemented requires every owned requirement to be conformant")
         if spec.get("production_status") == "physically-verified":
             result.error(spec_id, "production_status physically-verified requires signed journey-result contract before promotion")
         if spec.get("status") == "physically-verified":
@@ -819,7 +846,7 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
     for requirement_id, requirement in requirements_by_id.items():
         for mapping_key in ("implementation", "tests"):
             for mapping in requirement.get(mapping_key, []) if isinstance(requirement.get(mapping_key), list) else []:
-                if isinstance(mapping, str) and mapping.startswith("specs/"):
+                if isinstance(mapping, str) and SPEC_PATH_RE.match(_normalized_mapping_file(root, mapping)):
                     result.error(requirement_id, f"{mapping_key} mapping must not point at SPEC Markdown as implementation or test evidence")
         for domain_id in spec_records.get(requirement.get("spec_id"), {}).get("authority_domains", []):
             domain = domain_records.get(domain_id, {})

@@ -232,6 +232,10 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
     elif operation == "implemented_unverified_without_requirements":
         specs[1]["status"] = "implemented-unverified"
         specs[1]["requirement_id_migration"] = "complete"
+    elif operation == "implemented_unverified_without_conformance":
+        specs[0]["status"] = "implemented-unverified"
+    elif operation == "implementation_status_implemented_without_conformance":
+        specs[0]["implementation_status"] = "implemented"
     elif operation == "physically_verified_without_proof":
         specs[0]["status"] = "physically-verified"
     elif operation == "production_physically_verified_without_signed_result":
@@ -291,9 +295,16 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         requirements[0]["implementation"] = ["specs/SPEC-001-one.md:Human contract text"]
         requirements[0]["tests"] = ["specs/SPEC-001-one.md:Human contract text"]
         requirements[0]["gap"] = None
+    elif operation == "normalized_spec_markdown_mapping":
+        requirements[0]["state"] = "conformant"
+        requirements[0]["implementation"] = ["./specs/SPEC-001-one.md:Human contract text"]
+        requirements[0]["tests"] = ["./specs/SPEC-001-one.md:Human contract text"]
+        requirements[0]["gap"] = None
     elif operation == "deprecated_authority_owner":
         specs[0]["status"] = "deprecated"
         specs[0]["deprecation_rationale"] = "retired"
+    elif operation == "deprecated_domain_listed_by_active_spec":
+        authority["domains"][0]["status"] = "deprecated"
     elif operation == "malformed_owner_spec":
         authority["domains"][0]["owner_spec"] = []
     elif operation == "malformed_consumers":
