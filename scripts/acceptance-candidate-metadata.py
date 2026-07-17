@@ -26,6 +26,7 @@ SIGNING_DOMAIN = b"macprovider.acceptance-candidate.v1\n"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
+SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_REF = re.compile(r"^refs/heads/[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,252}[A-Za-z0-9._-])?$")
 ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$")
@@ -272,7 +273,7 @@ def command_verify_unsigned(args: argparse.Namespace) -> None:
             fail(f"unsigned manifest: {label} mismatch")
 
 
-def compatibility_identity(path: pathlib.Path) -> str:
+def validated_compatibility_manifest(path: pathlib.Path) -> tuple[dict, str]:
     value = strict_json(path, "compatibility manifest")
     exact_keys(value, {"schema_version", "signatures", "signed"}, "compatibility manifest")
     if value["schema_version"] != "macprovider.compatibility-set-envelope.v1":
@@ -290,6 +291,11 @@ def compatibility_identity(path: pathlib.Path) -> str:
     identity = f"{repository}:{tag}@{commit}"
     if signed.get("compatibility_set_id") != identity:
         fail("compatibility manifest: compatibility set id mismatch")
+    return signed, identity
+
+
+def compatibility_identity(path: pathlib.Path) -> str:
+    _, identity = validated_compatibility_manifest(path)
     return identity
 
 
@@ -297,10 +303,32 @@ def command_compatibility_id(args: argparse.Namespace) -> None:
     print(compatibility_identity(args.input))
 
 
+def compatibility_provider_cli_version(path: pathlib.Path, expected_identity: str) -> str:
+    signed, identity = validated_compatibility_manifest(path)
+    if identity != expected_identity:
+        fail("compatibility manifest: release identity mismatch")
+    components = signed.get("components")
+    if not isinstance(components, dict):
+        fail("compatibility manifest: missing components")
+    provider_cli = components.get("provider_cli")
+    if not isinstance(provider_cli, dict):
+        fail("compatibility manifest: missing provider CLI component")
+    return require_string(
+        provider_cli.get("version"),
+        SEMVER,
+        "compatibility provider CLI version",
+    )
+
+
 def build_pearl(args: argparse.Namespace) -> dict:
     repository = require_string(args.repository, REPOSITORY, "repository")
     tag = require_string(args.tag, TAG, "tag")
     commit = require_string(args.commit, HEX40, "commit")
+    compatibility_set_id = f"{repository}:{tag}@{commit}"
+    provider_cli_version = compatibility_provider_cli_version(
+        args.compatibility_manifest,
+        compatibility_set_id,
+    )
     catalog = args.catalog_directory
     files = {name: sha256(catalog / name, f"catalog {name}") for name in CATALOG_NAMES}
     release = strict_json(catalog / "release.json", "catalog release", catalog_release=True)
@@ -315,6 +343,7 @@ def build_pearl(args: argparse.Namespace) -> dict:
     return {
         "architecture": "linux-amd64",
         "catalog": {"files": files, "policy_version": policy_version, "release_id": release_id},
+        "channel": "private_acceptance",
         "commit": commit,
         "components": {
             "coordinator": {
@@ -335,7 +364,7 @@ def build_pearl(args: argparse.Namespace) -> dict:
             }
         },
         "provider_admission_rollout": rollout,
-        "provider_advertised_version": tag.removeprefix("v"),
+        "provider_advertised_version": provider_cli_version,
         "release_version": tag.removeprefix("v"),
         "repository": repository,
         "schema_version": 1,
@@ -625,6 +654,7 @@ def parser() -> argparse.ArgumentParser:
     pearl.add_argument("--repository", required=True)
     pearl.add_argument("--tag", required=True)
     pearl.add_argument("--commit", required=True)
+    pearl.add_argument("--compatibility-manifest", required=True, type=pathlib.Path)
     pearl.add_argument("--provider-admission-policy", choices=("bridge_required", "strict_post_migration"), required=True)
     pearl.add_argument("--catalog-directory", required=True, type=pathlib.Path)
     pearl.add_argument("--coordinator", required=True, type=pathlib.Path)

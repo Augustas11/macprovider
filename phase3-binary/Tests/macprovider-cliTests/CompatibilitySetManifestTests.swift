@@ -35,12 +35,14 @@ final class CompatibilitySetManifestTests: XCTestCase {
 
         let manifest = try CompatibilitySetManifest.loadValidated(
             from: fixture.root,
-            expectedVersion: fixture.version,
+            expectedProviderVersion: fixture.providerCLIVersion,
             publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
         )
 
         XCTAssertEqual(manifest.compatibilitySetID, fixture.compatibilitySetID)
         XCTAssertEqual(manifest.version, fixture.version)
+        XCTAssertEqual(manifest.providerCLIVersion, fixture.providerCLIVersion)
+        XCTAssertEqual(manifest.malibuAppVersion, fixture.malibuAppVersion)
         XCTAssertEqual(manifest.catalogReleaseID, "published-test-release")
         XCTAssertEqual(manifest.catalogPolicyVersion, "catalog-policy-v1")
         XCTAssertEqual(manifest.maintenanceLeaseSeconds, 1_200)
@@ -54,6 +56,38 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertFalse(CompatibilitySetManifest.localActivationMembers.contains("coordinator_admission"))
     }
 
+    func testInstalledManifestResolutionFollowsNormalBinarySymlinkTopology() throws {
+        let fixture = try CompatibilityManifestFixture()
+        let realBinary = fixture.root.appendingPathComponent("macprovider-cli")
+        try Data("#!/bin/sh\n".utf8).write(to: realBinary)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: realBinary.path
+        )
+        let binDirectory = fixture.root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binDirectory, withIntermediateDirectories: false)
+        let linkedBinary = binDirectory.appendingPathComponent("macprovider-cli")
+        try FileManager.default.createSymbolicLink(
+            at: linkedBinary,
+            withDestinationURL: realBinary
+        )
+
+        let manifest = try XCTUnwrap(
+            CompatibilitySetManifest.loadInstalled(
+                executableURL: linkedBinary,
+                expectedVersion: fixture.providerCLIVersion,
+                publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+            )
+        )
+
+        XCTAssertEqual(
+            CompatibilitySetManifest.resolvedExecutableURL(linkedBinary),
+            realBinary.standardizedFileURL
+        )
+        XCTAssertEqual(manifest.compatibilitySetID, fixture.compatibilitySetID)
+        XCTAssertEqual(manifest.providerCLIVersion, fixture.providerCLIVersion)
+    }
+
     func testCatalogMutationIsRejectedAfterSignatureVerification() throws {
         let fixture = try CompatibilityManifestFixture()
         try Data("tampered".utf8).write(
@@ -63,7 +97,7 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertThrowsError(
             try CompatibilitySetManifest.loadValidated(
                 from: fixture.root,
-                expectedVersion: fixture.version,
+                expectedProviderVersion: fixture.providerCLIVersion,
                 publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
             )
         ) { error in
@@ -92,7 +126,7 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertThrowsError(
             try CompatibilitySetManifest.loadValidated(
                 from: fixture.root,
-                expectedVersion: fixture.version,
+                expectedProviderVersion: fixture.providerCLIVersion,
                 publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
             )
         ) { error in
@@ -112,7 +146,7 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertThrowsError(
             try CompatibilitySetManifest.loadValidated(
                 from: fixture.root,
-                expectedVersion: fixture.version,
+                expectedProviderVersion: fixture.providerCLIVersion,
                 publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
             )
         ) { error in
@@ -140,7 +174,7 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertThrowsError(
             try CompatibilitySetManifest.loadValidated(
                 from: fixture.root,
-                expectedVersion: fixture.version,
+                expectedProviderVersion: fixture.providerCLIVersion,
                 publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
             )
         ) { error in
@@ -166,7 +200,7 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertThrowsError(
             try CompatibilitySetManifest.loadValidated(
                 from: fixture.root,
-                expectedVersion: fixture.version,
+                expectedProviderVersion: fixture.providerCLIVersion,
                 publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
             )
         ) { error in
@@ -180,7 +214,7 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertThrowsError(
             try CompatibilitySetManifest.loadValidated(
                 from: fixture.root,
-                expectedVersion: "9.9.9",
+                expectedProviderVersion: "9.9.9",
                 publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
             )
         ) { error in
@@ -188,14 +222,14 @@ final class CompatibilitySetManifestTests: XCTestCase {
                 String(describing: error),
                 UpdateError.compatibilityManifestVersionMismatch(
                     expected: "9.9.9",
-                    actual: fixture.version
+                    actual: fixture.providerCLIVersion
                 ).description
             )
         }
     }
 }
 
-private final class CompatibilityManifestFixture {
+final class CompatibilityManifestFixture {
     static let catalogNames = [
         "autotune-candidates.json",
         "autotune-candidates.json.sig",
@@ -207,21 +241,46 @@ private final class CompatibilityManifestFixture {
 
     let root: URL
     let privateKey: P256.Signing.PrivateKey
-    let version = "1.9.0"
-    let commit = "0123456789abcdef0123456789abcdef01234567"
+    let version: String
+    let providerCLIVersion: String
+    let malibuAppVersion: String
+    let commit: String
+    private let ownsRoot: Bool
     var compatibilitySetID: String {
         "Augustas11/macprovider:v\(version)@\(commit)"
     }
 
-    init() throws {
-        root = FileManager.default.temporaryDirectory
+    init(
+        root: URL? = nil,
+        privateKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey(),
+        version: String = "1.8.42",
+        providerCLIVersion: String = "1.8.40",
+        malibuAppVersion: String = "1.8.41",
+        commit: String = "0123456789abcdef0123456789abcdef01234567",
+        populateResources: Bool = true
+    ) throws {
+        self.root = root ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("compatibility-manifest-tests-\(UUID().uuidString)", isDirectory: true)
-        privateKey = P256.Signing.PrivateKey()
-        try FileManager.default.createDirectory(
-            at: root,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
+        self.privateKey = privateKey
+        self.version = version
+        self.providerCLIVersion = providerCLIVersion
+        self.malibuAppVersion = malibuAppVersion
+        self.commit = commit
+        ownsRoot = root == nil
+        if ownsRoot {
+            try FileManager.default.createDirectory(
+                at: self.root,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        if populateResources {
+            try populateFixtureResources()
+        }
+        try writeManifest()
+    }
+
+    private func populateFixtureResources() throws {
         let catalog = root.appendingPathComponent("catalog-release", isDirectory: true)
         try FileManager.default.createDirectory(
             at: catalog,
@@ -248,11 +307,12 @@ private final class CompatibilityManifestFixture {
         try CompatibilitySetRollbackPlan.canonicalSupportedData().write(
             to: local.appendingPathComponent("updater-rollback.json")
         )
-        try writeManifest()
     }
 
     deinit {
-        try? FileManager.default.removeItem(at: root)
+        if ownsRoot {
+            try? FileManager.default.removeItem(at: root)
+        }
     }
 
     func writeManifest() throws {
@@ -302,14 +362,14 @@ private final class CompatibilityManifestFixture {
                         "reader_compatibility": "backward_compatible",
                     ],
                     "minimum_status_reader": 1,
-                    "version": version,
+                    "version": malibuAppVersion,
                 ],
                 "provider_cli": [
                     "activation": "local",
                     "designated_identifier": "live.streamvc.macprovider.cli",
                     "platform": "darwin-arm64",
                     "status_contract": "macprovider.local-status.v1",
-                    "version": version,
+                    "version": providerCLIVersion,
                 ],
                 "launchd": [
                     "activation": "local",

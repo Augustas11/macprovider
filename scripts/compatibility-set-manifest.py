@@ -318,8 +318,7 @@ def validate_payload(value: object) -> dict:
         "reader_compatibility": "backward_compatible",
     }:
         fail("components.malibu_app: unsupported artifact handoff")
-    if string(malibu["version"], "components.malibu_app.version", SEMVER) != version:
-        fail("components.malibu_app.version: must equal release version")
+    string(malibu["version"], "components.malibu_app.version", SEMVER)
     integer(malibu["minimum_status_reader"], "components.malibu_app.minimum_status_reader", 1, 1)
 
     cli = components["provider_cli"]
@@ -328,8 +327,7 @@ def validate_payload(value: object) -> dict:
     exact_keys(cli, {"activation", "designated_identifier", "platform", "status_contract", "version"}, "components.provider_cli")
     if cli["activation"] != "local" or cli["designated_identifier"] != "live.streamvc.macprovider.cli" or cli["platform"] != "darwin-arm64" or cli["status_contract"] != "macprovider.local-status.v1":
         fail("components.provider_cli: unsupported executable identity or contract")
-    if string(cli["version"], "components.provider_cli.version", SEMVER) != version:
-        fail("components.provider_cli.version: must equal release version")
+    string(cli["version"], "components.provider_cli.version", SEMVER)
 
     launchd = components["launchd"]
     if not isinstance(launchd, dict):
@@ -569,6 +567,16 @@ def build_manifest(args: argparse.Namespace) -> dict:
     commit = string(args.commit, "commit", HEX40)
     repository = string(args.repository, "repository", REPOSITORY)
     version = tag.removeprefix("v")
+    malibu_app_version = string(
+        args.malibu_app_version or version,
+        "malibu app version",
+        SEMVER,
+    )
+    provider_cli_version = string(
+        args.provider_cli_version or version,
+        "provider CLI version",
+        SEMVER,
+    )
     local_directory = pathlib.Path(args.local_artifacts_directory)
     payload = {
         "artifact_binding": {
@@ -606,14 +614,14 @@ def build_manifest(args: argparse.Namespace) -> dict:
                     "reader_compatibility": "backward_compatible",
                 },
                 "minimum_status_reader": 1,
-                "version": version,
+                "version": malibu_app_version,
             },
             "provider_cli": {
                 "activation": "local",
                 "designated_identifier": "live.streamvc.macprovider.cli",
                 "platform": "darwin-arm64",
                 "status_contract": "macprovider.local-status.v1",
-                "version": version,
+                "version": provider_cli_version,
             },
             "updater_rollback": {
                 "activation": "local",
@@ -747,6 +755,16 @@ def command_validate(args: argparse.Namespace) -> None:
         (args.expected_tag, release["tag"], "release tag"),
         (args.expected_commit, release["commit"], "release commit"),
         (args.expected_provider_admission_policy, admission["mode"], "provider admission policy"),
+        (
+            args.expected_malibu_app_version,
+            envelope["signed"]["components"]["malibu_app"]["version"],
+            "Malibu app version",
+        ),
+        (
+            args.expected_provider_cli_version,
+            envelope["signed"]["components"]["provider_cli"]["version"],
+            "provider CLI version",
+        ),
     )
     for expected, actual, label in checks:
         if expected is not None and expected != actual:
@@ -771,6 +789,8 @@ def parser() -> argparse.ArgumentParser:
     generate.add_argument("--tag", required=True)
     generate.add_argument("--commit", required=True)
     generate.add_argument("--repository", default="Augustas11/macprovider")
+    generate.add_argument("--malibu-app-version")
+    generate.add_argument("--provider-cli-version")
     generate.add_argument("--provider-admission-policy", choices=("bridge_required", "strict_post_migration"), required=True)
     generate.add_argument("--catalog-directory", required=True)
     generate.add_argument("--catalog-feed-directory", required=True)
@@ -793,6 +813,8 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--expected-key-id", default=DEFAULT_KEY_ID)
     validate.add_argument("--expected-tag")
     validate.add_argument("--expected-commit")
+    validate.add_argument("--expected-malibu-app-version")
+    validate.add_argument("--expected-provider-cli-version")
     validate.add_argument("--expected-provider-admission-policy", choices=("bridge_required", "strict_post_migration"))
     validate.add_argument("--payload-directory")
     validate.add_argument("--openssl")

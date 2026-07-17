@@ -1,6 +1,22 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.16 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.17 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.17 (2026-07-17, compatibility-set component versions).**
+The signed compatibility-set release identity and each member's marketing
+version are separate version domains. Private acceptance candidates may bind a
+reviewed release tag to independently versioned Malibu and provider CLI
+components, while the manifest, updater, rollback marker, and candidate checks
+must validate the exact declared component tuple. An acceptance set may keep the
+provider CLI at the installed version or advance it, but may not downgrade it;
+only the separately gated emergency rollback path may move the CLI backward.
+Installed payload discovery resolves the normal CLI symlink to the canonical
+support-directory executable before reading adjacent signed resources. Private
+Pearl metadata derives its advertised provider version from the same signed
+tuple and is rejected unless Pearl's bounded private-acceptance flag is
+explicitly enabled. Public production releases retain the stricter
+tag-to-provider-CLI equality gate unless a separate reviewed release change
+explicitly replaces it.
 
 **Change log v0.16 (2026-07-16, referral projection hardening).** The CLI
 projects the coordinator-authenticated public `join_base_url` and Malibu accepts
@@ -401,6 +417,41 @@ time (60–240 s for the first model) in the background.
   launchd definitions, watchdog, catalog/resources, coordinator admission metadata,
   and rollback schema. Every compatibility-set member is hash-bound and release-role
   checked before mutation.
+- The compatibility-set release version names the immutable signed set and remains
+  equal to its `v<release-version>` tag. `components.malibu_app.version` and
+  `components.provider_cli.version` name the actual independently versioned members;
+  they are valid semantic versions but need not equal each other or the set release
+  version for a private acceptance candidate. Coordinator admission remains bound to
+  the set release version. The set ID remains
+  `<repository>:<release-tag>@<commit>`; component versions do not create parallel set
+  identities.
+- Candidate generation derives the Malibu and provider CLI component versions from
+  the built sources, verifies them against the built artifacts in the unprivileged
+  build job, and signs the resulting exact tuple. The protected signing job must not
+  execute candidate code. Update and rollback marker fields that describe a binary
+  version use `components.provider_cli.version`; Malibu bundle activation uses
+  `components.malibu_app.version`. Acceptance upgrade freshness compares signed set
+  release identities, not the provider CLI component version. Independently, the
+  acceptance updater and installer require the signed provider CLI component to
+  be greater than or equal to the installed CLI; equality supports a newer set
+  that reuses reviewed CLI bytes, while a lower component is rejected outside
+  the existing emergency rollback transaction.
+- Every installed-payload reader resolves the launchd/PATH symlink to the
+  canonical executable before selecting its adjacent manifest and resources.
+  Candidate preflight, freshness, admission, update activation, and startup
+  recovery therefore use one payload directory and cannot accidentally inspect
+  `~/.local/bin` as though it contained the signed release set.
+- Private acceptance Pearl metadata declares `channel: private_acceptance` and
+  derives `provider_advertised_version` from the production-key-validated
+  compatibility manifest's provider CLI component. Pearl rejects that channel
+  by default; the bounded acceptance environment must explicitly set
+  `PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE=1`. Missing or production channels
+  continue to require the advertised provider version to equal the release tag,
+  even when the private flag is enabled.
+- Public production release workflows continue to require the provider CLI version
+  to equal the release tag. Independent component versions are private-acceptance
+  authority only until a separately reviewed production release contract says
+  otherwise.
 - The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
   dashboard invoke `macprovider-cli update`; they do not download or replace artifacts.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
