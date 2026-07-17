@@ -946,6 +946,16 @@ WHERE provider_id = $1 AND nonce = $2
 	if count != 1 {
 		t.Fatalf("provider_onboarding selected %d attempt rows, want 1", count)
 	}
+	if _, err := onboardingDB.ExecContext(ctx, `
+INSERT INTO provider_register_attempts (
+    provider_id, nonce, ts_utc, source_ip, committed_at
+) VALUES (
+    'p_forged_commit_time', 'nonce-forged', '2026-07-16T00:00:00Z',
+    '127.0.0.1', '2000-01-01T00:00:00Z'
+)
+`); err == nil || !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+		t.Fatalf("provider_onboarding committed_at override error=%v, want permission denied", err)
+	}
 	for operation, query := range map[string]string{
 		"update": `UPDATE provider_register_attempts SET source_ip = '127.0.0.2' WHERE provider_id = 'p_migration_roundtrip'`,
 		"delete": `DELETE FROM provider_register_attempts WHERE provider_id = 'p_migration_roundtrip'`,

@@ -580,7 +580,9 @@ func TestApptrackRegisterAttemptsMigrationShape(t *testing.T) {
 		"CREATE OR REPLACE FUNCTION prune_provider_register_attempts",
 		"retain_for must be at least 7 days",
 		"SET search_path = pg_catalog, public, pg_temp",
-		"GRANT SELECT, INSERT ON provider_register_attempts TO provider_onboarding",
+		"REVOKE INSERT ON provider_register_attempts FROM provider_onboarding",
+		"GRANT SELECT ON provider_register_attempts TO provider_onboarding",
+		"GRANT INSERT (provider_id, nonce, ts_utc, source_ip)",
 		"REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM PUBLIC",
 		"REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM provider_onboarding",
 	} {
@@ -588,6 +590,8 @@ func TestApptrackRegisterAttemptsMigrationShape(t *testing.T) {
 	}
 	mustNotContain(t, body, "GRANT DELETE ON provider_register_attempts",
 		"runtime onboarding role must not delete durable attempt markers")
+	mustNotContain(t, body, "GRANT SELECT, INSERT ON provider_register_attempts",
+		"runtime onboarding role must not receive table-level insert")
 	mustNotContain(t, body, "PRIMARY KEY (provider_id, nonce, ts_utc, source_ip)",
 		"connection metadata must not participate in commitment identity")
 

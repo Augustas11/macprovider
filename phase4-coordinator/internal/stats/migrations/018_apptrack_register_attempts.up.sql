@@ -41,8 +41,12 @@ BEGIN
 END;
 $$;
 
--- The runtime role can record and verify commitments but cannot mutate them.
-GRANT SELECT, INSERT ON provider_register_attempts TO provider_onboarding;
+-- The runtime role can record and verify commitments but cannot mutate them or
+-- choose the database-owned commitment timestamp used by retention.
+REVOKE INSERT ON provider_register_attempts FROM provider_onboarding;
+GRANT SELECT ON provider_register_attempts TO provider_onboarding;
+GRANT INSERT (provider_id, nonce, ts_utc, source_ip)
+    ON provider_register_attempts TO provider_onboarding;
 
 REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM PUBLIC;
 REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM provider_onboarding;
