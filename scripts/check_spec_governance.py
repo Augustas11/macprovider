@@ -121,9 +121,22 @@ class ValidationResult:
 def _contract_markdown(text: str) -> str:
     """Return Markdown contract text without examples or HTML comments."""
     lines: list[str] = []
-    fence: str | None = None
+    fence: tuple[str, int] | None = None
     in_comment = False
     for raw_line in text.splitlines():
+        if fence is not None:
+            delimiter, minimum_length = fence
+            closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", raw_line)
+            if (
+                closing is not None
+                and closing.group(1)[0] == delimiter
+                and len(closing.group(1)) >= minimum_length
+                and set(closing.group(1)) == {delimiter}
+            ):
+                fence = None
+            lines.append("")
+            continue
+
         visible: list[str] = []
         cursor = 0
         while cursor < len(raw_line):
@@ -143,16 +156,14 @@ def _contract_markdown(text: str) -> str:
             in_comment = True
             cursor = start + 4
         line = "".join(visible)
-        stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            if fence is None:
-                fence = marker
-            elif fence == marker:
-                fence = None
-            lines.append("")
-            continue
-        lines.append("" if fence is not None else line)
+        opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", line)
+        if opening is not None:
+            marker, info = opening.groups()
+            if marker[0] == "~" or "`" not in info:
+                fence = (marker[0], len(marker))
+                lines.append("")
+                continue
+        lines.append(line)
     return "\n".join(lines)
 
 

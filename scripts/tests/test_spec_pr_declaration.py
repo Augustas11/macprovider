@@ -60,6 +60,32 @@ class SpecPRDeclarationTests(unittest.TestCase):
         comment = "<!--\nspec-governance:\n  behavior-change: none\n-->\n"
         self.assertIn("missing", "\n".join(validate_body(comment)))
 
+    def test_shorter_fence_runs_do_not_expose_example_declarations(self) -> None:
+        for opener, shorter, closer in (
+            ("````text", "```", "````"),
+            ("`````text", "````", "`````"),
+            ("~~~~text", "~~~", "~~~~"),
+            ("~~~~~text", "~~~~", "~~~~~"),
+        ):
+            with self.subTest(opener=opener):
+                body = (
+                    f"{opener}\n{shorter}\n"
+                    "spec-governance:\n  behavior-change: none\n"
+                    f"{closer}\n"
+                )
+                self.assertIn("missing", "\n".join(validate_body(body)))
+
+    def test_comment_openers_inside_fences_do_not_hide_real_declarations(self) -> None:
+        for opener, closer in (("```html", "```"), ("~~~html", "~~~")):
+            with self.subTest(opener=opener):
+                body = (
+                    f"{opener}\n"
+                    "<!-- literal example opener\n"
+                    f"{closer}\n"
+                    "spec-governance:\n  behavior-change: none\n"
+                )
+                self.assertEqual([], validate_body(body))
+
     def test_behavior_none_rejects_product_paths(self) -> None:
         errors = validate_body(
             "spec-governance:\n  behavior-change: none\n",

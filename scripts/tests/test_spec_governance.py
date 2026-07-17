@@ -380,6 +380,10 @@ class GovernanceValidatorTests(unittest.TestCase):
         examples = (
             "```text\n**SPEC-001-R999 — Example only.** It MUST not count.\n```\n",
             "~~~text\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~\n",
+            "````text\n```\n**SPEC-001-R999 — Example only.** It MUST not count.\n````\n",
+            "`````text\n````\n**SPEC-001-R999 — Example only.** It MUST not count.\n`````\n",
+            "~~~~text\n~~~\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~~\n",
+            "~~~~~text\n~~~~\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~~~\n",
             "<!-- **SPEC-001-R999 — Comment only.** It MUST not count. -->\n",
         )
         for example in examples:
@@ -418,6 +422,18 @@ class GovernanceValidatorTests(unittest.TestCase):
                     "removed 1 legacy normative obligation line(s) but added only 0 stable requirement tombstone(s)",
                     "\n".join(result.errors),
                 )
+
+    def test_comment_openers_inside_fences_cannot_hide_later_obligations(self) -> None:
+        for opener, closer in (("```html", "```"), ("~~~html", "~~~")):
+            with self.subTest(opener=opener):
+                text = (
+                    f"{opener}\n"
+                    "<!-- literal example opener\n"
+                    f"{closer}\n"
+                    "The provider MUST preserve the visible contract.\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
 
     def test_malformed_nested_values_never_crash(self) -> None:
         mutations = [

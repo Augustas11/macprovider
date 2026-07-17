@@ -11,9 +11,25 @@ import sys
 from pathlib import Path
 
 try:
-    from scripts.check_spec_governance import DOMAIN_RE, JOURNEY_RE, REQUIREMENT_ID_RE, SENSITIVE_PHYSICAL_DOMAINS, SPEC_ID_RE, VERDICTS
+    from scripts.check_spec_governance import (
+        DOMAIN_RE,
+        JOURNEY_RE,
+        REQUIREMENT_ID_RE,
+        SENSITIVE_PHYSICAL_DOMAINS,
+        SPEC_ID_RE,
+        VERDICTS,
+        _contract_markdown,
+    )
 except ModuleNotFoundError:  # Direct execution sets sys.path[0] to scripts/.
-    from check_spec_governance import DOMAIN_RE, JOURNEY_RE, REQUIREMENT_ID_RE, SENSITIVE_PHYSICAL_DOMAINS, SPEC_ID_RE, VERDICTS
+    from check_spec_governance import (
+        DOMAIN_RE,
+        JOURNEY_RE,
+        REQUIREMENT_ID_RE,
+        SENSITIVE_PHYSICAL_DOMAINS,
+        SPEC_ID_RE,
+        VERDICTS,
+        _contract_markdown,
+    )
 
 
 FIELD_RE = re.compile(r"^\s*(behavior-change|contract-change|specs|requirements|authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$", re.IGNORECASE)
@@ -41,26 +57,9 @@ def _values(raw: str) -> list[str]:
 
 
 def _declaration_marker(lines: list[str]) -> int | None:
-    fence: str | None = None
-    in_comment = False
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if in_comment:
-            if "-->" in stripped:
-                in_comment = False
-            continue
-        if "<!--" in stripped:
-            if "-->" not in stripped.split("<!--", 1)[1]:
-                in_comment = True
-            continue
-        if stripped.startswith(("```", "~~~")):
-            marker = stripped[:3]
-            if fence is None:
-                fence = marker
-            elif fence == marker:
-                fence = None
-            continue
-        if fence is None and stripped.lower() == "spec-governance:":
+    visible_lines = _contract_markdown("\n".join(lines)).splitlines()
+    for index, line in enumerate(visible_lines):
+        if line.strip().lower() == "spec-governance:":
             return index
     return None
 
