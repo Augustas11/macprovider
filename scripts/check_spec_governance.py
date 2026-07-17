@@ -459,7 +459,7 @@ def _breaks_lazy_container_paragraph(line: str) -> bool:
 def _multiline_link_label(
     lines: list[str],
     line_index: int,
-) -> tuple[int, str, ContainerContext] | None:
+) -> tuple[int, str, ContainerContext, str] | None:
     """Return the closing-label line and text after its colon."""
     content, container = _block_line_context(lines[line_index])
     leading = re.match(r" {0,3}", content)
@@ -505,7 +505,12 @@ def _multiline_link_label(
                     or not "".join(visible_label).strip()
                 ):
                     return None
-                return candidate_index, content[cursor + 2:], container
+                return (
+                    candidate_index,
+                    content[cursor + 2:],
+                    container,
+                    "".join(visible_label),
+                )
             label_length += 1
             visible_label.append(character)
             if label_length > 999:
@@ -562,7 +567,7 @@ def _link_definition_span(lines: list[str], line_index: int) -> int:
     label = _multiline_link_label(lines, line_index)
     if label is None:
         return 0
-    label_line, remainder, container = label
+    label_line, remainder, container, _ = label
     destination_line = label_line
     destination = remainder
     if not destination.strip():
@@ -615,7 +620,7 @@ def _contract_markdown(
     text: str,
     *,
     preserve_code_payload: bool = False,
-    preserve_details_openers: bool = False,
+    preserve_raw_html: bool = False,
 ) -> str:
     """Return contract text with nonnormative block and inline syntax removed."""
     text = text.replace("\x00", "\ufffd")
@@ -661,7 +666,7 @@ def _contract_markdown(
                 if closing_pattern.search(html_line):
                     raw_html_end = None
                 paragraph_open = False
-                lines.append("")
+                lines.append(html_line if preserve_raw_html else "")
                 continue
             raw_html_end = None
         if raw_html_blank_container is not None:
@@ -670,7 +675,7 @@ def _contract_markdown(
                 if not html_line.strip():
                     raw_html_blank_container = None
                 paragraph_open = False
-                lines.append("")
+                lines.append(html_line if preserve_raw_html else "")
                 continue
             raw_html_blank_container = None
 
@@ -694,7 +699,7 @@ def _contract_markdown(
             if link_definition_span:
                 link_definition_remaining = link_definition_span - 1
                 paragraph_open = False
-                lines.append("")
+                lines.append(block_line if preserve_raw_html else "")
                 continue
             if not paragraph_open and raw_line.startswith(("    ", "\t")):
                 paragraph_open = False
@@ -731,7 +736,7 @@ def _contract_markdown(
                 break
             if matched_special:
                 paragraph_open = False
-                lines.append("")
+                lines.append(block_line if preserve_raw_html else "")
                 continue
             if (
                 RAW_HTML_BLOCK_TAG_RE.match(block_line) is not None
@@ -742,16 +747,7 @@ def _contract_markdown(
             ):
                 raw_html_blank_container = line_container
                 paragraph_open = False
-                lines.append(
-                    block_line
-                    if preserve_details_openers
-                    and re.match(
-                        r" {0,3}<details(?=[\s/>])",
-                        block_line,
-                        re.IGNORECASE,
-                    )
-                    else ""
-                )
+                lines.append(block_line if preserve_raw_html else "")
                 continue
             opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", block_line)
             if opening is not None:
@@ -820,7 +816,8 @@ def _contract_markdown(
                 cursor = end
                 continue
             if (
-                raw_line.startswith("<!--", cursor)
+                not preserve_raw_html
+                and raw_line.startswith("<!--", cursor)
                 and not raw_line.startswith(("<!-->", "<!--->"), cursor)
                 and _has_inline_comment_closer(
                     raw_lines,
@@ -893,7 +890,10 @@ def _has_inline_comment_closer(
     first_end = first.find("-->")
     if first_end != -1:
         candidate = first[:first_end]
-        return "--" not in candidate and not candidate.endswith("-")
+        return (
+            ("--" not in candidate or "<!--" in candidate)
+            and not candidate.endswith("-")
+        )
     content.append(first)
     if not _paragraph_remains_open(lines[line_index], True):
         return False
@@ -914,7 +914,10 @@ def _has_inline_comment_closer(
         if end != -1:
             content.append(candidate[:end])
             joined = "\n".join(content)
-            return "--" not in joined and not joined.endswith("-")
+            return (
+                ("--" not in joined or "<!--" in joined)
+                and not joined.endswith("-")
+            )
         content.append(candidate)
     return False
 
@@ -922,7 +925,8 @@ def _has_inline_comment_closer(
 def _legacy_normative_lines(text: str) -> list[str]:
     """Return frozen, unnumbered normative lines from contract Markdown."""
     lines: list[str] = []
-    paragraph: list[tuple[str, str, bool]] = []
+    paragraph: list[tuple[str, str, int]] = []
+    reference_labels = _reference_labels(text)
     in_code_span = False
     contract_lines = _contract_markdown(
         text,
@@ -947,28 +951,41 @@ def _legacy_normative_lines(text: str) -> list[str]:
             cursor += 1
         stripped = "".join(fingerprint).strip()
         visible_source = "".join(visible).strip()
-        visible_text = _visible_inline_text(visible_source)
-        line_has_keyword = bool(NORMATIVE_KEYWORD_RE.search(visible_text))
+        visible_text = _visible_inline_text(visible_source, reference_labels)
+        line_keyword_count = len(NORMATIVE_KEYWORD_RE.findall(visible_text))
         if stripped or visible_source:
-            paragraph.append((stripped, visible_source, line_has_keyword))
+            paragraph.append((stripped, visible_source, line_keyword_count))
         else:
-            _append_paragraph_normative_fallback(paragraph, lines)
+            _append_paragraph_normative_fallback(
+                paragraph,
+                lines,
+                reference_labels,
+            )
             paragraph = []
-        if line_has_keyword and not REQUIREMENT_DEFINITION_RE.match(stripped):
+        if line_keyword_count and not REQUIREMENT_DEFINITION_RE.match(stripped):
             lines.append(" ".join(stripped.split()))
-    _append_paragraph_normative_fallback(paragraph, lines)
+    _append_paragraph_normative_fallback(paragraph, lines, reference_labels)
     return lines
 
 
 def _append_paragraph_normative_fallback(
-    paragraph: list[tuple[str, str, bool]],
+    paragraph: list[tuple[str, str, int]],
     lines: list[str],
+    reference_labels: set[str],
 ) -> None:
     """Count a rendered multiline obligation missed by physical-line scans."""
-    if not paragraph or any(item[2] for item in paragraph):
+    if not paragraph:
         return
     visible_source = "\n".join(item[1] for item in paragraph)
-    if not NORMATIVE_KEYWORD_RE.search(_visible_inline_text(visible_source)):
+    paragraph_keyword_count = len(
+        NORMATIVE_KEYWORD_RE.findall(
+            _visible_inline_text(visible_source, reference_labels),
+        ),
+    )
+    missing_keyword_count = paragraph_keyword_count - sum(
+        item[2] for item in paragraph
+    )
+    if missing_keyword_count <= 0:
         return
     fingerprint = " ".join(
         part
@@ -976,7 +993,7 @@ def _append_paragraph_normative_fallback(
         for part in item[0].split()
     )
     if fingerprint and not REQUIREMENT_DEFINITION_RE.match(fingerprint):
-        lines.append(fingerprint)
+        lines.extend([fingerprint] * missing_keyword_count)
 
 
 class _InlineHTMLTextParser(HTMLParser):
@@ -986,6 +1003,37 @@ class _InlineHTMLTextParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         self.parts.append(data)
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        raw = self.get_starttag_text()
+        if RAW_HTML_COMPLETE_TAG_RE.fullmatch(raw) is None:
+            self.parts.append(raw)
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+
+
+def _normalize_reference_label(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _reference_labels(text: str) -> set[str]:
+    raw_lines = text.replace("\x00", "\ufffd").splitlines()
+    labels: set[str] = set()
+    for line_index in range(len(raw_lines)):
+        label = _multiline_link_label(raw_lines, line_index)
+        if label is None or not _link_definition_span(raw_lines, line_index):
+            continue
+        labels.add(_normalize_reference_label(label[3]))
+    return labels
 
 
 def _balanced_inline_end(
@@ -1045,7 +1093,10 @@ def _balanced_inline_end(
     return None
 
 
-def _inline_link_labels(text: str) -> str:
+def _inline_link_labels(
+    text: str,
+    reference_labels: set[str] | None = None,
+) -> str:
     """Replace inline/reference link syntax with its rendered label."""
     rendered: list[str] = []
     cursor = 0
@@ -1075,21 +1126,43 @@ def _inline_link_labels(text: str) -> str:
                 rendered.append(text[cursor])
                 cursor += 1
                 continue
+            destination = text[suffix + 1:destination_end]
+            valid_destination, title, _ = _link_destination_parts(destination)
+            if (
+                destination.strip()
+                and (
+                    not valid_destination
+                    or (title is not None and not _valid_link_title(title))
+                )
+            ):
+                rendered.append(text[cursor])
+                cursor += 1
+                continue
             rendered.append(label)
             cursor = destination_end + 1
             continue
         if suffix < len(text) and text[suffix] == "[":
             reference_end = _balanced_inline_end(text, suffix, "[", "]")
             if reference_end is not None:
-                rendered.append(label)
+                reference = text[suffix + 1:reference_end] or label
+                if _normalize_reference_label(reference) in (reference_labels or set()):
+                    rendered.append(label)
+                else:
+                    rendered.append(text[cursor:reference_end + 1])
                 cursor = reference_end + 1
                 continue
-        rendered.append(label)
+        if _normalize_reference_label(label) in (reference_labels or set()):
+            rendered.append(label)
+        else:
+            rendered.append(text[cursor:label_end + 1])
         cursor = label_end + 1
     return "".join(rendered)
 
 
-def _visible_inline_text(text: str) -> str:
+def _visible_inline_text(
+    text: str,
+    reference_labels: set[str] | None = None,
+) -> str:
     """Return conservative rendered text for reserved-token scans."""
     previous = None
     while previous != text:
@@ -1097,7 +1170,7 @@ def _visible_inline_text(text: str) -> str:
         text = text.replace(INLINE_JOIN + "\n", "")
         text = text.replace("\n" + INLINE_JOIN, "")
     text = text.replace(INLINE_JOIN, "")
-    text = _inline_link_labels(text)
+    text = _inline_link_labels(text, reference_labels)
     parser = _InlineHTMLTextParser()
     parser.feed(text)
     buffered_literal = parser.rawdata
@@ -2024,7 +2097,10 @@ def validate_repository(
     for spec_id, path in canonical.items():
         text = path.read_text(encoding="utf-8")
         contract_text = _contract_markdown(text)
-        visible_contract_text = _visible_inline_text(contract_text)
+        visible_contract_text = _visible_inline_text(
+            contract_text,
+            _reference_labels(text),
+        )
         for requirement_id in REQUIREMENT_DEFINITION_RE.findall(contract_text):
             definitions.setdefault(requirement_id, []).append(path)
             if requirement_id[:8] != spec_id:

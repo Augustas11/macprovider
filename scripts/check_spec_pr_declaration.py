@@ -20,6 +20,7 @@ try:
         SPEC_ID_RE,
         VERDICTS,
         _contract_markdown,
+        _inline_link_labels,
     )
 except ModuleNotFoundError:  # Direct execution sets sys.path[0] to scripts/.
     from check_spec_governance import (
@@ -30,6 +31,7 @@ except ModuleNotFoundError:  # Direct execution sets sys.path[0] to scripts/.
         SPEC_ID_RE,
         VERDICTS,
         _contract_markdown,
+        _inline_link_labels,
     )
 
 
@@ -78,7 +80,10 @@ class _DetailsOpeningParser(HTMLParser):
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
-        if tag.lower() == "details":
+        if (
+            tag.lower() == "details"
+            or _has_unquoted_details_fragment(self.get_starttag_text())
+        ):
             self.found = True
 
     def handle_startendtag(
@@ -86,8 +91,31 @@ class _DetailsOpeningParser(HTMLParser):
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
-        if tag.lower() == "details":
+        if (
+            tag.lower() == "details"
+            or _has_unquoted_details_fragment(self.get_starttag_text())
+        ):
             self.found = True
+
+
+def _has_unquoted_details_fragment(text: str) -> bool:
+    quote: str | None = None
+    cursor = 1
+    while cursor < len(text):
+        character = text[cursor]
+        if quote is not None:
+            if character == quote:
+                quote = None
+            cursor += 1
+            continue
+        if character in {'"', "'"}:
+            quote = character
+            cursor += 1
+            continue
+        if text[cursor:cursor + 8].casefold() == "<details":
+            return True
+        cursor += 1
+    return False
 
 
 def _mask_escaped_angle_brackets(text: str) -> str:
@@ -106,8 +134,15 @@ def _mask_escaped_angle_brackets(text: str) -> str:
 
 
 def _inside_details_markup(lines: list[str], marker: int) -> bool:
+    candidate = "\n".join(lines[:marker])
+    if re.search(r"(?im)^ {0,3}<details[ \t]*$", candidate):
+        return True
     parser = _DetailsOpeningParser()
-    parser.feed(_mask_escaped_angle_brackets("\n".join(lines[:marker])))
+    parser.feed(
+        _mask_escaped_angle_brackets(
+            _inline_link_labels(candidate),
+        ),
+    )
     parser.close()
     return parser.found
 
@@ -137,14 +172,15 @@ def _contract_path(path: str) -> bool:
 
 def validate_body(body: str, root: Path | None = None, changed_paths: list[str] | None = None) -> list[str]:
     errors: list[str] = []
-    lines = _contract_markdown(
-        body,
-        preserve_details_openers=True,
-    ).splitlines()
+    lines = _contract_markdown(body).splitlines()
     marker = _declaration_marker(lines)
     if marker is None:
         return ["missing 'spec-governance:' declaration block"]
-    if _inside_details_markup(lines, marker):
+    details_lines = _contract_markdown(
+        body,
+        preserve_raw_html=True,
+    ).splitlines()
+    if _inside_details_markup(details_lines, marker):
         return ["missing top-level 'spec-governance:' declaration block"]
     fields: dict[str, str] = {}
     for line in lines[marker + 1:]:

@@ -283,10 +283,12 @@ class GovernanceValidatorTests(unittest.TestCase):
             "The provider M<span\ntitle=\"x\">U</span>ST preserve behavior.\n",
             "The provider M<span\n class=x>U</span>ST preserve behavior.\n",
             "The provider M<!--\nhidden\n-->UST preserve behavior.\n",
+            "The provider M<!--x<!--y-->UST preserve behavior.\n",
             "Prefix <x a=\"unterminated The provider MUST preserve behavior.\n",
             "Prefix <x a=\"unterminated M&#85;ST preserve behavior.\n",
             "Prefix <x a=\"unterminated M**U**ST preserve behavior.\n",
             "Prefix <x a=\"unterminated M[U](https://example.invalid)ST preserve behavior.\n",
+            "Prefix <x=MUST> suffix.\n",
         )
         for text in normative_forms:
             with self.subTest(text=text):
@@ -295,10 +297,24 @@ class GovernanceValidatorTests(unittest.TestCase):
             "[link](https://example.invalid/MUST)\n",
             '<span title="MUST">informative text</span>\n',
             "M[[U]](https://example.invalid)ST\n",
+            "M[U]ST\n",
+            "M[U][]ST\n",
+            "M[U][missing]ST\n",
         )
         for text in informative_forms:
             with self.subTest(text=text):
                 self.assertEqual(0, legacy_requirement_fingerprint(text)[1])
+        base = "The provider MUST preserve A.\n"
+        for addition in (
+            "It M<span\n class=x>U</span>ST preserve B.\n",
+            "It M<!--\nhidden\n-->UST preserve B.\n",
+            'It M[U](https://example.invalid "multi\nline")ST preserve B.\n',
+        ):
+            with self.subTest(addition=addition):
+                self.assertNotEqual(
+                    legacy_requirement_fingerprint(base),
+                    legacy_requirement_fingerprint(base + addition),
+                )
 
         reference_forms = (
             "See SPEC-**999**.\n",
@@ -312,6 +328,7 @@ class GovernanceValidatorTests(unittest.TestCase):
             "See SPEC-<span title=\">\">9</span>99.\n",
             "Prefix <x a=\"unterminated SPEC-999.\n",
             "Prefix <x a=\"unterminated SPEC-9&#57;9.\n",
+            "Prefix <x=SPEC-999> suffix.\n",
             "See SPEC-<span\n class=x>9</span>99.\n",
             "See SPEC-9<!--\nhidden\n-->99.\n",
         )
@@ -340,6 +357,9 @@ class GovernanceValidatorTests(unittest.TestCase):
         repository["specs"]["specs/SPEC-001-one.md"] += (
             "\n[Informative link](https://example.invalid/SPEC-999)\n"
             "SPEC-[[9]](https://example.invalid)99\n"
+            "SPEC-[9]99\n"
+            "SPEC-[9][]99\n"
+            "SPEC-[9][missing]99\n"
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

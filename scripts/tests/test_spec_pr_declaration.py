@@ -302,6 +302,39 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "</details>\n"
             ),
             (
+                "<details\n"
+                " open>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "<div>\n"
+                "<details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "<div><details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "<script>\n"
+                "</script><details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "M<!--x<!--y--><details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
                 "<details>\n"
                 "<summary>Example</summary>\n\n"
                 "spec-governance:\n"
@@ -329,6 +362,24 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "spec-governance:\n"
                 "  behavior-change: none\n"
             ),
+            (
+                "Example <span ! <details>>\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "Example <span x=<details>>\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "Example [x](<bad <details>>)\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
         )
         for body in bodies:
             with self.subTest(body=body):
@@ -340,6 +391,8 @@ class SpecPRDeclarationTests(unittest.TestCase):
             "Inline `<details>` example.\n",
             "<!-- <details> -->\n",
             "Escaped \\<details> example.\n",
+            "[Link](<details>) example.\n",
+            "![Image](<details>) example.\n",
         )
         for example in examples:
             with self.subTest(example=example):
