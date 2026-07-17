@@ -18,7 +18,6 @@ import (
 var (
 	ErrReferralLocked                = errors.New("provider referral locked until first verified serving")
 	ErrReferralQualificationConflict = errors.New("provider serving qualification conflicts with durable state")
-	ErrReferralReplacementConflict   = errors.New("provider referral replacement snapshot conflicts with durable state")
 	ErrSocialDisabled                = errors.New("social invite bonus disabled")
 	ErrSocialChallenge               = errors.New("social challenge invalid")
 	ErrSocialRateLimited             = errors.New("social action rate limited")
@@ -288,14 +287,13 @@ func (s *Store) ProviderReferralStatus(ctx context.Context, policy ReferralPolic
 
 	out := ProviderReferral{Campaign: policy.Campaign, SocialState: SocialStateLocked}
 	var keyID, evidenceAt string
-	var carriedRedemptions int
 	var revokedAt sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-SELECT i.issuer_id, i.key_id, i.base_capacity, i.bonus_capacity, i.carried_redemptions, q.evidence_at, i.revoked_at
+SELECT i.issuer_id, i.key_id, i.base_capacity, i.bonus_capacity, q.evidence_at, i.revoked_at
   FROM referral_serving_qualifications q
   JOIN referral_issuers i ON i.issuer_id = q.issuer_id
  WHERE q.provider_id = ? AND q.campaign = ?`, providerID, policy.Campaign).Scan(
-		&out.IssuerID, &keyID, &out.BaseCapacity, &out.BonusCapacity, &carriedRedemptions, &evidenceAt, &revokedAt)
+		&out.IssuerID, &keyID, &out.BaseCapacity, &out.BonusCapacity, &evidenceAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrReferralLocked
 	}
@@ -311,7 +309,6 @@ SELECT i.issuer_id, i.key_id, i.base_capacity, i.bonus_capacity, i.carried_redem
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?`, out.IssuerID).Scan(&out.Redemptions); err != nil {
 		return ProviderReferral{}, err
 	}
-	out.Redemptions += carriedRedemptions
 	out.Remaining = out.BaseCapacity + out.BonusCapacity - out.Redemptions
 	if out.Remaining < 0 {
 		out.Remaining = 0
@@ -845,159 +842,6 @@ VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?)`, campaign, providerID, issuerID, ev
 func hashSocialSubject(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("%x", digest[:])
-}
-
-type ReferralReplacement struct {
-	ProviderID          string
-	OldIssuerID         string
-	OldBaseCapacity     int
-	OldBonusCapacity    int
-	Redeemed            int
-	Remaining           int
-	NewIssuerID         string
-	NewCode             string
-	KeyID               string
-	BaseCapacity        int
-	BonusCapacity       int
-	PendingSocialReview bool
-	Applied             bool
-}
-
-type ReferralReplacementExpectation struct {
-	ProviderID          string
-	OldBaseCapacity     int
-	OldBonusCapacity    int
-	Redeemed            int
-	PendingSocialReview bool
-}
-
-// ReplaceReferralIssuer replaces only an issuer backed by durable serving
-// qualification. The evidence timestamp is copied exactly; this operation can
-// never synthesize a provider's serving eligibility.
-func (s *Store) ReplaceReferralIssuer(ctx context.Context, policy ReferralPolicy, issuerID, actor, reason string, apply bool, now time.Time) (ReferralReplacement, error) {
-	if apply {
-		return ReferralReplacement{}, ErrReferralReplacementConflict
-	}
-	return s.ReplaceReferralIssuerExpected(ctx, policy, issuerID, actor, reason, nil, false, now)
-}
-
-// ReplaceReferralIssuerExpected binds an operator-approved preview to the same
-// transaction that replaces the issuer. No mutable capacity or pending-review
-// state can drift between the preview and the apply decision.
-func (s *Store) ReplaceReferralIssuerExpected(ctx context.Context, policy ReferralPolicy, issuerID, actor, reason string, expectation *ReferralReplacementExpectation, apply bool, now time.Time) (ReferralReplacement, error) {
-	if err := policy.Validate(); err != nil {
-		return ReferralReplacement{}, err
-	}
-	issuerID = strings.TrimSpace(issuerID)
-	actor = strings.TrimSpace(actor)
-	reason = strings.TrimSpace(reason)
-	if !referralPartPattern.MatchString(issuerID) {
-		return ReferralReplacement{}, ErrReferralInvalid
-	}
-	if apply && (actor == "" || reason == "") {
-		return ReferralReplacement{}, fmt.Errorf("actor and reason are required to replace an issuer")
-	}
-	if apply && expectation == nil {
-		return ReferralReplacement{}, ErrReferralReplacementConflict
-	}
-
-	var out ReferralReplacement
-	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
-		var codeType string
-		var providerID, revokedAt sql.NullString
-		var evidenceAt string
-		var carriedRedemptions int
-		if err := conn.QueryRowContext(ctx, `
-SELECT i.code_type, i.provider_id, i.revoked_at, i.base_capacity, i.bonus_capacity, i.carried_redemptions, q.evidence_at
-  FROM referral_issuers i
-  JOIN referral_serving_qualifications q ON q.issuer_id = i.issuer_id AND q.provider_id = i.provider_id AND q.campaign = i.campaign
-		 WHERE i.issuer_id = ? AND i.campaign = ?`, issuerID, policy.Campaign).Scan(&codeType, &providerID, &revokedAt, &out.OldBaseCapacity, &out.OldBonusCapacity, &carriedRedemptions, &evidenceAt); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return ErrReferralInvalid
-			}
-			return err
-		}
-		if codeType != ReferralTypeProvider || !providerID.Valid || providerID.String == "" || !revokedAt.Valid || evidenceAt == "" {
-			return ErrReferralInvalid
-		}
-		if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM referral_social_verifications WHERE provider_id = ? AND campaign = ? AND granted_at IS NULL AND failed_at IS NULL)`, providerID.String, policy.Campaign).Scan(&out.PendingSocialReview); err != nil {
-			return err
-		}
-		out.ProviderID = providerID.String
-		out.OldIssuerID = issuerID
-		out.KeyID = policy.CurrentKeyID
-		out.BaseCapacity = out.OldBaseCapacity
-		out.BonusCapacity = out.OldBonusCapacity
-		if err := conn.QueryRowContext(ctx, `SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?`, issuerID).Scan(&out.Redeemed); err != nil {
-			return err
-		}
-		out.Redeemed += carriedRedemptions
-		out.Remaining = out.OldBaseCapacity + out.OldBonusCapacity - out.Redeemed
-		if out.Remaining < 0 {
-			return ErrReferralReplacementConflict
-		}
-		if apply && (expectation.ProviderID != out.ProviderID ||
-			expectation.OldBaseCapacity != out.OldBaseCapacity ||
-			expectation.OldBonusCapacity != out.OldBonusCapacity ||
-			expectation.Redeemed != out.Redeemed ||
-			expectation.PendingSocialReview != out.PendingSocialReview) {
-			return ErrReferralReplacementConflict
-		}
-		if !apply {
-			return nil
-		}
-
-		newIssuerID, err := randomReferralID()
-		if err != nil {
-			return err
-		}
-		result, err := conn.ExecContext(ctx, `UPDATE referral_issuers SET provider_id = NULL, replaced_by = ? WHERE issuer_id = ? AND campaign = ? AND revoked_at IS NOT NULL AND provider_id = ? AND replaced_by IS NULL`, newIssuerID, issuerID, policy.Campaign, providerID.String)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil || changed != 1 {
-			return ErrReferralInvalid
-		}
-		if _, err := conn.ExecContext(ctx, `
-INSERT INTO referral_issuers (issuer_id, code_type, key_id, campaign, provider_id, base_capacity, bonus_capacity, carried_redemptions, created_at, first_serving_at)
-VALUES (?, 'P', ?, ?, ?, ?, ?, ?, ?, ?)`, newIssuerID, policy.CurrentKeyID, policy.Campaign, providerID.String, out.OldBaseCapacity, out.OldBonusCapacity, out.Redeemed, timeText(now.UTC()), evidenceAt); err != nil {
-			return err
-		}
-		result, err = conn.ExecContext(ctx, `UPDATE referral_serving_qualifications SET issuer_id = ? WHERE campaign = ? AND provider_id = ? AND issuer_id = ?`, newIssuerID, policy.Campaign, providerID.String, issuerID)
-		if err != nil {
-			return err
-		}
-		changed, err = result.RowsAffected()
-		if err != nil || changed != 1 {
-			return ErrReferralQualificationConflict
-		}
-		if _, err := conn.ExecContext(ctx, `UPDATE referral_social_verifications SET issuer_id = ?, lease_token = NULL, lease_until = NULL, next_check_at = ? WHERE provider_id = ? AND campaign = ? AND issuer_id = ?`, newIssuerID, timeText(now.UTC()), providerID.String, policy.Campaign, issuerID); err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `UPDATE referral_social_challenges SET issuer_id = ? WHERE provider_id = ? AND campaign = ? AND issuer_id = ?`, newIssuerID, providerID.String, policy.Campaign, issuerID); err != nil {
-			return err
-		}
-		code, err := EncodeReferralCode(policy, ReferralTypeProvider, policy.CurrentKeyID, newIssuerID)
-		if err != nil {
-			return err
-		}
-		detail := fmt.Sprintf("provider=%s replaced_by=%s base_capacity=%d bonus_capacity=%d redeemed=%d remaining=%d pending_social=%t", providerID.String, newIssuerID, out.OldBaseCapacity, out.OldBonusCapacity, out.Redeemed, out.Remaining, out.PendingSocialReview)
-		if err := recordReferralAdminAuditTx(ctx, conn, actor, reason, "replace_issuer", policy.Campaign+"/"+issuerID, detail, now); err != nil {
-			return err
-		}
-		if err := recordSocialAuditTx(ctx, conn, policy.Campaign, providerID.String, newIssuerID, "issuer", "replaced", hashSocialSubject(issuerID), "operator_recovery", now); err != nil {
-			return err
-		}
-		out.NewIssuerID = newIssuerID
-		out.NewCode = code
-		out.Applied = true
-		return nil
-	})
-	if err != nil {
-		return ReferralReplacement{}, err
-	}
-	return out, nil
 }
 
 func randomReferralID() (string, error) {

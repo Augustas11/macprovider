@@ -460,7 +460,6 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			provider_id TEXT,
 			base_capacity INTEGER NOT NULL CHECK(base_capacity >= 0),
 			bonus_capacity INTEGER NOT NULL DEFAULT 0 CHECK(bonus_capacity >= 0),
-			carried_redemptions INTEGER NOT NULL DEFAULT 0 CHECK(carried_redemptions >= 0),
 			expires_at TEXT,
 			revoked_at TEXT,
 			created_at TEXT NOT NULL,
@@ -522,12 +521,6 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {
-		return err
-	}
-	if err := ensureColumnTx(ctx, tx, "referral_issuers", "replaced_by", `ALTER TABLE referral_issuers ADD COLUMN replaced_by TEXT`); err != nil {
-		return err
-	}
-	if err := ensureColumnTx(ctx, tx, "referral_issuers", "carried_redemptions", `ALTER TABLE referral_issuers ADD COLUMN carried_redemptions INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "share_url_hash", `ALTER TABLE referral_social_verifications ADD COLUMN share_url_hash TEXT NOT NULL DEFAULT ''`); err != nil {
