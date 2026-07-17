@@ -32,7 +32,11 @@ except ModuleNotFoundError:  # Direct execution sets sys.path[0] to scripts/.
     )
 
 
-FIELD_RE = re.compile(r"^\s*(behavior-change|contract-change|specs|requirements|authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$", re.IGNORECASE)
+FIELD_RE = re.compile(
+    r"^ {0,3}(behavior-change|contract-change|specs|requirements|"
+    r"authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$",
+    re.IGNORECASE,
+)
 CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
@@ -58,7 +62,7 @@ def _values(raw: str) -> list[str]:
 
 def _declaration_marker(lines: list[str]) -> int | None:
     for index, line in enumerate(lines):
-        if line.strip().lower() == "spec-governance:":
+        if re.fullmatch(r" {0,3}spec-governance:", line, re.IGNORECASE):
             return index
     return None
 

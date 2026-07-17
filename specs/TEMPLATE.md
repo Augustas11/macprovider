@@ -68,7 +68,9 @@ in `CONFORMANCE.json` and includes:
 
 Mappings use `path:symbol` or `path::test_name` and the selector must resolve in
 the named file. A `sha256:` evidence artifact also names its repository-relative
-source file; commit evidence uses `source: null`.
+source file; commit evidence uses `source: null`. Commit evidence remains
+current only while every mapped implementation and test file matches the
+evidence commit.
 
 ## 5. Open gaps
 

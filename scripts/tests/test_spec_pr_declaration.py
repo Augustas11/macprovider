@@ -59,6 +59,8 @@ class SpecPRDeclarationTests(unittest.TestCase):
         self.assertIn("missing", "\n".join(validate_body(tilde)))
         comment = "<!--\nspec-governance:\n  behavior-change: none\n-->\n"
         self.assertIn("missing", "\n".join(validate_body(comment)))
+        indented = "    spec-governance:\n      behavior-change: none\n"
+        self.assertIn("missing", "\n".join(validate_body(indented)))
 
     def test_shorter_fence_runs_do_not_expose_example_declarations(self) -> None:
         for opener, shorter, closer in (
@@ -92,6 +94,11 @@ class SpecPRDeclarationTests(unittest.TestCase):
             "````text\n```\n  behavior-change: none\n````\n",
             "~~~text\n  behavior-change: none\n~~~\n",
             "<pre>\n  behavior-change: none\n</pre>\n",
+            "<details>\n  behavior-change: none\n</details>\n",
+            "<div>\n  behavior-change: none\n</div>\n",
+            "<?example\n  behavior-change: none\n?>\n",
+            "<![CDATA[\n  behavior-change: none\n]]>\n",
+            "    behavior-change: none\n",
             "<!--\n  behavior-change: none\n-->\n",
         )
         for hidden in hidden_blocks:

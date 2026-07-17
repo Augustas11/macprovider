@@ -293,6 +293,55 @@ class GovernanceValidatorTests(unittest.TestCase):
                 result = validate_repository(root, date(2026, 7, 16))
                 self.assertIn("invalid UTF-8", "\n".join(result.errors))
 
+    def test_duplicate_json_object_keys_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            manifest = root / "specs" / "AUTHORITY.json"
+            text = manifest.read_text(encoding="utf-8")
+            text = text.replace(
+                '"schema_version": "spec-authority-v1"',
+                '"schema_version": "spec-authority-v1", '
+                '"schema_version": "spec-authority-v1"',
+                1,
+            )
+            manifest.write_text(text, encoding="utf-8")
+            result = validate_repository(root, date(2026, 7, 16))
+        self.assertIn(
+            "duplicate JSON object key 'schema_version'",
+            "\n".join(result.errors),
+        )
+
+    def test_commit_evidence_expires_when_a_mapped_file_changes(self) -> None:
+        repository = base_repository()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            commit = self._commit_repository(root)
+            requirement = repository["conformance"]["requirements"][0]
+            requirement.update({
+                "state": "conformant",
+                "implementation": ["src/example.py:example"],
+                "tests": ["tests/test_example.py::test_example"],
+                "evidence": [{
+                    "artifact": f"commit:{commit}",
+                    "source": None,
+                    "captured_at": "2026-07-16",
+                    "expires_at": "2027-07-16",
+                }],
+                "gap": None,
+            })
+            repository["specs"]["src/example.py"] = (
+                "def example():\n"
+                "    return False  # selector remains, behavior changed\n"
+            )
+            write_repository(root, repository)
+            result = validate_repository(root, date(2026, 7, 16))
+        self.assertIn(
+            "no evidence commit matches every current mapped implementation/test file and selector",
+            "\n".join(result.errors),
+        )
+
     def test_manifest_cannot_reseed_bootstrap_baseline(self) -> None:
         repository = base_repository()
         with tempfile.TemporaryDirectory() as directory:
@@ -385,6 +434,10 @@ class GovernanceValidatorTests(unittest.TestCase):
             "~~~~text\n~~~\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~~\n",
             "~~~~~text\n~~~~\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~~~\n",
             "<pre>\n**SPEC-001-R999 — Example only.** It MUST not count.\n</pre>\n",
+            "<details>\n**SPEC-001-R999 — Example only.** It MUST not count.\n</details>\n",
+            "<div>\n**SPEC-001-R999 — Example only.** It MUST not count.\n</div>\n",
+            "<?example\n**SPEC-001-R999 — Example only.** It MUST not count.\n?>\n",
+            "<![CDATA[\n**SPEC-001-R999 — Example only.** It MUST not count.\n]]>\n",
             "<!-- **SPEC-001-R999 — Comment only.** It MUST not count. -->\n",
         )
         for example in examples:

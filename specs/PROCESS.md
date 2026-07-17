@@ -54,7 +54,8 @@ spec references the owner and may add local integration constraints, but may
 not restate or redefine the owned contract. New shared concepts must be added
 to the authority manifest in the same PR that introduces them. Pending
 reconciliation is explicit and issue-linked; it is not permission for a second
-owner.
+owner. Both governance manifests use deterministic JSON with unique object
+keys; duplicate keys are invalid rather than last-value-wins aliases.
 
 ## Requirement IDs
 
@@ -84,7 +85,9 @@ insufficient, a conformance state, and evidence. Allowed states are
 
 - `conformant` requires implementation mapping, a test or journey, reachable
   commit evidence for the code mappings, and current evidence with an expiry
-  date.
+  date. Every mapped source and test file must still match that evidence
+  commit; a later file change invalidates the evidence even when its selector
+  text remains present.
 - `pending`, `blocked`, and `nonconformant` require an arbitration verdict,
   owner, and issue.
 - `not-applicable` requires a recorded rationale and owner.

@@ -100,6 +100,20 @@ VERDICTS = {
     "DUPLICATE_AUTHORITY",
     "UNKNOWN",
 }
+RAW_HTML_BLOCK_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|"
+    "colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
+    "footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|"
+    "li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|"
+    "search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
+)
+RAW_HTML_BLOCK_TAG_RE = re.compile(
+    rf" {{0,3}}</?(?:{RAW_HTML_BLOCK_TAGS})(?:\s|/?>|$)",
+    re.IGNORECASE,
+)
+RAW_HTML_COMPLETE_TAG_RE = re.compile(
+    r" {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*)?/?>[ \t]*$",
+)
 BOOTSTRAP_BASELINE_COMMIT = "1df5f76c3fbde1b84619b717fcc28ef1e2c05bc3"
 LIFECYCLE_TRANSITIONS = {
     "draft": {"draft", "normative", "deprecated"},
@@ -118,13 +132,27 @@ class ValidationResult:
         self.errors.append(f"{location}: {message}")
 
 
+class DuplicateJSONKeyError(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise DuplicateJSONKeyError(key)
+        value[key] = item
+    return value
+
+
 def _contract_markdown(text: str) -> str:
     """Return Markdown contract text without examples or HTML comments."""
     raw_lines = text.splitlines()
     lines: list[str] = []
     fence: tuple[str, int] | None = None
     code_span: int | None = None
-    raw_html_block: str | None = None
+    raw_html_end: re.Pattern[str] | None = None
+    raw_html_until_blank = False
     in_comment = False
     for line_index, raw_line in enumerate(raw_lines):
         if fence is not None:
@@ -140,9 +168,14 @@ def _contract_markdown(text: str) -> str:
             lines.append("")
             continue
 
-        if raw_html_block is not None:
-            if re.search(rf"</{raw_html_block}\s*>", raw_line, re.IGNORECASE):
-                raw_html_block = None
+        if raw_html_end is not None:
+            if raw_html_end.search(raw_line):
+                raw_html_end = None
+            lines.append("")
+            continue
+        if raw_html_until_blank:
+            if not raw_line.strip():
+                raw_html_until_blank = False
             lines.append("")
             continue
 
@@ -155,7 +188,30 @@ def _contract_markdown(text: str) -> str:
             if raw_html_opening is not None:
                 tag = raw_html_opening.group(1)
                 if re.search(rf"</{tag}\s*>", raw_line, re.IGNORECASE) is None:
-                    raw_html_block = tag
+                    raw_html_end = re.compile(rf"</{tag}\s*>", re.IGNORECASE)
+                lines.append("")
+                continue
+            raw_html_special = (
+                (r" {0,3}<\?", re.compile(r"\?>")),
+                (r" {0,3}<!\[CDATA\[", re.compile(r"\]\]>")),
+                (r" {0,3}<![A-Z]", re.compile(r">")),
+            )
+            matched_special = False
+            for opening_pattern, closing_pattern in raw_html_special:
+                if re.match(opening_pattern, raw_line) is None:
+                    continue
+                if closing_pattern.search(raw_line) is None:
+                    raw_html_end = closing_pattern
+                matched_special = True
+                break
+            if matched_special:
+                lines.append("")
+                continue
+            if (
+                RAW_HTML_BLOCK_TAG_RE.match(raw_line) is not None
+                or RAW_HTML_COMPLETE_TAG_RE.fullmatch(raw_line) is not None
+            ):
+                raw_html_until_blank = True
                 lines.append("")
                 continue
             opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", raw_line)
@@ -320,6 +376,12 @@ def _commit_covers_mappings(root: Path, commit: str, mappings: list[str]) -> boo
         )
         if shown.returncode or selector not in shown.stdout:
             return False
+        unchanged = subprocess.run(
+            ["git", "diff", "--quiet", commit, "--", relative],
+            cwd=root, capture_output=True, text=True,
+        )
+        if unchanged.returncode:
+            return False
     return True
 
 
@@ -334,9 +396,14 @@ def _is_physical_evidence_path(root: Path, source: str) -> bool:
 
 def _load_json(path: Path, result: ValidationResult) -> Any | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
     except FileNotFoundError:
         result.error(str(path), "required manifest does not exist")
+    except DuplicateJSONKeyError as exc:
+        result.error(str(path), f"duplicate JSON object key {str(exc)!r}")
     except json.JSONDecodeError as exc:
         result.error(str(path), f"invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}")
     except UnicodeDecodeError as exc:
@@ -689,7 +756,10 @@ def _validate_conformance_schema(
                 _commit_covers_mappings(root, commit, implementation + tests)
                 for commit in commit_artifacts
             ):
-                result.error(loc, "no evidence commit contains every mapped implementation/test selector")
+                result.error(
+                    loc,
+                    "no evidence commit matches every current mapped implementation/test file and selector",
+                )
             if gap is not None:
                 result.error(loc, "conformant requirement must not retain a gap")
         valid_requirements.append(requirement)
