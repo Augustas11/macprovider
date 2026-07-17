@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Runs the public CLI-track `install.sh` non-interactively from Malibu.app.
@@ -5,16 +6,46 @@ import Foundation
 enum CLIInstallRunner {
     enum Error: Swift.Error, LocalizedError {
         case installScriptNotFound
+        case compatibilityManifestNotFound
         case invalidPinnedVersion(String)
+        case referralFailure(ReferralFailure)
         case nonZeroExit(Int32)
         case launchFailed(String)
+
+        enum ReferralFailure: Int32, Equatable {
+            case required = 20
+            case invalid = 21
+            case expired = 22
+            case revoked = 23
+            case exhausted = 24
+            case conflict = 25
+            case rateLimited = 26
+            case unavailable = 27
+
+            var message: String {
+                switch self {
+                case .required: return "A referral code is required to join right now. Enter an invite and retry."
+                case .invalid: return "This referral code is invalid. Check the code or invite link and retry."
+                case .expired: return "This referral code has expired. Ask the sender for a current invite."
+                case .revoked: return "This referral code was revoked. Ask the sender for a different invite."
+                case .exhausted: return "This referral code has no redemptions left. Ask the sender for a different invite."
+                case .conflict: return "This provider identity is already bound to a different referral attempt. Retry the original invite or contact support."
+                case .rateLimited: return "Too many referral attempts were submitted. Wait before retrying."
+                case .unavailable: return "Referral admission is temporarily unavailable. Your provider identity is preserved; retry later."
+                }
+            }
+        }
 
         var errorDescription: String? {
             switch self {
             case .installScriptNotFound:
                 return "The bundled macprovider installer script was not found."
+            case .compatibilityManifestNotFound:
+                return "The signed provider compatibility manifest was not found."
             case let .invalidPinnedVersion(version):
                 return "Provider install version pin is invalid: \(version)."
+            case let .referralFailure(failure):
+                return failure.message
             case let .nonZeroExit(code):
                 return "Provider install failed (exit \(code)). See the log above for details."
             case let .launchFailed(message):
@@ -27,16 +58,25 @@ enum CLIInstallRunner {
     /// lines to `onLogLine` on the main actor.
     static func run(
         pinnedVersion: String? = nil,
+        referralCode: String? = nil,
         onLogLine: @escaping @Sendable @MainActor (String) -> Void
     ) async throws {
         let scriptURL = try resolveInstallScriptURL()
-        let runnableURL = try materializeRunnableScript(from: scriptURL)
-        defer { try? FileManager.default.removeItem(at: runnableURL) }
+        let manifestURL = try resolveCompatibilityManifestURL()
+        let verifiedScript = try BundledInstallContractVerifier.verify(
+            scriptURL: scriptURL,
+            manifestURL: manifestURL
+        )
+        let referralFileURL = try referralCode.map { try ReferralCodeFile.create(code: $0) }
+        defer {
+            if let referralFileURL { try? FileManager.default.removeItem(at: referralFileURL) }
+        }
         let installPort = resolveInstallPort()
         let environment = try installerEnvironment(
             parentEnvironment: ProcessInfo.processInfo.environment,
             installPort: installPort,
-            pinnedVersion: pinnedVersion
+            pinnedVersion: pinnedVersion,
+            referralCodeFile: referralFileURL
         )
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
@@ -44,10 +84,14 @@ enum CLIInstallRunner {
         let exitCode: Int32 = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
+                let stdin = Pipe()
                 let stdout = Pipe()
                 let stderr = Pipe()
                 process.executableURL = URL(fileURLWithPath: "/bin/bash")
-                process.arguments = [runnableURL.path]
+                // Execute the exact authenticated bytes without reopening an
+                // owner-writable path between verification and bash parsing.
+                process.arguments = ["-s", "--"]
+                process.standardInput = stdin
                 process.standardOutput = stdout
                 process.standardError = stderr
 
@@ -70,7 +114,11 @@ enum CLIInstallRunner {
 
                 do {
                     try process.run()
+                    try stdin.fileHandleForWriting.write(contentsOf: verifiedScript)
+                    try stdin.fileHandleForWriting.close()
                 } catch {
+                    try? stdin.fileHandleForWriting.close()
+                    if process.isRunning { process.terminate() }
                     continuation.resume(throwing: Error.launchFailed(error.localizedDescription))
                     return
                 }
@@ -83,6 +131,9 @@ enum CLIInstallRunner {
         if exitCode == 0 {
             return
         }
+        if let failure = Error.ReferralFailure(rawValue: exitCode) {
+            throw Error.referralFailure(failure)
+        }
         // Every non-zero installer exit leaves the durable transaction
         // uncommitted and triggers rollback. A healthy local process may be
         // the restored previous release, so it cannot prove this install won.
@@ -92,7 +143,8 @@ enum CLIInstallRunner {
     static func installerEnvironment(
         parentEnvironment: [String: String],
         installPort: Int?,
-        pinnedVersion: String?
+        pinnedVersion: String?,
+        referralCodeFile: URL? = nil
     ) throws -> [String: String] {
         // Deliberately do not inherit the parent environment. install.sh has
         // authority-changing knobs for repositories, public keys, acceptance
@@ -115,6 +167,9 @@ enum CLIInstallRunner {
                 throw Error.invalidPinnedVersion(pinnedVersion)
             }
             explicit["MACPROVIDER_VERSION"] = "v\(normalized)"
+        }
+        if let referralCodeFile {
+            explicit["MACPROVIDER_REFERRAL_CODE_FILE"] = referralCodeFile.path
         }
         return try ProcessEnvironmentSanitizer.sanitized(
             from: [:],
@@ -216,6 +271,13 @@ enum CLIInstallRunner {
         throw Error.installScriptNotFound
     }
 
+    static func resolveCompatibilityManifestURL() throws -> URL {
+        guard let bundled = Bundle.main.url(forResource: "compatibility-set", withExtension: "json") else {
+            throw Error.compatibilityManifestNotFound
+        }
+        return bundled
+    }
+
     /// Port for `install.sh`: explicit env override, existing config, else a probed free port.
     /// Avoids exit 6 when the default 8080 is occupied (common on dev Macs running Node).
     static func resolveInstallPort(
@@ -230,12 +292,4 @@ enum CLIInstallRunner {
         return try? FreePortProbe.probe()
     }
 
-    /// Bundle resources are not guaranteed executable; copy to a temp path with +x.
-    private static func materializeRunnableScript(from source: URL) throws -> URL {
-        let temp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("macprovider-install-\(UUID().uuidString).sh")
-        try FileManager.default.copyItem(at: source, to: temp)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: temp.path)
-        return temp
-    }
 }

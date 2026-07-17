@@ -17,7 +17,19 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
     @Option(help: "Maximum seconds to wait for credential persistence.")
     var timeoutSeconds: Int = 30
 
+    @Option(help: "Owner-only referral-code file used only for first credential bootstrap.")
+    var referralCodeFile: String?
+
     func run() async throws {
+        do {
+            try await runBootstrap()
+        } catch let failure as ReferralBootstrapFailure {
+            Self.emitReferralFailure(failure)
+            throw ExitCode(failure.exitCode)
+        }
+    }
+
+    private func runBootstrap() async throws {
         guard timeoutSeconds > 0 && timeoutSeconds <= 120 else {
             throw ValidationError("--timeout-seconds must be in 1...120")
         }
@@ -27,15 +39,39 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             throw ValidationError("provider_id is required before credential bootstrap")
         }
         let providerCredentialStore = KeychainProviderCredentialStore()
+        let referralInput = try referralCodeFile.map { try ReferralCodeFile.read(path: $0) }
+        let receiptKeyStore = KeychainReceiptKeyStore()
         if let configToken = resolved.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !configToken.isEmpty {
             try providerCredentialStore.importIfAbsentOrMatches(
                 providerID: providerID,
                 token: configToken
             )
+            if let referralInput {
+                try Self.reconcilePersistedReferral(
+                    providerID: providerID,
+                    receiptPublicKey: try Self.persistedBootstrapReceiptPublicKey(
+                        providerID: providerID,
+                        store: receiptKeyStore
+                    ),
+                    input: referralInput,
+                    journal: ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL())
+                )
+            }
             return
         }
         if try Self.storedCredentialPresent(providerID: providerID, store: providerCredentialStore) {
+            if let referralInput {
+                try Self.reconcilePersistedReferral(
+                    providerID: providerID,
+                    receiptPublicKey: try Self.persistedBootstrapReceiptPublicKey(
+                        providerID: providerID,
+                        store: receiptKeyStore
+                    ),
+                    input: referralInput,
+                    journal: ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL())
+                )
+            }
             return
         }
         guard Self.isCredentialBootstrapPrincipal(providerID) else {
@@ -61,13 +97,25 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         // challenge under this exact same Keychain key and can replace only
         // its own unused bootstrap token, including after its initial TTL
         // while the coordinator's recovery-retention window remains open.
-        let receiptKeyStore = KeychainReceiptKeyStore()
         let currentReceiptKey = try receiptKeyStore.loadOrGenerate(providerId: providerID)
         let receiptKey = try receiptKeyStore.loadOrStoreBootstrapIdentity(
             providerId: providerID,
             candidate: currentReceiptKey
         )
         let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        let referralJournal = referralInput.map { _ in
+            ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL())
+        }
+        let referralAttempt: ReferralBootstrapAttempt?
+        if let referralInput, let referralJournal {
+            referralAttempt = try referralJournal.prepare(
+                providerID: providerID,
+                receiptPublicKey: receiptPublicKey,
+                input: referralInput
+            )
+        } else {
+            referralAttempt = nil
+        }
         guard let client = CoordinatorClient(
             config: resolved,
             modelRuntime: runtime,
@@ -75,6 +123,7 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             providerReceiptPublicKey: receiptPublicKey,
             credentialBootstrap: true,
             bootstrapReceiptSigningKey: receiptKey,
+            bootstrapReferralCode: referralInput?.code,
             providerCredentialStore: providerCredentialStore
         ) else {
             throw ValidationError("credential bootstrap requires a secure wss coordinator_url")
@@ -89,7 +138,25 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
                     store: providerCredentialStore
                 ) {
                     await client.stop()
+                    if let referralInput, let referralJournal {
+                        try Self.reconcilePersistedReferral(
+                            providerID: providerID,
+                            receiptPublicKey: receiptPublicKey,
+                            input: referralInput,
+                            journal: referralJournal
+                        )
+                    }
                     return
+                }
+                if let failure = await client.credentialBootstrapTerminalReferralFailure() {
+                    await client.stop()
+                    if let referralJournal, let referralAttempt {
+                        try referralJournal.markTerminal(
+                            attemptID: referralAttempt.attemptID,
+                            failure: failure
+                        )
+                    }
+                    throw failure
                 }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
@@ -98,6 +165,9 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             throw error
         }
         await client.stop()
+        if referralInput != nil {
+            throw ReferralBootstrapFailure(kind: .unavailable)
+        }
         throw ValidationError("coordinator did not persist a provider token before the bootstrap timeout")
     }
 
@@ -115,6 +185,34 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         hasToken(try store.load(providerID: providerID))
     }
 
+    static func reconcilePersistedReferral(
+        providerID: String,
+        receiptPublicKey: String,
+        input: ReferralCodeInput,
+        journal: ReferralBootstrapJournal
+    ) throws {
+        guard try journal.reconcilePersistedCredential(
+            providerID: providerID,
+            receiptPublicKey: receiptPublicKey,
+            input: input
+        ) != nil else {
+            // A credential without the exact pending provider+code binding is
+            // an incumbent identity, not proof that this referral was redeemed.
+            throw ReferralBootstrapFailure(kind: .conflict)
+        }
+        try ReferralCodeFile.removeIfUnchanged(input)
+    }
+
+    private static func persistedBootstrapReceiptPublicKey(
+        providerID: String,
+        store: KeychainReceiptKeyStore
+    ) throws -> String {
+        guard let receiptKey = try store.loadBootstrapIdentity(providerId: providerID) else {
+            throw ReferralBootstrapFailure(kind: .conflict)
+        }
+        return Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+    }
+
     static func isCredentialBootstrapPrincipal(_ providerID: String) -> Bool {
         let prefix = "mp-"
         guard providerID.hasPrefix(prefix), providerID.utf8.count == prefix.utf8.count + 32 else {
@@ -127,5 +225,11 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
 
     private static func hasToken(_ value: String?) -> Bool {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private static func emitReferralFailure(_ failure: ReferralBootstrapFailure) {
+        FileHandle.standardError.write(Data(
+            "referral_bootstrap_error=\(failure.kind.rawValue)\n".utf8
+        ))
     }
 }

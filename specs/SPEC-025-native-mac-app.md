@@ -280,40 +280,53 @@ From reading `phase3-binary/`:
    register / autotune / spawn step. The stages are:
    - **Short-circuit:** if a local provider is already healthy, skip the installer
      and just attach (`:79-87,144-163`).
-   - **Run the bundled `install.sh`** (`runCLIInstall`, `:117-125`). The installer
+   - **Run the bundled `install.sh`** (`runCLIInstall`). The installer
      is bundled at `Contents/Resources/install.sh` (copied from
-     `phase3-binary/dist/install.sh` at build time, `project.yml:72-75`), run via
-     `/bin/bash <temp-copy 0700>` with **no CLI args**. Current
+     `phase3-binary/dist/install.sh` at build time). Malibu first authenticates
+     the exact regular-file bytes against the signed compatibility manifest,
+     then supplies those already-authenticated bytes to `/bin/bash -s --` over
+     stdin with **no script-path or installer CLI args**. Current
      `CLIInstallRunner.installerEnvironment` does **not** inherit the parent
      environment: it constructs a sanitized allowlist containing fixed
      `PATH`/`HOME`/`TMPDIR`/`LC_ALL`, `MACPROVIDER_NO_PROMPT=1`, and only its
-     validated port/version values (`CLIInstallRunner.swift:92-119`).
+     validated port/version values.
 
      Referral onboarding extends that exact boundary as
      `CLIInstallRunner.run(referralCode:)`. After bounded syntax validation it
-     adds one explicit `MACPROVIDER_REFERRAL_CODE` value to the sanitized install
-     environment. `install.sh` immediately writes the value to the CLI-owned 0600
-     journal `~/.config/macprovider/onboarding/referral-attempt-v1.json`, unsets
-     it, and invokes `macprovider-cli bootstrap-auth
-     --referral-code-file <journal>`. The code never appears in argv, config,
-     logs, lifecycle status, or Malibu persistence. The CLI sends it only on the
-     bootstrap initial/proof frames, persists the returned bearer to CLI Keychain,
-     then atomically retires the plaintext journal before exit 0. That exit is the
-     non-secret acknowledgement Malibu observes; the bearer never crosses back.
+     creates an owner-only 0600, single-link, no-ACL regular source file with an
+     unpredictable name and adds only its path as
+     `MACPROVIDER_REFERRAL_CODE_FILE` to the sanitized install environment.
+     `install.sh` captures and unsets that path before launching any child; it
+     never reads, logs, copies, or persists the code. It invokes
+     `macprovider-cli bootstrap-auth --referral-code-file <source>`, and the CLI
+     reopens the source with no-follow identity checks before reading it. The
+     durable CLI journal
+     `~/.config/macprovider/onboarding/referral-attempt-v1.json` stores only the
+     provider ID, receipt-key digest, referral-code digest, attempt ID, and typed
+     state; plaintext referral material is never journaled. The CLI sends the
+     code only on the bootstrap initial/proof frames, persists the returned bearer
+     to CLI Keychain, marks the digest journal committed, and removes the source
+     file only after reopening it no-follow and proving the full stat identity and
+     byte digest are unchanged. Malibu also best-effort removes its source file
+     after installer exit. Exit 0 is the non-secret acknowledgement Malibu
+     observes; the bearer never crosses back.
 
      Compatibility-set manifest v1 is exact-key and has no capability field; it
      MUST NOT be extended in place. For the fresh bundled path, the replacement
      Malibu build enables this UI only for its compiled-in v1 handoff. Before
      execution it hashes the exact `Contents/Resources/install.sh` regular-file
-     bytes it is about to copy/run and requires equality with the signed
+     bytes it is about to supply over stdin and requires equality with the signed
      manifest's `components.launchd.install_contract.sha256`, whose declared
      member is `compatibility-set-local/install.sh`. A missing, unreadable,
      symlinked, or mismatched top-level resource renders referral onboarding
-     unavailable and executes nothing. For an existing installation, Malibu
-     requires `referral_bootstrap_v1` in the installed CLI's versioned local
-     status contract. Otherwise it renders referral onboarding unavailable while
-     retaining ordinary attach/monitor behavior. No marketing-version equality
-     check substitutes for either gate.
+     unavailable and executes nothing. Because Malibu executes that bundled
+     installer for both fresh and existing-install onboarding, the compiled
+     `MalibuBundledReferralBootstrapV1` gate MUST be true on every referral path.
+     An existing installation additionally requires `referral_bootstrap_v1` in
+     the installed CLI's versioned local status contract. Either missing gate
+     renders referral onboarding unavailable while retaining ordinary
+     attach/monitor behavior. No marketing-version equality check substitutes for
+     either gate.
      `install.sh` performs the register + autotune (`autotune --recommend`) + model
      download + **launchd provider-service + watchdog install**; the app only surfaces a progress hint
      by scraping `ps` for the autotune stage (`:110-149`). A non-zero installer exit

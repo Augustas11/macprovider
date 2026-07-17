@@ -45,22 +45,36 @@ run_case() {
   if [ "$mode" = "receipt-probe-fails" ]; then
     : > "$root/prefetch-receipt.json"
   fi
+  case "$mode" in
+    referral-success|referral-expired|existing-referral-retry|existing-referral-import)
+      printf '%s' 'MAL1-S-key-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA' > "$root/referral-code"
+      chmod 600 "$root/referral-code"
+      ;;
+  esac
   cat > "$root/config/config.yaml" <<EOF
 model: "seed"
 provider_id: "$provider_id"
 coordinator_url: "wss://coordinator.example/ws/provider"
 EOF
+  if [ "$mode" = "existing-referral-import" ]; then
+    printf '%s\n' 'provider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' >> "$root/config/config.yaml"
+  fi
   case "$mode" in
-    existing-mp|existing-legacy) : > "$root/credential" ;;
+    existing-mp|existing-legacy|existing-referral-retry) : > "$root/credential" ;;
   esac
   set +e
   CASE_MODE="$mode" CASE_ROOT="$root" bash -c '
     set -euo pipefail
     INSTALL_DIR="$CASE_ROOT/install"
+    CONFIG_DIR="$CASE_ROOT/config"
     CONFIG_PATH="$CASE_ROOT/config/config.yaml"
     DRY_RUN=0
     SKIP_PROVIDER_START=0
     model="seed"
+    REFERRAL_CODE_SOURCE_FILE=""
+    case "$CASE_MODE" in
+      referral-success|referral-expired|existing-referral-retry|existing-referral-import) REFERRAL_CODE_SOURCE_FILE="$CASE_ROOT/referral-code" ;;
+    esac
     if [ "$CASE_MODE" = "receipt-probe-fails" ]; then
       AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="namespace/seed"
       AUTOTUNE_PREFETCH_RECEIPT_PATH="$CASE_ROOT/prefetch-receipt.json"
@@ -68,14 +82,27 @@ EOF
     log() { :; }
     die() { exit "$1"; }
     prompt_yes_no() { return 0; }
+    publish_bootstrap_identity_for_rollback() {
+      printf "publish-bootstrap-identity\n" >> "$CASE_ROOT/calls"
+    }
     run_macprovider_cli_with_amfi_retry() {
       printf "%s\n" "$*" >> "$CASE_ROOT/calls"
       case "$1" in
         bootstrap-auth)
           [ "$CASE_MODE" != "bootstrap-fails" ] || return 9
+          [ "$CASE_MODE" != "referral-expired" ] || return 22
+          if [ "$CASE_MODE" = "existing-referral-retry" ] || [ "$CASE_MODE" = "existing-referral-import" ]; then
+            : > "$CASE_ROOT/reconciled"
+            rm -f "$CASE_ROOT/referral-code"
+          fi
           : > "$CASE_ROOT/credential"
           ;;
         credentials)
+          if [ "$2" = "import" ]; then
+            [ "$CASE_MODE" = "existing-referral-import" ] || return 12
+            : > "$CASE_ROOT/credential"
+            return 0
+          fi
           [ "$2" = "verify" ] || return 12
           [ "$CASE_MODE" != "store-unavailable" ] || return 17
           [ -f "$CASE_ROOT/credential" ] || return 3
@@ -101,7 +128,7 @@ EOF
   rc=$?
   set -e
   case "$mode" in
-    success)
+    success|referral-success)
       [ "$rc" -eq 0 ]
       awk '
         /--no-submit-hardware-evidence/ { tune=NR }
@@ -111,6 +138,22 @@ EOF
         /service-start/ { service=NR }
         END { exit !(tune < bootstrap && bootstrap < verify && verify < evidence && evidence < service) }
       ' "$root/calls"
+      if [ "$mode" = "referral-success" ]; then
+        grep -F -- "bootstrap-auth --timeout-seconds 30 --config $root/config/config.yaml --referral-code-file $root/referral-code" "$root/calls" >/dev/null
+        awk '
+          /publish-bootstrap-identity/ { publish=NR }
+          /bootstrap-auth/ { bootstrap=NR }
+          END { exit !(publish < bootstrap) }
+        ' "$root/calls"
+      fi
+      ;;
+    referral-expired)
+      [ "$rc" -eq 22 ]
+      grep -F -- "--referral-code-file $root/referral-code" "$root/calls" >/dev/null
+      if grep -F "service-start" "$root/calls" >/dev/null; then
+        echo "$mode started service after referral rejection" >&2
+        exit 1
+      fi
       ;;
     bootstrap-fails|evidence-fails|predictable-id)
       [ "$rc" -ne 0 ]
@@ -126,6 +169,29 @@ EOF
         echo "$mode bootstrapped over an existing CLI-Keychain credential" >&2
         exit 1
       fi
+      ;;
+    existing-referral-retry)
+      [ "$rc" -eq 0 ]
+      grep -F "credentials verify" "$root/calls" >/dev/null
+      grep -F -- "bootstrap-auth --timeout-seconds 30 --config $root/config/config.yaml --referral-code-file $root/referral-code" "$root/calls" >/dev/null
+      if grep -F "publish-bootstrap-identity" "$root/calls" >/dev/null; then
+        echo "$mode republished an identity that was already durable" >&2
+        exit 1
+      fi
+      [ -f "$root/reconciled" ]
+      [ ! -e "$root/referral-code" ]
+      ;;
+    existing-referral-import)
+      [ "$rc" -eq 0 ]
+      grep -F "credentials import" "$root/calls" >/dev/null
+      grep -F "credentials verify" "$root/calls" >/dev/null
+      grep -F -- "bootstrap-auth --timeout-seconds 30 --config $root/config/config.yaml --referral-code-file $root/referral-code" "$root/calls" >/dev/null
+      if grep -F "publish-bootstrap-identity" "$root/calls" >/dev/null; then
+        echo "$mode published a staged config that still contains a legacy bearer" >&2
+        exit 1
+      fi
+      [ -f "$root/reconciled" ]
+      [ ! -e "$root/referral-code" ]
       ;;
     store-unavailable)
       [ "$rc" -ne 0 ]
@@ -150,11 +216,15 @@ EOF
 }
 
 run_case success
+run_case referral-success
+run_case referral-expired
 run_case bootstrap-fails
 run_case evidence-fails
 run_case predictable-id
 run_case existing-mp
 run_case existing-legacy
+run_case existing-referral-retry
+run_case existing-referral-import
 run_case store-unavailable
 run_case receipt-probe-fails
 

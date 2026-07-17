@@ -271,6 +271,30 @@ jobs:
             -exec cp -R {} "$app/Contents/MacOS"/ \;
           cp "$payload_dir/compatibility-set.json" \
             "$app/Contents/Resources/compatibility-set.json"
+          # The app must execute the exact installer authenticated by the
+          # signed compatibility set, never the source-tree post-build copy.
+          cp "$payload_dir/compatibility-set-local/install.sh" \
+            "$app/Contents/Resources/install.sh"
+          chmod 755 "$app/Contents/Resources/install.sh"
+          /usr/libexec/PlistBuddy -c \
+            'Set :MalibuBundledReferralBootstrapV1 false' \
+            "$app/Contents/Info.plist"
+          python3 - \
+            "$app/Contents/Resources/compatibility-set.json" \
+            "$app/Contents/Resources/install.sh" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          manifest_path = pathlib.Path(sys.argv[1])
+          installer_path = pathlib.Path(sys.argv[2])
+          envelope = json.loads(manifest_path.read_bytes())
+          expected = envelope["signed"]["components"]["launchd"]["install_contract"]["sha256"]
+          actual = hashlib.sha256(installer_path.read_bytes()).hexdigest()
+          if actual != expected:
+              raise SystemExit("embedded install.sh does not match the signed compatibility set")
+          PY
           embedded_cli="$app/Contents/MacOS/macprovider-cli"
           test "$(shasum -a 256 "$embedded_cli" | awk '{print $1}')" = "$CLI_SHA256"
 
@@ -577,6 +601,22 @@ jobs:
           codesign -dv --verbose=4 "$cli" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
           codesign -dv --verbose=4 "$cli" 2>&1 | grep -q '^Runtime Version='
           test -f "$app/Contents/Resources/compatibility-set.json"
+          test -x "$app/Contents/Resources/install.sh"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MalibuBundledReferralBootstrapV1' "$plist")" = false
+          python3 - \
+            "$app/Contents/Resources/compatibility-set.json" \
+            "$app/Contents/Resources/install.sh" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          envelope = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+          expected = envelope["signed"]["components"]["launchd"]["install_contract"]["sha256"]
+          actual = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
+          if actual != expected:
+              raise SystemExit("release artifact installer/manifest mismatch")
+          PY
           cleanup_mount
           trap - EXIT
 
