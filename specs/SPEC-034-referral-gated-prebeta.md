@@ -113,9 +113,9 @@ capacity.
 | First-serving qualification | Coordinator reconciler | Issuer/qualification row with evidence reference and earliest qualifying time | Status, operator audit, invite service | `(campaign, provider_id)` conditional insert/update | Preserve earliest authoritative evidence under duplicates/out-of-order delivery | `eligible` with evidence-derived timestamp | Two reconcilers and duplicate evidence create one base grant |
 | Invite balance and link | Coordinator | Issuer base/bonus capacity minus committed redemptions plus configured HTTPS `join_base_url` | Authenticated CLI API, Malibu sanitized projection, `/j/<code>` resolver | Issuer/campaign and redemption IDs | Read is side-effect free; CLI and Malibu accept only the exact `join_base_url/<code>` projection; retry never decrements twice | Available, exhausted, disabled, or unavailable with exact remaining count | A public join origin distinct from the coordinator is accepted only when coordinator status declares it; redemption decrements exactly once |
 | X challenge | Coordinator | Hashed challenge, expiry, provider/campaign binding, issued/consumed times; CLI-owned 0600 pending-challenge journal holds the raw challenge, exact invite URL, and composer intent | CLI and verification service; Malibu sees expiry/state only | One active `(campaign, provider_id)` challenge + random digest | Replacement/expiry is explicit; CLI restores or reopens only after a fresh status read confirms social rewards and the exact invite binding; raw challenge, share URL, and composer intent never cross into Malibu | `challenge_ready`, `expired`, or retryable failure | Duplicate request and restart respect challenge and rate limits; flag disable or join/code rotation clears local pending state; local frames contain no nonce or intent URL |
-| X submission | Coordinator | Canonical post ID/URL digest, provider/campaign/challenge binding | Verification/recheck worker, audit, status | Globally unique post ID plus `(campaign, provider_id)` | Duplicate same submission converges; reused post or author mismatch rejects | `pending`, `failed`, or `matured` with truthful reason | Success, bad URL, wrong author, wrong link, replay, and rate-limit cases |
-| X verification decision | Coordinator server-side verifier | Current verification row plus append-only social decision audit | Bonus transaction, status, security/operator review | Verification attempt/event UUID and expected prior state | External transient failure is retryable; terminal failure is stable; redirects and untrusted origins fail closed | Pending/retryable/terminal failure separated | Audit records challenge, submit, recheck, decision, and redacted cause |
-| X observed-author binding | Coordinator records the X API result | Numeric `author_id` in the pending verification and immutable history/audit | Recheck worker and security/operator review | Globally unique post ID + initial numeric author ID | This is continuity of the observed post author, not proof the provider owns an X account; recheck must return the same nonempty numeric author or fail terminally | No ownership badge; only pending/failed/matured reward state | Empty/non-numeric author rejects; changed author on recheck fails; exact author continuity may mature |
+| X submission | Coordinator | Positively verified canonical post ID/URL digest and provider/campaign/challenge binding; terminal failures use a separate provider-scoped failure row | Verification/recheck worker, audit, status | Verified post ID is globally unique; terminal failure uses `(campaign, provider_id, challenge_digest, post_id)` without reserving the post globally | Duplicate same submission converges; a positively verified reused post or author mismatch rejects; an unverified rejected post cannot deny another provider's later legitimate verification | `pending`, `failed`, or `matured` with truthful reason | Success, bad URL, wrong author, wrong link, replay, cross-provider rejected-post reuse, and rate-limit cases |
+| X verification decision | Coordinator server-side verifier | Current verification or terminal-failure row plus append-only social decision audit | Bonus transaction, status, security/operator review | Verification attempt/event UUID and expected prior state | External transient failure is retryable; terminal failure is stable and response-loss safe without claiming global ownership of unverified evidence; redirects and untrusted origins fail closed | Pending/retryable/terminal failure separated | Audit records challenge, submit, recheck, decision, and redacted cause |
+| X observed-author binding | Coordinator records the positive X API result | Numeric `author_id` in the pending verification and immutable history/audit | Recheck worker and security/operator review | Globally unique positively verified post ID + initial numeric author ID | This is continuity of the observed post author, not proof the provider owns an X account; recheck must return the same nonempty numeric author or fail terminally | No ownership badge; only pending/failed/matured reward state | Empty/non-numeric author rejects; changed author on recheck fails; exact author continuity may mature |
 | Bonus grant | Coordinator | Conditional verification `granted_at` plus issuer bonus or dedicated grant row and audit event | Status and operator audit | `(campaign, provider_id, bonus_kind)` | Transactional conditional grant makes parallel rechecks no-ops after one winner | `matured` and exact bonus/remaining counts | Concurrent promotion grants capacity exactly once |
 | Operator mutation | Coordinator CLI/admin path | Append-only audit with actor, reason, target, expected prior state, result | Operators/security review | Audit event UUID + compare-and-swap expectation | Dry-run and expected-value checks prevent stale writes; rollback is explicit | Not exposed as provider success until committed | Seed, adjust, replace, revoke, and raced mutation audit tests |
 | Malibu referral projection | CLI writes sanitized status from coordinator authority | Versioned local status/control response; no App-side policy database | Malibu only | Capability name + schema version + coordinator revision | Unsupported older/newer CLI renders unavailable and suppresses actions | Truthful disabled/locked/pending/failed/matured/exhausted/revoked/unavailable states | Independent Malibu/CLI marketing versions negotiate by capability, not equality |
@@ -202,9 +202,13 @@ does not assert that the provider controls the X account and MUST NOT be rendere
 as account ownership. A future ownership claim requires a separate proof flow.
 
 Every challenge issuance, submission, external response classification, recheck,
-terminal decision, and grant writes an append-only redacted audit event. Post IDs
-cannot be reused across providers/campaigns. Bonus promotion and `granted_at`
-commit atomically with the issuer balance using the grant identity
+terminal decision, and grant writes an append-only redacted audit event. A post
+ID becomes globally replay-protected only after the initial server-side lookup
+positively verifies the exact invite URL and a numeric author. Terminally
+rejected, unverified post IDs remain provider/challenge-scoped failure evidence
+and MUST NOT reserve the global replay key or deny another provider's later
+legitimate verification. Bonus promotion and `granted_at` commit atomically with
+the issuer balance using the grant identity
 `(campaign, provider_id, bonus_kind)`. Parallel workers therefore produce one
 grant and any number of idempotent observations.
 
@@ -265,8 +269,9 @@ Required automated evidence:
 - no invite before authoritative evidence; one invite after first verified
   serving; duplicate and concurrent evidence no-op;
 - invite-link redemption exactly once;
-- X success, transient/terminal failure, author/link mismatch, replay, rate
-  limiting, audit, concurrent recheck, and exactly-once bonus;
+- X success, transient/terminal failure, author/link mismatch, replay,
+  cross-provider reuse after an unverified rejection, rate limiting, audit,
+  concurrent recheck, and exactly-once bonus;
 - referral admission, public validation, social reward, and public join flags
   absent/false by default, safe route/config rollback, and retained durable
   state;
