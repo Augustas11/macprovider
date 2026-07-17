@@ -962,13 +962,23 @@ def _mapping_parts(value: str) -> tuple[str, str | None]:
     return value, None
 
 
+def _resolve_repository_path(root: Path, relative: str) -> Path | None:
+    try:
+        return (root / relative).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _validate_mapping_paths(
     values: list[str], field_name: str, location: str, root: Path,
     result: ValidationResult,
 ) -> None:
     for value in values:
         relative, selector = _mapping_parts(value)
-        path = (root / relative).resolve()
+        path = _resolve_repository_path(root, relative)
+        if path is None:
+            result.error(location, f"{field_name} mapping has invalid path: {relative!r}")
+            continue
         try:
             normalized = path.relative_to(root).as_posix()
         except ValueError:
@@ -999,7 +1009,9 @@ def _commit_covers_mappings(root: Path, commit: str, mappings: list[str]) -> boo
         relative, selector = _mapping_parts(mapping)
         if not selector:
             return False
-        path = (root / relative).resolve()
+        path = _resolve_repository_path(root, relative)
+        if path is None:
+            return False
         try:
             relative = path.relative_to(root).as_posix()
         except ValueError:
@@ -1020,7 +1032,9 @@ def _commit_covers_mappings(root: Path, commit: str, mappings: list[str]) -> boo
 
 
 def _is_physical_evidence_path(root: Path, source: str) -> bool:
-    path = (root / source).resolve()
+    path = _resolve_repository_path(root, source)
+    if path is None:
+        return False
     try:
         normalized = path.relative_to(root).as_posix()
     except ValueError:
@@ -1175,7 +1189,10 @@ def _validate_evidence_list(
             if not isinstance(source, str) or not source:
                 result.error(evidence_loc, "sha256 evidence requires a repository-relative source file")
             else:
-                source_path = (root / source).resolve()
+                source_path = _resolve_repository_path(root, source)
+                if source_path is None:
+                    result.error(evidence_loc, f"evidence source has invalid path: {source!r}")
+                    continue
                 try:
                     source_path.relative_to(root)
                 except ValueError:
@@ -1703,7 +1720,13 @@ def validate_repository(
         rel_path = record.get("path")
         if not isinstance(rel_path, str):
             continue
-        path = (root / rel_path).resolve()
+        path = _resolve_repository_path(root, rel_path)
+        if path is None:
+            result.error(
+                f"specs/CONFORMANCE.json.specs[{index}]",
+                f"invalid path: {rel_path!r}",
+            )
+            continue
         try:
             path.relative_to(root)
         except ValueError:
@@ -1844,7 +1867,13 @@ def validate_repository(
             target = target.strip().split("#", 1)[0]
             if not target or re.match(r"^(?:https?://|mailto:)", target):
                 continue
-            linked = (path.parent / target).resolve()
+            linked = _resolve_repository_path(path.parent, target)
+            if linked is None:
+                result.error(
+                    str(path.relative_to(root)),
+                    f"Markdown link has invalid path: {target!r}",
+                )
+                continue
             try:
                 linked.relative_to(root)
             except ValueError:

@@ -838,6 +838,36 @@ class GovernanceValidatorTests(unittest.TestCase):
         _, count = legacy_requirement_fingerprint(text)
         self.assertEqual(1, count)
 
+    def test_embedded_nul_paths_fail_actionably(self) -> None:
+        mutations = (
+            ("implementation", lambda repository: repository["conformance"]["requirements"][0].update({
+                "implementation": ["src/\x00example.py:symbol"],
+            })),
+            ("tests", lambda repository: repository["conformance"]["requirements"][0].update({
+                "tests": ["tests/\x00example.py::test_symbol"],
+            })),
+            ("evidence", lambda repository: repository["conformance"]["requirements"][0].update({
+                "evidence": [{
+                    "artifact": "sha256:" + "0" * 64,
+                    "source": "journeys/evidence/\x00proof.json",
+                    "captured_at": "2026-07-16",
+                    "expires_at": "2027-07-16",
+                }],
+            })),
+            ("spec path", lambda repository: repository["conformance"]["specs"][0].update({
+                "path": "specs/\x00SPEC-001.md",
+            })),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                repository = base_repository()
+                mutate(repository)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    write_repository(root, repository)
+                    result = validate_repository(root, date(2026, 7, 16))
+                self.assertIn("invalid path", "\n".join(result.errors))
+
     def test_malformed_nested_values_never_crash(self) -> None:
         mutations = [
             ("authority", "domains", 0, "id"),
