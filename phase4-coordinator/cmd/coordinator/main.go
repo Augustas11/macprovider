@@ -936,7 +936,7 @@ func main() {
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
 	var trustedReferralProxies []netip.Prefix
-	if cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks {
+	if cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.RequireForRegistration {
 		trustedReferralProxies = mustParseTrustedProxies(cfg, logger)
 	}
 	var referralValidationHandler http.HandlerFunc
@@ -966,14 +966,16 @@ func main() {
 	var referralStatus, referralChallenge, referralVerify http.HandlerFunc
 	if cfg.Referrals.RequireForRegistration {
 		advocacy := &referralapi.AdvocacyHandler{
-			Store:           tokenStore,
-			Tokens:          tokenStore,
-			Policy:          referralPolicy,
-			PublicLimiter:   referralapi.NewBoundedLimiter(60, time.Minute, 4096),
-			ProviderLimiter: referralapi.NewBoundedLimiter(10, time.Minute, 4096),
-			AuthSlots:       make(chan struct{}, 16),
-			VerifySlots:     make(chan struct{}, 8),
-			JoinBaseURL:     cfg.Referrals.JoinBaseURL,
+			Store:            tokenStore,
+			Tokens:           tokenStore,
+			Policy:           referralPolicy,
+			PublicLimiter:    referralapi.NewBoundedLimiter(60, time.Minute, 4096),
+			ProviderLimiter:  referralapi.NewBoundedLimiter(10, time.Minute, 4096),
+			AuthSlots:        make(chan struct{}, 16),
+			VerifySlots:      make(chan struct{}, 8),
+			JoinBaseURL:      cfg.Referrals.JoinBaseURL,
+			JoinLinksEnabled: cfg.Referrals.EnableJoinLinks,
+			Metrics:          metricsHandle,
 			SourceIP: func(r *http.Request) string {
 				return onboarding.ClientIP(r, trustedReferralProxies)
 			},

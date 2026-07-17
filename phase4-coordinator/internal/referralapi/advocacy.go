@@ -16,6 +16,7 @@ type AdvocacyStore interface {
 	CreateSocialChallenge(context.Context, auth.ReferralPolicy, string, time.Time) (auth.SocialChallenge, error)
 	PreflightSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, time.Time) (auth.ProviderReferral, bool, error)
 	CompleteSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, string, string, string, time.Time) (auth.ProviderReferral, error)
+	FailSocialVerification(context.Context, auth.ReferralPolicy, string, string, string, string, string, string, time.Time) (auth.ProviderReferral, error)
 	ConsumeSocialRateLimit(context.Context, auth.ReferralPolicy, string, string, time.Time, time.Duration, int) (bool, error)
 	RecordSocialAudit(context.Context, auth.ReferralPolicy, string, string, string, string, string, string, string, time.Time) error
 }
@@ -31,18 +32,19 @@ type PostVerifier interface {
 // AdvocacyHandler owns the provider-authenticated referral endpoints. It never
 // consumes invite capacity; only provider registration creates redemptions.
 type AdvocacyHandler struct {
-	Store           AdvocacyStore
-	Tokens          ProviderTokenValidator
-	PostVerifier    PostVerifier
-	Policy          auth.ReferralPolicy
-	PublicLimiter   *BoundedLimiter
-	ProviderLimiter *BoundedLimiter
-	AuthSlots       chan struct{}
-	VerifySlots     chan struct{}
-	SourceIP        func(*http.Request) string
-	Now             func() time.Time
-	JoinBaseURL     string
-	Metrics         ReferralMetrics
+	Store            AdvocacyStore
+	Tokens           ProviderTokenValidator
+	PostVerifier     PostVerifier
+	Policy           auth.ReferralPolicy
+	PublicLimiter    *BoundedLimiter
+	ProviderLimiter  *BoundedLimiter
+	AuthSlots        chan struct{}
+	VerifySlots      chan struct{}
+	SourceIP         func(*http.Request) string
+	Now              func() time.Time
+	JoinBaseURL      string
+	JoinLinksEnabled bool
+	Metrics          ReferralMetrics
 }
 
 func (h *AdvocacyHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +207,12 @@ func (h *AdvocacyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	expectedURL := strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" +
 		url.PathEscape(status.Code) + "?c=" + url.QueryEscape(request.Challenge)
+	shareURLHash, err := ShareURLDigest(expectedURL, h.JoinBaseURL)
+	if err != nil {
+		h.observe("x_verify", "error")
+		writeError(w, http.StatusInternalServerError, "verification_config_invalid", "social verification is unavailable")
+		return
+	}
 	if h.VerifySlots != nil {
 		select {
 		case h.VerifySlots <- struct{}{}:
@@ -235,22 +243,19 @@ func (h *AdvocacyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			reason = "author_missing"
 		}
-		if auditErr := h.Store.RecordSocialAudit(
-			r.Context(), h.Policy, providerID, request.Challenge, postID, authorID,
-			"external_verify", "terminal", reason, h.now(),
-		); auditErr != nil {
+		status, failErr := h.Store.FailSocialVerification(
+			r.Context(), h.Policy, providerID, request.Challenge, postID, authorID, shareURLHash, reason, submittedAt,
+		)
+		if failErr != nil {
 			h.observe("x_verify", "error")
-			writeError(w, http.StatusServiceUnavailable, "verification_audit_unavailable", "social verification is temporarily unavailable")
+			writeError(w, http.StatusServiceUnavailable, "verification_state_unavailable", "social verification is temporarily unavailable")
 			return
 		}
 		h.observe("x_verify", "failed")
-		writeError(w, http.StatusUnprocessableEntity, "post_not_verified", "post is unavailable or does not contain the invite link")
-		return
-	}
-	shareURLHash, err := ShareURLDigest(expectedURL, h.JoinBaseURL)
-	if err != nil {
-		h.observe("x_verify", "error")
-		writeError(w, http.StatusInternalServerError, "verification_config_invalid", "social verification is unavailable")
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":        map[string]any{"code": "post_not_verified", "message": "post is unavailable or does not contain the invite link"},
+			"social_state": status.SocialState,
+		})
 		return
 	}
 	status, err = h.Store.CompleteSocialVerification(
@@ -323,10 +328,13 @@ func (h *AdvocacyHandler) writeStatus(w http.ResponseWriter, status auth.Provide
 		"redemptions":               status.Redemptions,
 		"remaining":                 status.Remaining,
 		"first_serving_seen":        status.FirstServingSeen,
+		"join_links_enabled":        h.JoinLinksEnabled,
 		"social_bonus_enabled":      h.Policy.EnableSocialBonus,
 	}
 	if status.Code != "" {
 		body["invite_code"] = status.Code
+	}
+	if status.Code != "" && h.JoinLinksEnabled {
 		body["invite_url"] = strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" + url.PathEscape(status.Code)
 	}
 	writeJSON(w, http.StatusOK, body)

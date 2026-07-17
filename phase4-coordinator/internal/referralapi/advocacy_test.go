@@ -90,15 +90,16 @@ func qualifyAdvocacyProvider(t *testing.T, store *auth.Store, policy auth.Referr
 
 func newAdvocacyHandler(store *auth.Store, providerID string, now time.Time) AdvocacyHandler {
 	return AdvocacyHandler{
-		Store:           store,
-		Tokens:          advocacyTokens{providerID: providerID},
-		Policy:          advocacyPolicy(),
-		PublicLimiter:   NewBoundedLimiter(1000, time.Minute, 128),
-		ProviderLimiter: NewBoundedLimiter(1000, time.Minute, 128),
-		AuthSlots:       make(chan struct{}, 1),
-		VerifySlots:     make(chan struct{}, 1),
-		Now:             func() time.Time { return now },
-		JoinBaseURL:     "https://malibu.tech/j",
+		Store:            store,
+		Tokens:           advocacyTokens{providerID: providerID},
+		Policy:           advocacyPolicy(),
+		PublicLimiter:    NewBoundedLimiter(1000, time.Minute, 128),
+		ProviderLimiter:  NewBoundedLimiter(1000, time.Minute, 128),
+		AuthSlots:        make(chan struct{}, 1),
+		VerifySlots:      make(chan struct{}, 1),
+		Now:              func() time.Time { return now },
+		JoinBaseURL:      "https://malibu.tech/j",
+		JoinLinksEnabled: true,
 	}
 }
 
@@ -282,6 +283,13 @@ func TestAdvocacyExternalDecisionsAreAuditedAndTransientRetryUsesSameChallenge(t
 	if retry.Code != http.StatusOK || !strings.Contains(retry.Body.String(), `"social_state":"pending"`) {
 		t.Fatalf("retry status=%d body=%s", retry.Code, retry.Body.String())
 	}
+	var verifiedAudit int
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM referral_social_audit WHERE provider_id = ? AND event_kind = 'external_verify' AND outcome = 'verified'`, "provider-retry").Scan(&verifiedAudit); err != nil {
+		t.Fatal(err)
+	}
+	if verifiedAudit != 1 {
+		t.Fatalf("verified audit rows=%d", verifiedAudit)
+	}
 
 	qualifyAdvocacyProvider(t, store, advocacyPolicy(), "provider-terminal", now)
 	terminalVerifier := &advocacyVerifier{err: ErrXPostTerminal}
@@ -294,12 +302,40 @@ func TestAdvocacyExternalDecisionsAreAuditedAndTransientRetryUsesSameChallenge(t
 	if terminal.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("terminal status=%d body=%s", terminal.Code, terminal.Body.String())
 	}
+	if !strings.Contains(terminal.Body.String(), `"social_state":"failed"`) {
+		t.Fatalf("terminal body=%s", terminal.Body.String())
+	}
 	var terminalAudit int
 	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM referral_social_audit WHERE provider_id = ? AND event_kind = 'external_verify' AND outcome = 'terminal' AND reason = 'post_not_verified'`, "provider-terminal").Scan(&terminalAudit); err != nil {
 		t.Fatal(err)
 	}
 	if terminalAudit != 1 {
 		t.Fatalf("terminal audit rows=%d", terminalAudit)
+	}
+	replayed := httptest.NewRecorder()
+	terminalHandler.HandleVerify(replayed, bearerRequest(http.MethodPost, "/v1/provider/referrals/x/verify", terminalBody))
+	if replayed.Code != http.StatusOK || !strings.Contains(replayed.Body.String(), `"social_state":"failed"`) {
+		t.Fatalf("terminal replay status=%d body=%s", replayed.Code, replayed.Body.String())
+	}
+	if terminalVerifier.calls != 1 {
+		t.Fatalf("terminal replay external calls=%d", terminalVerifier.calls)
+	}
+}
+
+func TestAdvocacyStatusDoesNotAdvertiseDisabledJoinLink(t *testing.T) {
+	store := openAdvocacyStore(t)
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	qualified := qualifyAdvocacyProvider(t, store, advocacyPolicy(), "provider-link-disabled", now)
+	handler := newAdvocacyHandler(store, "provider-link-disabled", now)
+	handler.JoinLinksEnabled = false
+
+	response := httptest.NewRecorder()
+	handler.HandleStatus(response, bearerRequest(http.MethodGet, "/v1/provider/referrals", ""))
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"join_links_enabled":false`) ||
+		!strings.Contains(response.Body.String(), `"invite_code":"`+qualified.Code+`"`) ||
+		strings.Contains(response.Body.String(), `"invite_url"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

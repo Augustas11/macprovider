@@ -625,7 +625,102 @@ INSERT INTO referral_social_verifications (
 		if err != nil || changed != 1 {
 			return ErrSocialChallenge
 		}
+		if err := recordSocialAuditTx(ctx, conn, policy.Campaign, providerID, issuerID, "external_verify", "verified", hashSocialSubject(postID), "x_api", now); err != nil {
+			return err
+		}
 		return recordSocialAuditTx(ctx, conn, policy.Campaign, providerID, issuerID, "submission", "accepted", hashSocialSubject(postID), "x_api", now)
+	})
+	if err != nil {
+		return ProviderReferral{}, err
+	}
+	return s.ProviderReferralStatus(ctx, policy, providerID)
+}
+
+// FailSocialVerification consumes a terminally classified submission and
+// persists the failed state in the same transaction as its redacted decision
+// audit. An exact response-loss retry then recovers the failed status without
+// calling the external verifier again.
+func (s *Store) FailSocialVerification(ctx context.Context, policy ReferralPolicy, providerID, challenge, postID, authorID, shareURLHash, reason string, now time.Time) (ProviderReferral, error) {
+	if err := policy.Validate(); err != nil {
+		return ProviderReferral{}, err
+	}
+	if !policy.EnableSocialBonus {
+		return ProviderReferral{}, ErrSocialDisabled
+	}
+	postID = strings.TrimSpace(postID)
+	authorID = strings.TrimSpace(authorID)
+	shareURLHash = strings.TrimSpace(shareURLHash)
+	reason = strings.TrimSpace(reason)
+	if err := config.ValidateProviderID(providerID); err != nil ||
+		!socialPrincipalIDPattern.MatchString(postID) ||
+		(authorID != "" && !socialPrincipalIDPattern.MatchString(authorID)) ||
+		!socialShareURLHashPattern.MatchString(shareURLHash) ||
+		!socialAuditTokenPattern.MatchString(reason) ||
+		now.IsZero() {
+		return ProviderReferral{}, ErrSocialChallenge
+	}
+	digest := sha256.Sum256([]byte(strings.TrimSpace(challenge)))
+	digestText := fmt.Sprintf("%x", digest[:])
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var issuerID, expiresAt string
+		var consumedAt sql.NullString
+		if err := conn.QueryRowContext(ctx, `
+SELECT c.issuer_id, c.expires_at, c.consumed_at
+  FROM referral_social_challenges c
+  JOIN referral_serving_qualifications q ON q.issuer_id = c.issuer_id AND q.provider_id = c.provider_id AND q.campaign = c.campaign
+  JOIN referral_issuers i ON i.issuer_id = q.issuer_id AND i.revoked_at IS NULL
+ WHERE c.challenge_hash = ? AND c.provider_id = ? AND c.campaign = ?`, digestText, providerID, policy.Campaign).Scan(&issuerID, &expiresAt, &consumedAt); err != nil {
+			return ErrSocialChallenge
+		}
+		if consumedAt.Valid {
+			var storedIssuer, storedChallenge, storedPost, storedAuthor, storedShare string
+			var failedAt sql.NullString
+			err := conn.QueryRowContext(ctx, `
+SELECT issuer_id, challenge_hash, post_id, author_id, share_url_hash, failed_at
+  FROM referral_social_verifications
+ WHERE provider_id = ? AND campaign = ?`, providerID, policy.Campaign).Scan(
+				&storedIssuer, &storedChallenge, &storedPost, &storedAuthor, &storedShare, &failedAt,
+			)
+			if err == nil && failedAt.Valid && storedIssuer == issuerID && storedChallenge == digestText &&
+				storedPost == postID && storedAuthor == authorID && storedShare == shareURLHash {
+				return nil
+			}
+			return ErrSocialChallenge
+		}
+		expires, err := time.Parse(time.RFC3339, expiresAt)
+		if err != nil || !expires.After(now.UTC()) {
+			return ErrSocialChallenge
+		}
+		var archivedPost bool
+		if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM referral_social_verification_history WHERE post_id = ?)`, postID).Scan(&archivedPost); err != nil {
+			return err
+		}
+		if archivedPost {
+			return ErrSocialChallenge
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO referral_social_verifications (
+    provider_id, campaign, issuer_id, challenge_hash, post_id, author_id, share_url_hash,
+    verification_method, submitted_at, pending_since, next_check_at, failed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, 'x_api', ?, ?, ?, ?)`,
+			providerID, policy.Campaign, issuerID, digestText, postID, authorID, shareURLHash,
+			timeText(now.UTC()), timeText(now.UTC()), timeText(now.UTC()), timeText(now.UTC())); err != nil {
+			if isConstraintFailure(err) {
+				return ErrSocialChallenge
+			}
+			return err
+		}
+		result, err := conn.ExecContext(ctx, `
+UPDATE referral_social_challenges SET consumed_at = ?
+ WHERE challenge_hash = ? AND consumed_at IS NULL`, timeText(now.UTC()), digestText)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return ErrSocialChallenge
+		}
+		return recordSocialAuditTx(ctx, conn, policy.Campaign, providerID, issuerID, "external_verify", "terminal", hashSocialSubject(postID), reason, now)
 	})
 	if err != nil {
 		return ProviderReferral{}, err
@@ -787,6 +882,9 @@ UPDATE referral_social_verifications SET granted_at = ?, lease_token = NULL, lea
 			return fmt.Errorf("social verification changed during grant")
 		}
 		if err := recordSocialAuditTx(ctx, conn, policy.Campaign, claim.providerID, claim.issuerID, "bonus", "granted", hashSocialSubject(claim.postID), socialGrantKind, now); err != nil {
+			return err
+		}
+		if err := recordSocialAuditTx(ctx, conn, policy.Campaign, claim.providerID, claim.issuerID, "recheck", "verified", hashSocialSubject(claim.postID), "author_continuity", now); err != nil {
 			return err
 		}
 		granted = true

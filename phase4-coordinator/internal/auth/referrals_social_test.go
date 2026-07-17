@@ -333,15 +333,18 @@ func TestParallelPromotersGrantBonusExactlyOnce(t *testing.T) {
 	if err != nil || status.BonusCapacity != policy.SocialBonusUses || status.SocialState != SocialStateMatured {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
-	var grants, grantAudits int
+	var grants, grantAudits, recheckAudits int
 	if err := first.db.QueryRow(`SELECT COUNT(1) FROM referral_social_grants WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&grants); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.db.QueryRow(`SELECT COUNT(1) FROM referral_social_audit WHERE campaign = ? AND provider_id = ? AND event_kind = 'bonus' AND outcome = 'granted'`, policy.Campaign, providerID).Scan(&grantAudits); err != nil {
 		t.Fatal(err)
 	}
-	if grants != 1 || grantAudits != 1 {
-		t.Fatalf("grant rows=%d grant audits=%d", grants, grantAudits)
+	if err := first.db.QueryRow(`SELECT COUNT(1) FROM referral_social_audit WHERE campaign = ? AND provider_id = ? AND event_kind = 'recheck' AND outcome = 'verified'`, policy.Campaign, providerID).Scan(&recheckAudits); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 1 || grantAudits != 1 || recheckAudits != 1 {
+		t.Fatalf("grant rows=%d grant audits=%d recheck audits=%d", grants, grantAudits, recheckAudits)
 	}
 	if _, err := first.db.Exec(`UPDATE referral_social_grants SET amount = amount + 1`); err == nil {
 		t.Fatal("grant update unexpectedly succeeded")
