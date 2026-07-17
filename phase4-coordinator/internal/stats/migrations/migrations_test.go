@@ -38,6 +38,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{15, "provider_onboarding_hardware_decision_reason"},
 		{16, "hardware_profile_memory_reverification"},
 		{17, "autotune_current_hardware_gate_grants"},
+		{18, "apptrack_register_attempts"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -557,4 +558,53 @@ func extractBetween(body, start, end string) string {
 		return rest
 	}
 	return rest[:j+len(end)]
+}
+
+func TestApptrackRegisterAttemptsMigrationShape(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	var body string
+	for _, m := range all {
+		if m.Name == "apptrack_register_attempts" {
+			body = m.SQL
+		}
+	}
+	if body == "" {
+		t.Fatal("apptrack_register_attempts migration body is empty")
+	}
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS provider_register_attempts",
+		"PRIMARY KEY (provider_id, nonce, ts_utc)",
+		"CREATE OR REPLACE FUNCTION prune_provider_register_attempts",
+		"retain_for must be at least 7 days",
+		"SET search_path = pg_catalog, public, pg_temp",
+		"REVOKE INSERT ON provider_register_attempts FROM provider_onboarding",
+		"GRANT SELECT ON provider_register_attempts TO provider_onboarding",
+		"GRANT INSERT (provider_id, nonce, ts_utc, source_ip)",
+		"REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM PUBLIC",
+		"REVOKE ALL ON FUNCTION prune_provider_register_attempts(INTERVAL) FROM provider_onboarding",
+	} {
+		mustContain(t, body, needle, "durable registration attempt marker migration")
+	}
+	mustNotContain(t, body, "GRANT DELETE ON provider_register_attempts",
+		"runtime onboarding role must not delete durable attempt markers")
+	mustNotContain(t, body, "GRANT SELECT, INSERT ON provider_register_attempts",
+		"runtime onboarding role must not receive table-level insert")
+	mustNotContain(t, body, "PRIMARY KEY (provider_id, nonce, ts_utc, source_ip)",
+		"connection metadata must not participate in commitment identity")
+
+	down, err := os.ReadFile("018_apptrack_register_attempts.down.sql")
+	if err != nil {
+		t.Fatalf("read rollback artifact: %v", err)
+	}
+	downSQL := string(down)
+	for _, needle := range []string{
+		"REVOKE ALL ON provider_register_attempts FROM provider_onboarding",
+		"DROP FUNCTION IF EXISTS prune_provider_register_attempts(INTERVAL)",
+		"DROP TABLE IF EXISTS provider_register_attempts",
+	} {
+		mustContain(t, downSQL, needle, "registration attempt rollback artifact")
+	}
 }
