@@ -758,6 +758,8 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
             result.error(spec_id, "complete requirement migration requires at least one structured requirement")
         if spec.get("status") in {"implemented-unverified", "physically-verified"} and not owned_requirements:
             result.error(spec_id, f"{spec.get('status')} requires at least one owned requirement")
+        if spec.get("production_status") == "physically-verified":
+            result.error(spec_id, "production_status physically-verified requires signed journey-result contract before promotion")
         if spec.get("status") == "physically-verified":
             result.error(spec_id, "physically-verified requires signed journey-result contract before promotion")
             nonconformant = [

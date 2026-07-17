@@ -227,6 +227,8 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         specs[1]["requirement_id_migration"] = "complete"
     elif operation == "physically_verified_without_proof":
         specs[0]["status"] = "physically-verified"
+    elif operation == "production_physically_verified_without_signed_result":
+        specs[0]["production_status"] = "physically-verified"
     elif operation == "stale_evidence":
         digest = hashlib.sha256(b"proof\n").hexdigest()
         requirements[0]["state"] = "conformant"
