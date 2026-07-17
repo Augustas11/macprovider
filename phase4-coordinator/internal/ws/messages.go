@@ -39,6 +39,7 @@ type Hello struct {
 	CandidateRowIdentity   string          `json:"catalog_row_identity,omitempty"`
 	CompatibilitySetID     string          `json:"compatibility_set_id,omitempty"`
 	CredentialBootstrap    bool            `json:"credential_bootstrap,omitempty"`
+	ReferralCode           string          `json:"referral_code,omitempty"`
 }
 
 const (
@@ -46,6 +47,7 @@ const (
 	maxHandshakeModelIDBytes       = 256
 	maxHandshakeBinaryVersionBytes = 32
 	maxHandshakeMetadataBytes      = 1024
+	maxReferralCodeBytes           = 256
 )
 
 type HelloAck struct {
@@ -62,9 +64,9 @@ type HelloAck struct {
 	// the top-level `provider_token` YAML key (FR-C9.3) so the next
 	// reconnect carries Bearer. Note: top-level, NOT nested under
 	// `auth:` — codex audit on PR #44 caught the prior spec/code drift.
-	AssignedProviderToken         string `json:"assigned_provider_token,omitempty"`
-	PairOT                        string `json:"pair_ot,omitempty"`
-	ClaimURL                      string `json:"claim_url,omitempty"`
+	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
+	PairOT                string `json:"pair_ot,omitempty"`
+	ClaimURL              string `json:"claim_url,omitempty"`
 	// The coordinator's admission verdict on this ACCEPT ack — one of
 	// bearer_validated / self_minted / bearerless_duplicate (pool.AuthState).
 	// mint_failed and the reject paths CLOSE the connection, so they never ride
@@ -123,6 +125,7 @@ type AuthRequest struct {
 	CandidateRowIdentity           string          `json:"catalog_row_identity,omitempty"`
 	CompatibilitySetID             string          `json:"compatibility_set_id,omitempty"`
 	CredentialBootstrap            bool            `json:"credential_bootstrap,omitempty"`
+	ReferralCode                   string          `json:"referral_code,omitempty"`
 }
 
 type Spec010Presence struct {
@@ -170,9 +173,9 @@ type AuthResponse struct {
 	// SPEC-003 v0.8 FR-C9.2 — populated only on proof-stage acceptance
 	// when a tokenless provisional provider was just self-minted on this
 	// connect. Never present on rejection-shaped responses.
-	AssignedProviderToken               string `json:"assigned_provider_token,omitempty"`
-	PairOT                              string `json:"pair_ot,omitempty"`
-	ClaimURL                            string `json:"claim_url,omitempty"`
+	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
+	PairOT                string `json:"pair_ot,omitempty"`
+	ClaimURL              string `json:"claim_url,omitempty"`
 	// Coordinator admission verdict on this ACCEPT ack; see the
 	// HelloAck.AuthState note (emission SPEC-003 FR-C9.2a, shape SPEC-001 §6.5.1,
 	// interpretation SPEC-020 v0.1.7). mint_failed / rejects close the
@@ -555,6 +558,11 @@ func ParseHello(payload []byte) (Hello, string, error) {
 			return Hello{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
 		}
 	}
+	if v, ok := raw["referral_code"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &h.ReferralCode); err != nil || len([]byte(h.ReferralCode)) > maxReferralCodeBytes || containsControlChar(h.ReferralCode) {
+			return Hello{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
+		}
+	}
 	if field, err := parseCatalogAdmissionMetadata(raw, &h.CatalogReleaseID, &h.CatalogPolicyVersion, &h.CandidateCatalogSHA256, &h.CatalogSignerKeyID, &h.CandidateRowIdentity); err != nil {
 		return Hello{}, field, err
 	}
@@ -686,6 +694,11 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if v, ok := raw["provider_admission_recovery"]; ok {
 		if string(v) == "null" || json.Unmarshal(v, &req.ProviderAdmissionRecovery) != nil {
 			return AuthRequest{}, Spec010Presence{}, "provider_admission_recovery", fmt.Errorf("provider_admission_recovery must be a bool")
+		}
+	}
+	if v, ok := raw["referral_code"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ReferralCode); err != nil || len([]byte(req.ReferralCode)) > maxReferralCodeBytes || containsControlChar(req.ReferralCode) {
+			return AuthRequest{}, Spec010Presence{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
 		}
 	}
 	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
@@ -830,6 +843,11 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 			return AuthRequest{}, Spec010Presence{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
 		}
 	}
+	if v, ok := raw["referral_code"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ReferralCode); err != nil || len([]byte(req.ReferralCode)) > maxReferralCodeBytes || containsControlChar(req.ReferralCode) {
+			return AuthRequest{}, Spec010Presence{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
+		}
+	}
 	// Proof-stage MUST keep the bare "supported_models" badField (NOT
 	// the locked initial-stage substring) — AC-K.15's surfacing
 	// contract is initial-stage-only, and the R2V regression test
@@ -885,6 +903,7 @@ func (r AuthRequest) Hello() Hello {
 		CandidateRowIdentity:   r.CandidateRowIdentity,
 		CompatibilitySetID:     r.CompatibilitySetID,
 		CredentialBootstrap:    r.CredentialBootstrap,
+		ReferralCode:           r.ReferralCode,
 	}
 }
 

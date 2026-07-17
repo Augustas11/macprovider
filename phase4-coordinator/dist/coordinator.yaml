@@ -86,6 +86,28 @@ auth:
     spec026_a: env:OPERATOR_AUTH_POLICY_A
     spec026_b: env:OPERATOR_AUTH_POLICY_B
 
+# Pre-beta referral admission. All public/enforcement switches remain off in
+# checked-in config; enabling one requires an explicit campaign, key id, and
+# 32+ byte HMAC key.
+referrals:
+  require_for_registration: false
+  enable_public_validation: false
+  enable_join_links: false
+  enable_social_invite_bonus: false
+  campaign: ""
+  policy_version: "v1"
+  grandfather_before: ""
+  current_key_id: ""
+  hmac_keys: {}
+  provider_base_uses: 1
+  social_bonus_uses: 2
+  challenge_ttl_s: 900
+  social_verification_dwell_s: 1800
+  join_base_url: "https://coordinator.streamvc.live/j"
+  join_download_url: ""
+  x_api_bearer_token: ""
+  request_access_url: ""
+
 # SPEC-007 v0.2 — internal read-only operator explorer.
 # Reuses auth.operator_key (D15). Disable by setting enabled: false.
 # Mounted at /admin/explorer/ on provider_port (8444); already proxied by nginx.

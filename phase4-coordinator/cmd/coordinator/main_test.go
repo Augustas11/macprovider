@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -41,6 +42,132 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout == 0 {
 		t.Fatal("IdleTimeout must be set")
+	}
+}
+
+func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	disabled := withReferralValidation(base, nil, nil)
+	disabledResponse := httptest.NewRecorder()
+	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if disabledResponse.Code != http.StatusNoContent {
+		t.Fatalf("disabled validation route unexpectedly mounted: status=%d", disabledResponse.Code)
+	}
+
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }, nil)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("validation status=%d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/reserve", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("reservation route unexpectedly mounted: status=%d", response.Code)
+	}
+}
+
+func TestAppTrackReferralMintReconcilerRunsAfterEnforcementRollback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := make(chan struct{}, 1)
+	startAppTrackReferralMintReconciler(ctx, appTrackReferralMintReconcilerFunc(func(context.Context) error {
+		called <- struct{}{}
+		return nil
+	}), zerolog.Nop())
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("referral mint reconciler did not run with enforcement disabled")
+	}
+}
+
+func TestOnboardingStoreRemainsOpenAfterRouteRollback(t *testing.T) {
+	cfg := config.Default().Onboarding
+	cfg.AppTrackRegisterEnabled = false
+	cfg.PostgresDSN = "postgres://provider_onboarding@postgres/onboarding"
+	if !shouldOpenOnboardingStore(cfg) {
+		t.Fatal("configured onboarding authority closed when registration route was disabled")
+	}
+	cfg.PostgresDSN = ""
+	if shouldOpenOnboardingStore(cfg) {
+		t.Fatal("unconfigured disabled onboarding store unexpectedly opened")
+	}
+}
+
+type appTrackReferralMintReconcilerFunc func(context.Context) error
+
+func (f appTrackReferralMintReconcilerFunc) ReconcilePendingAppTrackReferralMints(ctx context.Context) error {
+	return f(ctx)
+}
+
+func TestWithReferralValidationMountsJoinRouteOnlyWhenEnabled(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	disabled := withReferralValidation(base, nil, nil)
+	disabledResponse := httptest.NewRecorder()
+	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
+	if disabledResponse.Code != http.StatusNoContent {
+		t.Fatalf("disabled join route unexpectedly mounted: status=%d", disabledResponse.Code)
+	}
+
+	handler := withReferralValidation(
+		base,
+		nil,
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) },
+	)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("join status=%d", response.Code)
+	}
+}
+
+func TestWithReferralAdvocacyKeepsMutationRoutesAbsentWhenDisabled(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.NotFound(w, nil) })
+	status := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+	challenge := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) }
+	verify := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }
+
+	statusOnly := withReferralAdvocacy(base, status, nil, nil)
+	for _, test := range []struct {
+		path string
+		want int
+	}{
+		{path: "/v1/provider/referrals", want: http.StatusOK},
+		{path: "/v1/provider/referrals/x/challenge", want: http.StatusNotFound},
+		{path: "/v1/provider/referrals/x/verify", want: http.StatusNotFound},
+	} {
+		response := httptest.NewRecorder()
+		statusOnly.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, nil))
+		if response.Code != test.want {
+			t.Fatalf("status-only path=%s status=%d want=%d", test.path, response.Code, test.want)
+		}
+	}
+
+	fullyEnabled := withReferralAdvocacy(base, status, challenge, verify)
+	for path, want := range map[string]int{
+		"/v1/provider/referrals":             http.StatusOK,
+		"/v1/provider/referrals/x/challenge": http.StatusCreated,
+		"/v1/provider/referrals/x/verify":    http.StatusAccepted,
+	} {
+		response := httptest.NewRecorder()
+		fullyEnabled.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != want {
+			t.Fatalf("enabled path=%s status=%d want=%d", path, response.Code, want)
+		}
+	}
+}
+
+func TestNewReferralValidationHandlerWiresOperatorRecoveryURL(t *testing.T) {
+	handler := newReferralValidationHandler(nil, auth.ReferralPolicy{}, nil, "  https://access.example.test/waitlist  ", nil)
+	if handler.RequestAccessURL != "https://access.example.test/waitlist" {
+		t.Fatalf("request access URL=%q", handler.RequestAccessURL)
+	}
+	if handler.PublicLimiter == nil || handler.ValidateSlots == nil || handler.SourceIP == nil {
+		t.Fatal("production validation safeguards were not wired")
 	}
 }
 

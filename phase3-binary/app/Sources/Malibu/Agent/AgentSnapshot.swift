@@ -138,6 +138,14 @@ struct AgentSnapshot: Equatable {
     var cliUpdateInProgress: Bool
     var cliUpdateLastError: String?
 
+    // Coordinator-authoritative referral projection received only through the
+    // launchd CLI's owner-only control socket. Malibu never receives the
+    // provider bearer or the X challenge cleartext.
+    var referralAvailability: ReferralAvailability = .unsupported
+    var referralStatus: ReferralStatusProjection? = nil
+    var referralLastError: String? = nil
+    var referralActionInProgress: Bool = false
+
     // Whether the CLI has explicitly acknowledged a pause; distinct from
     // "we optimistically flipped the UI" — pauseAck accepted:false must NOT
     // leave the UI showing Paused.
@@ -168,6 +176,15 @@ struct AgentSnapshot: Equatable {
             return age >= -1 && age <= 60
         }
         return isLocalStatusObservationCurrent(at: now)
+    }
+
+    func hasTrustedReferralBoundary() -> Bool {
+        localStatusContractCompatible == true
+            && localStatusLifecycleOwner == "macprovider_cli"
+            && localStatusCapabilities.contains("referral_status_v1")
+            && localStatusCapabilities.contains("service_instance_v1")
+            && serviceRole == "serve"
+            && localProviderID != nil
     }
 
     mutating func invalidateLocalStatusObservation() {
@@ -226,6 +243,10 @@ struct AgentSnapshot: Equatable {
         compatibilitySetID = nil
         compatibilitySetSHA256 = nil
         coordinatorRecommendedVersion = nil
+        referralAvailability = .unsupported
+        referralStatus = nil
+        referralLastError = nil
+        referralActionInProgress = false
     }
 
     static let empty = AgentSnapshot(

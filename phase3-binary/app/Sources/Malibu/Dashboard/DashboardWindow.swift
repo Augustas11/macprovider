@@ -14,7 +14,7 @@ enum DashboardWindow {
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Malibu"
-        window.setContentSize(NSSize(width: 780, height: 560))
+        window.setContentSize(NSSize(width: 780, height: 740))
         window.center()
         window.isReleasedWhenClosed = false
         return window
@@ -173,6 +173,10 @@ private struct DashboardView: View {
             }
             .frame(minHeight: 280)
 
+            if agent.snapshot.localProviderID != nil {
+                ReferralPanel(agent: agent)
+            }
+
             if !agent.logLines.isEmpty {
                 LogTailView(lines: agent.logLines)
                     .frame(minHeight: 120, maxHeight: 180)
@@ -233,6 +237,119 @@ private struct DashboardView: View {
         case .paused: return MalibuBrand.sunnyYellow
         case .error: return .red
         case .idle: return .secondary
+        }
+    }
+}
+
+private struct ReferralPanel: View {
+    @ObservedObject var agent: MalibuAgent
+    @State private var postURL = ""
+
+    private var status: ReferralStatusProjection? { agent.snapshot.referralStatus }
+    private var availability: ReferralAvailability {
+        guard agent.snapshot.hasTrustedReferralBoundary() else { return .unsupported }
+        if agent.snapshot.referralAvailability == .available,
+           agent.snapshot.referralStatus?.isCurrent() != true {
+            return .unavailable
+        }
+        return agent.snapshot.referralAvailability
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Invite providers")
+                        .font(.headline)
+                    Text(ReferralPanelPresenter.headline(availability: availability, status: status))
+                        .font(.callout.weight(.semibold))
+                    Text(ReferralPanelPresenter.detail(availability: availability, status: status))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if agent.snapshot.referralActionInProgress {
+                    ProgressView().controlSize(.small)
+                }
+                Button("Refresh") {
+                    Task { await agent.refreshReferralStatus() }
+                }
+                .disabled(!agent.snapshot.hasTrustedReferralBoundary() || agent.snapshot.referralActionInProgress)
+            }
+
+            if availability == .available, let status {
+                Text(ReferralPanelPresenter.capacity(status))
+                    .font(.caption.monospacedDigit())
+
+                HStack(spacing: 8) {
+                    Button("Copy private invite") {
+                        guard status.isCurrent(), let invite = status.availableInviteURL else { return }
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(invite.absoluteString, forType: .string)
+                    }
+                    .disabled(!status.isCurrent() || status.availableInviteURL == nil)
+
+                    if status.canStartSocialChallenge,
+                       agent.snapshot.localStatusCapabilities.contains("referral_advocacy_v1") {
+                        Button("Share on X for \(ReferralPanelPresenter.invitePhrase(status.configuredBonusCapacity))") {
+                            Task { await agent.startReferralChallenge() }
+                        }
+                        .disabled(agent.snapshot.referralActionInProgress)
+                    }
+                }
+
+                if let challenge = status.pendingChallenge {
+                    Divider()
+                    Text(challenge.expiresAt > Date()
+                         ? "Paste the public x.com post URL before \(challenge.expiresAt.formatted(date: .omitted, time: .shortened))."
+                         : "This X verification link expired. Start over to create a new one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Reopen X composer") {
+                            Task { await agent.reopenReferralChallenge() }
+                        }
+                        .disabled(challenge.expiresAt <= Date() || agent.snapshot.referralActionInProgress)
+                        Button("Start over") {
+                            Task { await agent.cancelReferralChallenge() }
+                        }
+                        .disabled(agent.snapshot.referralActionInProgress)
+                    }
+                    HStack(spacing: 8) {
+                        TextField("https://x.com/you/status/…", text: $postURL)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Submit for verification") {
+                            let submitted = postURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                            Task { await agent.verifyReferralPost(submitted) }
+                        }
+                        .disabled(
+                            postURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || challenge.expiresAt <= Date()
+                                || agent.snapshot.referralActionInProgress
+                        )
+                    }
+                }
+            }
+
+            if let error = agent.snapshot.referralLastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.gray.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(MalibuBrand.coral.opacity(0.25), lineWidth: 1)
+                )
+        )
+        .task(id: agent.snapshot.localProviderID) {
+            guard agent.snapshot.hasTrustedReferralBoundary() else { return }
+            await agent.refreshReferralStatus()
         }
     }
 }

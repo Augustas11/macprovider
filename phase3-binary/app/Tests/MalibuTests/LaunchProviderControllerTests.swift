@@ -84,6 +84,113 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
+    func testLaunchPassesNormalizedReferralLinkToCLIInstaller() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let code = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
+        controller.referralInput = "https://coordinator.streamvc.live/j/\(code)"
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.installedReferralCode, code)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testInvalidReferralInputDoesNotRunInstaller() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        controller.referralInput = "https://evil.example/j/not-an-invite"
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        if case let .failed(stage, retryable, _) = controller.stage {
+            XCTAssertEqual(stage, "referral")
+            XCTAssertTrue(retryable)
+        } else {
+            XCTFail("expected referral correction state")
+        }
+    }
+
+    func testReferralInputRequiresNegotiatedCapability() async {
+        let harness = Harness()
+        harness.referralInputAvailable = false
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        controller.referralInput = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "referral")
+            XCTAssertTrue(retryable)
+            XCTAssertTrue(message.contains("referral_bootstrap_v1"))
+        } else {
+            XCTFail("expected unavailable referral correction state")
+        }
+    }
+
+    func testRefreshPublishesReferralCapabilityAvailability() async {
+        let harness = Harness()
+        harness.referralInputAvailable = false
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.refreshReferralInputAvailability()
+
+        XCTAssertTrue(controller.referralAvailabilityChecked)
+        XCTAssertFalse(controller.referralInputAvailable)
+    }
+
+    func testReferralHandoffRequiresBundledArtifactAndInstalledCapability() {
+        XCTAssertFalse(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: false,
+            installedCLIAdvertisesReferralBootstrapV1: true
+        ))
+        XCTAssertFalse(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: true,
+            installedCLIAdvertisesReferralBootstrapV1: false
+        ))
+        XCTAssertTrue(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: true,
+            installedCLIAdvertisesReferralBootstrapV1: true
+        ))
+        XCTAssertTrue(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: true,
+            installedCLIAdvertisesReferralBootstrapV1: nil
+        ))
+    }
+
+    func testDefaultMalibuArtifactKeepsReferralHandoffDisabled() {
+        let bundledHandoffEnabled = Bundle.main.object(
+            forInfoDictionaryKey: "MalibuBundledReferralBootstrapV1"
+        ) as? Bool == true
+
+        XCTAssertFalse(bundledHandoffEnabled)
+        XCTAssertFalse(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: bundledHandoffEnabled,
+            installedCLIAdvertisesReferralBootstrapV1: true
+        ))
+    }
+
+    func testTypedReferralFailureDoesNotDestroyIdentityOrAttachProvider() async {
+        let harness = Harness()
+        harness.cliInstallError = CLIInstallRunner.Error.referralFailure(.expired)
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliImportRuns, 0)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "referral")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(message, CLIInstallRunner.Error.ReferralFailure.expired.message)
+        } else {
+            XCTFail("expected typed referral failure")
+        }
+    }
+
     func testRefreshFromExistingInstallConnectsWithoutInstaller() async {
         let harness = Harness()
         harness.localInstallSucceeded = true
@@ -240,6 +347,7 @@ final class LaunchProviderControllerTests: XCTestCase {
 
     private final class Harness {
         var localInstallSucceeded = false
+        var referralInputAvailable = true
         var localInstallSucceededAfterInstall = false
         var markLocalInstallSucceededAfterInstall = true
         var cliInstallRuns = 0
@@ -256,17 +364,20 @@ final class LaunchProviderControllerTests: XCTestCase {
         var cliImportErrors: [Error] = []
         var configModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
         var installLogLines: [String] = []
+        var installedReferralCode: String?
 
         func dependencies() -> LaunchProviderController.Dependencies {
             LaunchProviderController.Dependencies(
                 localInstallSucceeded: {
                     self.localInstallSucceeded || self.localInstallSucceededAfterInstall
                 },
+                referralInputAvailable: { self.referralInputAvailable },
                 registerLoginItem: {
                     self.loginItemRegistrations += 1
                 },
-                runCLIInstall: { onLogLine in
+                runCLIInstall: { referralCode, onLogLine in
                     self.cliInstallRuns += 1
+                    self.installedReferralCode = referralCode
                     if let error = self.cliInstallError { throw error }
                     self.localInstallSucceededAfterInstall = self.markLocalInstallSucceededAfterInstall
                     onLogLine("install.sh finished")

@@ -123,6 +123,8 @@ type BootstrapMintRequest struct {
 	UnconfirmedIDMax    int
 	OutstandingTokenMax int
 	IdentityRetention   time.Duration
+	ReferralCode        string
+	ReferralPolicy      ReferralPolicy
 }
 
 type BootstrapMint struct {
@@ -450,6 +452,50 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bootstrap_mint_log_provider_ts ON bootstrap_mint_log(provider_id, ts)`,
 		`CREATE INDEX IF NOT EXISTS idx_bootstrap_mint_log_ip_ts ON bootstrap_mint_log(source_ip, ts)`,
+		`CREATE TABLE IF NOT EXISTS referral_issuers (
+			issuer_id TEXT PRIMARY KEY,
+			code_type TEXT NOT NULL CHECK(code_type IN ('S','P')),
+			key_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			provider_id TEXT,
+			base_capacity INTEGER NOT NULL CHECK(base_capacity >= 0),
+			bonus_capacity INTEGER NOT NULL DEFAULT 0 CHECK(bonus_capacity >= 0),
+			expires_at TEXT,
+			revoked_at TEXT,
+			created_at TEXT NOT NULL,
+			first_serving_at TEXT,
+			UNIQUE(provider_id, campaign)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_referral_issuers_provider_campaign ON referral_issuers(provider_id, campaign)`,
+		`CREATE TABLE IF NOT EXISTS referral_redemptions (
+			campaign TEXT NOT NULL,
+			provider_id TEXT NOT NULL,
+			issuer_id TEXT NOT NULL REFERENCES referral_issuers(issuer_id),
+			code_digest TEXT NOT NULL,
+			policy_version TEXT NOT NULL DEFAULT 'v1',
+			redeemed_at TEXT NOT NULL,
+			PRIMARY KEY(campaign, provider_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_referral_redemptions_issuer ON referral_redemptions(issuer_id)`,
+		`CREATE TABLE IF NOT EXISTS provider_referral_admissions (
+			provider_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			policy_version TEXT NOT NULL,
+			decision TEXT NOT NULL CHECK(decision IN ('referred','grandfathered')),
+			applied_at TEXT NOT NULL,
+			PRIMARY KEY(provider_id, campaign)
+		)`,
+		`CREATE TABLE IF NOT EXISTS apptrack_pending_referral_mints (
+			provider_id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL UNIQUE,
+			campaign TEXT NOT NULL,
+			registration_source_ip TEXT NOT NULL,
+			registration_nonce TEXT NOT NULL,
+			registration_attempt_ts TEXT NOT NULL,
+			created_redemption INTEGER NOT NULL CHECK(created_redemption IN (0, 1)),
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_apptrack_pending_referral_mints_created_at ON apptrack_pending_referral_mints(created_at)`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_gc_audit (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			last_run_at TEXT NOT NULL,
@@ -461,6 +507,8 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			total_removed_logs INTEGER NOT NULL
 		)`,
 	}
+	stmts = append(stmts, referralAdminSchemaStatements()...)
+	stmts = append(stmts, referralSocialSchemaStatements()...)
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -473,6 +521,33 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "share_url_hash", `ALTER TABLE referral_social_verifications ADD COLUMN share_url_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "challenge_hash", `ALTER TABLE referral_social_verifications ADD COLUMN challenge_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "next_check_at", `ALTER TABLE referral_social_verifications ADD COLUMN next_check_at TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "recheck_attempts", `ALTER TABLE referral_social_verifications ADD COLUMN recheck_attempts INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "lease_token", `ALTER TABLE referral_social_verifications ADD COLUMN lease_token TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "lease_until", `ALTER TABLE referral_social_verifications ADD COLUMN lease_until TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verification_history", "challenge_hash", `ALTER TABLE referral_social_verification_history ADD COLUMN challenge_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_referral_social_recheck_pending
+    ON referral_social_verifications(campaign, next_check_at, pending_since)
+ WHERE granted_at IS NULL AND failed_at IS NULL`); err != nil {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "confirmed_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN confirmed_at TEXT`); err != nil {
@@ -631,6 +706,16 @@ func (s *Store) ensureProviderIDColumn(ctx context.Context) error {
 }
 
 func (s *Store) IssueToken(ctx context.Context, providerID, providerName string) (TokenRecord, string, error) {
+	return s.issueToken(ctx, providerID, providerName, "", ReferralPolicy{})
+}
+
+// IssueTokenWithReferral redeems referral capacity in the same SQLite
+// transaction as the token insert.
+func (s *Store) IssueTokenWithReferral(ctx context.Context, providerID, providerName, referralCode string, policy ReferralPolicy) (TokenRecord, string, error) {
+	return s.issueToken(ctx, providerID, providerName, referralCode, policy)
+}
+
+func (s *Store) issueToken(ctx context.Context, providerID, providerName, referralCode string, policy ReferralPolicy) (TokenRecord, string, error) {
 	// Issue #274 R1 CODE LOW-1: validate the RAW provider_id before any
 	// normalization so admission paths apply the same gate semantics as WS
 	// paths (which validate as-received). Leading/trailing whitespace is
@@ -650,7 +735,8 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	token := hex.EncodeToString(raw[:])
 	hash := tokenHash(token)
 	prefix := token[:tokenDisplayPrefixLength]
-	createdAt := nowString()
+	now := time.Now().UTC()
+	createdAt := timeText(now)
 	var record TokenRecord
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		if IsCredentialBootstrapPrincipal(providerID) {
@@ -664,6 +750,9 @@ SELECT EXISTS(
 			if bootstrapIdentityExists == 1 {
 				return ErrBootstrapIdentityExists
 			}
+		}
+		if _, err := redeemReferralTx(ctx, conn, policy, referralCode, providerID, now); err != nil {
+			return err
 		}
 		res, err := conn.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, createdAt)
 		if err != nil {
@@ -904,6 +993,14 @@ SELECT COUNT(1)
 			}
 		}
 
+		referralPolicy := req.ReferralPolicy
+		// Grandfathering is available only after exact receipt-key custody of an
+		// existing bootstrap identity has been proven above.
+		referralPolicy.GrandfatherProof = identityExists
+		if _, err := redeemReferralTx(ctx, conn, referralPolicy, req.ReferralCode, req.ProviderID, req.Now); err != nil {
+			return err
+		}
+
 		if activeExists {
 			res, err := conn.ExecContext(ctx, `
 UPDATE provider_tokens
@@ -1013,7 +1110,7 @@ func deleteRows(ctx context.Context, conn *sql.Conn, query string, args ...any) 
 	return res.RowsAffected()
 }
 
-func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
+func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer, freshTokenCandidate *string) (string, error) {
 	if err := config.ValidateProviderID(providerID); err != nil {
 		return "", err
 	}
@@ -1061,9 +1158,18 @@ UPDATE provider_tokens
 			}
 		}
 
-		newToken, err := randomHex(32)
-		if err != nil {
-			return err
+		var newToken string
+		if !requiresProof && freshTokenCandidate != nil {
+			newToken = strings.TrimSpace(*freshTokenCandidate)
+			if len(newToken) != 64 || !isLowerHexToken(newToken) {
+				return ErrReferralConflict
+			}
+		} else {
+			var err error
+			newToken, err = randomHex(32)
+			if err != nil {
+				return err
+			}
 		}
 		prefix := newToken[:tokenDisplayPrefixLength]
 		if _, err := conn.ExecContext(ctx, `
@@ -1312,6 +1418,36 @@ UPDATE provider_tokens
 	}
 	if providerID == "" {
 		return "", false, nil
+	}
+	return providerID, true, nil
+}
+
+// ValidateTokenReadOnly authenticates provider API reads without taking a
+// write transaction or refreshing last_used_at. Expired provisional bootstrap
+// credentials fail closed but remain for the normal auth retention path.
+func (s *Store) ValidateTokenReadOnly(ctx context.Context, token string) (string, bool, error) {
+	if token == "" {
+		return "", false, nil
+	}
+	var providerID string
+	var bootstrapIssued int
+	var bootstrapExpiresAt, lastUsedAt sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, tokenHash(token)).Scan(
+		&providerID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if bootstrapIssued == 1 && !lastUsedAt.Valid {
+		expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+		if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(time.Now().UTC()) {
+			return "", false, nil
+		}
 	}
 	return providerID, true, nil
 }
@@ -2581,6 +2717,14 @@ func (s *Store) HasOwnership(ctx context.Context, providerID string) (bool, erro
 }
 
 func (s *Store) MintAdmissionTokenAndPairOT(ctx context.Context, providerID, providerName string, now time.Time) (AdmissionPairMint, error) {
+	return s.mintAdmissionTokenAndPairOT(ctx, providerID, providerName, now, "", ReferralPolicy{})
+}
+
+func (s *Store) MintAdmissionTokenAndPairOTWithReferral(ctx context.Context, providerID, providerName string, now time.Time, referralCode string, policy ReferralPolicy) (AdmissionPairMint, error) {
+	return s.mintAdmissionTokenAndPairOT(ctx, providerID, providerName, now, referralCode, policy)
+}
+
+func (s *Store) mintAdmissionTokenAndPairOT(ctx context.Context, providerID, providerName string, now time.Time, referralCode string, policy ReferralPolicy) (AdmissionPairMint, error) {
 	// Issue #274 R1 CODE LOW-1: validate the RAW provider_id before any
 	// normalization so admission paths apply the same gate semantics as WS
 	// paths.
@@ -2615,6 +2759,9 @@ SELECT EXISTS(
 			if bootstrapIdentityExists == 1 {
 				return ErrBootstrapIdentityExists
 			}
+		}
+		if _, err := redeemReferralTx(ctx, conn, policy, referralCode, providerID, now); err != nil {
+			return err
 		}
 		res, err := conn.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, nowText)
 		if err != nil {

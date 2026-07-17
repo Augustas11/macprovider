@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -29,6 +30,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/referralapi"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
@@ -453,7 +455,29 @@ func main() {
 		}
 	}()
 	wsOpts := []providerws.Option{}
+	var grandfatherBefore *time.Time
+	if raw := strings.TrimSpace(cfg.Referrals.GrandfatherBefore); raw != "" && cfg.Referrals.RequireForRegistration {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("parse referral grandfather cutoff")
+		}
+		grandfatherBefore = &parsed
+	}
+	referralPolicy := auth.ReferralPolicy{
+		RequireForRegistration:  cfg.Referrals.RequireForRegistration,
+		EnableSocialBonus:       cfg.Referrals.EnableSocialInviteBonus,
+		Campaign:                cfg.Referrals.Campaign,
+		PolicyVersion:           cfg.Referrals.PolicyVersion,
+		GrandfatherBefore:       grandfatherBefore,
+		CurrentKeyID:            cfg.Referrals.CurrentKeyID,
+		HMACKeys:                cfg.Referrals.HMACKeys,
+		ProviderBaseUses:        cfg.Referrals.ProviderBaseUses,
+		SocialBonusUses:         cfg.Referrals.SocialBonusUses,
+		ChallengeTTL:            time.Duration(cfg.Referrals.ChallengeTTLS) * time.Second,
+		SocialVerificationDwell: time.Duration(cfg.Referrals.SocialVerificationDwellS) * time.Second,
+	}
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
+	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	if canaryStore != nil {
 		wsOpts = append(wsOpts, providerws.WithCanarySanctionStore(canaryStore))
@@ -506,13 +530,19 @@ func main() {
 		catalogLog.Msg("provider catalog compatibility enabled")
 	}
 	var onboardingStore *onboarding.PGStore
-	if cfg.Onboarding.AppTrackRegisterEnabled {
-		onboardingStore, err = onboarding.OpenPGStoreWithAuthPolicyDSNs(
-			cfg.Onboarding.PostgresDSN,
-			cfg.Onboarding.AuthPolicyRequestDSN,
-			cfg.Onboarding.AuthPolicyApproveDSN,
-			cfg.Onboarding.AuthPolicyCutoverDSN,
-		)
+	if shouldOpenOnboardingStore(cfg.Onboarding) {
+		if cfg.Onboarding.AppTrackRegisterEnabled {
+			onboardingStore, err = onboarding.OpenPGStoreWithAuthPolicyDSNs(
+				cfg.Onboarding.PostgresDSN,
+				cfg.Onboarding.AuthPolicyRequestDSN,
+				cfg.Onboarding.AuthPolicyApproveDSN,
+				cfg.Onboarding.AuthPolicyCutoverDSN,
+			)
+		} else {
+			// Keep the primary authority available to reconcile referral mints
+			// created before an operator disabled the public registration route.
+			onboardingStore, err = onboarding.OpenPGStore(cfg.Onboarding.PostgresDSN)
+		}
 		if err != nil {
 			logger.Fatal().Err(err).Msg("open onboarding postgres store")
 		}
@@ -520,8 +550,10 @@ func main() {
 		if err := onboardingStore.Smoke(context.Background()); err != nil {
 			logger.Fatal().Err(err).Msg("onboarding postgres smoke failed")
 		}
-		wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
-		wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+		if cfg.Onboarding.AppTrackRegisterEnabled {
+			wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
+			wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+		}
 	}
 	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
 		if autotuneCatalog == nil {
@@ -843,36 +875,44 @@ func main() {
 
 	var register http.HandlerFunc
 	var hardwareEvidence http.HandlerFunc
+	registerHandler := &onboarding.Handler{
+		StatsDB:                             onboardingStore,
+		AuthTokenStore:                      tokenStore,
+		ReferralStore:                       tokenStore,
+		ReferralPolicy:                      referralPolicy,
+		CoordinatorDomain:                   cfg.Onboarding.CoordinatorDomain,
+		CoordinatorWSURL:                    "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
+		TrustedProxies:                      mustParseTrustedProxies(cfg, logger),
+		IPRateLimiter:                       onboarding.NewMemoryRateLimiter(5, time.Minute),
+		CommittedRetryRateLimiter:           onboarding.NewMemoryRateLimiter(5, time.Minute),
+		CommittedRetryGlobalRateLimiter:     onboarding.NewMemoryRateLimiter(60, time.Minute),
+		CommittedRetrySlots:                 make(chan struct{}, 4),
+		ASNRateLimiter:                      onboarding.NewMemoryRateLimiter(30, time.Minute),
+		HardwareEvidenceIPRateLimiter:       onboarding.NewMemoryRateLimiter(10, time.Minute),
+		HardwareEvidenceProviderRateLimiter: onboarding.NewMemoryRateLimiter(1, 10*time.Minute),
+		AppAttestVerifier: onboarding.AppleAppAttestVerifier{
+			Config: onboarding.AppAttestConfig{
+				CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+				BundleID:          cfg.Onboarding.BundleID,
+				TeamID:            cfg.Onboarding.AppleTeamID,
+			},
+		},
+		Metrics: metricsHandle,
+		AppAttestConfig: onboarding.AppAttestConfig{
+			CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+			BundleID:          cfg.Onboarding.BundleID,
+			TeamID:            cfg.Onboarding.AppleTeamID,
+		},
+	}
+	// Pending cross-store referral mints must converge even when operators
+	// disable the admission route or referral enforcement after a crash.
+	startAppTrackReferralMintReconciler(shutdownCtx, registerHandler, logger)
 	if cfg.Onboarding.AppTrackRegisterEnabled {
 		asnResolver, err := onboarding.NewStaticASNResolver(cfg.Onboarding.ASNPrefixes)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("onboarding ASN resolver config invalid")
 		}
-		registerHandler := &onboarding.Handler{
-			StatsDB:                             onboardingStore,
-			AuthTokenStore:                      tokenStore,
-			CoordinatorDomain:                   cfg.Onboarding.CoordinatorDomain,
-			CoordinatorWSURL:                    "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
-			TrustedProxies:                      mustParseTrustedProxies(cfg, logger),
-			IPRateLimiter:                       onboarding.NewMemoryRateLimiter(5, time.Minute),
-			ASNRateLimiter:                      onboarding.NewMemoryRateLimiter(30, time.Minute),
-			ASNResolver:                         asnResolver,
-			HardwareEvidenceIPRateLimiter:       onboarding.NewMemoryRateLimiter(10, time.Minute),
-			HardwareEvidenceProviderRateLimiter: onboarding.NewMemoryRateLimiter(1, 10*time.Minute),
-			AppAttestVerifier: onboarding.AppleAppAttestVerifier{
-				Config: onboarding.AppAttestConfig{
-					CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
-					BundleID:          cfg.Onboarding.BundleID,
-					TeamID:            cfg.Onboarding.AppleTeamID,
-				},
-			},
-			Metrics: metricsHandle,
-			AppAttestConfig: onboarding.AppAttestConfig{
-				CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
-				BundleID:          cfg.Onboarding.BundleID,
-				TeamID:            cfg.Onboarding.AppleTeamID,
-			},
-		}
+		registerHandler.ASNResolver = asnResolver
 		register = registerHandler.HandleAppTrackRegister
 		hardwareEvidence = registerHandler.HandleHardwareEvidence
 		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
@@ -887,7 +927,7 @@ func main() {
 			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
 			Msg("MDM enrollment profile route mounted on buyer port (/v1/enroll)")
 	}
-	buyerHandler := buyerHandlerWithOptionalProviderEndpoints(
+	var buyerHandler http.Handler = buyerHandlerWithOptionalProviderEndpoints(
 		buyerServer.Handler(),
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
@@ -895,6 +935,73 @@ func main() {
 		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
+	var trustedReferralProxies []netip.Prefix
+	if cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.RequireForRegistration {
+		trustedReferralProxies = mustParseTrustedProxies(cfg, logger)
+	}
+	var referralValidationHandler http.HandlerFunc
+	if cfg.Referrals.EnablePublicValidation {
+		referralValidation := newReferralValidationHandler(tokenStore, referralPolicy, trustedReferralProxies, cfg.Referrals.RequestAccessURL, metricsHandle)
+		referralValidationHandler = referralValidation.ServeHTTP
+	}
+	var referralJoinHandler http.HandlerFunc
+	if cfg.Referrals.EnableJoinLinks {
+		referralJoin := &referralapi.JoinHandler{
+			Store:            tokenStore,
+			Policy:           referralPolicy,
+			PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+			ValidateSlots:    make(chan struct{}, 4),
+			RequestAccessURL: cfg.Referrals.RequestAccessURL,
+			DownloadURL:      cfg.Referrals.JoinDownloadURL,
+			SourceIP: func(r *http.Request) string {
+				return onboarding.ClientIP(r, trustedReferralProxies)
+			},
+			ErrorLogger: func(op string, err error) {
+				logger.Error().Err(err).Str("op", op).Msg("referral join failed")
+			},
+		}
+		referralJoinHandler = referralJoin.ServeHTTP
+	}
+	buyerHandler = withReferralValidation(buyerHandler, referralValidationHandler, referralJoinHandler)
+	var referralStatus, referralChallenge, referralVerify http.HandlerFunc
+	if cfg.Referrals.RequireForRegistration {
+		advocacy := &referralapi.AdvocacyHandler{
+			Store:            tokenStore,
+			Tokens:           tokenStore,
+			Policy:           referralPolicy,
+			PublicLimiter:    referralapi.NewBoundedLimiter(60, time.Minute, 4096),
+			ProviderLimiter:  referralapi.NewBoundedLimiter(10, time.Minute, 4096),
+			AuthSlots:        make(chan struct{}, 16),
+			VerifySlots:      make(chan struct{}, 8),
+			JoinBaseURL:      cfg.Referrals.JoinBaseURL,
+			JoinLinksEnabled: cfg.Referrals.EnableJoinLinks,
+			Metrics:          metricsHandle,
+			SourceIP: func(r *http.Request) string {
+				return onboarding.ClientIP(r, trustedReferralProxies)
+			},
+		}
+		referralStatus = advocacy.HandleStatus
+		startReferralServingReconciler(shutdownCtx, referralapi.ServingReconciler{
+			Source: referralapi.SQLiteServingEvidence{Path: cfg.Storage.DBPath},
+			Store:  tokenStore,
+			Policy: referralPolicy,
+		}, logger)
+		if cfg.Referrals.EnableSocialInviteBonus {
+			xClient, err := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("invalid social verification configuration")
+			}
+			advocacy.PostVerifier = xClient
+			referralChallenge = advocacy.HandleChallenge
+			referralVerify = advocacy.HandleVerify
+			startSocialVerificationPromotionReconciler(shutdownCtx, tokenStore, referralPolicy, xClient, logger)
+		}
+		logger.Info().
+			Bool("social_invite_bonus", cfg.Referrals.EnableSocialInviteBonus).
+			Str("campaign", cfg.Referrals.Campaign).
+			Msg("provider referral status endpoint mounted; mutation routes remain feature-gated")
+	}
+	buyerHandler = withReferralAdvocacy(buyerHandler, referralStatus, referralChallenge, referralVerify)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
@@ -1172,6 +1279,125 @@ func startGitHubAuthStatePruner(ctx context.Context, store githubAuthStatePruner
 	}()
 }
 
+type appTrackReferralMintReconciler interface {
+	ReconcilePendingAppTrackReferralMints(context.Context) error
+}
+
+func shouldOpenOnboardingStore(cfg config.OnboardingConfig) bool {
+	return cfg.AppTrackRegisterEnabled || strings.TrimSpace(cfg.PostgresDSN) != ""
+}
+
+func startAppTrackReferralMintReconciler(ctx context.Context, handler appTrackReferralMintReconciler, logger zerolog.Logger) {
+	if handler == nil {
+		return
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := handler.ReconcilePendingAppTrackReferralMints(reconcileCtx); err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Msg("App-track referral mint reconciliation failed")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
+func startReferralServingReconciler(ctx context.Context, reconciler referralapi.ServingReconciler, logger zerolog.Logger) {
+	if reconciler.Source == nil || reconciler.Store == nil || !reconciler.Policy.RequireForRegistration {
+		return
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			qualified, err := reconciler.Reconcile(reconcileCtx)
+			if err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Msg("referral serving qualification reconciliation failed")
+				return
+			}
+			if qualified > 0 {
+				logger.Info().Int("qualified", qualified).Msg("provider referral invite capacity awarded from verified serving evidence")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
+type socialAuthorLookup interface {
+	RecheckPost(context.Context, string, string) (string, error)
+}
+
+func startSocialVerificationPromotionReconciler(
+	ctx context.Context,
+	store *auth.Store,
+	policy auth.ReferralPolicy,
+	verifier socialAuthorLookup,
+	logger zerolog.Logger,
+) {
+	if store == nil || verifier == nil || !policy.EnableSocialBonus {
+		return
+	}
+	recheck := func(ctx context.Context, postID, boundAuthorID, shareURLHash string) error {
+		authorID, err := verifier.RecheckPost(ctx, postID, shareURLHash)
+		if err != nil {
+			if errors.Is(err, referralapi.ErrXPostTransient) {
+				return fmt.Errorf("%w: x lookup unavailable", auth.ErrSocialRecheckTransient)
+			}
+			return err
+		}
+		if boundAuthorID == "" || authorID != boundAuthorID {
+			return fmt.Errorf("x post author no longer matches")
+		}
+		return nil
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			granted, err := store.PromoteMaturedSocialVerifications(reconcileCtx, policy, time.Now().UTC(), recheck)
+			if err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Msg("social verification promotion failed")
+				return
+			}
+			if granted > 0 {
+				logger.Info().Int("granted", granted).Msg("social invite bonus granted exactly once")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
 func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
@@ -1244,6 +1470,53 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	}
 	mux.Handle("/", base)
 	return mux
+}
+
+func withReferralValidation(base http.Handler, validate, join http.HandlerFunc) http.Handler {
+	if validate == nil && join == nil {
+		return base
+	}
+	mux := http.NewServeMux()
+	if validate != nil {
+		mux.HandleFunc("/v1/referrals/validate", validate)
+	}
+	if join != nil {
+		mux.HandleFunc("/j/", join)
+	}
+	mux.Handle("/", base)
+	return mux
+}
+
+func withReferralAdvocacy(base http.Handler, status, challenge, verify http.HandlerFunc) http.Handler {
+	if status == nil && challenge == nil && verify == nil {
+		return base
+	}
+	mux := http.NewServeMux()
+	if status != nil {
+		mux.HandleFunc("/v1/provider/referrals", status)
+	}
+	if challenge != nil {
+		mux.HandleFunc("/v1/provider/referrals/x/challenge", challenge)
+	}
+	if verify != nil {
+		mux.HandleFunc("/v1/provider/referrals/x/verify", verify)
+	}
+	mux.Handle("/", base)
+	return mux
+}
+
+func newReferralValidationHandler(store referralapi.ValidationStore, policy auth.ReferralPolicy, trustedProxies []netip.Prefix, requestAccessURL string, metrics referralapi.ReferralMetrics) *referralapi.ValidationHandler {
+	return &referralapi.ValidationHandler{
+		Store:            store,
+		Policy:           policy,
+		PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+		ValidateSlots:    make(chan struct{}, 4),
+		RequestAccessURL: strings.TrimSpace(requestAccessURL),
+		Metrics:          metrics,
+		SourceIP: func(r *http.Request) string {
+			return onboarding.ClientIP(r, trustedProxies)
+		},
+	}
 }
 
 // buildEnrollHandler constructs the MDM enrollment handler for POST /v1/enroll.

@@ -14,6 +14,30 @@ final class ControlFrameCodecTests: XCTestCase {
         return try ControlCodec.decode(encoded)
     }
 
+    private func referralStatus(
+        state: String = ReferralStatusProjection.eligible,
+        pending: ReferralPendingChallengeProjection? = nil
+    ) -> ReferralStatusProjection {
+        let observedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 1)
+        return ReferralStatusProjection(
+            campaign: "launch",
+            joinBaseURL: URL(string: "https://coordinator.streamvc.live/j")!,
+            socialState: state,
+            baseCapacity: 1,
+            configuredBonusCapacity: 2,
+            bonusCapacity: 0,
+            redemptions: 0,
+            remaining: 1,
+            firstServingSeen: true,
+            joinLinksEnabled: true,
+            socialBonusEnabled: true,
+            inviteCode: "invite-123",
+            inviteURL: URL(string: "https://coordinator.streamvc.live/j/invite-123"),
+            observedAt: observedAt,
+            pendingChallenge: pending
+        )!
+    }
+
     func testMetricsResponseRoundTrip() throws {
         let f = ControlFrame.metricsResponse(
             earningsUsdc: 1.25,
@@ -171,6 +195,121 @@ final class ControlFrameCodecTests: XCTestCase {
         } else {
             XCTFail("expected statusResponse")
         }
+    }
+
+    func testReferralStatusResponseRoundTripCarriesOnlySanitizedProjection() throws {
+        let pending = ReferralPendingChallengeProjection(
+            expiresAt: Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) + 600)
+        )
+        let frame = ControlFrame.referralStatusResponse(
+            referralStatus(state: ReferralStatusProjection.pending, pending: pending)
+        )
+
+        XCTAssertEqual(try roundTrip(frame), frame)
+
+        let wire = String(decoding: try ControlCodec.encode(frame), as: UTF8.self)
+        XCTAssertFalse(wire.localizedCaseInsensitiveContains("authorization"))
+        XCTAssertFalse(wire.localizedCaseInsensitiveContains("provider_token"))
+        XCTAssertFalse(wire.contains("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+    }
+
+    func testReferralFramesDecodeCLIFractionalTimestamps() throws {
+        let observedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 1)
+        let expiresAt = observedAt.addingTimeInterval(600)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let raw: [String: Any] = [
+            "type": "referral_status_response",
+            "campaign": "prebeta",
+            "join_base_url": "https://malibu.tech/j",
+            "social_state": "eligible",
+            "base_capacity": 1,
+            "configured_bonus_capacity": 2,
+            "bonus_capacity": 0,
+            "redemptions": 0,
+            "remaining": 1,
+            "first_serving_seen": true,
+            "join_links_enabled": true,
+            "social_bonus_enabled": true,
+            "invite_code": "CODE",
+            "invite_url": "https://malibu.tech/j/CODE",
+            "observed_at": formatter.string(from: observedAt),
+            "pending_challenge": ["expires_at": formatter.string(from: expiresAt)],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: raw)
+        guard case let .referralStatusResponse(status) = try ControlCodec.decode(data) else {
+            return XCTFail("fractional CLI frame did not decode")
+        }
+        XCTAssertEqual(status.observedAt.timeIntervalSince1970, observedAt.timeIntervalSince1970, accuracy: 0.001)
+        let expiry = try XCTUnwrap(status.pendingChallenge?.expiresAt)
+        XCTAssertEqual(expiry.timeIntervalSince1970, expiresAt.timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testReferralActionFramesUseTypedSanitizedWireShapes() throws {
+        XCTAssertEqual(try roundTrip(.referralStatusRequest), .referralStatusRequest)
+        XCTAssertEqual(try roundTrip(.referralChallengeRequest), .referralChallengeRequest)
+        XCTAssertEqual(
+            try roundTrip(.referralChallengeResponse(expiresAt: "2027-01-15T08:10:00Z")),
+            .referralChallengeResponse(expiresAt: "2027-01-15T08:10:00Z")
+        )
+        XCTAssertEqual(try roundTrip(.referralChallengeReopenRequest), .referralChallengeReopenRequest)
+        XCTAssertEqual(
+            try roundTrip(.referralChallengeReopenAck(expiresAt: "2027-01-15T08:10:00Z")),
+            .referralChallengeReopenAck(expiresAt: "2027-01-15T08:10:00Z")
+        )
+        XCTAssertEqual(
+            try roundTrip(.referralVerifyRequest(postURL: "https://x.com/provider/status/123")),
+            .referralVerifyRequest(postURL: "https://x.com/provider/status/123")
+        )
+        XCTAssertEqual(try roundTrip(.referralChallengeCancelRequest), .referralChallengeCancelRequest)
+        XCTAssertEqual(
+            try roundTrip(.referralChallengeCancelAck(status: referralStatus())),
+            .referralChallengeCancelAck(status: referralStatus())
+        )
+        XCTAssertEqual(
+            try roundTrip(.referralError(
+                operation: .verify,
+                code: .rateLimited,
+                retryAfterSeconds: 30
+            )),
+            .referralError(operation: .verify, code: .rateLimited, retryAfterSeconds: 30)
+        )
+    }
+
+    func testMalformedReferralStatusFailsClosed() throws {
+        let negative = Data("""
+        {
+          "type": "referral_status_response",
+          "campaign": "launch",
+          "social_state": "eligible",
+          "base_capacity": 1,
+          "configured_bonus_capacity": 2,
+          "bonus_capacity": 0,
+          "redemptions": 0,
+          "remaining": -1,
+          "first_serving_seen": true,
+          "social_bonus_enabled": true,
+          "observed_at": "2027-01-15T08:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try ControlCodec.decode(negative))
+
+        let unknownState = Data("""
+        {
+          "type": "referral_status_response",
+          "campaign": "launch",
+          "social_state": "probably_eligible",
+          "base_capacity": 1,
+          "configured_bonus_capacity": 2,
+          "bonus_capacity": 0,
+          "redemptions": 0,
+          "remaining": 1,
+          "first_serving_seen": true,
+          "social_bonus_enabled": true,
+          "observed_at": "2027-01-15T08:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try ControlCodec.decode(unknownState))
     }
 
 }

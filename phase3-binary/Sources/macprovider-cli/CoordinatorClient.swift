@@ -254,6 +254,8 @@ actor CoordinatorClient {
     private let streamInterval: Int
     private let credentialBootstrap: Bool
     private let bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey?
+    private let bootstrapReferralCode: String?
+    private var terminalBootstrapReferralFailure: ReferralBootstrapFailure?
     private let receiptIdentitySigningKeys: [Curve25519.Signing.PrivateKey]
     private let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
 
@@ -318,6 +320,7 @@ actor CoordinatorClient {
         autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         credentialBootstrap: Bool = false,
         bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
+        bootstrapReferralCode: String? = nil,
         receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = nil,
         receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = [],
         persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)? = nil,
@@ -436,6 +439,7 @@ actor CoordinatorClient {
             }
         }
         self.bootstrapReceiptSigningKey = bootstrapReceiptSigningKey
+        self.bootstrapReferralCode = credentialBootstrap ? bootstrapReferralCode : nil
         self.receiptIdentitySigningKeys = receiptIdentitySigningKey.map { [$0] }
             ?? receiptIdentitySigningKeyCandidates
         self.persistReceiptIdentitySigningKey = persistReceiptIdentitySigningKey
@@ -633,6 +637,11 @@ actor CoordinatorClient {
                 consecutiveAuthProtocolFailures = 0
             } catch {
                 await cleanupConnection()
+                if credentialBootstrap,
+                   let terminalFailure = Self.terminalBootstrapReferralFailure(for: error) {
+                    terminalBootstrapReferralFailure = terminalFailure
+                    return
+                }
                 let classification = Self.lifecycleClassification(for: error)
                 recordConnectionFailureLifecycle(
                     state: classification.state,
@@ -697,6 +706,20 @@ actor CoordinatorClient {
                 lowered.contains("auth_challenge") ||
                 lowered.contains("unrecognized auth message")
         }
+    }
+
+    private static func terminalBootstrapReferralFailure(
+        for error: Error
+    ) -> ReferralBootstrapFailure? {
+        guard let authError = error as? CoordinatorAuthError,
+              case .rejected(let code, _) = authError else {
+            return nil
+        }
+        return ReferralBootstrapFailure.coordinatorCode(code)
+    }
+
+    func credentialBootstrapTerminalReferralFailure() -> ReferralBootstrapFailure? {
+        terminalBootstrapReferralFailure
     }
 
     struct ConnectionLifecycleClassification: Equatable, Sendable {
@@ -1383,7 +1406,15 @@ actor CoordinatorClient {
         case 4005 where reason == "invalid_token" ||
             reason == "bootstrap_identity_mismatch" ||
             reason == "bootstrap_token_used" ||
-            reason == "bootstrap_token_expired":
+            reason == "bootstrap_token_expired" ||
+            reason == "referral_required" ||
+            reason == "referral_invalid" ||
+            reason == "referral_expired" ||
+            reason == "referral_revoked" ||
+            reason == "referral_exhausted" ||
+            reason == "referral_conflict":
+            return .rejected(code: reason, message: reason)
+        case 4008 where reason == "credential_bootstrap_rate_limited":
             return .rejected(code: reason, message: reason)
         case 4000 where reason == "unrecognized auth message":
             return .invalidMessage(reason)
@@ -2003,6 +2034,9 @@ actor CoordinatorClient {
                 throw CoordinatorAuthError.invalidMessage("credential bootstrap receipt identity unavailable")
             }
             proof["credential_bootstrap"] = true
+            if let bootstrapReferralCode {
+                proof["referral_code"] = bootstrapReferralCode
+            }
             let transcriptSHA256 = try Self.initialAuthTranscriptHashBase64(initialMessage)
             let payload = try Self.credentialBootstrapIdentityPayload(
                 challenge: challenge,
@@ -3957,6 +3991,9 @@ actor CoordinatorClient {
         }
         if credentialBootstrap {
             message["credential_bootstrap"] = true
+            if let bootstrapReferralCode {
+                message["referral_code"] = bootstrapReferralCode
+            }
         }
         return message
     }

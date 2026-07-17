@@ -9,6 +9,13 @@
 
 set -euo pipefail
 
+# Malibu may provide a one-shot owner-only file containing a referral code.
+# Capture only the path, then remove it from the environment before any child
+# process is launched. The CLI validates and consumes the file; install.sh
+# never reads, logs, copies, or persists the code.
+REFERRAL_CODE_SOURCE_FILE="${MACPROVIDER_REFERRAL_CODE_FILE:-}"
+unset MACPROVIDER_REFERRAL_CODE_FILE
+
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
@@ -5480,55 +5487,99 @@ read_config_donor_mode() {
   ' "$CONFIG_PATH"
 }
 
+publish_bootstrap_identity_for_rollback() {
+  [ -n "${STAGED_CONFIG_PATH:-}" ] && [ "$CONFIG_PATH" = "$STAGED_CONFIG_PATH" ] \
+    || return 0
+  [ -z "$(read_config_provider_token_line || true)" ] \
+    || die 70 "refusing to publish a bootstrap identity from a config that still contains a provider bearer"
+  # Publish only the tokenless provider principal. The CLI keeps the bearer in
+  # Keychain. Recovery moves this config aside and preserves its high-entropy
+  # principal, so an interrupted referral request retries against the same
+  # coordinator registration instead of generating a second identity.
+  assert_install_lock_ownership
+  mark_install_cutover_started
+  mkdir -p "$CONFIG_DIR"
+  bootstrap_config_temp="$LIVE_CONFIG_PATH.bootstrap.$$"
+  cp "$STAGED_CONFIG_PATH" "$bootstrap_config_temp" \
+    || die 70 "could not preserve the bootstrapped provider identity for rollback"
+  chmod 600 "$bootstrap_config_temp" 2>/dev/null || true
+  mv "$bootstrap_config_temp" "$LIVE_CONFIG_PATH" \
+    || die 70 "could not publish the bootstrapped provider identity for rollback"
+  if [ -f "$STAGED_PROVIDER_ID_PATH" ]; then
+    bootstrap_provider_id_temp="$LIVE_PROVIDER_ID_PATH.bootstrap.$$"
+    cp "$STAGED_PROVIDER_ID_PATH" "$bootstrap_provider_id_temp" \
+      || die 70 "could not preserve the bootstrapped provider identity for rollback"
+    chmod 600 "$bootstrap_provider_id_temp" 2>/dev/null || true
+    mv "$bootstrap_provider_id_temp" "$LIVE_PROVIDER_ID_PATH" \
+      || die 70 "could not publish the bootstrapped provider identity for rollback"
+  fi
+}
+
 ensure_provider_credentials() {
+  credential_already_present=0
   if [ -n "$(read_config_provider_token_line || true)" ]; then
     run_macprovider_cli_with_amfi_retry credentials import --config "$CONFIG_PATH" \
       || die 6 "provider credential migration into CLI Keychain failed"
     run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
       || die 6 "provider credential migration verification failed"
-    return 0
+    [ -n "${REFERRAL_CODE_SOURCE_FILE:-}" ] || return 0
+    credential_already_present=1
+  else
+    credential_verify_rc=0
+    run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
+      || credential_verify_rc=$?
+    case "$credential_verify_rc" in
+      0)
+        [ -n "${REFERRAL_CODE_SOURCE_FILE:-}" ] || return 0
+        credential_already_present=1
+        ;;
+      3) ;;
+      *) die 6 "existing CLI Keychain credential is unavailable or invalid; refusing unsafe bootstrap" ;;
+    esac
   fi
-  credential_verify_rc=0
-  run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
-    || credential_verify_rc=$?
-  case "$credential_verify_rc" in
-    0) return 0 ;;
-    3) ;;
-    *) die 6 "existing CLI Keychain credential is unavailable or invalid; refusing unsafe bootstrap" ;;
+  if [ "$credential_already_present" -eq 0 ]; then
+    provider_id="$(read_config_provider_id || true)"
+    case "$provider_id" in
+      mp-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) die 6 "tokenless credential bootstrap requires a fresh high-entropy mp-* provider ID; this existing predictable ID needs an operator-issued ownership credential" ;;
+    esac
+    log "Acquiring first-install provider credential before evidence admission."
+  else
+    log "Reconciling interrupted referral bootstrap with the existing CLI-owned credential."
+  fi
+  referral_onboarding_dir="$CONFIG_DIR/onboarding"
+  mkdir -p "$referral_onboarding_dir" \
+    || die 70 "could not create durable CLI onboarding state"
+  chmod 700 "$referral_onboarding_dir" \
+    || die 70 "could not protect durable CLI onboarding state"
+  bootstrap_auth_args=(bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH")
+  if [ -n "${REFERRAL_CODE_SOURCE_FILE:-}" ]; then
+    bootstrap_auth_args+=(--referral-code-file "$REFERRAL_CODE_SOURCE_FILE")
+    # The journal and Keychain credential are bound to this provider ID. Make
+    # the tokenless identity rollback-durable before the request can redeem the
+    # referral and persist a bearer, including abrupt response-loss exits.
+    if [ "$credential_already_present" -eq 0 ]; then
+      publish_bootstrap_identity_for_rollback
+    fi
+  fi
+  bootstrap_auth_rc=0
+  run_macprovider_cli_with_amfi_retry "${bootstrap_auth_args[@]}" || bootstrap_auth_rc=$?
+  case "$bootstrap_auth_rc" in
+    0) ;;
+    20|21|22|23|24|25|26|27)
+      # Stable referral outcomes are part of the Malibu/installer/CLI
+      # capability contract. Preserve them through transaction rollback so
+      # Malibu can render a truthful, recoverable state without log scraping.
+      exit "$bootstrap_auth_rc"
+      ;;
+    *) die 6 "provider credential bootstrap failed before evidence admission" ;;
   esac
-  provider_id="$(read_config_provider_id || true)"
-  case "$provider_id" in
-    mp-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-    *) die 6 "tokenless credential bootstrap requires a fresh high-entropy mp-* provider ID; this existing predictable ID needs an operator-issued ownership credential" ;;
-  esac
-  log "Acquiring first-install provider credential before evidence admission."
-  run_macprovider_cli_with_amfi_retry bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH" \
-    || die 6 "provider credential bootstrap failed before evidence admission"
   run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
     || die 6 "provider credential bootstrap completed without restart-safe CLI custody"
-  if [ -n "${STAGED_CONFIG_PATH:-}" ] && [ "$CONFIG_PATH" = "$STAGED_CONFIG_PATH" ]; then
-    # Coordinator bootstrap creates a durable Keychain principal. Publish its
-    # provider ID and tokenless config into the protected live transaction
-    # immediately so #547's rollback helper preserves the identity even if
-    # later evidence or startup admission fails. The incumbent process remains
-    # running until cutover.
-    assert_install_lock_ownership
-    mark_install_cutover_started
-    mkdir -p "$CONFIG_DIR"
-    bootstrap_config_temp="$LIVE_CONFIG_PATH.bootstrap.$$"
-    cp "$STAGED_CONFIG_PATH" "$bootstrap_config_temp" \
-      || die 70 "could not preserve the bootstrapped provider identity for rollback"
-    chmod 600 "$bootstrap_config_temp" 2>/dev/null || true
-    mv "$bootstrap_config_temp" "$LIVE_CONFIG_PATH" \
-      || die 70 "could not publish the bootstrapped provider identity for rollback"
-    if [ -f "$STAGED_PROVIDER_ID_PATH" ]; then
-      bootstrap_provider_id_temp="$LIVE_PROVIDER_ID_PATH.bootstrap.$$"
-      cp "$STAGED_PROVIDER_ID_PATH" "$bootstrap_provider_id_temp" \
-        || die 70 "could not preserve the bootstrapped provider identity for rollback"
-      chmod 600 "$bootstrap_provider_id_temp" 2>/dev/null || true
-      mv "$bootstrap_provider_id_temp" "$LIVE_PROVIDER_ID_PATH" \
-        || die 70 "could not publish the bootstrapped provider identity for rollback"
-    fi
+  if [ -z "${REFERRAL_CODE_SOURCE_FILE:-}" ]; then
+    # Non-referral bootstrap cannot redeem admission before it returns, so keep
+    # the existing post-success publication boundary.
+    publish_bootstrap_identity_for_rollback
   fi
 }
 

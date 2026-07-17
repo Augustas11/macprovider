@@ -69,6 +69,7 @@ type Metrics struct {
 	IdlePrewarmEventTotal    *prometheus.CounterVec
 	ModelHashMismatchTotal   prometheus.Counter
 	CredentialBootstrapTotal *prometheus.CounterVec
+	ReferralEventTotal       *prometheus.CounterVec
 }
 
 // New registers all five metrics against reg and returns the
@@ -162,6 +163,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"outcome"},
 		),
+		ReferralEventTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "referral_event_total",
+				Help: "Count of public referral validation outcomes using closed-set event and outcome labels.",
+			},
+			[]string{"event", "outcome"},
+		),
 	}
 }
 
@@ -239,4 +247,17 @@ func (m *Metrics) IncCredentialBootstrap(outcome string) {
 		return
 	}
 	m.CredentialBootstrapTotal.WithLabelValues(outcome).Inc()
+}
+
+func (m *Metrics) IncReferralEvent(event, outcome string) {
+	if m == nil || m.ReferralEventTotal == nil || event != "validate" {
+		return
+	}
+	switch outcome {
+	case "disabled", "busy", "rate_limited", "unavailable", "bad_request",
+		"missing", "expired", "revoked", "exhausted", "conflict", "invalid", "valid":
+	default:
+		return
+	}
+	m.ReferralEventTotal.WithLabelValues(event, outcome).Inc()
 }

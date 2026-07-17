@@ -70,6 +70,7 @@ type Config struct {
 	Tier2                        Tier2Config                  `yaml:"tier2"`
 	CoordinatorAdvertisedVersion CoordinatorAdvertisedVersion `yaml:"coordinator_advertised_version"`
 	Auth                         AuthConfig                   `yaml:"auth"`
+	Referrals                    ReferralConfig               `yaml:"referrals"`
 	Storage                      StorageConfig                `yaml:"storage"`
 	Logging                      LoggingConfig                `yaml:"logging"`
 	Rewards                      RewardsConfig                `yaml:"rewards"`
@@ -702,6 +703,29 @@ type AuthConfig struct {
 	GitHubOAuth                           GitHubOAuthConfig `yaml:"github_oauth"`
 }
 
+// ReferralConfig owns pre-beta admission policy. All launch flags default
+// off; HMAC material supports env:NAME indirection and never needs to be
+// written to the credential database.
+type ReferralConfig struct {
+	RequireForRegistration   bool              `yaml:"require_for_registration"`
+	EnablePublicValidation   bool              `yaml:"enable_public_validation"`
+	EnableJoinLinks          bool              `yaml:"enable_join_links"`
+	EnableSocialInviteBonus  bool              `yaml:"enable_social_invite_bonus"`
+	Campaign                 string            `yaml:"campaign"`
+	PolicyVersion            string            `yaml:"policy_version"`
+	GrandfatherBefore        string            `yaml:"grandfather_before"`
+	CurrentKeyID             string            `yaml:"current_key_id"`
+	HMACKeys                 map[string]string `yaml:"hmac_keys"`
+	ProviderBaseUses         int               `yaml:"provider_base_uses"`
+	SocialBonusUses          int               `yaml:"social_bonus_uses"`
+	ChallengeTTLS            int               `yaml:"challenge_ttl_s"`
+	SocialVerificationDwellS int               `yaml:"social_verification_dwell_s"`
+	JoinBaseURL              string            `yaml:"join_base_url"`
+	JoinDownloadURL          string            `yaml:"join_download_url"`
+	XAPIBearerToken          string            `yaml:"x_api_bearer_token"`
+	RequestAccessURL         string            `yaml:"request_access_url"`
+}
+
 type GitHubOAuthConfig struct {
 	Enabled             bool   `yaml:"enabled"`
 	ClientID            string `yaml:"client_id"`
@@ -1124,6 +1148,15 @@ func Default() Config {
 			CredentialBootstrapTokenTTLS:          600,
 			CredentialBootstrapIdentityRetentionS: 604800,
 		},
+		Referrals: ReferralConfig{
+			ProviderBaseUses:         1,
+			SocialBonusUses:          2,
+			ChallengeTTLS:            900,
+			SocialVerificationDwellS: 1800,
+			JoinBaseURL:              "https://coordinator.streamvc.live/j",
+			PolicyVersion:            "v1",
+			HMACKeys:                 map[string]string{},
+		},
 		Proxy: ProxyConfig{
 			// Default trusts loopback only. Production sits behind nginx on
 			// localhost, so the default keys rate-limit buckets on the
@@ -1212,6 +1245,18 @@ func (c *Config) resolveEnv() error {
 			return err
 		}
 		c.Auth.OperatorKeys[name] = v
+	}
+	for keyID, raw := range c.Referrals.HMACKeys {
+		v, err := resolveEnvValue("referrals.hmac_keys."+keyID, raw)
+		if err != nil {
+			return err
+		}
+		c.Referrals.HMACKeys[keyID] = v
+	}
+	if v, err := resolveEnvValue("referrals.x_api_bearer_token", c.Referrals.XAPIBearerToken); err != nil {
+		return err
+	} else {
+		c.Referrals.XAPIBearerToken = v
 	}
 	// Round-1 SECURITY r1 MEDIUM 1: stats DSN fields go through
 	// the same env-indirection resolver. Operators inject DSNs
@@ -1516,6 +1561,9 @@ func (c Config) Validate() error {
 	if c.Auth.CredentialBootstrapIdentityRetentionS <= c.Auth.CredentialBootstrapTokenTTLS {
 		return fmt.Errorf("auth.credential_bootstrap_identity_retention_s must exceed auth.credential_bootstrap_token_ttl_s")
 	}
+	if err := c.validateReferrals(); err != nil {
+		return err
+	}
 	if c.WS.WriteBufferSize <= 0 {
 		return fmt.Errorf("ws.write_buffer_size must be > 0")
 	}
@@ -1801,6 +1849,86 @@ func (c Config) validateCompatibilitySet() error {
 	}
 	if _, ok := seen[policy.TargetID]; !ok {
 		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain target_id")
+	}
+	return nil
+}
+
+var (
+	referralConfigPartPattern      = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+	referralDownloadVersionPattern = regexp.MustCompile(`(^|[-_/])v?[0-9]+[.][0-9]+[.][0-9]+([-_.]|$)`)
+)
+
+func (c Config) validateReferrals() error {
+	r := c.Referrals
+	// The read-only validation response may advertise this URL even while the
+	// referral gate is disabled, so validate it independently of launch flags.
+	if raw := strings.TrimSpace(r.RequestAccessURL); raw != "" {
+		reqURL, err := url.Parse(raw)
+		if err != nil || reqURL.Scheme != "https" || reqURL.Host == "" || reqURL.User != nil {
+			return fmt.Errorf("referrals.request_access_url must be an absolute https URL without credentials when set")
+		}
+	}
+	if raw := strings.TrimSpace(r.JoinDownloadURL); raw != "" {
+		downloadURL, err := url.Parse(raw)
+		if err != nil || downloadURL == nil {
+			return fmt.Errorf("referrals.join_download_url must be a fixed absolute https URL without credentials, query, fragment, trailing slash, or a moving latest path")
+		}
+		lowerPath := strings.ToLower(downloadURL.Path)
+		if downloadURL.Scheme != "https" || downloadURL.Host == "" || downloadURL.User != nil || downloadURL.RawQuery != "" || downloadURL.Fragment != "" || strings.HasSuffix(downloadURL.Path, "/") || strings.Contains(lowerPath, "latest") || !referralDownloadVersionPattern.MatchString(downloadURL.Path) {
+			return fmt.Errorf("referrals.join_download_url must be a fixed, versioned absolute https URL without credentials, query, fragment, trailing slash, or a moving latest path")
+		}
+	}
+	if r.EnableJoinLinks {
+		if !r.RequireForRegistration {
+			return fmt.Errorf("referrals.enable_join_links requires require_for_registration=true")
+		}
+		if strings.TrimSpace(r.JoinDownloadURL) == "" {
+			return fmt.Errorf("referrals.join_download_url must be set when join links are enabled")
+		}
+	}
+	if r.EnableSocialInviteBonus && (!r.RequireForRegistration || !r.EnableJoinLinks) {
+		return fmt.Errorf("referrals.enable_social_invite_bonus requires referral admission and join links")
+	}
+	if !r.RequireForRegistration && !r.EnablePublicValidation && !r.EnableJoinLinks && !r.EnableSocialInviteBonus {
+		return nil
+	}
+	if !referralConfigPartPattern.MatchString(r.Campaign) {
+		return fmt.Errorf("referrals.campaign must contain 1-32 letters, digits, or underscores")
+	}
+	if !referralConfigPartPattern.MatchString(r.PolicyVersion) {
+		return fmt.Errorf("referrals.policy_version must contain 1-32 letters, digits, or underscores")
+	}
+	if raw := strings.TrimSpace(r.GrandfatherBefore); raw != "" {
+		if _, err := time.Parse(time.RFC3339, raw); err != nil {
+			return fmt.Errorf("referrals.grandfather_before must be RFC3339: %w", err)
+		}
+	}
+	if !referralConfigPartPattern.MatchString(r.CurrentKeyID) {
+		return fmt.Errorf("referrals.current_key_id must contain 1-32 letters, digits, or underscores")
+	}
+	secret := r.HMACKeys[r.CurrentKeyID]
+	if len(secret) < 32 {
+		return fmt.Errorf("referrals.hmac_keys.%s must be at least 32 bytes", r.CurrentKeyID)
+	}
+	for keyID, value := range r.HMACKeys {
+		if !referralConfigPartPattern.MatchString(keyID) || len(value) < 32 {
+			return fmt.Errorf("referrals.hmac_keys.%s is invalid or shorter than 32 bytes", keyID)
+		}
+	}
+	if r.ProviderBaseUses <= 0 {
+		return fmt.Errorf("referrals.provider_base_uses must be > 0")
+	}
+	if r.EnableSocialInviteBonus {
+		if r.SocialBonusUses <= 0 || r.ChallengeTTLS <= 0 || r.SocialVerificationDwellS <= 0 {
+			return fmt.Errorf("referrals social_bonus_uses, challenge_ttl_s, and social_verification_dwell_s must be > 0")
+		}
+		if strings.TrimSpace(r.XAPIBearerToken) == "" {
+			return fmt.Errorf("referrals.x_api_bearer_token must be set when social invite bonus is enabled")
+		}
+	}
+	joinURL, err := url.Parse(strings.TrimSpace(r.JoinBaseURL))
+	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.User != nil || joinURL.RawQuery != "" || joinURL.ForceQuery || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
+		return fmt.Errorf("referrals.join_base_url must be a credential-free absolute https URL ending in /j")
 	}
 	return nil
 }

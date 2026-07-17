@@ -1318,6 +1318,21 @@ struct ServeCommand: AsyncParsableCommand {
                 providerID: $0
             )
         }
+        let referralCoordinatorService: ReferralCoordinatorService? = {
+            guard let providerID = resolved.providerID,
+                  let providerToken = resolved.providerToken,
+                  let client = try? ReferralCoordinatorClient(
+                      coordinatorURL: resolved.coordinatorURL,
+                      providerID: providerID,
+                      bearerToken: providerToken
+                  ) else {
+                return nil
+            }
+            return ReferralCoordinatorService(
+                client: client,
+                store: ReferralChallengeStore(url: ReferralChallengeStore.defaultURL())
+            )
+        }()
         let malibuAccrualClient = try? MalibuAccrualClient(coordinatorURL: resolved.coordinatorURL)
         controlSocket = ControlSocketServer(
             socketPath: socketURL,
@@ -1327,6 +1342,7 @@ struct ServeCommand: AsyncParsableCommand {
             receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
             providerStatus: providerStatus,
             providerEarningsClient: providerEarningsClient,
+            referralCoordinatorService: referralCoordinatorService,
             malibuAccrualClient: malibuAccrualClient,
             providerToken: resolved.providerToken,
             pauseProvider: pauseProvider,

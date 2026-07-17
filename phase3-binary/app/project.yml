@@ -50,6 +50,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "14.0"
         LSUIElement: true                # menu bar only, no Dock icon
+        MalibuBundledReferralBootstrapV1: false
         NSHumanReadableCopyright: "Copyright © 2026 Malibu AI, Inc."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

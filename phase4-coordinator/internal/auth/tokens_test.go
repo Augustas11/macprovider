@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,117 @@ func bootstrapRequest(providerID, sourceIP string, key []byte, now time.Time) au
 func bootstrapPrincipal(label string) string {
 	sum := sha256.Sum256([]byte(label))
 	return "mp-" + hex.EncodeToString(sum[:16])
+}
+
+func TestValidateTokenReadOnlyAuthenticatesWithoutRefreshingUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	record, bearer, err := store.IssueToken(ctx, "provider-read-only", "dashboard polling")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID, valid, err := store.ValidateTokenReadOnly(ctx, bearer)
+	if err != nil || !valid || providerID != "provider-read-only" {
+		t.Fatalf("provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+	row, err := lookupTokenRow(ctx, t, store, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.LastUsedAt.Valid {
+		t.Fatalf("read-only validation refreshed last_used_at=%v", row.LastUsedAt)
+	}
+	if providerID, valid, err := store.ValidateTokenReadOnly(ctx, "not-a-token"); err != nil || valid || providerID != "" {
+		t.Fatalf("invalid provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+}
+
+func TestOpenStoreUpgradesPreRecoverySocialTablesAdditively(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE referral_social_verifications (
+    provider_id TEXT NOT NULL,
+    campaign TEXT NOT NULL,
+    issuer_id TEXT NOT NULL,
+    post_id TEXT NOT NULL UNIQUE,
+    author_id TEXT NOT NULL,
+    share_url_hash TEXT NOT NULL,
+    verification_method TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    pending_since TEXT NOT NULL,
+    granted_at TEXT,
+    failed_at TEXT,
+    PRIMARY KEY(provider_id, campaign)
+);
+CREATE TABLE referral_social_verification_history (
+    archive_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    campaign TEXT NOT NULL,
+    issuer_id TEXT NOT NULL,
+    post_id TEXT NOT NULL UNIQUE,
+    author_id TEXT NOT NULL,
+    share_url_hash TEXT NOT NULL,
+    verification_method TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    pending_since TEXT NOT NULL,
+    granted_at TEXT,
+    failed_at TEXT NOT NULL,
+    archived_at TEXT NOT NULL
+)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := auth.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for table, columns := range map[string][]string{
+		"referral_social_verifications":        {"challenge_hash", "next_check_at", "recheck_attempts", "lease_token", "lease_until"},
+		"referral_social_verification_history": {"challenge_hash"},
+	} {
+		rows, err := store.DB().Query(`PRAGMA table_info(` + table + `)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, kind string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			got[name] = true
+		}
+		rows.Close()
+		for _, column := range columns {
+			if !got[column] {
+				t.Fatalf("%s missing upgraded column %s", table, column)
+			}
+		}
+	}
+	var failureTableCount int
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'referral_social_failures'`).Scan(&failureTableCount); err != nil || failureTableCount != 1 {
+		t.Fatalf("social failure table count=%d err=%v", failureTableCount, err)
+	}
+	var indexCount int
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_referral_social_recheck_pending'`).Scan(&indexCount); err != nil || indexCount != 1 {
+		t.Fatalf("recheck index count=%d err=%v", indexCount, err)
+	}
 }
 
 func TestBindAdmissionIdentityPreservesLegacyProviderIDAcrossRestart(t *testing.T) {
@@ -1239,7 +1351,7 @@ func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
 	ctx := context.Background()
 	const providerID = "p_apptrackprovider"
 
-	first, err := store.MintProviderTokenAppTrack(ctx, providerID, nil)
+	first, err := store.MintProviderTokenAppTrack(ctx, providerID, nil, nil)
 	if err != nil {
 		t.Fatalf("first app-track mint: %v", err)
 	}
@@ -1247,18 +1359,18 @@ func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
 		t.Fatalf("first token len=%d want 64", len(first))
 	}
 
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
 		t.Fatalf("unused active without proof err=%v want ErrAppTrackExistingTokenNoProof", err)
 	}
 	if provider, ok, err := store.ValidateToken(ctx, first); err != nil || !ok || provider != providerID {
 		t.Fatalf("first token should remain active provider=%q ok=%v err=%v", provider, ok, err)
 	}
 	wrong := "wrong-token"
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
 		t.Fatalf("active token with wrong proof err=%v want ErrAppTrackExistingTokenNoProof", err)
 	}
 
-	second, err := store.MintProviderTokenAppTrack(ctx, providerID, &first)
+	second, err := store.MintProviderTokenAppTrack(ctx, providerID, &first, nil)
 	if err != nil {
 		t.Fatalf("active token with current proof should reissue: %v", err)
 	}
@@ -1268,8 +1380,24 @@ func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
 	if err := store.MarkTokenUsed(ctx, second); err != nil {
 		t.Fatalf("mark second used: %v", err)
 	}
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &second); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &second, nil); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
 		t.Fatalf("cooldown reissue err=%v want ErrAppTrackReissueCooldown", err)
+	}
+}
+
+func TestMintProviderTokenAppTrackUsesFreshClientCandidate(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	candidate := strings.Repeat("c", 64)
+	got, err := store.MintProviderTokenAppTrack(context.Background(), "p_apptrackcandidate", nil, &candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != candidate {
+		t.Fatalf("token=%q want client candidate", got)
 	}
 }
 

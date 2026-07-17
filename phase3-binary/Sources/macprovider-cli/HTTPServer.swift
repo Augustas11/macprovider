@@ -228,6 +228,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "service_instance_v1",
         "status_observation_v1",
         "provider_safety_telemetry_v1",
+        "referral_bootstrap_v1",
+        "referral_status_v1",
+        "referral_advocacy_v1",
         "provider_safety_telemetry_v2",
     ]
     static let serviceInstanceID = UUID().uuidString.lowercased()

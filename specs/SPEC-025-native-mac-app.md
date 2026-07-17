@@ -280,40 +280,53 @@ From reading `phase3-binary/`:
    register / autotune / spawn step. The stages are:
    - **Short-circuit:** if a local provider is already healthy, skip the installer
      and just attach (`:79-87,144-163`).
-   - **Run the bundled `install.sh`** (`runCLIInstall`, `:117-125`). The installer
+   - **Run the bundled `install.sh`** (`runCLIInstall`). The installer
      is bundled at `Contents/Resources/install.sh` (copied from
-     `phase3-binary/dist/install.sh` at build time, `project.yml:72-75`), run via
-     `/bin/bash <temp-copy 0700>` with **no CLI args**. Current
+     `phase3-binary/dist/install.sh` at build time). Malibu first authenticates
+     the exact regular-file bytes against the signed compatibility manifest,
+     then supplies those already-authenticated bytes to `/bin/bash -s --` over
+     stdin with **no script-path or installer CLI args**. Current
      `CLIInstallRunner.installerEnvironment` does **not** inherit the parent
      environment: it constructs a sanitized allowlist containing fixed
      `PATH`/`HOME`/`TMPDIR`/`LC_ALL`, `MACPROVIDER_NO_PROMPT=1`, and only its
-     validated port/version values (`CLIInstallRunner.swift:92-119`).
+     validated port/version values.
 
      Referral onboarding extends that exact boundary as
      `CLIInstallRunner.run(referralCode:)`. After bounded syntax validation it
-     adds one explicit `MACPROVIDER_REFERRAL_CODE` value to the sanitized install
-     environment. `install.sh` immediately writes the value to the CLI-owned 0600
-     journal `~/.config/macprovider/onboarding/referral-attempt-v1.json`, unsets
-     it, and invokes `macprovider-cli bootstrap-auth
-     --referral-code-file <journal>`. The code never appears in argv, config,
-     logs, lifecycle status, or Malibu persistence. The CLI sends it only on the
-     bootstrap initial/proof frames, persists the returned bearer to CLI Keychain,
-     then atomically retires the plaintext journal before exit 0. That exit is the
-     non-secret acknowledgement Malibu observes; the bearer never crosses back.
+     creates an owner-only 0600, single-link, no-ACL regular source file with an
+     unpredictable name and adds only its path as
+     `MACPROVIDER_REFERRAL_CODE_FILE` to the sanitized install environment.
+     `install.sh` captures and unsets that path before launching any child; it
+     never reads, logs, copies, or persists the code. It invokes
+     `macprovider-cli bootstrap-auth --referral-code-file <source>`, and the CLI
+     reopens the source with no-follow identity checks before reading it. The
+     durable CLI journal
+     `~/.config/macprovider/onboarding/referral-attempt-v1.json` stores only the
+     provider ID, receipt-key digest, referral-code digest, attempt ID, and typed
+     state; plaintext referral material is never journaled. The CLI sends the
+     code only on the bootstrap initial/proof frames, persists the returned bearer
+     to CLI Keychain, marks the digest journal committed, and removes the source
+     file only after reopening it no-follow and proving the full stat identity and
+     byte digest are unchanged. Malibu also best-effort removes its source file
+     after installer exit. Exit 0 is the non-secret acknowledgement Malibu
+     observes; the bearer never crosses back.
 
      Compatibility-set manifest v1 is exact-key and has no capability field; it
      MUST NOT be extended in place. For the fresh bundled path, the replacement
      Malibu build enables this UI only for its compiled-in v1 handoff. Before
      execution it hashes the exact `Contents/Resources/install.sh` regular-file
-     bytes it is about to copy/run and requires equality with the signed
+     bytes it is about to supply over stdin and requires equality with the signed
      manifest's `components.launchd.install_contract.sha256`, whose declared
      member is `compatibility-set-local/install.sh`. A missing, unreadable,
      symlinked, or mismatched top-level resource renders referral onboarding
-     unavailable and executes nothing. For an existing installation, Malibu
-     requires `referral_bootstrap_v1` in the installed CLI's versioned local
-     status contract. Otherwise it renders referral onboarding unavailable while
-     retaining ordinary attach/monitor behavior. No marketing-version equality
-     check substitutes for either gate.
+     unavailable and executes nothing. Because Malibu executes that bundled
+     installer for both fresh and existing-install onboarding, the compiled
+     `MalibuBundledReferralBootstrapV1` gate MUST be true on every referral path.
+     An existing installation additionally requires `referral_bootstrap_v1` in
+     the installed CLI's versioned local status contract. Either missing gate
+     renders referral onboarding unavailable while retaining ordinary
+     attach/monitor behavior. No marketing-version equality check substitutes for
+     either gate.
      `install.sh` performs the register + autotune (`autotune --recommend`) + model
      download + **launchd provider-service + watchdog install**; the app only surfaces a progress hint
      by scraping `ps` for the autotune stage (`:110-149`). A non-zero installer exit
@@ -356,9 +369,10 @@ time (60–240 s for the first model) in the background.
   diagnostics" action, and no "Quit and Uninstall" control** (those are designed, not
   shipped). The wallet card's "Set payout wallet" button is **disabled**
   (SPEC-027-gated, `DashboardWindow.swift:59`). The model-swap-over-ControlSocket
-  affordance is **not** wired in the monitor-only flow (the control socket is never
-  connected, §5.2); model selection is owned by `install.sh` / autotune and the CLI,
-  not an in-app `switch_request`.
+  affordance is **not** wired in the monitor-only flow; Malibu does attach to the
+  owner-only socket for typed status and referral projections (§5.2), but it does
+  not send `switch_request`. Model selection is owned by `install.sh` / autotune
+  and the CLI.
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
   control-socket projection only when the CLI advertises `referral_status_v1`.
   Typed challenge/verify/cancel/reopen actions additionally require
@@ -444,8 +458,9 @@ Ship `.dmg` for v1. **Reconciled v0.4:** the pipeline already emits an **optiona
 **Shipped model:** `Malibu.app` is a **thin monitor wrapper**. `install.sh` (bundled
 in `Contents/Resources/`) sets up a **launchd provider-service-managed** `macprovider-cli`
 (`live.streamvc.macprovider`, `KeepAlive`) plus a companion health watchdog (§8);
-the app then adopts and **observes** it over local HTTP. The app never spawns the CLI
-and never opens the control socket in the live flow.
+the app then adopts and **observes** it over local HTTP plus a capability-gated,
+owner-only control socket. The app never spawns the CLI; the socket carries typed,
+sanitized CLI-authenticated projections and never transfers provider credentials.
 
 ```
 ┌───────────────────────────── Malibu.app ─────────────────────────────┐
@@ -454,8 +469,9 @@ and never opens the control socket in the live flow.
 │                    └──────────┬───────────────┘                       │
 │                               ▼                                       │
 │   LaunchProviderController (onboarding)   MalibuAgent (steady state)  │
-│    · runs Contents/Resources/install.sh    · MONITORS via HTTP poll   │
-│    · imports token → Keychain              · never spawns a child     │
+│    · runs Contents/Resources/install.sh    · HTTP health/status poll  │
+│                                             · typed control projection │
+│    · invokes CLI-owned registration         · never spawns a child     │
 │    · registers SMAppService (APP login item)                         │
 │                               │ GET /v1/health + /v1/status           │
 │                               ▼ (127.0.0.1:<port from config.yaml>)   │
@@ -504,23 +520,22 @@ v0.3 — required, not optional). The bundled copy is the signed transaction inv
 installation source; the live daemon remains the launchd install. `Info.plist` carries **no**
 `malibu://` URL scheme (removed by PR #418; tombstone at `MalibuApp.swift:35-38`).
 
-### 5.2 IPC: the shipped monitor path is HTTP-poll only
+### 5.2 IPC: HTTP lifecycle monitoring plus a bounded control projection
 
-**Reconciled v0.2 — the control socket is NOT used in the shipped flow.** Steady-state
-monitoring is entirely `GET http://127.0.0.1:<port>/v1/health` +
-`GET /v1/status` against the launchd-managed CLI (`InstalledProviderMonitor.swift:39-117`;
-port from `config.yaml`). Health readiness = `status ∈ {ready, busy}`; "serving"
-additionally requires `/v1/status.network_state == "buyer_serving"`
-(`MalibuAgent.swift:307-322`).
+Steady-state lifecycle monitoring uses
+`GET http://127.0.0.1:<port>/v1/health` + `GET /v1/status` against the
+launchd-managed CLI (`InstalledProviderMonitor.swift`; port from `config.yaml`).
+Health readiness = `status ∈ {ready, busy}`; "serving" additionally requires
+`/v1/status.network_state == "buyer_serving"`.
 
-The v0.1 design — the wrapper as a `ControlSocket` **client** using
-`status_request` / `switch_request` / `rotate_receipt_key_request` and new
-`metrics_request` / `pause_request` / `shutdown_request` frames — **did not ship as a
-live path.** `ControlSocketClient` and `MalibuAgent.connectControl(...)` compile and
-are unit-tested but have **no production call site** (`MalibuAgent.swift:409-463`, no
-callers). Treat those frames and the "unix socket over HTTP for metrics" rationale as
-**legacy/test surface**, superseded by the HTTP-poll monitor. (The `agent.sock` path
-is still reserved under the app support dir, `ProviderPaths.swift`, but not connected.)
+Malibu also attaches to the launchd-owned CLI's owner-only control socket when
+the CLI advertises compatible typed capabilities. That socket supplies bounded
+status, metrics, earnings, and referral projections and accepts supported
+operator/UI requests. It does not make Malibu a lifecycle owner: Malibu never
+receives the provider bearer, never talks directly to the coordinator, and
+never launches or supervises a second provider process. Unknown or malformed
+frames terminate the local connection and are recovered by capability
+negotiation and reattachment.
 
 ### 5.3 CLI lifecycle: launchd owns it, the app monitors
 
