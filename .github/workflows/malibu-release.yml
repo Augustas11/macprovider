@@ -1,0 +1,751 @@
+name: Release Malibu independently
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Create a private candidate or publish the exact accepted candidate"
+        required: true
+        type: choice
+        options:
+          - candidate
+          - publish
+      version:
+        description: "Malibu marketing version, without a v prefix"
+        required: true
+        default: "1.8.41"
+        type: string
+      source_commit:
+        description: "Exact reviewed origin/main commit"
+        required: true
+        type: string
+      candidate_run_id:
+        description: "Candidate workflow run ID; required only for publish"
+        required: false
+        type: string
+      expected_dmg_sha256:
+        description: "Physically accepted DMG SHA-256; required only for publish"
+        required: false
+        type: string
+      physical_acceptance_confirmed:
+        description: "Confirm the exact candidate passed physical acceptance"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: malibu-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  TEAM_ID: YF7XNRJUG4
+  CLI_TAG: v1.8.40
+  CLI_VERSION: 1.8.40
+  CLI_SHA256: 4392cfff14abc7c4ee4e8992e2f264b465f754594397bfd4f92d5859f4d77ff1
+  CLI_ARCHIVE_SHA256: 1eee4900109f958c95c66830f17295bfba4dfe93e0a72aa720f0ed20a9b2b918
+
+jobs:
+  build_candidate:
+    name: Build exact unsigned Malibu candidate
+    if: inputs.operation == 'candidate'
+    runs-on: macos-15
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.source.outputs.artifact_name }}
+    steps:
+      - name: Checkout reviewed main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify independent release source
+        id: source
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git fetch --quiet --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_COMMIT"
+          project_version="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*"([^"]+)".*$/\1/p' phase3-binary/app/project.yml)"
+          project_build="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION:[[:space:]]*"?([0-9]+)"?.*$/\1/p' phase3-binary/app/project.yml)"
+          test "$project_version" = "$APP_VERSION"
+          test "$project_build" = "${APP_VERSION##*.}"
+          grep -Eq "^${APP_VERSION}[[:space:]]+${project_build}$" phase3-binary/app/release-builds.tsv
+          bash scripts/test-coordinator-advertised-version.sh "$CLI_TAG"
+          if git ls-remote --exit-code --tags origin "refs/tags/v${APP_VERSION}" >/dev/null 2>&1; then
+            echo "::error::release tag v${APP_VERSION} already exists" >&2
+            exit 1
+          fi
+          if gh release view "v${APP_VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release v${APP_VERSION} already exists" >&2
+            exit 1
+          fi
+          echo "artifact_name=malibu-v${APP_VERSION}-${SOURCE_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Select reviewed release toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
+          bash scripts/verify-app-build-inputs.sh "${{ inputs.source_commit }}"
+          bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
+
+      - name: Test and archive Malibu
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd phase3-binary/app
+          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          xcodebuild \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Debug \
+            -destination "platform=macOS" \
+            test
+          xcodebuild \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
+            archive \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO
+          cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
+            "$RUNNER_TEMP/Malibu.app"
+          plist="$RUNNER_TEMP/Malibu.app/Contents/Info.plist"
+          app_build='${{ inputs.version }}'
+          app_build="${app_build##*.}"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" |
+            grep -qx 'tech.malibu.app'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            "$plist" | grep -qx '${{ inputs.version }}'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist" |
+            grep -qx "$app_build"
+          tar -czf "$RUNNER_TEMP/Malibu.app.tar.gz" -C "$RUNNER_TEMP" Malibu.app
+
+      - name: Upload unsigned reviewed input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unsigned-${{ steps.source.outputs.artifact_name }}
+          path: ${{ runner.temp }}/Malibu.app.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  sign_candidate:
+    name: Sign private Malibu candidate
+    if: inputs.operation == 'candidate'
+    needs: build_candidate
+    runs-on: macos-15
+    environment: production-release
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout reviewed main signer
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download unsigned reviewed input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-${{ needs.build_candidate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Reverify source and protected posture
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git fetch --quiet --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_COMMIT"
+          bash scripts/verify-github-release-posture.sh \
+            "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Restore unsigned Malibu app
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf "$RUNNER_TEMP/unsigned/Malibu.app.tar.gz" -C "$RUNNER_TEMP/unsigned"
+          test -d "$RUNNER_TEMP/unsigned/Malibu.app"
+
+      - name: Import Developer ID identity
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_DEVELOPER_ID_CERT_P12_BASE64"
+          test -n "$APPLE_DEVELOPER_ID_CERT_PASSWORD"
+          signing_tmp="$(mktemp -d)"
+          keychain_pass="$(openssl rand -hex 16)"
+          echo "SIGNING_TMP=$signing_tmp" >> "$GITHUB_ENV"
+          security create-keychain -p "$keychain_pass" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$keychain_pass" build.keychain
+          security set-keychain-settings -lut 3600 build.keychain
+          printf '%s' "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" | base64 -d > "$signing_tmp/cert.p12"
+          security import "$signing_tmp/cert.p12" \
+            -k build.keychain \
+            -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_pass" build.keychain
+
+      - name: Restore exact signed CLI 1.8.40 payload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cli_dir="$RUNNER_TEMP/cli-release"
+          payload_dir="$RUNNER_TEMP/cli-payload"
+          mkdir -p "$cli_dir" "$payload_dir"
+          gh release download "$CLI_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$cli_dir" \
+            --pattern "macprovider-cli-${CLI_TAG}-darwin-arm64.tar.gz"
+          archive="$cli_dir/macprovider-cli-${CLI_TAG}-darwin-arm64.tar.gz"
+          test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "$CLI_ARCHIVE_SHA256"
+          tar -xzf "$archive" -C "$payload_dir"
+          cli="$payload_dir/macprovider-cli"
+          test "$(shasum -a 256 "$cli" | awk '{print $1}')" = "$CLI_SHA256"
+          test "$("$cli" --version)" = "$CLI_VERSION"
+          codesign --verify --strict --verbose=2 "$cli"
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
+            "$cli"
+          codesign -dv --verbose=4 "$cli" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
+          codesign -dv --verbose=4 "$cli" 2>&1 | grep -q '^Runtime Version='
+
+      - name: Sign, notarize, staple, and package Malibu
+        shell: bash
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          ARTIFACT_NAME: ${{ needs.build_candidate.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          test "$APPLE_NOTARY_TEAM_ID" = "$TEAM_ID"
+          test -n "$APPLE_NOTARY_APPLE_ID"
+          test -n "$APPLE_NOTARY_PASSWORD"
+          app="$RUNNER_TEMP/unsigned/Malibu.app"
+          payload_dir="$RUNNER_TEMP/cli-payload"
+          test -d "$app"
+          signing_id="$(security find-identity -v -p codesigning build.keychain | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          test -n "$signing_id"
+
+          cp "$payload_dir/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
+          chmod 755 "$app/Contents/MacOS/macprovider-cli"
+          cp "$payload_dir/mlx.metallib" "$app/Contents/MacOS/mlx.metallib"
+          find "$payload_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' \
+            -exec cp -R {} "$app/Contents/MacOS"/ \;
+          cp "$payload_dir/compatibility-set.json" \
+            "$app/Contents/Resources/compatibility-set.json"
+          embedded_cli="$app/Contents/MacOS/macprovider-cli"
+          test "$(shasum -a 256 "$embedded_cli" | awk '{print $1}')" = "$CLI_SHA256"
+
+          find "$app/Contents/MacOS" -mindepth 1 -maxdepth 1 -name '*.bundle' \
+            -exec codesign --force --options runtime --timestamp --sign "$signing_id" {} \;
+          codesign --force --options runtime --timestamp --sign "$signing_id" \
+            "$app/Contents/MacOS/mlx.metallib"
+          codesign --force \
+            --options runtime \
+            --timestamp \
+            --entitlements phase3-binary/app/Malibu.entitlements \
+            --sign "$signing_id" \
+            "$app"
+          codesign --verify --strict --verbose=2 --deep "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -q '^Runtime Version='
+          test "$(shasum -a 256 "$embedded_cli" | awk '{print $1}')" = "$CLI_SHA256"
+          test "$("$embedded_cli" --version)" = "$CLI_VERSION"
+
+          notary_zip="$RUNNER_TEMP/Malibu-notary.zip"
+          /usr/bin/ditto -c -k --keepParent "$app" "$notary_zip"
+          scripts/notarytool-submit-with-retry.sh "$notary_zip" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl -a -vvv -t exec "$app"
+
+          dist="$RUNNER_TEMP/candidate"
+          stage="$RUNNER_TEMP/dmg-stage"
+          mkdir -p "$dist" "$stage"
+          cp -R "$app" "$stage/Malibu.app"
+          ln -s /Applications "$stage/Applications"
+          dmg="$dist/Malibu-v${APP_VERSION}.dmg"
+          hdiutil create -volname Malibu -srcfolder "$stage" -ov -format UDZO "$dmg"
+          codesign --sign "$signing_id" --timestamp "$dmg"
+          scripts/notarytool-submit-with-retry.sh "$dmg" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          bash scripts/verify-malibu-release-artifacts.sh "$dmg"
+
+          dmg_sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+          printf '%s  %s\n' "$dmg_sha" "$(basename "$dmg")" > "$dmg.sha256"
+          APP_VERSION="$APP_VERSION" SOURCE_COMMIT="$SOURCE_COMMIT" \
+          CLI_VERSION="$CLI_VERSION" CLI_SHA256="$CLI_SHA256" \
+          TEAM_ID="$TEAM_ID" DMG_SHA256="$dmg_sha" \
+          GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+          python3 - "$dist/candidate-manifest.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          manifest = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "malibu_version": os.environ["APP_VERSION"],
+              "malibu_build": int(os.environ["APP_VERSION"].split(".")[-1]),
+              "bundle_identifier": "tech.malibu.app",
+              "team_id": os.environ["TEAM_ID"],
+              "cli_version": os.environ["CLI_VERSION"],
+              "cli_sha256": os.environ["CLI_SHA256"],
+              "dmg_asset": f"Malibu-v{os.environ['APP_VERSION']}.dmg",
+              "dmg_sha256": os.environ["DMG_SHA256"],
+              "candidate_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "candidate_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "notarization": "accepted",
+              "stapling": "validated",
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as output:
+              json.dump(manifest, output, sort_keys=True, indent=2)
+              output.write("\n")
+          PY
+
+      - name: Upload private signed candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ needs.build_candidate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Clean signing material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain build.keychain >/dev/null 2>&1 || true
+          rm -rf "${SIGNING_TMP:-}" "$RUNNER_TEMP/cli-release" "$RUNNER_TEMP/cli-payload"
+
+  publish:
+    name: Publish physically accepted Malibu candidate
+    if: inputs.operation == 'publish'
+    runs-on: macos-15
+    environment: production-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate publication authority and source
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          EXPECTED_DMG_SHA256: ${{ inputs.expected_dmg_sha256 }}
+          PHYSICAL_ACCEPTANCE_CONFIRMED: ${{ inputs.physical_acceptance_confirmed }}
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$PHYSICAL_ACCEPTANCE_CONFIRMED" = true
+          [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main \
+            "refs/tags/v${APP_VERSION}:refs/tags/v${APP_VERSION}"
+          test "$(git rev-list -n 1 "v${APP_VERSION}")" = "$SOURCE_COMMIT"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main
+          git merge-base --is-ancestor "$SOURCE_COMMIT" "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          bash scripts/verify-github-release-posture.sh \
+            "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Authenticate candidate workflow run
+        id: provenance
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifact_name="malibu-v${APP_VERSION}-${SOURCE_COMMIT}"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/malibu-release.yml" \
+            > "$RUNNER_TEMP/candidate-workflow.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" \
+            > "$RUNNER_TEMP/candidate-run.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/jobs?filter=latest&per_page=100" \
+            > "$RUNNER_TEMP/candidate-jobs.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?name=$artifact_name&per_page=100" \
+            > "$RUNNER_TEMP/candidate-artifacts.json"
+          python3 - "$RUNNER_TEMP/candidate-workflow.json" \
+            "$RUNNER_TEMP/candidate-run.json" "$RUNNER_TEMP/candidate-jobs.json" \
+            "$RUNNER_TEMP/candidate-artifacts.json" "$CANDIDATE_RUN_ID" \
+            "$SOURCE_COMMIT" "$artifact_name" "$GITHUB_REPOSITORY" <<'PY'
+          import json
+          import sys
+
+          workflow_path, run_path, jobs_path, artifacts_path, run_id, commit, artifact_name, repo = sys.argv[1:]
+          workflow = json.load(open(workflow_path, encoding="utf-8"))
+          run = json.load(open(run_path, encoding="utf-8"))
+          jobs = json.load(open(jobs_path, encoding="utf-8"))["jobs"]
+          artifacts = json.load(open(artifacts_path, encoding="utf-8"))["artifacts"]
+          expected_run = {
+              "id": int(run_id),
+              "workflow_id": workflow["id"],
+              "path": ".github/workflows/malibu-release.yml",
+              "event": "workflow_dispatch",
+              "head_branch": "main",
+              "head_sha": commit,
+              "status": "completed",
+              "conclusion": "success",
+          }
+          for key, value in expected_run.items():
+              if run.get(key) != value:
+                  raise SystemExit(f"candidate workflow run mismatch for {key}")
+          if run.get("head_repository", {}).get("full_name") != repo:
+              raise SystemExit("candidate workflow run repository mismatch")
+          attempt = run.get("run_attempt")
+          if not isinstance(attempt, int) or attempt < 1:
+              raise SystemExit("candidate workflow run attempt is invalid")
+          conclusions = {job.get("name"): job.get("conclusion") for job in jobs}
+          for name in ("Build exact unsigned Malibu candidate", "Sign private Malibu candidate"):
+              if conclusions.get(name) != "success":
+                  raise SystemExit(f"candidate workflow job did not succeed: {name}")
+          if conclusions.get("Publish physically accepted Malibu candidate") == "success":
+              raise SystemExit("candidate run unexpectedly executed publication")
+          if len(artifacts) != 1:
+              raise SystemExit("candidate workflow has an ambiguous signed artifact")
+          artifact = artifacts[0]
+          if artifact.get("name") != artifact_name or artifact.get("expired") is not False:
+              raise SystemExit("candidate workflow artifact identity is invalid")
+          artifact_run = artifact.get("workflow_run", {})
+          if artifact_run.get("id") != int(run_id) or artifact_run.get("head_sha") != commit:
+              raise SystemExit("candidate artifact is not bound to the authenticated run")
+          print(f"run_attempt={attempt}")
+          PY
+          run_attempt="$(jq -r .run_attempt "$RUNNER_TEMP/candidate-run.json")"
+          echo "run_attempt=$run_attempt" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact private candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: malibu-v${{ inputs.version }}-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/candidate
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Reverify exact accepted bytes
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ steps.provenance.outputs.run_attempt }}
+          EXPECTED_DMG_SHA256: ${{ inputs.expected_dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/candidate"
+          dmg="$candidate/Malibu-v${APP_VERSION}.dmg"
+          manifest="$candidate/candidate-manifest.json"
+          checksum="$dmg.sha256"
+          test -f "$dmg"
+          test -f "$manifest"
+          test -f "$checksum"
+          test "$(find "$candidate" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
+          actual_sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+          test "$actual_sha" = "$EXPECTED_DMG_SHA256"
+          grep -qx "$EXPECTED_DMG_SHA256  Malibu-v${APP_VERSION}.dmg" "$checksum"
+          python3 - "$manifest" "$APP_VERSION" "$SOURCE_COMMIT" \
+            "$CANDIDATE_RUN_ID" "$CANDIDATE_RUN_ATTEMPT" "$EXPECTED_DMG_SHA256" \
+            "$CLI_SHA256" "$TEAM_ID" <<'PY'
+          import json
+          import sys
+
+          path, version, commit, run_id, run_attempt, dmg_sha, cli_sha, team_id = sys.argv[1:]
+          manifest = json.load(open(path, encoding="utf-8"))
+          expected = {
+              "repository": "Augustas11/macprovider",
+              "source_commit": commit,
+              "malibu_version": version,
+              "malibu_build": int(version.split(".")[-1]),
+              "bundle_identifier": "tech.malibu.app",
+              "team_id": team_id,
+              "cli_version": "1.8.40",
+              "cli_sha256": cli_sha,
+              "dmg_asset": f"Malibu-v{version}.dmg",
+              "dmg_sha256": dmg_sha,
+              "candidate_run_id": int(run_id),
+              "candidate_run_attempt": int(run_attempt),
+              "notarization": "accepted",
+              "stapling": "validated",
+          }
+          for key, value in expected.items():
+              if manifest.get(key) != value:
+                  raise SystemExit(f"candidate manifest mismatch for {key}")
+          PY
+          bash scripts/verify-malibu-release-artifacts.sh "$dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
+          codesign -dv --verbose=4 "$dmg" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
+          mount_dir="$(mktemp -d "$RUNNER_TEMP/malibu-candidate.XXXXXX")"
+          cleanup_mount() {
+            hdiutil detach "$mount_dir" -quiet >/dev/null 2>&1 || true
+            rm -rf "$mount_dir"
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg" >/dev/null
+          app="$mount_dir/Malibu.app"
+          plist="$app/Contents/Info.plist"
+          cli="$app/Contents/MacOS/macprovider-cli"
+          test -d "$app"
+          test -L "$mount_dir/Applications"
+          test "$(readlink "$mount_dir/Applications")" = /Applications
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = tech.malibu.app
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$APP_VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "${APP_VERSION##*.}"
+          codesign --verify --strict --deep --verbose=2 "$app"
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"tech.malibu.app\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
+            "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -q '^Runtime Version='
+          xcrun stapler validate "$app"
+          spctl -a -vvv -t exec "$app"
+          test -f "$cli"
+          test -x "$cli"
+          test "$(stat -f '%Lp' "$cli")" = 755
+          test "$(shasum -a 256 "$cli" | awk '{print $1}')" = "$CLI_SHA256"
+          test "$("$cli" --version)" = "$CLI_VERSION"
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
+            "$cli"
+          codesign -dv --verbose=4 "$cli" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
+          codesign -dv --verbose=4 "$cli" 2>&1 | grep -q '^Runtime Version='
+          test -f "$app/Contents/Resources/compatibility-set.json"
+          cleanup_mount
+          trap - EXIT
+
+      - name: Create and verify draft Malibu release
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXPECTED_DMG_SHA256: ${{ inputs.expected_dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          tag="v${APP_VERSION}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $tag already exists" >&2
+            exit 1
+          fi
+          candidate="$RUNNER_TEMP/candidate"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          # Malibu ${APP_VERSION}
+
+          Malibu-only recovery for #611. This release requests complete macOS signing
+          metadata so Malibu can verify the production Team ID and monitor an existing
+          launchd-managed provider.
+
+          macprovider-cli remains independently versioned and unchanged. The supported
+          CLI in this release is 1.8.40 with SHA-256 \`${CLI_SHA256}\`; no CLI replacement
+          or Malibu/CLI marketing-version equality is required.
+          EOF
+          gh release create "$tag" \
+            "$candidate/Malibu-v${APP_VERSION}.dmg" \
+            "$candidate/Malibu-v${APP_VERSION}.dmg.sha256" \
+            "$candidate/candidate-manifest.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Malibu ${APP_VERSION}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --target "$SOURCE_COMMIT" \
+            --verify-tag \
+            --latest=false \
+            --draft
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,isDraft,tagName,targetCommitish,assets,url > "$RUNNER_TEMP/draft.json"
+          jq -e --arg tag "$tag" --arg commit "$SOURCE_COMMIT" \
+            '.isDraft == true and .tagName == $tag and .targetCommitish == $commit and
+             ([.assets[].name] | sort) == (["Malibu-v" + env.APP_VERSION + ".dmg",
+               "Malibu-v" + env.APP_VERSION + ".dmg.sha256", "candidate-manifest.json"] | sort)' \
+            "$RUNNER_TEMP/draft.json" >/dev/null
+          draft_id="$(jq -r .databaseId "$RUNNER_TEMP/draft.json")"
+          [[ "$draft_id" =~ ^[1-9][0-9]*$ ]]
+          mkdir -p "$RUNNER_TEMP/draft-download"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/draft-download"
+          for asset in "Malibu-v${APP_VERSION}.dmg" \
+            "Malibu-v${APP_VERSION}.dmg.sha256" candidate-manifest.json; do
+            cmp -s "$candidate/$asset" "$RUNNER_TEMP/draft-download/$asset"
+          done
+          echo "release_id=$draft_id" >> "$GITHUB_OUTPUT"
+
+      - name: Publish only the revalidated draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXPECTED_DMG_SHA256: ${{ inputs.expected_dmg_sha256 }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v${APP_VERSION}"
+          candidate="$RUNNER_TEMP/candidate"
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main \
+            "refs/tags/$tag:refs/tags/$tag"
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-list -n 1 "$tag")" = "$SOURCE_COMMIT"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main
+          git merge-base --is-ancestor "$SOURCE_COMMIT" "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/final-draft-by-id.json"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json databaseId,isDraft,tagName,targetCommitish,assets > "$RUNNER_TEMP/final-draft-cli.json"
+          python3 - "$RUNNER_TEMP/final-draft-by-id.json" \
+            "$RUNNER_TEMP/final-draft-cli.json" "$candidate" "$RELEASE_ID" \
+            "$tag" "$SOURCE_COMMIT" "$APP_VERSION" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          by_id_path, cli_path, candidate_path, release_id, tag, commit, version = sys.argv[1:]
+          candidate = pathlib.Path(candidate_path)
+          names = [f"Malibu-v{version}.dmg", f"Malibu-v{version}.dmg.sha256", "candidate-manifest.json"]
+          expected_digests = {
+              name: "sha256:" + hashlib.sha256((candidate / name).read_bytes()).hexdigest()
+              for name in names
+          }
+          by_id = json.load(open(by_id_path, encoding="utf-8"))
+          by_cli = json.load(open(cli_path, encoding="utf-8"))
+          releases = (
+              ("numeric", by_id.get("id"), by_id.get("draft"), by_id.get("immutable"),
+               by_id.get("tag_name"), by_id.get("target_commitish"), by_id.get("assets", [])),
+              ("cli", by_cli.get("databaseId"), by_cli.get("isDraft"), None,
+               by_cli.get("tagName"), by_cli.get("targetCommitish"), by_cli.get("assets", [])),
+          )
+          for label, actual_id, draft, immutable, actual_tag, actual_commit, assets in releases:
+              if actual_id != int(release_id):
+                  raise SystemExit(f"{label} draft release ID mismatch")
+              if draft is not True or immutable is True:
+                  raise SystemExit(f"{label} release is not the mutable draft")
+              if actual_tag != tag or actual_commit != commit:
+                  raise SystemExit(f"{label} draft source identity mismatch")
+              if {asset.get("name") for asset in assets} != set(names):
+                  raise SystemExit(f"{label} draft asset set mismatch")
+              for asset in assets:
+                  if asset.get("digest") != expected_digests[asset["name"]]:
+                      raise SystemExit(f"{label} draft asset digest mismatch for {asset['name']}")
+          PY
+          test "$(shasum -a 256 "$candidate/Malibu-v${APP_VERSION}.dmg" | awk '{print $1}')" = "$EXPECTED_DMG_SHA256"
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=false -f make_latest=false > "$RUNNER_TEMP/published.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/immutable-release-by-id.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$RUNNER_TEMP/immutable-release-by-tag.json"
+          python3 - "$RUNNER_TEMP/immutable-release-by-id.json" \
+            "$RUNNER_TEMP/immutable-release-by-tag.json" "$candidate" "$RELEASE_ID" \
+            "$tag" "$SOURCE_COMMIT" "$APP_VERSION" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          by_id_path, by_tag_path, candidate_path, release_id, tag, commit, version = sys.argv[1:]
+          candidate = pathlib.Path(candidate_path)
+          names = [f"Malibu-v{version}.dmg", f"Malibu-v{version}.dmg.sha256", "candidate-manifest.json"]
+          expected_digests = {
+              name: "sha256:" + hashlib.sha256((candidate / name).read_bytes()).hexdigest()
+              for name in names
+          }
+          for label, path in (("numeric", by_id_path), ("tag", by_tag_path)):
+              release = json.load(open(path, encoding="utf-8"))
+              if release.get("id") != int(release_id):
+                  raise SystemExit(f"{label} immutable release ID mismatch")
+              if release.get("draft") is not False or release.get("immutable") is not True:
+                  raise SystemExit(f"{label} release is not public and immutable")
+              if release.get("prerelease") is not False:
+                  raise SystemExit(f"{label} release unexpectedly became a prerelease")
+              if release.get("tag_name") != tag or release.get("target_commitish") != commit:
+                  raise SystemExit(f"{label} immutable source identity mismatch")
+              assets = release.get("assets", [])
+              if {asset.get("name") for asset in assets} != set(names):
+                  raise SystemExit(f"{label} immutable asset set mismatch")
+              for asset in assets:
+                  if asset.get("digest") != expected_digests[asset["name"]]:
+                      raise SystemExit(f"{label} immutable asset digest mismatch for {asset['name']}")
+          PY
+          mkdir -p "$RUNNER_TEMP/public-download"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/public-download"
+          for asset in "Malibu-v${APP_VERSION}.dmg" \
+            "Malibu-v${APP_VERSION}.dmg.sha256" candidate-manifest.json; do
+            cmp -s "$candidate/$asset" "$RUNNER_TEMP/public-download/$asset"
+          done
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url,isDraft,tagName,assets

@@ -56,10 +56,6 @@ if [[ "$app_version_count" -ne 1 ]]; then
   exit 1
 fi
 app_version="$app_version_lines"
-if [[ "$app_version" != "$binary_version" ]]; then
-  echo "Malibu app marketing version is $app_version; expected $binary_version" >&2
-  exit 1
-fi
 
 app_build_definition_count="$(awk '/^[[:space:]]*CURRENT_PROJECT_VERSION[[:space:]]*:/ { count++ } END { print count + 0 }' "$app_project_file")"
 if [[ "$app_build_definition_count" -ne 1 ]]; then
@@ -74,7 +70,7 @@ if [[ "$app_build_count" -ne 1 ]]; then
 fi
 app_build="$app_build_lines"
 
-python3 - "$release_builds_file" "$binary_version" "$app_build" <<'PY'
+python3 - "$release_builds_file" "$app_version" "$app_build" <<'PY'
 import re
 import sys
 
@@ -148,4 +144,4 @@ for config_file in "${config_files[@]}"; do
   fi
 done
 
-echo "CLI, Malibu app, and coordinator advertised versions are aligned at $binary_version"
+echo "CLI and coordinator advertised versions are aligned at $binary_version; Malibu $app_version build $app_build is validated independently"
