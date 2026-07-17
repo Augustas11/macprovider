@@ -286,6 +286,11 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         requirements[0]["gap"] = None
     elif operation == "normalized_spec_mapping":
         requirements[0]["implementation"] = ["specs/SPEC-002-two.md"]
+    elif operation == "same_spec_markdown_mapping":
+        requirements[0]["state"] = "conformant"
+        requirements[0]["implementation"] = ["specs/SPEC-001-one.md:Human contract text"]
+        requirements[0]["tests"] = ["specs/SPEC-001-one.md:Human contract text"]
+        requirements[0]["gap"] = None
     elif operation == "deprecated_authority_owner":
         specs[0]["status"] = "deprecated"
         specs[0]["deprecation_rationale"] = "retired"

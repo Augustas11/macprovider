@@ -819,8 +819,8 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
     for requirement_id, requirement in requirements_by_id.items():
         for mapping_key in ("implementation", "tests"):
             for mapping in requirement.get(mapping_key, []) if isinstance(requirement.get(mapping_key), list) else []:
-                if isinstance(mapping, str) and mapping.startswith("specs/") and not mapping.startswith(f"specs/{requirement.get('spec_id')}-"):
-                    result.error(requirement_id, f"{mapping_key} mapping must not point at another SPEC as implementation")
+                if isinstance(mapping, str) and mapping.startswith("specs/"):
+                    result.error(requirement_id, f"{mapping_key} mapping must not point at SPEC Markdown as implementation or test evidence")
         for domain_id in spec_records.get(requirement.get("spec_id"), {}).get("authority_domains", []):
             domain = domain_records.get(domain_id, {})
             if (

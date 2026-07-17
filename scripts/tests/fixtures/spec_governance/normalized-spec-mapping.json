@@ -1,4 +1,4 @@
 {
   "mutation": {"operation": "normalized_spec_mapping"},
-  "expected": "implementation mapping must not point at another SPEC"
+  "expected": "implementation mapping must not point at SPEC Markdown"
 }
