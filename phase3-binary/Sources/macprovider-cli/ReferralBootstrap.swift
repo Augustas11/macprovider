@@ -46,12 +46,12 @@ struct ReferralBootstrapFailure: Error, Equatable, Sendable {
 struct ReferralCodeInput: Equatable, Sendable {
     let code: String
     let digestSHA256: String
+    let sourceFileSHA256: String
     let path: String
-    let device: UInt64
-    let inode: UInt64
+    let fileIdentity: ReferralFileIdentity
 }
 
-private struct ReferralFileIdentity: Equatable {
+struct ReferralFileIdentity: Equatable, Sendable {
     let device: dev_t
     let inode: ino_t
     let size: off_t
@@ -138,20 +138,60 @@ enum ReferralCodeFile {
         return ReferralCodeInput(
             code: code,
             digestSHA256: sha256Hex(Data(code.utf8)),
+            sourceFileSHA256: sha256Hex(raw),
             path: path,
-            device: UInt64(openStat.st_dev),
-            inode: UInt64(openStat.st_ino)
+            fileIdentity: ReferralFileIdentity(openStat)
         )
     }
 
     static func removeIfUnchanged(_ input: ReferralCodeInput) throws {
-        var current = stat()
-        guard lstat(input.path, &current) == 0 else {
+        var pathStat = stat()
+        guard lstat(input.path, &pathStat) == 0 else {
             if errno == ENOENT { return }
             throw ReferralBootstrapFailure(kind: .unavailable)
         }
-        try validate(current)
-        guard UInt64(current.st_dev) == input.device, UInt64(current.st_ino) == input.inode else {
+        try validate(pathStat)
+        guard ReferralFileIdentity(pathStat) == input.fileIdentity else {
+            throw ReferralBootstrapFailure(kind: .unavailable)
+        }
+
+        let descriptor = open(input.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            throw ReferralBootstrapFailure(kind: .unavailable)
+        }
+        defer { _ = close(descriptor) }
+        var openStat = stat()
+        guard fstat(descriptor, &openStat) == 0 else {
+            throw ReferralBootstrapFailure(kind: .unavailable)
+        }
+        try validate(openStat)
+        try validateNoExtendedACL(descriptor)
+        guard ReferralFileIdentity(openStat) == input.fileIdentity else {
+            throw ReferralBootstrapFailure(kind: .unavailable)
+        }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: maximumBytes + 1)
+        while data.count <= maximumBytes {
+            let received = Darwin.read(descriptor, &buffer, buffer.count)
+            if received < 0 {
+                if errno == EINTR { continue }
+                throw ReferralBootstrapFailure(kind: .unavailable)
+            }
+            if received == 0 { break }
+            data.append(contentsOf: buffer.prefix(received))
+        }
+        var finalOpenStat = stat()
+        guard !data.isEmpty,
+              data.count <= maximumBytes,
+              sha256Hex(data) == input.sourceFileSHA256,
+              fstat(descriptor, &finalOpenStat) == 0,
+              ReferralFileIdentity(finalOpenStat) == input.fileIdentity else {
+            throw ReferralBootstrapFailure(kind: .unavailable)
+        }
+        var finalPathStat = stat()
+        guard lstat(input.path, &finalPathStat) == 0,
+              ReferralFileIdentity(finalPathStat) == input.fileIdentity else {
             throw ReferralBootstrapFailure(kind: .unavailable)
         }
         guard unlink(input.path) == 0 else {

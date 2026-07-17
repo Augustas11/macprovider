@@ -97,6 +97,29 @@ final class BootstrapAuthCommandTests: XCTestCase {
         }
     }
 
+    func testReferralCodeFileDoesNotRetireInPlaceMutation() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("source")
+        try Data("MAL1-S-key-original-tag".utf8).write(to: source)
+        XCTAssertEqual(chmod(source.path, 0o600), 0)
+        let input = try ReferralCodeFile.read(path: source.path)
+
+        let descriptor = open(source.path, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        let replacement = Data("MAL1-S-key-revised-tag".utf8)
+        XCTAssertEqual(replacement.withUnsafeBytes {
+            Darwin.write(descriptor, $0.baseAddress, $0.count)
+        }, replacement.count)
+        XCTAssertEqual(close(descriptor), 0)
+
+        XCTAssertThrowsError(try ReferralCodeFile.removeIfUnchanged(input)) { error in
+            XCTAssertEqual(error as? ReferralBootstrapFailure, .init(kind: .unavailable))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(try String(contentsOf: source, encoding: .utf8), "MAL1-S-key-revised-tag")
+    }
+
     func testReferralJournalResumesSameBindingAndRejectsPendingCodeChange() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

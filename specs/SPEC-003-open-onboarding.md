@@ -684,9 +684,12 @@ Old binaries that cannot parse `assigned_provider_token` will silently drop the 
 The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues
 to work without a referral input and obtains a credential through the CLI-owned
 WS bootstrap. SPEC-034's optional referral integration may modify `install.sh`
-only to consume `MACPROVIDER_REFERRAL_CODE`, copy it into the owner-only 0600
-onboarding journal, unset the environment value, and pass the journal path to
-`bootstrap-auth --referral-code-file`. It MUST NOT write the code to
+only to capture and unset the path supplied as
+`MACPROVIDER_REFERRAL_CODE_FILE`, then pass that owner-only source path to
+`bootstrap-auth --referral-code-file`. The installer MUST NOT read, copy, log, or
+persist the code. The CLI's owner-only durable onboarding journal stores only the
+provider/receipt/code digests, attempt identity, and typed state; it never stores
+plaintext referral input. Neither installer nor CLI may write the code to
 `config.yaml`, logs, argv, lifecycle status, or Malibu storage. With the variable
 absent, installer behavior remains the ordinary single-shell-pipe flow.
 

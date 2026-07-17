@@ -216,16 +216,19 @@ grant and any number of idempotent observations.
 
 Malibu passes referral input only through SPEC-025/026's concrete
 `referral_bootstrap_v1` contract: sanitized one-shot install environment,
-CLI-owned 0600 attempt journal, and `bootstrap-auth --referral-code-file`. For a
-fresh bundled install, Malibu relies on its compiled-in v1 install handoff and
+CLI-owned 0600 digest-only attempt journal, and
+`bootstrap-auth --referral-code-file`. For a fresh bundled install, Malibu relies
+on its compiled-in v1 install handoff and
 hashes the exact regular-file `Contents/Resources/install.sh` bytes it is about
 to execute. Those bytes MUST equal the existing signed manifest's
 `components.launchd.install_contract.sha256` for
 `compatibility-set-local/install.sh`; missing, symlinked, unreadable, or
 mismatched resources fail unavailable before execution. Compatibility-set v1
-has no capability field and MUST NOT be extended in place. For an existing installed CLI, Malibu
-requires `referral_bootstrap_v1` in the CLI-authored local status contract before
-offering input. It invokes later typed referral actions over an owner-only local
+has no capability field and MUST NOT be extended in place. Because Malibu always
+executes that bundled installer, its compiled handoff gate applies to existing
+installs as well. An existing installed CLI additionally requires
+`referral_bootstrap_v1` in the CLI-authored local status contract before offering
+input. It invokes later typed referral actions over an owner-only local
 interface. The CLI owns all authenticated coordinator calls and exposes only a
 sanitized owner-only control-socket projection under `referral_status_v1`.
 Typed challenge/verify/cancel/reopen actions additionally require

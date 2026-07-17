@@ -1283,31 +1283,40 @@ input. The concrete v1 handoff is:
    result with the signed
    `components.launchd.install_contract.sha256` value for
    `compatibility-set-local/install.sh`. Missing, symlinked, unreadable, or
-   mismatched resources fail to `unavailable` before execution. For an existing CLI, Malibu
-   requires `referral_bootstrap_v1` in the CLI-authored local status contract.
-   Otherwise it renders the input unavailable; it never infers support from a
+   mismatched resources fail to `unavailable` before execution. The compiled
+   `MalibuBundledReferralBootstrapV1` gate applies to every referral path because
+   Malibu executes the bundled installer even when a provider is already
+   installed. For an existing CLI, Malibu additionally requires
+   `referral_bootstrap_v1` in the CLI-authored local status contract. Either
+   missing gate renders the input unavailable; support is never inferred from a
    marketing version.
 2. `CLIInstallRunner.run(referralCode:)` validates at most 256 UTF-8 bytes with
-   no control characters and adds only `MACPROVIDER_REFERRAL_CODE` to its existing
-   sanitized allowlist. It does not inherit the App environment.
-3. `install.sh` writes the code to the CLI-owned 0600 journal
-   `~/.config/macprovider/onboarding/referral-attempt-v1.json`, unsets the
-   environment value, and calls the installed `macprovider-cli bootstrap-auth
-   --referral-code-file <journal>`.
-4. `bootstrap-auth` validates the owner/mode and bounded code, reuses the durable
-   provider/receipt identity, and sends the exact code in both signed bootstrap
-   stages. It persists the response bearer to CLI Keychain before atomically
-   retiring the plaintext journal and exiting 0.
+   no control characters, writes the code to an unpredictable owner-only 0600,
+   single-link, no-ACL regular source file, and adds only that file's path as
+   `MACPROVIDER_REFERRAL_CODE_FILE` to its existing sanitized allowlist. It does
+   not inherit the App environment.
+3. `install.sh` captures and unsets the source-file path before launching any
+   child. It never reads, logs, copies, or persists the code, and calls the
+   installed `macprovider-cli bootstrap-auth --referral-code-file <source>`.
+4. `bootstrap-auth` opens the source with no-follow owner/mode/link/ACL and
+   device/inode stability checks, reuses the durable provider/receipt identity,
+   and sends the exact code in both signed bootstrap stages. Its owner-only
+   `~/.config/macprovider/onboarding/referral-attempt-v1.json` journal contains
+   only provider/receipt/code digests, attempt ID, and typed state. It persists
+   the response bearer to CLI Keychain, marks that digest journal committed,
+   removes the source only after its full stat identity and byte digest still
+   match the original read, and exits 0.
 5. The installer exit and versioned local status are Malibu's acknowledgement;
    no response contains the bearer. Existing installs advertise
    `referral_bootstrap_v1` in local status before Malibu exposes referral input;
    `referral_status_v1` independently gates the sanitized referral dashboard.
 
-If the process or host restarts, the CLI reuses the journal and exact receipt
-key. If the coordinator committed but the journal was already retired, exact-key
-same-campaign recovery may omit the code and replace only its own unused
-bootstrap bearer. No raw code or bearer is written to Malibu storage, config,
-lifecycle state, or logs.
+If the process or host restarts, the CLI reuses the digest journal, exact receipt
+key, and a newly supplied source file containing the same code. If the
+coordinator committed but the response was lost, the same binding reconciles the
+persisted credential or the coordinator replaces only that exact bootstrap
+identity's unused bearer. No raw code or bearer is written to Malibu storage,
+config, the durable journal, lifecycle state, or logs.
 
 A coordinator rejection maps to a typed invalid, expired, revoked, exhausted,
 conflict, rate-limited, unavailable, or retryable result. The CLI reuses its
@@ -2148,15 +2157,17 @@ slower payout release. Not required for this spec to ship.
       id, a port, and readable launchd evidence (`install_manifest.json` /
       `live.streamvc.macprovider.plist`), skip the installer and attach
       (`CLIInstallRunner.swift:89-103`; `LaunchProviderController.swift:79-87`).
-   b. **Run the bundled `install.sh`** (`.runningCLIInstall`, `:117-125`) via
-      `/bin/bash <temp-copy 0700>` with **no CLI args**, one script-path arg.
+   b. **Run the bundled `install.sh`** (`.runningCLIInstall`) by authenticating
+      the exact bundled regular-file bytes and supplying those same bytes to
+      `/bin/bash -s --` over stdin with **no script-path or installer CLI args**.
       **Environment is sanitized (reconciled v0.25 to current source):**
       `CLIInstallRunner.installerEnvironment` constructs a new allowlist with
       fixed `PATH`, validated `HOME`/`TMPDIR`, `LC_ALL`,
       `MACPROVIDER_NO_PROMPT=1`, and its validated port/version inputs; it does
-      not inherit the parent process environment
-      (`CLIInstallRunner.swift:92-119`). SPEC-034 adds only the validated
-      one-shot `MACPROVIDER_REFERRAL_CODE` value to that allowlist. **`install.sh` runs the
+      not inherit the parent process environment. SPEC-034 adds only the path to
+      the validated one-shot owner-only referral source file as
+      `MACPROVIDER_REFERRAL_CODE_FILE`; the raw code is not an environment value.
+      **`install.sh` runs the
       CLI-track onboarding:** it generates a fresh `mp-<32hex>` principal and runs
       `bootstrap-auth`, which acquires the `provider_token` via the coordinator's
       **tokenless WS admission** handshake (NOT the App-track `/v1/providers/register`,

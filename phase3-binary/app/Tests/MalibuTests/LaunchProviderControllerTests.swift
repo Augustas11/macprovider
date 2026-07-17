@@ -141,6 +141,37 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertFalse(controller.referralInputAvailable)
     }
 
+    func testReferralHandoffRequiresBundledArtifactAndInstalledCapability() {
+        XCTAssertFalse(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: false,
+            installedCLIAdvertisesReferralBootstrapV1: true
+        ))
+        XCTAssertFalse(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: true,
+            installedCLIAdvertisesReferralBootstrapV1: false
+        ))
+        XCTAssertTrue(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: true,
+            installedCLIAdvertisesReferralBootstrapV1: true
+        ))
+        XCTAssertTrue(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: true,
+            installedCLIAdvertisesReferralBootstrapV1: nil
+        ))
+    }
+
+    func testDefaultMalibuArtifactKeepsReferralHandoffDisabled() {
+        let bundledHandoffEnabled = Bundle.main.object(
+            forInfoDictionaryKey: "MalibuBundledReferralBootstrapV1"
+        ) as? Bool == true
+
+        XCTAssertFalse(bundledHandoffEnabled)
+        XCTAssertFalse(LaunchProviderController.referralHandoffAvailable(
+            bundledHandoffEnabled: bundledHandoffEnabled,
+            installedCLIAdvertisesReferralBootstrapV1: true
+        ))
+    }
+
     func testTypedReferralFailureDoesNotDestroyIdentityOrAttachProvider() async {
         let harness = Harness()
         harness.cliInstallError = CLIInstallRunner.Error.referralFailure(.expired)

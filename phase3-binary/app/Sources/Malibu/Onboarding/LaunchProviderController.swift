@@ -316,6 +316,15 @@ final class LaunchProviderController: ObservableObject {
     }
 
     private static func referralInputAvailableForCurrentInstall() async -> Bool {
+        let bundledHandoffEnabled = Bundle.main.object(
+            forInfoDictionaryKey: "MalibuBundledReferralBootstrapV1"
+        ) as? Bool == true
+        guard bundledHandoffEnabled else {
+            // Malibu always executes its separately bundled, signed installer.
+            // An independently updated installed CLI cannot make an older
+            // bundled handoff capable of forwarding referral input.
+            return false
+        }
         let paths = ProviderPaths.current
         let hasExistingInstall = FileManager.default.fileExists(atPath: paths.configFile.path)
             || StartupState.launchdInstallEvidenceExists(paths: paths)
@@ -324,9 +333,7 @@ final class LaunchProviderController: ObservableObject {
             // release assembly may enable this only after it embeds a signed,
             // referral-capable CLI/install contract. It remains off for older
             // independently versioned CLI payloads.
-            return Bundle.main.object(
-                forInfoDictionaryKey: "MalibuBundledReferralBootstrapV1"
-            ) as? Bool == true
+            return true
         }
         guard let port = InstalledProviderMonitor.readHTTPPort(paths: paths),
               let status = await InstalledProviderMonitor.fetchStatus(port: port),
@@ -342,7 +349,19 @@ final class LaunchProviderController: ObservableObject {
               ) else {
             return false
         }
-        return status.capabilities.contains("referral_bootstrap_v1")
+        return referralHandoffAvailable(
+            bundledHandoffEnabled: bundledHandoffEnabled,
+            installedCLIAdvertisesReferralBootstrapV1:
+                status.capabilities.contains("referral_bootstrap_v1")
+        )
+    }
+
+    static func referralHandoffAvailable(
+        bundledHandoffEnabled: Bool,
+        installedCLIAdvertisesReferralBootstrapV1: Bool?
+    ) -> Bool {
+        guard bundledHandoffEnabled else { return false }
+        return installedCLIAdvertisesReferralBootstrapV1 ?? true
     }
 
     private func beginInstallProgressWatch() {
