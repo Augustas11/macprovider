@@ -263,6 +263,13 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "  behavior-change: none\n"
                 "</details>\n"
             ),
+            (
+                "Example <details\n"
+                ' class="example">\n'
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
         )
         for body in bodies:
             with self.subTest(body=body):

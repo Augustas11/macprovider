@@ -37,7 +37,7 @@ FIELD_RE = re.compile(
     r"authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$",
     re.IGNORECASE,
 )
-INLINE_DETAILS_OPEN_RE = re.compile(r"<details(?:\s|>)", re.IGNORECASE)
+INLINE_DETAILS_OPEN_RE = re.compile(r"<details(?:\s|>|$)", re.IGNORECASE)
 CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
