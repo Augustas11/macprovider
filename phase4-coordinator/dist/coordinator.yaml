@@ -102,6 +102,7 @@ referrals:
   provider_base_uses: 1
   social_bonus_uses: 2
   challenge_ttl_s: 900
+  social_verification_dwell_s: 1800
   join_base_url: "https://coordinator.streamvc.live/j"
   join_download_url: ""
   x_api_bearer_token: ""

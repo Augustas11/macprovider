@@ -34,17 +34,18 @@ var referralEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 // ReferralPolicy is a caller-owned immutable snapshot. Secrets remain in
 // memory; issuer rows persist only the key id needed for explicit rotation.
 type ReferralPolicy struct {
-	RequireForRegistration bool
-	EnableSocialBonus      bool
-	Campaign               string
-	PolicyVersion          string
-	GrandfatherBefore      *time.Time
-	GrandfatherProof       bool
-	CurrentKeyID           string
-	HMACKeys               map[string]string
-	ProviderBaseUses       int
-	SocialBonusUses        int
-	ChallengeTTL           time.Duration
+	RequireForRegistration  bool
+	EnableSocialBonus       bool
+	Campaign                string
+	PolicyVersion           string
+	GrandfatherBefore       *time.Time
+	GrandfatherProof        bool
+	CurrentKeyID            string
+	HMACKeys                map[string]string
+	ProviderBaseUses        int
+	SocialBonusUses         int
+	ChallengeTTL            time.Duration
+	SocialVerificationDwell time.Duration
 }
 
 func (p ReferralPolicy) Validate() error {
@@ -72,8 +73,8 @@ func (p ReferralPolicy) Validate() error {
 	if p.ProviderBaseUses <= 0 {
 		return fmt.Errorf("referral provider capacity must be positive")
 	}
-	if p.EnableSocialBonus && (p.SocialBonusUses <= 0 || p.ChallengeTTL <= 0) {
-		return fmt.Errorf("referral social capacity and challenge ttl must be positive")
+	if p.EnableSocialBonus && (p.SocialBonusUses <= 0 || p.ChallengeTTL <= 0 || p.SocialVerificationDwell <= 0) {
+		return fmt.Errorf("referral social capacity, challenge ttl, and verification dwell must be positive")
 	}
 	return nil
 }

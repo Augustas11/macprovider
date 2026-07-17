@@ -508,6 +508,7 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		)`,
 	}
 	stmts = append(stmts, referralAdminSchemaStatements()...)
+	stmts = append(stmts, referralSocialSchemaStatements()...)
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -520,6 +521,33 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "share_url_hash", `ALTER TABLE referral_social_verifications ADD COLUMN share_url_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "challenge_hash", `ALTER TABLE referral_social_verifications ADD COLUMN challenge_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "next_check_at", `ALTER TABLE referral_social_verifications ADD COLUMN next_check_at TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "recheck_attempts", `ALTER TABLE referral_social_verifications ADD COLUMN recheck_attempts INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "lease_token", `ALTER TABLE referral_social_verifications ADD COLUMN lease_token TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verifications", "lease_until", `ALTER TABLE referral_social_verifications ADD COLUMN lease_until TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_social_verification_history", "challenge_hash", `ALTER TABLE referral_social_verification_history ADD COLUMN challenge_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_referral_social_recheck_pending
+    ON referral_social_verifications(campaign, next_check_at, pending_since)
+ WHERE granted_at IS NULL AND failed_at IS NULL`); err != nil {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "confirmed_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN confirmed_at TEXT`); err != nil {
@@ -1390,6 +1418,36 @@ UPDATE provider_tokens
 	}
 	if providerID == "" {
 		return "", false, nil
+	}
+	return providerID, true, nil
+}
+
+// ValidateTokenReadOnly authenticates provider API reads without taking a
+// write transaction or refreshing last_used_at. Expired provisional bootstrap
+// credentials fail closed but remain for the normal auth retention path.
+func (s *Store) ValidateTokenReadOnly(ctx context.Context, token string) (string, bool, error) {
+	if token == "" {
+		return "", false, nil
+	}
+	var providerID string
+	var bootstrapIssued int
+	var bootstrapExpiresAt, lastUsedAt sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, tokenHash(token)).Scan(
+		&providerID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if bootstrapIssued == 1 && !lastUsedAt.Valid {
+		expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+		if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(time.Now().UTC()) {
+			return "", false, nil
+		}
 	}
 	return providerID, true, nil
 }
