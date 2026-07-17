@@ -452,14 +452,14 @@ INSERT INTO provider_hardware_profiles (
     $1, $2, $3, $4, $5, $6, 'app_register', $7
 )
 ON CONFLICT (provider_id) DO UPDATE
-   SET chip = EXCLUDED.chip,
-       chip_normalized = EXCLUDED.chip_normalized,
-       unified_memory_gb = EXCLUDED.unified_memory_gb,
-       macos_version = EXCLUDED.macos_version,
-       app_version = EXCLUDED.app_version,
-       source = EXCLUDED.source,
-       last_reported_at = EXCLUDED.last_reported_at
- WHERE provider_hardware_profiles.last_reported_at <= EXCLUDED.last_reported_at`,
+   SET chip = $2,
+       chip_normalized = $3,
+       unified_memory_gb = $4,
+       macos_version = $5,
+       app_version = $6,
+       source = 'app_register',
+       last_reported_at = $7
+ WHERE provider_hardware_profiles.last_reported_at <= $7`,
 		providerID, chip, normalized, memoryGB, macosVersion, appVersion, observedAt.UTC(),
 	)
 	return err
