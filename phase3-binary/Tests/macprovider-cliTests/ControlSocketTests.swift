@@ -194,6 +194,7 @@ final class ControlSocketTests: XCTestCase {
             redemptions: 0,
             remaining: 1,
             firstServingSeen: true,
+            joinLinksEnabled: true,
             socialBonusEnabled: true,
             inviteCode: "invite-1",
             inviteURL: "https://join.example/j/invite-1",

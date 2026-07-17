@@ -35,6 +35,19 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertEqual(status.availableInviteURL, inviteURL)
     }
 
+    func testJoinLinkRollbackPreservesStatusButSuppressesInviteAndAdvocacy() throws {
+        let status = try XCTUnwrap(makeStatus(joinLinksEnabled: false, inviteURL: nil))
+
+        XCTAssertEqual(status.remaining, 1)
+        XCTAssertEqual(status.inviteCode, "CODE")
+        XCTAssertNil(status.availableInviteURL)
+        XCTAssertFalse(status.canStartSocialChallenge)
+        XCTAssertEqual(
+            ReferralPanelPresenter.headline(availability: .available, status: status),
+            "Invite links temporarily unavailable"
+        )
+    }
+
     func testExhaustedStatusCannotCopyInvite() throws {
         let status = try XCTUnwrap(makeStatus(redemptions: 1, remaining: 0))
 
@@ -80,6 +93,20 @@ final class ReferralProjectionTests: XCTestCase {
         ))
     }
 
+    @MainActor
+    func testReferralActionWatchdogTimesOutAndCanBeCancelled() async {
+        let fired = expectation(description: "watchdog fired")
+        let watchdog = ReferralActionWatchdog(timeout: 0.01)
+        watchdog.arm { fired.fulfill() }
+        await fulfillment(of: [fired], timeout: 1)
+
+        let cancelled = expectation(description: "cancelled watchdog stayed quiet")
+        cancelled.isInverted = true
+        watchdog.arm { cancelled.fulfill() }
+        watchdog.cancel()
+        await fulfillment(of: [cancelled], timeout: 0.05)
+    }
+
     func testSocialRollbackSuppressesOnlyAdvocacyActions() throws {
         let status = try XCTUnwrap(makeStatus())
         let rolledBack = try XCTUnwrap(status.withSocialBonusEnabled(false))
@@ -113,6 +140,7 @@ final class ReferralProjectionTests: XCTestCase {
         redemptions: Int = 0,
         remaining: Int = 1,
         joinBaseURL: URL = URL(string: "https://coordinator.streamvc.live/j")!,
+        joinLinksEnabled: Bool = true,
         inviteURL: URL? = URL(string: "https://coordinator.streamvc.live/j/CODE"),
         observedAt: Date = Date()
     ) -> ReferralStatusProjection? {
@@ -126,6 +154,7 @@ final class ReferralProjectionTests: XCTestCase {
             redemptions: redemptions,
             remaining: remaining,
             firstServingSeen: firstServingSeen,
+            joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: true,
             inviteCode: "CODE",
             inviteURL: inviteURL,

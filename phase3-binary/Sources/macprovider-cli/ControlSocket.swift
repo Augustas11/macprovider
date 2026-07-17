@@ -835,16 +835,13 @@ actor ControlSocketServer {
                         .referralStatusResponse(try await service.verify(postURL: postURL))
                     }
                 case .referralChallengeCancelRequest:
-                    guard let referralCoordinatorService else {
-                        try? await connection.send(.referralError(
-                            operation: .cancel,
-                            code: .featureUnavailable,
-                            retryAfterSeconds: nil
-                        ))
-                        continue
+                    await handleReferralRequest(
+                        operation: .cancel,
+                        service: referralCoordinatorService,
+                        connection: connection
+                    ) { service in
+                        .referralChallengeCancelAck(status: try await service.cancel())
                     }
-                    let status = await referralCoordinatorService.cancel()
-                    try? await connection.send(.referralChallengeCancelAck(status: status))
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()

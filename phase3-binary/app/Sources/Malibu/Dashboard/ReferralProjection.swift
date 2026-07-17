@@ -3,9 +3,36 @@ import Foundation
 enum ReferralRefreshPolicy {
     static let minimumInterval: TimeInterval = 60
     static let statusLifetime: TimeInterval = 90
+    static let actionResponseTimeout: TimeInterval = 15
 
     static func shouldRequest(now: Date, lastRequestedAt: Date?) -> Bool {
         lastRequestedAt.map { now.timeIntervalSince($0) >= minimumInterval } != false
+    }
+}
+
+@MainActor
+final class ReferralActionWatchdog {
+    private let timeout: TimeInterval
+    private var task: Task<Void, Never>?
+
+    init(timeout: TimeInterval = ReferralRefreshPolicy.actionResponseTimeout) {
+        self.timeout = timeout
+    }
+
+    func arm(onTimeout: @escaping @MainActor @Sendable () -> Void) {
+        task?.cancel()
+        task = Task {
+            let nanoseconds = UInt64(max(0, timeout) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            onTimeout()
+            task = nil
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
     }
 }
 
@@ -38,6 +65,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
     let redemptions: Int
     let remaining: Int
     let firstServingSeen: Bool
+    let joinLinksEnabled: Bool
     let socialBonusEnabled: Bool
     let inviteCode: String?
     let inviteURL: URL?
@@ -54,6 +82,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
         redemptions: Int,
         remaining: Int,
         firstServingSeen: Bool,
+        joinLinksEnabled: Bool,
         socialBonusEnabled: Bool,
         inviteCode: String?,
         inviteURL: URL?,
@@ -69,13 +98,18 @@ struct ReferralStatusProjection: Equatable, Sendable {
               observedAt <= Date().addingTimeInterval(60) else {
             return nil
         }
-        switch (inviteCode, inviteURL) {
-        case (nil, nil):
-            break
-        case let (code?, url?):
-            guard Self.isCanonicalInvite(url, code: code, joinBaseURL: joinBaseURL) else { return nil }
-        default:
-            return nil
+        if let inviteCode, !Self.isSafeInviteCode(inviteCode) { return nil }
+        if joinLinksEnabled {
+            switch (inviteCode, inviteURL) {
+            case (nil, nil):
+                break
+            case let (code?, url?):
+                guard Self.isCanonicalInvite(url, code: code, joinBaseURL: joinBaseURL) else { return nil }
+            default:
+                return nil
+            }
+        } else {
+            guard inviteURL == nil else { return nil }
         }
         if let pendingChallenge, pendingChallenge.expiresAt <= observedAt {
             return nil
@@ -89,6 +123,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
         self.redemptions = redemptions
         self.remaining = remaining
         self.firstServingSeen = firstServingSeen
+        self.joinLinksEnabled = joinLinksEnabled
         self.socialBonusEnabled = socialBonusEnabled
         self.inviteCode = inviteCode
         self.inviteURL = inviteURL
@@ -98,6 +133,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
 
     var availableInviteURL: URL? {
         guard firstServingSeen,
+              joinLinksEnabled,
               socialState != Self.locked,
               socialState != Self.revoked,
               remaining > 0,
@@ -129,6 +165,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
             redemptions: redemptions,
             remaining: remaining,
             firstServingSeen: firstServingSeen,
+            joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
@@ -148,6 +185,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
             redemptions: redemptions,
             remaining: remaining,
             firstServingSeen: firstServingSeen,
+            joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: enabled,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
@@ -178,9 +216,15 @@ struct ReferralStatusProjection: Equatable, Sendable {
     }
 
     private static func isCanonicalInvite(_ url: URL, code: String, joinBaseURL: URL) -> Bool {
-        guard !code.isEmpty,
+        guard isSafeInviteCode(code),
               let expected = URL(string: joinBaseURL.absoluteString + "/" + code) else { return false }
         return url == expected
+    }
+
+    private static func isSafeInviteCode(_ code: String) -> Bool {
+        !code.isEmpty && code.count <= 128 && code.unicodeScalars.allSatisfy {
+            CharacterSet.alphanumerics.contains($0) || "-._~".unicodeScalars.contains($0)
+        }
     }
 }
 
@@ -192,6 +236,7 @@ enum ReferralPanelPresenter {
         case .unavailable: return "Referral status unavailable"
         case .available:
             guard let status else { return "Referral status unavailable" }
+            if !status.joinLinksEnabled { return "Invite links temporarily unavailable" }
             switch status.socialState {
             case ReferralStatusProjection.locked: return "Serve once to unlock invites"
             case ReferralStatusProjection.eligible: return status.remaining == 0 ? "Invite capacity used" : "Invites ready"
@@ -214,6 +259,9 @@ enum ReferralPanelPresenter {
             return "Malibu cannot confirm invite capacity right now. Provider serving is unaffected."
         case .available:
             guard let status else { return "Malibu cannot confirm invite capacity right now." }
+            if !status.joinLinksEnabled {
+                return "The coordinator preserved your invite balance while public join links are disabled."
+            }
             switch status.socialState {
             case ReferralStatusProjection.locked:
                 return "The coordinator has not yet confirmed a verified buyer-serving receipt."

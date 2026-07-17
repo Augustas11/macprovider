@@ -20,6 +20,7 @@ public struct ReferralStatusSnapshot: Codable, Equatable, Sendable {
     public let redemptions: Int
     public let remaining: Int
     public let firstServingSeen: Bool
+    public let joinLinksEnabled: Bool
     public let socialBonusEnabled: Bool
     public let inviteCode: String?
     public let inviteURL: String?
@@ -36,6 +37,7 @@ public struct ReferralStatusSnapshot: Codable, Equatable, Sendable {
         case redemptions
         case remaining
         case firstServingSeen = "first_serving_seen"
+        case joinLinksEnabled = "join_links_enabled"
         case socialBonusEnabled = "social_bonus_enabled"
         case inviteCode = "invite_code"
         case inviteURL = "invite_url"
@@ -54,6 +56,7 @@ public struct ReferralStatusSnapshot: Codable, Equatable, Sendable {
             redemptions: redemptions,
             remaining: remaining,
             firstServingSeen: firstServingSeen,
+            joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
@@ -303,6 +306,7 @@ struct ReferralCoordinatorClient: Sendable {
               let redemptions = count("redemptions", in: object),
               let remaining = count("remaining", in: object),
               let firstServingSeen = object["first_serving_seen"] as? Bool,
+              let joinLinksEnabled = object["join_links_enabled"] as? Bool,
               let socialBonusEnabled = object["social_bonus_enabled"] as? Bool,
               remaining == max(0, baseCapacity + bonusCapacity - redemptions) else {
             throw control(.invalidResponse)
@@ -312,8 +316,15 @@ struct ReferralCoordinatorClient: Sendable {
         let inviteURL = optionalBoundedString("invite_url", in: object, maximum: 2048)
         if object["invite_url"] != nil, inviteURL == nil { throw control(.invalidResponse) }
         if let inviteCode {
-            guard isInviteCode(inviteCode), let inviteURL,
-                  isValidInviteURL(inviteURL, code: inviteCode, expectedJoinBaseURL: expectedJoinBaseURL) else {
+            guard isInviteCode(inviteCode) else {
+                throw control(.invalidResponse)
+            }
+            if joinLinksEnabled {
+                guard let inviteURL,
+                      isValidInviteURL(inviteURL, code: inviteCode, expectedJoinBaseURL: expectedJoinBaseURL) else {
+                    throw control(.invalidResponse)
+                }
+            } else if inviteURL != nil {
                 throw control(.invalidResponse)
             }
         } else if inviteURL != nil {
@@ -329,6 +340,7 @@ struct ReferralCoordinatorClient: Sendable {
             redemptions: redemptions,
             remaining: remaining,
             firstServingSeen: firstServingSeen,
+            joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
@@ -649,19 +661,19 @@ actor ReferralCoordinatorService {
     func status() async throws -> ReferralStatusSnapshot {
         var status = try await client.fetchStatus()
         if !status.socialBonusEnabled {
-            try? store.clear()
+            try store.clear()
             return status
         }
         // `pending` means the coordinator durably accepted verification and
         // consumed the challenge. It also covers response-loss recovery: a
         // later status read clears the now-terminal local secret.
         guard status.socialState == "eligible" else {
-            try? store.clear()
+            try store.clear()
             return status
         }
         if let pending = try store.load(providerID: client.providerID, now: now()) {
             guard status.inviteURL == pending.inviteURL else {
-                try? store.clear()
+                try store.clear()
                 return status
             }
             status = status.withPendingChallenge(
@@ -708,7 +720,7 @@ actor ReferralCoordinatorService {
     func reopenChallenge() async throws -> ReferralPendingAdvocacy {
         let current = try await client.fetchStatus()
         guard current.socialBonusEnabled else {
-            try? store.clear()
+            try store.clear()
             throw ReferralCoordinatorClientError.control(
                 code: .featureUnavailable,
                 retryAfterSeconds: nil,
@@ -720,7 +732,7 @@ actor ReferralCoordinatorService {
               current.inviteURL == payload.inviteURL,
               let intentURL = URL(string: payload.intentURL),
               await openIntent(intentURL) else {
-            try? store.clear()
+            try store.clear()
             throw ReferralCoordinatorClientError.control(
                 code: .challengeUnavailable,
                 retryAfterSeconds: nil,
@@ -740,16 +752,16 @@ actor ReferralCoordinatorService {
         }
         do {
             let status = try await client.verify(postURL: postURL, challenge: pending.challenge)
-            try? store.clear()
+            try store.clear()
             return status
         } catch let error as ReferralCoordinatorClientError {
-            if case .control(_, _, let terminal) = error, terminal { try? store.clear() }
+            if case .control(_, _, let terminal) = error, terminal { try store.clear() }
             throw error
         }
     }
 
-    func cancel() async -> ReferralStatusSnapshot? {
-        try? store.clear()
+    func cancel() async throws -> ReferralStatusSnapshot? {
+        try store.clear()
         return try? await client.fetchStatus()
     }
 }

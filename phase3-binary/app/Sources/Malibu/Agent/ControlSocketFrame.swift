@@ -293,6 +293,7 @@ enum ControlCodec {
             "redemptions": status.redemptions,
             "remaining": status.remaining,
             "first_serving_seen": status.firstServingSeen,
+            "join_links_enabled": status.joinLinksEnabled,
             "social_bonus_enabled": status.socialBonusEnabled,
             "observed_at": ISO8601DateFormatter().string(from: status.observedAt),
         ]
@@ -317,6 +318,7 @@ enum ControlCodec {
               let redemptions = intValue(dict["redemptions"]),
               let remaining = intValue(dict["remaining"]),
               let firstServingSeen = dict["first_serving_seen"] as? Bool,
+              let joinLinksEnabled = dict["join_links_enabled"] as? Bool,
               let socialBonusEnabled = dict["social_bonus_enabled"] as? Bool,
               let observedWire = dict["observed_at"] as? String,
               let observedAt = ReferralWireDate.parse(observedWire) else {
@@ -350,6 +352,7 @@ enum ControlCodec {
             redemptions: redemptions,
             remaining: remaining,
             firstServingSeen: firstServingSeen,
+            joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
             inviteCode: inviteCode,
             inviteURL: inviteURL,

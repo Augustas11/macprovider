@@ -369,9 +369,10 @@ time (60–240 s for the first model) in the background.
   diagnostics" action, and no "Quit and Uninstall" control** (those are designed, not
   shipped). The wallet card's "Set payout wallet" button is **disabled**
   (SPEC-027-gated, `DashboardWindow.swift:59`). The model-swap-over-ControlSocket
-  affordance is **not** wired in the monitor-only flow (the control socket is never
-  connected, §5.2); model selection is owned by `install.sh` / autotune and the CLI,
-  not an in-app `switch_request`.
+  affordance is **not** wired in the monitor-only flow; Malibu does attach to the
+  owner-only socket for typed status and referral projections (§5.2), but it does
+  not send `switch_request`. Model selection is owned by `install.sh` / autotune
+  and the CLI.
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
   control-socket projection only when the CLI advertises `referral_status_v1`.
   Typed challenge/verify/cancel/reopen actions additionally require

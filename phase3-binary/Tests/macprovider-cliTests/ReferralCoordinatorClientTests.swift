@@ -31,8 +31,28 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         XCTAssertEqual(status.socialState, "eligible")
         XCTAssertEqual(status.remaining, 1)
         XCTAssertEqual(status.inviteCode, "invite-1")
+        XCTAssertTrue(status.joinLinksEnabled)
         XCTAssertEqual(status.observedAt, "2027-01-15T08:00:00.000Z")
         XCTAssertNil(status.pendingChallenge)
+    }
+
+    func testStatusPreservesAuthoritativeBalanceWhenJoinLinksAreRolledBack() async throws {
+        let body = statusJSON
+            .replacingOccurrences(of: #""join_links_enabled":true"#, with: #""join_links_enabled":false"#)
+            .replacingOccurrences(
+                of: #","invite_url":"https://malibu.tech/j/invite-1""#,
+                with: ""
+            )
+        let client = try makeClient(session: mockSession { request in
+            self.response(request, status: 200, body: body)
+        })
+
+        let status = try await client.fetchStatus()
+
+        XCTAssertFalse(status.joinLinksEnabled)
+        XCTAssertEqual(status.remaining, 1)
+        XCTAssertEqual(status.inviteCode, "invite-1")
+        XCTAssertNil(status.inviteURL)
     }
 
     func testStatusRejectsFractionalNegativeAndInconsistentCounts() async throws {
@@ -137,6 +157,29 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         let wire = String(decoding: try ControlSocketCodec.encode(.referralStatusResponse(status)), as: UTF8.self)
         XCTAssertFalse(wire.contains(challenge))
         XCTAssertFalse(wire.contains("share_url"))
+    }
+
+    func testCancelFailsClosedWhenDurableChallengeCannotBeRemoved() async throws {
+        let storeURL = temporaryStoreURL()
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: storeURL, withIntermediateDirectories: true)
+        try Data("retain".utf8).write(to: storeURL.appendingPathComponent("child"))
+        let client = try makeClient(session: mockSession { request in
+            self.response(request, status: 200, body: self.statusJSON)
+        })
+        let service = ReferralCoordinatorService(
+            client: client,
+            store: ReferralChallengeStore(url: storeURL),
+            now: { self.now },
+            openIntent: { _ in true }
+        )
+
+        do {
+            _ = try await service.cancel()
+            XCTFail("cancel acknowledged despite retained durable challenge state")
+        } catch {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: storeURL.path))
+        }
     }
 
     func testStatusClearsChallengeOutsideEligibleState() async throws {
@@ -391,7 +434,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
     }
 
     private var statusJSON: String {
-        #"{"campaign":"prebeta","join_base_url":"https://malibu.tech/j","social_state":"eligible","base_capacity":1,"configured_bonus_capacity":2,"bonus_capacity":0,"redemptions":0,"remaining":1,"first_serving_seen":true,"social_bonus_enabled":true,"invite_code":"invite-1","invite_url":"https://malibu.tech/j/invite-1"}"#
+        #"{"campaign":"prebeta","join_base_url":"https://malibu.tech/j","social_state":"eligible","base_capacity":1,"configured_bonus_capacity":2,"bonus_capacity":0,"redemptions":0,"remaining":1,"first_serving_seen":true,"join_links_enabled":true,"social_bonus_enabled":true,"invite_code":"invite-1","invite_url":"https://malibu.tech/j/invite-1"}"#
     }
 
     private func makeClient(session: URLSession) throws -> ReferralCoordinatorClient {

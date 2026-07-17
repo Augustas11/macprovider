@@ -119,7 +119,7 @@ actor ControlSocketClient {
         }
     }
 
-    private static func blockingReadLoop(
+    static func blockingReadLoop(
         fd: Int32,
         continuation: AsyncStream<ControlFrame>.Continuation?
     ) {
@@ -137,7 +137,11 @@ actor ControlSocketClient {
             while let nl = buffer.firstIndex(of: 0x0A) {
                 let line = buffer.subdata(in: 0..<nl)
                 buffer.removeSubrange(0...nl)
-                guard !line.isEmpty, let frame = try? ControlCodec.decode(line) else { continue }
+                guard !line.isEmpty else { continue }
+                guard let frame = try? ControlCodec.decode(line) else {
+                    continuation?.finish()
+                    return
+                }
                 continuation?.yield(frame)
             }
         }
