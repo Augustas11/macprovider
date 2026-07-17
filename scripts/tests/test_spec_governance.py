@@ -276,8 +276,13 @@ class GovernanceValidatorTests(unittest.TestCase):
             "The provider M[U](https://example.invalid/a&#41;b)ST preserve behavior.\n",
             "The provider M[U](foo\"bar)ST preserve behavior.\n",
             "The provider M[U](foo'bar)ST preserve behavior.\n",
+            "The provider M[U](<https://example.invalid/a(b>)ST preserve behavior.\n",
             "The provider M[U]ST preserve behavior.\n\n[U]: https://example.invalid\n",
             "The provider M<span title=\">\">U</span>ST preserve behavior.\n",
+            "The provider M[U](https://example.invalid \"multi\nline\")ST preserve behavior.\n",
+            "The provider M<span\ntitle=\"x\">U</span>ST preserve behavior.\n",
+            "The provider M<span\n class=x>U</span>ST preserve behavior.\n",
+            "The provider M<!--\nhidden\n-->UST preserve behavior.\n",
             "Prefix <x a=\"unterminated The provider MUST preserve behavior.\n",
             "Prefix <x a=\"unterminated M&#85;ST preserve behavior.\n",
             "Prefix <x a=\"unterminated M**U**ST preserve behavior.\n",
@@ -286,6 +291,14 @@ class GovernanceValidatorTests(unittest.TestCase):
         for text in normative_forms:
             with self.subTest(text=text):
                 self.assertEqual(1, legacy_requirement_fingerprint(text)[1])
+        informative_forms = (
+            "[link](https://example.invalid/MUST)\n",
+            '<span title="MUST">informative text</span>\n',
+            "M[[U]](https://example.invalid)ST\n",
+        )
+        for text in informative_forms:
+            with self.subTest(text=text):
+                self.assertEqual(0, legacy_requirement_fingerprint(text)[1])
 
         reference_forms = (
             "See SPEC-**999**.\n",
@@ -294,10 +307,13 @@ class GovernanceValidatorTests(unittest.TestCase):
             "See SPEC-[9](https://example.invalid)99.\n",
             "See SPEC-[9](https://example.invalid/a(b))99.\n",
             "See SPEC-[9](https://example.invalid/a&#41;b)99.\n",
+            "See SPEC-[9](<https://example.invalid/a(b>)99.\n",
             "See SPEC-[9]99.\n\n[9]: https://example.invalid\n",
             "See SPEC-<span title=\">\">9</span>99.\n",
             "Prefix <x a=\"unterminated SPEC-999.\n",
             "Prefix <x a=\"unterminated SPEC-9&#57;9.\n",
+            "See SPEC-<span\n class=x>9</span>99.\n",
+            "See SPEC-9<!--\nhidden\n-->99.\n",
         )
         for reference in reference_forms:
             with self.subTest(reference=reference):
@@ -319,6 +335,17 @@ class GovernanceValidatorTests(unittest.TestCase):
                         base_ref=None,
                     )
                 self.assertIn("broken cross-spec reference SPEC-999", "\n".join(result.errors))
+
+        repository = base_repository()
+        repository["specs"]["specs/SPEC-001-one.md"] += (
+            "\n[Informative link](https://example.invalid/SPEC-999)\n"
+            "SPEC-[[9]](https://example.invalid)99\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            result = validate_repository(root, date(2026, 7, 16), base_ref=None)
+        self.assertNotIn("broken cross-spec reference", "\n".join(result.errors))
 
     def test_all_negative_fixtures_fail_actionably(self) -> None:
         fixture_paths = sorted(FIXTURES.glob("*.json"))
@@ -919,7 +946,7 @@ class GovernanceValidatorTests(unittest.TestCase):
                 )
                 expected = (
                     1
-                    if boundary_interrupt
+                    if boundary_interrupt or "<MUST>" in prefix
                     else (2 if "MUST" in prefix else 1)
                 )
                 self.assertEqual(expected, count)

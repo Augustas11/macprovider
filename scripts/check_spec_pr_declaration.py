@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 import json
 import re
 import subprocess
@@ -37,7 +38,6 @@ FIELD_RE = re.compile(
     r"authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$",
     re.IGNORECASE,
 )
-INLINE_DETAILS_OPEN_RE = re.compile(r"<details(?:\s|>|$)", re.IGNORECASE)
 CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
@@ -68,8 +68,48 @@ def _declaration_marker(lines: list[str]) -> int | None:
     return None
 
 
-def _inside_inline_details(lines: list[str], marker: int) -> bool:
-    return any(INLINE_DETAILS_OPEN_RE.search(line) for line in lines[:marker])
+class _DetailsOpeningParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.found = False
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag.lower() == "details":
+            self.found = True
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag.lower() == "details":
+            self.found = True
+
+
+def _mask_escaped_angle_brackets(text: str) -> str:
+    masked: list[str] = []
+    for index, character in enumerate(text):
+        if character != "<":
+            masked.append(character)
+            continue
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        masked.append("&lt;" if backslashes % 2 else "<")
+    return "".join(masked)
+
+
+def _inside_details_markup(lines: list[str], marker: int) -> bool:
+    parser = _DetailsOpeningParser()
+    parser.feed(_mask_escaped_angle_brackets("\n".join(lines[:marker])))
+    parser.close()
+    return parser.found
 
 
 def _manifest_ids(root: Path) -> tuple[set[str], set[str], set[str]]:
@@ -97,12 +137,14 @@ def _contract_path(path: str) -> bool:
 
 def validate_body(body: str, root: Path | None = None, changed_paths: list[str] | None = None) -> list[str]:
     errors: list[str] = []
-    raw_lines = body.splitlines()
-    lines = _contract_markdown(body).splitlines()
+    lines = _contract_markdown(
+        body,
+        preserve_details_openers=True,
+    ).splitlines()
     marker = _declaration_marker(lines)
     if marker is None:
         return ["missing 'spec-governance:' declaration block"]
-    if _inside_inline_details(raw_lines, marker):
+    if _inside_details_markup(lines, marker):
         return ["missing top-level 'spec-governance:' declaration block"]
     fields: dict[str, str] = {}
     for line in lines[marker + 1:]:

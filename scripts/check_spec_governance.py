@@ -47,6 +47,7 @@ NORMATIVE_KEYWORD_RE = re.compile(r"\b(?:MUST(?:\s+NOT)?|SHOULD)\b")
 MARKDOWN_LINK_RE = re.compile(r"\]\(([^)]+)\)")
 CODE_SPAN_START = "\x00code-span-start\x00"
 CODE_SPAN_END = "\x00code-span-end\x00"
+INLINE_JOIN = "\x00inline-join\x00"
 
 AUTHORITY_SCHEMA_PATH = "../schemas/spec-authority-v1.schema.json"
 CONFORMANCE_SCHEMA_PATH = "../schemas/spec-conformance-v1.schema.json"
@@ -614,6 +615,7 @@ def _contract_markdown(
     text: str,
     *,
     preserve_code_payload: bool = False,
+    preserve_details_openers: bool = False,
 ) -> str:
     """Return contract text with nonnormative block and inline syntax removed."""
     text = text.replace("\x00", "\ufffd")
@@ -740,7 +742,16 @@ def _contract_markdown(
             ):
                 raw_html_blank_container = line_container
                 paragraph_open = False
-                lines.append("")
+                lines.append(
+                    block_line
+                    if preserve_details_openers
+                    and re.match(
+                        r" {0,3}<details(?=[\s/>])",
+                        block_line,
+                        re.IGNORECASE,
+                    )
+                    else ""
+                )
                 continue
             opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", block_line)
             if opening is not None:
@@ -781,9 +792,11 @@ def _contract_markdown(
             if in_comment:
                 end = raw_line.find("-->", cursor)
                 if end == -1:
+                    visible.append(INLINE_JOIN)
                     cursor = len(raw_line)
                     break
                 in_comment = False
+                visible.append(INLINE_JOIN)
                 cursor = end + 3
                 continue
             if (
@@ -816,6 +829,7 @@ def _contract_markdown(
                 )
             ):
                 in_comment = True
+                visible.append(INLINE_JOIN)
                 cursor += 4
                 continue
             visible.append(raw_line[cursor])
@@ -908,11 +922,13 @@ def _has_inline_comment_closer(
 def _legacy_normative_lines(text: str) -> list[str]:
     """Return frozen, unnumbered normative lines from contract Markdown."""
     lines: list[str] = []
+    paragraph: list[tuple[str, str, bool]] = []
     in_code_span = False
-    for raw_line in _contract_markdown(
+    contract_lines = _contract_markdown(
         text,
         preserve_code_payload=True,
-    ).splitlines():
+    ).splitlines()
+    for raw_line in contract_lines:
         visible: list[str] = []
         fingerprint: list[str] = []
         cursor = 0
@@ -932,15 +948,35 @@ def _legacy_normative_lines(text: str) -> list[str]:
         stripped = "".join(fingerprint).strip()
         visible_source = "".join(visible).strip()
         visible_text = _visible_inline_text(visible_source)
-        if not (
-            NORMATIVE_KEYWORD_RE.search(visible_source)
-            or NORMATIVE_KEYWORD_RE.search(visible_text)
-        ):
-            continue
-        if REQUIREMENT_DEFINITION_RE.match(stripped):
-            continue
-        lines.append(" ".join(stripped.split()))
+        line_has_keyword = bool(NORMATIVE_KEYWORD_RE.search(visible_text))
+        if stripped or visible_source:
+            paragraph.append((stripped, visible_source, line_has_keyword))
+        else:
+            _append_paragraph_normative_fallback(paragraph, lines)
+            paragraph = []
+        if line_has_keyword and not REQUIREMENT_DEFINITION_RE.match(stripped):
+            lines.append(" ".join(stripped.split()))
+    _append_paragraph_normative_fallback(paragraph, lines)
     return lines
+
+
+def _append_paragraph_normative_fallback(
+    paragraph: list[tuple[str, str, bool]],
+    lines: list[str],
+) -> None:
+    """Count a rendered multiline obligation missed by physical-line scans."""
+    if not paragraph or any(item[2] for item in paragraph):
+        return
+    visible_source = "\n".join(item[1] for item in paragraph)
+    if not NORMATIVE_KEYWORD_RE.search(_visible_inline_text(visible_source)):
+        return
+    fingerprint = " ".join(
+        part
+        for item in paragraph
+        for part in item[0].split()
+    )
+    if fingerprint and not REQUIREMENT_DEFINITION_RE.match(fingerprint):
+        lines.append(fingerprint)
 
 
 class _InlineHTMLTextParser(HTMLParser):
@@ -962,6 +998,7 @@ def _balanced_inline_end(
 ) -> int | None:
     depth = 0
     quote: str | None = None
+    angle_destination = False
     cursor = start
     while cursor < len(text):
         character = text[cursor]
@@ -971,6 +1008,21 @@ def _balanced_inline_end(
         if quote_aware and quote is not None:
             if character == quote:
                 quote = None
+            cursor += 1
+            continue
+        if angle_destination:
+            if character == ">":
+                angle_destination = False
+            cursor += 1
+            continue
+        if (
+            quote_aware
+            and opener == "("
+            and depth == 1
+            and character == "<"
+            and not text[start + 1:cursor].strip()
+        ):
+            angle_destination = True
             cursor += 1
             continue
         if (
@@ -1009,7 +1061,7 @@ def _inline_link_labels(text: str) -> str:
             rendered.append(text[cursor])
             cursor += 1
             continue
-        label = _inline_link_labels(text[label_start + 1:label_end])
+        label = text[label_start + 1:label_end]
         suffix = label_end + 1
         if suffix < len(text) and text[suffix] == "(":
             destination_end = _balanced_inline_end(
@@ -1039,6 +1091,12 @@ def _inline_link_labels(text: str) -> str:
 
 def _visible_inline_text(text: str) -> str:
     """Return conservative rendered text for reserved-token scans."""
+    previous = None
+    while previous != text:
+        previous = text
+        text = text.replace(INLINE_JOIN + "\n", "")
+        text = text.replace("\n" + INLINE_JOIN, "")
+    text = text.replace(INLINE_JOIN, "")
     text = _inline_link_labels(text)
     parser = _InlineHTMLTextParser()
     parser.feed(text)
@@ -1967,15 +2025,14 @@ def validate_repository(
         text = path.read_text(encoding="utf-8")
         contract_text = _contract_markdown(text)
         visible_contract_text = _visible_inline_text(contract_text)
-        reference_text = contract_text + "\n" + visible_contract_text
         for requirement_id in REQUIREMENT_DEFINITION_RE.findall(contract_text):
             definitions.setdefault(requirement_id, []).append(path)
             if requirement_id[:8] != spec_id:
                 result.error(str(path.relative_to(root)), f"requirement {requirement_id} must use owning prefix {spec_id}")
-        for reference in sorted(set(SPEC_REFERENCE_RE.findall(reference_text))):
+        for reference in sorted(set(SPEC_REFERENCE_RE.findall(visible_contract_text))):
             if reference not in canonical:
                 result.error(str(path.relative_to(root)), f"broken cross-spec reference {reference}; no canonical spec exists")
-        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(reference_text))):
+        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(visible_contract_text))):
             requirement_references.setdefault(requirement_reference, []).append(path)
         for target in MARKDOWN_LINK_RE.findall(text):
             target = target.strip().split("#", 1)[0]

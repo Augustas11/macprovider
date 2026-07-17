@@ -252,25 +252,7 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "</details>\n"
             ),
             (
-                "Example <span ! <details>>\n"
-                "spec-governance:\n"
-                "  behavior-change: none\n"
-                "</details>\n"
-            ),
-            (
-                "Example <span x=<details>>\n"
-                "spec-governance:\n"
-                "  behavior-change: none\n"
-                "</details>\n"
-            ),
-            (
                 "Example [x](bad <details>)\n"
-                "spec-governance:\n"
-                "  behavior-change: none\n"
-                "</details>\n"
-            ),
-            (
-                "Example [x](<bad <details>>)\n"
                 "spec-governance:\n"
                 "  behavior-change: none\n"
                 "</details>\n"
@@ -314,6 +296,12 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "  behavior-change: none\n"
             ),
             (
+                "<details/>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
                 "<details>\n"
                 "<summary>Example</summary>\n\n"
                 "spec-governance:\n"
@@ -335,11 +323,6 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 "  behavior-change: none\n"
             ),
             (
-                "Example follows \\<details>\n"
-                "spec-governance:\n"
-                "  behavior-change: none\n"
-            ),
-            (
                 "Example <details>\n"
                 '[x](</details> "title")\n'
                 "</details>\n\n"
@@ -350,6 +333,22 @@ class SpecPRDeclarationTests(unittest.TestCase):
         for body in bodies:
             with self.subTest(body=body):
                 self.assertIn("missing", "\n".join(validate_body(body)))
+
+    def test_non_markup_details_examples_before_declaration_are_allowed(self) -> None:
+        examples = (
+            "```html\n<details>\n```\n",
+            "Inline `<details>` example.\n",
+            "<!-- <details> -->\n",
+            "Escaped \\<details> example.\n",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                body = (
+                    example
+                    + "\nspec-governance:\n"
+                    + "  behavior-change: none\n"
+                )
+                self.assertEqual([], validate_body(body))
 
     def test_lazy_container_continuations_are_not_top_level_declarations(self) -> None:
         prefixes = (
