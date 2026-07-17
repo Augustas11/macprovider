@@ -438,6 +438,7 @@ class GovernanceValidatorTests(unittest.TestCase):
             "<div>\n**SPEC-001-R999 — Example only.** It MUST not count.\n</div>\n",
             "<?example\n**SPEC-001-R999 — Example only.** It MUST not count.\n?>\n",
             "<![CDATA[\n**SPEC-001-R999 — Example only.** It MUST not count.\n]]>\n",
+            "<widget title=\">\">\n**SPEC-001-R999 — Example only.** It MUST not count.\n\n",
             "<!-- **SPEC-001-R999 — Comment only.** It MUST not count. -->\n",
         )
         for example in examples:
@@ -498,6 +499,15 @@ class GovernanceValidatorTests(unittest.TestCase):
                 )
                 _, count = legacy_requirement_fingerprint(text)
                 self.assertEqual(1, count)
+
+    def test_type_seven_html_cannot_interrupt_a_visible_paragraph(self) -> None:
+        text = (
+            "Visible paragraph.\n"
+            "<widget>\n"
+            "The provider MUST preserve the visible contract.\n"
+        )
+        _, count = legacy_requirement_fingerprint(text)
+        self.assertEqual(1, count)
 
     def test_malformed_nested_values_never_crash(self) -> None:
         mutations = [

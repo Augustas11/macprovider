@@ -98,6 +98,7 @@ class SpecPRDeclarationTests(unittest.TestCase):
             "<div>\n  behavior-change: none\n</div>\n",
             "<?example\n  behavior-change: none\n?>\n",
             "<![CDATA[\n  behavior-change: none\n]]>\n",
+            "\n<widget title=\">\">\n  behavior-change: none\n\n",
             "    behavior-change: none\n",
             "<!--\n  behavior-change: none\n-->\n",
         )

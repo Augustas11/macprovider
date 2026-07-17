@@ -111,8 +111,15 @@ RAW_HTML_BLOCK_TAG_RE = re.compile(
     rf" {{0,3}}</?(?:{RAW_HTML_BLOCK_TAGS})(?:\s|/?>|$)",
     re.IGNORECASE,
 )
+RAW_HTML_ATTRIBUTE = (
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:[^ \"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+)
 RAW_HTML_COMPLETE_TAG_RE = re.compile(
-    r" {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*)?/?>[ \t]*$",
+    rf" {{0,3}}(?:"
+    rf"<[A-Za-z][A-Za-z0-9-]*{RAW_HTML_ATTRIBUTE}\s*/?>|"
+    r"</[A-Za-z][A-Za-z0-9-]*\s*>)"
+    r"[ \t]*$",
 )
 BOOTSTRAP_BASELINE_COMMIT = "1df5f76c3fbde1b84619b717fcc28ef1e2c05bc3"
 LIFECYCLE_TRANSITIONS = {
@@ -154,6 +161,7 @@ def _contract_markdown(text: str) -> str:
     raw_html_end: re.Pattern[str] | None = None
     raw_html_until_blank = False
     in_comment = False
+    paragraph_open = False
     for line_index, raw_line in enumerate(raw_lines):
         if fence is not None:
             delimiter, minimum_length = fence
@@ -165,17 +173,20 @@ def _contract_markdown(text: str) -> str:
                 and set(closing.group(1)) == {delimiter}
             ):
                 fence = None
+            paragraph_open = False
             lines.append("")
             continue
 
         if raw_html_end is not None:
             if raw_html_end.search(raw_line):
                 raw_html_end = None
+            paragraph_open = False
             lines.append("")
             continue
         if raw_html_until_blank:
             if not raw_line.strip():
                 raw_html_until_blank = False
+            paragraph_open = False
             lines.append("")
             continue
 
@@ -189,9 +200,11 @@ def _contract_markdown(text: str) -> str:
                 tag = raw_html_opening.group(1)
                 if re.search(rf"</{tag}\s*>", raw_line, re.IGNORECASE) is None:
                     raw_html_end = re.compile(rf"</{tag}\s*>", re.IGNORECASE)
+                paragraph_open = False
                 lines.append("")
                 continue
             raw_html_special = (
+                (r" {0,3}<!--", re.compile(r"-->")),
                 (r" {0,3}<\?", re.compile(r"\?>")),
                 (r" {0,3}<!\[CDATA\[", re.compile(r"\]\]>")),
                 (r" {0,3}<![A-Z]", re.compile(r">")),
@@ -205,13 +218,18 @@ def _contract_markdown(text: str) -> str:
                 matched_special = True
                 break
             if matched_special:
+                paragraph_open = False
                 lines.append("")
                 continue
             if (
                 RAW_HTML_BLOCK_TAG_RE.match(raw_line) is not None
-                or RAW_HTML_COMPLETE_TAG_RE.fullmatch(raw_line) is not None
+                or (
+                    not paragraph_open
+                    and RAW_HTML_COMPLETE_TAG_RE.fullmatch(raw_line) is not None
+                )
             ):
                 raw_html_until_blank = True
+                paragraph_open = False
                 lines.append("")
                 continue
             opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", raw_line)
@@ -219,6 +237,7 @@ def _contract_markdown(text: str) -> str:
                 marker, info = opening.groups()
                 if marker[0] == "~" or "`" not in info:
                     fence = (marker[0], len(marker))
+                    paragraph_open = False
                     lines.append("")
                     continue
 
@@ -272,6 +291,16 @@ def _contract_markdown(text: str) -> str:
             cursor += 1
         line = "".join(visible)
         lines.append(line)
+        stripped = raw_line.strip()
+        if (
+            not stripped
+            or re.match(r" {0,3}#{1,6}(?:\s|$)", raw_line)
+            or re.fullmatch(r" {0,3}(?:=+|-+|\*\s*\*\s*\*[\s*]*|_\s*_\s*_[\s_]*)", raw_line)
+            or (not paragraph_open and raw_line.startswith(("    ", "\t")))
+        ):
+            paragraph_open = False
+        else:
+            paragraph_open = True
     return "\n".join(lines)
 
 
