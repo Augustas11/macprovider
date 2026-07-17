@@ -22,6 +22,7 @@ if grep -A5 'location \^~ /j/' "$config" | grep -q 'return 301 '; then
 fi
 
 grep -q 'zone=referral_validate_rate:10m rate=30r/m;' "$shared_config"
+grep -q 'zone=referral_provider_rate:10m rate=60r/m;' "$shared_config"
 grep -q 'NGINX_STATS_SHARED=.*nginx-snippets/stats-shared.conf' "$deploy"
 grep -q 'install .*nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf' "$deploy"
 test "$(grep -c 'location = /v1/referrals/validate' "$config")" -eq 1
@@ -44,6 +45,7 @@ do
   test "$(grep -Fc "location = $path {" "$config")" -eq 1
   block="$(grep -FA18 "location = $path {" "$config")"
   grep -q "proxy_pass http://127.0.0.1:8443$path;" <<<"$block"
+  grep -q 'limit_req zone=referral_provider_rate burst=10 nodelay;' <<<"$block"
   grep -q 'proxy_set_header Authorization $http_authorization;' <<<"$block"
   grep -q 'proxy_no_cache 1;' <<<"$block"
   grep -q 'proxy_cache_bypass 1;' <<<"$block"
