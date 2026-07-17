@@ -86,6 +86,28 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 )
                 self.assertEqual([], validate_body(body))
 
+    def test_hidden_declaration_fields_are_rejected(self) -> None:
+        hidden_blocks = (
+            "```text\n  behavior-change: none\n```\n",
+            "````text\n```\n  behavior-change: none\n````\n",
+            "~~~text\n  behavior-change: none\n~~~\n",
+            "<pre>\n  behavior-change: none\n</pre>\n",
+            "<!--\n  behavior-change: none\n-->\n",
+        )
+        for hidden in hidden_blocks:
+            with self.subTest(hidden=hidden.splitlines()[0]):
+                errors = validate_body("spec-governance:\n" + hidden)
+                self.assertTrue(any("behavior-change" in error for error in errors))
+
+    def test_literal_comment_syntax_does_not_hide_real_declarations(self) -> None:
+        for literal in ("`<!--` is inline code.", r"\<!-- is escaped syntax."):
+            with self.subTest(literal=literal):
+                body = (
+                    f"{literal}\n"
+                    "spec-governance:\n  behavior-change: none\n"
+                )
+                self.assertEqual([], validate_body(body))
+
     def test_behavior_none_rejects_product_paths(self) -> None:
         errors = validate_body(
             "spec-governance:\n  behavior-change: none\n",

@@ -384,6 +384,7 @@ class GovernanceValidatorTests(unittest.TestCase):
             "`````text\n````\n**SPEC-001-R999 — Example only.** It MUST not count.\n`````\n",
             "~~~~text\n~~~\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~~\n",
             "~~~~~text\n~~~~\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~~~\n",
+            "<pre>\n**SPEC-001-R999 — Example only.** It MUST not count.\n</pre>\n",
             "<!-- **SPEC-001-R999 — Comment only.** It MUST not count. -->\n",
         )
         for example in examples:
@@ -430,6 +431,16 @@ class GovernanceValidatorTests(unittest.TestCase):
                     f"{opener}\n"
                     "<!-- literal example opener\n"
                     f"{closer}\n"
+                    "The provider MUST preserve the visible contract.\n"
+                )
+                _, count = legacy_requirement_fingerprint(text)
+                self.assertEqual(1, count)
+
+    def test_literal_comment_syntax_cannot_hide_later_obligations(self) -> None:
+        for literal in ("`<!--` is inline code.", r"\<!-- is escaped syntax."):
+            with self.subTest(literal=literal):
+                text = (
+                    f"{literal}\n"
                     "The provider MUST preserve the visible contract.\n"
                 )
                 _, count = legacy_requirement_fingerprint(text)

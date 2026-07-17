@@ -57,8 +57,7 @@ def _values(raw: str) -> list[str]:
 
 
 def _declaration_marker(lines: list[str]) -> int | None:
-    visible_lines = _contract_markdown("\n".join(lines)).splitlines()
-    for index, line in enumerate(visible_lines):
+    for index, line in enumerate(lines):
         if line.strip().lower() == "spec-governance:":
             return index
     return None
@@ -89,7 +88,7 @@ def _contract_path(path: str) -> bool:
 
 def validate_body(body: str, root: Path | None = None, changed_paths: list[str] | None = None) -> list[str]:
     errors: list[str] = []
-    lines = body.splitlines()
+    lines = _contract_markdown(body).splitlines()
     marker = _declaration_marker(lines)
     if marker is None:
         return ["missing 'spec-governance:' declaration block"]

@@ -120,10 +120,13 @@ class ValidationResult:
 
 def _contract_markdown(text: str) -> str:
     """Return Markdown contract text without examples or HTML comments."""
+    raw_lines = text.splitlines()
     lines: list[str] = []
     fence: tuple[str, int] | None = None
+    code_span: int | None = None
+    raw_html_block: str | None = None
     in_comment = False
-    for raw_line in text.splitlines():
+    for line_index, raw_line in enumerate(raw_lines):
         if fence is not None:
             delimiter, minimum_length = fence
             closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", raw_line)
@@ -137,9 +140,48 @@ def _contract_markdown(text: str) -> str:
             lines.append("")
             continue
 
+        if raw_html_block is not None:
+            if re.search(rf"</{raw_html_block}\s*>", raw_line, re.IGNORECASE):
+                raw_html_block = None
+            lines.append("")
+            continue
+
+        if code_span is None and not in_comment:
+            raw_html_opening = re.match(
+                r" {0,3}<(pre|script|style|textarea)(?:\s|>|$)",
+                raw_line,
+                re.IGNORECASE,
+            )
+            if raw_html_opening is not None:
+                tag = raw_html_opening.group(1)
+                if re.search(rf"</{tag}\s*>", raw_line, re.IGNORECASE) is None:
+                    raw_html_block = tag
+                lines.append("")
+                continue
+            opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", raw_line)
+            if opening is not None:
+                marker, info = opening.groups()
+                if marker[0] == "~" or "`" not in info:
+                    fence = (marker[0], len(marker))
+                    lines.append("")
+                    continue
+
         visible: list[str] = []
         cursor = 0
         while cursor < len(raw_line):
+            if code_span is not None:
+                if raw_line[cursor] != "`":
+                    visible.append(raw_line[cursor])
+                    cursor += 1
+                    continue
+                end = cursor
+                while end < len(raw_line) and raw_line[end] == "`":
+                    end += 1
+                visible.append(raw_line[cursor:end])
+                if end - cursor == code_span:
+                    code_span = None
+                cursor = end
+                continue
             if in_comment:
                 end = raw_line.find("-->", cursor)
                 if end == -1:
@@ -148,23 +190,59 @@ def _contract_markdown(text: str) -> str:
                 in_comment = False
                 cursor = end + 3
                 continue
-            start = raw_line.find("<!--", cursor)
-            if start == -1:
-                visible.append(raw_line[cursor:])
-                break
-            visible.append(raw_line[cursor:start])
-            in_comment = True
-            cursor = start + 4
-        line = "".join(visible)
-        opening = re.fullmatch(r" {0,3}(`{3,}|~{3,})(.*)", line)
-        if opening is not None:
-            marker, info = opening.groups()
-            if marker[0] == "~" or "`" not in info:
-                fence = (marker[0], len(marker))
-                lines.append("")
+            if (
+                raw_line[cursor] == "\\"
+                and cursor + 1 < len(raw_line)
+                and raw_line[cursor + 1] in r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""
+            ):
+                visible.append(raw_line[cursor:cursor + 2])
+                cursor += 2
                 continue
+            if raw_line[cursor] == "`":
+                end = cursor
+                while end < len(raw_line) and raw_line[end] == "`":
+                    end += 1
+                run_length = end - cursor
+                if _has_code_span_closer(raw_lines, line_index, end, run_length):
+                    code_span = run_length
+                visible.append(raw_line[cursor:end])
+                cursor = end
+                continue
+            if raw_line.startswith("<!--", cursor):
+                in_comment = True
+                cursor += 4
+                continue
+            visible.append(raw_line[cursor])
+            cursor += 1
+        line = "".join(visible)
         lines.append(line)
     return "\n".join(lines)
+
+
+def _has_code_span_closer(
+    lines: list[str],
+    line_index: int,
+    cursor: int,
+    run_length: int,
+) -> bool:
+    """Return whether an exact CommonMark code-span closer exists in this paragraph."""
+    for candidate_index in range(line_index, len(lines)):
+        candidate = lines[candidate_index]
+        if candidate_index != line_index:
+            if not candidate.strip():
+                return False
+            cursor = 0
+        while cursor < len(candidate):
+            start = candidate.find("`", cursor)
+            if start == -1:
+                break
+            end = start
+            while end < len(candidate) and candidate[end] == "`":
+                end += 1
+            if end - start == run_length:
+                return True
+            cursor = end
+    return False
 
 
 def _legacy_normative_lines(text: str) -> list[str]:
