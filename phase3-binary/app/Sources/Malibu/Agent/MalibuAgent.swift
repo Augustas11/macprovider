@@ -1068,7 +1068,7 @@ final class MalibuAgent: ObservableObject {
             if [.challengeInvalid, .postNotVerified].contains(code) {
                 snapshot.referralStatus = snapshot.referralStatus?.withPendingChallenge(nil)
             }
-            if staleStatusRequestFailed {
+            if staleStatusRequestFailed, code != .featureUnavailable {
                 referralStatusExpiryTask?.cancel()
                 referralStatusExpiryTask = nil
                 snapshot.referralStatus = nil

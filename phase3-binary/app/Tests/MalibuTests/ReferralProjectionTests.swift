@@ -168,6 +168,28 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertEqual(agent.snapshot.referralLastError, "Too many referral requests. Retry in 30 seconds.")
     }
 
+    @MainActor
+    func testStaleStatusFeatureRollbackRemainsDisabled() async throws {
+        let agent = MalibuAgent(initialSnapshot: trustedReferralSnapshot())
+        let status = try XCTUnwrap(makeStatus(
+            observedAt: Date().addingTimeInterval(-ReferralRefreshPolicy.statusLifetime + 0.02)
+        ))
+        agent.consume(.referralStatusResponse(status))
+        agent.beginReferralAction()
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        agent.consume(.referralError(
+            operation: .status,
+            code: .featureUnavailable,
+            retryAfterSeconds: nil
+        ))
+
+        XCTAssertNil(agent.snapshot.referralStatus)
+        XCTAssertEqual(agent.snapshot.referralAvailability, .disabled)
+        XCTAssertFalse(agent.snapshot.referralActionInProgress)
+        XCTAssertEqual(agent.snapshot.referralLastError, "Referral actions are not enabled by the coordinator.")
+    }
+
     func testSocialRollbackSuppressesOnlyAdvocacyActions() throws {
         let status = try XCTUnwrap(makeStatus())
         let rolledBack = try XCTUnwrap(status.withSocialBonusEnabled(false))
