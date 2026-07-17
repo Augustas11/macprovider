@@ -226,11 +226,12 @@ def validate_body(
     return errors
 
 
-def _changed_paths(base: str | None, head: str | None) -> list[str]:
+def _changed_paths(root: Path, base: str | None, head: str | None) -> list[str]:
     if not base or not head:
         return []
     completed = subprocess.run(
         ["git", "diff", "--name-only", f"{base}..{head}"],
+        cwd=root,
         capture_output=True,
         text=True,
         check=False,
@@ -250,12 +251,13 @@ def main(argv: list[str] | None = None) -> int:
 
     event = json.loads(Path(args.event).read_text(encoding="utf-8"))
     body = ((event.get("pull_request") or {}).get("body") or "")
+    root = Path(args.root)
     try:
-        changed = _changed_paths(args.base, args.head)
+        changed = _changed_paths(root, args.base, args.head)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    errors = validate_body(body, Path(args.root), changed)
+    errors = validate_body(body, root, changed)
     if errors:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)

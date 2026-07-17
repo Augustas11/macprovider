@@ -139,7 +139,7 @@ class SpecPRDeclarationTests(unittest.TestCase):
                     "--root",
                     str(root),
                 ],
-                cwd=root,
+                cwd=Path(__file__).resolve().parents[2],
                 capture_output=True,
                 text=True,
             )

@@ -759,6 +759,7 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
         if spec.get("status") in {"implemented-unverified", "physically-verified"} and not owned_requirements:
             result.error(spec_id, f"{spec.get('status')} requires at least one owned requirement")
         if spec.get("status") == "physically-verified":
+            result.error(spec_id, "physically-verified requires signed journey-result contract before promotion")
             nonconformant = [
                 item.get("requirement_id")
                 for item in owned_requirements
@@ -777,6 +778,7 @@ def validate_repository(root: Path, base_ref: str | None = None) -> ValidationRe
                 domain_id in SENSITIVE_PHYSICAL_DOMAINS
                 and requirement.get("state") == "conformant"
             ):
+                result.error(requirement_id, "sensitive conformant requirement requires signed journey-result contract before promotion")
                 if not requirement.get("journeys"):
                     result.error(requirement_id, "sensitive conformant requirement requires a physical journey mapping")
                 has_physical_artifact = False

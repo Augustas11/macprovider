@@ -171,6 +171,23 @@ def apply_post_write_mutation(root: Path, repository: dict[str, object]) -> None
             "expires_at": "2027-01-01",
         }]
         (root / "src" / "example.py").write_text("def example():\n    return False\n", encoding="utf-8")
+    elif operation == "sensitive_conformant_without_signed_result":
+        digest = hashlib.sha256((root / "journeys" / "evidence" / "proof.txt").read_bytes()).hexdigest()
+        requirement["journeys"] = ["JOURNEY-BOOT"]
+        requirement["evidence"] = [
+            {
+                "artifact": f"commit:{commit}",
+                "source": None,
+                "captured_at": "2026-01-01",
+                "expires_at": "2027-01-01",
+            },
+            {
+                "artifact": f"sha256:{digest}",
+                "source": "journeys/evidence/proof.txt",
+                "captured_at": "2026-01-01",
+                "expires_at": "2027-01-01",
+            },
+        ]
     else:
         raise AssertionError(f"unknown post-write fixture operation {operation!r}")
 
@@ -247,6 +264,8 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         repository["_post_write_operation"] = "future_evidence"
     elif operation == "stale_commit_evidence":
         repository["_post_write_operation"] = "stale_commit_evidence"
+    elif operation == "sensitive_conformant_without_signed_result":
+        repository["_post_write_operation"] = "sensitive_conformant_without_signed_result"
     elif operation == "mismatched_spec_header_id":
         repository["files"]["specs/SPEC-001-one.md"] = (
             "# SPEC-999 - One\n\n**Version:** 0.1.0\n\nHuman contract text.\n"
