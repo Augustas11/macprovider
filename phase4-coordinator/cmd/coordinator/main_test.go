@@ -44,6 +44,64 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 }
 
+func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	disabled := withReferralValidation(base, nil)
+	disabledResponse := httptest.NewRecorder()
+	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if disabledResponse.Code != http.StatusNoContent {
+		t.Fatalf("disabled validation route unexpectedly mounted: status=%d", disabledResponse.Code)
+	}
+
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("validation status=%d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/reserve", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("reservation route unexpectedly mounted: status=%d", response.Code)
+	}
+}
+
+func TestAppTrackReferralMintReconcilerRunsAfterEnforcementRollback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := make(chan struct{}, 1)
+	startAppTrackReferralMintReconciler(ctx, appTrackReferralMintReconcilerFunc(func(context.Context) error {
+		called <- struct{}{}
+		return nil
+	}), zerolog.Nop())
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("referral mint reconciler did not run with enforcement disabled")
+	}
+}
+
+func TestOnboardingStoreRemainsOpenAfterRouteRollback(t *testing.T) {
+	cfg := config.Default().Onboarding
+	cfg.AppTrackRegisterEnabled = false
+	cfg.PostgresDSN = "postgres://provider_onboarding@postgres/onboarding"
+	if !shouldOpenOnboardingStore(cfg) {
+		t.Fatal("configured onboarding authority closed when registration route was disabled")
+	}
+	cfg.PostgresDSN = ""
+	if shouldOpenOnboardingStore(cfg) {
+		t.Fatal("unconfigured disabled onboarding store unexpectedly opened")
+	}
+}
+
+type appTrackReferralMintReconcilerFunc func(context.Context) error
+
+func (f appTrackReferralMintReconcilerFunc) ReconcilePendingAppTrackReferralMints(ctx context.Context) error {
+	return f(ctx)
+}
+
 func TestListenAddressParsesIPv4AndIPv6(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "::1", "::"} {
 		t.Run(host, func(t *testing.T) {

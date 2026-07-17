@@ -9,11 +9,12 @@ import (
 // register surface. Production has one process per coordinator on Pearl, so
 // process-local limiting is sufficient for Step 1's deploy-disabled path.
 type MemoryRateLimiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	now    func() time.Time
-	hits   map[string][]time.Time
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	now       func() time.Time
+	hits      map[string][]time.Time
+	lastSweep time.Time
 }
 
 func NewMemoryRateLimiter(limit int, window time.Duration) *MemoryRateLimiter {
@@ -34,6 +35,23 @@ func (l *MemoryRateLimiter) Allow(key string) bool {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.lastSweep.IsZero() || !now.Before(l.lastSweep.Add(l.window)) {
+		for key, timestamps := range l.hits {
+			kept := timestamps[:0]
+			for _, ts := range timestamps {
+				if ts.After(cutoff) {
+					kept = append(kept, ts)
+				}
+			}
+			if len(kept) == 0 {
+				delete(l.hits, key)
+			} else {
+				l.hits[key] = kept
+			}
+		}
+		l.lastSweep = now
+	}
 
 	existing := l.hits[key]
 	kept := existing[:0]
