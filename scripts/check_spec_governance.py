@@ -45,6 +45,10 @@ MARKDOWN_LINK_RE = re.compile(r"\]\(([^)]+)\)")
 
 AUTHORITY_SCHEMA_PATH = "../schemas/spec-authority-v1.schema.json"
 CONFORMANCE_SCHEMA_PATH = "../schemas/spec-conformance-v1.schema.json"
+TRACKED_SCHEMA_SHA256 = {
+    "spec-authority-v1.schema.json": "1a56337905558224f12c789a86edcbf5e91fba7791b337949593c5f0678b51a7",
+    "spec-conformance-v1.schema.json": "81769b5397dd8b7b831329fd80f6f924884ebebc154a1605d91b9c8857083930",
+}
 SENSITIVE_PHYSICAL_DOMAINS = {
     "provider-wire-protocol",
     "provider-onboarding-identity",
@@ -114,16 +118,50 @@ class ValidationResult:
         self.errors.append(f"{location}: {message}")
 
 
-def _legacy_normative_lines(text: str) -> list[str]:
-    """Return frozen, unnumbered normative lines outside fenced code blocks."""
+def _contract_markdown(text: str) -> str:
+    """Return Markdown contract text without examples or HTML comments."""
     lines: list[str] = []
-    in_fence = False
+    fence: str | None = None
+    in_comment = False
     for raw_line in text.splitlines():
-        stripped = raw_line.strip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
+        visible: list[str] = []
+        cursor = 0
+        while cursor < len(raw_line):
+            if in_comment:
+                end = raw_line.find("-->", cursor)
+                if end == -1:
+                    cursor = len(raw_line)
+                    break
+                in_comment = False
+                cursor = end + 3
+                continue
+            start = raw_line.find("<!--", cursor)
+            if start == -1:
+                visible.append(raw_line[cursor:])
+                break
+            visible.append(raw_line[cursor:start])
+            in_comment = True
+            cursor = start + 4
+        line = "".join(visible)
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            lines.append("")
             continue
-        if in_fence or not NORMATIVE_KEYWORD_RE.search(stripped):
+        lines.append("" if fence is not None else line)
+    return "\n".join(lines)
+
+
+def _legacy_normative_lines(text: str) -> list[str]:
+    """Return frozen, unnumbered normative lines from contract Markdown."""
+    lines: list[str] = []
+    for raw_line in _contract_markdown(text).splitlines():
+        stripped = raw_line.strip()
+        if not NORMATIVE_KEYWORD_RE.search(stripped):
             continue
         if REQUIREMENT_DEFINITION_RE.match(stripped):
             continue
@@ -579,6 +617,19 @@ def _nested(value: dict[str, Any], *keys: str) -> Any:
 
 
 def _validate_tracked_schemas(root: Path, result: ValidationResult) -> None:
+    for name, expected in TRACKED_SCHEMA_SHA256.items():
+        path = root / "schemas" / name
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            result.error("schemas", f"cannot fingerprint tracked schema {name}: {exc}")
+            continue
+        if actual != expected:
+            result.error(
+                "schemas",
+                f"tracked schema/runtime contract drift for {name}: "
+                f"expected sha256:{expected}, got sha256:{actual}",
+            )
     authority = _load_json(root / "schemas" / "spec-authority-v1.schema.json", result)
     conformance = _load_json(root / "schemas" / "spec-conformance-v1.schema.json", result)
     if not isinstance(authority, dict) or not isinstance(conformance, dict):
@@ -687,7 +738,7 @@ def _validate_base_identities(
         if text is None or not text.startswith(f"# {match.group(1)}"):
             continue
         base_spec_ids.add(match.group(1))
-        found_requirements = set(REQUIREMENT_DEFINITION_RE.findall(text))
+        found_requirements = set(REQUIREMENT_DEFINITION_RE.findall(_contract_markdown(text)))
         base_requirement_ids.update(found_requirements)
         base_requirements_by_spec[match.group(1)] = found_requirements
         base_legacy_by_spec[match.group(1)] = Counter(_legacy_normative_lines(text))
@@ -711,6 +762,8 @@ def _validate_base_identities(
                     result.error("specs/AUTHORITY.json", f"authority identity {domain_id!r} cannot be deleted")
                 elif domains[domain_id].get("owner_spec") != item.get("owner_spec"):
                     result.error("specs/AUTHORITY.json", f"authority owner for {domain_id!r} cannot change without a versioned governance migration")
+                elif item.get("status") == "deprecated" and domains[domain_id].get("status") != "deprecated":
+                    result.error("specs/AUTHORITY.json", f"deprecated authority tombstone {domain_id!r} cannot be revived")
 
     base_conformance_text = _git_show(root, base_commit, "specs/CONFORMANCE.json")
     if base_conformance_text:
@@ -914,6 +967,13 @@ def validate_repository(
         if not isinstance(owner_spec, str):
             continue
         owner_record = spec_records.get(owner_spec, {})
+        if owner_record.get("status") == "deprecated" and domain.get("status") != "deprecated":
+            result.error(
+                "specs/AUTHORITY.json",
+                f"authority domain {domain_id!r} owned by deprecated {owner_spec} must be a deprecated tombstone",
+            )
+        if domain.get("status") == "deprecated":
+            continue
         declared = owner_record.get("authority_domains")
         if domain_id not in (declared if isinstance(declared, list) else []):
             result.error("specs/CONFORMANCE.json", f"owner {owner_spec} does not declare authority domain {domain_id!r}")
@@ -927,19 +987,22 @@ def validate_repository(
                 result.error("specs/CONFORMANCE.json", f"{spec_id} declares unknown authority domain {domain_id!r}")
             elif domain.get("owner_spec") != spec_id:
                 result.error("specs/CONFORMANCE.json", f"{spec_id} declares {domain_id!r}, owned by {domain.get('owner_spec')}")
+            elif domain.get("status") == "deprecated":
+                result.error("specs/CONFORMANCE.json", f"{spec_id} cannot declare deprecated authority domain {domain_id!r}")
 
     definitions: dict[str, list[Path]] = {}
     requirement_references: dict[str, list[Path]] = {}
     for spec_id, path in canonical.items():
         text = path.read_text(encoding="utf-8")
-        for requirement_id in REQUIREMENT_DEFINITION_RE.findall(text):
+        contract_text = _contract_markdown(text)
+        for requirement_id in REQUIREMENT_DEFINITION_RE.findall(contract_text):
             definitions.setdefault(requirement_id, []).append(path)
             if requirement_id[:8] != spec_id:
                 result.error(str(path.relative_to(root)), f"requirement {requirement_id} must use owning prefix {spec_id}")
-        for reference in sorted(set(SPEC_REFERENCE_RE.findall(text))):
+        for reference in sorted(set(SPEC_REFERENCE_RE.findall(contract_text))):
             if reference not in canonical:
                 result.error(str(path.relative_to(root)), f"broken cross-spec reference {reference}; no canonical spec exists")
-        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(text))):
+        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(contract_text))):
             requirement_references.setdefault(requirement_reference, []).append(path)
         for target in MARKDOWN_LINK_RE.findall(text):
             target = target.strip().split("#", 1)[0]

@@ -16,7 +16,9 @@ except ModuleNotFoundError:  # Direct execution sets sys.path[0] to scripts/.
     from check_spec_governance import DOMAIN_RE, JOURNEY_RE, REQUIREMENT_ID_RE, SENSITIVE_PHYSICAL_DOMAINS, SPEC_ID_RE, VERDICTS
 
 
-FIELD_RE = re.compile(r"^\s*(behavior-change|specs|requirements|authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$", re.IGNORECASE)
+FIELD_RE = re.compile(r"^\s*(behavior-change|contract-change|specs|requirements|authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$", re.IGNORECASE)
+CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
+CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
     ".github/CODEOWNERS",
     ".github/workflows/spec-index.yml",
@@ -82,6 +84,10 @@ def _governance_only(path: str) -> bool:
                (allowed.endswith("-") and path.startswith(allowed)) for allowed in GOVERNANCE_ONLY_PATHS)
 
 
+def _contract_path(path: str) -> bool:
+    return path in CONTRACT_PATHS or bool(CANONICAL_SPEC_PATH_RE.fullmatch(path))
+
+
 def validate_body(body: str, root: Path | None = None, changed_paths: list[str] | None = None) -> list[str]:
     errors: list[str] = []
     lines = body.splitlines()
@@ -99,6 +105,15 @@ def validate_body(body: str, root: Path | None = None, changed_paths: list[str] 
     if behavior not in {"none", "yes"}:
         errors.append("behavior-change must be exactly 'none' or 'yes'")
         return errors
+    contract_change = fields.get("contract-change")
+    if contract_change is not None and contract_change not in {"none", "yes"}:
+        errors.append("contract-change must be exactly 'none' or 'yes'")
+    changed_contract_paths = [path for path in changed_paths or [] if _contract_path(path)]
+    if changed_contract_paths and contract_change != "yes":
+        errors.append(
+            "contract-change must be 'yes' when canonical SPEC bodies, AUTHORITY.json, "
+            "or CONFORMANCE.json change"
+        )
     if behavior == "none":
         for path in changed_paths or []:
             if not _governance_only(path):

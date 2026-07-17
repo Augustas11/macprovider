@@ -113,14 +113,20 @@ Canonical specs contain the current contract, its conformance summary, and
 issue-linked open gaps. Superseded wording, reconstruction notes, and long
 change narratives belong in `docs/spec-history/` or `audits/`; Git remains the
 complete revision history. A deprecated spec must identify its successor and
-must not retain authority domains. Historical documents must not use the
-canonical header shape or appear in the generated index.
+must not retain active authority domains. Each formerly owned domain remains in
+`AUTHORITY.json` as an immutable `deprecated` tombstone with its original
+owner; the deprecated domain is removed from the spec's active
+`authority_domains` list. Historical documents must not use the canonical
+header shape or appear in the generated index.
 
 ## Pull requests and release gates
 
 Behavior-changing PRs must list affected spec IDs, requirement IDs, authority
 domains, arbitration verdicts, tests, and journeys. A PR with no product
-behavior change states `behavior-change: none`. Changes to normative specs,
+behavior change states `behavior-change: none`. Any change to a canonical SPEC
+body, `AUTHORITY.json`, or `CONFORMANCE.json` additionally states
+`contract-change: yes`; this prevents normative contract edits from hiding
+inside the governance-only path allowlist. Changes to normative specs,
 authority, conformance, validator logic, or release gates require review and
 must pass the spec index, governance validator, targeted tests, and the three
 repository audit lanes at 0 CRITICAL, 0 HIGH, and 0 MEDIUM.
@@ -136,14 +142,17 @@ Every PR body contains this exact block:
 ```text
 spec-governance:
   behavior-change: none
+  contract-change: none
 ```
 
-For a behavior change, use `behavior-change: yes` and add non-empty `specs:`,
-`requirements:`, `authority-domains:`, `arbitration:`, `tests:`, and
-`journeys:` lines (`journeys: not-required` is explicit for a non-physical
-change). IDs must resolve in the tracked manifests. CI compares the declaration
-to the base-to-head diff on every pull request; `none` is accepted only for the
-governance/documentation allowlist.
+Use `contract-change: yes` whenever the canonical contract paths above change,
+even when product behavior remains unchanged. For a behavior change, use
+`behavior-change: yes` and add non-empty `specs:`, `requirements:`,
+`authority-domains:`, `arbitration:`, `tests:`, and `journeys:` lines
+(`journeys: not-required` is explicit for a non-physical change). IDs must
+resolve in the tracked manifests. CI compares the declaration to the
+base-to-head diff on every pull request; `behavior-change: none` is accepted
+only for the governance/documentation allowlist.
 
 ## Reconciliation workflow
 

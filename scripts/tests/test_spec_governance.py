@@ -213,6 +213,11 @@ class GovernanceValidatorTests(unittest.TestCase):
         subprocess.run(["git", "config", "user.name", "Governance Tests"], cwd=root, check=True)
         subprocess.run(["git", "add", "."], cwd=root, check=True)
         subprocess.run(["git", "commit", "-qm", "test base"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "fetch", "-q", str(ROOT), BOOTSTRAP_BASELINE_COMMIT],
+            cwd=root,
+            check=True,
+        )
         return subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True,
         ).stdout.strip()
@@ -247,6 +252,17 @@ class GovernanceValidatorTests(unittest.TestCase):
             schema_path = root / "schemas" / "spec-conformance-v1.schema.json"
             schema = json.loads(schema_path.read_text(encoding="utf-8"))
             schema["$defs"]["requirement"]["properties"]["state"]["enum"].append("green")
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
+            result = validate_repository(root, date(2026, 7, 16))
+        self.assertIn("tracked schema/runtime contract drift", "\n".join(result.errors))
+
+    def test_tracked_schema_required_field_drift_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            schema_path = root / "schemas" / "spec-conformance-v1.schema.json"
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            schema["$defs"]["spec"]["required"].remove("title")
             schema_path.write_text(json.dumps(schema), encoding="utf-8")
             result = validate_repository(root, date(2026, 7, 16))
         self.assertIn("tracked schema/runtime contract drift", "\n".join(result.errors))
@@ -313,6 +329,28 @@ class GovernanceValidatorTests(unittest.TestCase):
             result = validate_repository(root, date(2026, 7, 16), base_ref=commit)
         self.assertIn("invalid lifecycle transition for SPEC-001: normative -> draft", "\n".join(result.errors))
 
+    def test_spec_and_authority_domain_can_retire_as_tombstones(self) -> None:
+        repository = base_repository()
+        for spec in repository["conformance"]["specs"]:
+            spec.update({
+                "requirement_id_migration": "complete",
+                "legacy_requirement_fingerprint": None,
+                "legacy_requirement_count": 0,
+            })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            commit = self._commit_repository(root)
+            repository["authority"]["domains"][0]["status"] = "deprecated"
+            repository["conformance"]["specs"][0].update({
+                "status": "deprecated",
+                "authority_domains": [],
+                "superseded_by": ["SPEC-002"],
+            })
+            write_repository(root, repository)
+            result = validate_repository(root, date(2026, 7, 16), base_ref=commit)
+        self.assertEqual([], result.errors)
+
     def test_legacy_obligations_cannot_be_erased_during_normative_promotion(self) -> None:
         repository = base_repository()
         repository["specs"]["specs/SPEC-001-one.md"] = "# SPEC-001 — One\n\n**Version:** 0.1.0\n\nThe provider MUST preserve behavior.\n"
@@ -337,6 +375,49 @@ class GovernanceValidatorTests(unittest.TestCase):
         errors = "\n".join(result.errors)
         self.assertIn("removed 1 legacy normative obligation", errors)
         self.assertIn("draft -> normative requires complete ID migration and at least one stable requirement", errors)
+
+    def test_example_requirement_ids_cannot_hide_removed_obligations(self) -> None:
+        examples = (
+            "```text\n**SPEC-001-R999 — Example only.** It MUST not count.\n```\n",
+            "~~~text\n**SPEC-001-R999 — Example only.** It MUST not count.\n~~~\n",
+            "<!-- **SPEC-001-R999 — Comment only.** It MUST not count. -->\n",
+        )
+        for example in examples:
+            with self.subTest(example=example.splitlines()[0]):
+                repository = base_repository()
+                repository["specs"]["specs/SPEC-001-one.md"] = (
+                    "# SPEC-001 — One\n\n**Version:** 0.1.0\n\n"
+                    "The provider MUST preserve behavior.\n"
+                )
+                fingerprint, count = legacy_requirement_fingerprint(
+                    repository["specs"]["specs/SPEC-001-one.md"]
+                )
+                repository["conformance"]["specs"][0]["legacy_requirement_fingerprint"] = fingerprint
+                repository["conformance"]["specs"][0]["legacy_requirement_count"] = count
+                repository["conformance"]["requirements"] = []
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    write_repository(root, repository)
+                    commit = self._commit_repository(root)
+                    repository["specs"]["specs/SPEC-001-one.md"] = (
+                        "# SPEC-001 — One\n\n**Version:** 0.1.0\n\n" + example
+                    )
+                    repository["conformance"]["requirements"] = [{
+                        "requirement_id": "SPEC-001-R999",
+                        "spec_id": "SPEC-001",
+                        "state": "pending",
+                        "implementation": [],
+                        "tests": [],
+                        "journeys": [],
+                        "evidence": [],
+                        "gap": copy.deepcopy(repository["conformance"]["specs"][0]["gap"]),
+                    }]
+                    write_repository(root, repository)
+                    result = validate_repository(root, date(2026, 7, 16), base_ref=commit)
+                self.assertIn(
+                    "removed 1 legacy normative obligation line(s) but added only 0 stable requirement tombstone(s)",
+                    "\n".join(result.errors),
+                )
 
     def test_malformed_nested_values_never_crash(self) -> None:
         mutations = [

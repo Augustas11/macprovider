@@ -35,7 +35,7 @@ class SpecPRDeclarationTests(unittest.TestCase):
         self.assertTrue(any("requirements" in error for error in errors))
 
     def test_direct_cli_execution_matches_github_actions(self) -> None:
-        event = {"pull_request": {"body": "spec-governance:\n  behavior-change: none\n"}}
+        event = {"pull_request": {"body": "spec-governance:\n  behavior-change: none\n  contract-change: yes\n"}}
         with tempfile.TemporaryDirectory() as directory:
             event_path = Path(directory) / "event.json"
             event_path.write_text(json.dumps(event), encoding="utf-8")
@@ -66,6 +66,27 @@ class SpecPRDeclarationTests(unittest.TestCase):
             changed_paths=["phase4-coordinator/internal/ws/server.go"],
         )
         self.assertTrue(any("non-governance path" in error for error in errors))
+
+    def test_contract_changes_require_explicit_declaration(self) -> None:
+        body = "spec-governance:\n  behavior-change: none\n"
+        for path in (
+            "specs/SPEC-001-provider.md",
+            "specs/AUTHORITY.json",
+            "specs/CONFORMANCE.json",
+        ):
+            with self.subTest(path=path):
+                errors = validate_body(body, changed_paths=[path])
+                self.assertTrue(any("contract-change must be 'yes'" in error for error in errors))
+
+    def test_explicit_contract_change_can_leave_product_behavior_unchanged(self) -> None:
+        body = """spec-governance:
+  behavior-change: none
+  contract-change: yes
+"""
+        self.assertEqual(
+            [],
+            validate_body(body, changed_paths=["specs/SPEC-001-provider.md"]),
+        )
 
     def test_behavior_change_references_must_exist(self) -> None:
         body = """spec-governance:

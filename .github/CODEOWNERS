@@ -16,6 +16,7 @@ Makefile @Augustas11
 # fixtures together still requires repository-owner review.
 specs/AUTHORITY.json @Augustas11
 specs/CONFORMANCE.json @Augustas11
+specs/SPEC-*.md @Augustas11
 specs/PROCESS.md @Augustas11
 specs/TEMPLATE.md @Augustas11
 schemas/spec-authority-v1.schema.json @Augustas11
