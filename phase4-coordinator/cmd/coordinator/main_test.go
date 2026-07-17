@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -46,14 +47,14 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 
 func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	disabled := withReferralValidation(base, nil)
+	disabled := withReferralValidation(base, nil, nil)
 	disabledResponse := httptest.NewRecorder()
 	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
 	if disabledResponse.Code != http.StatusNoContent {
 		t.Fatalf("disabled validation route unexpectedly mounted: status=%d", disabledResponse.Code)
 	}
 
-	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }, nil)
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
@@ -100,6 +101,38 @@ type appTrackReferralMintReconcilerFunc func(context.Context) error
 
 func (f appTrackReferralMintReconcilerFunc) ReconcilePendingAppTrackReferralMints(ctx context.Context) error {
 	return f(ctx)
+}
+
+func TestWithReferralValidationMountsJoinRouteOnlyWhenEnabled(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	disabled := withReferralValidation(base, nil, nil)
+	disabledResponse := httptest.NewRecorder()
+	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
+	if disabledResponse.Code != http.StatusNoContent {
+		t.Fatalf("disabled join route unexpectedly mounted: status=%d", disabledResponse.Code)
+	}
+
+	handler := withReferralValidation(
+		base,
+		nil,
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) },
+	)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("join status=%d", response.Code)
+	}
+}
+
+func TestNewReferralValidationHandlerWiresOperatorRecoveryURL(t *testing.T) {
+	handler := newReferralValidationHandler(nil, auth.ReferralPolicy{}, nil, "  https://access.example.test/waitlist  ", nil)
+	if handler.RequestAccessURL != "https://access.example.test/waitlist" {
+		t.Fatalf("request access URL=%q", handler.RequestAccessURL)
+	}
+	if handler.PublicLimiter == nil || handler.ValidateSlots == nil || handler.SourceIP == nil {
+		t.Fatal("production validation safeguards were not wired")
+	}
 }
 
 func TestListenAddressParsesIPv4AndIPv6(t *testing.T) {

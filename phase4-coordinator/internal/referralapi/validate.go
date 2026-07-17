@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,12 @@ import (
 
 type ValidationStore interface {
 	ValidateReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ReferralValidation, error)
+}
+
+// ReferralMetrics accepts only the closed event/outcome vocabulary enforced
+// by the coordinator metrics implementation.
+type ReferralMetrics interface {
+	IncReferralEvent(event, outcome string)
 }
 
 // ValidationHandler is intentionally read-only. It exposes invite state for
@@ -29,6 +36,17 @@ type ValidationHandler struct {
 	ValidateSlots chan struct{}
 	SourceIP      func(*http.Request) string
 	Now           func() time.Time
+	Metrics       ReferralMetrics
+	// RequestAccessURL is optional operator configuration shared with the
+	// durable /j/ page. It is informational only and never grants admission.
+	RequestAccessURL string
+}
+
+type validationResponse struct {
+	Valid            bool   `json:"valid"`
+	Required         bool   `json:"required"`
+	Reason           string `json:"reason"`
+	RequestAccessURL string `json:"request_access_url,omitempty"`
 }
 
 func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,10 +56,6 @@ func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if !h.Policy.RequireForRegistration {
-		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "required": false, "reason": "disabled"})
-		return
-	}
 	key := r.RemoteAddr
 	if h.SourceIP != nil {
 		key = h.SourceIP(r)
@@ -51,36 +65,66 @@ func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case h.ValidateSlots <- struct{}{}:
 			defer func() { <-h.ValidateSlots }()
 		default:
+			h.observe("busy")
 			w.Header().Set("Retry-After", "5")
 			writeError(w, http.StatusServiceUnavailable, "busy", "invite validation is temporarily busy")
 			return
 		}
 	}
 	if h.PublicLimiter == nil || !h.PublicLimiter.Allow(key) {
+		h.observe("rate_limited")
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many referral checks")
 		return
 	}
-	if h.Store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
-		return
-	}
+	// Decode and bound the request before consulting policy or authority so a
+	// temporarily disabled public route retains the same abuse posture.
 	var request struct {
 		Code string `json:"code"`
 	}
 	if err := decodeBoundedJSON(r, &request, 1024); err != nil || len([]byte(request.Code)) > 256 {
+		h.observe("bad_request")
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid request")
+		return
+	}
+	if !h.Policy.RequireForRegistration {
+		h.observe("disabled")
+		h.writeValidation(w, true, false, "disabled")
+		return
+	}
+	if h.Store == nil {
+		h.observe("unavailable")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
 		return
 	}
 	validation, err := h.Store.ValidateReferral(r.Context(), h.Policy, request.Code, h.now())
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"valid": false, "required": true, "reason": referralReason(err),
-		})
+		reason := referralReason(err)
+		if reason == "invalid" && !errors.Is(err, auth.ErrReferralInvalid) {
+			h.observe("unavailable")
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
+			return
+		}
+		h.observe(reason)
+		h.writeValidation(w, false, true, reason)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"valid": validation.Valid, "required": true, "reason": validation.Reason,
+	h.observe("valid")
+	h.writeValidation(w, validation.Valid, true, validation.Reason)
+}
+
+func (h *ValidationHandler) observe(outcome string) {
+	if h.Metrics != nil {
+		h.Metrics.IncReferralEvent("validate", outcome)
+	}
+}
+
+func (h *ValidationHandler) writeValidation(w http.ResponseWriter, valid, required bool, reason string) {
+	writeJSON(w, http.StatusOK, validationResponse{
+		Valid:            valid,
+		Required:         required,
+		Reason:           reason,
+		RequestAccessURL: strings.TrimSpace(h.RequestAccessURL),
 	})
 }
 

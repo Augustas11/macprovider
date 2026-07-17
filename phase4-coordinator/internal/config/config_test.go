@@ -35,7 +35,7 @@ func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 
 func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T) {
 	cfg := Default()
-	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableSocialInviteBonus {
+	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.EnableSocialInviteBonus {
 		t.Fatal("referral launch policy must default off")
 	}
 	cfg.Auth.OperatorKey = "operator-key"
@@ -52,6 +52,63 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid referral gate: %v", err)
+	}
+}
+
+func TestReferralJoinLinksRequireAdmissionAndFixedDownload(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Referrals.EnableJoinLinks = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires require_for_registration") {
+		t.Fatalf("join without admission error=%v", err)
+	}
+
+	cfg.Referrals.RequireForRegistration = true
+	cfg.Referrals.Campaign = "prebeta_2026"
+	cfg.Referrals.CurrentKeyID = "k1"
+	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "join_download_url must be set") {
+		t.Fatalf("join without download error=%v", err)
+	}
+
+	cfg.Referrals.JoinDownloadURL = "https://download.malibu.tech/releases/Malibu-1.9.0.dmg"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("fixed join download URL: %v", err)
+	}
+
+	cfg.Referrals.EnableJoinLinks = false
+	cfg.Referrals.RequireForRegistration = false
+	for _, raw := range []string{
+		"https://download.malibu.tech/latest.dmg",
+		"https://download.malibu.tech/releases/Malibu-latest.dmg",
+		"https://download.malibu.tech/releases/Malibu.dmg",
+	} {
+		cfg.Referrals.JoinDownloadURL = raw
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "fixed, versioned") {
+			t.Fatalf("moving join download %q error=%v", raw, err)
+		}
+	}
+}
+
+func TestReferralRequestAccessURLMustBeCredentialFreeHTTPSEvenWhenGateIsOff(t *testing.T) {
+	for _, raw := range []string{
+		"http://access.example.test/waitlist",
+		"/relative-access",
+		"https://user:secret@access.example.test/waitlist",
+	} {
+		cfg := Default()
+		cfg.Auth.OperatorKey = "operator-key"
+		cfg.Referrals.RequestAccessURL = raw
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_access_url") {
+			t.Fatalf("request_access_url=%q error=%v", raw, err)
+		}
+	}
+
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Referrals.RequestAccessURL = "https://access.example.test/waitlist?campaign=prebeta"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid request access URL: %v", err)
 	}
 }
 

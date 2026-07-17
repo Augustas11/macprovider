@@ -507,6 +507,7 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			total_removed_logs INTEGER NOT NULL
 		)`,
 	}
+	stmts = append(stmts, referralAdminSchemaStatements()...)
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
