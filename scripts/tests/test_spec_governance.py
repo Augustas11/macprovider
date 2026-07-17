@@ -226,8 +226,81 @@ class GovernanceValidatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_repository(root, base_repository())
-            result = validate_repository(root, date(2026, 7, 16))
+            result = validate_repository(root, date(2026, 7, 16), base_ref=None)
             self.assertEqual([], result.errors)
+
+    def test_base_ref_requires_git_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            result = validate_repository(root, date(2026, 7, 16))
+        self.assertIn("requires repository git metadata", "\n".join(result.errors))
+
+    def test_commit_evidence_requires_git_metadata(self) -> None:
+        repository = base_repository()
+        requirement = repository["conformance"]["requirements"][0]
+        requirement.update({
+            "state": "conformant",
+            "implementation": ["src/example.py:example"],
+            "tests": ["tests/test_example.py::test_example"],
+            "evidence": [{
+                "artifact": "commit:" + "0" * 40,
+                "source": None,
+                "captured_at": "2026-07-16",
+                "expires_at": "2027-07-16",
+            }],
+            "gap": None,
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            result = validate_repository(
+                root,
+                date(2026, 7, 16),
+                base_ref=None,
+            )
+        self.assertIn(
+            "commit evidence requires git metadata",
+            "\n".join(result.errors),
+        )
+
+    def test_visible_inline_markup_cannot_hide_reserved_tokens(self) -> None:
+        normative_forms = (
+            "The provider M**U**ST preserve behavior.\n",
+            "The provider M&#85;ST preserve behavior.\n",
+            "The provider M<b>U</b>ST preserve behavior.\n",
+            "The provider M[U](https://example.invalid)ST preserve behavior.\n",
+        )
+        for text in normative_forms:
+            with self.subTest(text=text):
+                self.assertEqual(1, legacy_requirement_fingerprint(text)[1])
+
+        reference_forms = (
+            "See SPEC-**999**.\n",
+            "See SPEC-9&#57;9.\n",
+            "See SPEC-<b>9</b>99.\n",
+            "See SPEC-[9](https://example.invalid)99.\n",
+        )
+        for reference in reference_forms:
+            with self.subTest(reference=reference):
+                repository = base_repository()
+                repository["specs"]["specs/SPEC-001-one.md"] += reference
+                fingerprint, count = legacy_requirement_fingerprint(
+                    repository["specs"]["specs/SPEC-001-one.md"],
+                )
+                repository["conformance"]["specs"][0].update({
+                    "legacy_requirement_fingerprint": fingerprint,
+                    "legacy_requirement_count": count,
+                })
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    write_repository(root, repository)
+                    result = validate_repository(
+                        root,
+                        date(2026, 7, 16),
+                        base_ref=None,
+                    )
+                self.assertIn("broken cross-spec reference SPEC-999", "\n".join(result.errors))
 
     def test_all_negative_fixtures_fail_actionably(self) -> None:
         fixture_paths = sorted(FIXTURES.glob("*.json"))

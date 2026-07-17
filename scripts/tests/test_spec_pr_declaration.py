@@ -34,6 +34,24 @@ class SpecPRDeclarationTests(unittest.TestCase):
         errors = validate_body("spec-governance:\n  behavior-change: yes\n  specs: SPEC-001\n")
         self.assertTrue(any("requirements" in error for error in errors))
 
+    def test_duplicate_declaration_fields_fail_closed(self) -> None:
+        bodies = (
+            (
+                "spec-governance:\n"
+                "  behavior-change: yes\n"
+                "  behavior-change: none\n"
+            ),
+            (
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "  contract-change: yes\n"
+                "  contract-change: none\n"
+            ),
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertIn("duplicate", "\n".join(validate_body(body)))
+
     def test_direct_cli_execution_matches_github_actions(self) -> None:
         event = {"pull_request": {"body": "spec-governance:\n  behavior-change: none\n  contract-change: yes\n"}}
         with tempfile.TemporaryDirectory() as directory:
@@ -277,6 +295,20 @@ class SpecPRDeclarationTests(unittest.TestCase):
 
     def test_declaration_must_precede_inline_details_markup(self) -> None:
         bodies = (
+            (
+                "<details>\n"
+                "<summary>Example</summary>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+                "</details>\n"
+            ),
+            (
+                "<DETAILS open>\n"
+                "example\n"
+                "</DETAILS>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+            ),
             (
                 "Example follows <details>\n"
                 "ordinary example\n"

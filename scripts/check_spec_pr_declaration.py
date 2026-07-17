@@ -103,22 +103,26 @@ def validate_body(body: str, root: Path | None = None, changed_paths: list[str] 
         for line in raw_lines
     ):
         return ["missing top-level 'spec-governance:' declaration block"]
-    lines = _contract_markdown(
-        body,
-        preserve_details_closers=True,
-    ).splitlines()
+    raw_marker = _declaration_marker(raw_lines)
+    if raw_marker is None or _inside_inline_details(raw_lines, raw_marker):
+        return ["missing top-level 'spec-governance:' declaration block"]
+    lines = _contract_markdown(body).splitlines()
     marker = _declaration_marker(lines)
     if marker is None:
         return ["missing 'spec-governance:' declaration block"]
-    if _inside_inline_details(lines, marker):
-        return ["missing top-level 'spec-governance:' declaration block"]
     fields: dict[str, str] = {}
     for line in lines[marker + 1:]:
         if line.strip().startswith("#") or (not line.strip() and fields):
             break
         match = FIELD_RE.match(line)
         if match:
-            fields[match.group(1).lower()] = match.group(2)
+            field_name = match.group(1).lower()
+            if field_name in fields:
+                errors.append(
+                    f"duplicate spec-governance field {field_name!r}",
+                )
+            else:
+                fields[field_name] = match.group(2)
         elif line.strip():
             break
     behavior = fields.get("behavior-change")

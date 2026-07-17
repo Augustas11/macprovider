@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import hashlib
+import html
 import json
 import re
 import string
@@ -43,6 +44,7 @@ ARTIFACT_RE = re.compile(
 JOURNEY_RE = re.compile(r"^JOURNEY-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
 NORMATIVE_KEYWORD_RE = re.compile(r"\b(?:MUST(?:\s+NOT)?|SHOULD)\b")
 MARKDOWN_LINK_RE = re.compile(r"\]\(([^)]+)\)")
+INLINE_HTML_TAG_RE = re.compile(r"</?[A-Za-z][^>\n]*>")
 CODE_SPAN_START = "\x00code-span-start\x00"
 CODE_SPAN_END = "\x00code-span-end\x00"
 
@@ -612,7 +614,6 @@ def _contract_markdown(
     text: str,
     *,
     preserve_code_payload: bool = False,
-    preserve_details_closers: bool = False,
 ) -> str:
     """Return contract text with nonnormative block and inline syntax removed."""
     text = text.replace("\x00", "\ufffd")
@@ -731,21 +732,10 @@ def _contract_markdown(
                 lines.append("")
                 continue
             if (
-                not (
-                    preserve_details_closers
-                    and re.fullmatch(
-                        r" {0,3}</details\s*>[ \t]*",
-                        block_line,
-                        re.IGNORECASE,
-                    )
-                )
-                and (
-                    RAW_HTML_BLOCK_TAG_RE.match(block_line) is not None
-                    or (
-                        not paragraph_open
-                        and RAW_HTML_COMPLETE_TAG_RE.fullmatch(block_line)
-                        is not None
-                    )
+                RAW_HTML_BLOCK_TAG_RE.match(block_line) is not None
+                or (
+                    not paragraph_open
+                    and RAW_HTML_COMPLETE_TAG_RE.fullmatch(block_line) is not None
                 )
             ):
                 raw_html_blank_container = line_container
@@ -940,12 +930,26 @@ def _legacy_normative_lines(text: str) -> list[str]:
                 visible.append(raw_line[cursor])
             cursor += 1
         stripped = "".join(fingerprint).strip()
-        if not NORMATIVE_KEYWORD_RE.search("".join(visible).strip()):
+        visible_text = _visible_inline_text("".join(visible).strip())
+        if not NORMATIVE_KEYWORD_RE.search(visible_text):
             continue
         if REQUIREMENT_DEFINITION_RE.match(stripped):
             continue
         lines.append(" ".join(stripped.split()))
     return lines
+
+
+def _visible_inline_text(text: str) -> str:
+    """Return conservative rendered text for reserved-token scans."""
+    text = html.unescape(text)
+    text = INLINE_HTML_TAG_RE.sub("", text)
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"!?\[([^\]\n]*)\]\([^)\n]*\)", r"\1", text)
+        text = re.sub(r"!?\[([^\]\n]*)\]\[[^\]\n]*\]", r"\1", text)
+    text = re.sub(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])", r"\1", text)
+    return text.translate(str.maketrans("", "", "*_~"))
 
 
 def legacy_requirement_fingerprint(text: str) -> tuple[str, int]:
@@ -1170,7 +1174,12 @@ def _validate_evidence_list(
         if artifact and artifact.startswith("commit:"):
             if source is not None:
                 result.error(evidence_loc, "commit evidence source must be null")
-            if (root / ".git").exists():
+            if not (root / ".git").exists():
+                result.error(
+                    evidence_loc,
+                    "commit evidence requires git metadata to verify reachability and ancestry",
+                )
+            else:
                 commit = artifact.removeprefix("commit:")
                 check = subprocess.run(
                     ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
@@ -1504,7 +1513,10 @@ def _canonical_specs(root: Path, result: ValidationResult) -> dict[str, Path]:
 
 
 def _resolve_base_commit(root: Path, base_ref: str | None, result: ValidationResult) -> str | None:
-    if not (root / ".git").exists() or not base_ref:
+    if not base_ref:
+        return None
+    if not (root / ".git").exists():
+        result.error("git", f"base ref {base_ref!r} requires repository git metadata")
         return None
     resolved = subprocess.run(
         ["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
@@ -1854,14 +1866,15 @@ def validate_repository(
     for spec_id, path in canonical.items():
         text = path.read_text(encoding="utf-8")
         contract_text = _contract_markdown(text)
+        visible_contract_text = _visible_inline_text(contract_text)
         for requirement_id in REQUIREMENT_DEFINITION_RE.findall(contract_text):
             definitions.setdefault(requirement_id, []).append(path)
             if requirement_id[:8] != spec_id:
                 result.error(str(path.relative_to(root)), f"requirement {requirement_id} must use owning prefix {spec_id}")
-        for reference in sorted(set(SPEC_REFERENCE_RE.findall(contract_text))):
+        for reference in sorted(set(SPEC_REFERENCE_RE.findall(visible_contract_text))):
             if reference not in canonical:
                 result.error(str(path.relative_to(root)), f"broken cross-spec reference {reference}; no canonical spec exists")
-        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(contract_text))):
+        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(visible_contract_text))):
             requirement_references.setdefault(requirement_reference, []).append(path)
         for target in MARKDOWN_LINK_RE.findall(text):
             target = target.strip().split("#", 1)[0]
