@@ -1,22 +1,33 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.7
-Status: Implemented on branch; v1.8.31 rollout pending. The production path ran
+Version: v0.1.8
+Status: Normative; coordinator-independent recovery is reconciled and
+implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
 autoupdate to CLI 1.8.21. Trust-table drift remains resolved as documented in
-v0.1.5. v0.1.6 adds the complete-payload, shared-mutation-ownership, and
-coordinator-authoritative buyer-serving commit gates required by Entry 133.
+v0.1.5. v0.1.6 added the complete-payload, shared-mutation-ownership, and
+then-required coordinator-authoritative buyer-serving commit gates from Entry
+133; v0.1.8 supersedes only that commit-authority choice.
 v0.1.7 (runbook item 23) closes the tokenless race-loser residual: the
 coordinator propagates its `auth_state` admission verdict on the accept ack so
 the bearerless-duplicate notify-only row is client-enforceable.
+v0.1.8 makes the signed release and compatibility manifest—not coordinator
+admission—the update authority, and separates local update success from network
+readiness.
 
 ## Goal
 
-SPEC-020 v0.1.7 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.8 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
 observability invariants.
+
+The v0.1.8 recovery amendment also covers a provider that cannot establish an
+accepted coordinator session. A valid signed release remains discoverable and
+installable under the local pinned release trust root. Coordinator policy may
+recommend a target but cannot make coordinator connectivity a prerequisite for
+repairing an outdated or rejected provider.
 
 The baseline implementation already has a mature manual update path in
 `phase3-binary/Sources/macprovider-cli/SelfUpdate.swift`: GitHub Releases
@@ -139,35 +150,28 @@ Implementations MUST store an explicit current `autoupdate_trust_state` field
 per coordinator session and MUST NOT derive eligibility from
 `recommended_binary_version` alone.
 
-**Live trust-state predicate.** `autoupdate_trust_state` is NOT a
-handshake-time snapshot; it is a live session predicate. The provider MUST
-re-evaluate eligibility immediately before each irreversible autoupdate phase:
+**Two update-authority modes.** Coordinator session trust authorizes only the
+coordinator's target recommendation. Signed recovery discovery is a separate
+authority and never derives eligibility from coordinator admission.
 
-1. Before starting download.
-2. Before entering drain.
-3. Before creating `pending.json` / writing the rollback backup.
-4. Before invoking the atomic binary swap.
-5. Before invoking `launchctl bootstrap` to start the new binary.
+- `coordinator_recommendation`: before accepting the recommended target and
+  before accepting its signed discovery metadata, the provider MUST
+  re-evaluate the live `autoupdate_trust_state`. A transition from `eligible`
+  to notify-only before signed metadata acceptance aborts that recommendation
+  attempt, emits `failure_class:"trust_state_lost"` with a stable structured
+  reason, and cleans up temporary downloads and locks. The independent signed
+  recovery-discovery loop MAY subsequently select the same release.
+- `signed_release`: after the provider verifies the signed monotonic discovery
+  head, compatibility artifact index, complete target payload, and signed
+  compatibility manifest, local pinned release trust owns the transaction.
+  Coordinator disconnect, rejection, tier change, token state, or attestation
+  state MUST be reported as network readiness and MUST NOT abort, roll back, or
+  prevent starting that locally authorized target.
 
-Any transition from `eligible` to a notify-only verdict (per the trust-state
-table) between these phases MUST:
-
-- Abort the autoupdate sequence immediately.
-- Emit `failure_class:"trust_state_lost"` with a stable structured reason
-  naming the trigger (e.g., `encrypted_leg_invalidated`, `tier_demoted`,
-  `token_revoked`, `coordinator_disconnected`,
-  `attestation_state_degraded`).
-- Clean up partial state: release the inner `update.lock` and then the outer
-  provider mutation lock, delete any temp downloads,
-  delete any partial `pending.json` and rollback backup that have not yet been
-  atomically committed.
-- If `pending.json`, the rollback backup, or the live binary swap has already
-  been atomically committed, restore the prior binary through the rollback path
-  before deleting the committed marker/backup and releasing both locks in
-  reverse acquisition order; the provider MUST NOT start the newly swapped
-  binary after trust is lost.
-- Refuse to retry autoupdate for the remainder of the session; cooldown
-  re-evaluation is performed on the next coordinator session start.
+The provider MUST persist the selected authority mode and signed discovery-head
+identity in the pending transaction before drain. No transition from
+`signed_release` back to coordinator-session authority is permitted for that
+transaction.
 
 v2 encrypted-leg negotiation is REQUIRED for eligibility regardless of whether
 Tier2 attestation is configured. Tier2-attestation-not-required deployments are
@@ -183,8 +187,10 @@ in legacy `hello_ack` `specs/SPEC-001-phase3-binary.md` §6.5 and v2
 `auth_response` `specs/SPEC-008-tier2.md` §10.5 ONLY for SPEC-020-capable
 providers AND ONLY when the normative table above returns `eligible`.
 
-All notify-only rows in the normative table MUST NOT trigger download, drain,
-swap, marker creation, or cooldown.
+All notify-only rows in the normative table MUST NOT use a coordinator
+recommendation to trigger download, drain, swap, marker creation, or cooldown.
+They do not disable independent signed-release discovery under
+SPEC-020-R001.
 
 `required_binary_version` enforcement, the existing admission gate, is
 unchanged.
@@ -204,22 +210,41 @@ provider MUST evaluate autoupdate eligibility. The provider MUST use
 behavior-equivalent. Manual update, coordinator recommendation handling,
 downgrade refusal, and status display MUST all use that same comparator.
 
-R-1.2. The provider MAY poll GitHub Releases periodically as a fallback release
-discovery source, but GitHub polling MUST NOT override an active coordinator
-recommendation. While connected to a coordinator that supplies
-`recommended_binary_version`, the provider MUST only install that target
-version, not a newer unrelated GitHub `latest` version. When no coordinator
-session is active or the coordinator omits `recommended_binary_version`, a
-GitHub poll MAY discover a newer version for notify/status purposes, but it MUST
-NOT trigger autoupdate in v0.1.0.
+**SPEC-020-R001 — Discover signed recovery releases without coordinator
+admission.** The provider MUST periodically discover newer signed releases when
+no accepted coordinator session exists, including when the coordinator rejects
+the installed version. Discovery MUST be bounded, jittered, enabled by default,
+and subject to the same downgrade, revocation, compatibility-manifest,
+mutation-lock, rollback, and explicit opt-out controls as a
+coordinator-recommended update.
 
-R-1.3. Before attempting an autoupdate, the provider MUST validate
-`recommended_binary_version` against `^[vV]?[0-9]+\.[0-9]+\.[0-9]+$`.
-Missing or empty values are no trigger. Malformed values MUST fail eligibility
-with `failure_class:"recommended_version_invalid"` and MUST NOT mutate
-autoupdate state. The entire `recommended_binary_version` value MUST be no
-more than 32 UTF-8 bytes, and each numeric component MUST be no more than
-8 digits. Oversized values MUST fail eligibility with
+Discovery MUST begin from a signature-authenticated monotonic discovery head
+under the pinned release trust root, not from mutable GitHub `latest` ordering.
+The head MUST bind a schema version, monotonically increasing unsigned
+`release_sequence`, target compatibility-set ID, target artifact-index SHA-256,
+signed-policy minimum and revocation set, `issued_at`, and `expires_at`.
+`expires_at` MUST be no more than seven days after `issued_at`. The provider
+MUST persist the highest accepted sequence and head digest before mutation,
+reject a lower sequence as `failure_class:"discovery_head_replay"`, reject a
+different digest at the same sequence as
+`failure_class:"discovery_head_equivocation"`, and reject an expired or
+not-yet-valid head as `failure_class:"discovery_head_expired"`. A newer head
+may only raise the effective minimum and add revocations under R-2.2a.
+
+A trusted coordinator recommendation remains the preferred target while an
+accepted session exists; otherwise this signed discovery head is sufficient
+update authority. This requirement supersedes the v0.1.7 R-1.2 prohibition on
+disconnected automatic application.
+
+R-1.3. Before accepting a coordinator-recommended target, the provider MUST
+validate `recommended_binary_version` against
+`^[vV]?[0-9]+\.[0-9]+\.[0-9]+$`. Missing or empty coordinator values are no
+coordinator trigger; they do not suppress SPEC-020-R001 discovery. The signed
+discovery head's target component version MUST pass the same validation.
+Malformed values MUST fail eligibility with
+`failure_class:"recommended_version_invalid"` and MUST NOT mutate autoupdate
+state. Each source value MUST be no more than 32 UTF-8 bytes, and each numeric
+component MUST be no more than 8 digits. Oversized values MUST fail eligibility with
 `failure_class:"recommended_version_invalid"` and `reason:"version_too_long"`
 or `reason:"version_component_too_long"`.
 
@@ -261,9 +286,15 @@ the same target version using
 `cooldown = min(300s * 2^(attempt-1), 3600s)`. The 3600s cap is fixed for
 v0.1.0.
 
-R-1.7. The manual `macprovider-cli update` command MAY ignore the autoupdate
-session-attempt throttle, but it MUST continue to enforce the cryptographic and
-archive safety requirements in R-2.
+**SPEC-020-R002 — Keep manual recovery independent of coordinator state.** The
+manual `macprovider-cli update` command MUST work without a live, accepted, or
+cached coordinator compatibility admission. It MAY ignore the automatic-update
+session-attempt throttle, but it MUST enforce every cryptographic, archive,
+signed compatibility-manifest, downgrade, revocation, mutation-lock, activation,
+local-health, and rollback requirement in R-2 through R-4. Explicit automatic
+update opt-out MUST NOT block this manual command. Its release discovery MUST
+use the same signed monotonic discovery head and anti-replay state as
+SPEC-020-R001.
 
 ### R-2. Safety invariants
 
@@ -473,8 +504,9 @@ transaction ID; Swift mutators and recovery observers MUST validate any such
 record rather than trusting PID reuse. All other owners remain authoritative
 through the kernel-held outer lock and their durable pending marker. An
 installer or updater MUST treat a durable pending transaction as owned until
-the exact admission commit or its recovery completes, even if the original
-writer exited. On contention, an autoupdate path MUST emit
+the exact local signed-set/health commit or its recovery completes, even if the
+original writer exited. Network-readiness observation does not extend mutation
+ownership after local commit. On contention, an autoupdate path MUST emit
 `failure_class:"autoupdate_already_pending"`; other writers MUST report
 `failure_class:"provider_mutation_pending"`. No contender may create or mutate
 a pending marker, rollback backup, or live release graph.
@@ -500,6 +532,14 @@ MUST include:
 | `release_backup_path` | string; required for v0.1.6 writers; absolute path to the complete release snapshot, no trailing slash |
 | `release_backup_sha256` | string; required with `release_backup_path`; lowercase 64-hex deterministic release-tree digest |
 | `commit_owner` | string; required for v0.1.6 writers; stable enum identifying the updater/recovery authority |
+| `target_compatibility_set_id` | string; required for v0.1.8 writers; immutable signed compatibility-set identity |
+| `target_compatibility_set_sha256` | string; required with target set ID; lowercase 64-hex digest of the signed compatibility-set manifest |
+| `previous_version` | string; required for v0.1.8 writers; normalized prior CLI component version |
+| `previous_compatibility_set_id` | string; required for v0.1.8 writers; immutable prior signed compatibility-set identity |
+| `previous_compatibility_set_sha256` | string; required with previous set ID; lowercase 64-hex digest of the prior signed compatibility-set manifest |
+| `discovery_head_sequence` | integer; required for automatic-discovery writers; accepted unsigned monotonic release sequence |
+| `discovery_head_sha256` | string; required with discovery sequence; lowercase 64-hex signed discovery-head digest |
+| `update_authority_mode` | string; required for v0.1.8 writers; `coordinator_recommendation` or `signed_release` |
 
 **`marker_deadline` semantics.** Writer: the autoupdate process at marker-write
 time. Basis: `marker_write_time + post_start_window + 5 min safety margin`.
@@ -566,28 +606,37 @@ missing or hash-mismatched, the provider or watchdog MUST emit
 because no rollback is possible, MUST disable autoupdate for the session, and
 MUST surface a structured event.
 
+**SPEC-020-R003 — Separate local update integrity from network readiness.**
+After activation, the updater MUST first decide local update success from the
+signed target identity, successful launch, and local provider health.
+Coordinator connectivity and network admission MUST be reported as a
+separate readiness result. Coordinator unavailability or rejection MUST NOT by
+itself roll a locally healthy, strictly newer signed release back to an older
+or already-rejected release. Activation, launch, self-test, local-health, or
+signed-set identity failure MUST still enter the rollback decision in R-4.11.
+Model selection, model warmth, and continuity of the prior serving model remain
+owned by SPEC-023/#612 and are not local update-commit criteria here.
+
 R-4.10a. Success-state cleanup.
 
 **Success-state cleanup sequence and crash recovery.**
 
-**Success-state cleanup sequence.** Post-start observation succeeds only when
-the new binary passes local health, reports
-`binary_version == NORMALIZED_TARGET`, and the coordinator's authenticated,
-non-redirected exact-provider readiness response reports
-`buyer_serving:true` with `catalog_admission_mode` equal to `current` or
-`previous` within the post-start window. The returned catalog release, digest,
-signer, and selected-row identity MUST equal the activated local payload. A
-WebSocket rejoin, process liveness, or local health alone is insufficient. A
-busy provider with no free inference slot MAY satisfy `buyer_serving:true`:
-serving-capable network membership, not instantaneous `RoutingEligible`, is the
-commit authority. Only then may the observer execute the following ordered
-sequence. Each step MUST complete (or its absence MUST be safely recoverable)
-before proceeding to the next:
+**Success-state cleanup sequence.** Local update observation succeeds when the
+new binary passes local health, reports `binary_version == NORMALIZED_TARGET`,
+and proves the activated signed compatibility-set identity. When an
+authenticated, non-redirected exact-provider readiness response is available,
+the updater MUST separately record whether it reports `buyer_serving:true`,
+`catalog_admission_mode:current|previous`, and the activated catalog release,
+digest, signer, and selected-row identity. A mismatch is a network-readiness
+failure and MUST remain visible, but it is not local release-integrity failure.
+A busy provider with no free slot MAY satisfy network readiness. After local
+success, the observer executes the following ordered sequence. Each step MUST
+complete, or its absence MUST be safely recoverable, before the next:
 
 1. **Write success sentinel.** Atomically create
    `<binary-dir>/.macprovider-cli.success-<update_id>` with
    `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, containing the JSON
-   `{"update_id":"<uuid>","binary_version":"<NORMALIZED_TARGET>","success_at":"<RFC3339>"}`.
+   `{"update_id":"<uuid>","binary_version":"<NORMALIZED_TARGET>","target_compatibility_set_id":"<set-id>","target_compatibility_set_sha256":"<64-hex>","success_at":"<RFC3339>"}`.
    `fsync()` the file and parent directory, then atomic rename to final name.
 2. **Unlink `pending.json`** via `unlink()`.
 3. **Delete rollback backup** at
@@ -601,16 +650,19 @@ before proceeding to the next:
 handshake), the observer MUST scan for a success sentinel:
 
 - If `<binary-dir>/.macprovider-cli.success-<update_id>` exists AND its
-  embedded `binary_version` matches the current
-  `CoordinatorClient.binaryVersion`: this is a delayed success cleanup path.
+  embedded `binary_version`, `target_compatibility_set_id`, and
+  `target_compatibility_set_sha256` match the current binary component version
+  and the reverified local signed compatibility-set manifest: this is a delayed
+  success cleanup path.
   The observer MUST unlink any matching `pending.json` (without triggering
   orphan recovery), delete any matching rollback backup, release any held
   inner `update.lock` and outer `install.lock`, then delete the success sentinel.
   Treat as
   `outcome:"success"`, NOT as orphan recovery.
-- If a success sentinel exists but its `binary_version` does NOT match the
-  current binary: emit `failure_class:"orphaned_success_sentinel"`, delete the
-  sentinel, continue.
+- If a success sentinel exists but any bound binary/set field does not match,
+  or the local set cannot be reverified, emit
+  `failure_class:"orphaned_success_sentinel"`, retain `pending.json` and the
+  rollback backup for recovery, delete only the invalid sentinel, and continue.
 - If `pending.json` is absent BUT a rollback backup exists with a stale
   `update_id` (no matching pending marker), delete the backup without
   attempting restore.
@@ -618,26 +670,36 @@ handshake), the observer MUST scan for a success sentinel:
 v0.1.0 deletes the rollback backup on success. Multi-version rollback
 retention is deferred to v0.3.0.
 
-R-4.11. If the new binary crashes, fails to start, fails local health, or fails
-to obtain the R-4.10a coordinator-authoritative buyer-serving verdict within
-60 seconds of the new process start, the watchdog MUST roll back the complete
-payload by restoring the preserved prior release and restarting the
-LaunchAgent. Each trigger maps to exactly one failure class:
+R-4.11. If the new binary crashes, fails to start, fails local provider health,
+or fails exact signed-set identity verification within 60 seconds of the new
+process start, the provider health monitor MUST evaluate the preserved prior
+release's signed compatibility-set ID/digest and CLI component version against
+the preserved rollback record, then evaluate it against
+`effective_minimum_safe_binary_version` and
+`effective_revoked_binary_versions` before restoration. If the prior release is
+allowed, the monitor restores the complete payload and restarts the LaunchAgent.
+If the prior release is revoked or below the effective minimum, the monitor
+MUST NOT restore or restart it; it MUST stop the failed target, retain the
+validated recovery material and pending marker, emit
+`failure_class:"rollback_target_disallowed"`, and require the separately
+authorized emergency recovery path. Each trigger maps to exactly one failure
+class:
 
 - `post_start_crash`: the new binary fails to start or exits within the
   post-start window.
 - `post_start_health_failed`: the new binary started but local health check
   (e.g., `/healthz` probe) failed within the post-start window.
-- `post_start_rejoin_timeout`: the new binary did not obtain an authoritative
-  readiness response for the exact provider within the post-start window.
-- `post_start_not_buyer_serving`: the coordinator answered authoritatively but
-  did not report `buyer_serving:true`, did not admit `current|previous`, or
-  returned catalog identity fields different from the activated payload.
+- `post_start_network_unavailable`: local activation succeeded but no
+  authoritative readiness response arrived; report without rollback.
+- `post_start_network_not_ready`: local activation succeeded but the
+  coordinator did not report current/previous network readiness or returned
+  different catalog identity; report without rollback.
 
 R-4.12. After watchdog rollback, autoupdate MUST be disabled for the rest of the
 provider session and the provider MUST emit a structured rollback failure event.
 The next provider process start MAY re-enable autoupdate unless disabled by
-configuration or cooldown state.
+configuration or cooldown state. A `rollback_target_disallowed` stop remains
+fenced across restart until emergency recovery supplies an allowed signed set.
 
 ### R-5. Opt-out
 
@@ -707,7 +769,9 @@ R-6.5. `failure_class` MUST be one of:
 `release_payload_incomplete`, `self_test_failed`, `drain_timeout`,
 `trust_state_lost`,
 `post_start_crash`, `post_start_health_failed`,
-`post_start_rejoin_timeout`, `post_start_not_buyer_serving`,
+`post_start_network_unavailable`, `post_start_network_not_ready`,
+`rollback_target_disallowed`, `discovery_head_replay`,
+`discovery_head_equivocation`, `discovery_head_expired`,
 `insufficient_disk_space`,
 `event_payload_too_large`, `other`.
 
@@ -723,15 +787,16 @@ autoupdate state, including `enabled`, `last_event`, `cooldown_until`, and
 
 ## Acceptance criteria
 
-AC-V0.1-1. End-to-end autoupdate: given a running provider at version `N` and a
-trusted coordinator auth payload advertising `recommended_binary_version: N+1`,
-the provider detects the target, resolves the matching GitHub release by tag,
+AC-V0.1-1. End-to-end autoupdate: given a running provider at version `N` and
+either a trusted coordinator recommendation or disconnected signed-release
+discovery identifying `N+1`, the provider detects the target, resolves the
+matching GitHub release,
 downloads the `darwin-arm64` tarball plus checksum assets, verifies signature
 and checksum, validates the complete manifest-bound binary-plus-catalog payload,
 runs `self-test`, drains to zero in-flight requests, preserves the prior release,
 atomically writes the pending marker, atomically swaps, restarts through
-launchd, and receives the exact coordinator-authoritative current-or-previous
-buyer-serving verdict before reporting success at `binary_version: N+1`.
+launchd, proves local signed-set and runtime health, and reports network
+readiness separately at `binary_version: N+1`.
 
 AC-V0.1-2. Downgrade rejected: given current version `N` and coordinator
 recommendation `< N`, the provider emits a no-op event, does not download
@@ -772,25 +837,26 @@ opt-out event and optional notify-only message, but no download, drain, swap,
 or restart occurs.
 
 AC-V0.1-10. Post-swap rollback classification: given a new binary that fails to
-start or exits within 60 seconds, the watchdog restores the prior release and
-emits `failure_class:"post_start_crash"`. Given a new binary that starts but
-fails local health within the post-start window, the watchdog restores and
-emits `failure_class:"post_start_health_failed"`. Given no authoritative
-readiness answer within the post-start window, the watchdog restores and emits
-`failure_class:"post_start_rejoin_timeout"`; given an authoritative answer that
-is not exact current-or-previous buyer serving, it restores and emits
-`failure_class:"post_start_not_buyer_serving"`. In all cases rollback uses the
-pending marker only after `lstat` checks and binary plus release-tree SHA-256
-verification, restarts the LaunchAgent, disables autoupdate for the rest of the
-session, and surfaces a structured rollback event.
+start or exits within 60 seconds, the provider health monitor emits
+`failure_class:"post_start_crash"`. Given a new binary that starts but fails
+local provider health or exact signed-set verification, it emits
+`failure_class:"post_start_health_failed"`. An allowed prior release is restored
+only after `lstat`, complete-release digest, minimum-version, and revocation
+checks. A revoked or below-minimum prior release is not restarted and emits
+`rollback_target_disallowed`. Given no authoritative readiness answer, the
+monitor records `post_start_network_unavailable` without rollback; given an
+authoritative answer that is not current-or-previous network-ready, it records
+`post_start_network_not_ready` without rollback.
 
 AC-V0.1-11. Coordinator-visible observability: after each major decision point,
 the next heartbeat or state update includes `last_autoupdate_event` with a
 bounded structured object reflecting the latest phase and outcome.
 
-AC-V0.1-12. Manual update compatibility: `macprovider-cli update` continues to
-perform the existing cryptographic validation and self-test path, and opt-out
-configuration does not prevent a manual operator update.
+AC-V0.1-12. Manual update recovery: with the coordinator unreachable or
+rejecting the installed version, `macprovider-cli update` discovers and
+installs a strictly newer signed release using its signed compatibility
+manifest without fresh or cached coordinator admission. Opt-out configuration
+does not prevent the manual update.
 
 AC-V0.1-13. Untrusted recommendation remains notify-only: given legacy
 hello_ack-only, unauthenticated, a notify-only provisional sub-state
@@ -870,18 +936,25 @@ outer durable owner record, treats only a live advisory lock holder or a
 durable pending transaction as contention, and creates marker and backup temp
 files with `O_CREAT|O_EXCL|O_NOFOLLOW`.
 
-AC-V0.1-22. Live trust-state loss aborts autoupdate: provider becomes eligible
-at v2 `auth_response`, begins download, and then the encrypted leg is
-invalidated mid-download. No swap occurs; the provider emits
+AC-V0.1-22. Coordinator recommendation trust loss: provider becomes eligible at
+v2 `auth_response`, begins resolving the recommendation, and then the encrypted
+leg is invalidated before the signed discovery head and target index are
+accepted. No coordinator-triggered swap occurs; the provider emits
 `failure_class:"trust_state_lost"` with reason
 `encrypted_leg_invalidated`, cleans up partial state, and refuses autoupdate
-for the remainder of the session.
+from that recommendation for the remainder of the session. The independent
+signed-release loop remains eligible. If the same disconnect occurs after the
+signed metadata transition, the local transaction continues and records
+network readiness separately.
 
 AC-V0.1-23. Success-state cleanup. Post-start success completes the ordered
 cleanup sequence. Subsequent provider startup finds no orphan state, emits no
 rollback events, and reports `outcome:"success"` (or `outcome:"noop"` if
-cleanup completed during the prior session). Crash between any pair of steps
-1–5 is recoverable on next startup without rollback of the successful update.
+cleanup completed during the prior session). The success sentinel binds the
+target CLI component version plus exact compatibility-set ID and manifest
+digest; crash recovery reverifies all three before deleting pending/rollback
+state. Crash between any pair of steps 1–5 is recoverable on next startup
+without rollback of the successful update.
 
 AC-V0.1-24. Complete release payload: a candidate archive whose executable is
 correctly signed but whose manifest-bound catalog sidecar is absent or whose
@@ -890,19 +963,22 @@ catalog digest belongs to the previous release fails before drain with
 changed. Activation and forced rollback tests prove executable, manifest,
 catalog bytes, sidecars, and keyring move together.
 
-AC-V0.1-25. Coordinator-authoritative commit: local health and WebSocket rejoin
-alone do not clear `pending.json`. Success is committed only after the exact
-provider's authenticated `details=readiness` response reports
-`buyer_serving:true`, `catalog_admission_mode:current|previous`, and the exact
-activated release/digest/signer/row identity. An authoritative mismatch rolls
-back with `post_start_not_buyer_serving`; timeout remains
-`post_start_rejoin_timeout`.
+AC-V0.1-25. Split local and network commit: local success clears the update
+transaction only after the running binary reports the target version, the
+activated signed compatibility-set identity matches, and local provider health
+passes. The exact provider's authenticated `details=readiness` response,
+when available, separately records `buyer_serving`,
+`catalog_admission_mode:current|previous`, and the release/digest/signer/row
+identity. A timeout records `post_start_network_unavailable`; an authoritative
+mismatch records `post_start_network_not_ready`. Neither network-only result
+rolls a locally healthy strictly newer signed release back.
 
-AC-V0.1-26. Busy capacity is serving capacity: an admitted exact provider in
-the coordinator's busy state with zero free slots reports
-`buyer_serving:true` and can commit an update even though it is not immediately
-`RoutingEligible`. A degraded, draining, legacy, incompatible, or sanctioned
-provider reports `buyer_serving:false` and cannot commit.
+AC-V0.1-26. Busy capacity is network-ready capacity: an admitted exact provider
+in the coordinator's busy state with zero free slots reports
+`buyer_serving:true` even though it is not immediately `RoutingEligible`. A
+degraded, draining, legacy, incompatible, or sanctioned provider reports
+`buyer_serving:false` and cannot satisfy network readiness, but that result does
+not prevent or undo an independently proven local signed-set/health commit.
 
 AC-V0.1-27. Shared mutation ownership: installer, manual update, coordinator
 autoupdate, Malibu, watchdog, and both recovery paths contend on the same outer
@@ -912,6 +988,19 @@ the fixed outer-then-inner order, live-owner refusal, stale-file recovery,
 installer-record PID-reuse/start-identity rejection, boot-change recovery,
 pending-transaction fencing, reverse-order release, and SIGKILL recovery
 without mixed release components or deadlock.
+
+AC-V0.1-28. Signed discovery replay resistance: after accepting discovery head
+sequence `N` and digest `D`, a lower sequence is rejected with
+`discovery_head_replay`, a different digest at sequence `N` is rejected with
+`discovery_head_equivocation`, and an expired head is rejected with
+`discovery_head_expired`. No rejected head causes download, drain, marker
+creation, or mutation.
+
+AC-V0.1-29. Revoked rollback target remains stopped: when local target health
+fails but the preserved prior release is below the effective signed minimum or
+revoked, recovery emits `rollback_target_disallowed`, restarts neither release,
+retains fenced recovery material, and requires an independently authorized
+emergency recovery target.
 
 ## Threat model
 
@@ -926,9 +1015,11 @@ machines.
 
 T-2. Attacker MITMs GitHub Releases responses or asset downloads. HTTPS,
 GitHub-host validation, signed checksums, SHA-256 tarball verification, and
-archive validation defend against response substitution, asset URL hijack, and
-tarball tampering. Residual risk: the attacker can cause denial of update by
-blocking or corrupting responses.
+archive validation defend against asset substitution, URL hijack, and tarball
+tampering. The signed, expiring monotonic discovery head plus persisted highest
+sequence prevents mutable-listing replay and equivocation after a trusted
+checkpoint. Residual risk: the attacker can cause denial of update by blocking
+or corrupting responses.
 
 T-3. Attacker controls the coordinator and lies about
 `recommended_binary_version`. The coordinator cannot make the provider install
@@ -977,13 +1068,14 @@ known revoked after signing. Downgrade refusal alone does not block this if the
 historical release is still semantically newer than the running binary.
 `effective_minimum_safe_binary_version` and
 `effective_revoked_binary_versions` defend against signed historical-release
-replay only once a non-empty local baseline exists; v0.1.0 empty defaults are a
-hook, NOT active protection until such a baseline ships. Ordinary coordinator
+replay, while the signed expiring discovery head rejects stale discovery state
+and persists the highest accepted sequence/digest. Ordinary coordinator
 recommendations MUST NOT lower the effective floor or remove versions from the
 effective revoked set. The persisted monotonic signed-policy invariant also
-protects against attacker-controlled signed releases attempting to
+protects against attacker-controlled release listings attempting to
 retroactively clear revocations or lower previously observed signed-policy
-minimums.
+minimums. A provider with no prior checkpoint still requires a currently valid
+signed head; its bounded validity window is the bootstrap freshness limit.
 
 ## Open questions
 
@@ -991,8 +1083,8 @@ Q-1. Should autoupdate respect a quiet window, such as avoiding local
 09:00-18:00, or should it always update immediately on detection after drain?
 
 Q-2. Should the complete prior-release backup be retained after a successful
-admission commit across reboots and arbitrary process restarts, or is the
-single pending-update observation window enough?
+local signed-set/health commit across reboots and arbitrary process restarts,
+or is the single pending-update observation window enough?
 
 Q-3. When the coordinator advertises a version and GitHub does not yet have a
 matching release, should the provider silently retry with backoff, or should it
@@ -1007,8 +1099,8 @@ Deferred to v0.2.0:
 
 - Per-machine randomized stagger to avoid a whole fleet draining at once.
 - Canary cohorts, staged rollout percentages, and prerelease channel opt-in.
-- A custom release feed or signed update manifest independent of GitHub
-  Releases `latest`.
+- A custom transport for the mandatory signed monotonic discovery head and
+  compatibility artifact index, independent of GitHub Releases hosting.
 - Coordinator UI/API aggregation for fleet-wide autoupdate status beyond the
   provider-sent `last_autoupdate_event`.
 
@@ -1017,11 +1109,22 @@ Deferred to v0.3.0 or later:
 - Rollback retention beyond one prior complete release.
 - Multi-architecture update selection.
 - Quiet-window policy, if Q-1 resolves in favor of time-windowed updates.
-- An authenticated synthetic buyer request as a stronger proof beyond local
-  health plus coordinator-authoritative current-or-previous buyer serving.
+- An authenticated synthetic buyer request as optional network-readiness
+  evidence beyond local update integrity.
 
 ## Change log
 
+- v0.1.8 (2026-07-17): Reconciled the `provider-autoupdate` authority against
+  #610. A signed expiring monotonic discovery head plus exact artifact index and
+  compatibility manifest are the update authority; live or cached coordinator
+  admission is not required for manual recovery or default disconnected
+  discovery. Local signed-set/launch/provider-health success is distinct from
+  network readiness. Pending and success markers bind the exact target set,
+  while rollback refuses a prior set that is revoked or below the effective
+  minimum. SPEC-025 v0.18 consumes this split instead of repeating the prior
+  admission-commit gate. The implementation remains nonconformant and requires
+  code plus physical disconnected/rejected-provider evidence. #612, #616, and
+  #617 remain separate authority-domain reconciliations.
 - v0.1.7 (2026-07-15, runbook item 23): Closed the tokenless race-loser residual
   (the "Tokenless race-loser corner" note above). The coordinator propagates its
   admission verdict via the OPTIONAL `auth_state` ack field — wire shape/domain
