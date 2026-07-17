@@ -66,10 +66,10 @@ using the format in `TEMPLATE.md`; later mentions are references. Moving text
 does not change its ID. Deleted or superseded IDs remain reserved and their
 history is retained. Existing clauses without canonical IDs are tracked as
 pending migration gaps in `CONFORMANCE.json`; no wildcard mapping is allowed.
-Each pending spec carries a frozen fingerprint and count of its legacy
-unnumbered normative lines. A changed/new legacy obligation fails validation;
-the affected clauses must be migrated to stable IDs rather than refreshing the
-baseline.
+Existing clauses without stable IDs remain explicit pending gaps in
+`CONFORMANCE.json`. The foundation does not infer which prose is normative; a
+later reconciliation PR migrates requirements into structured IDs and mappings
+before claiming conformance.
 
 Canonical SPEC IDs, stable requirement IDs, and authority-domain IDs are
 append-only identities. The trusted base manifest/spec corpus is the tombstone
@@ -148,18 +148,37 @@ spec-governance:
   contract-change: none
 ```
 
-The declaration block precedes any `<details>` disclosure markup in the PR
-body. The validator rejects a later declaration rather than attempting to
-infer whether presentation-layer disclosure content is open or closed.
+Every PR body contains exactly one raw, marker-delimited JSON declaration:
 
-Use `contract-change: yes` whenever the canonical contract paths above change,
-even when product behavior remains unchanged. For a behavior change, use
-`behavior-change: yes` and add non-empty `specs:`, `requirements:`,
-`authority-domains:`, `arbitration:`, `tests:`, and `journeys:` lines
-(`journeys: not-required` is explicit for a non-physical change). IDs must
-resolve in the tracked manifests. CI compares the declaration to the
-base-to-head diff on every pull request; `behavior-change: none` is accepted
-only for the governance/documentation allowlist.
+```text
+SPEC-GOVERNANCE-DECLARATION-BEGIN
+{
+  "schema_version": "spec-pr-governance-v1",
+  "behavior_change": "none",
+  "contract_change": "none",
+  "specs": [],
+  "requirements": [],
+  "authority_domains": [],
+  "arbitration": [],
+  "tests": [],
+  "journeys": []
+}
+SPEC-GOVERNANCE-DECLARATION-END
+```
+
+Use `"contract_change": "yes"` whenever canonical SPEC bodies,
+`AUTHORITY.json`, or `CONFORMANCE.json` change, even when product behavior
+remains unchanged. For a behavior change, use `"behavior_change": "yes"` and
+fill non-empty `specs`, `arbitration`, `tests`, and `journeys` arrays
+(`"not-required"` is explicit for a non-physical journey). SPEC IDs,
+requirement IDs, and authority-domain IDs must resolve in the tracked
+manifests. CI compares the declaration to the base-to-head diff on every pull
+request; `"behavior_change": "none"` is accepted only for the
+governance/documentation allowlist.
+
+The declaration boundary is not Markdown. The validator reads the raw bytes
+between the exact markers and parses them as JSON; it does not evaluate fenced
+code, comments, disclosure blocks, rendered links, or other prose semantics.
 
 ## Reconciliation workflow
 

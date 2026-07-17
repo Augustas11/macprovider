@@ -1,45 +1,41 @@
 #!/usr/bin/env python3
-"""Require an explicit SPEC-governance declaration on every pull request."""
+"""Require a structured SPEC governance declaration on pull requests."""
 
 from __future__ import annotations
 
 import argparse
-from html.parser import HTMLParser
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 try:
     from scripts.check_spec_governance import (
         DOMAIN_RE,
-        JOURNEY_RE,
+        ISSUE_RE,
         REQUIREMENT_ID_RE,
-        SENSITIVE_PHYSICAL_DOMAINS,
         SPEC_ID_RE,
         VERDICTS,
-        _contract_markdown,
-        _inline_link_labels,
+        _load_json,
+        ValidationResult,
     )
-except ModuleNotFoundError:  # Direct execution sets sys.path[0] to scripts/.
+except ModuleNotFoundError:
     from check_spec_governance import (
         DOMAIN_RE,
-        JOURNEY_RE,
+        ISSUE_RE,
         REQUIREMENT_ID_RE,
-        SENSITIVE_PHYSICAL_DOMAINS,
         SPEC_ID_RE,
         VERDICTS,
-        _contract_markdown,
-        _inline_link_labels,
+        _load_json,
+        ValidationResult,
     )
 
 
-FIELD_RE = re.compile(
-    r"^ {0,3}(behavior-change|contract-change|specs|requirements|"
-    r"authority-domains|arbitration|tests|journeys)\s*:\s*(.*?)\s*$",
-    re.IGNORECASE,
-)
+BEGIN = "SPEC-GOVERNANCE-DECLARATION-BEGIN"
+END = "SPEC-GOVERNANCE-DECLARATION-END"
+SCHEMA_VERSION = "spec-pr-governance-v1"
 CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
@@ -51,268 +47,215 @@ GOVERNANCE_ONLY_PATHS = (
     "scripts/check_spec_governance.py",
     "scripts/check_spec_pr_declaration.py",
     "scripts/gen_spec_index.py",
-    "scripts/tests/__init__.py",
-    "scripts/tests/fixtures/spec_governance/",
-    "scripts/tests/test_spec_governance.py",
-    "scripts/tests/test_spec_pr_declaration.py",
+    "scripts/tests/",
     "specs/",
 )
 
 
-def _values(raw: str) -> list[str]:
-    return [item for item in re.split(r"[\s,]+", raw.strip()) if item]
-
-
-def _declaration_marker(lines: list[str]) -> int | None:
-    for index, line in enumerate(lines):
-        if re.fullmatch(r" {0,3}spec-governance:", line, re.IGNORECASE):
-            return index
-    return None
-
-
-class _DetailsOpeningParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.found = False
-
-    def handle_starttag(
-        self,
-        tag: str,
-        attrs: list[tuple[str, str | None]],
-    ) -> None:
-        if (
-            tag.lower() == "details"
-            or _has_unquoted_details_fragment(self.get_starttag_text())
-        ):
-            self.found = True
-
-    def handle_startendtag(
-        self,
-        tag: str,
-        attrs: list[tuple[str, str | None]],
-    ) -> None:
-        if (
-            tag.lower() == "details"
-            or _has_unquoted_details_fragment(self.get_starttag_text())
-        ):
-            self.found = True
-
-
-def _has_unquoted_details_fragment(text: str) -> bool:
-    quote: str | None = None
-    cursor = 1
-    while cursor < len(text):
-        character = text[cursor]
-        if quote is not None:
-            if character == quote:
-                quote = None
-            cursor += 1
-            continue
-        if character in {'"', "'"}:
-            quote = character
-            cursor += 1
-            continue
-        if text[cursor:cursor + 8].casefold() == "<details":
-            return True
-        cursor += 1
-    return False
-
-
-def _mask_escaped_angle_brackets(text: str) -> str:
-    masked: list[str] = []
-    for index, character in enumerate(text):
-        if character != "<":
-            masked.append(character)
-            continue
-        backslashes = 0
-        cursor = index - 1
-        while cursor >= 0 and text[cursor] == "\\":
-            backslashes += 1
-            cursor -= 1
-        masked.append("&lt;" if backslashes % 2 else "<")
-    return "".join(masked)
-
-
-def _inside_details_markup(lines: list[str], marker: int) -> bool:
-    candidate = "\n".join(lines[:marker])
-    if re.search(r"(?im)^ {0,3}<details[ \t]*$", candidate):
-        return True
-    parser = _DetailsOpeningParser()
-    parser.feed(
-        _mask_escaped_angle_brackets(
-            _inline_link_labels(candidate),
-        ),
-    )
-    parser.close()
-    return parser.found
-
-
-def _manifest_ids(root: Path) -> tuple[set[str], set[str], set[str]]:
-    try:
-        conformance = json.loads((root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
-        authority = json.loads((root / "specs" / "AUTHORITY.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return set(), set(), set()
-    specs = {item.get("spec_id") for item in conformance.get("specs", []) if isinstance(item, dict)}
-    requirements = {item.get("requirement_id") for item in conformance.get("requirements", []) if isinstance(item, dict)}
-    domains = {item.get("id") for item in authority.get("domains", []) if isinstance(item, dict)}
-    return ({item for item in specs if isinstance(item, str)},
-            {item for item in requirements if isinstance(item, str)},
-            {item for item in domains if isinstance(item, str)})
-
-
 def _governance_only(path: str) -> bool:
-    return any(path == allowed or (allowed.endswith("/") and path.startswith(allowed)) or
-               (allowed.endswith("-") and path.startswith(allowed)) for allowed in GOVERNANCE_ONLY_PATHS)
+    return any(
+        path == allowed
+        or (allowed.endswith("/") and path.startswith(allowed))
+        or (allowed.endswith("-") and path.startswith(allowed))
+        for allowed in GOVERNANCE_ONLY_PATHS
+    )
 
 
 def _contract_path(path: str) -> bool:
     return path in CONTRACT_PATHS or bool(CANONICAL_SPEC_PATH_RE.fullmatch(path))
 
 
-def validate_body(body: str, root: Path | None = None, changed_paths: list[str] | None = None) -> list[str]:
+def _extract_declaration(body: str) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
-    lines = _contract_markdown(body).splitlines()
-    marker = _declaration_marker(lines)
-    if marker is None:
-        return ["missing 'spec-governance:' declaration block"]
-    details_lines = _contract_markdown(
-        body,
-        preserve_raw_html=True,
-    ).splitlines()
-    if _inside_details_markup(details_lines, marker):
-        return ["missing top-level 'spec-governance:' declaration block"]
-    fields: dict[str, str] = {}
-    for line in lines[marker + 1:]:
-        if line.strip().startswith("#") or (not line.strip() and fields):
-            break
-        match = FIELD_RE.match(line)
-        if match:
-            field_name = match.group(1).lower()
-            if field_name in fields:
-                errors.append(
-                    f"duplicate spec-governance field {field_name!r}",
-                )
-            else:
-                fields[field_name] = match.group(2)
-        elif line.strip():
-            break
-    behavior = fields.get("behavior-change")
+    begin_count = body.count(BEGIN)
+    end_count = body.count(END)
+    if begin_count != 1 or end_count != 1:
+        return None, [f"PR body must contain exactly one {BEGIN}/{END} declaration"]
+    start = body.index(BEGIN) + len(BEGIN)
+    stop = body.index(END)
+    if stop <= start:
+        return None, ["declaration end marker must follow begin marker"]
+    payload = body[start:stop].strip()
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        return None, [f"declaration JSON is invalid: {exc}"]
+    if not isinstance(value, dict):
+        return None, ["declaration JSON must be an object"]
+    return value, errors
+
+
+def _string_array(value: Any, field: str, errors: list[str], pattern: re.Pattern[str] | None = None) -> list[str]:
+    if not isinstance(value, list):
+        errors.append(f"{field} must be an array")
+        return []
+    output: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item:
+            errors.append(f"{field}[{index}] must be a non-empty string")
+            continue
+        if pattern is not None and not pattern.fullmatch(item):
+            errors.append(f"{field}[{index}] has invalid value {item!r}")
+            continue
+        if item in seen:
+            errors.append(f"{field}[{index}] duplicates {item!r}")
+        seen.add(item)
+        output.append(item)
+    return output
+
+
+def _manifest_ids(root: Path) -> tuple[set[str], set[str], set[str]]:
+    result = ValidationResult()
+    conformance = _load_json(root / "specs" / "CONFORMANCE.json", result)
+    authority = _load_json(root / "specs" / "AUTHORITY.json", result)
+    if result.errors or not isinstance(conformance, dict) or not isinstance(authority, dict):
+        return set(), set(), set()
+    specs = {
+        item.get("spec_id")
+        for item in conformance.get("specs", [])
+        if isinstance(item, dict) and isinstance(item.get("spec_id"), str)
+    }
+    requirements = {
+        item.get("requirement_id")
+        for item in conformance.get("requirements", [])
+        if isinstance(item, dict) and isinstance(item.get("requirement_id"), str)
+    }
+    domains = {
+        item.get("id")
+        for item in authority.get("domains", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    return specs, requirements, domains
+
+
+def validate_body(
+    body: str,
+    root: Path | None = None,
+    changed_paths: list[str] | None = None,
+) -> list[str]:
+    declaration, errors = _extract_declaration(body)
+    if declaration is None:
+        return errors
+    required = {
+        "schema_version",
+        "behavior_change",
+        "contract_change",
+        "specs",
+        "requirements",
+        "authority_domains",
+        "arbitration",
+        "tests",
+        "journeys",
+    }
+    allowed = required | {"issue"}
+    for field in sorted(required - declaration.keys()):
+        errors.append(f"declaration missing required field {field!r}")
+    for field in sorted(declaration.keys() - allowed):
+        errors.append(f"declaration has unexpected field {field!r}")
+    if declaration.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"schema_version must be {SCHEMA_VERSION!r}")
+
+    behavior = declaration.get("behavior_change")
+    contract = declaration.get("contract_change")
     if behavior not in {"none", "yes"}:
-        errors.append("behavior-change must be exactly 'none' or 'yes'")
-        return errors
-    contract_change = fields.get("contract-change")
-    if contract_change is not None and contract_change not in {"none", "yes"}:
-        errors.append("contract-change must be exactly 'none' or 'yes'")
-    changed_contract_paths = [path for path in changed_paths or [] if _contract_path(path)]
-    if changed_contract_paths and contract_change != "yes":
-        errors.append(
-            "contract-change must be 'yes' when canonical SPEC bodies, AUTHORITY.json, "
-            "or CONFORMANCE.json change"
-        )
+        errors.append("behavior_change must be exactly 'none' or 'yes'")
+    if contract not in {"none", "yes"}:
+        errors.append("contract_change must be exactly 'none' or 'yes'")
+    if "issue" in declaration and (
+        not isinstance(declaration["issue"], str)
+        or not ISSUE_RE.fullmatch(declaration["issue"])
+    ):
+        errors.append("issue must be an Augustas11/macprovider issue URL")
+
+    specs = _string_array(declaration.get("specs"), "specs", errors, SPEC_ID_RE)
+    requirements = _string_array(
+        declaration.get("requirements"),
+        "requirements",
+        errors,
+        REQUIREMENT_ID_RE,
+    )
+    domains = _string_array(
+        declaration.get("authority_domains"),
+        "authority_domains",
+        errors,
+        DOMAIN_RE,
+    )
+    arbitration = _string_array(declaration.get("arbitration"), "arbitration", errors)
+    tests = _string_array(declaration.get("tests"), "tests", errors)
+    journeys = _string_array(declaration.get("journeys"), "journeys", errors)
+
+    changed = changed_paths or []
+    if any(_contract_path(path) for path in changed) and contract != "yes":
+        errors.append("contract_change must be 'yes' when canonical SPECs or governance manifests change")
     if behavior == "none":
-        for path in changed_paths or []:
+        for path in changed:
             if not _governance_only(path):
-                errors.append(f"behavior-change none is invalid for non-governance path {path!r}")
-        return errors
-    required = {"specs", "requirements", "authority-domains", "arbitration", "tests", "journeys"}
-    for field in sorted(required - fields.keys()):
-        errors.append(f"behavior-change yes requires '{field}:'")
-    specs = _values(fields.get("specs", ""))
-    requirements = _values(fields.get("requirements", ""))
-    domains = _values(fields.get("authority-domains", ""))
-    verdicts = _values(fields.get("arbitration", ""))
-    tests = _values(fields.get("tests", ""))
-    journeys = _values(fields.get("journeys", ""))
-    if not specs:
-        errors.append("specs must list at least one SPEC-NNN")
-    if not requirements:
-        errors.append("requirements must list at least one SPEC-NNN-RNNN")
-    if not domains:
-        errors.append("authority-domains must list at least one domain")
-    if not verdicts:
-        errors.append("arbitration must list at least one verdict")
-    if not tests:
-        errors.append("tests must list at least one test mapping")
-    if not journeys:
-        errors.append("journeys must list journey IDs or 'not-required'")
-    known_specs, known_requirements, known_domains = _manifest_ids(root) if root else (set(), set(), set())
-    for value in specs:
-        if not SPEC_ID_RE.fullmatch(value):
-            errors.append(f"invalid spec ID {value!r}")
-        elif root and value not in known_specs:
-            errors.append(f"unknown spec ID {value!r}")
-    for value in requirements:
-        if not REQUIREMENT_ID_RE.fullmatch(value):
-            errors.append(f"invalid requirement ID {value!r}")
-        elif root and value not in known_requirements:
-            errors.append(f"unknown requirement ID {value!r}")
-    for value in domains:
-        if not DOMAIN_RE.fullmatch(value):
-            errors.append(f"invalid authority domain {value!r}")
-        elif root and value not in known_domains:
-            errors.append(f"unknown authority domain {value!r}")
-    for value in verdicts:
-        if value not in VERDICTS:
-            errors.append(f"invalid arbitration verdict {value!r}")
-    for value in journeys:
-        if value != "not-required" and not JOURNEY_RE.fullmatch(value):
-            errors.append(f"invalid journey declaration {value!r}")
-        elif root and value != "not-required":
-            journey_root = (root / "journeys").resolve()
-            journey_path = (journey_root / f"{value}.md").resolve()
-            if journey_path.parent != journey_root or not journey_path.is_file():
-                errors.append(f"unknown journey ID {value!r}")
-    if "not-required" in journeys and any(domain in SENSITIVE_PHYSICAL_DOMAINS for domain in domains):
-        errors.append("journeys: not-required is forbidden for sensitive authority domains")
-    if root:
-        for value in tests:
-            if "::" not in value:
-                errors.append(f"test mapping requires path::selector: {value!r}")
-                continue
-            relative, selector = value.split("::", 1)
-            path = (root / relative).resolve()
-            try:
-                normalized = path.relative_to(root).as_posix()
-            except ValueError:
-                errors.append(f"test mapping escapes repository: {value!r}")
-                continue
-            if not path.is_file() or "test" not in Path(normalized).name.lower():
-                errors.append(f"test mapping does not resolve to a test file: {value!r}")
-            elif not selector or selector not in path.read_text(encoding="utf-8"):
-                errors.append(f"test mapping selector does not resolve: {value!r}")
+                errors.append(f"behavior_change none is invalid for non-governance path {path!r}")
+    if behavior == "yes":
+        if not specs:
+            errors.append("behavior_change yes requires at least one spec")
+        if not arbitration:
+            errors.append("behavior_change yes requires at least one arbitration verdict")
+        if not tests:
+            errors.append("behavior_change yes requires tests")
+        if not journeys:
+            errors.append("behavior_change yes requires journeys or 'not-required'")
+    for verdict in arbitration:
+        if verdict not in VERDICTS:
+            errors.append(f"unknown arbitration verdict {verdict!r}")
+
+    if root is not None:
+        known_specs, known_requirements, known_domains = _manifest_ids(root)
+        for spec in specs:
+            if spec not in known_specs:
+                errors.append(f"unknown spec {spec!r}")
+        for requirement in requirements:
+            if requirement not in known_requirements:
+                errors.append(f"unknown requirement {requirement!r}")
+        for domain in domains:
+            if domain not in known_domains:
+                errors.append(f"unknown authority domain {domain!r}")
     return errors
+
+
+def _changed_paths(base: str | None, head: str | None) -> list[str]:
+    if not base or not head:
+        return []
+    completed = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}..{head}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or "git diff failed")
+    return [line for line in completed.stdout.splitlines() if line]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--event", type=Path, required=True, help="GitHub event JSON")
-    parser.add_argument("--base", required=True, help="base commit SHA")
-    parser.add_argument("--head", default="HEAD", help="head commit SHA")
+    parser.add_argument("--event", required=True, help="GitHub pull_request event JSON")
+    parser.add_argument("--base", default=None, help="base commit SHA")
+    parser.add_argument("--head", default=None, help="head commit SHA")
+    parser.add_argument("--root", default=".", help="repository root")
     args = parser.parse_args(argv)
+
+    event = json.loads(Path(args.event).read_text(encoding="utf-8"))
+    body = ((event.get("pull_request") or {}).get("body") or "")
     try:
-        event = json.loads(args.event.read_text(encoding="utf-8"))
-        body = event["pull_request"].get("body") or ""
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        print(f"invalid pull-request event: {exc}", file=sys.stderr)
+        changed = _changed_paths(args.base, args.head)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    changed = subprocess.run(
-        ["git", "diff", "--name-only", f"{args.base}...{args.head}"],
-        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
-    )
-    if changed.returncode:
-        print(f"cannot inspect pull-request diff: {changed.stderr.strip()}", file=sys.stderr)
-        return 1
-    root = Path(__file__).resolve().parents[1]
-    errors = validate_body(body, root=root, changed_paths=changed.stdout.splitlines())
+    errors = validate_body(body, Path(args.root), changed)
     if errors:
-        print("SPEC governance PR declaration failed:", file=sys.stderr)
         for error in errors:
-            print(f"  - {error}", file=sys.stderr)
+            print(f"error: {error}", file=sys.stderr)
         return 1
-    print("ok: pull request contains an explicit SPEC governance declaration")
+    print("SPEC governance PR declaration passed")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

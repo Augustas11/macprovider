@@ -1,1 +1,1 @@
-{"mutation":{"operation":"duplicate_authority"},"expected":"duplicate authority ownership for 'one-domain'"}
+{"mutation":{"operation":"duplicate_authority"},"expected":"duplicate authority ownership for 'provider-wire-protocol'"}

@@ -27,7 +27,7 @@
     "spec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["spec_id", "title", "version", "path", "status", "owner", "authority_domains", "supersedes", "depends_on", "implementation_status", "production_status", "last_reconciled_commit", "last_reconciled_at", "evidence", "requirement_id_migration", "legacy_requirement_fingerprint", "legacy_requirement_count", "gap"],
+      "required": ["spec_id", "title", "version", "path", "status", "owner", "authority_domains", "supersedes", "depends_on", "implementation_status", "production_status", "last_reconciled_commit", "last_reconciled_at", "evidence", "requirement_id_migration", "gap"],
       "properties": {
         "spec_id": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"},
         "title": {"type": "string", "minLength": 1},
@@ -46,8 +46,6 @@
         "last_reconciled_at": {"oneOf": [{"type": "string", "format": "date"}, {"type": "null"}]},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
         "requirement_id_migration": {"enum": ["pending", "complete"]},
-        "legacy_requirement_fingerprint": {"oneOf": [{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, {"type": "null"}]},
-        "legacy_requirement_count": {"type": "integer", "minimum": 0},
         "gap": {"oneOf": [{"$ref": "#/$defs/gap"}, {"type": "null"}]}
       }
     },

@@ -26,8 +26,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:61099ec858d9e224ae14bff743d8c41b1ea780140f84b567c99c3086a6ec04fa",
-      "legacy_requirement_count": 177,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -55,8 +53,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:8b22dca7f2803577a143f8bc92af6837f2cc7157a531c1871c0c18336a9c4046",
-      "legacy_requirement_count": 249,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -85,8 +81,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:5c039cc93f9e78bcccf152f5753d597f37e3019bca085ec0029cf244ecec0999",
-      "legacy_requirement_count": 77,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -116,8 +110,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:5cb643b19ca4c197d37d9c3eb5aa8cc3226148ab277ab61aad8fbb88bbc27e4c",
-      "legacy_requirement_count": 98,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -149,8 +141,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:ccd2cd83dbc49b2b7f37895a17406a9c6d61415045290989da2b292adee120f6",
-      "legacy_requirement_count": 222,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -180,8 +170,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:2cdd0455edb36fef3c515aafa01e38e8b47faf8bda57252dbde91b542a09ac39",
-      "legacy_requirement_count": 472,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -206,8 +194,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:688598768262cdd980f0b48d83cbd6427404ab4d0fd97d82c933dd04613b6c38",
-      "legacy_requirement_count": 204,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -237,8 +223,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:996b022a4bee7cdc7257552149582a00d63cbfc75361d9c6b820b60435c8cabd",
-      "legacy_requirement_count": 244,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -263,8 +247,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "legacy_requirement_count": 0,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -289,8 +271,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:35dd8cdf06bbc7aa08c112aaa72db571e6360d564ff83c18f58cdafc393c3d7a",
-      "legacy_requirement_count": 71,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -315,8 +295,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:80a0b9602cf5b7f39e860925873d2211e68aacc20345603b1a083807f04587db",
-      "legacy_requirement_count": 97,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -351,8 +329,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:869dc3b894b4cd9cce78cccf892e49e228f912c9c25e0800df7855af6ca49a0a",
-      "legacy_requirement_count": 92,
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
@@ -383,8 +359,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:04f231465dd023a0db8ccf197e1d1304617342bc0f7e666923bed1775774a473",
-      "legacy_requirement_count": 111,
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
@@ -409,8 +383,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:87dcc6b156b461883f4478fab7e237a3f83ac32ac544d2d57e8e00701e1d7329",
-      "legacy_requirement_count": 61,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -445,8 +417,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:6fb68af2a9545f704fbaf1345ad3b7d8e856e19c8dc168ad4e63eb66d30ca6f9",
-      "legacy_requirement_count": 326,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -475,8 +445,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:25ef56e7937ab8aeb2f29b23845575c7cec2188d74fcbaa3e75c403de52f32a1",
-      "legacy_requirement_count": 209,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -507,8 +475,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:1a03dbcddd3fd4048a56f22971dbae3172884366671590d29ed4c1705520839d",
-      "legacy_requirement_count": 149,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -540,8 +506,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:f68f43b59ba37c95e8056a51074d6cec5cb00a3dbf93ad51b884df63e486b81b",
-      "legacy_requirement_count": 138,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -571,8 +535,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:4f0fb57341735609416e67b2a738be8a330dc47c135a16bb4cd0e1dfe24ceec8",
-      "legacy_requirement_count": 133,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -597,8 +559,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:2433217c28e3842c2e6a765c677888536a422855ef885b133aca998c53afdeee",
-      "legacy_requirement_count": 156,
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
@@ -628,8 +588,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:753ecc962609420ad773edfda387ee444f282ad2914378a16a27d54e390d9d2b",
-      "legacy_requirement_count": 5,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -664,8 +622,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:fdc9050124a3cef6f437b57149a44e2dad6b8d680d5355cdf2f2988e1dddad0d",
-      "legacy_requirement_count": 96,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -690,8 +646,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:2f5637c6e243b759401ef1e50ce998c497d6f924533d54b15c3118426d69d0f1",
-      "legacy_requirement_count": 27,
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
@@ -723,8 +677,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:82038c2fa0d51e9fb9666ac056d873175fff44cd46f8997d89c9d8d2f43aebb8",
-      "legacy_requirement_count": 69,
       "gap": {
         "verdict": "DUPLICATE_AUTHORITY",
         "owner": "@Augustas11",
@@ -751,8 +703,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:b6058a0534767172c88b28a5e357ed500d85859e53a77d4ce1656c8de9178e0f",
-      "legacy_requirement_count": 3,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -779,8 +729,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:167886f2a9467c52f9abfb380ee7aa59b95a5adb3c9bd053f56bdecdc44a40b8",
-      "legacy_requirement_count": 62,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -805,8 +753,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:11a45b6c0bc76c693a4686f02b9dc2a5e9bbea3ff7f2c5345648ce9c9d836506",
-      "legacy_requirement_count": 5,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -837,8 +783,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:1b6a308a7eaff0b65dad0360c3c2223c9b8758017b4ed4cc86ed03fdc6649083",
-      "legacy_requirement_count": 47,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -867,8 +811,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:e1cd3da71065ff00a587286c376fd8a71ddddd6cf4274de7552e62805a9620a9",
-      "legacy_requirement_count": 41,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -897,8 +839,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:d4b0016d74ce86e0f49e65483b512ea596d8101b490d5337f2c3046492c278c5",
-      "legacy_requirement_count": 83,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -929,8 +869,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:b23dd155943a22279f987cad4a65a76e35a0d02ae7f7cbf67a5e5556049effc5",
-      "legacy_requirement_count": 98,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -962,8 +900,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:0d82ee2be882f326af761fc1a6ac195173a0b73ddcfb6e99d1d792a9ed1927f0",
-      "legacy_requirement_count": 40,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -991,8 +927,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:08829493d5f5e38c817ffc9f7a03d7b2954ddd01c69873af3ba848decec25f0d",
-      "legacy_requirement_count": 28,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -1023,8 +957,6 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:c40635e1bd489d1b33285219353a8a6f7484bdde5408f6d3f9d8c14f63658278",
-      "legacy_requirement_count": 14,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",

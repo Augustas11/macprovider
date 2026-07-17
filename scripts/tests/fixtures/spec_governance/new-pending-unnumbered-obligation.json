@@ -1,6 +1,0 @@
-{
-  "mutation": {
-    "operation": "new_pending_unnumbered_obligation"
-  },
-  "expected": "legacy normative obligation ledger must match"
-}

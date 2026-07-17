@@ -1,1 +1,1 @@
-{"mutation":{"operation":"hostile_schema_pointer"},"expected":"$schema must equal '../schemas/spec-authority-v1.schema.json'"}
+{"mutation":{"operation":"hostile_schema_pointer"},"expected":"must equal '../schemas/spec-authority-v1.schema.json'"}

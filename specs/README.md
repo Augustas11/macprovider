@@ -70,6 +70,11 @@ The foundation records every unmigrated spec as an explicit pending gap owned
 by `@Augustas11` and tracked by issue #614. That is a visible reconciliation
 backlog, not a conformance claim or compatibility bypass.
 
+The structured trust boundary is documented in
+[`docs/spec-governance-foundation.md`](../docs/spec-governance-foundation.md).
+Governance checks read JSON manifests and exact PR declaration markers; they do
+not infer normative meaning from rendered Markdown prose.
+
 Run the complete local spec checks with:
 
 ```bash
@@ -82,4 +87,7 @@ python3 scripts/check_spec_governance.py
 The governance validator uses only the Python standard library. It validates
 both manifest schemas, exact authority ownership, canonical file references,
 lifecycle/conformance states, stable requirement definitions and mappings,
-cross-spec references, gap ownership, and evidence expiry.
+cross-spec references, gap ownership, and evidence expiry. Pull requests that
+touch canonical SPEC bodies or governance manifests must include the
+marker-delimited `spec-pr-governance-v1` JSON declaration described in
+[`PROCESS.md`](PROCESS.md).

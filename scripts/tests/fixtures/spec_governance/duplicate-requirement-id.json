@@ -1,1 +1,1 @@
-{"mutation":{"operation":"duplicate_requirement_definition"},"expected":"duplicate requirement definition SPEC-001-R001"}
+{"mutation":{"operation":"duplicate_requirement_id"},"expected":"duplicate requirement ID SPEC-001-R001"}

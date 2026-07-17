@@ -19,8 +19,6 @@
   "last_reconciled_at": null,
   "evidence": [],
   "requirement_id_migration": "complete",
-  "legacy_requirement_fingerprint": null,
-  "legacy_requirement_count": 0,
   "gap": null
 }
 ```
@@ -30,8 +28,8 @@ one and the version within the first 15 lines so the canonical index can parse
 it. Add the JSON object above to `CONFORMANCE.json`; that manifest is the single
 machine-readable metadata record, while this spec header remains the
 human-readable title/version source checked against it. New specs start with
-complete ID migration and no legacy fingerprint because every normative
-obligation must be numbered from the first draft.
+complete ID migration because every normative obligation must be represented by
+a structured requirement record from the first draft.
 
 ## 1. Purpose and scope
 

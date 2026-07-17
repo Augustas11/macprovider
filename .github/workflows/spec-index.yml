@@ -15,6 +15,7 @@ on:
       - "specs/**"
       - "schemas/spec-authority-v1.schema.json"
       - "schemas/spec-conformance-v1.schema.json"
+      - "schemas/spec-pr-governance-v1.schema.json"
       - "scripts/check_spec_governance.py"
       - "scripts/check_spec_pr_declaration.py"
       - "scripts/gen_spec_index.py"

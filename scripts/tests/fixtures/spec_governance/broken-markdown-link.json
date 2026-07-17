@@ -1,4 +1,0 @@
-{
-  "mutation": {"operation": "broken_markdown_link"},
-  "expected": "broken Markdown link target"
-}

@@ -1,1 +1,1 @@
-{"mutation":{"operation":"fake_evidence_mappings"},"expected":"implementation mapping path does not exist"}
+{"mutation":{"operation":"fake_evidence_mappings"},"expected":"mapping path does not exist"}

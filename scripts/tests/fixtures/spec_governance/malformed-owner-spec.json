@@ -1,4 +1,4 @@
 {
   "mutation": {"operation": "malformed_owner_spec"},
-  "expected": "field 'owner_spec' must be a non-empty string"
+  "expected": "owner_spec: must be a non-empty string"
 }
