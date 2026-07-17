@@ -352,6 +352,16 @@
     "input" : 0.5
   },
   {
+    "expected_canonical_b64" : "MC4wOTc3NDAxMjI3MjM3MDc0Nw==",
+    "id" : "double_captured_acceptance_success",
+    "input" : 0.09774012272370747
+  },
+  {
+    "expected_canonical_b64" : "MC4xNTcxMDE3MzMwODQ2MTI4NA==",
+    "id" : "double_captured_acceptance_rejection",
+    "input" : 0.15710173308461284
+  },
+  {
     "expected_canonical_b64" : "eyJmcmVxdWVuY3lfcGVuYWx0eSI6MCwibWF4X3Rva2VucyI6MjU2LCJtZXNzYWdlcyI6W3siY29udGVudCI6IkNhZsOpIiwicm9sZSI6InVzZXIifV0sIm1vZGVsIjoibSIsInByZXNlbmNlX3BlbmFsdHkiOjAsInRlbXBlcmF0dXJlIjowLjcsInRvb2xfY2hvaWNlIjpudWxsLCJ0b29scyI6W10sInRvcF9wIjoxfQ==",
     "id" : "prompt_like",
     "input" : {

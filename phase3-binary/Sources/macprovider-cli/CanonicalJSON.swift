@@ -2,9 +2,10 @@ import Foundation
 
 // RFC 8785 JSON Canonicalization Scheme (JCS).
 //
-// Byte-identical mirror of the Malibu.app CanonicalJSON implementation at
-// phase3-binary/app/Sources/Malibu/System/RegisterClient.swift and of the
-// coordinator's Go implementation at phase4-coordinator/internal/billing/jcs.go.
+// CLI-side adapter for the coordinator's Go implementation at
+// phase4-coordinator/internal/billing/jcs.go. Numeric rendering delegates to
+// RFC8785JCS so the signed transcript matches the coordinator's canonical form
+// of the actual wire message.
 //
 // Used by the SPEC-026 identity_signature flow to build the canonical bytes
 // whose SHA-256 the coordinator retains from the initial `auth_request`
@@ -13,6 +14,7 @@ import Foundation
 
 enum CanonicalJSONError: Error {
     case nonFiniteNumber
+    case integerOutOfRange
     case invalidStringEncoding
 }
 
@@ -97,10 +99,6 @@ extension CanonicalJSON {
         switch any {
         case is NSNull:
             return .null
-        case let bool as Bool:
-            return .bool(bool)
-        case let string as String:
-            return .string(string)
         case let number as NSNumber:
             if CFGetTypeID(number) == CFBooleanGetTypeID() {
                 return .bool(number.boolValue)
@@ -109,7 +107,20 @@ extension CanonicalJSON {
             if raw == "q" || raw == "l" || raw == "i" || raw == "s" || raw == "c" {
                 return .number(String(number.int64Value))
             }
-            return .number(number.stringValue)
+            if raw == "Q" || raw == "L" || raw == "I" || raw == "S" || raw == "C" {
+                guard number.uint64Value <= UInt64(Int64.max) else {
+                    throw CanonicalJSONError.integerOutOfRange
+                }
+                return .number(String(number.uint64Value))
+            }
+            guard number.doubleValue.isFinite else {
+                throw CanonicalJSONError.nonFiniteNumber
+            }
+            return .number(try RFC8785JCS.canonicalString(.double(number.doubleValue)))
+        case let bool as Bool:
+            return .bool(bool)
+        case let string as String:
+            return .string(string)
         case let int as Int:
             return .number(String(int))
         case let int64 as Int64:
@@ -118,10 +129,7 @@ extension CanonicalJSON {
             guard double.isFinite else {
                 throw CanonicalJSONError.nonFiniteNumber
             }
-            if double == double.rounded() && abs(double) < Double(Int64.max) {
-                return .number(String(Int64(double)))
-            }
-            return .number(String(double))
+            return .number(try RFC8785JCS.canonicalString(.double(double)))
         case let array as [Any]:
             return try .array(array.map { try fromJSONLike($0) })
         case let dict as [String: Any]:
