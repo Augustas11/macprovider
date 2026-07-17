@@ -42,6 +42,7 @@ GOVERNANCE_ONLY_PATHS = (
     ".github/CODEOWNERS",
     ".github/workflows/spec-index.yml",
     "beta/DECISION_CRITERIA.md",
+    "docs/spec-governance-foundation.md",
     "docs/spec-history/",
     "schemas/spec-",
     "scripts/check_spec_governance.py",
