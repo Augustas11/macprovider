@@ -98,18 +98,12 @@ def _contract_path(path: str) -> bool:
 def validate_body(body: str, root: Path | None = None, changed_paths: list[str] | None = None) -> list[str]:
     errors: list[str] = []
     raw_lines = body.splitlines()
-    if not any(
-        re.fullmatch(r"spec-governance:", line, re.IGNORECASE)
-        for line in raw_lines
-    ):
-        return ["missing top-level 'spec-governance:' declaration block"]
-    raw_marker = _declaration_marker(raw_lines)
-    if raw_marker is None or _inside_inline_details(raw_lines, raw_marker):
-        return ["missing top-level 'spec-governance:' declaration block"]
     lines = _contract_markdown(body).splitlines()
     marker = _declaration_marker(lines)
     if marker is None:
         return ["missing 'spec-governance:' declaration block"]
+    if _inside_inline_details(raw_lines, marker):
+        return ["missing top-level 'spec-governance:' declaration block"]
     fields: dict[str, str] = {}
     for line in lines[marker + 1:]:
         if line.strip().startswith("#") or (not line.strip() and fields):

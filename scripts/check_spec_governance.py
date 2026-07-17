@@ -12,6 +12,7 @@ import argparse
 from collections import Counter
 import hashlib
 import html
+from html.parser import HTMLParser
 import json
 import re
 import string
@@ -44,7 +45,6 @@ ARTIFACT_RE = re.compile(
 JOURNEY_RE = re.compile(r"^JOURNEY-[A-Z0-9]+(?:-[A-Z0-9]+)*$")
 NORMATIVE_KEYWORD_RE = re.compile(r"\b(?:MUST(?:\s+NOT)?|SHOULD)\b")
 MARKDOWN_LINK_RE = re.compile(r"\]\(([^)]+)\)")
-INLINE_HTML_TAG_RE = re.compile(r"</?[A-Za-z][^>\n]*>")
 CODE_SPAN_START = "\x00code-span-start\x00"
 CODE_SPAN_END = "\x00code-span-end\x00"
 
@@ -939,15 +939,101 @@ def _legacy_normative_lines(text: str) -> list[str]:
     return lines
 
 
+class _InlineHTMLTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def _balanced_inline_end(
+    text: str,
+    start: int,
+    opener: str,
+    closer: str,
+    *,
+    quote_aware: bool = False,
+) -> int | None:
+    depth = 0
+    quote: str | None = None
+    cursor = start
+    while cursor < len(text):
+        character = text[cursor]
+        if character == "\\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
+        if quote_aware and quote is not None:
+            if character == quote:
+                quote = None
+            cursor += 1
+            continue
+        if quote_aware and character in {'"', "'"}:
+            quote = character
+            cursor += 1
+            continue
+        if character == opener:
+            depth += 1
+        elif character == closer:
+            depth -= 1
+            if depth == 0:
+                return cursor
+        cursor += 1
+    return None
+
+
+def _inline_link_labels(text: str) -> str:
+    """Replace inline/reference link syntax with its rendered label."""
+    rendered: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        image = text.startswith("![", cursor)
+        label_start = cursor + 1 if image else cursor
+        if text[label_start:label_start + 1] != "[":
+            rendered.append(text[cursor])
+            cursor += 1
+            continue
+        label_end = _balanced_inline_end(text, label_start, "[", "]")
+        if label_end is None:
+            rendered.append(text[cursor])
+            cursor += 1
+            continue
+        label = _inline_link_labels(text[label_start + 1:label_end])
+        suffix = label_end + 1
+        if suffix < len(text) and text[suffix] == "(":
+            destination_end = _balanced_inline_end(
+                text,
+                suffix,
+                "(",
+                ")",
+                quote_aware=True,
+            )
+            if destination_end is None:
+                rendered.append(text[cursor])
+                cursor += 1
+                continue
+            rendered.append(label)
+            cursor = destination_end + 1
+            continue
+        if suffix < len(text) and text[suffix] == "[":
+            reference_end = _balanced_inline_end(text, suffix, "[", "]")
+            if reference_end is not None:
+                rendered.append(label)
+                cursor = reference_end + 1
+                continue
+        rendered.append(label)
+        cursor = label_end + 1
+    return "".join(rendered)
+
+
 def _visible_inline_text(text: str) -> str:
     """Return conservative rendered text for reserved-token scans."""
-    text = html.unescape(text)
-    text = INLINE_HTML_TAG_RE.sub("", text)
-    previous = None
-    while previous != text:
-        previous = text
-        text = re.sub(r"!?\[([^\]\n]*)\]\([^)\n]*\)", r"\1", text)
-        text = re.sub(r"!?\[([^\]\n]*)\]\[[^\]\n]*\]", r"\1", text)
+    parser = _InlineHTMLTextParser()
+    parser.feed(text)
+    parser.close()
+    text = html.unescape("".join(parser.parts))
+    text = _inline_link_labels(text)
     text = re.sub(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])", r"\1", text)
     return text.translate(str.maketrans("", "", "*_~"))
 

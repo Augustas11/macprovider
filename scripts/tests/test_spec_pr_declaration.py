@@ -296,6 +296,24 @@ class SpecPRDeclarationTests(unittest.TestCase):
     def test_declaration_must_precede_inline_details_markup(self) -> None:
         bodies = (
             (
+                "```text\n"
+                "spec-governance:\n"
+                "```\n"
+                "<details>\n"
+                "<summary>Example</summary>\n"
+                "</details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+            ),
+            (
+                "<!-- spec-governance: -->\n"
+                "<details>\n"
+                "<summary>Example</summary>\n"
+                "</details>\n\n"
+                "spec-governance:\n"
+                "  behavior-change: none\n"
+            ),
+            (
                 "<details>\n"
                 "<summary>Example</summary>\n\n"
                 "spec-governance:\n"
