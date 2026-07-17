@@ -1094,6 +1094,20 @@ def validate_repository(
                 if shown.returncode == 0:
                     baseline_legacy[match.group(1)] = Counter(_legacy_normative_lines(shown.stdout))
                     baseline_fingerprints[match.group(1)] = legacy_requirement_fingerprint(shown.stdout)
+    if base_commit:
+        tree = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", base_commit, "specs"],
+            cwd=root, capture_output=True, text=True,
+        )
+        for relative in tree.stdout.splitlines():
+            match = re.match(r"^specs/(SPEC-\d{3})-.*\.md$", relative)
+            if not match:
+                continue
+            text = _git_show(root, base_commit, relative)
+            if text is None or not text.startswith(f"# {match.group(1)}"):
+                continue
+            baseline_legacy[match.group(1)] = Counter(_legacy_normative_lines(text))
+            baseline_fingerprints[match.group(1)] = legacy_requirement_fingerprint(text)
     canonical = _canonical_specs(root, result)
 
     spec_records: dict[str, dict[str, Any]] = {}

@@ -354,6 +354,35 @@ class GovernanceValidatorTests(unittest.TestCase):
             result = validate_repository(root, date(2026, 7, 16), base_ref=commit)
         self.assertIn("must remain pinned to bootstrap baseline", "\n".join(result.errors))
 
+    def test_base_ref_can_extend_pending_legacy_ledger(self) -> None:
+        repository = base_repository()
+        repository["specs"]["specs/SPEC-001-one.md"] += (
+            "\nA mainline compatibility rule MUST remain pending reconciliation.\n"
+        )
+        fingerprint, count = legacy_requirement_fingerprint(
+            repository["specs"]["specs/SPEC-001-one.md"]
+        )
+        repository["conformance"]["specs"][0]["legacy_requirement_fingerprint"] = fingerprint
+        repository["conformance"]["specs"][0]["legacy_requirement_count"] = count
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            commit = self._commit_repository(root)
+
+            result = validate_repository(root, date(2026, 7, 16), base_ref=commit)
+            self.assertEqual([], result.errors)
+
+            repository["specs"]["specs/SPEC-001-one.md"] += (
+                "\nA pull request MUST not silently extend that trusted ledger.\n"
+            )
+            write_repository(root, repository)
+            result = validate_repository(root, date(2026, 7, 16), base_ref=commit)
+
+        self.assertIn(
+            "new or changed unnumbered normative obligation is forbidden",
+            "\n".join(result.errors),
+        )
+
     def test_stable_requirement_cannot_be_deleted_from_base(self) -> None:
         repository = base_repository()
         with tempfile.TemporaryDirectory() as directory:

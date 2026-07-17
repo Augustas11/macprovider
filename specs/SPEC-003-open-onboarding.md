@@ -1,6 +1,15 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.10.3 (2026-07-15, FR-C9.2a `auth_state` admission-verdict ack field — runbook item 23)
+**Version:** 0.11.0 (2026-07-16, referral-gated CLI bootstrap integration)
+
+**Change log v0.11.0:** Adds FR-C9.7 as the open-onboarding integration point
+for SPEC-034. A referral code is optional WS bootstrap input when enforcement is
+off and required only for a fresh public credential when enforcement is on.
+Validation/redemption and bootstrap credential mint are one coordinator-owned
+commitment. Operational admission remains the later authenticated WS decision;
+the bootstrap-only connection never creates a routable pool entry. Valid
+incumbent bearers, identity rotation/recovery, and operator/pinned issuance are
+not retroactively gated. Provider identity and returned bearer remain CLI-owned.
 
 **Change log v0.10.3:** Adds **FR-C9.2a**, the coordinator emission policy for the OPTIONAL `auth_state` admission-verdict field on both v1 `hello_ack` and v2 `auth_response` accept frames (`pool.AuthState`: `bearer_validated` / `self_minted` / `bearerless_duplicate`; `mint_failed`/rejects close the connection and never ride an ack; omitted when no token issuer). The field's wire shape/domain is owned by SPEC-001 §6.5.1 and its autoupdate interpretation by SPEC-020 v0.1.7; FR-C9.2a is the sibling of FR-C9.2's existing `assigned_provider_token` ack contract. This propagates the coordinator's own admission verdict so the SPEC-020 bearerless-duplicate notify-only floor is client-enforceable, closing the SPEC-020 tokenless race-loser residual. Additive `omitempty`; a pre-item-23 binary ignores the key and a pre-item-23 coordinator omits it (client falls back to inference) — no behavior change either direction.
 
@@ -9,7 +18,7 @@
 Keychain custody. Newly assigned credentials are never written to YAML. In-memory
 adoption and the authenticated reconnect remain persist-before-adopt. Redacted status
 also exposes conflict and pending-migration state.
-**Depends on:** SPEC-001 v1.8.4 (FR-C9.2a requires the §6.5.1 `auth_state` ack-field shape), SPEC-002 v1.3.5
+**Depends on:** SPEC-001 v1.9.0, SPEC-002 v1.3.5, SPEC-034 v0.4.0
 
 **Change log v0.10.1:** Additive patch on v0.10 (no wire-shape changes). Closes issue #82 item 3. The FR-C9.4 flag-flip runbook (text added under v0.8.4) referenced a tracking issue for the `coordinator-cli pre-flip-audit --max-last-used-age=24h` command; the command is now shipped and normatively required. Updates the runbook prose to point at the shipped command rather than a tracking issue. No primitive added; no wire field changed.
 
@@ -655,7 +664,11 @@ auth:
   allow_tokenless_provisional_bootstrap: true
 ```
 
-Invite-only deployments MAY keep `allow_tokenless_provisional_bootstrap=false`, but then each new provider needs an operator-preprovisioned `provider_token` before first connect.
+Invite-only deployments using the legacy operator-token path MAY keep
+`allow_tokenless_provisional_bootstrap=false`, but then each new provider needs an
+operator-preprovisioned `provider_token` before first connect. Referral-gated
+public onboarding instead enables tokenless provisional bootstrap and applies
+FR-C9.7; a referral code is admission input, never a preprovisioned bearer.
 
 **Supersedes SPEC-002 v1.3.5 FR-P12 / PG-1 for tokenless provisional admission.** Those locked clauses say provisional providers may continue without tokens under `require_provider_tokens=true`; SPEC-003 v0.8.1 explicitly narrows that to "providers with at least one unrevoked token row." The locked SPEC-002 text is intentionally preserved as-is; this supersede is normative for the open-onboarding tier (per codex architect MAJOR-1, PR #44). A future SPEC-002 revision SHOULD amend FR-P12 / PG-1 to reflect this.
 
@@ -667,8 +680,49 @@ The flag flip is safe AFTER:
 
 Old binaries that cannot parse `assigned_provider_token` will silently drop the field (Swift's JSON decoder ignores unknown keys) and never persist a token; at flag-flip time they are rejected at the WS handshake — same blast radius as the original M1-1 plan, no worse. Entry 60 records this as the explicit compatibility cutoff. The operator action `coordinator-cli list-tokens` may be used during the settling window to verify that all expected provider IDs have at least one unrevoked token row before flipping the flag.
 
-**FR-C9.6. install.sh is NOT modified.**
-The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues to write a tokenless `config.yaml`. Token acquisition happens automatically on the first WS connect after install. This preserves the single-shell-pipe UX that the open-onboarding tier exists to provide; gating provisional token issuance on operator action would re-create the very approval bottleneck Q2 was about removing.
+**FR-C9.6. Installer changes preserve the ordinary open-onboarding path.**
+The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues
+to work without a referral input and obtains a credential through the CLI-owned
+WS bootstrap. SPEC-034's optional referral integration may modify `install.sh`
+only to consume `MACPROVIDER_REFERRAL_CODE`, copy it into the owner-only 0600
+onboarding journal, unset the environment value, and pass the journal path to
+`bootstrap-auth --referral-code-file`. It MUST NOT write the code to
+`config.yaml`, logs, argv, lifecycle status, or Malibu storage. With the variable
+absent, installer behavior remains the ordinary single-shell-pipe flow.
+
+**FR-C9.7. Referral admission composes with fresh credential bootstrap.**
+The initial and proof-stage bootstrap frames MAY carry the optional
+`referral_code` field owned by SPEC-001. The launchd-managed CLI is the only live
+client that submits it and the only client that adopts the returned provider
+credential. Malibu may collect the non-secret input but MUST pass it through a
+supported installed-CLI/install interface; it does not call the coordinator or
+receive the bearer.
+
+When `referrals.require_for_registration` is absent or false, omission of
+`referral_code` preserves all FR-C9 behavior. When true, the coordinator requires
+a valid SPEC-034 code only for a fresh public credential/bootstrap. It MUST
+validate and redeem the code in the same recoverable SQLite decision as exact
+receipt-key binding and unused bootstrap-token mint, and MUST expose only typed,
+non-secret referral failures. That bootstrap-only socket then closes without
+reserving admission capacity or registering a pool entry. Operational admission
+occurs on the later bearer-authenticated connection through the unchanged
+compatibility, admission-identity, capacity, token-confirmation, and pool path.
+The gate MUST NOT reject a valid incumbent bearer, a proven admission-identity
+rotation or recovery, a pinned/operator-issued principal, or an idempotent retry
+of an already-committed same-code attempt.
+
+The optional unauthenticated `/v1/referrals/validate` convenience route is not
+part of admission and is mounted only when the independent
+`referrals.enable_public_validation` flag is true. That flag defaults false.
+Malibu performs local syntax validation when the route/capability is unavailable;
+the CLI bootstrap transaction remains the authoritative validation.
+
+The coordinator compares the replay-stable referral field in the signed v2
+transcript. Retrying with the same `(campaign, provider_id, exact receipt key,
+code_digest)` consumes no additional capacity; presenting another code for an
+already-attributed provider fails without consuming either issuer. Referral
+semantics, serving qualification, invite balance, and advocacy rewards are owned
+by SPEC-034 and are not duplicated here.
 
 **FR-C10. `pair_ot` minting policy on provisional admission.**
 

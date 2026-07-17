@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.8.4",
+      "version": "1.9.0",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -17,15 +17,17 @@
         "provider-wire-protocol"
       ],
       "supersedes": [],
-      "depends_on": [],
+      "depends_on": [
+        "SPEC-034"
+      ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:4022cf2efca338cf1710ef55114ed5f61d8fa0ee243928096d0038edd092b03d",
-      "legacy_requirement_count": 172,
+      "legacy_requirement_fingerprint": "sha256:61099ec858d9e224ae14bff743d8c41b1ea780140f84b567c99c3086a6ec04fa",
+      "legacy_requirement_count": 177,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -64,7 +66,7 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.10.3",
+      "version": "0.11.0",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -74,7 +76,8 @@
       "supersedes": [],
       "depends_on": [
         "SPEC-001",
-        "SPEC-002"
+        "SPEC-002",
+        "SPEC-034"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
@@ -82,8 +85,8 @@
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:b1b75b8401c5b1cb0d85c310d3d83d792aa20a708c73f0d1f19c52b9e7653fe3",
-      "legacy_requirement_count": 72,
+      "legacy_requirement_fingerprint": "sha256:0a2e0ae7c9baaef1ad8681ddd020dea41b872d06329faafcad37a8aba300d27d",
+      "legacy_requirement_count": 77,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -731,7 +734,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.14",
+      "version": "v0.16",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -739,15 +742,17 @@
         "native-app-lifecycle"
       ],
       "supersedes": [],
-      "depends_on": [],
+      "depends_on": [
+        "SPEC-034"
+      ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "legacy_requirement_count": 0,
+      "legacy_requirement_fingerprint": "sha256:91a73f939a423d1c7c247f9a9e2598e87eb5801b7ad568715e75af6349a86b99",
+      "legacy_requirement_count": 2,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -757,7 +762,7 @@
     {
       "spec_id": "SPEC-026",
       "title": "Browserless Provider Onboarding (one-click Launch Provider)",
-      "version": "v0.24",
+      "version": "v0.25",
       "path": "specs/SPEC-026-browserless-provider-onboarding.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -765,15 +770,17 @@
         "browserless-onboarding"
       ],
       "supersedes": [],
-      "depends_on": [],
+      "depends_on": [
+        "SPEC-034"
+      ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
       "requirement_id_migration": "pending",
-      "legacy_requirement_fingerprint": "sha256:67e255db37275bf42acde8f8db4b296a95ab20f5a988942a0d256f28d4fee6ac",
-      "legacy_requirement_count": 58,
+      "legacy_requirement_fingerprint": "sha256:c7252f94e334eb410a89a014cddd317e160676cdafb8fd267193c3c7ea75c026",
+      "legacy_requirement_count": 62,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -986,6 +993,38 @@
       "requirement_id_migration": "pending",
       "legacy_requirement_fingerprint": "sha256:08829493d5f5e38c817ffc9f7a03d7b2954ddd01c69873af3ba848decec25f0d",
       "legacy_requirement_count": 28,
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-034",
+      "title": "Referral admission, provider invites, and advocacy rewards",
+      "version": "v0.4.1",
+      "path": "specs/SPEC-034-referral-gated-prebeta.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "referral-advocacy-policy"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-022",
+        "SPEC-025",
+        "SPEC-026"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "legacy_requirement_fingerprint": "sha256:9d31e32b9e755f7f72186f4191ce8c270addeb0909c3a5b9f95d43daccaaacf9",
+      "legacy_requirement_count": 13,
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
