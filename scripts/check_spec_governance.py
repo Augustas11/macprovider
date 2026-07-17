@@ -930,8 +930,12 @@ def _legacy_normative_lines(text: str) -> list[str]:
                 visible.append(raw_line[cursor])
             cursor += 1
         stripped = "".join(fingerprint).strip()
-        visible_text = _visible_inline_text("".join(visible).strip())
-        if not NORMATIVE_KEYWORD_RE.search(visible_text):
+        visible_source = "".join(visible).strip()
+        visible_text = _visible_inline_text(visible_source)
+        if not (
+            NORMATIVE_KEYWORD_RE.search(visible_source)
+            or NORMATIVE_KEYWORD_RE.search(visible_text)
+        ):
             continue
         if REQUIREMENT_DEFINITION_RE.match(stripped):
             continue
@@ -969,7 +973,13 @@ def _balanced_inline_end(
                 quote = None
             cursor += 1
             continue
-        if quote_aware and character in {'"', "'"}:
+        if (
+            quote_aware
+            and character in {'"', "'"}
+            and depth == 1
+            and cursor > start
+            and text[cursor - 1].isspace()
+        ):
             quote = character
             cursor += 1
             continue
@@ -1029,11 +1039,15 @@ def _inline_link_labels(text: str) -> str:
 
 def _visible_inline_text(text: str) -> str:
     """Return conservative rendered text for reserved-token scans."""
+    text = _inline_link_labels(text)
     parser = _InlineHTMLTextParser()
     parser.feed(text)
+    buffered_literal = parser.rawdata
+    parts_before_close = len(parser.parts)
     parser.close()
+    if buffered_literal and len(parser.parts) == parts_before_close:
+        parser.parts.append(buffered_literal)
     text = html.unescape("".join(parser.parts))
-    text = _inline_link_labels(text)
     text = re.sub(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])", r"\1", text)
     return text.translate(str.maketrans("", "", "*_~"))
 
@@ -1953,14 +1967,15 @@ def validate_repository(
         text = path.read_text(encoding="utf-8")
         contract_text = _contract_markdown(text)
         visible_contract_text = _visible_inline_text(contract_text)
+        reference_text = contract_text + "\n" + visible_contract_text
         for requirement_id in REQUIREMENT_DEFINITION_RE.findall(contract_text):
             definitions.setdefault(requirement_id, []).append(path)
             if requirement_id[:8] != spec_id:
                 result.error(str(path.relative_to(root)), f"requirement {requirement_id} must use owning prefix {spec_id}")
-        for reference in sorted(set(SPEC_REFERENCE_RE.findall(visible_contract_text))):
+        for reference in sorted(set(SPEC_REFERENCE_RE.findall(reference_text))):
             if reference not in canonical:
                 result.error(str(path.relative_to(root)), f"broken cross-spec reference {reference}; no canonical spec exists")
-        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(visible_contract_text))):
+        for requirement_reference in sorted(set(REQUIREMENT_REFERENCE_RE.findall(reference_text))):
             requirement_references.setdefault(requirement_reference, []).append(path)
         for target in MARKDOWN_LINK_RE.findall(text):
             target = target.strip().split("#", 1)[0]

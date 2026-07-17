@@ -273,8 +273,15 @@ class GovernanceValidatorTests(unittest.TestCase):
             "The provider M[U](https://example.invalid/a(b))ST preserve behavior.\n",
             "The provider M[U](https://example.invalid \"a)b\")ST preserve behavior.\n",
             "The provider M[U](https://example.invalid/a\\)b)ST preserve behavior.\n",
+            "The provider M[U](https://example.invalid/a&#41;b)ST preserve behavior.\n",
+            "The provider M[U](foo\"bar)ST preserve behavior.\n",
+            "The provider M[U](foo'bar)ST preserve behavior.\n",
             "The provider M[U]ST preserve behavior.\n\n[U]: https://example.invalid\n",
             "The provider M<span title=\">\">U</span>ST preserve behavior.\n",
+            "Prefix <x a=\"unterminated The provider MUST preserve behavior.\n",
+            "Prefix <x a=\"unterminated M&#85;ST preserve behavior.\n",
+            "Prefix <x a=\"unterminated M**U**ST preserve behavior.\n",
+            "Prefix <x a=\"unterminated M[U](https://example.invalid)ST preserve behavior.\n",
         )
         for text in normative_forms:
             with self.subTest(text=text):
@@ -286,8 +293,11 @@ class GovernanceValidatorTests(unittest.TestCase):
             "See SPEC-<b>9</b>99.\n",
             "See SPEC-[9](https://example.invalid)99.\n",
             "See SPEC-[9](https://example.invalid/a(b))99.\n",
+            "See SPEC-[9](https://example.invalid/a&#41;b)99.\n",
             "See SPEC-[9]99.\n\n[9]: https://example.invalid\n",
             "See SPEC-<span title=\">\">9</span>99.\n",
+            "Prefix <x a=\"unterminated SPEC-999.\n",
+            "Prefix <x a=\"unterminated SPEC-9&#57;9.\n",
         )
         for reference in reference_forms:
             with self.subTest(reference=reference):
@@ -907,10 +917,9 @@ class GovernanceValidatorTests(unittest.TestCase):
                     or "\n>" in prefix
                     or "\n# " in prefix
                 )
-                hidden_html_keyword = "<MUST>" in prefix
                 expected = (
                     1
-                    if boundary_interrupt or hidden_html_keyword
+                    if boundary_interrupt
                     else (2 if "MUST" in prefix else 1)
                 )
                 self.assertEqual(expected, count)
