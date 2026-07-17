@@ -1,6 +1,15 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.17 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.18 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.18 (2026-07-17, provider-update authority reconciliation).**
+SPEC-020 owns update authorization and commit semantics. The signed monotonic
+discovery head and exact compatibility artifact index authorize recovery
+without coordinator admission. Exact signed-set identity, launch, and local
+provider health commit the local transaction; coordinator admission and
+buyer-serving are separate network-readiness evidence and cannot roll a locally
+healthy newer signed set back. Malibu remains a typed caller/observer of the
+CLI-owned transaction.
 
 **Change log v0.17 (2026-07-17, compatibility-set component versions).**
 The signed compatibility-set release identity and each member's marketing
@@ -61,10 +70,10 @@ is proven; production Malibu cannot create a provider bearer, register an identi
 sign coordinator admission. Sparkle, appcast publication, `latest.dmg`, and independent
 App update ownership are removed. The signed compatibility set binds Malibu.app, the
 CLI, launchd definitions, watchdog, catalog/resources, coordinator admission metadata,
-and rollback plan; target activation commits only after exact target admission and
-buyer-serving readiness, and the prior set remains until its own readiness is proven
-after rollback. Auto-update opt-out applies to the entire set while explicit user update
-remains available. **Every older statement below that assigns credentials, identity,
+and rollback plan. v0.18 supersedes v0.13's target-admission commit gate with
+SPEC-020's local signed-set/health commit and separate network-readiness result.
+Auto-update opt-out applies to the entire set while explicit user update remains
+available. **Every older statement below that assigns credentials, identity,
 or update ownership to Malibu/Sparkle is historical and superseded by v0.13.** Physical
 two-Mac, reboot/logout/locked-Keychain, interruption, #584 canary, and 24-hour soak
 evidence remain rollout gates rather than claims of this repository change.
@@ -231,9 +240,11 @@ Ship a **click-and-forget provider experience** for non-developer Mac users. Rep
 
 - Non-technical Apple Silicon user goes from `malibu.tech/host` → running provider in **≤ 3 minutes**, zero terminal.
 - Same coordinator behavior, same receipts as the CLI track (the shipped app onboards a **CLI-track** provider via `install.sh` — SPEC-026 §6.1; no separate App-track registration).
-- Signed compatibility-set updates are validated, installed, admitted, committed, and
-  rolled back by the launchd CLI as one exact transaction. Malibu can request the
-  transaction but cannot update itself independently. "Quit and Uninstall" invokes the
+- Signed compatibility-set updates are validated, installed, locally committed,
+  and, on local failure, safely rolled back by the launchd CLI as one exact
+  transaction under SPEC-020. Coordinator admission is a separate
+  network-readiness result. Malibu can request the transaction but cannot
+  update itself independently. "Quit and Uninstall" invokes the
   CLI transaction and reports any residue; dragging the app to Trash alone is not the
   supported uninstall path (§3.4).
 - The CLI track coexists via the shared `config.yaml` + `.installed-by-app` marker (§7),
@@ -459,12 +470,15 @@ time (60–240 s for the first model) in the background.
   `SUPublicEDKey` in its signed target bundle because Sparkle 2.6.4 requires key
   continuity after extraction; without Sparkle code or a feed, this public key cannot
   initiate an update. Later builds must omit it.
-- The updater acquires the maintenance lease, persists a phase journal and exact typed
-  rollback plan, stages and validates the target, drains buyer work, installs the whole
-  set, restarts launchd, and commits only after the coordinator admits that exact set
-  and the provider proves buyer-serving readiness. Failure restores the prior exact set,
-  including Malibu.app and launchd/watchdog resources, and retains the rollback material
-  until prior-set admission and buyer-serving readiness are proven.
+- The updater acquires the maintenance lease, persists a phase journal and exact
+  typed rollback plan, stages and validates the target, drains buyer work,
+  installs the whole set, restarts launchd, and commits only after exact signed
+  target-set identity, target CLI component version, and local provider health
+  are proven under SPEC-020. Coordinator admission and buyer-serving are
+  reported separately and do not undo local commit. Local failure restores the
+  prior exact set only when it remains above the effective minimum and is not
+  revoked; otherwise recovery stops fail-closed for the separately authorized
+  emergency path.
 - `auto_update_enabled: false` suppresses scheduled mutation of every set member. It
   does not disable the explicit user action. Model caches remain outside the set unless
   a signed target explicitly declares a compatible model/catalog migration.
@@ -807,9 +821,12 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
 
 ## 9. Compatibility-set trust and discovery
 
-- The compatibility artifact index is the release root for update discovery. It binds
-  immutable GitHub release artifact names, SHA-256 digests, required release roles, the
-  compatibility-set manifest, and rollback-plan schema.
+- A signature-authenticated, expiring monotonic discovery head defined by
+  SPEC-020 is the release root for update discovery. It binds the release
+  sequence, exact set identity, signed-policy floor/revocations, and
+  compatibility artifact-index digest. The compatibility artifact index binds
+  immutable GitHub release artifact names, SHA-256 digests, required release
+  roles, the compatibility-set manifest, and rollback-plan schema.
 - The CLI verifies the catalog/release trust chain, artifact-index signature, exact set
   identity, per-role uniqueness, hashes, Developer ID identity/team where applicable,
   launchd labels, and target coordinator policy before any drain or replacement.
@@ -817,8 +834,10 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
   alone carries the frozen v1.8.32 public key as inert trust-continuity metadata;
   it has no Sparkle runtime, and later builds carry no app-update public key.
   Failure to verify or fetch any required member leaves the current set running and
-  emits a typed redacted update state. A staged target that cannot prove exact-set
-  admission and buyer-serving readiness is rolled back as a whole.
+  emits a typed redacted update state. A staged target that fails exact signed-set
+  identity, launch, or local provider health enters SPEC-020 rollback recovery.
+  Coordinator admission or buyer-serving failure remains network-readiness
+  evidence and does not independently roll back local success.
 
 ## 10. Landing page changes (`malibu.tech/host/`)
 

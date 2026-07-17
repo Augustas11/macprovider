@@ -544,7 +544,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.7",
+      "version": "v0.1.8",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -552,17 +552,23 @@
         "provider-autoupdate"
       ],
       "supersedes": [],
-      "depends_on": [],
-      "implementation_status": "pending-reconciliation",
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-008",
+        "SPEC-010"
+      ],
+      "implementation_status": "partial",
       "production_status": "pending-verification",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
+      "last_reconciled_commit": "38e3a5fcce6304d12c2708199698187b3964d3b1",
+      "last_reconciled_at": "2026-07-17",
       "evidence": [],
       "requirement_id_migration": "pending",
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/610"
+        "issue": "https://github.com/Augustas11/macprovider/issues/610",
+        "rationale": "Manual update requires fresh coordinator compatibility admission, automatic discovery is coordinator-session-bound, and post-start success rolls back on network readiness rather than separating local update integrity from admission."
       }
     },
     {
@@ -686,7 +692,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.17",
+      "version": "v0.18",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -695,6 +701,7 @@
       ],
       "supersedes": [],
       "depends_on": [
+        "SPEC-020",
         "SPEC-034"
       ],
       "implementation_status": "pending-reconciliation",
@@ -706,7 +713,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/611"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
     },
     {
@@ -964,5 +971,69 @@
       }
     }
   ],
-  "requirements": []
+  "requirements": [
+    {
+      "requirement_id": "SPEC-020-R001",
+      "spec_id": "SPEC-020",
+      "state": "nonconformant",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleCoordinatorRecommendation",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:recommended_binary_version"
+      ],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/610",
+        "rationale": "Automatic application is reachable only from an accepted coordinator recommendation; no default disconnected or rejected-provider loop or replay-resistant signed monotonic discovery head exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R002",
+      "spec_id": "SPEC-020",
+      "state": "nonconformant",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:struct UpdateCommand",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:requireFreshCoordinatorCompatibilityAdmission"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testCoordinatorCompatibilityAdmissionRequiresFreshExactCurrentAndTargetSets"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/610",
+        "rationale": "All manual application paths call the fresh coordinator compatibility-admission gate after signed release validation."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R003",
+      "spec_id": "SPEC-020",
+      "state": "nonconformant",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:applyValidatedUpdate",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForBuyerServingIfManaged",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:writeSuccessSentinel",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:readSuccessSentinel",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runStartupAutoupdateRecovery"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReadinessFailureRollsBackReplacement",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testSuccessCleanupIsIdempotentAcrossCrashSteps",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testPreStagedSuccessSentinelMismatchDoesNotCleanupPendingOrBackup"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/610",
+        "rationale": "The updater treats missing buyer-serving readiness as rollback-worthy even when signed activation, launch, and local health succeeded; success sentinels bind only the CLI version rather than the exact compatibility set; rollback does not fail closed when the prior set is revoked or below the effective minimum."
+      }
+    }
+  ]
 }
