@@ -106,8 +106,9 @@ type TrustState struct {
 	RateLimitBucket string `json:"rate_limit_bucket"`
 }
 
-// Handler wires SPEC-026 §4.1 dependencies. Fields are populated at
-// coordinator boot when onboarding.app_track_register_enabled is true.
+// Handler wires SPEC-026 §4.1 dependencies. The coordinator keeps the durable
+// store and referral recovery dependencies populated even when the public
+// App-track registration route is disabled.
 type Handler struct {
 	// Postgres stats DB — for provider_identities, provider_auth_policy,
 	// nonce replay cache, App Attest key uniqueness.
@@ -124,10 +125,15 @@ type Handler struct {
 	CoordinatorWSURL  string
 	TrustedProxies    []netip.Prefix
 
-	// Rate limiter (SPEC-026 §4.1 step 4)
-	IPRateLimiter  IPRateLimiter
-	ASNRateLimiter ASNRateLimiter
-	ASNResolver    ASNResolver
+	// Rate limiters (SPEC-026 §4.1 step 4). CommittedRetryRateLimiter is
+	// independent so a throttled admission can still recover later without
+	// exposing the SQLite credential authority to unbounded stale requests.
+	IPRateLimiter                   IPRateLimiter
+	CommittedRetryRateLimiter       IPRateLimiter
+	CommittedRetryGlobalRateLimiter IPRateLimiter
+	CommittedRetrySlots             chan struct{}
+	ASNRateLimiter                  ASNRateLimiter
+	ASNResolver                     ASNResolver
 
 	// Hardware evidence has separate limits from app registration so autotune
 	// telemetry cannot consume the register budget or buyer DB capacity.
@@ -253,8 +259,10 @@ var (
 
 const hardwareProfilePersistTimeout = 2 * time.Second
 const hardwareProfilePersistConcurrency = 2
+const committedRetryConcurrency = 4
 
 var defaultHardwareProfilePersistSlots = make(chan struct{}, hardwareProfilePersistConcurrency)
+var defaultCommittedRetrySlots = make(chan struct{}, committedRetryConcurrency)
 
 // HandleAppTrackRegister is the SPEC-026 §4.1 endpoint. Full contract:
 // specs/BUILD_SPEC_026_IMPL_STEP_1_COORD_REGISTER_PROMPT.md.
@@ -334,8 +342,65 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	timestampOutsideSkew := now.Sub(tsUTC) > time.Minute || now.Sub(tsUTC) < -time.Minute
+	prepareStore, prepareStoreOK := h.StatsDB.(RegistrationPrepareStore)
 	sourceIP := clientIP(r, h.TrustedProxies)
-	if delta := now.Sub(tsUTC); delta > time.Minute || delta < -time.Minute {
+	// A response-lost retry must be able to recover the exact committed
+	// credential even after clock skew, admission throttling, or an operator
+	// rollback of referral enforcement. Only take this pre-admission path once
+	// the original request is stale; fresh attempts retain rate-limit ordering,
+	// and a throttled committed retry converges here after its backoff.
+	if timestampOutsideSkew && req.ProviderTokenCandidate != "" && prepareStoreOK {
+		rateLimited := h.CommittedRetryGlobalRateLimiter != nil && !h.CommittedRetryGlobalRateLimiter.Allow("global")
+		if !rateLimited && h.CommittedRetryRateLimiter != nil {
+			providerAllowed := h.CommittedRetryRateLimiter.Allow("provider|" + req.ProviderID)
+			ipAllowed := providerAllowed && h.CommittedRetryRateLimiter.Allow("ip|"+sourceIP)
+			rateLimited = !providerAllowed || !ipAllowed
+		}
+		if rateLimited {
+			if h.Metrics != nil {
+				h.Metrics.IncRegisterRateLimitHit("ip")
+			}
+			w.Header().Set("Retry-After", "60")
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "committed retry rate limit exceeded")
+			return
+		}
+		retrySlots := h.CommittedRetrySlots
+		if retrySlots == nil {
+			retrySlots = defaultCommittedRetrySlots
+		}
+		select {
+		case retrySlots <- struct{}{}:
+			defer func() { <-retrySlots }()
+		default:
+			if h.Metrics != nil {
+				h.Metrics.IncRegisterRateLimitHit("ip")
+			}
+			w.Header().Set("Retry-After", "1")
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "committed retry capacity exceeded")
+			return
+		}
+		boundProviderID, active, validateErr := h.AuthTokenStore.ValidateToken(r.Context(), req.ProviderTokenCandidate)
+		if validateErr != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "credential authority unavailable")
+			return
+		}
+		if active && boundProviderID == req.ProviderID {
+			checkCtx, cancelCheck := context.WithTimeout(r.Context(), 2*time.Second)
+			prepared, checkErr := prepareStore.ProviderRegistrationPrepared(checkCtx, req.ProviderID, req.Nonce, tsUTC)
+			cancelCheck()
+			if checkErr != nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "provider registration outcome unavailable")
+				return
+			}
+			if prepared {
+				writeAppTrackRegisterSuccess(w, req.ProviderID, req.ProviderTokenCandidate, false, h.CoordinatorWSURL)
+				return
+			}
+		}
+	}
+
+	if timestampOutsideSkew {
 		writeJSONError(w, http.StatusBadRequest, "timestamp_skew", "ts_utc outside allowed skew")
 		return
 	}
@@ -376,7 +441,6 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		}
 		bearerExempt = ok && boundProviderID == req.ProviderID
 	}
-	prepareStore, prepareStoreOK := h.StatsDB.(RegistrationPrepareStore)
 	if h.ReferralPolicy.RequireForRegistration && !bearerExempt {
 		if h.ReferralStore == nil || !prepareStoreOK {
 			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "referral authority unavailable")
@@ -566,12 +630,8 @@ func writeAppTrackRegisterSuccess(w http.ResponseWriter, providerID, token strin
 // belong to a live request. A committed marker preserves the token; an absent
 // marker compensates the undisclosed token and its exact new redemption.
 func (h *Handler) ReconcilePendingAppTrackReferralMints(ctx context.Context) error {
-	if h == nil || h.ReferralStore == nil || h.StatsDB == nil {
+	if h == nil || h.ReferralStore == nil {
 		return nil
-	}
-	prepareStore, ok := h.StatsDB.(RegistrationPrepareStore)
-	if !ok {
-		return errors.New("registration prepare store unavailable")
 	}
 	now := time.Now().UTC()
 	if h.Now != nil {
@@ -580,6 +640,13 @@ func (h *Handler) ReconcilePendingAppTrackReferralMints(ctx context.Context) err
 	pending, err := h.ReferralStore.ListPendingAppTrackReferralMints(ctx, now.Add(-appTrackPendingMintReconcileAge))
 	if err != nil {
 		return fmt.Errorf("list pending App-track referral mints: %w", err)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	prepareStore, ok := h.StatsDB.(RegistrationPrepareStore)
+	if !ok {
+		return errors.New("registration prepare store unavailable with pending App-track referral mints")
 	}
 	var reconcileErrs []error
 	for _, item := range pending {

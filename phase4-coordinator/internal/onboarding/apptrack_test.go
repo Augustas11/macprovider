@@ -160,6 +160,145 @@ func TestHandleAppTrackRegisterCommittedRetryNeverRotatesCredential(t *testing.T
 	}
 }
 
+func TestHandleAppTrackRegisterCommittedRetrySurvivesRollbackSkewAndRateLimit(t *testing.T) {
+	body, providerID := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepared: true}
+	authStore := &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: providerID,
+	}
+	metrics := &fakeMetrics{}
+	handler := testRegisterHandler(stats, authStore, metrics, denyLimiter{})
+	handler.ReferralStore = authStore
+	handler.Now = func() time.Time {
+		return time.Date(2026, 7, 3, 12, 2, 0, 0, time.UTC)
+	}
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body)))
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), strings.Repeat("c", 64)) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authStore.referralMintCalls != 0 || stats.prepareCalls != 0 || stats.nonceCalls != 0 {
+		t.Fatalf("committed retry mutated state: mint=%d prepare=%d nonce=%d", authStore.referralMintCalls, stats.prepareCalls, stats.nonceCalls)
+	}
+	if metrics.limitIP != 0 {
+		t.Fatalf("committed retry reached IP limiter: hits=%d", metrics.limitIP)
+	}
+}
+
+func TestHandleAppTrackRegisterCommittedRetryIsBoundedBeforeCredentialLookup(t *testing.T) {
+	body, providerID := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepared: true}
+	authStore := &fakeAuthStore{validateOK: true, validateProviderID: providerID}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralStore = authStore
+	limiter := newPerKeyLimiter(1)
+	handler.CommittedRetryRateLimiter = limiter
+	handler.Now = func() time.Time {
+		return time.Date(2026, 7, 3, 12, 2, 0, 0, time.UTC)
+	}
+
+	first := httptest.NewRecorder()
+	firstRequest := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	firstRequest.RemoteAddr = "198.51.100.10:4444"
+	handler.HandleAppTrackRegister(first, firstRequest)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	secondRequest := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	secondRequest.RemoteAddr = "198.51.100.10:4444"
+	handler.HandleAppTrackRegister(second, secondRequest)
+	if second.Code != http.StatusTooManyRequests || !strings.Contains(second.Body.String(), "rate_limited") {
+		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
+	}
+	if authStore.validateCalls != 1 || stats.preparedChecks != 1 {
+		t.Fatalf("bounded retry authority calls: validates=%d prepared=%d", authStore.validateCalls, stats.preparedChecks)
+	}
+	if len(limiter.keys) != 3 ||
+		limiter.keys[0] != "provider|"+providerID ||
+		limiter.keys[1] != "ip|198.51.100.10" {
+		t.Fatalf("recovery limiter keys=%q", limiter.keys)
+	}
+}
+
+func TestHandleAppTrackRegisterAbsentCommittedRetryIsBounded(t *testing.T) {
+	body, providerID := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepared: false}
+	authStore := &fakeAuthStore{validateOK: true, validateProviderID: providerID}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralStore = authStore
+	limiter := newPerKeyLimiter(1)
+	handler.CommittedRetryRateLimiter = limiter
+	handler.Now = func() time.Time {
+		return time.Date(2026, 7, 3, 12, 2, 0, 0, time.UTC)
+	}
+
+	first := httptest.NewRecorder()
+	handler.HandleAppTrackRegister(first, httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body)))
+	if first.Code != http.StatusBadRequest || !strings.Contains(first.Body.String(), "timestamp_skew") {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	handler.HandleAppTrackRegister(second, httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body)))
+	if second.Code != http.StatusTooManyRequests || !strings.Contains(second.Body.String(), "rate_limited") {
+		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
+	}
+	if authStore.validateCalls != 1 || stats.preparedChecks != 1 {
+		t.Fatalf("bounded absent retry authority calls: validates=%d prepared=%d", authStore.validateCalls, stats.preparedChecks)
+	}
+}
+
+func TestHandleAppTrackRegisterCommittedRetryGlobalCapacityPrecedesAuthorities(t *testing.T) {
+	body, _ := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepared: true}
+	authStore := &fakeAuthStore{validateOK: true}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralStore = authStore
+	handler.CommittedRetrySlots = make(chan struct{}, 1)
+	handler.CommittedRetrySlots <- struct{}{}
+	handler.Now = func() time.Time {
+		return time.Date(2026, 7, 3, 12, 2, 0, 0, time.UTC)
+	}
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body)))
+
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "rate_limited") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authStore.validateCalls != 0 || stats.preparedChecks != 0 {
+		t.Fatalf("capacity-bound retry reached authorities: validates=%d prepared=%d", authStore.validateCalls, stats.preparedChecks)
+	}
+}
+
+func TestHandleAppTrackRegisterCommittedRetryGlobalRatePrecedesPerKeyState(t *testing.T) {
+	body, _ := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
+	stats := &fakeStatsDB{prepared: true}
+	authStore := &fakeAuthStore{validateOK: true}
+	perKey := newPerKeyLimiter(1)
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralStore = authStore
+	handler.CommittedRetryGlobalRateLimiter = denyLimiter{}
+	handler.CommittedRetryRateLimiter = perKey
+	handler.Now = func() time.Time {
+		return time.Date(2026, 7, 3, 12, 2, 0, 0, time.UTC)
+	}
+	response := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(response, httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body)))
+
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), "rate_limited") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(perKey.keys) != 0 || authStore.validateCalls != 0 || stats.preparedChecks != 0 {
+		t.Fatalf("global-bound retry reached lower authorities: keys=%q validates=%d prepared=%d", perKey.keys, authStore.validateCalls, stats.preparedChecks)
+	}
+}
+
 func TestHandleAppTrackRegisterCommittedRetryRejectsDifferentCandidate(t *testing.T) {
 	body, _ := signedRegisterBody(t, func(body map[string]any) { body["referral_code"] = "invite" })
 	stats := &fakeStatsDB{prepared: true}
@@ -219,7 +358,7 @@ func TestHandleAppTrackRegisterCompensatesOnlyProvenAbsentPrepare(t *testing.T) 
 	}
 }
 
-func TestReconcilePendingAppTrackReferralMintUsesExactSignedAttempt(t *testing.T) {
+func TestReconcilePendingAppTrackReferralMintUsesExactSignedAttemptWithEnforcementOff(t *testing.T) {
 	attemptTS := time.Date(2026, 7, 3, 11, 59, 30, 0, time.UTC)
 	pending := auth.PendingAppTrackReferralMint{
 		ProviderID: "provider-a",
@@ -231,7 +370,6 @@ func TestReconcilePendingAppTrackReferralMintUsesExactSignedAttempt(t *testing.T
 	stats := &fakeStatsDB{prepared: true}
 	authStore := &fakeAuthStore{pendingMints: []auth.PendingAppTrackReferralMint{pending}}
 	handler := testRegisterHandler(stats, authStore, nil)
-	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
 	handler.ReferralStore = authStore
 
 	if err := handler.ReconcilePendingAppTrackReferralMints(context.Background()); err != nil {
@@ -242,6 +380,30 @@ func TestReconcilePendingAppTrackReferralMintUsesExactSignedAttempt(t *testing.T
 	}
 	if len(authStore.resolvedMints) != 1 || !authStore.resolvedPrepared[0] {
 		t.Fatalf("resolved=%+v prepared=%+v", authStore.resolvedMints, authStore.resolvedPrepared)
+	}
+}
+
+func TestReconcilePendingAppTrackReferralMintReportsMissingPostgresAuthority(t *testing.T) {
+	authStore := &fakeAuthStore{pendingMints: []auth.PendingAppTrackReferralMint{{
+		ProviderID: "provider-a",
+		Attempt: auth.AppTrackRegistrationAttempt{
+			Nonce:     strings.Repeat("b", 64),
+			AttemptTS: time.Date(2026, 7, 3, 11, 59, 30, 0, time.UTC),
+		},
+	}}}
+	handler := &Handler{
+		ReferralStore: authStore,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 2, 0, 0, time.UTC)
+		},
+	}
+
+	err := handler.ReconcilePendingAppTrackReferralMints(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "registration prepare store unavailable") {
+		t.Fatalf("error=%v, want missing registration prepare authority", err)
+	}
+	if len(authStore.resolvedMints) != 0 {
+		t.Fatalf("resolved without PostgreSQL authority: %+v", authStore.resolvedMints)
 	}
 }
 
@@ -1166,12 +1328,14 @@ func testRegisterHandler(stats *fakeStatsDB, authStore *fakeAuthStore, metrics *
 		limiter = limiters[0]
 	}
 	return &Handler{
-		StatsDB:           stats,
-		AuthTokenStore:    authStore,
-		CoordinatorDomain: "coordinator.streamvc.live",
-		CoordinatorWSURL:  "wss://coordinator.streamvc.live/v2/provider",
-		IPRateLimiter:     limiter,
-		ASNRateLimiter:    allowLimiter{},
+		StatsDB:                         stats,
+		AuthTokenStore:                  authStore,
+		CoordinatorDomain:               "coordinator.streamvc.live",
+		CoordinatorWSURL:                "wss://coordinator.streamvc.live/v2/provider",
+		IPRateLimiter:                   limiter,
+		CommittedRetryRateLimiter:       allowLimiter{},
+		CommittedRetryGlobalRateLimiter: allowLimiter{},
+		ASNRateLimiter:                  allowLimiter{},
 		AppAttestConfig: AppAttestConfig{
 			BundleID: "live.streamvc.Malibu",
 			TeamID:   "MALIBU1234",
@@ -1506,6 +1670,25 @@ func (allowLimiter) Allow(string) bool { return true }
 type denyLimiter struct{}
 
 func (denyLimiter) Allow(string) bool { return false }
+
+type perKeyLimiter struct {
+	limit int
+	hits  map[string]int
+	keys  []string
+}
+
+func newPerKeyLimiter(limit int) *perKeyLimiter {
+	return &perKeyLimiter{limit: limit, hits: make(map[string]int)}
+}
+
+func (l *perKeyLimiter) Allow(key string) bool {
+	l.keys = append(l.keys, key)
+	if l.hits[key] >= l.limit {
+		return false
+	}
+	l.hits[key]++
+	return true
+}
 
 func stringPtr(s string) *string {
 	return &s

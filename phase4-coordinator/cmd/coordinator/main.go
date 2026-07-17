@@ -528,13 +528,19 @@ func main() {
 		catalogLog.Msg("provider catalog compatibility enabled")
 	}
 	var onboardingStore *onboarding.PGStore
-	if cfg.Onboarding.AppTrackRegisterEnabled {
-		onboardingStore, err = onboarding.OpenPGStoreWithAuthPolicyDSNs(
-			cfg.Onboarding.PostgresDSN,
-			cfg.Onboarding.AuthPolicyRequestDSN,
-			cfg.Onboarding.AuthPolicyApproveDSN,
-			cfg.Onboarding.AuthPolicyCutoverDSN,
-		)
+	if shouldOpenOnboardingStore(cfg.Onboarding) {
+		if cfg.Onboarding.AppTrackRegisterEnabled {
+			onboardingStore, err = onboarding.OpenPGStoreWithAuthPolicyDSNs(
+				cfg.Onboarding.PostgresDSN,
+				cfg.Onboarding.AuthPolicyRequestDSN,
+				cfg.Onboarding.AuthPolicyApproveDSN,
+				cfg.Onboarding.AuthPolicyCutoverDSN,
+			)
+		} else {
+			// Keep the primary authority available to reconcile referral mints
+			// created before an operator disabled the public registration route.
+			onboardingStore, err = onboarding.OpenPGStore(cfg.Onboarding.PostgresDSN)
+		}
 		if err != nil {
 			logger.Fatal().Err(err).Msg("open onboarding postgres store")
 		}
@@ -542,8 +548,10 @@ func main() {
 		if err := onboardingStore.Smoke(context.Background()); err != nil {
 			logger.Fatal().Err(err).Msg("onboarding postgres smoke failed")
 		}
-		wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
-		wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+		if cfg.Onboarding.AppTrackRegisterEnabled {
+			wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
+			wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+		}
 	}
 	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
 		if autotuneCatalog == nil {
@@ -865,41 +873,46 @@ func main() {
 
 	var register http.HandlerFunc
 	var hardwareEvidence http.HandlerFunc
+	registerHandler := &onboarding.Handler{
+		StatsDB:                             onboardingStore,
+		AuthTokenStore:                      tokenStore,
+		ReferralStore:                       tokenStore,
+		ReferralPolicy:                      referralPolicy,
+		CoordinatorDomain:                   cfg.Onboarding.CoordinatorDomain,
+		CoordinatorWSURL:                    "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
+		TrustedProxies:                      mustParseTrustedProxies(cfg, logger),
+		IPRateLimiter:                       onboarding.NewMemoryRateLimiter(5, time.Minute),
+		CommittedRetryRateLimiter:           onboarding.NewMemoryRateLimiter(5, time.Minute),
+		CommittedRetryGlobalRateLimiter:     onboarding.NewMemoryRateLimiter(60, time.Minute),
+		CommittedRetrySlots:                 make(chan struct{}, 4),
+		ASNRateLimiter:                      onboarding.NewMemoryRateLimiter(30, time.Minute),
+		HardwareEvidenceIPRateLimiter:       onboarding.NewMemoryRateLimiter(10, time.Minute),
+		HardwareEvidenceProviderRateLimiter: onboarding.NewMemoryRateLimiter(1, 10*time.Minute),
+		AppAttestVerifier: onboarding.AppleAppAttestVerifier{
+			Config: onboarding.AppAttestConfig{
+				CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+				BundleID:          cfg.Onboarding.BundleID,
+				TeamID:            cfg.Onboarding.AppleTeamID,
+			},
+		},
+		Metrics: metricsHandle,
+		AppAttestConfig: onboarding.AppAttestConfig{
+			CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+			BundleID:          cfg.Onboarding.BundleID,
+			TeamID:            cfg.Onboarding.AppleTeamID,
+		},
+	}
+	// Pending cross-store referral mints must converge even when operators
+	// disable the admission route or referral enforcement after a crash.
+	startAppTrackReferralMintReconciler(shutdownCtx, registerHandler, logger)
 	if cfg.Onboarding.AppTrackRegisterEnabled {
 		asnResolver, err := onboarding.NewStaticASNResolver(cfg.Onboarding.ASNPrefixes)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("onboarding ASN resolver config invalid")
 		}
-		registerHandler := &onboarding.Handler{
-			StatsDB:                             onboardingStore,
-			AuthTokenStore:                      tokenStore,
-			ReferralStore:                       tokenStore,
-			ReferralPolicy:                      referralPolicy,
-			CoordinatorDomain:                   cfg.Onboarding.CoordinatorDomain,
-			CoordinatorWSURL:                    "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
-			TrustedProxies:                      mustParseTrustedProxies(cfg, logger),
-			IPRateLimiter:                       onboarding.NewMemoryRateLimiter(5, time.Minute),
-			ASNRateLimiter:                      onboarding.NewMemoryRateLimiter(30, time.Minute),
-			ASNResolver:                         asnResolver,
-			HardwareEvidenceIPRateLimiter:       onboarding.NewMemoryRateLimiter(10, time.Minute),
-			HardwareEvidenceProviderRateLimiter: onboarding.NewMemoryRateLimiter(1, 10*time.Minute),
-			AppAttestVerifier: onboarding.AppleAppAttestVerifier{
-				Config: onboarding.AppAttestConfig{
-					CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
-					BundleID:          cfg.Onboarding.BundleID,
-					TeamID:            cfg.Onboarding.AppleTeamID,
-				},
-			},
-			Metrics: metricsHandle,
-			AppAttestConfig: onboarding.AppAttestConfig{
-				CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
-				BundleID:          cfg.Onboarding.BundleID,
-				TeamID:            cfg.Onboarding.AppleTeamID,
-			},
-		}
+		registerHandler.ASNResolver = asnResolver
 		register = registerHandler.HandleAppTrackRegister
 		hardwareEvidence = registerHandler.HandleHardwareEvidence
-		startAppTrackReferralMintReconciler(shutdownCtx, registerHandler, logger)
 		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
 	}
 	// Phase 2 Track P2-A: MDM enrollment profile endpoint.
@@ -1212,8 +1225,16 @@ func startGitHubAuthStatePruner(ctx context.Context, store githubAuthStatePruner
 	}()
 }
 
-func startAppTrackReferralMintReconciler(ctx context.Context, handler *onboarding.Handler, logger zerolog.Logger) {
-	if handler == nil || !handler.ReferralPolicy.RequireForRegistration {
+type appTrackReferralMintReconciler interface {
+	ReconcilePendingAppTrackReferralMints(context.Context) error
+}
+
+func shouldOpenOnboardingStore(cfg config.OnboardingConfig) bool {
+	return cfg.AppTrackRegisterEnabled || strings.TrimSpace(cfg.PostgresDSN) != ""
+}
+
+func startAppTrackReferralMintReconciler(ctx context.Context, handler appTrackReferralMintReconciler, logger zerolog.Logger) {
+	if handler == nil {
 		return
 	}
 	go func() {
