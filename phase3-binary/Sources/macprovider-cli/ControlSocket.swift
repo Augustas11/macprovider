@@ -51,7 +51,20 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case resumeAck(accepted: Bool, reason: String?)
     case shutdownRequest(graceSeconds: Int)
     case shutdownAck
-
+    case referralStatusRequest
+    case referralStatusResponse(ReferralStatusSnapshot)
+    case referralChallengeRequest
+    case referralChallengeResponse(expiresAt: String)
+    case referralChallengeReopenRequest
+    case referralChallengeReopenAck(expiresAt: String)
+    case referralVerifyRequest(postURL: String)
+    case referralChallengeCancelRequest
+    case referralChallengeCancelAck(status: ReferralStatusSnapshot?)
+    case referralError(
+        operation: ReferralControlOperation,
+        code: ReferralControlErrorCode,
+        retryAfterSeconds: Int?
+    )
 }
 
 public enum ControlSocketCodec {
@@ -153,6 +166,45 @@ public enum ControlSocketCodec {
             object = ["type": "shutdown_request", "grace_seconds": graceSeconds]
         case .shutdownAck:
             object = ["type": "shutdown_ack"]
+        case .referralStatusRequest:
+            object = ["type": "referral_status_request"]
+        case let .referralStatusResponse(status):
+            object = try Self.object(
+                encoding: status,
+                adding: ["type": "referral_status_response"]
+            )
+        case .referralChallengeRequest:
+            object = ["type": "referral_challenge_request"]
+        case let .referralChallengeResponse(expiresAt):
+            object = [
+                "type": "referral_challenge_response",
+                "expires_at": expiresAt,
+            ]
+        case .referralChallengeReopenRequest:
+            object = ["type": "referral_challenge_reopen_request"]
+        case let .referralChallengeReopenAck(expiresAt):
+            object = ["type": "referral_challenge_reopen_ack", "expires_at": expiresAt]
+        case let .referralVerifyRequest(postURL):
+            object = [
+                "type": "referral_verify_request",
+                "post_url": postURL,
+            ]
+        case .referralChallengeCancelRequest:
+            object = ["type": "referral_challenge_cancel_request"]
+        case let .referralChallengeCancelAck(status):
+            var frame: [String: Any] = ["type": "referral_challenge_cancel_ack"]
+            if let status {
+                frame["status"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(status))
+            }
+            object = frame
+        case let .referralError(operation, code, retryAfterSeconds):
+            var frame: [String: Any] = [
+                "type": "referral_error",
+                "operation": operation.rawValue,
+                "code": code.rawValue,
+            ]
+            if let retryAfterSeconds { frame["retry_after_seconds"] = retryAfterSeconds }
+            object = frame
         }
 
         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
@@ -262,9 +314,75 @@ public enum ControlSocketCodec {
             return .shutdownRequest(graceSeconds: try intField("grace_seconds", in: object))
         case "shutdown_ack":
             return .shutdownAck
+        case "referral_status_request":
+            return .referralStatusRequest
+        case "referral_status_response":
+            return .referralStatusResponse(try decode(ReferralStatusSnapshot.self, from: object, removing: "type"))
+        case "referral_challenge_request":
+            return .referralChallengeRequest
+        case "referral_challenge_response":
+            return .referralChallengeResponse(expiresAt: try stringField("expires_at", in: object))
+        case "referral_challenge_reopen_request":
+            return .referralChallengeReopenRequest
+        case "referral_challenge_reopen_ack":
+            return .referralChallengeReopenAck(expiresAt: try stringField("expires_at", in: object))
+        case "referral_verify_request":
+            return .referralVerifyRequest(postURL: try stringField("post_url", in: object))
+        case "referral_challenge_cancel_request":
+            return .referralChallengeCancelRequest
+        case "referral_challenge_cancel_ack":
+            let status: ReferralStatusSnapshot? = if let raw = object["status"] {
+                try decode(ReferralStatusSnapshot.self, from: raw)
+            } else {
+                nil
+            }
+            return .referralChallengeCancelAck(status: status)
+        case "referral_error":
+            let operationRaw = try stringField("operation", in: object)
+            guard let operation = ReferralControlOperation(rawValue: operationRaw) else {
+                throw ControlSocketError.invalidEnumValue(field: "operation", value: operationRaw)
+            }
+            let codeRaw = try stringField("code", in: object)
+            guard let code = ReferralControlErrorCode(rawValue: codeRaw) else {
+                throw ControlSocketError.invalidEnumValue(field: "code", value: codeRaw)
+            }
+            let retryAfter = optionalIntField("retry_after_seconds", in: object)
+            if let retryAfter, !(0...86_400).contains(retryAfter) {
+                throw ControlSocketError.invalidEnumValue(
+                    field: "retry_after_seconds",
+                    value: String(retryAfter)
+                )
+            }
+            return .referralError(
+                operation: operation,
+                code: code,
+                retryAfterSeconds: retryAfter
+            )
         default:
             throw ControlSocketError.unknownType(type)
         }
+    }
+
+    private static func object<T: Encodable>(encoding value: T, adding fields: [String: Any]) throws -> [String: Any] {
+        guard var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any] else {
+            throw ControlSocketError.missingType
+        }
+        for (key, value) in fields { object[key] = value }
+        return object
+    }
+
+    private static func decode<T: Decodable>(_ type: T.Type, from raw: Any) throws -> T {
+        try JSONDecoder().decode(type, from: JSONSerialization.data(withJSONObject: raw))
+    }
+
+    private static func decode<T: Decodable>(
+        _ type: T.Type,
+        from object: [String: Any],
+        removing key: String
+    ) throws -> T {
+        var value = object
+        value.removeValue(forKey: key)
+        return try decode(type, from: value)
     }
 
     private static func doubleField(_ field: String, in object: [String: Any]) throws -> Double {
@@ -404,6 +522,7 @@ actor ControlSocketServer {
     private let idleTimeoutSeconds: TimeInterval
     private let providerStatus: ProviderStatus?
     private let providerEarningsClient: ProviderEarningsClient?
+    private let referralCoordinatorService: ReferralCoordinatorService?
     private let malibuAccrualClient: MalibuAccrualClient?
     private let providerToken: String?
     private let pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?
@@ -423,6 +542,7 @@ actor ControlSocketServer {
         idleTimeoutSeconds: TimeInterval = 30.0,
         providerStatus: ProviderStatus? = nil,
         providerEarningsClient: ProviderEarningsClient? = nil,
+        referralCoordinatorService: ReferralCoordinatorService? = nil,
         malibuAccrualClient: MalibuAccrualClient? = nil,
         providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
@@ -436,6 +556,7 @@ actor ControlSocketServer {
         self.idleTimeoutSeconds = idleTimeoutSeconds
         self.providerStatus = providerStatus
         self.providerEarningsClient = providerEarningsClient
+        self.referralCoordinatorService = referralCoordinatorService
         self.malibuAccrualClient = malibuAccrualClient
         self.providerToken = providerToken
         self.pauseProvider = pauseProvider
@@ -487,6 +608,7 @@ actor ControlSocketServer {
         let idleTimeoutSeconds = idleTimeoutSeconds
         let providerStatus = providerStatus
         let providerEarningsClient = providerEarningsClient
+        let referralCoordinatorService = referralCoordinatorService
         let malibuAccrualClient = malibuAccrualClient
         let providerToken = providerToken
         let pauseProvider = pauseProvider
@@ -502,6 +624,7 @@ actor ControlSocketServer {
                 idleTimeoutSeconds: idleTimeoutSeconds,
                 providerStatus: providerStatus,
                 providerEarningsClient: providerEarningsClient,
+                referralCoordinatorService: referralCoordinatorService,
                 malibuAccrualClient: malibuAccrualClient,
                 providerToken: providerToken,
                 pauseProvider: pauseProvider,
@@ -560,6 +683,7 @@ actor ControlSocketServer {
         idleTimeoutSeconds: TimeInterval,
         providerStatus: ProviderStatus?,
         providerEarningsClient: ProviderEarningsClient?,
+        referralCoordinatorService: ReferralCoordinatorService?,
         malibuAccrualClient: MalibuAccrualClient?,
         providerToken: String?,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?,
@@ -594,6 +718,7 @@ actor ControlSocketServer {
                     idleTimeoutSeconds: idleTimeoutSeconds,
                     providerStatus: providerStatus,
                     providerEarningsClient: providerEarningsClient,
+                    referralCoordinatorService: referralCoordinatorService,
                     malibuAccrualClient: malibuAccrualClient,
                     providerToken: providerToken,
                     pauseProvider: pauseProvider,
@@ -615,6 +740,7 @@ actor ControlSocketServer {
         idleTimeoutSeconds: TimeInterval,
         providerStatus: ProviderStatus? = nil,
         providerEarningsClient: ProviderEarningsClient? = nil,
+        referralCoordinatorService: ReferralCoordinatorService? = nil,
         malibuAccrualClient: MalibuAccrualClient? = nil,
         providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
@@ -674,6 +800,48 @@ actor ControlSocketServer {
                     // launchd provider under the Issue 585 Option-2 contract.
                     try? await connection.send(.shutdownAck)
                     _ = graceSeconds
+                case .referralStatusRequest:
+                    await handleReferralRequest(
+                        operation: .status,
+                        service: referralCoordinatorService,
+                        connection: connection
+                    ) { service in
+                        .referralStatusResponse(try await service.status())
+                    }
+                case .referralChallengeRequest:
+                    await handleReferralRequest(
+                        operation: .challenge,
+                        service: referralCoordinatorService,
+                        connection: connection
+                    ) { service in
+                        let pending = try await service.challenge()
+                        return .referralChallengeResponse(expiresAt: pending.expiresAt)
+                    }
+                case .referralChallengeReopenRequest:
+                    await handleReferralRequest(
+                        operation: .challenge,
+                        service: referralCoordinatorService,
+                        connection: connection
+                    ) { service in
+                        let pending = try await service.reopenChallenge()
+                        return .referralChallengeReopenAck(expiresAt: pending.expiresAt)
+                    }
+                case let .referralVerifyRequest(postURL):
+                    await handleReferralRequest(
+                        operation: .verify,
+                        service: referralCoordinatorService,
+                        connection: connection
+                    ) { service in
+                        .referralStatusResponse(try await service.verify(postURL: postURL))
+                    }
+                case .referralChallengeCancelRequest:
+                    await handleReferralRequest(
+                        operation: .cancel,
+                        service: referralCoordinatorService,
+                        connection: connection
+                    ) { service in
+                        .referralChallengeCancelAck(status: try await service.cancel())
+                    }
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()
@@ -696,6 +864,47 @@ actor ControlSocketServer {
             }
         }
         await connection.close()
+    }
+
+    private nonisolated static func handleReferralRequest(
+        operation: ReferralControlOperation,
+        service: ReferralCoordinatorService?,
+        connection: ControlSocketConnection,
+        action: @Sendable (ReferralCoordinatorService) async throws -> ControlSocketFrame
+    ) async {
+        guard let service else {
+            try? await connection.send(.referralError(
+                operation: operation,
+                code: .featureUnavailable,
+                retryAfterSeconds: nil
+            ))
+            return
+        }
+        do {
+            try await connection.send(try await action(service))
+        } catch let error as ReferralCoordinatorClientError {
+            let code: ReferralControlErrorCode
+            let retryAfter: Int?
+            switch error {
+            case .invalidCoordinatorURL:
+                code = .featureUnavailable
+                retryAfter = nil
+            case let .control(errorCode, retryAfterSeconds, _):
+                code = errorCode
+                retryAfter = retryAfterSeconds
+            }
+            try? await connection.send(.referralError(
+                operation: operation,
+                code: code,
+                retryAfterSeconds: retryAfter
+            ))
+        } catch {
+            try? await connection.send(.referralError(
+                operation: operation,
+                code: .temporarilyUnavailable,
+                retryAfterSeconds: nil
+            ))
+        }
     }
 
 

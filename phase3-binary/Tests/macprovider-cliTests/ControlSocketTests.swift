@@ -183,6 +183,43 @@ final class ControlSocketTests: XCTestCase {
         try assertRoundTrip(.shutdownAck)
     }
 
+    func testEncodeDecodeReferralFrames() throws {
+        let status = ReferralStatusSnapshot(
+            campaign: "prebeta",
+            joinBaseURL: "https://join.example/j",
+            socialState: "eligible",
+            baseCapacity: 1,
+            configuredBonusCapacity: 2,
+            bonusCapacity: 0,
+            redemptions: 0,
+            remaining: 1,
+            firstServingSeen: true,
+            joinLinksEnabled: true,
+            socialBonusEnabled: true,
+            inviteCode: "invite-1",
+            inviteURL: "https://join.example/j/invite-1",
+            observedAt: "2027-01-15T08:00:00.000Z",
+            pendingChallenge: ReferralPendingAdvocacy(
+                expiresAt: "2027-01-15T08:10:00.000Z"
+            )
+        )
+        try assertRoundTrip(.referralStatusRequest)
+        try assertRoundTrip(.referralStatusResponse(status))
+        try assertRoundTrip(.referralChallengeRequest)
+        try assertRoundTrip(.referralChallengeResponse(expiresAt: "2027-01-15T08:10:00.000Z"))
+        try assertRoundTrip(.referralChallengeReopenRequest)
+        try assertRoundTrip(.referralChallengeReopenAck(expiresAt: "2027-01-15T08:10:00.000Z"))
+        try assertRoundTrip(.referralVerifyRequest(postURL: "https://x.com/a/status/123"))
+        try assertRoundTrip(.referralChallengeCancelRequest)
+        try assertRoundTrip(.referralChallengeCancelAck(status: status))
+        try assertRoundTrip(.referralChallengeCancelAck(status: nil))
+        try assertRoundTrip(.referralError(
+            operation: .verify,
+            code: .rateLimited,
+            retryAfterSeconds: 17
+        ))
+    }
+
     func testAckOmitsReasonWhenNil() throws {
         let data = try ControlSocketCodec.encode(.pauseAck(accepted: true, reason: nil))
         let text = String(decoding: data, as: UTF8.self)
@@ -255,6 +292,28 @@ final class ControlSocketTests: XCTestCase {
 
         XCTAssertTrue(paused.get())
         XCTAssertTrue(resumed.get())
+    }
+
+    func testServerReturnsSanitizedReferralAvailabilityWithoutService() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.referralStatusRequest)
+        let statusResponse = try await connection.receive(timeout: 1)
+        XCTAssertEqual(
+            statusResponse,
+            .referralError(operation: .status, code: .featureUnavailable, retryAfterSeconds: nil)
+        )
+        try await connection.send(.referralChallengeCancelRequest)
+        let cancelResponse = try await connection.receive(timeout: 1)
+        XCTAssertEqual(
+            cancelResponse,
+            .referralError(operation: .cancel, code: .featureUnavailable, retryAfterSeconds: nil)
+        )
+        await connection.close()
+        await server.stop()
     }
 
     func testServerRejectsReceiptRotationWhenDisabled() async throws {
