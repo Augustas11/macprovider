@@ -82,44 +82,58 @@ struct SelfUpdate {
     }
 
     func run(checkOnly: Bool) async throws {
-        let release = try await latestRelease()
-        let latest = try Self.validateReleaseTag(release.tagName)
-        let comparison = Self.compareSemver(currentVersion, latest)
+        let head = try await discoverSignedReleaseHead()
+        try await markerStore.updateSignedPolicy(
+            minimum: head.signedPolicyMinimum,
+            revoked: head.signedPolicyRevoked
+        )
+        let latest = head.targetVersion
+        let installedReleaseVersion = (try? installedCompatibilitySetReleaseVersion()) ?? currentVersion
+        let comparison = Self.compareSemver(installedReleaseVersion, latest)
 
         if comparison != .orderedAscending {
-            print("Already up to date (v\(currentVersion))")
+            print("Already up to date (v\(installedReleaseVersion))")
             return
         }
 
         if checkOnly {
-            print("Update available: v\(currentVersion) -> v\(latest)")
+            print("Update available: v\(installedReleaseVersion) -> v\(latest)")
             return
         }
 
-        let prepared = try await prepareValidatedUpdate(from: release)
+        let release = try await resolveReleaseByTags(normalizedTarget: latest)
+        let prepared = try await prepareValidatedUpdate(
+            from: release,
+            expectedArtifactIndexSHA256: head.targetArtifactIndexSHA256
+        )
         defer { prepared.cleanup() }
-        try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
+        try Self.requireDiscoveryHead(head, matches: prepared)
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
             stagedMalibuApp: prepared.stagedMalibuApp,
-            targetVersion: latest,
-            compatibilityManifest: prepared.compatibilityManifest
+            targetVersion: prepared.compatibilityManifest.providerCLIVersion,
+            compatibilityManifest: prepared.compatibilityManifest,
+            authorityMode: "signed_release",
+            discoveryHead: head
         )
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
-        print("Update complete. Restart macprovider-cli to use v\(latest).")
+        print(
+            "Update complete. Restart macprovider-cli to use provider CLI "
+                + "v\(prepared.compatibilityManifest.providerCLIVersion)."
+        )
     }
 
     func runByTag(tag: String) async throws {
         let release = try await releaseByTag(tag)
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
-        let target = try AutoUpdateRecommendation.validate(release.tagName).normalized
-        try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
             stagedMalibuApp: prepared.stagedMalibuApp,
-            targetVersion: target,
-            compatibilityManifest: prepared.compatibilityManifest
+            targetVersion: prepared.compatibilityManifest.providerCLIVersion,
+            compatibilityManifest: prepared.compatibilityManifest,
+            authorityMode: nil,
+            discoveryHead: nil
         )
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
     }
@@ -153,12 +167,13 @@ struct SelfUpdate {
             current: currentVersion,
             target: prepared.compatibilityManifest.providerCLIVersion
         )
-        try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
             stagedMalibuApp: prepared.stagedMalibuApp,
             targetVersion: prepared.compatibilityManifest.providerCLIVersion,
-            compatibilityManifest: prepared.compatibilityManifest
+            compatibilityManifest: prepared.compatibilityManifest,
+            authorityMode: nil,
+            discoveryHead: nil
         )
         print(
             "Acceptance candidate v\(target) applied with provider CLI "
@@ -190,7 +205,10 @@ struct SelfUpdate {
         }
     }
 
-    func prepareValidatedUpdate(from release: GitHubRelease) async throws -> PreparedSelfUpdate {
+    func prepareValidatedUpdate(
+        from release: GitHubRelease,
+        expectedArtifactIndexSHA256: String? = nil
+    ) async throws -> PreparedSelfUpdate {
         let targetVersion = try Self.validateReleaseTag(release.tagName)
         let canonicalTarballName = "macprovider-cli-\(release.tagName)-darwin-arm64.tar.gz"
         let canonicalMalibuDMGName = "Malibu-\(release.tagName).dmg"
@@ -233,6 +251,10 @@ struct SelfUpdate {
                     expected: expectedArtifactIndexSHA,
                     actual: actualArtifactIndexSHA
                 )
+            }
+            if let expectedArtifactIndexSHA256,
+               actualArtifactIndexSHA.lowercased() != expectedArtifactIndexSHA256.lowercased() {
+                throw UpdateError.compatibilityArtifactIndexInvalid("discovery_head_digest_mismatch")
             }
             try await download(from: tarball.browserDownloadURL, to: tarballURL)
             try await download(from: malibuDMG.browserDownloadURL, to: malibuDMGURL)
@@ -450,17 +472,19 @@ struct SelfUpdate {
         releasesAPIURL
     }
 
-    private func requireFreshCoordinatorCompatibilityAdmission(
-        _ target: CompatibilitySetManifest
+    static func requireDiscoveryHead(
+        _ head: SignedReleaseDiscoveryHead,
+        matches prepared: PreparedSelfUpdate
     ) throws {
-        let current = CompatibilitySetManifest.loadInstalled(
-            executableURL: Bundle.main.executableURL,
-            expectedVersion: currentVersion
-        )
-        try markerStore.requireCoordinatorCompatibilityTarget(
-            target.compatibilitySetID,
-            currentCompatibilitySetID: current?.compatibilitySetID
-        )
+        guard prepared.compatibilityManifest.version == head.targetVersion,
+              prepared.compatibilityManifest.compatibilitySetID == head.targetCompatibilitySetID,
+              prepared.compatibilityManifest.envelopeSHA256.range(
+                  of: #"^[0-9a-f]{64}$"#,
+                  options: .regularExpression
+              ) != nil
+        else {
+            throw UpdateError.discoveryHeadInvalid("target_identity_mismatch")
+        }
     }
 
     static func releaseSigningPublicKeyPEMForTest() -> String {
@@ -508,6 +532,32 @@ struct SelfUpdate {
             throw UpdateError.httpStatus(http.statusCode)
         }
         return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    func discoverSignedReleaseHead(now: Date = Date()) async throws -> SignedReleaseDiscoveryHead {
+        let release = try await latestRelease()
+        guard let headAsset = release.assets.first(where: { $0.name == SignedReleaseDiscoveryHead.assetName }),
+              let signatureAsset = release.assets.first(where: { $0.name == SignedReleaseDiscoveryHead.signatureAssetName })
+        else {
+            throw UpdateError.missingAsset
+        }
+        try validateDownloadURL(headAsset.browserDownloadURL)
+        try validateDownloadURL(signatureAsset.browserDownloadURL)
+        let (headData, headResponse) = try await session.data(from: headAsset.browserDownloadURL)
+        if let http = headResponse as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        let (signatureData, signatureResponse) = try await session.data(from: signatureAsset.browserDownloadURL)
+        if let http = signatureResponse as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        let head = try SignedReleaseDiscoveryHead.loadVerified(
+            headData: headData,
+            signatureData: signatureData,
+            now: now
+        )
+        try markerStore.acceptDiscoveryHead(head)
+        return head
     }
 
     private func releaseByTag(_ tag: String) async throws -> GitHubRelease {
@@ -569,7 +619,9 @@ struct SelfUpdate {
         newBinary: URL,
         stagedMalibuApp: URL?,
         targetVersion: String,
-        compatibilityManifest: CompatibilitySetManifest?
+        compatibilityManifest: CompatibilitySetManifest?,
+        authorityMode: String? = nil,
+        discoveryHead: SignedReleaseDiscoveryHead? = nil
     ) async throws {
         let lifecycleOperationID = "self-update:\(UUID().uuidString.lowercased())"
         var maintenanceLease: ProviderLifecycleLeaseRecord?
@@ -619,6 +671,9 @@ struct SelfUpdate {
                 commitOwner: "self_update",
                 targetCompatibilitySetID: compatibilityManifest?.compatibilitySetID,
                 targetCompatibilitySetSHA256: compatibilityManifest?.envelopeSHA256,
+                discoveryHeadSequence: discoveryHead?.releaseSequence,
+                discoveryHeadSHA256: discoveryHead?.digest,
+                updateAuthorityMode: authorityMode,
                 readinessTimeoutSeconds: compatibilityManifest?.readinessTimeoutSeconds ?? 300
             )
             do {
@@ -722,7 +777,8 @@ struct SelfUpdate {
         let ready = if let postRestartReadiness {
             await postRestartReadiness()
         } else {
-            await Self.waitForBuyerServingIfManaged(
+            await Self.waitForLocalHealthIfManaged(
+                targetVersion: targetVersion,
                 expectedCompatibilitySetID: compatibilityManifest?.compatibilitySetID,
                 timeout: TimeInterval(compatibilityManifest?.readinessTimeoutSeconds ?? 90)
             )
@@ -761,7 +817,7 @@ struct SelfUpdate {
         if replaceBinary == nil {
             _ = try lifecycleStateStore.transition(
                 to: .servingBuyers,
-                reasonCode: "updated_compatibility_set_ready",
+                reasonCode: "updated_compatibility_set_locally_healthy",
                 writer: .updater,
                 compatibilitySetID: compatibilityManifest?.compatibilitySetID,
                 operationID: lifecycleOperationID
@@ -797,7 +853,8 @@ struct SelfUpdate {
         }
     }
 
-    private static func waitForBuyerServingIfManaged(
+    private static func waitForLocalHealthIfManaged(
+        targetVersion: String,
         expectedCompatibilitySetID: String?,
         timeout: TimeInterval = 90
     ) async -> Bool {
@@ -808,10 +865,8 @@ struct SelfUpdate {
         guard let port = config?.port else { return false }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            // /v1/status only emits buyer_serving after the coordinator's
-            // public readiness endpoint confirms full routing eligibility.
             if let status = try? await LocalStatusClient.fetch(port: port),
-               status["network_state"] as? String == "buyer_serving",
+               status["binary_version"] as? String == targetVersion,
                expectedCompatibilitySetID == nil
                     || status["compatibility_set_id"] as? String == expectedCompatibilitySetID {
                 return true
@@ -1778,6 +1833,10 @@ enum UpdateError: Error, CustomStringConvertible {
     case compatibilityManifestInvalid(String)
     case compatibilityManifestVersionMismatch(expected: String, actual: String)
     case compatibilityArtifactIndexInvalid(String)
+    case discoveryHeadInvalid(String)
+    case discoveryHeadReplay
+    case discoveryHeadEquivocation
+    case discoveryHeadExpired
     case unsafeAcceptanceDirectory(String)
     case acceptanceCandidateNotNewer(current: String, target: String)
     case acceptanceProviderDowngrade(current: String, target: String)
@@ -1837,6 +1896,14 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Compatibility-set version mismatch: expected \(expected), got \(actual)"
         case .compatibilityArtifactIndexInvalid(let reason):
             return "Signed compatibility artifact index is invalid: \(reason)"
+        case .discoveryHeadInvalid(let reason):
+            return "Signed release discovery head is invalid: \(reason)"
+        case .discoveryHeadReplay:
+            return "Signed release discovery head replayed an older sequence"
+        case .discoveryHeadEquivocation:
+            return "Signed release discovery head changed digest at the accepted sequence"
+        case .discoveryHeadExpired:
+            return "Signed release discovery head is expired or not yet valid"
         case .unsafeAcceptanceDirectory(let reason):
             return "Acceptance-candidate directory is unsafe: \(reason)"
         case let .acceptanceCandidateNotNewer(current, target):

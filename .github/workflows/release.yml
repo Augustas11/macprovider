@@ -1235,7 +1235,15 @@ jobs:
             --tag "$tag" \
             --commit "${{ needs.build.outputs.commit }}" \
             "${artifact_index_arguments[@]}"
+          python3 scripts/build-release-discovery-head.py \
+            --sequence "$GITHUB_RUN_ID" \
+            --compatibility-manifest "$compatibility_manifest" \
+            --target-artifact-index "$compatibility_artifact_index" \
+            --private-key "$release_signing_key" \
+            --output macprovider-release-discovery.json \
+            --signature macprovider-release-discovery.json.sig
           release_assets+=("$compatibility_artifact_index")
+          release_assets+=(macprovider-release-discovery.json macprovider-release-discovery.json.sig)
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ needs.build.outputs.commit }}" "$GITHUB_REPOSITORY" \
             "${{ needs.build.outputs.prerelease }}" release-toolchain.json \

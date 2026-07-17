@@ -61,6 +61,41 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertNoThrow(try SelfUpdate.requireStagedBinaryVersion("1.8.40\n", targetVersion: "1.8.40"))
     }
 
+    func testDiscoveryHeadBindsSetVersionWhileCLIAndMalibuVersionsCanDiffer() throws {
+        let setID = "Augustas11/macprovider:v1.8.50@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: String(repeating: "b", count: 64),
+            version: "1.8.50",
+            catalogReleaseID: "catalog-2026-07-17",
+            catalogPolicyVersion: "policy-1",
+            maintenanceLeaseSeconds: 90,
+            readinessTimeoutSeconds: 300,
+            malibuAppVersion: "1.8.51",
+            providerCLIVersion: "1.8.49"
+        )
+        let prepared = PreparedSelfUpdate(
+            tempDir: FileManager.default.temporaryDirectory,
+            newBinary: URL(fileURLWithPath: "/tmp/macprovider-cli-test"),
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 1,
+            targetVersion: "1.8.50",
+            targetCompatibilitySetID: setID,
+            targetArtifactIndexSHA256: String(repeating: "c", count: 64),
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date(),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "d", count: 64)
+        )
+
+        XCTAssertNoThrow(try SelfUpdate.requireDiscoveryHead(head, matches: prepared))
+    }
+
     func testAcceptanceProviderComponentAllowsEqualityAndUpgradeButRejectsDowngrade() throws {
         XCTAssertNoThrow(
             try SelfUpdate.requireAcceptanceProviderVersion(current: "1.8.40", target: "1.8.40")
