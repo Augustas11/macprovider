@@ -1,6 +1,16 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.24 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.25 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.25 (2026-07-16, SPEC-034 referral recovery).** Referral-gated
+onboarding composes with the live CLI `bootstrap-auth`/WS admission path. Malibu
+may collect bounded non-secret input, but the signed installed CLI owns the
+registration attempt, identity, proof, coordinator exchange, bearer persistence,
+restart recovery, and launchd process. `/v1/providers/register`, `RegisterClient`,
+App admission signing, `--token-fd`, and an App-managed child MUST NOT be restored.
+After registration Malibu attaches to the one launchd provider and reads a
+capability-gated sanitized referral projection. Failures preserve a working
+identity and return typed retry/correction states.
 
 **Change log v0.24 (2026-07-14, issue #585 Option 2 completion).** The
 launchd-managed CLI is the sole runtime authority for provider bearer custody,
@@ -1246,7 +1256,7 @@ registration to succeed.
 > per section — a critical distinction: the shipped **Malibu app** is a monitor wrapper,
 > but the **`macprovider-cli` it monitors** is a full v2 client.
 > - **§4.1 `/v1/providers/register`** — **dormant**: neither the app nor `install.sh`
->   calls it (`RegisterClient.postRegister` unwired). Onboarding uses `bootstrap-auth` +
+>   calls it; current main deletes `RegisterClient`. Onboarding uses `bootstrap-auth` +
 >   tokenless WS admission (§6.1).
 > - **§4.3 `identity_signature` proof-stage** — **LIVE via the CLI track**: the
 >   launchd-managed `macprovider-cli` signs `identity_signature` with its stable
@@ -1259,6 +1269,59 @@ registration to succeed.
 >
 > Where §4/§5.3 say "the App calls X," qualify it as not-shipped-**app**-side; §4.3 is
 > nonetheless a live CLI-side dependency.
+
+### 4.0 Referral-gated onboarding integration
+
+When SPEC-034 enforcement is disabled, the existing one-click path is unchanged.
+When enabled, the onboarding window first accepts a referral code as untrusted
+input. The concrete v1 handoff is:
+
+1. Compatibility-set manifest v1 remains exact-key and is not extended with a
+   capability array. For a fresh bundled install, Malibu uses its compiled-in v1
+   handoff only after hashing the exact regular-file bytes at
+   `Contents/Resources/install.sh` that it is about to execute and comparing the
+   result with the signed
+   `components.launchd.install_contract.sha256` value for
+   `compatibility-set-local/install.sh`. Missing, symlinked, unreadable, or
+   mismatched resources fail to `unavailable` before execution. For an existing CLI, Malibu
+   requires `referral_bootstrap_v1` in the CLI-authored local status contract.
+   Otherwise it renders the input unavailable; it never infers support from a
+   marketing version.
+2. `CLIInstallRunner.run(referralCode:)` validates at most 256 UTF-8 bytes with
+   no control characters and adds only `MACPROVIDER_REFERRAL_CODE` to its existing
+   sanitized allowlist. It does not inherit the App environment.
+3. `install.sh` writes the code to the CLI-owned 0600 journal
+   `~/.config/macprovider/onboarding/referral-attempt-v1.json`, unsets the
+   environment value, and calls the installed `macprovider-cli bootstrap-auth
+   --referral-code-file <journal>`.
+4. `bootstrap-auth` validates the owner/mode and bounded code, reuses the durable
+   provider/receipt identity, and sends the exact code in both signed bootstrap
+   stages. It persists the response bearer to CLI Keychain before atomically
+   retiring the plaintext journal and exiting 0.
+5. The installer exit and versioned local status are Malibu's acknowledgement;
+   no response contains the bearer. Existing installs advertise
+   `referral_bootstrap_v1` in local status before Malibu exposes referral input;
+   `referral_status_v1` independently gates the sanitized referral dashboard.
+
+If the process or host restarts, the CLI reuses the journal and exact receipt
+key. If the coordinator committed but the journal was already retired, exact-key
+same-campaign recovery may omit the code and replace only its own unused
+bootstrap bearer. No raw code or bearer is written to Malibu storage, config,
+lifecycle state, or logs.
+
+A coordinator rejection maps to a typed invalid, expired, revoked, exhausted,
+conflict, rate-limited, unavailable, or retryable result. The CLI reuses its
+provider ID, admission key, and registration attempt on retry. Malibu offers
+correction/retry without deleting an existing credential, and after success it
+attaches to the launchd-managed provider rather than launching or supervising a
+child. Independent Malibu and CLI marketing versions negotiate the request and
+status surfaces by protocol capability; unsupported combinations render the
+referral step unavailable truthfully.
+
+The production implementation and acceptance tests MUST prove restart during
+onboarding, response loss after coordinator commit, CLI Keychain persistence,
+and exactly one managed provider process. Referral admission and advocacy policy
+remain owned by SPEC-034; wire/status shapes remain owned by SPEC-001.
 
 ### 4.1 `POST /v1/providers/register`
 
@@ -1273,17 +1336,18 @@ durable proof credential begins as the **bootstrap identity** (a CLI-owned, rota
 of the first receipt key — `ReceiptKeyStore.swift:66-92`; `install.sh:2484`) — see §2
 grounding. (Earlier reconciliations said "install.sh
 performs the §4.1 registration"; that was wrong — install.sh uses WS admission, not §4.1.)
-`Malibu.app`'s `RegisterClient` retains the full machinery to build a canonical,
-Ed25519-signed register body and validate the returned `coordinator_ws_url`
-(same-origin, redirect-Authorization-stripped — `RegisterClient.swift:74-228,319-361`),
-and it is unit-tested (`RegisterClientTests`), but `RegisterClient.postRegister` has
-**zero production callers** — it is a signing/validation library, not a live call path.
+The former Malibu `RegisterClient` and its tests are deleted from current main.
+No compiled App registration or provider-identity signing library remains, and
+referral recovery MUST NOT recreate one.
 App Attest fields (`app_attest_object` / `app_attest_key_id`) are optional passthrough
 params defaulting to `nil`; **no `DCAppAttestService` attestation is implemented in the
 app tree** (team/bundle pins are enforced coordinator-side per §5.3, not minted by the
 shipped app). The `p_*` body below is the DESIGNED wire contract for §4.1; it is **NOT**
 what the shipped `install.sh` sends (which uses `bootstrap-auth` / WS admission, above).
 Read it as a coordinator surface awaiting a client that drives it.
+
+SPEC-034 referral onboarding does not activate this dormant endpoint and MUST NOT
+restore `RegisterClient`. It extends the live CLI WS bootstrap described above.
 
 ```
 Content-Type: application/json
@@ -1942,9 +2006,8 @@ provided qualification lapses.
 
 > **NOT implemented client-side (reconciled v0.14).** The shipped Malibu app does
 > **not** call `DCAppAttestService` — there is no App Attest implementation in the app
-> tree; `RegisterClient` only carries optional `app_attest_object` / `app_attest_key_id`
-> passthrough params that default to `nil` (`RegisterClient.swift:125`), and that
-> register path is itself unwired (§4.1). So "valid App Attest evidence unlocks trust
+> tree, and current main deletes the former `RegisterClient` passthrough. The
+> register path remains dormant (§4.1). So "valid App Attest evidence unlocks trust
 > benefits" is a **coordinator-verifier contract + future client**, not shipped
 > behavior. **Hash-contract note (reconciled v0.16):** the coordinator hashes the JCS
 > member **named `ts_utc`** with an **integer Unix-seconds value** (it parses the RFC3339
@@ -2087,12 +2150,13 @@ slower payout release. Not required for this spec to ship.
       (`CLIInstallRunner.swift:89-103`; `LaunchProviderController.swift:79-87`).
    b. **Run the bundled `install.sh`** (`.runningCLIInstall`, `:117-125`) via
       `/bin/bash <temp-copy 0700>` with **no CLI args**, one script-path arg.
-      **Env is NOT sanitized (reconciled v0.14 — carried gap):** `CLIInstallRunner`
-      **inherits the full parent environment** and only sets `PATH` when it is
-      missing/empty (`CLIInstallRunner.swift:37-51`); the available
-      `ProcessEnvironmentSanitizer` is not used, so inherited `MACPROVIDER_*`
-      overrides (install location, repo, launchd-disable — `install.sh:12,48`) and a
-      caller-controlled non-empty `PATH` remain effective. **`install.sh` runs the
+      **Environment is sanitized (reconciled v0.25 to current source):**
+      `CLIInstallRunner.installerEnvironment` constructs a new allowlist with
+      fixed `PATH`, validated `HOME`/`TMPDIR`, `LC_ALL`,
+      `MACPROVIDER_NO_PROMPT=1`, and its validated port/version inputs; it does
+      not inherit the parent process environment
+      (`CLIInstallRunner.swift:92-119`). SPEC-034 adds only the validated
+      one-shot `MACPROVIDER_REFERRAL_CODE` value to that allowlist. **`install.sh` runs the
       CLI-track onboarding:** it generates a fresh `mp-<32hex>` principal and runs
       `bootstrap-auth`, which acquires the `provider_token` via the coordinator's
       **tokenless WS admission** handshake (NOT the App-track `/v1/providers/register`,
@@ -2315,8 +2379,9 @@ longer writes `onboarding.json` (§7.5).
 `phase3-binary/app/Sources` + `Tests` confirms: no `MalibuOnboardingPolicy`, no
 `MALIBU_ONBOARD_V2`, no `resumeOnboarding`/`setupPaused`, no `application(_:open:)` /
 `CFBundleURLSchemes` (only a tombstone comment at `MalibuApp.swift:35-38` records the
-v0.11 removal). `RegisterClient.postRegister` still *compiles* but has **zero callers**
-(unwired; §4.1). The original line-level removal list below is retained as provenance.
+v0.11 removal). Current main also deletes `RegisterClient.swift` and its tests;
+there is no compiling App registration client to reuse. The original line-level
+removal list below is retained as provenance.
 
 Removals (historical — now completed):
 

@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.8.4 (2026-07-15, §6.5.1 `auth_state` admission-verdict ack field — runbook item 23)
+**Version:** 1.9.0 (2026-07-16, referral bootstrap and sanitized status capability)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,19 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.9.0 (2026-07-16, SPEC-034 integration):**
+- The v1 `hello` and v2 initial/proof `auth_request` bootstrap shapes gain an
+  OPTIONAL `referral_code` string. It is emitted only from a supported CLI-owned
+  onboarding attempt and is covered by the v2 signed transcript. SPEC-003
+  FR-C9.7 owns coordinator emission/admission behavior; SPEC-034 owns code policy.
+- Local status may advertise `referral_bootstrap_v1` when the installed CLI
+  accepts the protected referral-journal handoff, and independently advertise
+  `referral_status_v1` for the sanitized owner-only control-socket status
+  projection. `referral_advocacy_v1` independently advertises the complete typed
+  challenge/verify/cancel/reopen action set. Neither capability exposes the
+  provider bearer or raw referral code, and Malibu never calls coordinator
+  referral APIs directly.
 
 **Change log v1.8.4 (2026-07-15, runbook item 23 — `auth_state` ack field):**
 - §6.5.1 adds the OPTIONAL `auth_state` string on the v1 `hello_ack` and v2 accepted `auth_response` frames — the coordinator's admission verdict (`bearer_validated` / `self_minted` / `bearerless_duplicate`). SPEC-001 owns the field shape/domain; emission is SPEC-003 FR-C9.2a and autoupdate interpretation is SPEC-020 v0.1.7. Additive `omitempty`; pre-v1.8.4 binaries ignore the key.
@@ -1029,7 +1042,8 @@ The local `GET /v1/status` response includes a versioned envelope. Contract v1 h
 `minimum_reader_version=1`, names `macprovider_cli` as `lifecycle_owner`, and advertises
 only fields a reader may trust through these capabilities:
 `buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
-`status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`, and
+`status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`,
+`referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`, and
 `legacy_reader_fallback_v1`. A reader MUST suppress a typed field when its capability
 is absent and MUST suppress all typed fields when the minimum reader exceeds its
 supported version. An absent envelope is the legacy-reader path.
@@ -1039,7 +1053,7 @@ supported version. An absent envelope is the legacy-reader path.
   "version": 1,
   "minimum_reader_version": 1,
   "lifecycle_owner": "macprovider_cli",
-  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1"]
+  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1", "referral_bootstrap_v1", "referral_status_v1", "referral_advocacy_v1"]
 },
 "observation": {
   "id": "per-response UUID",
@@ -1074,7 +1088,63 @@ hash, or any other stable token-derived value. The service instance identifies a
 process, not a provider principal or credential. Observation IDs change per response;
 service instance IDs remain stable only for that running `serve` process; transition
 IDs change only on a reported lifecycle edge. Older clients MUST tolerate all objects'
-absence.
+absence. `referral_bootstrap_v1` means the running installed CLI implements the
+complete SPEC-026 protected handoff: `bootstrap-auth --referral-code-file`,
+owner/mode and bounded-content validation, identical initial/proof transmission,
+Keychain persist-before-adopt, and safe journal retirement. It is not evidence
+that a code is valid or referral enforcement is enabled; it gates only whether
+Malibu may offer referral input to that installed CLI.
+
+`GET /v1/status` advertises referral capabilities but does not embed the
+coordinator referral projection. When `referral_status_v1` is advertised,
+Malibu obtains that projection over the owner-only provider control socket with
+`referral_status_request` and this flattened response shape:
+
+```json
+{
+  "type": "referral_status_response",
+  "campaign": "prebeta",
+  "join_base_url": "https://configured-public-origin/j",
+  "social_state": "locked_until_first_serving | eligible | pending | failed | matured | revoked",
+  "base_capacity": 1,
+  "configured_bonus_capacity": 2,
+  "bonus_capacity": 0,
+  "redemptions": 0,
+  "remaining": 1,
+  "first_serving_seen": true,
+  "social_bonus_enabled": false,
+  "invite_code": "shareable-code",
+  "invite_url": "https://configured-public-origin/j/shareable-code",
+  "observed_at": "RFC 3339 timestamp",
+  "pending_challenge": {
+    "expires_at": "RFC 3339 timestamp"
+  }
+}
+```
+
+The status capability covers only the request/response projection. Missing,
+unknown, or newer `referral_status_v1` suppresses all referral status and action
+UI. `referral_advocacy_v1` is separately advertised only when the CLI implements
+the complete typed `referral_challenge_request`,
+`referral_challenge_reopen_request`, `referral_verify_request`, and
+`referral_challenge_cancel_request` flows and their response/error frames.
+Malibu requires both capabilities before presenting any advocacy mutation; a
+status-capable CLI without `referral_advocacy_v1` remains read-only.
+
+The invite URL is a shareable product artifact, not a credential; all other
+secrets and raw onboarding inputs remain omitted. A successful status response
+MUST contain the campaign, join base, social state, counts, serving/social
+booleans, and observation time. Invite code/URL and pending challenge are
+optional. Coordinator/authentication/unavailability failures use the typed
+`referral_error` frame; they MUST NOT be converted into zero balances or local
+eligibility. `join_base_url` MUST be credential-free HTTPS and end in `/j`
+without a trailing slash. When invite code and URL are present, `invite_url`
+MUST equal the exact `join_base_url/<invite_code>` value supplied by the
+authenticated coordinator status. Malibu repeats that exact binding before
+presenting or copying the invite. `revoked` is distinct from `failed`:
+revocation is an authoritative issuer/policy action, while failure is a
+social-verification result; exhaustion is derived from authoritative
+`remaining == 0`, not a locally invented social state.
 
 The config file schema includes at minimum: `port`, `model` (HuggingFace
 model path), `coordinator_url`, `log_format` (`json` or `text`),
@@ -3009,6 +3079,10 @@ Initial-stage fields:
   credential-bootstrap / TOFU token-mint path (**SPEC-003** open onboarding,
   FR-C9 / `allow_tokenless_provisional_bootstrap`). SPEC-026 §4.3 does **not**
   define this flag — it owns only the identity-signature binding it pairs with.
+- `referral_code: <string>` — OPTIONAL untrusted admission input from the
+  CLI-owned onboarding journal. It MUST be omitted outside a referral attempt,
+  bounded to the SPEC-034 code limit, and redacted from logs. Its presence never
+  grants admission by itself.
 - Signed-catalog admission block: `catalog_release_id`, `catalog_policy_version`,
   `catalog_candidate_sha256`, `catalog_signer_key_id`, `catalog_row_identity`
   (**SPEC-010 / SPEC-022** signed-catalog admission). This block is **also**
@@ -3038,7 +3112,8 @@ catalog-invalidation guards (a field is dropped if its catalog admission was
 invalidated). A coordinator MUST treat each field as independently optional.
 
 Proof-stage `auth_request` (the second handshake message) can additionally
-carry `credential_bootstrap` (**SPEC-003** FR-C9), `identity_signature`, and
+carry `credential_bootstrap` and the same `referral_code` (**SPEC-003**
+FR-C9/FR-C9.7), `identity_signature`, and
 `identity_signature_transcript_sha256` (**SPEC-026 §4.3** identity binding;
 `CoordinatorClient.swift`).
 
