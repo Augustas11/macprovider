@@ -392,6 +392,7 @@ jobs:
     timeout-minutes: 5
     needs:
       - coordinator
+      - coordinator-stats-integration
       - coordinator-nginx-integration
       - gateway
       - phase7-verify
@@ -407,6 +408,7 @@ jobs:
         shell: bash
         env:
           COORDINATOR_RESULT: ${{ needs.coordinator.result }}
+          COORDINATOR_STATS_INTEGRATION_RESULT: ${{ needs.coordinator-stats-integration.result }}
           NGINX_INTEGRATION_RESULT: ${{ needs.coordinator-nginx-integration.result }}
           GATEWAY_RESULT: ${{ needs.gateway.result }}
           PHASE7_VERIFY_RESULT: ${{ needs.phase7-verify.result }}
@@ -422,6 +424,7 @@ jobs:
           failed=0
           for check in \
             "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
+            "phase4-coordinator (stats Postgres AC-9/10/19/20):${COORDINATOR_STATS_INTEGRATION_RESULT}" \
             "phase4-coordinator (nginx Step 4.B behavior smoke):${NGINX_INTEGRATION_RESULT}" \
             "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
             "phase7-verify (go vet + test):${PHASE7_VERIFY_RESULT}" \

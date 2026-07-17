@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
@@ -37,6 +38,11 @@ const trustRevalidationSweepDeadlineCap = 20 * time.Second
 // serving indefinitely on a trust store it cannot read. Kept small so the bound
 // is tight (3 * 30s ≈ 90s worst case) while still absorbing brief blips.
 const trustSweepDegradedThreshold = 3
+
+type admittedProviderSession struct {
+	tuple      onboarding.AdmittedTuple
+	assignedID string
+}
 
 // runTrustRevalidationLoop is the periodic goroutine backing issue #582 FIX A/B.
 // It is started only when the hardware-trust checker is wired (i.e. the
@@ -76,6 +82,7 @@ func (s *Server) runTrustRevalidationSweep() {
 	// captured hardware tuple (should not occur while the gate is enabled, since
 	// admission requires verified evidence) is skipped rather than evicted, so an
 	// edge entry is never dropped on a tuple we cannot check.
+	var sessions []admittedProviderSession
 	var tuples []onboarding.AdmittedTuple
 	seen := make(map[string]struct{})
 	for _, provider := range s.pool.Snapshot() {
@@ -85,17 +92,22 @@ func (s *Server) runTrustRevalidationSweep() {
 		if provider.AdmittedHardwareIdentityHash == "" {
 			continue
 		}
-		key := provider.ProviderID + "\x00" + provider.AdmittedHardwareIdentityHash
+		key := provider.ProviderID + "\x00" + provider.AssignedID + "\x00" + provider.AdmittedHardwareIdentityHash
 		if _, dup := seen[key]; dup {
 			continue
 		}
 		seen[key] = struct{}{}
-		tuples = append(tuples, onboarding.AdmittedTuple{
+		tuple := onboarding.AdmittedTuple{
 			ProviderID:           provider.ProviderID,
 			HardwareIdentityHash: provider.AdmittedHardwareIdentityHash,
 			ChipNormalized:       provider.AdmittedChipNormalized,
 			UnifiedMemoryGB:      provider.AdmittedUnifiedMemoryGB,
+		}
+		sessions = append(sessions, admittedProviderSession{
+			tuple:      tuple,
+			assignedID: provider.AssignedID,
 		})
+		tuples = append(tuples, tuple)
 	}
 	if len(tuples) == 0 {
 		return
@@ -118,7 +130,7 @@ func (s *Server) runTrustRevalidationSweep() {
 		// FIX C: a single (or brief) failure fails open — skip. Only SUSTAINED
 		// failure escalates to the degraded signal + bounded quarantine.
 		if s.trustSweepFailures >= trustSweepDegradedThreshold {
-			s.escalateTrustAuthorityDegraded(tuples)
+			s.escalateTrustAuthorityDegraded(sessions)
 		}
 		return
 	}
@@ -130,6 +142,10 @@ func (s *Server) runTrustRevalidationSweep() {
 		s.trustSweepFailures = 0
 		s.trustAuthorityDegraded.Store(false)
 	}
+	sessionsByTuple := make(map[string][]admittedProviderSession, len(sessions))
+	for _, session := range sessions {
+		sessionsByTuple[admittedTupleKey(session.tuple)] = append(sessionsByTuple[admittedTupleKey(session.tuple)], session)
+	}
 	for _, tuple := range untrusted {
 		s.log.Warn().
 			Str("event", "hardware_trust_session_revalidation_evict").
@@ -137,8 +153,9 @@ func (s *Server) runTrustRevalidationSweep() {
 			Str("hardware_identity_hash", tuple.HardwareIdentityHash).
 			Str("reason", "no_active_trust_root_for_admitted_tuple").
 			Msg("evicting active provider session: admitted hardware tuple no longer has an active trust root")
-		// Reuse the existing drain → mark-draining → CloseBanned eviction path.
-		s.disconnectProviderForTrustRevocation(tuple.ProviderID, "trust_revalidation")
+		for _, session := range sessionsByTuple[admittedTupleKey(tuple)] {
+			s.disconnectAdmittedSessionForTrustRevalidation(session, "trust_revalidation")
+		}
 	}
 }
 
@@ -152,17 +169,20 @@ func (s *Server) runTrustRevalidationSweep() {
 // were already committed and are being drained, not refused). Idempotent: a
 // session already draining is left alone, so repeated ticks past the threshold
 // do not re-drain.
-func (s *Server) escalateTrustAuthorityDegraded(tuples []onboarding.AdmittedTuple) {
+func (s *Server) escalateTrustAuthorityDegraded(sessions []admittedProviderSession) {
 	first := s.trustAuthorityDegraded.CompareAndSwap(false, true)
 	if first {
 		s.log.Error().
 			Int("consecutive_failures", s.trustSweepFailures).
-			Int("gated_sessions", len(tuples)).
+			Int("gated_sessions", len(sessions)).
 			Msg("hardware trust authority DEGRADED: sweep unverifiable past threshold; quarantining gated sessions")
 	}
-	for _, tuple := range tuples {
-		provider, ok := s.pool.Resolve(tuple.ProviderID, "")
+	for _, admitted := range sessions {
+		provider, ok := s.pool.Resolve(admitted.tuple.ProviderID, admitted.assignedID)
 		if !ok {
+			continue
+		}
+		if !providerMatchesAdmittedTuple(provider, admitted.tuple) {
 			continue
 		}
 		if provider.State == pool.StateDraining {
@@ -180,4 +200,43 @@ func (s *Server) escalateTrustAuthorityDegraded(tuples []onboarding.AdmittedTupl
 			Str("assigned_id", provider.AssignedID).
 			Msg("quarantining gated session: trust authority unverifiable (route-excluded, draining)")
 	}
+}
+
+func (s *Server) disconnectAdmittedSessionForTrustRevalidation(admitted admittedProviderSession, actor string) {
+	provider, ok := s.pool.Resolve(admitted.tuple.ProviderID, admitted.assignedID)
+	if !ok {
+		return
+	}
+	if !providerMatchesAdmittedTuple(provider, admitted.tuple) {
+		return
+	}
+	if provider.State == pool.StateDraining {
+		return
+	}
+	session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		return
+	}
+	_ = session.send([]byte(`{"type":"drain"}`))
+	s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDraining)
+	s.log.Warn().
+		Str("event", "hardware_trust_provider_evicted").
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Str("actor", actor).
+		Msg("draining provider session after hardware trust revocation")
+	time.AfterFunc(200*time.Millisecond, func() {
+		s.closeSession(session, CloseBanned, "hardware trust revoked for provider "+provider.ProviderID)
+	})
+}
+
+func providerMatchesAdmittedTuple(provider pool.Provider, tuple onboarding.AdmittedTuple) bool {
+	return provider.ProviderID == tuple.ProviderID &&
+		provider.AdmittedHardwareIdentityHash == tuple.HardwareIdentityHash &&
+		provider.AdmittedChipNormalized == tuple.ChipNormalized &&
+		provider.AdmittedUnifiedMemoryGB == tuple.UnifiedMemoryGB
+}
+
+func admittedTupleKey(tuple onboarding.AdmittedTuple) string {
+	return tuple.ProviderID + "\x00" + tuple.HardwareIdentityHash + "\x00" + tuple.ChipNormalized + "\x00" + strconv.Itoa(tuple.UnifiedMemoryGB)
 }

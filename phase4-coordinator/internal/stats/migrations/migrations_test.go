@@ -627,7 +627,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		// only — must never touch version 18 (018_apptrack_register_attempts).
 		"DELETE FROM schema_migrations_spec017 WHERE version = 19;",
 		// FIX 1: rollback restores migration 016's guard body (trust activity on
-		// now()) so the trigger returns to its exact pre-018 definition.
+		// now()) so the trigger returns to its exact pre-019 definition.
 		"AND (t.expires_at IS NULL OR t.expires_at > now())",
 		// FIX 4 (round-6): rollback also revokes the read-only trust SELECT that the
 		// up migration re-added to provider_onboarding for the admission re-check.

@@ -1,4 +1,4 @@
--- Bootstrap the issue #582 hardware-trust split login roles after migration 018
+-- Bootstrap the issue #582 hardware-trust split login roles after migration 019
 -- has created the NOLOGIN roles (hardware_trust_definer / _requester / _approver)
 -- and repaired grants. Run with an admin/operator Postgres role during the same
 -- maintenance window as the coordinator binary deploy:
@@ -16,7 +16,7 @@
 -- are supplied at execution time, never committed or passed through process
 -- arguments. Update /etc/macprovider/coordinator.env with matching
 -- ONBOARDING_HARDWARE_TRUST_REQUEST_DSN / ONBOARDING_HARDWARE_TRUST_APPROVE_DSN
--- values before restarting the new coordinator binary. Do not run migration 018
+-- values before restarting the new coordinator binary. Do not run migration 019
 -- ahead of the binary deploy unless the old coordinator can tolerate the
 -- hardware-trust admin endpoints being unavailable.
 

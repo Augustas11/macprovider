@@ -545,6 +545,65 @@ trusted_hardware:
 	}
 }
 
+func TestOpenPostgresDBRedactsMalformedDSN(t *testing.T) {
+	const secret = "SUPERSECRETPW"
+	rawDSN := "postgres://inventory:" + secret + "@db.example:notaport/macprovider"
+	for _, name := range []string{"inventory", "trust inventory"} {
+		t.Run(name, func(t *testing.T) {
+			db, err := openPostgresDB(rawDSN, name)
+			if db != nil {
+				_ = db.Close()
+			}
+			if err == nil {
+				t.Fatal("openPostgresDB() error = nil, want malformed DSN error")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, secret) || strings.Contains(msg, rawDSN) || strings.Contains(msg, "notaport") {
+				t.Fatalf("redacted error leaked DSN material: %q", msg)
+			}
+			if !strings.Contains(msg, name) || !strings.Contains(msg, "redacted") {
+				t.Fatalf("redacted error = %q, want name and redaction marker", msg)
+			}
+		})
+	}
+}
+
+func TestRunRedactsMalformedInventoryDSN(t *testing.T) {
+	const secret = "SUPERSECRETPW"
+	rawDSN := "postgres://inventory:" + secret + "@db.example:notaport/macprovider"
+	path := writeTempConfig(t, `
+chips:
+  operator fixture chip:
+    display_chip: Operator Fixture
+    memory_bandwidth_gb_per_s: 120
+    network_power_kw: 0.035
+    gpu_cores: 10
+    cpu_cores: 10
+providers:
+  mac:
+    chip_normalized: operator fixture chip
+    chip: Operator Fixture
+    unified_memory_gb: 32
+    source: operator
+    verified: true
+`)
+	err := run(context.Background(), options{
+		configPath: path,
+		dsn:        rawDSN,
+		stdout:     &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("run() error = nil, want malformed DSN error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, secret) || strings.Contains(msg, rawDSN) || strings.Contains(msg, "notaport") {
+		t.Fatalf("run() leaked DSN material: %q", msg)
+	}
+	if !strings.Contains(msg, "redacted") {
+		t.Fatalf("run() error = %q, want redaction marker", msg)
+	}
+}
+
 func TestLoadInventoryDetectsTrustedHardwarePresence(t *testing.T) {
 	base := `
 chips:

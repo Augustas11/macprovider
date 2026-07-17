@@ -213,6 +213,12 @@ grep -qxF 'OnUnitActiveSec=5min' "$TIMER" ||
   fail "sidecar timer must remain low-frequency"
 grep -qF 'root:root 0600' "$ENV_EXAMPLE" ||
   fail "env example must document root-only DSN credentials"
+if grep -Eq 'migration[- ]018|MIGRATION-018|pre-018' "$HARDWARE_TRUST_BOOTSTRAP"; then
+  fail "hardware trust bootstrap must identify the role dependency as migration 019, not migration 018"
+fi
+if grep -Eq 'migration[- ]018|MIGRATION-018|pre-018' "$DIST_DIR/coordinator-deploy-recover.sh"; then
+  fail "coordinator deploy recovery guidance must identify the sidecar parity boundary as migration 019, not migration 018"
+fi
 grep -qF 'SELECT, INSERT, UPDATE, DELETE on chip_hardware_profiles' "$ENV_EXAMPLE" ||
   fail "env example must document chip DELETE privilege for reconciliation"
 grep -qF 'SELECT, INSERT, UPDATE on provider_hardware_profiles' "$ENV_EXAMPLE" ||

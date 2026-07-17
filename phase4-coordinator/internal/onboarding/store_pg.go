@@ -760,7 +760,7 @@ func (s *PGStore) RequestHardwareTrustApproval(ctx context.Context, pendingID st
 		expires = expiresAt.UTC()
 	}
 	var outPending string
-	// Output columns are out_*-prefixed (migration 018 FIX 1) to avoid the
+	// Output columns are out_*-prefixed (migration 019 FIX 1) to avoid the
 	// RETURNS TABLE / plpgsql.variable_conflict=error 42702 collision; scan them
 	// positionally into the same destinations.
 	err = s.hardwareTrustRequestDB.QueryRowContext(ctx, `
@@ -909,7 +909,7 @@ SELECT id, provider_id, chip, chip_normalized, unified_memory_gb,
 // lock, matching revoke_hardware_trust_approval's post-lock clock so a root that
 // lapsed during the lock wait reads as inactive). This is a read as
 // provider_onboarding: SELECT on hardware_verification_trust and the join tables
-// is already granted (migration 018); no write/EXECUTE on the trust functions.
+// is already granted (migration 019); no write/EXECUTE on the trust functions.
 func providerTrustActiveQuery(clockExpr string) string {
 	return `SELECT ` + providerTrustActivePredicate("$1", clockExpr)
 }

@@ -152,7 +152,7 @@ DROP ROLE IF EXISTS hardware_trust_definer;
 -- FIX 1 (issue #582): 018 replaced the profile-promotion guard forward to compare
 -- the backing trust root with clock_timestamp() instead of the frozen now().
 -- Restore migration 016's guard body (now()) so rollback returns the trigger to
--- its exact pre-018 definition. Re-applying 018 re-installs the clock_timestamp()
+-- its exact pre-019 definition. Re-applying 019 re-installs the clock_timestamp()
 -- fix.
 CREATE OR REPLACE FUNCTION provider_hardware_profiles_guard_verification()
 RETURNS TRIGGER

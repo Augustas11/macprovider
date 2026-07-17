@@ -183,9 +183,9 @@ func run(parent context.Context, opts options) error {
 	ctx, cancel := context.WithTimeout(parent, runTimeout)
 	defer cancel()
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := openPostgresDB(dsn, "inventory")
 	if err != nil {
-		return fmt.Errorf("open postgres: %w", err)
+		return err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
@@ -252,9 +252,9 @@ func run(parent context.Context, opts options) error {
 // trusted_hardware section in its own transaction. Only called when the section
 // is present (issue #582 FIX 2).
 func reconcileTrustInventory(ctx context.Context, trustDSN string, inv inventory) error {
-	trustDB, err := sql.Open("postgres", trustDSN)
+	trustDB, err := openPostgresDB(trustDSN, "trust inventory")
 	if err != nil {
-		return fmt.Errorf("open trust postgres: %w", err)
+		return err
 	}
 	defer trustDB.Close()
 	trustDB.SetMaxOpenConns(1)
@@ -280,6 +280,23 @@ func reconcileTrustInventory(ctx context.Context, trustDSN string, inv inventory
 	}
 	committed = true
 	return nil
+}
+
+func openPostgresDB(dsn, name string) (*sql.DB, error) {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return nil, fmt.Errorf("%s postgres dsn is required", name)
+	}
+	connector, err := pq.NewConnector(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open %s postgres: invalid connection string (redacted)", name)
+	}
+	db := sql.OpenDB(connector)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(time.Minute)
+	return db, nil
 }
 
 // reconcileTrustDemotions runs the demotion sweep in its own transaction on the
@@ -675,7 +692,7 @@ func applyTrustInventory(ctx context.Context, db execer, inv inventory) error {
 			}
 			trustedKeys = append(trustedKeys, trustKey(providerID, identity.HardwareIdentityHash))
 			// The trust table PK is (provider_id, hardware_identity_hash, source)
-			// (migration 018), so this ON CONFLICT target isolates the inventory row:
+			// (migration 019), so this ON CONFLICT target isolates the inventory row:
 			// it can only ever match the existing source='inventory' row for the tuple
 			// and never an operator_api row (which is an independent row). The former
 			// WHERE hardware_verification_trust.source = 'inventory' DO UPDATE guard is

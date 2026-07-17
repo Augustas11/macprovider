@@ -1,8 +1,9 @@
 # Issue #582 — PR 1 design (locked)
 
-**Scope:** Durable operator hardware-trust approval path — closes the primary
-onboarding deadlock (`waiting_trust` with no operator API) and AC#2 (durable
-across `stats-inventory-sync`). Referral-orthogonal (#573–576 untouched).
+**Scope:** Durable operator hardware-trust approval path for `waiting_trust`
+hardware-identity jobs. This is PR1 of #582 and is partial: it covers the
+coordinator/operator trust approval slice and durability across
+`stats-inventory-sync`, but it does not close #582.
 
 ## Root cause (from recon)
 - A provider's `hardware_verification_jobs` row parks in `status='waiting_trust'`
@@ -55,6 +56,6 @@ independently; rollout gated on provisioning.
   (`AutotuneHardwareEvidence.swift:28`); map `autotune_evidence_required/_invalid`,
   `catalog_incompatible` close reasons to actionable lifecycle states
   (`CoordinatorClient.swift:1372` allow-list gap). AC#3.
-- PR3 Malibu: add onboarding-admission cases to shared `ProviderLifecycleState`
-  enum — coordinate with #575 (shared surface). AC#4.
-- AC#5 (no global gate disable) satisfied once PR1 gives per-provider approval.
+- PR3 Malibu: add onboarding-admission cases to the current shared
+  `ProviderLifecycleState` surface from `origin/main`. AC#4.
+- Physical fresh/restored onboarding acceptance remains outside this PR.

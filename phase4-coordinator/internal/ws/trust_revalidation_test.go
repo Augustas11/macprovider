@@ -20,6 +20,7 @@ import (
 type stubTrustChecker struct {
 	untrusted map[string]struct{}
 	err       error
+	onCheck   func()
 	calls     int
 	gotTuples []onboarding.AdmittedTuple
 }
@@ -27,6 +28,9 @@ type stubTrustChecker struct {
 func (s *stubTrustChecker) SessionsWithoutActiveTrust(_ context.Context, admitted []onboarding.AdmittedTuple) ([]onboarding.AdmittedTuple, error) {
 	s.calls++
 	s.gotTuples = append([]onboarding.AdmittedTuple(nil), admitted...)
+	if s.onCheck != nil {
+		s.onCheck()
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -44,9 +48,13 @@ func (s *stubTrustChecker) SessionsWithoutActiveTrust(_ context.Context, admitte
 // session (issue #582 FIX B). The registry stores the provider pointer, so this
 // mutation is visible to Snapshot.
 func setAdmittedTuple(p *pool.Provider) {
-	p.AdmittedHardwareIdentityHash = "hashA"
-	p.AdmittedChipNormalized = "apple m4 max"
-	p.AdmittedUnifiedMemoryGB = 64
+	setAdmittedTupleValues(p, "hashA", "apple m4 max", 64)
+}
+
+func setAdmittedTupleValues(p *pool.Provider, hardwareIdentityHash, chipNormalized string, unifiedMemoryGB int) {
+	p.AdmittedHardwareIdentityHash = hardwareIdentityHash
+	p.AdmittedChipNormalized = chipNormalized
+	p.AdmittedUnifiedMemoryGB = unifiedMemoryGB
 }
 
 // TestTrustRevalidationSweepEvictsInactiveTrust asserts the batched bounded sweep
@@ -95,6 +103,52 @@ func TestTrustRevalidationSweepEvictsInactiveTrust(t *testing.T) {
 				t.Fatalf("provider state = %q, wantDrained = %v", resolved.State, tc.wantDrained)
 			}
 		})
+	}
+}
+
+func TestTrustRevalidationSweepDoesNotDrainReplacementSession(t *testing.T) {
+	s, provider, _ := newEncryptedRelayHarness(t)
+	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+
+	replaced := false
+	checker := &stubTrustChecker{
+		untrusted: map[string]struct{}{"hashA": {}},
+		onCheck: func() {
+			replaced = true
+			serverConn, providerConn := net.Pipe()
+			t.Cleanup(func() {
+				_ = providerConn.Close()
+				_ = serverConn.Close()
+			})
+			replacement := *provider
+			replacement.AssignedID = "s2"
+			replacement.State = pool.StateReady
+			setAdmittedTupleValues(&replacement, "hashB", "apple m4 max", 64)
+			s.pool.Register(&replacement, serverConn)
+			session := newProviderSession(replacement.ProviderID, replacement.AssignedID, serverConn, 4)
+			s.sessions.Store(sessionKey(replacement.ProviderID, replacement.AssignedID), session)
+			go session.runWriter()
+		},
+	}
+	s.providerTrust = checker
+
+	s.runTrustRevalidationSweep()
+
+	if !replaced {
+		t.Fatal("test did not replace the session during the trust sweep")
+	}
+	if _, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID); ok {
+		t.Fatal("old assigned session still resolves after replacement")
+	}
+	resolved, ok := s.pool.Resolve(provider.ProviderID, "s2")
+	if !ok {
+		t.Fatal("replacement session missing from pool")
+	}
+	if resolved.AdmittedHardwareIdentityHash != "hashB" {
+		t.Fatalf("replacement admitted hash = %q, want hashB", resolved.AdmittedHardwareIdentityHash)
+	}
+	if resolved.State == pool.StateDraining {
+		t.Fatal("replacement session was drained by stale untrusted result for root A")
 	}
 }
 
