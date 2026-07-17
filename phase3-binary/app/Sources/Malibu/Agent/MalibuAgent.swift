@@ -50,7 +50,8 @@ final class MalibuAgent: ObservableObject {
     private var lastReferralRefreshRequestedAt: Date?
     private let latestReleaseTTL: TimeInterval = 3600
 
-    init() {
+    init(initialSnapshot: AgentSnapshot = .empty) {
+        snapshot = initialSnapshot
         thermalMonitor.$state
             .sink { [weak self] state in
                 self?.snapshot.thermalState = state
@@ -165,6 +166,7 @@ final class MalibuAgent: ObservableObject {
             try await control.send(.referralChallengeRequest)
         } catch {
             finishReferralAction()
+            resumeReferralStatusExpiryOrRefresh()
             snapshot.referralLastError = "The X verification request could not reach the provider CLI."
         }
     }
@@ -181,6 +183,7 @@ final class MalibuAgent: ObservableObject {
             try await control.send(.referralChallengeReopenRequest)
         } catch {
             finishReferralAction()
+            resumeReferralStatusExpiryOrRefresh()
             snapshot.referralLastError = "The X composer could not be reopened by the provider CLI."
         }
     }
@@ -197,6 +200,7 @@ final class MalibuAgent: ObservableObject {
             try await control.send(.referralVerifyRequest(postURL: postURL))
         } catch {
             finishReferralAction()
+            resumeReferralStatusExpiryOrRefresh()
             snapshot.referralLastError = "The X post could not be submitted to the provider CLI."
         }
     }
@@ -212,6 +216,7 @@ final class MalibuAgent: ObservableObject {
             try await control.send(.referralChallengeCancelRequest)
         } catch {
             finishReferralAction()
+            resumeReferralStatusExpiryOrRefresh()
             snapshot.referralLastError = "The pending X verification could not be cleared."
         }
     }
@@ -868,7 +873,9 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
-    private func beginReferralAction() {
+    func beginReferralAction() {
+        referralStatusExpiryTask?.cancel()
+        referralStatusExpiryTask = nil
         snapshot.referralActionInProgress = true
         referralActionWatchdog.arm { [weak self] in
             guard let self else { return }
@@ -901,7 +908,7 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
-    private func consume(_ frame: ControlFrame) {
+    func consume(_ frame: ControlFrame) {
         switch frame {
         case let .statusResponse(model, state):
             snapshot.currentModelID = model
@@ -1008,6 +1015,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.referralLastError = nil
         case let .referralChallengeResponse(expiresAt):
             finishReferralAction()
+            defer { resumeReferralStatusExpiryOrRefresh() }
             guard snapshot.hasTrustedReferralBoundary(),
                   let expiry = ReferralWireDate.parse(expiresAt),
                   let current = snapshot.referralStatus,
@@ -1023,6 +1031,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.referralLastError = nil
         case let .referralChallengeReopenAck(expiresAt):
             finishReferralAction()
+            defer { resumeReferralStatusExpiryOrRefresh() }
             guard ReferralWireDate.parse(expiresAt).map({ $0 > Date() }) == true else {
                 snapshot.referralLastError = "The provider CLI could not reopen an active X verification."
                 return
@@ -1036,6 +1045,7 @@ final class MalibuAgent: ObservableObject {
                 scheduleReferralStatusExpiry(for: status)
             } else {
                 snapshot.referralStatus = snapshot.referralStatus?.withPendingChallenge(nil)
+                resumeReferralStatusExpiryOrRefresh()
             }
             snapshot.referralLastError = nil
         case let .referralError(operation, code, retryAfterSeconds):
@@ -1056,6 +1066,7 @@ final class MalibuAgent: ObservableObject {
             if [.challengeInvalid, .postNotVerified].contains(code) {
                 snapshot.referralStatus = snapshot.referralStatus?.withPendingChallenge(nil)
             }
+            resumeReferralStatusExpiryOrRefresh()
             snapshot.referralLastError = referralErrorMessage(
                 operation,
                 code,
@@ -1083,9 +1094,22 @@ final class MalibuAgent: ObservableObject {
             self.snapshot.referralAvailability = self.snapshot.hasTrustedReferralBoundary()
                 ? .unavailable
                 : .unsupported
-            self.finishReferralAction()
             self.snapshot.referralLastError = "Referral status expired while Malibu waited for the provider CLI."
             self.referralStatusExpiryTask = nil
+        }
+    }
+
+    private func resumeReferralStatusExpiryOrRefresh() {
+        guard let status = snapshot.referralStatus else { return }
+        if status.isCurrent() {
+            scheduleReferralStatusExpiry(for: status)
+            return
+        }
+        referralStatusExpiryTask?.cancel()
+        referralStatusExpiryTask = nil
+        lastReferralRefreshRequestedAt = nil
+        Task { [weak self] in
+            _ = await self?.requestReferralStatusIfDue()
         }
     }
 
