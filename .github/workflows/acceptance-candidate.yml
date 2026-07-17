@@ -180,6 +180,31 @@ jobs:
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
             "$RUNNER_TEMP/Malibu.app"
 
+      - name: Verify candidate release and component versions
+        shell: bash
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
+          CANDIDATE_COMMIT: ${{ steps.source.outputs.candidate_commit }}
+          PROVIDER_ADMISSION_POLICY: ${{ steps.source.outputs.provider_admission_policy }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/component-version-payload"
+          mkdir "$payload"
+          tar -xzf "candidate/phase3-binary/dist/phase3-binary-m4-${TAG}.tar.gz" \
+            -C "$payload"
+          provider_version="$("$payload/macprovider-cli" --version)"
+          malibu_version="$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' \
+            "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          python3 control/scripts/compatibility-set-manifest.py validate \
+            --input "$payload/compatibility-set.json" \
+            --payload-directory "$payload" \
+            --expected-tag "$TAG" \
+            --expected-commit "$CANDIDATE_COMMIT" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY" \
+            --expected-provider-cli-version "$provider_version" \
+            --expected-malibu-app-version "$malibu_version"
+
       - name: Capture exact unsigned acceptance inputs
         shell: bash
         env:

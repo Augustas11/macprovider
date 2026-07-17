@@ -9,7 +9,9 @@ struct ReleasePayloadPreflightCommand: ParsableCommand {
     )
 
     func run() throws {
-        guard let executableURL = Bundle.main.executableURL else {
+        guard let executableURL = CompatibilitySetManifest.resolvedExecutableURL(
+            Bundle.main.executableURL
+        ) else {
             throw ValidationError("release payload preflight cannot resolve its executable")
         }
         let payloadDirectory = executableURL.deletingLastPathComponent()
@@ -19,7 +21,7 @@ struct ReleasePayloadPreflightCommand: ParsableCommand {
         )
         let manifest = try CompatibilitySetManifest.loadValidated(
             from: payloadDirectory,
-            expectedVersion: CoordinatorClient.binaryVersion
+            expectedProviderVersion: CoordinatorClient.binaryVersion
         )
         var output = try JSONSerialization.data(withJSONObject: [
             "compatibility_set_id": manifest.compatibilitySetID,

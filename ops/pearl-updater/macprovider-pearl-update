@@ -209,6 +209,7 @@ class Config:
     enabled: bool = False
     minimum_version: SemVer = SemVer(1, 8, 26)
     allow_provider_drain: bool = False
+    allow_private_acceptance: bool = False
     download_attempts: int = 3
     retry_backoff_s: int = 3
     request_timeout_s: int = 30
@@ -522,6 +523,7 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_ENABLED",
         "PEARL_UPDATER_MINIMUM_VERSION",
         "PEARL_UPDATER_ALLOW_PROVIDER_DRAIN",
+        "PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE",
         "PEARL_UPDATER_DOWNLOAD_ATTEMPTS",
         "PEARL_UPDATER_RETRY_BACKOFF_S",
         "PEARL_UPDATER_REQUEST_TIMEOUT_S",
@@ -553,6 +555,10 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         allow_provider_drain=bool_value(
             values.get("PEARL_UPDATER_ALLOW_PROVIDER_DRAIN", "0"),
             "PEARL_UPDATER_ALLOW_PROVIDER_DRAIN",
+        ),
+        allow_private_acceptance=bool_value(
+            values.get("PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE", "0"),
+            "PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE",
         ),
         download_attempts=bounded_int(values.get("PEARL_UPDATER_DOWNLOAD_ATTEMPTS", "3"), "download attempts", 1, 10),
         retry_backoff_s=bounded_int(values.get("PEARL_UPDATER_RETRY_BACKOFF_S", "3"), "retry backoff", 0, 60),
@@ -1372,6 +1378,7 @@ class Updater:
         tag = metadata.get("tag")
         commit = metadata.get("commit")
         advertised = metadata.get("provider_advertised_version")
+        channel = metadata.get("channel", "production")
         if not isinstance(tag, str) or not SEMVER_RE.fullmatch(tag):
             raise UpdateError("release metadata tag is invalid")
         version = SemVer.parse(tag)
@@ -1382,7 +1389,15 @@ class Updater:
         if not isinstance(advertised, str):
             raise UpdateError("release metadata advertised version is missing")
         SemVer.parse(advertised)
-        if advertised != str(version):
+        if channel == "private_acceptance":
+            if not self.config.allow_private_acceptance:
+                raise UpdateError(
+                    "private acceptance release metadata requires "
+                    "PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE=1"
+                )
+        elif channel not in ("production",):
+            raise UpdateError("release metadata channel is invalid")
+        elif advertised != str(version):
             raise UpdateError("release metadata advertised version must match the release version")
         components = metadata.get("components")
         if not isinstance(components, dict):
@@ -4490,8 +4505,9 @@ class Updater:
             raise UpdateError("phase journal committed release version mismatches its tag")
         if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
             raise UpdateError("phase journal committed release commit is invalid")
-        if not isinstance(advertised, str) or SemVer.parse(advertised) != version:
+        if not isinstance(advertised, str):
             raise UpdateError("phase journal committed advertised version is invalid")
+        SemVer.parse(advertised)
         if not isinstance(coordinator_sha, str) or not SHA256_RE.fullmatch(coordinator_sha):
             raise UpdateError("phase journal committed coordinator hash is invalid")
         if not isinstance(gateway_sha, str) or not SHA256_RE.fullmatch(gateway_sha):

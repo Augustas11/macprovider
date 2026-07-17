@@ -270,6 +270,7 @@ python3 "$metadata" build-pearl \
   --repository "$repository" \
   --tag "$tag" \
   --commit "$candidate_commit" \
+  --compatibility-manifest "$output_dir/compatibility-set.json" \
   --provider-admission-policy "$provider_admission_policy" \
   --catalog-directory "$output_dir" \
   --coordinator "$output_dir/coordinator-linux-amd64" \

@@ -166,6 +166,7 @@ class PearlUpdaterTests(unittest.TestCase):
         version: str = "1.8.27",
         advertised_version: str | None = None,
         rollout_mode: str = "bridge_required",
+        channel: str | None = None,
     ):
         tag = "v" + version
         advertised_version = advertised_version or version
@@ -218,6 +219,8 @@ class PearlUpdaterTests(unittest.TestCase):
                 },
             },
         }
+        if channel is not None:
+            metadata["channel"] = channel
         metadata_path = self.bundle / "pearl-release.json"
         metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
         self.sign(metadata_path, self.bundle / "pearl-release.json.sig")
@@ -305,6 +308,60 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_signed_advertised_version_must_match_release_pair(self):
         self.make_bundle(advertised_version="1.8.26")
         with self.assertRaisesRegex(updater_module.UpdateError, "advertised version must match"):
+            self.verify()
+
+    def test_private_acceptance_channel_is_disabled_by_default(self):
+        self.make_bundle(
+            advertised_version="1.8.26",
+            channel="private_acceptance",
+        )
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE=1",
+        ):
+            self.verify()
+
+    def test_private_acceptance_channel_allows_independent_provider_version_when_enabled(self):
+        self.make_bundle(
+            advertised_version="1.8.26",
+            channel="private_acceptance",
+        )
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            allow_private_acceptance=True,
+        )
+        release = self.verify()
+        self.assertEqual(release.provider_advertised_version, "1.8.26")
+
+    def test_private_acceptance_independent_provider_version_survives_journal_recovery(self):
+        self.make_bundle(
+            advertised_version="1.8.26",
+            channel="private_acceptance",
+        )
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            allow_private_acceptance=True,
+        )
+        release = self.verify()
+        self.updater._start_journal(release, updater_module.SemVer.parse("1.8.25"))
+
+        recovered = self.updater.committed_release(self.updater.journal["release"])
+
+        self.assertEqual(recovered.version, updater_module.SemVer.parse("1.8.27"))
+        self.assertEqual(recovered.provider_advertised_version, "1.8.26")
+
+    def test_private_acceptance_opt_in_does_not_relax_production_metadata(self):
+        self.make_bundle(advertised_version="1.8.26")
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            allow_private_acceptance=True,
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "advertised version must match"):
+            self.verify()
+
+    def test_unknown_release_channel_is_rejected(self):
+        self.make_bundle(channel="staging")
+        with self.assertRaisesRegex(updater_module.UpdateError, "channel is invalid"):
             self.verify()
 
     def test_signature_failure_rejected_before_artifact_execution(self):
@@ -3592,11 +3649,18 @@ class PearlUpdaterTests(unittest.TestCase):
         config = updater_module.load_config(self.root / "does-not-exist")
         self.assertFalse(config.enabled)
         self.assertFalse(config.allow_provider_drain)
+        self.assertFalse(config.allow_private_acceptance)
         self.assertEqual(config.canary_timeout_s, 720)
         self.assertEqual(config.provider_recovery_timeout_s, 900)
         self.assertEqual(config.provider_admission_policy, "")
         self.assertEqual(config.minimum_pool_ready_after_rollout, 0)
         self.assertEqual(config.minimum_bridge_remaining_s, 0)
+
+    def test_config_explicitly_enables_private_acceptance(self):
+        path = self.root / "private-acceptance.conf"
+        path.write_text("PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE=1\n")
+        config = updater_module.load_config(path)
+        self.assertTrue(config.allow_private_acceptance)
 
     def test_no_sanction_recovery_or_internal_canary_enablement(self):
         source = SCRIPT.read_text(encoding="utf-8")

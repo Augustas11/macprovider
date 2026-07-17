@@ -15,7 +15,9 @@ fail() {
   exit 1
 }
 
-tag="v1.8.33"
+tag="v1.8.42"
+provider_cli_version="1.8.40"
+malibu_app_version="1.8.41"
 commit="0123456789abcdef0123456789abcdef01234567"
 manifest="$work/compatibility-set.json"
 second="$work/compatibility-set-second.json"
@@ -34,6 +36,8 @@ cp "$catalog_feeds/autotune-candidates.json" "$catalog_feeds/autotune-candidates
 python3 "$tool" generate \
   --tag "$tag" \
   --commit "$commit" \
+  --provider-cli-version "$provider_cli_version" \
+  --malibu-app-version "$malibu_app_version" \
   --provider-admission-policy bridge_required \
   --catalog-directory "$catalog" \
   --catalog-feed-directory "$catalog_feeds" \
@@ -42,6 +46,8 @@ python3 "$tool" generate \
 python3 "$tool" generate \
   --tag "$tag" \
   --commit "$commit" \
+  --provider-cli-version "$provider_cli_version" \
+  --malibu-app-version "$malibu_app_version" \
   --provider-admission-policy bridge_required \
   --catalog-directory "$catalog" \
   --catalog-feed-directory "$catalog_feeds" \
@@ -52,11 +58,14 @@ python3 "$tool" validate \
   --input "$manifest" \
   --expected-tag "$tag" \
   --expected-commit "$commit" \
+  --expected-provider-cli-version "$provider_cli_version" \
+  --expected-malibu-app-version "$malibu_app_version" \
   --expected-provider-admission-policy bridge_required
 cp "$manifest" "$payload/compatibility-set.json"
 python3 "$tool" validate --input "$manifest" --payload-directory "$payload"
 
-python3 - "$schema" "$rollback_schema" "$manifest" "$local_artifacts" <<'PY'
+python3 - "$schema" "$rollback_schema" "$manifest" "$local_artifacts" \
+  "$provider_cli_version" "$malibu_app_version" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -79,6 +88,8 @@ assert rollback_schema["properties"]["rollback_order"]["const"] == [
     "release_resources", "catalog", "updater_rollback", "watchdog", "launchd", "malibu_app", "provider_cli"
 ]
 local = pathlib.Path(sys.argv[4])
+provider_cli_version = sys.argv[5]
+malibu_app_version = sys.argv[6]
 rollback_plan = json.loads((local / "updater-rollback.json").read_text(encoding="utf-8"))
 assert rollback_plan["activation_checkpoints"][-2:] == ["binary_activated", "malibu_app_activated"]
 assert rollback_plan["rollback_order"] == rollback_schema["properties"]["rollback_order"]["const"]
@@ -88,6 +99,10 @@ assert manifest["signed"]["components"]["coordinator_admission"]["activation"] =
 assert manifest["signed"]["components"]["coordinator_admission"]["handshake"] == "accepted_set_echo_v1"
 assert manifest["signed"]["components"]["coordinator_admission"]["scope"] == "remote_coordinator_policy"
 assert manifest["signed"]["components"]["malibu_app"]["activation"] == "cli_owned_if_installed"
+assert manifest["signed"]["components"]["provider_cli"]["version"] == provider_cli_version
+assert manifest["signed"]["components"]["malibu_app"]["version"] == malibu_app_version
+assert manifest["signed"]["release"]["version"] == "1.8.42"
+assert manifest["signed"]["components"]["coordinator_admission"]["version"] == "1.8.42"
 serialized = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 for forbidden in ("tar_sha256", "pkg_sha256", "dmg_sha256", "app_sha256", "cli_sha256"):
     assert forbidden not in serialized
@@ -112,6 +127,8 @@ for required in (
     'NOTICES_FILE="$PACKAGE_WORK_DIR/THIRD-PARTY-NOTICES.txt"',
     'STAGE_DIR="$PACKAGE_WORK_DIR/stage"',
     'cp "$COMPATIBILITY_SET_MANIFEST" "$STAGE_DIR/compatibility-set.json"',
+    '--provider-cli-version "$PROVIDER_CLI_VERSION"',
+    '--malibu-app-version "$MALIBU_APP_VERSION"',
     'cp -R "$LOCAL_COMPATIBILITY_SET_DIR" "$STAGE_DIR/compatibility-set-local"',
     'archive_members=(',
     'tar czf "$TARBALL" -C "$STAGE_DIR" "${archive_members[@]}"',
@@ -239,7 +256,25 @@ python3 "$tool" validate \
   --public-key "$work/public.pem" \
   --expected-tag "$tag" \
   --expected-commit "$commit" \
+  --expected-provider-cli-version "$provider_cli_version" \
+  --expected-malibu-app-version "$malibu_app_version" \
   --expected-provider-admission-policy bridge_required
+
+if python3 "$tool" validate \
+  --input "$manifest" \
+  --expected-provider-cli-version 1.8.39 \
+  >"$work/provider-version-mismatch.out" 2>&1; then
+  fail "manifest validation accepted the wrong provider CLI component version"
+fi
+grep -q "provider CLI version mismatch" "$work/provider-version-mismatch.out"
+
+if python3 "$tool" validate \
+  --input "$manifest" \
+  --expected-malibu-app-version 1.8.40 \
+  >"$work/malibu-version-mismatch.out" 2>&1; then
+  fail "manifest validation accepted the wrong Malibu component version"
+fi
+grep -q "Malibu app version mismatch" "$work/malibu-version-mismatch.out"
 
 cp -R "$payload" "$work/payload-tampered"
 printf '\n' >> "$work/payload-tampered/compatibility-set-local/watchdog.sh"

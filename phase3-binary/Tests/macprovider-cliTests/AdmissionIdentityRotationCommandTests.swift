@@ -167,6 +167,57 @@ final class AdmissionIdentityRotationCommandTests: XCTestCase {
         }
     }
 
+    func testRotationCanonicalizesSymlinkBeforePersistingAndAdoptingStartupHandoff() async throws {
+        let fixture = try AdmissionIdentityRotationFixture()
+        defer { fixture.cleanup() }
+        let store = InMemoryAdmissionIdentityRotationStore(
+            current: Curve25519.Signing.PrivateKey()
+        )
+        let symlinkURL = fixture.directory.appendingPathComponent("linked-macprovider-cli")
+        try FileManager.default.createSymbolicLink(
+            at: symlinkURL,
+            withDestinationURL: fixture.handoffExecutableURL
+        )
+
+        _ = try await AdmissionIdentityRotationCommandRunner.rotate(
+            configPath: fixture.configURL.path,
+            expectedProviderID: "provider-a",
+            previousServiceInstance: nil,
+            store: store,
+            leaseStore: fixture.leaseStore,
+            startupHandoffExecutableURL: { symlinkURL },
+            restartAndProve: { _, providerID, _ in
+                guard case .valid(let prepared) = fixture.leaseStore.inspect() else {
+                    throw AdmissionIdentityRotationTestError.handoffMissing
+                }
+                XCTAssertEqual(
+                    prepared.startupHandoff?.targetExecutablePath,
+                    fixture.handoffExecutableURL.path
+                )
+                XCTAssertNotEqual(
+                    prepared.startupHandoff?.targetExecutablePath,
+                    symlinkURL.path
+                )
+                let startupLease = try fixture.adoptPreparedStartupLease()
+                XCTAssertEqual(
+                    startupLease.startupHandoff?.targetExecutablePath,
+                    fixture.handoffExecutableURL.path
+                )
+                try store.commitPending()
+                XCTAssertTrue(try fixture.leaseStore.clear(ifLeaseID: startupLease.leaseID))
+                return CredentialCommandResult(
+                    providerID: providerID,
+                    status: ProviderCredentialStatus(
+                        source: .cliKeychain,
+                        state: .ready,
+                        restartSafe: true,
+                        migrationPending: false
+                    )
+                )
+            }
+        )
+    }
+
     func testRestartFailureRetainsExactPendingCandidateForRetry() async throws {
         let fixture = try AdmissionIdentityRotationFixture()
         defer { fixture.cleanup() }

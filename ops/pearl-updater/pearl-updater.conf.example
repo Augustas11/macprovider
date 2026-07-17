@@ -12,6 +12,12 @@ PEARL_UPDATER_MINIMUM_VERSION=1.8.26
 # coordinator gracefully.
 PEARL_UPDATER_ALLOW_PROVIDER_DRAIN=0
 
+# Private signed acceptance candidates may intentionally carry independently
+# versioned provider and server components. Keep this disabled outside a
+# bounded private acceptance window; public production metadata remains
+# release-tag coupled even when this opt-in is enabled.
+PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE=0
+
 PEARL_UPDATER_DOWNLOAD_ATTEMPTS=3
 PEARL_UPDATER_RETRY_BACKOFF_S=3
 PEARL_UPDATER_REQUEST_TIMEOUT_S=30

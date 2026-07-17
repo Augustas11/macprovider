@@ -1171,13 +1171,14 @@ struct ServeCommand: AsyncParsableCommand {
         }()
         let admissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(admissionIdentityStatus)
         let installedCompatibilityManifest: CompatibilitySetManifest? = try { () throws -> CompatibilitySetManifest? in
-            guard let executable = Bundle.main.executableURL else { return nil }
-            let directory = executable.deletingLastPathComponent()
+            guard let directory = CompatibilitySetManifest.payloadDirectory(
+                for: Bundle.main.executableURL
+            ) else { return nil }
             let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
             guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
             return try CompatibilitySetManifest.loadValidated(
                 from: directory,
-                expectedVersion: CoordinatorClient.binaryVersion
+                expectedProviderVersion: CoordinatorClient.binaryVersion
             )
         }()
         if resolved.donorMode {
