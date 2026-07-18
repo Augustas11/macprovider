@@ -54,6 +54,41 @@ func TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate(t *te
 	}
 }
 
+func TestHeartbeatModelChangeClearsPriorExpectedCatalogHash(t *testing.T) {
+	const hashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var seenExpected string
+	registry := NewRegistry(nil, WithModelIdentityVerifier(func(_, expected, _, _ string) HashStatus {
+		seenExpected = expected
+		if expected == "" {
+			return HashStatusUncatalogued
+		}
+		return HashStatusVerified
+	}))
+	start := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	registerHeartbeatProvider(t, registry, "model-a", hashA, HashStatusVerified, start)
+	registry.providers["p1"].ModelHashAlgorithm = modelidentity.SnapshotManifestV1
+	registry.providers["p1"].ExpectedModelHash = hashA
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:                    StateReady,
+		ModelID:                   "uncatalogued-model-b",
+		ModelHash:                 hashA,
+		ModelHashPresent:          true,
+		ModelHashAlgorithm:        modelidentity.SnapshotManifestV1,
+		ModelHashAlgorithmPresent: true,
+		ExpectedModelHash:         "",
+		SlotsFree:                 1,
+		SlotsTotal:                1,
+		At:                        start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat rejected provider")
+	}
+	if seenExpected != "" || provider.ExpectedModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("stale expected hash survived model change: seen=%q provider=%+v", seenExpected, provider)
+	}
+}
+
 // TestApplyHeartbeatSwapEmitterCalledWithoutPoolLock pins the M2-2 / ARCH-2
 // invariant: the swap emitter MUST NOT run while Registry.mu is held.
 // The callback re-enters Registry via ModelKnown, which takes r.mu.RLock.
@@ -401,6 +436,35 @@ func TestExpireLegacyBridgeAdmissionsRemovesBuyerServingCapacity(t *testing.T) {
 	}
 	if updated := registry.ExpireLegacyBridgeAdmissions(); updated != 0 {
 		t.Fatalf("second ExpireLegacyBridgeAdmissions() = %d, want idempotent 0", updated)
+	}
+}
+
+func TestExpireLegacyModelHashAdmissionsFencesOnlyUntypedSessions(t *testing.T) {
+	registry := NewRegistry(nil)
+	for _, provider := range []*Provider{
+		{
+			ProviderID: "legacy", AssignedID: "legacy-session", ModelID: "model-a",
+			ModelHash: strings.Repeat("a", 64), HashStatus: HashStatusUncatalogued,
+			State: StateReady, SlotsFree: 1, SlotsTotal: 1,
+		},
+		{
+			ProviderID: "modern", AssignedID: "modern-session", ModelID: "model-a",
+			ModelHash: strings.Repeat("a", 64), ModelHashAlgorithm: modelidentity.SnapshotManifestV1,
+			HashStatus: HashStatusVerified, State: StateReady, SlotsFree: 1, SlotsTotal: 1,
+		},
+	} {
+		if _, ok := registry.Register(provider, nil); !ok {
+			t.Fatalf("register %s", provider.ProviderID)
+		}
+	}
+	expired := registry.ExpireLegacyModelHashAdmissions()
+	if len(expired) != 1 || expired[0].ProviderID != "legacy" {
+		t.Fatalf("expired = %+v", expired)
+	}
+	legacy, _ := registry.Resolve("legacy", "legacy-session")
+	modern, _ := registry.Resolve("modern", "modern-session")
+	if legacy.HashStatus != HashStatusInvalid || modern.HashStatus != HashStatusVerified {
+		t.Fatalf("fence states legacy=%q modern=%q", legacy.HashStatus, modern.HashStatus)
 	}
 }
 
@@ -940,7 +1004,7 @@ func TestProviderCannotEscapeBreakerHoldViaDrainingLaundering(t *testing.T) {
 	assertState("after coordinator MarkRecovered", StateReady)
 }
 
-func TestApplyHeartbeatL1ByteIdenticalLegacyPath(t *testing.T) {
+func TestApplyHeartbeatOmittedIdentityClearsCachedVerification(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
 	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
@@ -949,8 +1013,8 @@ func TestApplyHeartbeatL1ByteIdenticalLegacyPath(t *testing.T) {
 	if !ok {
 		t.Fatal("heartbeat not applied")
 	}
-	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusVerified {
-		t.Fatalf("legacy unchanged hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
+	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("omitted identity state = (%q, %q), want cleared uncatalogued", provider.ModelHash, provider.HashStatus)
 	}
 	if provider.LastLoadingState {
 		t.Fatal("LastLoadingState changed on absent loading")
@@ -1179,7 +1243,7 @@ func TestApplyHeartbeatSPEC011PathReVerifiesOnHashChangeSameModelID(t *testing.T
 	}
 }
 
-func TestApplyHeartbeatSPEC011PathNoChangeWhenBothModelIDAndHashUnchanged(t *testing.T) {
+func TestApplyHeartbeatReverifiesUnchangedIdentity(t *testing.T) {
 	verifierCalls := 0
 	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
 		verifierCalls++
@@ -1192,10 +1256,10 @@ func TestApplyHeartbeatSPEC011PathNoChangeWhenBothModelIDAndHashUnchanged(t *tes
 	if !ok {
 		t.Fatal("heartbeat not applied")
 	}
-	if verifierCalls != 0 {
-		t.Fatalf("verifierCalls = %d, want 0", verifierCalls)
+	if verifierCalls != 1 {
+		t.Fatalf("verifierCalls = %d, want 1", verifierCalls)
 	}
-	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusVerified {
+	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusMismatch {
 		t.Fatalf("unchanged SPEC-011 hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
 	}
 }

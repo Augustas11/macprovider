@@ -1105,6 +1105,36 @@ func (r *Registry) ExpireLegacyBridgeAdmissions() int {
 	return updated
 }
 
+// ExpireLegacyModelHashAdmissions atomically fences every connected session
+// that still lacks the named canonical model-identity algorithm. The caller
+// closes the returned sessions after routing is already disabled.
+func (r *Registry) ExpireLegacyModelHashAdmissions() []Provider {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var expired []Provider
+	for _, p := range r.providers {
+		if strings.TrimSpace(p.ModelHashAlgorithm) != "" {
+			continue
+		}
+		cp := *p
+		cp.conn = nil
+		expired = append(expired, cp)
+		p.HashStatus = HashStatusInvalid
+	}
+	return expired
+}
+
+func (r *Registry) MarkHashStatusIfSession(providerID, assignedID string, status HashStatus) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	p.HashStatus = status
+	return true
+}
+
 func (r *Registry) MarkHTTPForwardingOnly(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1596,33 +1626,24 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	prev := p.LastHeartbeatAt
 	priorModelID := p.ModelID
 	priorModelHash := p.ModelHash
-	priorModelHashAlgorithm := p.ModelHashAlgorithm
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
 	if !hb.ModelHashPresent {
-		if modelIDChanged {
-			p.ModelHash = ""
-			p.ModelHashAlgorithm = ""
-			p.WeightsManifestSHA256 = ""
-			p.WeightsHashAlgorithm = ""
-			p.HashStatus = HashStatusUncatalogued
-		}
-	} else if modelIDChanged ||
-		!strings.EqualFold(priorModelHash, hb.ModelHash) ||
-		priorModelHashAlgorithm != hb.ModelHashAlgorithm {
+		p.ModelHash = ""
+		p.ModelHashAlgorithm = ""
+		p.WeightsManifestSHA256 = ""
+		p.WeightsHashAlgorithm = ""
+		p.HashStatus = HashStatusUncatalogued
+	} else {
 		p.ModelHash = hb.ModelHash
 		p.ModelHashAlgorithm = hb.ModelHashAlgorithm
 		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
 		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
 		if r.modelIdentityVerifier != nil {
-			expectedHash := p.ExpectedModelHash
-			if hb.ExpectedModelHash != "" {
-				expectedHash = hb.ExpectedModelHash
-			}
-			p.HashStatus = r.modelIdentityVerifier(hb.ModelID, expectedHash, hb.ModelHash, hb.ModelHashAlgorithm)
+			p.HashStatus = r.modelIdentityVerifier(hb.ModelID, hb.ExpectedModelHash, hb.ModelHash, hb.ModelHashAlgorithm)
 		} else if r.hashVerifier != nil {
 			p.HashStatus = r.hashVerifier(hb.ModelID, hb.ModelHash)
 		} else {
@@ -1633,9 +1654,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
 		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
 	}
-	if hb.ExpectedModelHash != "" {
-		p.ExpectedModelHash = hb.ExpectedModelHash
-	}
+	p.ExpectedModelHash = hb.ExpectedModelHash
 
 	p.ModelID = hb.ModelID
 	p.ModelParamsB = hb.ModelParamsB

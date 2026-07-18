@@ -313,8 +313,11 @@ func TestParseHeartbeatRejectsUnpairedIdentityMetadata(t *testing.T) {
 	base := `{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":3,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":10,"requests_served_since_last":0,"avg_latency_ms_since_last":0,"throughput_tps_since_last":0`
 	for name, suffix := range map[string]string{
 		"algorithm without model hash": `,"model_hash_algorithm":"` + modelidentity.SnapshotManifestV1 + `"}`,
+		"unknown model algorithm":      `,"model_hash":"` + strings.Repeat("a", 64) + `","model_hash_algorithm":"sha256"}`,
+		"malformed canonical hash":     `,"model_hash":"abc","model_hash_algorithm":"` + modelidentity.SnapshotManifestV1 + `"}`,
 		"weights without algorithm":    `,"weights_manifest_sha256":"` + strings.Repeat("b", 64) + `"}`,
 		"unknown weights algorithm":    `,"weights_manifest_sha256":"` + strings.Repeat("b", 64) + `","weights_manifest_algorithm":"sha256"}`,
+		"malformed weights hash":       `,"weights_manifest_sha256":"abc","weights_manifest_algorithm":"` + modelidentity.SafetensorsManifestV1 + `"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, _, _, err := ParseHeartbeat([]byte(base + suffix)); err == nil {
@@ -446,6 +449,31 @@ func TestParseAuthInitialAcceptsLegacyAbsentSpec010(t *testing.T) {
 	}
 	if req.ProviderAdmissionPublicKey != "" || req.ProviderAdmissionPubkey != nil {
 		t.Fatalf("admission key = (%q, %#v), want absent", req.ProviderAdmissionPublicKey, req.ProviderAdmissionPubkey)
+	}
+}
+
+func TestHandshakeParsersRejectUnknownModelHashAlgorithm(t *testing.T) {
+	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	authPayload := validAuthRequestInitial()
+	authPayload["model_hash"] = hash
+	authPayload["model_hash_algorithm"] = "sha256"
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, authPayload)); err == nil || field != "model_hash_algorithm" {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+
+	helloPayload := map[string]any{
+		"type": "hello", "version": 1, "tier": 1, "provider_id": "p-ok",
+		"hostname": "h-ok", "model_id": "m-ok", "model_hash": hash,
+		"model_hash_algorithm": "sha256", "model_params_b": 3.0, "ram_gb": 16,
+		"max_context_tokens": 4096, "max_concurrency": 1,
+		"throughput_tps_estimate": 10.0, "binary_version": "1.8.40",
+	}
+	raw, err := json.Marshal(helloPayload)
+	if err != nil {
+		t.Fatalf("marshal hello: %v", err)
+	}
+	if _, field, err := ParseHello(raw); err == nil || field != "model_hash_algorithm" {
+		t.Fatalf("ParseHello field=%q err=%v", field, err)
 	}
 }
 

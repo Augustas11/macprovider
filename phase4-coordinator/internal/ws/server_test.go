@@ -2039,6 +2039,34 @@ func TestHeartbeatSPEC011PathInvokesVerifier(t *testing.T) {
 	})
 }
 
+func TestHeartbeatUnknownModelHashAlgorithmFencesSession(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, assignedID := dialAndAuthV2Provider(t, h)
+	defer conn.Close()
+
+	hb := heartbeat()
+	hb["model_hash"] = strings.Repeat("a", 64)
+	hb["model_hash_algorithm"] = "sha256"
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write invalid identity heartbeat: %v", err)
+	}
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidHello || reason != "invalid_model_hash_identity" {
+		t.Fatalf("close = (%d, %q)", code, reason)
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if ok && provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("connected provider HashStatus=%q, want invalid", provider.HashStatus)
+	}
+}
+
 func TestHeartbeatSwapCompletionFiresInjectedEmitter(t *testing.T) {
 	var mu sync.Mutex
 	var events []pool.SwapEvent

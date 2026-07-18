@@ -1102,6 +1102,12 @@ func parseModelIdentityMetadata(
 	if modelAlgorithmPresent && strings.TrimSpace(modelHash) == "" {
 		return "model_hash_algorithm", fmt.Errorf("model_hash_algorithm requires model_hash")
 	}
+	if modelAlgorithmPresent && *modelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+		return "model_hash_algorithm", fmt.Errorf("unsupported model_hash_algorithm")
+	}
+	if modelAlgorithmPresent && !modelidentity.ValidSHA256(modelHash) {
+		return "model_hash", fmt.Errorf("model_hash must be a lowercase SHA-256 digest")
+	}
 	weightsPresent, err := parseOptionalIdentityString(raw, "weights_manifest_sha256", weightsHash)
 	if err != nil {
 		return "weights_manifest_sha256", err
@@ -1115,6 +1121,9 @@ func parseModelIdentityMetadata(
 	}
 	if weightsAlgorithmPresent && *weightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
 		return "weights_manifest_algorithm", fmt.Errorf("unsupported weights_manifest_algorithm")
+	}
+	if weightsPresent && !modelidentity.ValidSHA256(*weightsHash) {
+		return "weights_manifest_sha256", fmt.Errorf("weights_manifest_sha256 must be a lowercase SHA-256 digest")
 	}
 	return "", nil
 }
@@ -1199,11 +1208,20 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	if presence.ModelHashAlgorithm && !presence.ModelHash {
 		return Heartbeat{}, presence, "model_hash_algorithm", fmt.Errorf("model_hash_algorithm requires model_hash")
 	}
+	if presence.ModelHashAlgorithm && hb.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+		return Heartbeat{}, presence, "model_hash_algorithm", fmt.Errorf("unsupported model_hash_algorithm")
+	}
+	if presence.ModelHashAlgorithm && !modelidentity.ValidSHA256(hb.ModelHash) {
+		return Heartbeat{}, presence, "model_hash", fmt.Errorf("model_hash must be a lowercase SHA-256 digest")
+	}
 	if presence.WeightsManifestSHA256 != presence.WeightsHashAlgorithm {
 		return Heartbeat{}, presence, "weights_manifest_algorithm", fmt.Errorf("weights_manifest_sha256 and weights_manifest_algorithm must be reported together")
 	}
 	if presence.WeightsHashAlgorithm && hb.WeightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
 		return Heartbeat{}, presence, "weights_manifest_algorithm", fmt.Errorf("unsupported weights_manifest_algorithm")
+	}
+	if presence.WeightsManifestSHA256 && !modelidentity.ValidSHA256(hb.WeightsManifestSHA256) {
+		return Heartbeat{}, presence, "weights_manifest_sha256", fmt.Errorf("weights_manifest_sha256 must be a lowercase SHA-256 digest")
 	}
 	if v, ok := raw["loading"]; ok {
 		presence.Loading = true

@@ -51,18 +51,21 @@ const (
 )
 
 type Server struct {
-	cfg       config.Config
-	tier2Mu   sync.RWMutex
-	tier2     config.Tier2Config
-	pool      *pool.Registry
-	log       zerolog.Logger
-	now       func() time.Time
-	newUUID   func() string
-	timers    sync.Map
-	pending   sync.Map
-	warmups   sync.Map
-	canaries  sync.Map
-	canaryDue sync.Map
+	cfg                       config.Config
+	tier2Mu                   sync.RWMutex
+	tier2                     config.Tier2Config
+	modelHashLegacyMu         sync.Mutex
+	modelHashLegacyTimer      *time.Timer
+	modelHashLegacyGeneration uint64
+	pool                      *pool.Registry
+	log                       zerolog.Logger
+	now                       func() time.Time
+	newUUID                   func() string
+	timers                    sync.Map
+	pending                   sync.Map
+	warmups                   sync.Map
+	canaries                  sync.Map
+	canaryDue                 sync.Map
 	// canaryRecoveryMu fences operator recovery against canary result
 	// application. Epochs invalidate probes that began before a recovery.
 	canaryRecoveryMu sync.RWMutex
@@ -584,6 +587,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	for _, opt := range opts {
 		opt(s)
 	}
+	if tier2.ModelHashActive(s.tier2) || strings.TrimSpace(s.tier2.ModelHashLegacyUntil) != "" {
+		s.scheduleModelHashLegacyDeadline(s.tier2.ModelHashLegacyUntil)
+	}
 	if s.idlePrewarm != nil {
 		s.idlePrewarmQueue = make(chan idlePrewarmRecord, idlePrewarmEventQueueSize)
 		go s.runIdlePrewarmRecorder()
@@ -666,8 +672,84 @@ func (s *Server) PoolSnapshot() []pool.Provider {
 
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	s.tier2Mu.Lock()
-	defer s.tier2Mu.Unlock()
 	s.tier2 = cfg
+	s.tier2Mu.Unlock()
+	if tier2.ModelHashActive(cfg) || strings.TrimSpace(cfg.ModelHashLegacyUntil) != "" {
+		s.scheduleModelHashLegacyDeadline(cfg.ModelHashLegacyUntil)
+	} else {
+		s.cancelModelHashLegacyDeadline()
+	}
+}
+
+func (s *Server) cancelModelHashLegacyDeadline() {
+	s.modelHashLegacyMu.Lock()
+	defer s.modelHashLegacyMu.Unlock()
+	s.modelHashLegacyGeneration++
+	if s.modelHashLegacyTimer != nil {
+		s.modelHashLegacyTimer.Stop()
+		s.modelHashLegacyTimer = nil
+	}
+}
+
+func (s *Server) scheduleModelHashLegacyDeadline(raw string) {
+	deadline, err := modelidentity.ParseLegacyDeadline(raw)
+	s.modelHashLegacyMu.Lock()
+	s.modelHashLegacyGeneration++
+	generation := s.modelHashLegacyGeneration
+	if s.modelHashLegacyTimer != nil {
+		s.modelHashLegacyTimer.Stop()
+		s.modelHashLegacyTimer = nil
+	}
+	if err != nil {
+		s.modelHashLegacyMu.Unlock()
+		return
+	}
+	if deadline.IsZero() {
+		s.modelHashLegacyMu.Unlock()
+		s.expireLegacyModelHashAdmissions(s.now())
+		return
+	}
+	delay := deadline.Sub(s.now())
+	if delay <= 0 {
+		s.modelHashLegacyMu.Unlock()
+		s.expireLegacyModelHashAdmissions(deadline)
+		return
+	}
+	s.modelHashLegacyTimer = time.AfterFunc(delay, func() {
+		s.modelHashLegacyMu.Lock()
+		if generation != s.modelHashLegacyGeneration {
+			s.modelHashLegacyMu.Unlock()
+			return
+		}
+		s.modelHashLegacyTimer = nil
+		s.modelHashLegacyMu.Unlock()
+		s.expireLegacyModelHashAdmissions(deadline)
+	})
+	s.modelHashLegacyMu.Unlock()
+}
+
+func (s *Server) expireLegacyModelHashAdmissions(deadline time.Time) {
+	if s.pool == nil {
+		return
+	}
+	expired := s.pool.ExpireLegacyModelHashAdmissions()
+	for _, provider := range expired {
+		s.observeHashStatusTransition(
+			provider.HashStatus,
+			pool.HashStatusInvalid,
+			provider.ProviderID,
+			provider.AssignedID,
+			provider.ModelID,
+			provider.ModelHash,
+		)
+		if session, ok := s.storedSessionFor(provider.ProviderID, provider.AssignedID); ok {
+			s.closeSession(session, CloseInvalidHello, "model_hash_algorithm_required")
+		}
+	}
+	s.log.Warn().
+		Time("model_hash_legacy_until", deadline).
+		Int("legacy_sessions_fenced", len(expired)).
+		Msg("model hash legacy bridge deadline reached")
 }
 
 func (s *Server) RefreshTier2HashStatuses() int {
@@ -705,18 +787,17 @@ func (s *Server) tier2Config() config.Tier2Config {
 
 func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash, reportedAlgorithm string) pool.HashStatus {
 	cfg := s.tier2Config()
+	algorithm := strings.TrimSpace(reportedAlgorithm)
+	if algorithm != "" && (algorithm != modelidentity.SnapshotManifestV1 || !modelidentity.ValidSHA256(reportedHash)) {
+		return pool.HashStatusInvalid
+	}
 	if !tier2.ModelHashActive(cfg) {
 		return pool.HashStatusUncatalogued
 	}
-	allowMissingAlgorithm := modelidentity.LegacyMissingAlgorithmAllowed(cfg.ModelHashLegacyUntil, s.now())
-	algorithm := strings.TrimSpace(reportedAlgorithm)
 	if algorithm == "" {
-		if allowMissingAlgorithm {
+		if modelidentity.LegacyMissingAlgorithmAllowed(cfg.ModelHashLegacyUntil, s.now()) {
 			return pool.HashStatusUncatalogued
 		}
-		return pool.HashStatusInvalid
-	}
-	if algorithm != modelidentity.SnapshotManifestV1 || !modelidentity.ValidSHA256(reportedHash) {
 		return pool.HashStatusInvalid
 	}
 	if expected := strings.TrimSpace(expectedHash); expected != "" {
@@ -1866,6 +1947,17 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		s.close(conn, CloseInvalidHello, "catalog_incompatible")
 		return nil, false
 	}
+	now := s.now()
+	expectedModelHash := s.expectedAdmissionModelHash(hello, catalogAdmissionMode)
+	hashStatus := pool.HashStatus("")
+	tier2Cfg := s.tier2Config()
+	if tier2.ModelHashActive(tier2Cfg) {
+		hashStatus = s.verifyProviderModelIdentity(hello.ModelID, expectedModelHash, hello.ModelHash, hello.ModelHashAlgorithm)
+		if hashStatus == pool.HashStatusInvalid {
+			s.close(conn, CloseInvalidHello, "invalid_model_hash_identity")
+			return nil, false
+		}
+	}
 	providerCfg, pinned := s.pool.Endpoint(hello.ProviderID)
 	if s.tokens != nil {
 		if auth.validated && auth.providerID != hello.ProviderID {
@@ -1911,12 +2003,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	}
 
 	assignedID := s.newUUID()
-	now := s.now()
-	expectedModelHash := s.expectedAdmissionModelHash(hello, catalogAdmissionMode)
-	hashStatus := pool.HashStatus("")
-	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
-		hashStatus = s.verifyProviderModelIdentity(hello.ModelID, expectedModelHash, hello.ModelHash, hello.ModelHashAlgorithm)
 		if strings.TrimSpace(hello.ModelHashAlgorithm) == "" &&
 			modelidentity.LegacyMissingAlgorithmAllowed(tier2Cfg.ModelHashLegacyUntil, now) {
 			s.log.Warn().
@@ -3758,6 +3845,9 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	hb, presence, field, err := ParseHeartbeat(payload)
 	if err != nil {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid heartbeat")
+		if field == "model_hash" || field == "model_hash_algorithm" {
+			s.fenceInvalidModelIdentity(conn, providerID, assignedID)
+		}
 		return
 	}
 	state := pool.State(hb.Status)
@@ -3777,6 +3867,14 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat safety telemetry coordinator session mismatch")
 		return
 	}
+	expectedModelHash := s.expectedProviderModelHash(providerID, assignedID, hb.ModelID)
+	if tier2.ModelHashActive(s.tier2Config()) {
+		status := s.verifyProviderModelIdentity(hb.ModelID, expectedModelHash, hb.ModelHash, hb.ModelHashAlgorithm)
+		if status == pool.HashStatusInvalid {
+			s.fenceInvalidModelIdentity(conn, providerID, assignedID)
+			return
+		}
+	}
 	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
 		Status:                    state,
 		ModelID:                   hb.ModelID,
@@ -3795,7 +3893,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		ModelHashAlgorithmPresent: presence.ModelHashAlgorithm,
 		WeightsManifestSHA256:     hb.WeightsManifestSHA256,
 		WeightsHashAlgorithm:      hb.WeightsHashAlgorithm,
-		ExpectedModelHash:         s.expectedProviderModelHash(providerID, assignedID, hb.ModelID),
+		ExpectedModelHash:         expectedModelHash,
 		Loading:                   hb.Loading,
 		LoadingPresent:            presence.Loading,
 		LastAutoupdateEvent:       hb.LastAutoupdateEvent,
@@ -3832,6 +3930,15 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	if s.telemetryDrift != nil {
 		s.logTelemetryDriftAlerts(s.telemetryDrift.EvaluateHeartbeat(context.Background(), *entry))
 	}
+}
+
+func (s *Server) fenceInvalidModelIdentity(conn net.Conn, providerID, assignedID string) {
+	s.pool.MarkHashStatusIfSession(providerID, assignedID, pool.HashStatusInvalid)
+	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+		s.closeSession(session, CloseInvalidHello, "invalid_model_hash_identity")
+		return
+	}
+	_ = conn.Close()
 }
 
 func (s *Server) logTelemetryDriftAlerts(alerts []pow.Alert) {

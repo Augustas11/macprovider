@@ -9,6 +9,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/rs/zerolog"
 )
 
 func TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback(t *testing.T) {
@@ -56,6 +57,43 @@ func TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback(t *test
 	server.tier2.ModelHashLegacyUntil = now.Format(time.RFC3339)
 	if got := server.verifyProviderModelIdentity("model-a", expected, expected, ""); got != pool.HashStatusInvalid {
 		t.Fatalf("expired missing algorithm = %q", got)
+	}
+}
+
+func TestModelHashLegacyDeadlineReloadFencesUntypedSessions(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Tier2.ObserveEnabled = true
+	cfg.Tier2.ModelHashLegacyUntil = now.Add(time.Hour).Format(time.RFC3339)
+	registry := pool.NewRegistry(nil)
+	for _, provider := range []*pool.Provider{
+		{
+			ProviderID: "legacy", AssignedID: "legacy-session", ModelID: "model-a",
+			ModelHash: strings.Repeat("a", 64), HashStatus: pool.HashStatusUncatalogued,
+			State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+		},
+		{
+			ProviderID: "modern", AssignedID: "modern-session", ModelID: "model-a",
+			ModelHash: strings.Repeat("a", 64), ModelHashAlgorithm: modelidentity.SnapshotManifestV1,
+			HashStatus: pool.HashStatusVerified, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+		},
+	} {
+		if _, ok := registry.Register(provider, nil); !ok {
+			t.Fatalf("register %s", provider.ProviderID)
+		}
+	}
+	server := NewServer(cfg, registry, zerolog.Nop(), WithNow(func() time.Time { return now }))
+	next := cfg.Tier2
+	next.ModelHashLegacyUntil = now.Format(time.RFC3339)
+	server.SetTier2Config(next)
+
+	legacy, _ := registry.Resolve("legacy", "legacy-session")
+	modern, _ := registry.Resolve("modern", "modern-session")
+	if legacy.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("legacy HashStatus=%q, want invalid", legacy.HashStatus)
+	}
+	if modern.HashStatus != pool.HashStatusVerified {
+		t.Fatalf("modern HashStatus=%q, want verified", modern.HashStatus)
 	}
 }
 
