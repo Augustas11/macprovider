@@ -59,6 +59,10 @@ if 'git merge-base --is-ancestor "$CONTROL_SHA"' not in protected:
     raise SystemExit("acceptance signer control commit need not remain reachable from main")
 if protected.count('scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing') < 2:
     raise SystemExit("exact protected tag is not revalidated immediately before publication")
+if '[\\"candidate_ref\\"]' in protected or '.removeprefix(\\"refs/heads/\\")' in protected:
+    raise SystemExit("candidate ref extraction contains shell-literal Python escapes")
+if 'print(json.load(open(sys.argv[1]))["candidate_ref"])' not in protected:
+    raise SystemExit("promoter does not pass the signed candidate ref directly to verification")
 PY
 
 repository=Augustas11/macprovider
