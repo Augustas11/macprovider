@@ -173,20 +173,15 @@ jobs:
             "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
             "${release_assets[@]}"
 
-      - name: Verify accepted source is merged and reserve its exact tag
+      - name: Verify accepted source and owner-created protected tag
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.request.outputs.tag }}
           CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
           CONTROL_SHA: ${{ steps.run.outputs.control_sha }}
         run: |
           set -euo pipefail
-          tagger_id="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' user --jq .id)"
-          [[ "$tagger_id" == 28995904 ]] || {
-            echo "::error::protected tag credential is not the configured ruleset bypass actor" >&2
-            exit 1
-          }
           git fetch --quiet --no-tags origin refs/heads/main:refs/remotes/origin/main
           git cat-file -e "$CANDIDATE_SHA^{commit}"
           git cat-file -e "$CONTROL_SHA^{commit}"
@@ -217,12 +212,6 @@ jobs:
           if matches:
               raise SystemExit("a draft or public release already exists for the accepted tag")
           PY
-          tag_rows="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
-          if [[ -z "$tag_rows" ]]; then
-            gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
-              "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref="refs/tags/$TAG" -f sha="$CANDIDATE_SHA" >/dev/null
-          fi
           bash scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing
 
       - name: Generate only the production checksum signature
@@ -318,28 +307,7 @@ jobs:
             "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
             "${release_assets[@]}"
           gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            --include "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            > "$RUNNER_TEMP/final-draft-response"
-          python3 - "$RUNNER_TEMP/final-draft-response" \
-            "$RUNNER_TEMP/final-draft.json" "$RUNNER_TEMP/final-draft-etag" <<'PY'
-          import pathlib
-          import sys
-
-          raw = pathlib.Path(sys.argv[1]).read_bytes()
-          separator = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
-          headers, marker, body = raw.partition(separator)
-          if not marker:
-              raise SystemExit("GitHub draft response omitted headers")
-          etags = []
-          for line in headers.decode("latin-1").splitlines():
-              name, delimiter, value = line.partition(":")
-              if delimiter and name.lower() == "etag":
-                  etags.append(value.strip())
-          if len(etags) != 1 or not etags[0]:
-              raise SystemExit("GitHub draft response omitted a unique ETag")
-          pathlib.Path(sys.argv[2]).write_bytes(body)
-          pathlib.Path(sys.argv[3]).write_text(etags[0] + "\n", encoding="ascii")
-          PY
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/final-draft.json"
           python3 scripts/verify-release-draft-identity.py api \
             "$RUNNER_TEMP/final-draft.json" "$TAG" "$CANDIDATE_SHA" \
             --release-id "$RELEASE_ID" >/dev/null
@@ -348,9 +316,10 @@ jobs:
             "$RUNNER_TEMP/final-draft-publication.json" \
             "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
           bash scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing
-          draft_etag="$(cat "$RUNNER_TEMP/final-draft-etag")"
+          # Repository rules and the production-release environment serialize
+          # the sole owner publication path. Re-fetch the exact numeric draft
+          # and tag immediately before this irreversible transition.
           gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
-            -H "If-Match: $draft_etag" \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -F draft=false -F prerelease=false -f make_latest=true \
             > "$RUNNER_TEMP/published.json"

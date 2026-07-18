@@ -327,12 +327,19 @@ test "${#ACCEPTED_CHECKSUMS_SHA256}" = 64
 ```
 
 Merge the candidate source to `main` without rebuilding or altering the
-accepted commit. Then dispatch the protected exact-byte promoter from current
-`main`:
+accepted commit. The configured owner/bypass actor must then create the
+protected tag at that exact accepted commit; the workflow token is
+intentionally unable to create, move, or delete protected tags:
 
 ```bash
 git fetch origin main
 git merge-base --is-ancestor "$ACCEPTANCE_COMMIT" origin/main
+test -z "$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+git tag "$TAG" "$ACCEPTANCE_COMMIT"
+git push origin "refs/tags/$TAG"
+bash scripts/verify-release-tag-target.sh \
+  "$TAG" "$ACCEPTANCE_COMMIT" origin --require-existing
+
 gh workflow run promote-acceptance-candidate.yml \
   --repo Augustas11/macprovider \
   --ref main \
@@ -349,12 +356,18 @@ requires one successful, unexpired artifact from the exact
 `acceptance-candidate.yml` run; verifies the signed envelope, complete
 inventory, compatibility index, production Pearl signature/channel,
 provenance, and admission policy; and requires the accepted commit to be
-reachable from `origin/main`. It generates only the missing production
-`checksums.txt.sig`, tags the exact accepted SHA, uploads the exact accepted
-bytes to a numeric draft, verifies GitHub's asset digests, revalidates the
-draft immediately before publication, publishes it immutable, redownloads
-every public asset for byte comparison, and runs the existing Tier-2 public
-release verifier. It never checks out or executes candidate code.
+reachable from `origin/main` and the owner-created tag to target that exact
+commit. It generates only the missing production `checksums.txt.sig`, uploads
+the exact accepted bytes to a numeric draft, verifies GitHub's asset digests,
+revalidates the exact tag and numeric draft immediately before the sole-owner
+publication transition, publishes it immutable, and redownloads every public
+asset for byte comparison. A separate read-only, secretless job runs the
+existing Tier-2 public release verifier; the protected promoter never checks
+out or executes candidate code. GitHub does not expose a documented
+conditional release-PATCH revision contract, so repository rules, environment
+approval, the shared production-release concurrency group, immediate
+revalidation, and a single authorized owner remain the publication exclusion
+boundary.
 
 If the private artifact has expired, the accepted checksums digest differs,
 the source commit is not merged, or any tag/release identity is ambiguous, do

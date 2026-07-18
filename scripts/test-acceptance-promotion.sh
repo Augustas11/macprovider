@@ -51,14 +51,14 @@ if not separator or "scripts/verify-tier2-provider-release.sh" in protected:
     raise SystemExit("candidate executable verification must be isolated from the protected promoter")
 if "environment: production-release" in public_verify or "secrets." in public_verify:
     raise SystemExit("public executable verifier gained protected credentials")
-if "GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}" not in protected:
-    raise SystemExit("tag creation does not use the configured protected tagger identity")
-if '[[ "$tagger_id" == 28995904 ]]' not in protected:
-    raise SystemExit("protected tag credential is not verified against the ruleset actor")
+if 'scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing' not in protected:
+    raise SystemExit("promoter does not require the owner-created exact protected tag")
+if "/git/refs" in protected or "-f ref=\"refs/tags/$TAG\"" in protected:
+    raise SystemExit("promoter gained protected tag creation or mutation capability")
 if 'git merge-base --is-ancestor "$CONTROL_SHA"' not in protected:
     raise SystemExit("acceptance signer control commit need not remain reachable from main")
-if 'If-Match: $draft_etag' not in protected:
-    raise SystemExit("numeric draft publication lacks a conditional mutation guard")
+if protected.count('scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing') < 2:
+    raise SystemExit("exact protected tag is not revalidated immediately before publication")
 PY
 
 repository=Augustas11/macprovider
@@ -218,7 +218,16 @@ v["path"] = ".github/workflows/release.yml"
 p.write_text(json.dumps(v))
 PY
 expect_reject wrong-workflow "${run_verify[@]}"
-sed -i '' 's#\\.github/workflows/release.yml#.github/workflows/acceptance-candidate.yml#' "$work/run.json"
+python3 - "$work/run.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["path"] = ".github/workflows/acceptance-candidate.yml"
+path.write_text(json.dumps(value))
+PY
 
 cp "$work/artifacts.json" "$work/artifacts.valid"
 python3 - "$work/artifacts.json" <<'PY'
