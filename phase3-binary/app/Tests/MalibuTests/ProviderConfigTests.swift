@@ -70,6 +70,26 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertEqual(got, "p-abc", "CRLF file must not leave a \\r in provider_id")
     }
 
+    func testProviderTokenPresenceRequiresNonblankTopLevelValue() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        try "provider_id: p-abc\nprovider_token: secret\n".write(
+            to: paths.configFile,
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertTrue(ProviderConfig.hasProviderToken(paths: paths))
+
+        try "provider_id: p-abc\nprovider_token: \"\"\n".write(
+            to: paths.configFile,
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertFalse(ProviderConfig.hasProviderToken(paths: paths))
+    }
+
     func testImportExistingCLIConfigRecoversInterruptedTokenlessConfigFromBackup() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()

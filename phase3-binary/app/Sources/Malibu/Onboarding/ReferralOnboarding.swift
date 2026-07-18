@@ -7,7 +7,7 @@ enum ReferralOnboardingInput {
         case invalidCodeOrLink
 
         var errorDescription: String? {
-            "Enter a valid Malibu invite code or a https://coordinator.streamvc.live/j/ invite link."
+            "Enter a valid Malibu invite code or a https://malibu.tech/j/ invite link."
         }
     }
 
@@ -23,7 +23,7 @@ enum ReferralOnboardingInput {
         }
         guard let components = URLComponents(string: trimmed),
               components.scheme == "https",
-              components.host?.lowercased() == "coordinator.streamvc.live",
+              components.host?.lowercased() == "malibu.tech",
               components.user == nil,
               components.password == nil,
               components.port == nil,
@@ -35,7 +35,8 @@ enum ReferralOnboardingInput {
         guard segments.count == 2,
               segments[0] == "j",
               !segments[1].contains("%"),
-              isValidCode(String(segments[1])) else {
+              isValidCode(String(segments[1])),
+              components.percentEncodedPath == "/j/\(segments[1])" else {
             throw ValidationError.invalidCodeOrLink
         }
         return String(segments[1])

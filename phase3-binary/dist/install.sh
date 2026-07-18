@@ -10,10 +10,12 @@
 set -euo pipefail
 
 # Malibu may provide a one-shot owner-only file containing a referral code.
-# Capture only the path, then remove it from the environment before any child
-# process is launched. The CLI validates and consumes the file; install.sh
-# never reads, logs, copies, or persists the code.
+# Capture only that path, then remove it from the environment before any child
+# process is launched. For a direct fresh install, this script creates the same
+# protected file from an interactive prompt. The code never enters process
+# arguments, environment, or logs; the CLI validates and consumes the file.
 REFERRAL_CODE_SOURCE_FILE="${MACPROVIDER_REFERRAL_CODE_FILE:-}"
+CREATED_REFERRAL_CODE_SOURCE_FILE=0
 unset MACPROVIDER_REFERRAL_CODE_FILE
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
@@ -894,6 +896,12 @@ cleanup() {
         cleanup_rc=70
       fi
     fi
+  fi
+  if [ "${CREATED_REFERRAL_CODE_SOURCE_FILE:-0}" -eq 1 ] \
+      && [ -n "${REFERRAL_CODE_SOURCE_FILE:-}" ]; then
+    rm -f -- "$REFERRAL_CODE_SOURCE_FILE" || cleanup_rc=70
+    REFERRAL_CODE_SOURCE_FILE=""
+    CREATED_REFERRAL_CODE_SOURCE_FILE=0
   fi
   if ! release_install_lock; then
     log "ERROR: installer lock ownership could not be released safely: $INSTALL_LOCK_PATH"
@@ -4015,6 +4023,134 @@ read_line() {
   else
     IFS= read -r REPLY 2>/dev/null || REPLY=""
   fi
+}
+
+restart_safe_incumbent_present() {
+  installed_binary="$(installed_provider_binary_path)"
+  [ -n "$installed_binary" ] || return 1
+  existing_provider_id="$(read_config_provider_id || true)"
+  [ -n "$existing_provider_id" ] || return 1
+
+  if [ -n "$(read_config_provider_token_line || true)" ]; then
+    return 0
+  fi
+  if "$installed_binary" credentials verify --config "$CONFIG_PATH" >/dev/null 2>&1; then
+    return 0
+  fi
+  [ -f "$MANIFEST_PATH" ] && [ -f "$PLIST_PATH" ]
+}
+
+validate_supplied_referral_code_file() {
+  referral_source_rc=0
+  python3 - "$REFERRAL_CODE_SOURCE_FILE" <<'PY' || referral_source_rc=$?
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    path_info = os.lstat(path)
+except FileNotFoundError:
+    raise SystemExit(20)
+except OSError:
+    raise SystemExit(21)
+
+if (
+    not stat.S_ISREG(path_info.st_mode)
+    or path_info.st_uid != os.geteuid()
+    or path_info.st_nlink != 1
+    or stat.S_IMODE(path_info.st_mode) != 0o600
+    or path_info.st_size < 1
+    or path_info.st_size > 256
+):
+    raise SystemExit(21)
+
+descriptor = -1
+try:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    open_info = os.fstat(descriptor)
+except OSError:
+    raise SystemExit(21)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+
+if (
+    path_info.st_dev != open_info.st_dev
+    or path_info.st_ino != open_info.st_ino
+    or not stat.S_ISREG(open_info.st_mode)
+    or open_info.st_uid != os.geteuid()
+    or open_info.st_nlink != 1
+    or stat.S_IMODE(open_info.st_mode) != 0o600
+    or open_info.st_size < 1
+    or open_info.st_size > 256
+):
+    raise SystemExit(21)
+PY
+  case "$referral_source_rc" in
+    0) return 0 ;;
+    20) die 20 "an invite code is required for a new private pre-beta provider" ;;
+    *) die 21 "the invite-code handoff must be an owner-only 0600 regular file" ;;
+  esac
+}
+
+prepare_fresh_referral_code() {
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  [ "$EMERGENCY_ROLLBACK" != "1" ] || return 0
+  restart_safe_incumbent_present && return 0
+  if [ -n "$REFERRAL_CODE_SOURCE_FILE" ]; then
+    validate_supplied_referral_code_file
+    return 0
+  fi
+
+  if [ "$NO_PROMPT" = "1" ]; then
+    die 20 "an invite code is required for a new private pre-beta provider"
+  fi
+
+  printf "Malibu private pre-beta invite code (required): " >&2
+  read_line
+  referral_code="$REPLY"
+  REPLY=""
+  [ -n "$referral_code" ] \
+    || die 20 "an invite code is required for a new private pre-beta provider"
+
+  previous_umask="$(umask)"
+  umask 077
+  referral_path="$(mktemp "${TMPDIR:-/tmp}/macprovider-referral.XXXXXX")" || {
+    umask "$previous_umask"
+    referral_code=""
+    die 70 "could not create the protected invite-code handoff"
+  }
+  umask "$previous_umask"
+  REFERRAL_CODE_SOURCE_FILE="$referral_path"
+  CREATED_REFERRAL_CODE_SOURCE_FILE=1
+  chmod -N "$referral_path" 2>/dev/null || chmod 600 "$referral_path" \
+    || die 70 "could not protect the invite-code handoff"
+  printf "%s" "$referral_code" > "$referral_path" \
+    || die 70 "could not write the protected invite-code handoff"
+  referral_code=""
+  python3 - "$referral_path" <<'PY' \
+    || die 70 "invite-code handoff is not an owner-only regular file"
+import os
+import stat
+import sys
+
+info = os.lstat(sys.argv[1])
+if (
+    not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or info.st_nlink != 1
+    or stat.S_IMODE(info.st_mode) != 0o600
+):
+    raise SystemExit(1)
+PY
+  referral_path=""
+  log "Invite code accepted for secure one-time CLI validation."
 }
 
 # v1.2.2: pre-flight port collision detection. Without this, install
@@ -8191,6 +8327,7 @@ main() {
   validate_install_dir
   acquire_install_lock
   recover_orphaned_install_transactions
+  prepare_fresh_referral_code
 
   ram_gb="$(detect_ram_gb)"
   model=""

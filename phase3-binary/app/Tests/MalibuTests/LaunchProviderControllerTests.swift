@@ -6,7 +6,7 @@ final class LaunchProviderControllerTests: XCTestCase {
 
     func testLaunchViaCLIInstallWhenNotAlreadyRunning() async {
         let harness = Harness()
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -34,10 +34,34 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
+    func testUnhealthyRestartSafeIncumbentRunsInstallerWithoutReferral() async {
+        let harness = Harness()
+        harness.restartSafeIncumbentPresent = true
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertNil(harness.installedReferralCode)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testPartialInstallStillAcceptsReferralForFreshRecovery() async {
+        let harness = Harness()
+        harness.restartSafeIncumbentPresent = false
+        let controller = freshController(harness)
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertNotNil(harness.installedReferralCode)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
     func testLaunchInstallFailureIsRetryable() async {
         let harness = Harness()
         harness.cliInstallError = NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "install failed"])
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -56,7 +80,7 @@ final class LaunchProviderControllerTests: XCTestCase {
     func testLaunchMonitorFailureIsRetryable() async {
         let harness = Harness()
         harness.monitorHealthy = false
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -73,7 +97,7 @@ final class LaunchProviderControllerTests: XCTestCase {
     func testRetryRerunsInstallAfterFailure() async {
         let harness = Harness()
         harness.cliInstallError = NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "install failed"])
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
         harness.cliInstallError = nil
@@ -86,9 +110,9 @@ final class LaunchProviderControllerTests: XCTestCase {
 
     func testLaunchPassesNormalizedReferralLinkToCLIInstaller() async {
         let harness = Harness()
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
         let code = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
-        controller.referralInput = "https://coordinator.streamvc.live/j/\(code)"
+        controller.referralInput = "https://malibu.tech/j/\(code)"
 
         await controller.launch()
 
@@ -96,9 +120,25 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
-    func testInvalidReferralInputDoesNotRunInstaller() async {
+    func testBlankReferralInputFailsBeforeInstallerStarts() async {
         let harness = Harness()
         let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "referral")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(message, CLIInstallRunner.Error.ReferralFailure.required.message)
+        } else {
+            XCTFail("expected required referral correction state")
+        }
+    }
+
+    func testInvalidReferralInputDoesNotRunInstaller() async {
+        let harness = Harness()
+        let controller = freshController(harness)
         controller.referralInput = "https://evil.example/j/not-an-invite"
 
         await controller.launch()
@@ -115,7 +155,7 @@ final class LaunchProviderControllerTests: XCTestCase {
     func testReferralInputRequiresNegotiatedCapability() async {
         let harness = Harness()
         harness.referralInputAvailable = false
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
         controller.referralInput = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
 
         await controller.launch()
@@ -133,7 +173,7 @@ final class LaunchProviderControllerTests: XCTestCase {
     func testRefreshPublishesReferralCapabilityAvailability() async {
         let harness = Harness()
         harness.referralInputAvailable = false
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.refreshReferralInputAvailability()
 
@@ -160,13 +200,13 @@ final class LaunchProviderControllerTests: XCTestCase {
         ))
     }
 
-    func testDefaultMalibuArtifactKeepsReferralHandoffDisabled() {
+    func testReleasedMalibuArtifactExposesBundledReferralHandoff() {
         let bundledHandoffEnabled = Bundle.main.object(
             forInfoDictionaryKey: "MalibuBundledReferralBootstrapV1"
         ) as? Bool == true
 
-        XCTAssertFalse(bundledHandoffEnabled)
-        XCTAssertFalse(LaunchProviderController.referralHandoffAvailable(
+        XCTAssertTrue(bundledHandoffEnabled)
+        XCTAssertTrue(LaunchProviderController.referralHandoffAvailable(
             bundledHandoffEnabled: bundledHandoffEnabled,
             installedCLIAdvertisesReferralBootstrapV1: true
         ))
@@ -175,7 +215,7 @@ final class LaunchProviderControllerTests: XCTestCase {
     func testTypedReferralFailureDoesNotDestroyIdentityOrAttachProvider() async {
         let harness = Harness()
         harness.cliInstallError = CLIInstallRunner.Error.referralFailure(.expired)
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -195,7 +235,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         let harness = Harness()
         harness.localInstallSucceeded = true
         harness.appIdentityConfigured = true
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.refreshFromExistingInstall()
 
@@ -211,7 +251,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         harness.cliImportErrors = [
             NSError(domain: "tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "import failed"])
         ]
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -234,7 +274,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         let harness = Harness()
         harness.markLocalInstallSucceededAfterInstall = false
         harness.cliImportErrors = [ProviderConfig.SaveError.missingProviderToken]
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -253,7 +293,7 @@ final class LaunchProviderControllerTests: XCTestCase {
             repeating: ProviderConfig.SaveError.missingProviderToken,
             count: 2 * (MalibuOnboardingTimeouts.providerTokenImportRetryAttempts + 1)
         )
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
         await controller.retry()
@@ -285,7 +325,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         harness.cliImportErrors = [
             ProviderConfig.SaveError.importKeychainVerificationFailed
         ]
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -310,7 +350,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         harness.providerStartFailureMessage =
             "Model catalog is out of date for this Mac. Update Malibu to the latest release, "
             + "or run: macprovider-cli autotune --recommend --apply"
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -327,7 +367,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         let harness = Harness()
         harness.attachHealthy = false
         harness.providerStartFailureMessage = "provider attach failed"
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        let controller = freshController(harness)
 
         await controller.launch()
 
@@ -345,8 +385,15 @@ final class LaunchProviderControllerTests: XCTestCase {
         }
     }
 
+    private func freshController(_ harness: Harness) -> LaunchProviderController {
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+        controller.referralInput = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
+        return controller
+    }
+
     private final class Harness {
         var localInstallSucceeded = false
+        var restartSafeIncumbentPresent = false
         var referralInputAvailable = true
         var localInstallSucceededAfterInstall = false
         var markLocalInstallSucceededAfterInstall = true
@@ -371,6 +418,7 @@ final class LaunchProviderControllerTests: XCTestCase {
                 localInstallSucceeded: {
                     self.localInstallSucceeded || self.localInstallSucceededAfterInstall
                 },
+                restartSafeIncumbentPresent: { self.restartSafeIncumbentPresent },
                 referralInputAvailable: { self.referralInputAvailable },
                 registerLoginItem: {
                     self.loginItemRegistrations += 1

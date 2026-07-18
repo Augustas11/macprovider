@@ -200,13 +200,13 @@ private struct OnboardingRootView: View {
 
     private var referralField: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("Invite code (optional)")
+            Text("Invite code (required for private pre-beta)")
                 .font(.callout.weight(.medium))
             TextField("MAL1-S-… or invite link", text: $controller.referralInput)
                 .textFieldStyle(.roundedBorder)
                 .textContentType(.oneTimeCode)
                 .disableAutocorrection(true)
-            Text("Malibu passes this once to the installed CLI. Malibu never receives or stores the provider credential.")
+            Text("Paste the code or malibu.tech/j link from the person who invited you. Malibu passes it once to the installed CLI and never stores the provider credential.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

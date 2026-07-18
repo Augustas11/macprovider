@@ -9,7 +9,7 @@ final class ReferralOnboardingTests: XCTestCase {
     func testNormalizesExactCodeAndCanonicalJoinLink() throws {
         XCTAssertEqual(try ReferralOnboardingInput.normalize(validCode), validCode)
         XCTAssertEqual(
-            try ReferralOnboardingInput.normalize("https://coordinator.streamvc.live/j/\(validCode)"),
+            try ReferralOnboardingInput.normalize("https://malibu.tech/j/\(validCode)"),
             validCode
         )
         XCTAssertNil(try ReferralOnboardingInput.normalize("  \n"))
@@ -17,12 +17,15 @@ final class ReferralOnboardingTests: XCTestCase {
 
     func testRejectsNonCanonicalOrAuthorityChangingLinks() {
         for input in [
-            "http://coordinator.streamvc.live/j/\(validCode)",
+            "http://malibu.tech/j/\(validCode)",
             "https://evil.example/j/\(validCode)",
-            "https://user@coordinator.streamvc.live/j/\(validCode)",
-            "https://coordinator.streamvc.live:443/j/\(validCode)",
-            "https://coordinator.streamvc.live/j/\(validCode)?next=evil",
-            "https://coordinator.streamvc.live/j/%4D\(validCode.dropFirst())",
+            "https://coordinator.streamvc.live/j/\(validCode)",
+            "https://user@malibu.tech/j/\(validCode)",
+            "https://malibu.tech:443/j/\(validCode)",
+            "https://malibu.tech/j/\(validCode)?next=evil",
+            "https://malibu.tech/j/%4D\(validCode.dropFirst())",
+            "https://malibu.tech//j/\(validCode)",
+            "https://malibu.tech/j/\(validCode)/",
             validCode.lowercased(),
         ] {
             XCTAssertThrowsError(try ReferralOnboardingInput.normalize(input), input)

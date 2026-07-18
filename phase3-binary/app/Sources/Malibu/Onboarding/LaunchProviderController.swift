@@ -33,6 +33,7 @@ final class LaunchProviderController: ObservableObject {
 
     struct Dependencies {
         var localInstallSucceeded: @MainActor () async -> Bool
+        var restartSafeIncumbentPresent: @MainActor () async -> Bool
         var referralInputAvailable: @MainActor () async -> Bool
         var registerLoginItem: @MainActor () async throws -> Void
         var runCLIInstall: @MainActor (
@@ -50,6 +51,9 @@ final class LaunchProviderController: ObservableObject {
         static func live(agent: MalibuAgent?) -> Dependencies {
             Dependencies(
                 localInstallSucceeded: { await CLIInstallRunner.localInstallSucceeded() },
+                restartSafeIncumbentPresent: {
+                    await LaunchProviderController.restartSafeIncumbentPresent()
+                },
                 referralInputAvailable: {
                     await LaunchProviderController.referralInputAvailableForCurrentInstall()
                 },
@@ -93,6 +97,10 @@ final class LaunchProviderController: ObservableObject {
             )
             return
         }
+        if await dependencies.restartSafeIncumbentPresent() {
+            await launchViaCLIInstall(referralCode: nil)
+            return
+        }
         let referralCode: String?
         do {
             referralCode = try ReferralOnboardingInput.normalize(referralInput)
@@ -100,7 +108,15 @@ final class LaunchProviderController: ObservableObject {
             stage = .failed(stage: "referral", retryable: true, message: error.localizedDescription)
             return
         }
-        if referralCode != nil, !(await dependencies.referralInputAvailable()) {
+        guard let referralCode else {
+            stage = .failed(
+                stage: "referral",
+                retryable: true,
+                message: CLIInstallRunner.Error.ReferralFailure.required.message
+            )
+            return
+        }
+        if !(await dependencies.referralInputAvailable()) {
             stage = .failed(
                 stage: "referral",
                 retryable: true,
@@ -319,41 +335,43 @@ final class LaunchProviderController: ObservableObject {
         let bundledHandoffEnabled = Bundle.main.object(
             forInfoDictionaryKey: "MalibuBundledReferralBootstrapV1"
         ) as? Bool == true
-        guard bundledHandoffEnabled else {
-            // Malibu always executes its separately bundled, signed installer.
-            // An independently updated installed CLI cannot make an older
-            // bundled handoff capable of forwarding referral input.
+        // Malibu executes its separately bundled, signed installer. Fresh or
+        // partial installs therefore use that verified capability rather than
+        // requiring a possibly stopped installed provider to negotiate it.
+        return bundledHandoffEnabled
+    }
+
+    private static func restartSafeIncumbentPresent(
+        paths: ProviderPaths = .current,
+        fileManager: FileManager = .default
+    ) async -> Bool {
+        guard let providerID = ProviderConfig.readProviderID(paths: paths),
+              (try? ProviderCredentialHandoffRunner.resolveInstalledExecutable(
+                  home: fileManager.homeDirectoryForCurrentUser,
+                  fileManager: fileManager
+              )) != nil else {
             return false
         }
-        let paths = ProviderPaths.current
-        let hasExistingInstall = FileManager.default.fileExists(atPath: paths.configFile.path)
-            || StartupState.launchdInstallEvidenceExists(paths: paths)
-        guard hasExistingInstall else {
-            // Fresh onboarding has no installed CLI to negotiate with. The
-            // release assembly may enable this only after it embeds a signed,
-            // referral-capable CLI/install contract. It remains off for older
-            // independently versioned CLI payloads.
+        if ProviderConfig.hasProviderToken(paths: paths) {
             return true
         }
-        guard let port = InstalledProviderMonitor.readHTTPPort(paths: paths),
-              let status = await InstalledProviderMonitor.fetchStatus(port: port),
-              status.contractCompatible == true,
-              status.lifecycleOwner == "macprovider_cli",
-              status.capabilities.contains("service_instance_v1"),
-              let expectedProviderID = ProviderConfig.readProviderID(paths: paths),
-              InstalledProviderMonitor.serviceIdentityMatches(
-                  status,
-                  expectedProviderID: expectedProviderID,
-                  launchdPID: InstalledProviderMonitor.launchdServicePID(),
-                  liveCodeMatches: ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
-              ) else {
-            return false
+        if await ProviderConfig.isConfigured(paths: paths) {
+            return true
         }
-        return referralHandoffAvailable(
-            bundledHandoffEnabled: bundledHandoffEnabled,
-            installedCLIAdvertisesReferralBootstrapV1:
-                status.capabilities.contains("referral_bootstrap_v1")
+        if let credential = try? await ProviderCredentialHandoffRunner.credentialStatus(
+            configURL: paths.configFile,
+            expectedProviderID: providerID
+        ), credential.restartSafe {
+            return true
+        }
+        let manifest = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(
+            "Library/Application Support/macprovider/install_manifest.json"
         )
+        let launchd = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(
+            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+        )
+        return fileManager.isReadableFile(atPath: manifest.path)
+            && fileManager.isReadableFile(atPath: launchd.path)
     }
 
     static func referralHandoffAvailable(

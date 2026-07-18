@@ -1,6 +1,13 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.25 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.26 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.26 (2026-07-18, required early referral intake).** A fresh
+private-prebeta install obtains its referral before release discovery,
+autotune, model download, or mutation. Malibu requires the field locally; the
+direct interactive installer prompts and creates the same protected source
+file, while a noninteractive fresh install without one exits 20. Restart-safe
+incumbent updates remain unaffected.
 
 **Change log v0.25 (2026-07-16, SPEC-034 referral recovery).** Referral-gated
 onboarding composes with the live CLI `bootstrap-auth`/WS admission path. Malibu
@@ -1295,9 +1302,14 @@ input. The concrete v1 handoff is:
    single-link, no-ACL regular source file, and adds only that file's path as
    `MACPROVIDER_REFERRAL_CODE_FILE` to its existing sanitized allowlist. It does
    not inherit the App environment.
-3. `install.sh` captures and unsets the source-file path before launching any
-   child. It never reads, logs, copies, or persists the code, and calls the
-   installed `macprovider-cli bootstrap-auth --referral-code-file <source>`.
+3. `install.sh` captures and unsets a Malibu-supplied source-file path before
+   launching any child. For direct fresh interactive use, it prompts before
+   release discovery and writes the response with shell builtins to an
+   unpredictable owner-only 0600 regular source file. The code never enters a
+   process argument, child environment, or log. A noninteractive fresh install
+   without a source file exits with typed status 20. A restart-safe incumbent
+   bypasses this fresh-only intake. Both paths call the installed
+   `macprovider-cli bootstrap-auth --referral-code-file <source>`.
 4. `bootstrap-auth` opens the source with no-follow owner/mode/link/ACL and
    device/inode stability checks, reuses the durable provider/receipt identity,
    and sends the exact code in both signed bootstrap stages. Its owner-only

@@ -21,7 +21,7 @@ final class ControlFrameCodecTests: XCTestCase {
         let observedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 1)
         return ReferralStatusProjection(
             campaign: "launch",
-            joinBaseURL: URL(string: "https://coordinator.streamvc.live/j")!,
+            joinBaseURL: URL(string: "https://malibu.tech/j")!,
             socialState: state,
             baseCapacity: 1,
             configuredBonusCapacity: 2,
@@ -32,7 +32,7 @@ final class ControlFrameCodecTests: XCTestCase {
             joinLinksEnabled: true,
             socialBonusEnabled: true,
             inviteCode: "invite-123",
-            inviteURL: URL(string: "https://coordinator.streamvc.live/j/invite-123"),
+            inviteURL: URL(string: "https://malibu.tech/j/invite-123"),
             observedAt: observedAt,
             pendingChallenge: pending
         )!

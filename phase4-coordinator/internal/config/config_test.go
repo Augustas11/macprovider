@@ -38,6 +38,9 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.EnableSocialInviteBonus {
 		t.Fatal("referral launch policy must default off")
 	}
+	if cfg.Referrals.JoinBaseURL != "https://malibu.tech/j" {
+		t.Fatalf("default join_base_url=%q, want canonical public origin", cfg.Referrals.JoinBaseURL)
+	}
 	cfg.Auth.OperatorKey = "operator-key"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("disabled referral defaults should validate: %v", err)
@@ -116,7 +119,7 @@ func TestReferralSocialBonusRequiresDarkStackAndConfiguredDwell(t *testing.T) {
 		t.Fatalf("valid dark social stack: %v", err)
 	}
 
-	cfg.Referrals.JoinBaseURL = "https://user:secret@coordinator.streamvc.live/j"
+	cfg.Referrals.JoinBaseURL = "https://user:secret@malibu.tech/j"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "credential-free") {
 		t.Fatalf("credentialed join URL error=%v", err)
 	}

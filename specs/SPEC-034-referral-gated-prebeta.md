@@ -1,12 +1,16 @@
 # SPEC-034 — Referral admission, provider invites, and advocacy rewards
 
-Version: v0.4.1
+Version: v0.4.2
 Status: recovery implementation; production activation prohibited
 Owner: coordinator admission and referral services
 Product parent: https://github.com/MalibuAI/malibu/issues/46
 
 Changelog:
 
+- v0.4.2 (2026-07-18): makes `https://malibu.tech/j` the canonical public
+  invite origin and requires a referral before any expensive work in a fresh
+  private-prebeta Malibu or direct installer journey. Restart-safe incumbents
+  remain unaffected.
 - v0.4.1 (2026-07-16): defines the authenticated `join_base_url` projection,
   keeps X challenge secrets and composer intents inside the CLI, and bounds
   Malibu referral refresh/staleness behavior.
@@ -47,8 +51,8 @@ capacity.
 
 ## 2. Canonical provider journey
 
-1. A user obtains a valid operator seed code or provider invite URL
-   `/j/<code>`.
+1. A user obtains a valid operator seed code or canonical provider invite URL
+   `https://malibu.tech/j/<code>`.
 2. Malibu accepts the code as untrusted input and performs only bounded syntax
    validation. It does not claim server validity.
 3. Malibu invokes a supported signed installed-CLI/install onboarding
@@ -237,6 +241,16 @@ read-only. Malibu and CLI marketing versions are independent;
 compatibility is negotiated by advertised protocol capabilities and schema
 versions. Missing or unknown capability means unavailable, never an inferred
 zero balance or eligibility decision.
+
+During private-prebeta referral enforcement, a genuinely fresh public
+installation MUST obtain a nonblank referral before release download, autotune,
+model download, or provider mutation. Malibu renders the invite field as
+required and returns the typed `required` correction without starting its
+installer. The direct interactive installer prompts once and writes the input
+only to the same owner-only 0600 regular source-file contract; a noninteractive
+fresh invocation without that file exits 20. A restart-safe incumbent provider
+with durable identity plus credential or committed install evidence bypasses
+this fresh-only prompt and continues its existing update/recovery path.
 
 Authenticated referral status includes a credential-free HTTPS
 `join_base_url` ending in `/j`; it may intentionally use a public host different
