@@ -102,7 +102,7 @@ cat > "$accepted/release-provenance.json" <<EOF
 {"commit":"$candidate_sha","prerelease":false,"repository":"$repository","tag":"$tag"}
 EOF
 cat > "$accepted/compatibility-set.json" <<'EOF'
-{"signed":{"components":{"coordinator_admission":{"rollout":{"bridge_duration_s":0,"enforce_provider_admission":true,"mode":"strict_post_migration"}},"provider_cli":{"version":"1.8.48"}},"release":{"commit":"1111111111111111111111111111111111111111","repository":"Augustas11/macprovider","tag":"v1.8.48","version":"1.8.48"}}}
+{"signed":{"components":{"coordinator_admission":{"rollout":{"bridge_duration_seconds":0,"enforce_provider_admission":true,"mode":"strict_post_migration"}},"provider_cli":{"version":"1.8.48"}},"release":{"commit":"1111111111111111111111111111111111111111","repository":"Augustas11/macprovider","tag":"v1.8.48","version":"1.8.48"}}}
 EOF
 python3 - "$accepted" <<'PY'
 import hashlib
@@ -165,8 +165,11 @@ value = {
 PY
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$work/release-private.pem" >/dev/null 2>&1
 openssl pkey -in "$work/release-private.pem" -pubout -out "$work/release-public.pem" >/dev/null 2>&1
-openssl dgst -sha256 -sign "$work/release-private.pem" \
-  -out "$accepted/pearl-release.json.sig" "$accepted/pearl-release.json"
+sign_pearl() {
+  openssl dgst -sha256 -sign "$work/release-private.pem" \
+    -out "$accepted/pearl-release.json.sig" "$accepted/pearl-release.json"
+}
+sign_pearl
 printf 'fixture checksums\n' > "$accepted/checksums.txt"
 checksums_sha="$(shasum -a 256 "$accepted/checksums.txt" | awk '{print $1}')"
 
@@ -201,6 +204,37 @@ directory_verify=(
 )
 "${run_verify[@]}"
 "${directory_verify[@]}"
+
+cp "$accepted/compatibility-set.json" "$work/compatibility.strict"
+cp "$accepted/pearl-release.json" "$work/pearl.strict"
+python3 - "$accepted/compatibility-set.json" "$accepted/pearl-release.json" <<'PY'
+import json
+import pathlib
+import sys
+
+compatibility_path = pathlib.Path(sys.argv[1])
+compatibility = json.loads(compatibility_path.read_text())
+compatibility["signed"]["components"]["coordinator_admission"]["rollout"] = {
+    "bridge_duration_seconds": 86400,
+    "enforce_provider_admission": False,
+    "mode": "bridge_required",
+}
+compatibility_path.write_text(json.dumps(compatibility) + "\n")
+
+pearl_path = pathlib.Path(sys.argv[2])
+pearl = json.loads(pearl_path.read_text())
+pearl["provider_admission_rollout"] = {
+    "bridge_duration_s": 86400,
+    "enforce_provider_admission": False,
+    "mode": "bridge_required",
+}
+pearl_path.write_text(json.dumps(pearl) + "\n")
+PY
+sign_pearl
+"${directory_verify[@]}"
+mv "$work/compatibility.strict" "$accepted/compatibility-set.json"
+mv "$work/pearl.strict" "$accepted/pearl-release.json"
+sign_pearl
 
 expect_reject() {
   local label="$1"
@@ -292,8 +326,10 @@ v = json.loads(p.read_text())
 v["provider_admission_rollout"]["mode"] = "bridge_required"
 p.write_text(json.dumps(v) + "\n")
 PY
+sign_pearl
 expect_reject admission-mismatch "${directory_verify[@]}"
 mv "$work/pearl" "$accepted/pearl-release.json"
+sign_pearl
 
 expect_reject wrong-checksums-digest \
   python3 "$verifier" verify-directory \
