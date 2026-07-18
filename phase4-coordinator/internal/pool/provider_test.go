@@ -8,7 +8,51 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
+
+func TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate(t *testing.T) {
+	const artifactHash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+	const weightsHash = "0baf13715db1eeb56e6d0806b0d764aa1c44497aaaaf8d2ba90c21128d9fe2fe"
+	var verifiedHash string
+	registry := NewRegistry(nil, WithModelIdentityVerifier(func(_, expected, reported, algorithm string) HashStatus {
+		if expected != artifactHash || algorithm != modelidentity.SnapshotManifestV1 {
+			return HashStatusInvalid
+		}
+		verifiedHash = reported
+		return HashStatusVerified
+	}))
+	start := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	registerHeartbeatProvider(t, registry, "old-model", "", HashStatusUncatalogued, start)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:                    StateReady,
+		ModelID:                   "mlx-community/Llama-3.2-3B-Instruct-4bit",
+		ModelHash:                 artifactHash,
+		ModelHashPresent:          true,
+		ModelHashAlgorithm:        modelidentity.SnapshotManifestV1,
+		ModelHashAlgorithmPresent: true,
+		WeightsManifestSHA256:     weightsHash,
+		WeightsHashAlgorithm:      modelidentity.SafetensorsManifestV1,
+		ExpectedModelHash:         artifactHash,
+		MaxContextTokens:          8192,
+		MaxConcurrency:            1,
+		SlotsFree:                 1,
+		SlotsTotal:                1,
+		At:                        start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat rejected Air provider")
+	}
+	if verifiedHash != artifactHash || provider.ModelHash != artifactHash {
+		t.Fatalf("canonical verifier saw %q, provider stored %q", verifiedHash, provider.ModelHash)
+	}
+	if provider.WeightsManifestSHA256 != weightsHash ||
+		provider.WeightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
+		t.Fatalf("weights identity lost or substituted: %+v", provider)
+	}
+}
 
 // TestApplyHeartbeatSwapEmitterCalledWithoutPoolLock pins the M2-2 / ARCH-2
 // invariant: the swap emitter MUST NOT run while Registry.mu is held.

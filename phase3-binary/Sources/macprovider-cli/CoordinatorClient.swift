@@ -3771,10 +3771,25 @@ actor CoordinatorClient {
             payload["model_params_b"] = snapshot.capacity.modelParamsB(modelID: runtimeWireModelID)
             if let modelHash = runtimeSnapshot.modelHash {
                 payload["model_hash"] = modelHash
+                if let algorithm = runtimeSnapshot.modelHashAlgorithm {
+                    payload["model_hash_algorithm"] = algorithm
+                }
+            }
+            if let weights = runtimeSnapshot.weightsManifestSHA256 {
+                payload["weights_manifest_sha256"] = weights
+                payload["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
             }
             payload["loading"] = runtimeSnapshot.state == .loading || runtimeSnapshot.state == .draining
             specDecodeTelemetryMatchesRuntime = runtimeSnapshot.specDecodeGeneration == snapshot.specDecodeGeneration
             specDecodeTelemetryRuntimeEligible = runtimeSnapshot.state == .ready && runtimeSnapshot.hasTargetCompatibleDraft
+        } else if let modelHash = snapshot.modelHash,
+                  let algorithm = snapshot.modelHashAlgorithm {
+            payload["model_hash"] = modelHash
+            payload["model_hash_algorithm"] = algorithm
+            if let weights = snapshot.weightsManifestSHA256 {
+                payload["weights_manifest_sha256"] = weights
+                payload["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
+            }
         }
         if appConfig.publishesSpecDecodeTelemetry {
             if specDecodeTelemetryMatchesRuntime && specDecodeTelemetryRuntimeEligible {
@@ -3803,6 +3818,8 @@ actor CoordinatorClient {
             binaryVersion: Self.binaryVersion,
             compatibilitySetID: compatibilitySetID,
             modelHash: payload["model_hash"] as? String ?? snapshot.modelHash,
+            modelHashAlgorithm: payload["model_hash_algorithm"] as? String ?? snapshot.modelHashAlgorithm,
+            weightsManifestSHA256: payload["weights_manifest_sha256"] as? String ?? snapshot.weightsManifestSHA256,
             observationID: UUID().uuidString.lowercased(),
             observedAt: ISO8601DateFormatter().string(from: observedAt),
             validForMS: 90_000
@@ -3923,13 +3940,19 @@ actor CoordinatorClient {
         // helloMessage does.
         let wireModelID: String
         let resolvedModelHash: String?
+        let resolvedModelHashAlgorithm: String?
+        let resolvedWeightsManifestSHA256: String?
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
             wireModelID = coordinatorWireModelID(for: runtimeSnapshot.modelID)
             resolvedModelHash = runtimeSnapshot.modelHash
+            resolvedModelHashAlgorithm = runtimeSnapshot.modelHashAlgorithm
+            resolvedWeightsManifestSHA256 = runtimeSnapshot.weightsManifestSHA256
         } else {
             wireModelID = coordinatorWireModelID(for: snapshot.modelID)
             resolvedModelHash = snapshot.modelHash
+            resolvedModelHashAlgorithm = snapshot.modelHashAlgorithm
+            resolvedWeightsManifestSHA256 = snapshot.weightsManifestSHA256
         }
         var message: [String: Any] = [
             "type": "auth_request",
@@ -3990,6 +4013,13 @@ actor CoordinatorClient {
         }
         if let modelHash = resolvedModelHash {
             message["model_hash"] = modelHash
+            if let resolvedModelHashAlgorithm {
+                message["model_hash_algorithm"] = resolvedModelHashAlgorithm
+            }
+        }
+        if let resolvedWeightsManifestSHA256 {
+            message["weights_manifest_sha256"] = resolvedWeightsManifestSHA256
+            message["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
         if credentialBootstrap {
             message["credential_bootstrap"] = true
@@ -4032,10 +4062,14 @@ actor CoordinatorClient {
         }
         let wireModelIDForHello: String
         let hashForHello: String?
+        let hashAlgorithmForHello: String?
+        let weightsManifestForHello: String?
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
             wireModelIDForHello = coordinatorWireModelID(for: runtimeSnapshot.modelID)
             hashForHello = runtimeSnapshot.modelHash
+            hashAlgorithmForHello = runtimeSnapshot.modelHashAlgorithm
+            weightsManifestForHello = runtimeSnapshot.weightsManifestSHA256
             if catalogReleaseID != nil,
                await catalogRuntimeMatches(runtimeSnapshot) == false {
                 catalogWarmSwapInvalidated = true
@@ -4043,11 +4077,20 @@ actor CoordinatorClient {
         } else {
             wireModelIDForHello = coordinatorWireModelID(for: snapshot.modelID)
             hashForHello = snapshot.modelHash
+            hashAlgorithmForHello = snapshot.modelHashAlgorithm
+            weightsManifestForHello = snapshot.weightsManifestSHA256
         }
         message["model_id"] = wireModelIDForHello
         message["model_params_b"] = snapshot.capacity.modelParamsB(modelID: wireModelIDForHello)
         if let hashForHello {
             message["model_hash"] = hashForHello
+            if let hashAlgorithmForHello {
+                message["model_hash_algorithm"] = hashAlgorithmForHello
+            }
+        }
+        if let weightsManifestForHello {
+            message["weights_manifest_sha256"] = weightsManifestForHello
+            message["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
         if let compatibilitySetID {

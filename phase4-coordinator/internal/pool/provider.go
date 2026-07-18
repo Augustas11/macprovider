@@ -131,12 +131,16 @@ type Provider struct {
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a
 	// long generation is not closed for "missing" heartbeats it cannot send
 	// while its single inference slot is busy.
-	LastActivityAt time.Time  `json:"last_activity_at"`
-	ConnectedAt    time.Time  `json:"connected_at"`
-	BinaryVersion  string     `json:"binary_version"`
-	ModelHash      string     `json:"model_hash,omitempty"`
-	HashStatus     HashStatus `json:"hash_status,omitempty"`
-	EncryptedLeg   bool       `json:"encrypted_leg,omitempty"`
+	LastActivityAt        time.Time  `json:"last_activity_at"`
+	ConnectedAt           time.Time  `json:"connected_at"`
+	BinaryVersion         string     `json:"binary_version"`
+	ModelHash             string     `json:"model_hash,omitempty"`
+	ModelHashAlgorithm    string     `json:"model_hash_algorithm,omitempty"`
+	WeightsManifestSHA256 string     `json:"weights_manifest_sha256,omitempty"`
+	WeightsHashAlgorithm  string     `json:"weights_manifest_algorithm,omitempty"`
+	ExpectedModelHash     string     `json:"-"`
+	HashStatus            HashStatus `json:"hash_status,omitempty"`
+	EncryptedLeg          bool       `json:"encrypted_leg,omitempty"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge
@@ -234,33 +238,36 @@ type Provider struct {
 }
 
 type ProviderSafetyTelemetry struct {
-	SchemaVersion        int      `json:"schema_version"`
-	ProviderID           string   `json:"provider_id"`
-	ModelID              string   `json:"model_id"`
-	ModelLoaded          bool     `json:"model_loaded"`
-	RuntimeState         string   `json:"runtime_state"`
-	HardwareTier         string   `json:"hardware_tier"`
-	RequestsInFlight     int      `json:"requests_in_flight"`
-	RequestsQueued       int      `json:"requests_queued"`
-	MemoryRSSMB          int      `json:"memory_rss_mb"`
-	MemoryCapacityMB     int      `json:"memory_capacity_mb"`
-	MemoryPressure       string   `json:"memory_pressure"`
-	ThermalState         string   `json:"thermal_state"`
-	ThermallyThrottled   bool     `json:"thermally_throttled"`
-	RestartCount         int      `json:"restart_count"`
-	UptimeS              int      `json:"uptime_s"`
-	CoordinatorConnected bool     `json:"coordinator_connected"`
-	CoordinatorSessionID string   `json:"coordinator_session_id,omitempty"`
-	CPUUtilizationPct    *float64 `json:"cpu_utilization_pct"`
-	GPUUtilizationPct    *float64 `json:"gpu_utilization_pct"`
-	GPUUtilizationScope  string   `json:"gpu_utilization_scope,omitempty"`
-	PowerSource          string   `json:"power_source,omitempty"`
-	BinaryVersion        string   `json:"binary_version,omitempty"`
-	CompatibilitySetID   string   `json:"compatibility_set_id,omitempty"`
-	ModelHash            string   `json:"model_hash,omitempty"`
-	ObservationID        string   `json:"observation_id"`
-	ObservedAt           string   `json:"observed_at"`
-	ValidForMS           int      `json:"valid_for_ms"`
+	SchemaVersion         int      `json:"schema_version"`
+	ProviderID            string   `json:"provider_id"`
+	ModelID               string   `json:"model_id"`
+	ModelLoaded           bool     `json:"model_loaded"`
+	RuntimeState          string   `json:"runtime_state"`
+	HardwareTier          string   `json:"hardware_tier"`
+	RequestsInFlight      int      `json:"requests_in_flight"`
+	RequestsQueued        int      `json:"requests_queued"`
+	MemoryRSSMB           int      `json:"memory_rss_mb"`
+	MemoryCapacityMB      int      `json:"memory_capacity_mb"`
+	MemoryPressure        string   `json:"memory_pressure"`
+	ThermalState          string   `json:"thermal_state"`
+	ThermallyThrottled    bool     `json:"thermally_throttled"`
+	RestartCount          int      `json:"restart_count"`
+	UptimeS               int      `json:"uptime_s"`
+	CoordinatorConnected  bool     `json:"coordinator_connected"`
+	CoordinatorSessionID  string   `json:"coordinator_session_id,omitempty"`
+	CPUUtilizationPct     *float64 `json:"cpu_utilization_pct"`
+	GPUUtilizationPct     *float64 `json:"gpu_utilization_pct"`
+	GPUUtilizationScope   string   `json:"gpu_utilization_scope,omitempty"`
+	PowerSource           string   `json:"power_source,omitempty"`
+	BinaryVersion         string   `json:"binary_version,omitempty"`
+	CompatibilitySetID    string   `json:"compatibility_set_id,omitempty"`
+	ModelHash             string   `json:"model_hash,omitempty"`
+	ModelHashAlgorithm    string   `json:"model_hash_algorithm,omitempty"`
+	WeightsManifestSHA256 string   `json:"weights_manifest_sha256,omitempty"`
+	WeightsHashAlgorithm  string   `json:"weights_manifest_algorithm,omitempty"`
+	ObservationID         string   `json:"observation_id"`
+	ObservedAt            string   `json:"observed_at"`
+	ValidForMS            int      `json:"valid_for_ms"`
 }
 
 func cloneProviderSafetyTelemetry(in *ProviderSafetyTelemetry) *ProviderSafetyTelemetry {
@@ -529,6 +536,7 @@ type Registry struct {
 	lastBreakerRecoveries   map[string]time.Time
 	maxProvider             int
 	hashVerifier            HeartbeatHashVerifier
+	modelIdentityVerifier   ModelIdentityVerifier
 	swapEmitter             SwapEventEmitter
 	receiptRotationEmitter  ReceiptRotationEventEmitter
 }
@@ -1470,6 +1478,11 @@ func (r *Registry) Count() int {
 // tier2.ConfigureDefaultStrict swaps the underlying state atomically.
 type HeartbeatHashVerifier func(modelID, reportedHash string) HashStatus
 
+// ModelIdentityVerifier is the algorithm-aware production verifier. The
+// legacy two-argument verifier remains available only to preserve focused
+// package tests and old embedders while the wire migration is bounded.
+type ModelIdentityVerifier func(modelID, expectedHash, reportedHash, reportedAlgorithm string) HashStatus
+
 // SwapEvent carries the per-swap data needed for the operator_model_swap audit
 // event per SPEC-002 v1.3.5 §7.10. Phase 2C only populates and emits this
 // event; Phase 2E adds the SQLite write + payload schema + F-1.5 invariants.
@@ -1542,8 +1555,13 @@ type HeartbeatUpdate struct {
 	// ModelHash is the raw lowercase hex hash from the heartbeat when
 	// ModelHashPresent is true; ignored otherwise. Populated from the SPEC-011
 	// v0.5 optional heartbeat field per SPEC-002 v1.3.5 §7.1 R-7.1.4.
-	ModelHash        string
-	ModelHashPresent bool
+	ModelHash                 string
+	ModelHashPresent          bool
+	ModelHashAlgorithm        string
+	ModelHashAlgorithmPresent bool
+	WeightsManifestSHA256     string
+	WeightsHashAlgorithm      string
+	ExpectedModelHash         string
 	// Loading is the value of the heartbeat's optional `loading` field; absent
 	// on the wire (= LoadingPresent false) is equivalent to false per SPEC-011
 	// v0.5 R-3.3.4.
@@ -1578,6 +1596,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	prev := p.LastHeartbeatAt
 	priorModelID := p.ModelID
 	priorModelHash := p.ModelHash
+	priorModelHashAlgorithm := p.ModelHashAlgorithm
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
@@ -1586,15 +1605,36 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if !hb.ModelHashPresent {
 		if modelIDChanged {
 			p.ModelHash = ""
+			p.ModelHashAlgorithm = ""
+			p.WeightsManifestSHA256 = ""
+			p.WeightsHashAlgorithm = ""
 			p.HashStatus = HashStatusUncatalogued
 		}
-	} else if modelIDChanged || !strings.EqualFold(priorModelHash, hb.ModelHash) {
+	} else if modelIDChanged ||
+		!strings.EqualFold(priorModelHash, hb.ModelHash) ||
+		priorModelHashAlgorithm != hb.ModelHashAlgorithm {
 		p.ModelHash = hb.ModelHash
-		if r.hashVerifier != nil {
+		p.ModelHashAlgorithm = hb.ModelHashAlgorithm
+		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
+		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
+		if r.modelIdentityVerifier != nil {
+			expectedHash := p.ExpectedModelHash
+			if hb.ExpectedModelHash != "" {
+				expectedHash = hb.ExpectedModelHash
+			}
+			p.HashStatus = r.modelIdentityVerifier(hb.ModelID, expectedHash, hb.ModelHash, hb.ModelHashAlgorithm)
+		} else if r.hashVerifier != nil {
 			p.HashStatus = r.hashVerifier(hb.ModelID, hb.ModelHash)
 		} else {
 			p.HashStatus = HashStatusUncatalogued
 		}
+	}
+	if hb.WeightsManifestSHA256 != "" {
+		p.WeightsManifestSHA256 = hb.WeightsManifestSHA256
+		p.WeightsHashAlgorithm = hb.WeightsHashAlgorithm
+	}
+	if hb.ExpectedModelHash != "" {
+		p.ExpectedModelHash = hb.ExpectedModelHash
 	}
 
 	p.ModelID = hb.ModelID
@@ -1902,6 +1942,10 @@ type RegistryOption func(*Registry)
 // inject a stub or never exercise the SPEC-011 PATH).
 func WithHeartbeatHashVerifier(fn HeartbeatHashVerifier) RegistryOption {
 	return func(r *Registry) { r.hashVerifier = fn }
+}
+
+func WithModelIdentityVerifier(fn ModelIdentityVerifier) RegistryOption {
+	return func(r *Registry) { r.modelIdentityVerifier = fn }
 }
 
 // WithSwapEmitter injects the operator_model_swap callback per SPEC-002

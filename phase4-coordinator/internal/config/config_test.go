@@ -617,6 +617,20 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.ModelHashLegacyUntil = "tomorrow"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "model_hash_legacy_until") {
+		t.Fatalf("invalid model hash legacy deadline err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.ModelHashLegacyUntil = "2026-07-19T00:00:00Z"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("RFC3339 model hash legacy deadline should validate: %v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Tier2.EncryptedLegAEAD = "unknown"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "encrypted_leg_aead") {
 		t.Fatalf("unsupported AEAD err=%v", err)
@@ -670,6 +684,27 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 	cfg.Tier2.ResponseTimeAnomalyFactor = 1.0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "response_time_anomaly_factor") {
 		t.Fatalf("response anomaly factor err=%v", err)
+	}
+}
+
+func TestModelHashLegacyDeadlineEnvResolutionFailsClosed(t *testing.T) {
+	const deadline = "2099-07-19T00:00:00Z"
+	t.Setenv("MODEL_HASH_LEGACY_UNTIL_TEST", deadline)
+
+	cfg := Default()
+	cfg.Tier2.ModelHashLegacyUntil = "env:MODEL_HASH_LEGACY_UNTIL_TEST"
+	if err := cfg.resolveEnv(); err != nil {
+		t.Fatalf("resolve configured deadline: %v", err)
+	}
+	if cfg.Tier2.ModelHashLegacyUntil != deadline {
+		t.Fatalf("resolved deadline=%q want %q", cfg.Tier2.ModelHashLegacyUntil, deadline)
+	}
+
+	t.Setenv("MODEL_HASH_LEGACY_UNTIL_TEST", "")
+	cfg = Default()
+	cfg.Tier2.ModelHashLegacyUntil = "env:MODEL_HASH_LEGACY_UNTIL_TEST"
+	if err := cfg.resolveEnv(); err == nil || !strings.Contains(err.Error(), "tier2.model_hash_legacy_until") {
+		t.Fatalf("missing deadline environment error=%v", err)
 	}
 }
 

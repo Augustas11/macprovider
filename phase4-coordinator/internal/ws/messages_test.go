@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
 
 func TestParseNakAcceptsSwiftSpecShape(t *testing.T) {
@@ -286,6 +288,39 @@ func TestParseHeartbeatAcceptsSPEC011Fields(t *testing.T) {
 	}
 	if hb.ModelHash != hash || !hb.Loading {
 		t.Fatalf("SPEC-011 fields = (%q, %v)", hb.ModelHash, hb.Loading)
+	}
+}
+
+func TestParseHeartbeatPreservesNamedModelIdentities(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	weights := strings.Repeat("b", 64)
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":3,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":10,"requests_served_since_last":0,"avg_latency_ms_since_last":0,"throughput_tps_since_last":0,"model_hash":"` + hash + `","model_hash_algorithm":"` + modelidentity.SnapshotManifestV1 + `","weights_manifest_sha256":"` + weights + `","weights_manifest_algorithm":"` + modelidentity.SafetensorsManifestV1 + `"}`)
+	hb, presence, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if !presence.ModelHash || !presence.ModelHashAlgorithm || !presence.WeightsManifestSHA256 || !presence.WeightsHashAlgorithm {
+		t.Fatalf("presence = %+v", presence)
+	}
+	if hb.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 ||
+		hb.WeightsManifestSHA256 != weights ||
+		hb.WeightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
+		t.Fatalf("identity metadata = %+v", hb)
+	}
+}
+
+func TestParseHeartbeatRejectsUnpairedIdentityMetadata(t *testing.T) {
+	base := `{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":3,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":10,"requests_served_since_last":0,"avg_latency_ms_since_last":0,"throughput_tps_since_last":0`
+	for name, suffix := range map[string]string{
+		"algorithm without model hash": `,"model_hash_algorithm":"` + modelidentity.SnapshotManifestV1 + `"}`,
+		"weights without algorithm":    `,"weights_manifest_sha256":"` + strings.Repeat("b", 64) + `"}`,
+		"unknown weights algorithm":    `,"weights_manifest_sha256":"` + strings.Repeat("b", 64) + `","weights_manifest_algorithm":"sha256"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := ParseHeartbeat([]byte(base + suffix)); err == nil {
+				t.Fatal("ParseHeartbeat accepted invalid identity metadata")
+			}
+		})
 	}
 }
 

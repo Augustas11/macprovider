@@ -930,7 +930,8 @@ struct ServeCommand: AsyncParsableCommand {
                 maxBatch: resolved.maxConcurrencyOverride ?? 1,
                 warmSwapEnabled: resolved.enableWarmSwap,
                 swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
-                catalogModelIDAlias: catalogModelIDAlias
+                catalogModelIDAlias: catalogModelIDAlias,
+                verifiedModelArtifactSHA256: resolved.modelArtifactSHA256
             )
         } catch {
             _ = try? lifecycleStateStore.transition(
@@ -972,6 +973,8 @@ struct ServeCommand: AsyncParsableCommand {
             modelLoaded: await modelRuntime.isLoaded,
             capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
             modelHash: await modelRuntime.loadedModelHash,
+            modelHashAlgorithm: await modelRuntime.loadedModelHashAlgorithm,
+            weightsManifestSHA256: await modelRuntime.loadedWeightsManifestSHA256,
             thermalGate: thermalGate,
             specDecodeDraftModelID: resolved.draftModel,
             specDecodeNumDraftTokens: resolved.numDraftTokens,

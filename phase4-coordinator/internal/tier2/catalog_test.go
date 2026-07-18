@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/rs/zerolog"
 )
@@ -150,6 +151,37 @@ func TestVerifyProviderHashStatuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := VerifyProviderHash(tc.modelID, tc.reportedHash); got != tc.want {
 				t.Fatalf("VerifyProviderHash=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVerifyProviderIdentityNeverInfersAlgorithm(t *testing.T) {
+	defer ResetForTest()
+	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+	cfg := config.Default()
+	cfg.Tier2.CatalogPath = writeTempCatalog(t, raw)
+	cfg.Tier2.CatalogPublicKey = publicKey
+	if err := Configure(cfg.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	catalog := Default()
+
+	tests := []struct {
+		name      string
+		algorithm string
+		bridge    bool
+		want      pool.HashStatus
+	}{
+		{name: "canonical", algorithm: modelidentity.SnapshotManifestV1, want: pool.HashStatusVerified},
+		{name: "unknown explicit", algorithm: "sha256", bridge: true, want: pool.HashStatusInvalid},
+		{name: "missing enforced", want: pool.HashStatusInvalid},
+		{name: "missing bridged is not compared", bridge: true, want: pool.HashStatusUncatalogued},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := catalog.VerifyProviderIdentity("model-a", testHash, tc.algorithm, tc.bridge); got != tc.want {
+				t.Fatalf("VerifyProviderIdentity = %q, want %q", got, tc.want)
 			}
 		})
 	}

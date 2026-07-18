@@ -136,6 +136,11 @@ autotune:
 #   catalog_path: ""                # path to signed catalog JSON; empty = no catalog
 #   catalog_public_key: ""          # Ed25519 public key, base64url-unpadded; required with catalog_path
 #   require_hash_verified: false    # route only hash_verified providers when true
+#   # Bounded migration only: missing model_hash_algorithm remains untyped and
+#   # is never compared. Point this at a non-secret, operator-selected future
+#   # RFC3339 deadline, observe model_hash_algorithm_legacy_bridge, and remove
+#   # the field after the legacy count reaches zero. Empty/expired fails closed.
+#   model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL
 #
 #   # SPEC-008 §11.1 — Pillar B keys; present for forward compatibility only in Phase 1.
 #   require_encrypted_leg: false

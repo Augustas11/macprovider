@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
@@ -592,8 +593,8 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		// caller that overrides the catalog via WithCatalog (and the
 		// SIGHUP swap of tier2.Default()) is honored on every heartbeat
 		// rather than frozen at NewServer time.
-		pool.WithHeartbeatHashVerifier(func(modelID, reportedHash string) pool.HashStatus {
-			return s.catalogRef().VerifyProviderHash(modelID, reportedHash)
+		pool.WithModelIdentityVerifier(func(modelID, expectedHash, reportedHash, reportedAlgorithm string) pool.HashStatus {
+			return s.verifyProviderModelIdentity(modelID, expectedHash, reportedHash, reportedAlgorithm)
 		})(registry)
 	}
 	if s.autotuneCatalog != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
@@ -677,7 +678,7 @@ func (s *Server) RefreshTier2HashStatuses() int {
 		})
 	}
 	return s.pool.UpdateHashStatuses(func(provider pool.Provider) pool.HashStatus {
-		next := s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
+		next := s.verifyProviderModelIdentity(provider.ModelID, provider.ExpectedModelHash, provider.ModelHash, provider.ModelHashAlgorithm)
 		s.observeHashStatusTransition(provider.HashStatus, next, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash)
 		if cfg.RequireHashVerified && (next == pool.HashStatusUncatalogued || next == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
@@ -700,6 +701,34 @@ func (s *Server) tier2Config() config.Tier2Config {
 	s.tier2Mu.RLock()
 	defer s.tier2Mu.RUnlock()
 	return s.tier2
+}
+
+func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash, reportedAlgorithm string) pool.HashStatus {
+	cfg := s.tier2Config()
+	if !tier2.ModelHashActive(cfg) {
+		return pool.HashStatusUncatalogued
+	}
+	allowMissingAlgorithm := modelidentity.LegacyMissingAlgorithmAllowed(cfg.ModelHashLegacyUntil, s.now())
+	algorithm := strings.TrimSpace(reportedAlgorithm)
+	if algorithm == "" {
+		if allowMissingAlgorithm {
+			return pool.HashStatusUncatalogued
+		}
+		return pool.HashStatusInvalid
+	}
+	if algorithm != modelidentity.SnapshotManifestV1 || !modelidentity.ValidSHA256(reportedHash) {
+		return pool.HashStatusInvalid
+	}
+	if expected := strings.TrimSpace(expectedHash); expected != "" {
+		if strings.EqualFold(expected, strings.TrimSpace(reportedHash)) {
+			return pool.HashStatusVerified
+		}
+		return pool.HashStatusMismatch
+	}
+	if s.autotuneCatalog == nil {
+		return pool.HashStatusCatalogUnavailable
+	}
+	return pool.HashStatusUncatalogued
 }
 
 func (s *Server) Handler() http.Handler {
@@ -1883,10 +1912,20 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 
 	assignedID := s.newUUID()
 	now := s.now()
+	expectedModelHash := s.expectedAdmissionModelHash(hello, catalogAdmissionMode)
 	hashStatus := pool.HashStatus("")
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
-		hashStatus = s.catalogRef().VerifyProviderHash(hello.ModelID, hello.ModelHash)
+		hashStatus = s.verifyProviderModelIdentity(hello.ModelID, expectedModelHash, hello.ModelHash, hello.ModelHashAlgorithm)
+		if strings.TrimSpace(hello.ModelHashAlgorithm) == "" &&
+			modelidentity.LegacyMissingAlgorithmAllowed(tier2Cfg.ModelHashLegacyUntil, now) {
+			s.log.Warn().
+				Str("event", "model_hash_algorithm_legacy_bridge").
+				Str("provider_id", hello.ProviderID).
+				Str("model_id", hello.ModelID).
+				Str("legacy_until", tier2Cfg.ModelHashLegacyUntil).
+				Msg("provider admitted without a model hash algorithm during the bounded legacy window")
+		}
 		s.observeHashStatusTransition("", hashStatus, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash)
 		if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
@@ -1923,6 +1962,10 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		ConnectedAt:            now,
 		BinaryVersion:          hello.BinaryVersion,
 		ModelHash:              hello.ModelHash,
+		ModelHashAlgorithm:     hello.ModelHashAlgorithm,
+		WeightsManifestSHA256:  hello.WeightsManifestSHA256,
+		WeightsHashAlgorithm:   hello.WeightsHashAlgorithm,
+		ExpectedModelHash:      expectedModelHash,
 		HashStatus:             hashStatus,
 		CatalogAdmissionMode:   catalogAdmissionMode,
 		CatalogReleaseID:       hello.CatalogReleaseID,
@@ -1937,6 +1980,40 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		AdmittedChipNormalized:       admittedTuple.ChipNormalized,
 		AdmittedUnifiedMemoryGB:      admittedTuple.UnifiedMemoryGB,
 	}, true
+}
+
+func (s *Server) expectedAdmissionModelHash(hello Hello, admissionMode string) string {
+	catalog := s.autotuneCatalog
+	if admissionMode == "previous" {
+		catalog = s.autotuneCompatibleCatalogs[hello.CatalogReleaseID]
+	}
+	if catalog == nil || (admissionMode != "current" && admissionMode != "previous") {
+		return ""
+	}
+	_, row, ok := catalog.HighestClaimedTier(hello.ModelID)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(row.ModelSHA256)
+}
+
+func (s *Server) expectedProviderModelHash(providerID, assignedID, modelID string) string {
+	provider, ok := s.pool.Resolve(providerID, assignedID)
+	if !ok {
+		return ""
+	}
+	catalog := s.autotuneCatalog
+	if provider.CatalogAdmissionMode == "previous" {
+		catalog = s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
+	}
+	if catalog == nil || (provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous") {
+		return ""
+	}
+	_, row, ok := catalog.HighestClaimedTier(modelID)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(row.ModelSHA256)
 }
 
 // checkAutotuneHelloGate is the hardware-trust AUTHORIZATION POINT for the
@@ -2933,7 +3010,7 @@ func (s *Server) tier2WarmupExcluded(provider pool.Provider) bool {
 	if tier2.ModelHashActive(cfg) {
 		status := provider.HashStatus
 		if status == "" {
-			status = s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
+			status = s.verifyProviderModelIdentity(provider.ModelID, provider.ExpectedModelHash, provider.ModelHash, provider.ModelHashAlgorithm)
 		}
 		if tier2.IsHashPredicateFailure(status, cfg.RequireHashVerified) {
 			return true
@@ -3701,25 +3778,30 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		return
 	}
 	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
-		Status:                  state,
-		ModelID:                 hb.ModelID,
-		ModelParamsB:            hb.ModelParamsB,
-		RAMGB:                   hb.RAMGB,
-		MaxContextTokens:        hb.MaxContextTokens,
-		MaxConcurrency:          hb.MaxConcurrency,
-		SlotsFree:               hb.SlotsFree,
-		SlotsTotal:              hb.SlotsTotal,
-		ThroughputTPSEstimate:   hb.ThroughputTPSEstimate,
-		RequestsServedSinceLast: hb.RequestsServedSinceLast,
-		ThroughputTPSSinceLast:  hb.ThroughputTPSSinceLast,
-		ModelHash:               hb.ModelHash,
-		ModelHashPresent:        presence.ModelHash,
-		Loading:                 hb.Loading,
-		LoadingPresent:          presence.Loading,
-		LastAutoupdateEvent:     hb.LastAutoupdateEvent,
-		HardwareCapacity:        poolHardwareCapacity(hb.HardwareSummary),
-		SafetyTelemetry:         hb.SafetyTelemetry,
-		At:                      s.now(),
+		Status:                    state,
+		ModelID:                   hb.ModelID,
+		ModelParamsB:              hb.ModelParamsB,
+		RAMGB:                     hb.RAMGB,
+		MaxContextTokens:          hb.MaxContextTokens,
+		MaxConcurrency:            hb.MaxConcurrency,
+		SlotsFree:                 hb.SlotsFree,
+		SlotsTotal:                hb.SlotsTotal,
+		ThroughputTPSEstimate:     hb.ThroughputTPSEstimate,
+		RequestsServedSinceLast:   hb.RequestsServedSinceLast,
+		ThroughputTPSSinceLast:    hb.ThroughputTPSSinceLast,
+		ModelHash:                 hb.ModelHash,
+		ModelHashPresent:          presence.ModelHash,
+		ModelHashAlgorithm:        hb.ModelHashAlgorithm,
+		ModelHashAlgorithmPresent: presence.ModelHashAlgorithm,
+		WeightsManifestSHA256:     hb.WeightsManifestSHA256,
+		WeightsHashAlgorithm:      hb.WeightsHashAlgorithm,
+		ExpectedModelHash:         s.expectedProviderModelHash(providerID, assignedID, hb.ModelID),
+		Loading:                   hb.Loading,
+		LoadingPresent:            presence.Loading,
+		LastAutoupdateEvent:       hb.LastAutoupdateEvent,
+		HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
+		SafetyTelemetry:           hb.SafetyTelemetry,
+		At:                        s.now(),
 	})
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
@@ -4155,7 +4237,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := range providers {
-			providers[i].HashStatus = s.catalogRef().VerifyProviderHash(providers[i].ModelID, providers[i].ModelHash)
+			providers[i].HashStatus = s.verifyProviderModelIdentity(providers[i].ModelID, providers[i].ExpectedModelHash, providers[i].ModelHash, providers[i].ModelHashAlgorithm)
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -4281,7 +4363,7 @@ func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Co
 	if !tier2.ConfigActive(cfg) {
 		return true
 	}
-	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.catalogRef().VerifyProviderHash(p.ModelID, p.ModelHash), cfg.RequireHashVerified) {
+	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.verifyProviderModelIdentity(p.ModelID, p.ExpectedModelHash, p.ModelHash, p.ModelHashAlgorithm), cfg.RequireHashVerified) {
 		return false
 	}
 	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {

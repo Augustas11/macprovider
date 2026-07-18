@@ -263,6 +263,12 @@ tier2:
   #   # and MUST match this reference — any byte-for-byte diff flags a rotation:
   #   catalog_public_key: "IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ"
   #   require_hash_verified: false
+  #   # Optional bounded migration for clients that omit model_hash_algorithm.
+  #   # Missing values remain untyped and are never compared. Production uses
+  #   # env:MODEL_HASH_LEGACY_UNTIL so the deploy preflight requires an
+  #   # operator-selected future RFC3339 deadline without committing a stale
+  #   # date. Remove the field after the observed legacy count reaches zero.
+  #   model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL
   #
   # SPEC-015 v0.3 §M.4 — public absolute base URL the coordinator
   # advertises as `catalog_url` / `catalog_pubkey_url` in /poolz.

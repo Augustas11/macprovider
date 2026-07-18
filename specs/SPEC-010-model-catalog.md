@@ -1,7 +1,9 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.5
-**Status:** **LOCKED** at v1.5 (2026-06-06, Decision-log Entry 54 —
+**Version:** 1.6
+**Status:** v1.6 canonical model-identity amendment proposed by issue #609
+(2026-07-18). The supported-model catalog contract remains **LOCKED** at
+v1.5 (2026-06-06, Decision-log Entry 54 —
 codex round-6 returned 0 CRITICAL / 0 MAJOR / 0 MINOR). Implemented on
 both sides (provider `supported_models[]` advertisement, coordinator
 `Provider` extension, opt-in `/v1/status` echo). The former "pre round-6"
@@ -18,6 +20,18 @@ SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
 
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §7 OQ-1 (case preservation) and OQ-2 (admission counter) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-010.
+
+**Change log v1.6 (issue #609 canonical model identity):**
+- Names the canonical signed-snapshot identity
+  `macprovider.snapshot-manifest.v1` while reusing the canonical byte
+  algorithm already specified by SPEC-023 §3.2.
+- Adds typed provider/coordinator wire semantics, a separate optional
+  safetensors-weights diagnostic identity, exact admitted-row comparison,
+  route/receipt binding, warm-swap requirements, and a finite fail-closed
+  bridge for providers that do not yet report an algorithm.
+- Adds stable requirements SPEC-010-R001 through SPEC-010-R006. This is a
+  bounded `model-catalog-identity` amendment; it does not reopen or reconcile
+  unrelated SPEC-010 lifecycle behavior.
 
 **Change log v1.5 (round-5 polish pass — lock candidate):**
 Round-5 verdict was READY TO LOCK with 0 CRITICAL / 0 MAJOR /
@@ -364,6 +378,9 @@ guards for optional fields. The fields are:
 | Hostname | `hostname` | string | **REQUIRED** by `parseAuthInitial:337` `requireString` | NOTE: struct tag is `omitempty` but parser requires it |
 | Loaded model | `model_id` | string | **REQUIRED** by `parseAuthInitial:340` `requireString` | NOTE: struct tag is `omitempty` but parser requires it |
 | Model hash | `model_hash` | string sha256-hex | optional (parser uses `if v, ok` guard at line 343) | SPEC-008 Pillar A |
+| Model hash algorithm | `model_hash_algorithm` | string | optional at parsing; required by canonical admission policy when `model_hash` is present outside the bounded migration bridge | SPEC-010 §3.7 |
+| Weights manifest hash | `weights_manifest_sha256` | string sha256-hex | optional; MUST be paired with `weights_manifest_algorithm` | Diagnostic runtime evidence only; SPEC-010 §3.7 |
+| Weights manifest algorithm | `weights_manifest_algorithm` | string | optional; MUST equal `macprovider.safetensors-manifest.v1` and be paired with `weights_manifest_sha256` | Diagnostic runtime evidence only; SPEC-010 §3.7 |
 | Model params (B) | `model_params_b` | float | **REQUIRED** by `parseAuthInitial:348` `requireFloat` | |
 | RAM (GB) | `ram_gb` | int | **REQUIRED** by `parseAuthInitial:351` `requireInt` | |
 | Max context tokens | `max_context_tokens` | int | **REQUIRED** by `parseAuthInitial:354` `requireInt` | |
@@ -753,10 +770,15 @@ against retained initial-stage values, mismatch rejection).
 
 ### 3.2 Heartbeat frame
 
-Unchanged. `supported_models` and `publishes_supported_models` are
-set at `auth` and are immutable for the lifetime of the WS
-connection. To change the supported set, the provider must
-reconnect.
+`supported_models` and `publishes_supported_models` remain set at `auth`
+and immutable for the lifetime of the WS connection. To change the
+supported set, the provider must reconnect.
+
+The v1.6 model-identity amendment adds `model_hash_algorithm`,
+`weights_manifest_sha256`, and `weights_manifest_algorithm` alongside the
+existing heartbeat `model_hash`. Their pairing, validation, and authority
+semantics are defined only by §3.7. A heartbeat model change MUST be checked
+against the exact signed catalog release admitted for that provider session.
 
 Rationale: keeps heartbeat path zero-allocation; avoids racing
 mid-stream capability changes with in-flight routing decisions.
@@ -942,6 +964,66 @@ configs are introduced by SPEC-011 (swap_*) and SPEC-012
 - **R-3.6.4** Provider binary MUST gain `--publish-supported-models
   <bool>` flag (default `false`), populating
   `publishes_supported_models` in the `auth` frame.
+
+### 3.7 Canonical model artifact identity (v1.6 amendment)
+
+This section is the sole authority for model identity names and comparison
+semantics. SPEC-023 §3.2 remains the authority for the canonical artifact-set
+manifest bytes referenced below; this section does not duplicate that byte
+algorithm.
+
+- **SPEC-010-R001 — Canonical signed-snapshot identity.** The algorithm
+  identifier is exactly `macprovider.snapshot-manifest.v1`. Its digest is the
+  lowercase SHA-256 `model_sha256` from the exact signed candidate-catalog row,
+  whose canonical bytes are defined by SPEC-023 §3.2. The CLI MUST first
+  verify the downloaded snapshot against that row, then report the verified
+  row digest as `model_hash`. No component may infer this algorithm from the
+  presence or shape of a hash, or report a weights-only/subset digest under
+  this name.
+
+- **SPEC-010-R002 — Typed wire contract.** Provider hello, v2 auth initial,
+  heartbeat, local status, safety telemetry, and Tier-2 attestation projections
+  MUST keep `model_hash` paired with `model_hash_algorithm`. A modern canonical
+  pair uses only `macprovider.snapshot-manifest.v1` and a 64-character
+  lowercase SHA-256 digest. An explicit unknown algorithm, malformed pair, or
+  algorithm without a hash MUST be rejected; the coordinator MUST NOT guess
+  semantics from a hash value.
+
+- **SPEC-010-R003 — Separate weights evidence.** Implementations MAY report
+  `weights_manifest_sha256` only with
+  `weights_manifest_algorithm = "macprovider.safetensors-manifest.v1"`.
+  This pair identifies the sorted safetensors weights manifest used for runtime
+  diagnostics. It MUST NOT substitute for, be compared with, or satisfy the
+  canonical catalog artifact identity.
+
+- **SPEC-010-R004 — Exact admitted-row authority and settlement binding.**
+  Admission MUST select the expected `model_sha256` from the provider's exact
+  signed current or explicitly compatible-previous catalog release and model
+  row. That expected value remains session authority for later heartbeats.
+  Coordinator/Tier-2 logic MUST compare only the named provider artifact
+  identity with that same expected row; an independently selected catalog row
+  or second catalog fallback cannot authorize it. If existing Tier-2 signed
+  material is retained as proof, its expected hash MUST equal the admitted
+  autotune row. Buyer route snapshots MUST bind both algorithm and digest; the
+  existing receipt v0.4 transitively binds them through the signed route
+  snapshot digest without adding receipt keys.
+
+- **SPEC-010-R005 — Bounded missing-algorithm migration.** A provider that
+  omits `model_hash_algorithm` MAY remain connected only before an explicit
+  future RFC3339 `tier2.model_hash_legacy_until`. Its hash is untyped evidence
+  and MUST NOT be compared with any catalog digest or treated as verified.
+  Missing, malformed, or expired deadlines fail closed. Deploy preflight MUST
+  reject a declared mixed-version bridge unless the deadline resolves and is
+  in the future. Operators MUST count
+  `model_hash_algorithm_legacy_bridge`, update the remaining providers, and
+  remove the bridge field when the count reaches zero.
+
+- **SPEC-010-R006 — Warm-swap identity.** Before publishing a warm-swapped
+  model, the CLI MUST verify the complete target snapshot against the exact
+  signed target row and atomically replace the model ID, digest, and algorithm.
+  A swap with no bound signed target row, a mismatched digest, or a snapshot
+  that fails SPEC-023 §3.2 validation MUST fail closed without publishing the
+  new model under the prior model's identity.
 
 ---
 

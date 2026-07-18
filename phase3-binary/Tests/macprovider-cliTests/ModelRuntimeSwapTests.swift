@@ -5,6 +5,22 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelRuntimeSwapTests: XCTestCase {
+    func testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence() async {
+        let hash = String(repeating: "a", count: 64)
+        let legacy = makeRuntime(modelID: "model-a", modelHash: hash, warmSwapEnabled: false)
+        let canonical = makeRuntime(
+            modelID: "model-a",
+            modelHash: hash,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            warmSwapEnabled: false
+        )
+
+        let legacySnapshot = await legacy.currentSnapshot()
+        let canonicalSnapshot = await canonical.currentSnapshot()
+        XCTAssertNil(legacySnapshot.modelHashAlgorithm)
+        XCTAssertEqual(canonicalSnapshot.modelHashAlgorithm, ModelArtifactIdentity.snapshotManifestV1)
+    }
+
     func testDisabledModeRejectsSwap() async throws {
         let runtime = try await ModelRuntime(modelID: nil, warmSwapEnabled: false)
 
@@ -626,6 +642,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
     private func makeRuntime(
         modelID: String?,
         modelHash: String? = nil,
+        modelHashAlgorithm: String? = nil,
         draftModelID: String? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
@@ -636,6 +653,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ModelRuntime(
             modelID: modelID,
             modelHash: modelHash,
+            modelHashAlgorithm: modelHashAlgorithm,
             draftModelID: draftModelID,
             warmSwapEnabled: warmSwapEnabled,
             swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,

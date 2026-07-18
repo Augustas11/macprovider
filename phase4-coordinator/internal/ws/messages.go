@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 )
@@ -23,6 +24,9 @@ type Hello struct {
 	Hostname               string          `json:"hostname"`
 	ModelID                string          `json:"model_id"`
 	ModelHash              string          `json:"model_hash,omitempty"`
+	ModelHashAlgorithm     string          `json:"model_hash_algorithm,omitempty"`
+	WeightsManifestSHA256  string          `json:"weights_manifest_sha256,omitempty"`
+	WeightsHashAlgorithm   string          `json:"weights_manifest_algorithm,omitempty"`
 	ModelParamsB           float64         `json:"model_params_b"`
 	RAMGB                  int             `json:"ram_gb"`
 	MaxContextTokens       int             `json:"max_context_tokens"`
@@ -96,6 +100,9 @@ type AuthRequest struct {
 	Hostname                       string          `json:"hostname,omitempty"`
 	ModelID                        string          `json:"model_id,omitempty"`
 	ModelHash                      string          `json:"model_hash,omitempty"`
+	ModelHashAlgorithm             string          `json:"model_hash_algorithm,omitempty"`
+	WeightsManifestSHA256          string          `json:"weights_manifest_sha256,omitempty"`
+	WeightsHashAlgorithm           string          `json:"weights_manifest_algorithm,omitempty"`
 	ModelParamsB                   float64         `json:"model_params_b,omitempty"`
 	RAMGB                          int             `json:"ram_gb,omitempty"`
 	MaxContextTokens               int             `json:"max_context_tokens,omitempty"`
@@ -303,6 +310,9 @@ type Heartbeat struct {
 	AvgLatencyMSSinceLast   float64                       `json:"avg_latency_ms_since_last"`
 	ThroughputTPSSinceLast  float64                       `json:"throughput_tps_since_last"`
 	ModelHash               string                        `json:"model_hash,omitempty"`
+	ModelHashAlgorithm      string                        `json:"model_hash_algorithm,omitempty"`
+	WeightsManifestSHA256   string                        `json:"weights_manifest_sha256,omitempty"`
+	WeightsHashAlgorithm    string                        `json:"weights_manifest_algorithm,omitempty"`
 	Loading                 bool                          `json:"loading,omitempty"`
 	LastAutoupdateEvent     json.RawMessage               `json:"last_autoupdate_event,omitempty"`
 	HardwareSummary         *HardwareSummary              `json:"hardware_summary,omitempty"`
@@ -310,8 +320,11 @@ type Heartbeat struct {
 }
 
 type HeartbeatPresence struct {
-	ModelHash bool
-	Loading   bool
+	ModelHash             bool
+	ModelHashAlgorithm    bool
+	WeightsManifestSHA256 bool
+	WeightsHashAlgorithm  bool
+	Loading               bool
 }
 
 type IdlePrewarmEvent struct {
@@ -510,6 +523,15 @@ func ParseHello(payload []byte) (Hello, string, error) {
 			return Hello{}, "model_hash", fieldError{Field: "model_hash"}
 		}
 	}
+	if field, err := parseModelIdentityMetadata(
+		raw,
+		h.ModelHash,
+		&h.ModelHashAlgorithm,
+		&h.WeightsManifestSHA256,
+		&h.WeightsHashAlgorithm,
+	); err != nil {
+		return Hello{}, field, err
+	}
 	if err := requireFloat(raw, "model_params_b", &h.ModelParamsB); err != nil {
 		return Hello{}, err.Field, err
 	}
@@ -649,6 +671,15 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		if containsControlChar(req.ModelHash) {
 			return AuthRequest{}, Spec010Presence{}, "model_hash", fieldError{Field: "model_hash"}
 		}
+	}
+	if field, err := parseModelIdentityMetadata(
+		raw,
+		req.ModelHash,
+		&req.ModelHashAlgorithm,
+		&req.WeightsManifestSHA256,
+		&req.WeightsHashAlgorithm,
+	); err != nil {
+		return AuthRequest{}, Spec010Presence{}, field, err
 	}
 	if err := requireFloat(raw, "model_params_b", &req.ModelParamsB); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
@@ -888,6 +919,9 @@ func (r AuthRequest) Hello() Hello {
 		Hostname:               r.Hostname,
 		ModelID:                r.ModelID,
 		ModelHash:              r.ModelHash,
+		ModelHashAlgorithm:     r.ModelHashAlgorithm,
+		WeightsManifestSHA256:  r.WeightsManifestSHA256,
+		WeightsHashAlgorithm:   r.WeightsHashAlgorithm,
 		ModelParamsB:           r.ModelParamsB,
 		RAMGB:                  r.RAMGB,
 		MaxContextTokens:       r.MaxContextTokens,
@@ -1038,6 +1072,53 @@ func requireFloat(raw map[string]json.RawMessage, field string, out *float64) *f
 	return nil
 }
 
+func parseOptionalIdentityString(raw map[string]json.RawMessage, field string, out *string) (bool, error) {
+	v, ok := raw[field]
+	if !ok {
+		return false, nil
+	}
+	if string(v) == "null" {
+		return true, fmt.Errorf("%s must be a string", field)
+	}
+	if err := json.Unmarshal(v, out); err != nil {
+		return true, err
+	}
+	*out = strings.TrimSpace(*out)
+	if *out == "" || len([]byte(*out)) > 128 || containsControlChar(*out) {
+		return true, fmt.Errorf("%s must be a non-empty string of at most 128 bytes", field)
+	}
+	return true, nil
+}
+
+func parseModelIdentityMetadata(
+	raw map[string]json.RawMessage,
+	modelHash string,
+	modelHashAlgorithm, weightsHash, weightsHashAlgorithm *string,
+) (string, error) {
+	modelAlgorithmPresent, err := parseOptionalIdentityString(raw, "model_hash_algorithm", modelHashAlgorithm)
+	if err != nil {
+		return "model_hash_algorithm", err
+	}
+	if modelAlgorithmPresent && strings.TrimSpace(modelHash) == "" {
+		return "model_hash_algorithm", fmt.Errorf("model_hash_algorithm requires model_hash")
+	}
+	weightsPresent, err := parseOptionalIdentityString(raw, "weights_manifest_sha256", weightsHash)
+	if err != nil {
+		return "weights_manifest_sha256", err
+	}
+	weightsAlgorithmPresent, err := parseOptionalIdentityString(raw, "weights_manifest_algorithm", weightsHashAlgorithm)
+	if err != nil {
+		return "weights_manifest_algorithm", err
+	}
+	if weightsPresent != weightsAlgorithmPresent {
+		return "weights_manifest_algorithm", fmt.Errorf("weights_manifest_sha256 and weights_manifest_algorithm must be reported together")
+	}
+	if weightsAlgorithmPresent && *weightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
+		return "weights_manifest_algorithm", fmt.Errorf("unsupported weights_manifest_algorithm")
+	}
+	return "", nil
+}
+
 func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
@@ -1101,6 +1182,28 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		if containsControlChar(hb.ModelHash) {
 			return Heartbeat{}, presence, "model_hash", fieldError{Field: "model_hash"}
 		}
+	}
+	var err error
+	presence.ModelHashAlgorithm, err = parseOptionalIdentityString(raw, "model_hash_algorithm", &hb.ModelHashAlgorithm)
+	if err != nil {
+		return Heartbeat{}, presence, "model_hash_algorithm", err
+	}
+	presence.WeightsManifestSHA256, err = parseOptionalIdentityString(raw, "weights_manifest_sha256", &hb.WeightsManifestSHA256)
+	if err != nil {
+		return Heartbeat{}, presence, "weights_manifest_sha256", err
+	}
+	presence.WeightsHashAlgorithm, err = parseOptionalIdentityString(raw, "weights_manifest_algorithm", &hb.WeightsHashAlgorithm)
+	if err != nil {
+		return Heartbeat{}, presence, "weights_manifest_algorithm", err
+	}
+	if presence.ModelHashAlgorithm && !presence.ModelHash {
+		return Heartbeat{}, presence, "model_hash_algorithm", fmt.Errorf("model_hash_algorithm requires model_hash")
+	}
+	if presence.WeightsManifestSHA256 != presence.WeightsHashAlgorithm {
+		return Heartbeat{}, presence, "weights_manifest_algorithm", fmt.Errorf("weights_manifest_sha256 and weights_manifest_algorithm must be reported together")
+	}
+	if presence.WeightsHashAlgorithm && hb.WeightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
+		return Heartbeat{}, presence, "weights_manifest_algorithm", fmt.Errorf("unsupported weights_manifest_algorithm")
 	}
 	if v, ok := raw["loading"]; ok {
 		presence.Loading = true

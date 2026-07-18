@@ -92,6 +92,13 @@ struct SecureEnclaveAttestationGenerator: Tier2AttestationTokenGenerating {
         ]
         if let modelHash = snapshot.modelHash {
             claimed["model_hash"] = modelHash
+            if let algorithm = snapshot.modelHashAlgorithm {
+                claimed["model_hash_algorithm"] = algorithm
+            }
+        }
+        if let weights = snapshot.weightsManifestSHA256 {
+            claimed["weights_manifest_sha256"] = weights
+            claimed["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
 
         var envelope: [String: Any] = [
@@ -294,6 +301,13 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         ]
         if let modelHash = snapshot.modelHash {
             claimed["model_hash"] = modelHash
+            if let algorithm = snapshot.modelHashAlgorithm {
+                claimed["model_hash_algorithm"] = algorithm
+            }
+        }
+        if let weights = snapshot.weightsManifestSHA256 {
+            claimed["weights_manifest_sha256"] = weights
+            claimed["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
         return [
             "format": format,

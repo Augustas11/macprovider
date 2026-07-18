@@ -47,7 +47,7 @@ case "$GW" in
 esac
 
 python3 - "$COORD" "$GW" <<'PY'
-import os, re, sys
+import datetime, os, re, sys
 
 coord = open(sys.argv[1]).read()
 gw = open(sys.argv[2]).read() if len(sys.argv) > 2 and sys.argv[2] else ""
@@ -216,6 +216,52 @@ elif aptb.lower() == "false":
     warn("auth.allow_tokenless_provisional_bootstrap=false — clean public installs need a pre-provisioned provider_token.")
 else:
     hard(f"auth.allow_tokenless_provisional_bootstrap must be true or false, got: {aptb!r}")
+
+# --- bounded model-identity migration bridge ---
+# Absence means a canonical-only fleet and preserves the code's fail-closed
+# default. Presence means the operator is explicitly declaring a mixed fleet;
+# the deadline must resolve now and be a future RFC3339 instant. Production
+# uses env:MODEL_HASH_LEGACY_UNTIL so no soon-stale date is committed.
+legacy_until = g_section(coord, "tier2", "model_hash_legacy_until")
+if legacy_until is None or not legacy_until.strip():
+    ok("tier2.model_hash_legacy_until absent (canonical-only; missing algorithms fail closed)")
+else:
+    resolved_legacy_until = legacy_until
+    if legacy_until.startswith("env:"):
+        m = ENV_REF.match(legacy_until)
+        if not m:
+            hard("tier2.model_hash_legacy_until has malformed env indirection; expected env:NAME")
+            resolved_legacy_until = ""
+        else:
+            name = m.group(1)
+            resolved_legacy_until = os.environ.get(name, "").strip()
+            if not resolved_legacy_until:
+                hard(f"tier2.model_hash_legacy_until references env:{name}, but it is unset or empty; "
+                     "a mixed-version rollout requires an explicit future RFC3339 deadline")
+    if resolved_legacy_until:
+        rfc3339 = re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+            resolved_legacy_until,
+        )
+        if not rfc3339:
+            hard("tier2.model_hash_legacy_until must resolve to RFC3339")
+        else:
+            try:
+                deadline = datetime.datetime.fromisoformat(
+                    resolved_legacy_until[:-1] + "+00:00"
+                    if resolved_legacy_until.endswith("Z")
+                    else resolved_legacy_until
+                )
+            except ValueError:
+                hard("tier2.model_hash_legacy_until must resolve to a valid RFC3339 instant")
+            else:
+                now = datetime.datetime.now(datetime.timezone.utc)
+                if deadline <= now:
+                    hard("tier2.model_hash_legacy_until is expired; remove the bridge for a canonical-only "
+                         "fleet or set a reviewed future deadline for the counted legacy cohort")
+                else:
+                    ok("tier2.model_hash_legacy_until is an explicit future migration deadline; "
+                       "observe legacy count, update providers, then remove the field")
 
 # --- threshold sanity ---
 hi = g_section(coord, "pool", "heartbeat_interval_s")

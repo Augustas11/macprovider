@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/rs/zerolog"
 )
@@ -306,6 +307,29 @@ func (c *Catalog) Catalogued(modelID string) bool {
 // against c's current active catalog. Behavior identical to the pre-M3-8d
 // package-level function — same inputs, same outputs.
 func (c *Catalog) VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
+	c.mu.RLock()
+	st := c.st
+	c.mu.RUnlock()
+	return hashStatusForState(st, modelID, reportedHash)
+}
+
+// VerifyProviderIdentity verifies an explicitly named hash algorithm. A
+// missing algorithm may be admitted only by the caller's bounded migration
+// policy and is never compared with the catalog value.
+func (c *Catalog) VerifyProviderIdentity(modelID, reportedHash, reportedAlgorithm string, allowMissingAlgorithm bool) pool.HashStatus {
+	algorithm := strings.TrimSpace(reportedAlgorithm)
+	if algorithm == "" {
+		if allowMissingAlgorithm {
+			return pool.HashStatusUncatalogued
+		}
+		return pool.HashStatusInvalid
+	}
+	if algorithm != modelidentity.SnapshotManifestV1 {
+		return pool.HashStatusInvalid
+	}
+	if strings.TrimSpace(reportedHash) == "" {
+		return pool.HashStatusInvalid
+	}
 	c.mu.RLock()
 	st := c.st
 	c.mu.RUnlock()

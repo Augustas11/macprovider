@@ -690,7 +690,7 @@ func TestReloadTier2PreservesPreviousCatalogOnInvalidSamePathReload(t *testing.T
 	}
 }
 
-func TestReloadTier2ReevaluatesExistingProviderHashes(t *testing.T) {
+func TestReloadTier2RejectsExistingUntypedProviderHashesWithoutBridge(t *testing.T) {
 	defer tier2.ResetForTest()
 	catalogPath := t.TempDir() + "/catalog.json"
 	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
@@ -727,12 +727,12 @@ func TestReloadTier2ReevaluatesExistingProviderHashes(t *testing.T) {
 	if !ok {
 		t.Fatal("provider missing after reload")
 	}
-	if provider.HashStatus != pool.HashStatusVerified {
-		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusVerified)
+	if provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusInvalid)
 	}
 }
 
-func TestReloadTier2LogsHashStatusTransitions(t *testing.T) {
+func TestReloadTier2LogsUntypedHashInvalidTransition(t *testing.T) {
 	defer tier2.ResetForTest()
 	catalogPath := t.TempDir() + "/catalog.json"
 	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
@@ -772,18 +772,18 @@ func TestReloadTier2LogsHashStatusTransitions(t *testing.T) {
 	if !ok {
 		t.Fatal("provider missing after reload")
 	}
-	if provider.HashStatus != pool.HashStatusMismatch {
-		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusMismatch)
+	if provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusInvalid)
 	}
 	rawLog := wsLogs.String()
-	if !strings.Contains(rawLog, `"event":"model_hash_mismatch"`) ||
+	if !strings.Contains(rawLog, `"event":"model_hash_invalid"`) ||
 		!strings.Contains(rawLog, `"provider_id":"provider-a"`) ||
 		!strings.Contains(rawLog, `"decision":"exclude"`) {
-		t.Fatalf("reload transition audit log missing mismatch event: %s", rawLog)
+		t.Fatalf("reload transition audit log missing invalid event: %s", rawLog)
 	}
 }
 
-func TestReloadTier2LogsHashRequiredExclusionWhenStatusUnchanged(t *testing.T) {
+func TestReloadTier2LogsMissingAlgorithmInvalidation(t *testing.T) {
 	defer tier2.ResetForTest()
 	catalogPath := t.TempDir() + "/catalog.json"
 	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
@@ -822,14 +822,14 @@ func TestReloadTier2LogsHashRequiredExclusionWhenStatusUnchanged(t *testing.T) {
 	if !ok {
 		t.Fatal("provider missing after reload")
 	}
-	if provider.HashStatus != pool.HashStatusUncatalogued {
-		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusUncatalogued)
+	if provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusInvalid)
 	}
 	rawLog := wsLogs.String()
-	if !strings.Contains(rawLog, `"event":"hash_required_provider_excluded"`) ||
+	if !strings.Contains(rawLog, `"event":"model_hash_invalid"`) ||
 		!strings.Contains(rawLog, `"provider_id":"provider-a"`) ||
-		!strings.Contains(rawLog, `"config_flag":"tier2.require_hash_verified"`) {
-		t.Fatalf("reload audit log missing hash-required exclusion event: %s", rawLog)
+		!strings.Contains(rawLog, `"decision":"exclude"`) {
+		t.Fatalf("reload audit log missing invalid event: %s", rawLog)
 	}
 }
 
