@@ -205,13 +205,18 @@ def verify_directory(args: argparse.Namespace) -> None:
         fail("Pearl metadata does not advertise the signed provider CLI version")
     if provider_cli_version != args.tag.removeprefix("v"):
         fail("production provider CLI version differs from the stable release version")
-    if pearl.get("provider_admission_rollout") != rollout:
-        fail("Pearl and compatibility admission policies differ")
     if rollout not in (
-        {"bridge_duration_s": 86400, "enforce_provider_admission": False, "mode": "bridge_required"},
-        {"bridge_duration_s": 0, "enforce_provider_admission": True, "mode": "strict_post_migration"},
+        {"bridge_duration_seconds": 86400, "enforce_provider_admission": False, "mode": "bridge_required"},
+        {"bridge_duration_seconds": 0, "enforce_provider_admission": True, "mode": "strict_post_migration"},
     ):
         fail("provider admission policy is unsupported")
+    expected_pearl_rollout = {
+        "bridge_duration_s": rollout["bridge_duration_seconds"],
+        "enforce_provider_admission": rollout["enforce_provider_admission"],
+        "mode": rollout["mode"],
+    }
+    if pearl.get("provider_admission_rollout") != expected_pearl_rollout:
+        fail("Pearl and compatibility admission policies differ")
     expected_components = {
         "coordinator": ("coordinator-linux-amd64", args.tag),
         "gateway": ("gateway-linux-amd64", args.tag),
