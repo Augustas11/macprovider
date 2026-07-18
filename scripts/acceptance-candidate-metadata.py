@@ -343,7 +343,7 @@ def build_pearl(args: argparse.Namespace) -> dict:
     return {
         "architecture": "linux-amd64",
         "catalog": {"files": files, "policy_version": policy_version, "release_id": release_id},
-        "channel": "private_acceptance",
+        "channel": args.channel,
         "commit": commit,
         "components": {
             "coordinator": {
@@ -656,6 +656,7 @@ def parser() -> argparse.ArgumentParser:
     pearl.add_argument("--commit", required=True)
     pearl.add_argument("--compatibility-manifest", required=True, type=pathlib.Path)
     pearl.add_argument("--provider-admission-policy", choices=("bridge_required", "strict_post_migration"), required=True)
+    pearl.add_argument("--channel", choices=("private_acceptance", "production"), default="private_acceptance")
     pearl.add_argument("--catalog-directory", required=True, type=pathlib.Path)
     pearl.add_argument("--coordinator", required=True, type=pathlib.Path)
     pearl.add_argument("--coordinator-cli", required=True, type=pathlib.Path)

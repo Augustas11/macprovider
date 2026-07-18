@@ -1,0 +1,432 @@
+name: Promote exact physically accepted candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: "Successful acceptance-candidate workflow run ID"
+        required: true
+        type: string
+      candidate_sha:
+        description: "Exact accepted 40-character lowercase source SHA"
+        required: true
+        type: string
+      tag:
+        description: "Exact accepted semantic version tag"
+        required: true
+        type: string
+      expected_checksums_sha256:
+        description: "SHA-256 of checksums.txt recorded during physical acceptance"
+        required: true
+        type: string
+      physical_acceptance_confirmed:
+        description: "Confirm the exact checksums digest completed the physical acceptance journey"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Publish only the accepted bytes
+    runs-on: macos-15
+    environment: production-release
+    outputs:
+      tag: ${{ steps.request.outputs.tag }}
+    steps:
+      - name: Checkout reviewed promotion controls
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable promotion request
+        id: request
+        shell: bash
+        env:
+          RUN_ID_INPUT: ${{ github.event.inputs.candidate_run_id }}
+          CANDIDATE_SHA_INPUT: ${{ github.event.inputs.candidate_sha }}
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          CHECKSUMS_SHA_INPUT: ${{ github.event.inputs.expected_checksums_sha256 }}
+          PHYSICAL_ACCEPTANCE_INPUT: ${{ github.event.inputs.physical_acceptance_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid candidate run id" >&2; exit 1; }
+          [[ "$CANDIDATE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid candidate SHA" >&2; exit 1; }
+          [[ "$TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid tag" >&2; exit 1; }
+          [[ "$CHECKSUMS_SHA_INPUT" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::invalid checksums digest" >&2; exit 1; }
+          [[ "$PHYSICAL_ACCEPTANCE_INPUT" == true ]] || {
+            echo "::error::exact physical acceptance must be explicitly confirmed" >&2
+            exit 1
+          }
+          printf 'run_id=%s\n' "$RUN_ID_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'candidate_sha=%s\n' "$CANDIDATE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$TAG_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'checksums_sha=%s\n' "$CHECKSUMS_SHA_INPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Verify protected GitHub release posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Capture the exact successful acceptance run
+        id: run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.request.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > "$RUNNER_TEMP/acceptance-run.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/acceptance-artifacts.json"
+          python3 - "$RUNNER_TEMP/acceptance-run.json" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          attempt = value.get("run_attempt")
+          control = value.get("head_sha")
+          if type(attempt) is not int or attempt <= 0:
+              raise SystemExit("invalid acceptance run attempt")
+          if not isinstance(control, str) or len(control) != 40:
+              raise SystemExit("invalid acceptance control SHA")
+          with open(sys.argv[2], "a", encoding="ascii") as output:
+              output.write(f"run_attempt={attempt}\ncontrol_sha={control}\n")
+          PY
+
+      - name: Download only the exact private acceptance artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.request.outputs.run_id }}
+          name: acceptance-candidate-${{ steps.request.outputs.candidate_sha }}
+          path: ${{ runner.temp }}/accepted
+
+      - name: Select OpenSSL 3
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew install openssl@3
+          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
+          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'OPENSSL_BIN=%s\n' "$openssl_bin" >> "$GITHUB_ENV"
+
+      - name: Verify the signed acceptance set and production metadata
+        shell: bash
+        env:
+          RUN_ID: ${{ steps.request.outputs.run_id }}
+          RUN_ATTEMPT: ${{ steps.run.outputs.run_attempt }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+          CONTROL_SHA: ${{ steps.run.outputs.control_sha }}
+          TAG: ${{ steps.request.outputs.tag }}
+          EXPECTED_CHECKSUMS_SHA: ${{ steps.request.outputs.checksums_sha }}
+        run: |
+          set -euo pipefail
+          accepted="$RUNNER_TEMP/accepted"
+          python3 scripts/verify-acceptance-promotion.py verify-run \
+            --run-json "$RUNNER_TEMP/acceptance-run.json" \
+            --artifacts-json "$RUNNER_TEMP/acceptance-artifacts.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --control-sha "$CONTROL_SHA"
+          python3 scripts/verify-acceptance-promotion.py verify-directory \
+            --directory "$accepted" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --tag "$TAG" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --control-sha "$CONTROL_SHA" \
+            --expected-checksums-sha256 "$EXPECTED_CHECKSUMS_SHA" \
+            --release-public-key ops/pearl-updater/release-signing-public.pem \
+            --openssl "$OPENSSL_BIN"
+          release_assets=()
+          while IFS= read -r name; do
+            [[ -n "$name" ]] && release_assets+=("$accepted/$name")
+          done < "$accepted/release-assets.txt"
+          bash scripts/verify-release-checksums.sh \
+            --acceptance-candidate \
+            "$accepted/acceptance-candidate.json" \
+            "refs/heads/$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"candidate_ref\"].removeprefix(\"refs/heads/\"))' "$accepted/acceptance-candidate.json")" \
+            "$RUN_ID" "$RUN_ATTEMPT" "$CONTROL_SHA" \
+            "$accepted/checksums.txt" \
+            "$accepted/acceptance-candidate.json.sig" \
+            "$accepted/release-provenance.json" \
+            "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
+            "${release_assets[@]}"
+
+      - name: Verify accepted source is merged and reserve its exact tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+          TAG: ${{ steps.request.outputs.tag }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+          CONTROL_SHA: ${{ steps.run.outputs.control_sha }}
+        run: |
+          set -euo pipefail
+          tagger_id="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' user --jq .id)"
+          [[ "$tagger_id" == 28995904 ]] || {
+            echo "::error::protected tag credential is not the configured ruleset bypass actor" >&2
+            exit 1
+          }
+          git fetch --quiet --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git cat-file -e "$CANDIDATE_SHA^{commit}"
+          git cat-file -e "$CONTROL_SHA^{commit}"
+          git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main || {
+            echo "::error::accepted candidate is not reachable from origin/main" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$CONTROL_SHA" refs/remotes/origin/main || {
+            echo "::error::acceptance signer control commit is not reachable from origin/main" >&2
+            exit 1
+          }
+          gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/release-pages.json"
+          python3 - "$RUNNER_TEMP/release-pages.json" "$TAG" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = sys.argv[2]
+          matches = [
+              row
+              for page in pages
+              if isinstance(page, list)
+              for row in page
+              if isinstance(row, dict) and row.get("tag_name") == tag
+          ]
+          if matches:
+              raise SystemExit("a draft or public release already exists for the accepted tag")
+          PY
+          tag_rows="$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          if [[ -z "$tag_rows" ]]; then
+            gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$CANDIDATE_SHA" >/dev/null
+          fi
+          bash scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing
+
+      - name: Generate only the production checksum signature
+        shell: bash
+        env:
+          MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          TAG: ${{ steps.request.outputs.tag }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          accepted="$RUNNER_TEMP/accepted"
+          key="$(mktemp "$RUNNER_TEMP/release-signing-private.XXXXXX.pem")"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$key"
+          chmod 600 "$key"
+          "$OPENSSL_BIN" pkey -in "$key" -pubout -out "$RUNNER_TEMP/release-public.pem"
+          cmp "$RUNNER_TEMP/release-public.pem" ops/pearl-updater/release-signing-public.pem
+          "$OPENSSL_BIN" dgst -sha256 -sign "$key" \
+            -out "$accepted/checksums.txt.sig" "$accepted/checksums.txt"
+          release_assets=()
+          while IFS= read -r name; do
+            [[ -n "$name" ]] && release_assets+=("$accepted/$name")
+          done < "$accepted/release-assets.txt"
+          bash scripts/verify-release-checksums.sh \
+            "$accepted/checksums.txt" "$accepted/checksums.txt.sig" \
+            "$accepted/release-provenance.json" \
+            "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
+            "${release_assets[@]}"
+
+      - name: Create and fully verify a numeric draft
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          accepted="$RUNNER_TEMP/accepted"
+          release_assets=()
+          while IFS= read -r name; do
+            [[ -n "$name" ]] && release_assets+=("$accepted/$name")
+          done < "$accepted/release-assets.txt"
+          notes="$RUNNER_TEMP/release-notes.md"
+          printf '# macprovider-cli %s\n\nExact bytes promoted after signed physical acceptance.\n' "$TAG" > "$notes"
+          gh release create "$TAG" \
+            "${release_assets[@]}" \
+            "$accepted/checksums.txt" \
+            "$accepted/checksums.txt.sig" \
+            --title "macprovider-cli $TAG" \
+            --notes-file "$notes" \
+            --target "$CANDIDATE_SHA" \
+            --verify-tag \
+            --draft
+          gh release view "$TAG" \
+            --json databaseId,isDraft,tagName,targetCommitish > "$RUNNER_TEMP/draft-cli.json"
+          release_id="$(python3 scripts/verify-release-draft-identity.py cli \
+            "$RUNNER_TEMP/draft-cli.json" "$TAG" "$CANDIDATE_SHA")"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$RUNNER_TEMP/draft-api.json"
+          python3 scripts/verify-release-draft-identity.py api \
+            "$RUNNER_TEMP/draft-api.json" "$TAG" "$CANDIDATE_SHA" \
+            --release-id "$release_id" >/dev/null
+          python3 scripts/capture-release-publication.py --draft --notes-file "$notes" \
+            "$RUNNER_TEMP/draft-api.json" "$accepted/release-provenance.json" \
+            "$RUNNER_TEMP/draft-publication.json" \
+            "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+
+      - name: Reverify and publish only the captured numeric draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+          TAG: ${{ steps.request.outputs.tag }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          accepted="$RUNNER_TEMP/accepted"
+          release_assets=()
+          while IFS= read -r name; do
+            [[ -n "$name" ]] && release_assets+=("$accepted/$name")
+          done < "$accepted/release-assets.txt"
+          notes="$RUNNER_TEMP/release-notes.md"
+          bash scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
+          bash scripts/verify-release-checksums.sh \
+            "$accepted/checksums.txt" "$accepted/checksums.txt.sig" \
+            "$accepted/release-provenance.json" \
+            "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
+            "${release_assets[@]}"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            --include "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            > "$RUNNER_TEMP/final-draft-response"
+          python3 - "$RUNNER_TEMP/final-draft-response" \
+            "$RUNNER_TEMP/final-draft.json" "$RUNNER_TEMP/final-draft-etag" <<'PY'
+          import pathlib
+          import sys
+
+          raw = pathlib.Path(sys.argv[1]).read_bytes()
+          separator = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
+          headers, marker, body = raw.partition(separator)
+          if not marker:
+              raise SystemExit("GitHub draft response omitted headers")
+          etags = []
+          for line in headers.decode("latin-1").splitlines():
+              name, delimiter, value = line.partition(":")
+              if delimiter and name.lower() == "etag":
+                  etags.append(value.strip())
+          if len(etags) != 1 or not etags[0]:
+              raise SystemExit("GitHub draft response omitted a unique ETag")
+          pathlib.Path(sys.argv[2]).write_bytes(body)
+          pathlib.Path(sys.argv[3]).write_text(etags[0] + "\n", encoding="ascii")
+          PY
+          python3 scripts/verify-release-draft-identity.py api \
+            "$RUNNER_TEMP/final-draft.json" "$TAG" "$CANDIDATE_SHA" \
+            --release-id "$RELEASE_ID" >/dev/null
+          python3 scripts/capture-release-publication.py --draft --notes-file "$notes" \
+            "$RUNNER_TEMP/final-draft.json" "$accepted/release-provenance.json" \
+            "$RUNNER_TEMP/final-draft-publication.json" \
+            "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
+          bash scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing
+          draft_etag="$(cat "$RUNNER_TEMP/final-draft-etag")"
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            -H "If-Match: $draft_etag" \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=false -f make_latest=true \
+            > "$RUNNER_TEMP/published.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/immutable-by-id.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/immutable-by-tag.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/latest.json"
+          python3 scripts/verify-published-release.py \
+            "$RELEASE_ID" false "$RUNNER_TEMP/immutable-by-id.json" \
+            "$RUNNER_TEMP/immutable-by-tag.json" "$RUNNER_TEMP/latest.json"
+          python3 scripts/capture-release-publication.py --notes-file "$notes" \
+            "$RUNNER_TEMP/immutable-by-id.json" "$accepted/release-provenance.json" \
+            "$RUNNER_TEMP/publication.json" \
+            "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
+          cmp "$RUNNER_TEMP/final-draft-publication.json" "$RUNNER_TEMP/publication.json"
+
+      - name: Redownload and byte-compare every immutable asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          accepted="$RUNNER_TEMP/accepted"
+          download="$RUNNER_TEMP/redownload"
+          mkdir "$download"
+          python3 - "$RUNNER_TEMP/immutable-by-id.json" "$RUNNER_TEMP/assets.tsv" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          rows = []
+          for asset in value.get("assets", []):
+              name, asset_id = asset.get("name"), asset.get("id")
+              if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,255}", name):
+                  raise SystemExit("unsafe release asset name")
+              if type(asset_id) is not int or asset_id <= 0:
+                  raise SystemExit("invalid release asset id")
+              rows.append((name, asset_id))
+          pathlib.Path(sys.argv[2]).write_text(
+              "".join(f"{name}\t{asset_id}\n" for name, asset_id in sorted(rows)),
+              encoding="ascii",
+          )
+          PY
+          while IFS=$'\t' read -r name asset_id; do
+            gh api -H 'Accept: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$download/$name"
+            cmp "$accepted/$name" "$download/$name"
+          done < "$RUNNER_TEMP/assets.tsv"
+
+  verify_public:
+    name: Verify published bytes without protected credentials
+    needs: promote
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout reviewed public verifier
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify public Tier-2 release
+        shell: bash
+        env:
+          TAG: ${{ needs.promote.outputs.tag }}
+        run: |
+          set -euo pipefail
+          GITHUB_REPO="$GITHUB_REPOSITORY" \
+            DOWNLOAD_ATTEMPTS=6 \
+            DOWNLOAD_RETRY_SLEEP=5 \
+            scripts/verify-tier2-provider-release.sh --tag "$TAG"

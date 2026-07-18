@@ -95,8 +95,20 @@ for secret in (
         raise SystemExit(f"protected signer secret contract is incomplete: {secret}")
 if "--private-key \"$release_private_key\"" not in signer or "--public-key \"$release_public_key\"" not in signer:
     raise SystemExit("inner compatibility manifest is not main-owned and production-key verified")
-if "pearl-release.json.sig" not in signer or "-sign \"$private_key\"" not in signer:
-    raise SystemExit("acceptance-only Pearl metadata is not separately signed")
+if (
+    "pearl-release.json.sig" not in signer
+    or 'pearl_signing_key="$private_key"' not in signer
+    or 'pearl_signing_key="$release_private_key"' not in signer
+    or 'pearl_verification_key="$derived_public_key"' not in signer
+    or 'pearl_verification_key="$release_public_key"' not in signer
+):
+    raise SystemExit("Pearl metadata does not select the acceptance or production trust anchor explicitly")
+if (
+    '"$promotion_ready" == true' not in signer
+    or "pearl_channel=production" not in signer
+    or "release_prerelease=false" not in signer
+):
+    raise SystemExit("promotion-ready acceptance does not bind stable release provenance")
 if '--compatibility-manifest "$output_dir/compatibility-set.json"' not in signer:
     raise SystemExit("acceptance-only Pearl metadata is not bound to the signed compatibility manifest")
 if 'tar -czf "$provider_asset" -C "$cli_work" .' in signer:
@@ -374,6 +386,27 @@ if pearl.get("channel") != "private_acceptance":
     raise SystemExit("Pearl metadata did not declare the private acceptance channel")
 if pearl["provider_advertised_version"] != "1.8.31":
     raise SystemExit("Pearl metadata did not use the signed provider CLI component version")
+PY
+python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --compatibility-manifest "$work/pearl-compatibility.json" \
+  --provider-admission-policy strict_post_migration \
+  --channel production \
+  --catalog-directory "$work/pearl-catalog" \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-production.json"
+python3 - "$work/pearl-production.json" <<'PY'
+import json
+import pathlib
+import sys
+
+pearl = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if pearl.get("channel") != "production":
+    raise SystemExit("promotion-ready Pearl metadata did not declare the production channel")
 PY
 python3 - "$work/pearl-catalog/release.json" <<'PY'
 import json

@@ -59,6 +59,7 @@ test-dist:
 	bash scripts/test-recover-malibu-publication.sh
 	bash scripts/test-acceptance-candidate-security.sh
 	bash scripts/test-acceptance-candidate-metadata.sh
+	bash scripts/test-acceptance-promotion.sh
 	bash scripts/test-release-toolchain.sh
 	bash scripts/test-release-publication-provenance.sh
 	bash scripts/test-compatibility-set-manifest.sh

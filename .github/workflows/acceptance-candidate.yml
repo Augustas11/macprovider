@@ -23,6 +23,11 @@ on:
         options:
           - bridge_required
           - strict_post_migration
+      promotion_ready:
+        description: "Bind the exact candidate assets for stable production promotion after physical acceptance"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -43,6 +48,7 @@ jobs:
       control_commit: ${{ steps.source.outputs.control_commit }}
       tag: ${{ steps.source.outputs.tag }}
       provider_admission_policy: ${{ steps.source.outputs.provider_admission_policy }}
+      promotion_ready: ${{ steps.source.outputs.promotion_ready }}
     steps:
       - name: Checkout main-owned workflow controls
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -69,6 +75,7 @@ jobs:
           CANDIDATE_SHA_INPUT: ${{ github.event.inputs.candidate_sha }}
           TAG_INPUT: ${{ github.event.inputs.tag }}
           PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy }}
+          PROMOTION_READY_INPUT: ${{ github.event.inputs.promotion_ready || 'false' }}
         run: |
           set -euo pipefail
           bash control/scripts/verify-acceptance-candidate-source.sh \
@@ -78,11 +85,16 @@ jobs:
             bridge_required|strict_post_migration) ;;
             *) echo "::error::invalid provider admission policy" >&2; exit 1 ;;
           esac
+          case "$PROMOTION_READY_INPUT" in
+            true|false) ;;
+            *) echo "::error::invalid promotion-ready state" >&2; exit 1 ;;
+          esac
           printf 'candidate_ref=%s\n' "$CANDIDATE_REF_INPUT" >> "$GITHUB_OUTPUT"
           printf 'candidate_commit=%s\n' "$CANDIDATE_SHA_INPUT" >> "$GITHUB_OUTPUT"
           printf 'control_commit=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$TAG_INPUT" >> "$GITHUB_OUTPUT"
           printf 'provider_admission_policy=%s\n' "$PROVIDER_ADMISSION_POLICY_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'promotion_ready=%s\n' "$PROMOTION_READY_INPUT" >> "$GITHUB_OUTPUT"
 
       - name: Select and verify main-reviewed release toolchain
         shell: bash
@@ -326,6 +338,7 @@ jobs:
           CONTROL_COMMIT: ${{ needs.build_candidate.outputs.control_commit }}
           TAG: ${{ needs.build_candidate.outputs.tag }}
           PROVIDER_ADMISSION_POLICY: ${{ needs.build_candidate.outputs.provider_admission_policy }}
+          PROMOTION_READY: ${{ needs.build_candidate.outputs.promotion_ready }}
         run: |
           set -euo pipefail
           bash scripts/sign-acceptance-candidate.sh \
@@ -338,7 +351,8 @@ jobs:
             "$CONTROL_COMMIT" \
             "$GITHUB_RUN_ID" \
             "$GITHUB_RUN_ATTEMPT" \
-            "$PROVIDER_ADMISSION_POLICY"
+            "$PROVIDER_ADMISSION_POLICY" \
+            "$PROMOTION_READY"
 
       - name: Reverify candidate ref and tag before private export
         shell: bash
