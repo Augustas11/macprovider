@@ -125,7 +125,7 @@ func (h *AdvocacyHandler) HandleChallenge(w http.ResponseWriter, r *http.Request
 	}
 	shareURL := strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" +
 		url.PathEscape(challenge.Code) + "?c=" + url.QueryEscape(challenge.Cleartext)
-	copy := "My Mac just joined Malibu's pre-beta compute network. If you have a Mac and want early access: " + shareURL
+	copy := "My Mac just joined @malibuonbase’s pre-beta compute network. If you have a Mac and want early access: " + shareURL
 	h.observe("challenge", "created")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"intent_url": "https://twitter.com/intent/tweet?text=" + url.QueryEscape(copy),

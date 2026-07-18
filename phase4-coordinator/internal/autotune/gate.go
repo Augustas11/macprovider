@@ -2,7 +2,6 @@ package autotune
 
 import (
 	"fmt"
-	"math"
 	"strings"
 )
 
@@ -102,11 +101,8 @@ func benchmarkPassesGate(benchmark VerifiedBenchmark, row Row, catalogSHA256, ro
 	if strings.TrimSpace(benchmark.ArtifactSHA256) == "" || !strings.EqualFold(strings.TrimSpace(benchmark.ArtifactSHA256), strings.TrimSpace(row.ModelSHA256)) {
 		return false
 	}
-	if math.IsNaN(benchmark.SustainedTPS) || math.IsInf(benchmark.SustainedTPS, 0) || benchmark.SustainedTPS < row.BenchGate.MinSustainedTPS {
-		return false
-	}
-	if benchmark.TTFTMS > row.BenchGate.Max4KTTFTMS {
-		return false
-	}
+	// SPEC-023 v0.2: min_sustained_tps and max_4k_ttft_ms are advisory QoS
+	// thresholds. The coordinator mirror must not reject an otherwise valid
+	// benchmark row for low TPS, high TTFT, or a missing/non-finite TPS value.
 	return true
 }

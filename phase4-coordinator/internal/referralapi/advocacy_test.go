@@ -190,6 +190,39 @@ func createAdvocacyChallenge(t *testing.T, handler *AdvocacyHandler) (shareURL, 
 	return body.ShareURL, challenge
 }
 
+func TestAdvocacyChallengeIntentUsesTaggedMalibuHandle(t *testing.T) {
+	store := openAdvocacyStore(t)
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	qualifyAdvocacyProvider(t, store, advocacyPolicy(), "provider-copy", now)
+	handler := newAdvocacyHandler(store, "provider-copy", now)
+
+	response := httptest.NewRecorder()
+	handler.HandleChallenge(response, bearerRequest(http.MethodPost, "/v1/provider/referrals/x/challenge", ""))
+	if response.Code != http.StatusOK {
+		t.Fatalf("challenge status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	var body struct {
+		ShareURL string `json:"share_url"`
+		Intent   string `json:"intent_url"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	parsedIntent, err := url.Parse(body.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedText := parsedIntent.Query().Get("text")
+	want := "My Mac just joined @malibuonbase’s pre-beta compute network. If you have a Mac and want early access: " + body.ShareURL
+	if decodedText != want {
+		t.Fatalf("decoded intent text mismatch\nwant: %q\n got: %q", want, decodedText)
+	}
+	if strings.Contains(decodedText, "joined Malibu's") {
+		t.Fatalf("decoded intent text retained untagged legacy copy: %q", decodedText)
+	}
+}
+
 func TestAdvocacyXSubmissionIsExactReplaySafeAfterResponseLoss(t *testing.T) {
 	store := openAdvocacyStore(t)
 	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)

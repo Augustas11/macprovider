@@ -2252,9 +2252,9 @@ final class AutotuneRecommendTests: XCTestCase {
         ))
     }
 
-    // MARK: - Signed catalog TPS + TTFT admission parity
+    // MARK: - Signed catalog TPS + TTFT advisory parity
 
-    func testTPSBelowSignedCatalogGateBlocksRecommendation() throws {
+    func testTPSBelowSignedCatalogGateWarnsWithoutBlockingRecommendation() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
@@ -2264,15 +2264,16 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertNil(result.recommendedModel)
-        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertTrue(result.warnings.contains(.tpsBelowGate))
+        XCTAssertFalse(result.warnings.contains(.noEligibleModel))
         XCTAssertTrue(
             try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey }).why
-                .contains("below signed catalog minimum")
+                .contains("below advisory catalog target")
         )
     }
 
-    func testTTFTAboveSignedCatalogGateBlocksRecommendation() throws {
+    func testTTFTAboveSignedCatalogGateWarnsWithoutBlockingRecommendation() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
@@ -2282,12 +2283,31 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertNil(result.recommendedModel)
-        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertTrue(result.warnings.contains(.ttftAboveGate))
+        XCTAssertFalse(result.warnings.contains(.noEligibleModel))
         XCTAssertTrue(
             try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey }).why
-                .contains("exceeds signed catalog maximum")
+                .contains("exceeds advisory catalog target")
         )
+    }
+
+    func testTPSAndTTFTSignedCatalogGateMissesWarnWithoutBlockingRecommendation() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        let candidate = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.sustainedTPS = candidate.benchGate.minSustainedTPS.nextDown
+        benchmark.ttftMS = candidate.benchGate.max4KTTFTMS + 1
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertTrue(result.warnings.contains(.tpsBelowGate))
+        XCTAssertTrue(result.warnings.contains(.ttftAboveGate))
+        XCTAssertEqual(result.selectedCandidate?.tokensPerSecond, (benchmark.sustainedTPS * 1_000_000).rounded() / 1_000_000)
+        XCTAssertFalse(result.warnings.contains(.noEligibleModel))
     }
 
     func testSignedCatalogGateBoundariesAreInclusiveLikeCoordinator() throws {
@@ -2304,7 +2324,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(result.recommendedModel, modelKey)
     }
 
-    func testDonorModeAlsoRejectsSignedCatalogGateFailures() throws {
+    func testDonorModeAlsoTreatsSignedCatalogGateFailuresAsAdvisory() throws {
         var request = try makeRequest(modelKey: "qwen3-32b")
         request.donorMode = true
         request.hardware.bandwidthTier = .a
@@ -2314,7 +2334,7 @@ final class AutotuneRecommendTests: XCTestCase {
         benchmark.ttftMS = 100_000
         request.benchmarks["qwen3-32b"] = benchmark
 
-        XCTAssertFalse(AutotuneRecommendEngine.donorModeAdmitted(
+        XCTAssertTrue(AutotuneRecommendEngine.donorModeAdmitted(
             modelKey: "qwen3-32b",
             candidate: request.candidateCatalog.rows["qwen3-32b"],
             request: request
