@@ -21,7 +21,7 @@ Final validation:
 |---|---|
 | `swift test --package-path phase3-binary --filter InferenceRelayTests` | PASS |
 | `swift test --package-path phase3-binary --filter ReceiptBuilderTests` | PASS |
-| `swift test --package-path phase3-binary --filter HTTPServerReceiptTests/testHTTPStreamingHandlerWritesV04SettlementReceiptTrailer` | PASS |
+| `swift test --package-path phase3-binary --filter HTTPServerReceiptTests/testHTTPStreamingHandlerWritesV04SettlementReceiptTrailerWithWarmSwapDisabled` | PASS |
 | `swift test --package-path phase3-binary --filter HTTPServerReceiptTests` | PASS, 31 tests |
 | `swift test --package-path phase3-binary --filter 'HTTPServerReceiptTests\|ReceiptBuilderTests\|InferenceRelayTests'` | PASS, 49 tests |
 | `swift test --package-path phase3-binary --filter SPEC015V04SettlementFixtureTests` | PASS |

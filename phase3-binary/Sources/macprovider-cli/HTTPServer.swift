@@ -543,7 +543,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { false })
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
-                        snapshot: servedSnapshot
+                        snapshot: servedSnapshot,
+                        settlementMetadata: settlementMetadata
                     )
                     let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
@@ -942,7 +943,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 if settlementMetadata != nil {
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
-                        snapshot: handle.snapshot
+                        snapshot: handle.snapshot,
+                        settlementMetadata: settlementMetadata
                     )
                     let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
                     let receipt = try Self.receiptHeaderResult(
@@ -1118,16 +1120,30 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    /// SPEC-015 §M.2 — map (warmSwapEnabled, request-start snapshot)
-    /// to the receipt's `model_hash` provenance. §M.2.2 defence-in-
-    /// depth: if warm-swap is ON but the snapshot didn't carry a
-    /// hash (SPEC-011 R-3.4.1 in-flight tracking regression), the
-    /// runtime cannot disambiguate which container served and the
-    /// receipt-emission MUST refuse.
+    /// SPEC-015 §M.2 — map runtime provenance to the receipt's
+    /// `model_hash` source. Legacy v0.3 receipts retain the
+    /// warm-swap-disabled null-hash contract when no settlement
+    /// metadata is present. v0.4 settlement receipts are stricter:
+    /// when settlement metadata exists, the atomically served
+    /// RuntimeSnapshot hash is mandatory even if warm swap is disabled.
+    /// §M.2.2 defence-in-depth: if warm-swap is ON but the snapshot
+    /// didn't carry a hash (SPEC-011 R-3.4.1 in-flight tracking
+    /// regression), the runtime cannot disambiguate which container
+    /// served and the receipt-emission MUST refuse.
     static func resolveModelHashSource(
         warmSwapEnabled: Bool,
-        snapshot: RuntimeSnapshot
+        snapshot: RuntimeSnapshot,
+        settlementMetadata: SettlementReceiptMetadata? = nil
     ) -> ReceiptModelHashSource {
+        if settlementMetadata != nil {
+            guard let hash = snapshot.modelHash else {
+                // The v0.4 settlement branch requires `.captured`;
+                // returning non-captured provenance makes receipt
+                // construction fail closed as `construction_failed`.
+                return .warmSwapDisabled
+            }
+            return .captured(hash)
+        }
         if warmSwapEnabled {
             if let hash = snapshot.modelHash {
                 return .captured(hash)

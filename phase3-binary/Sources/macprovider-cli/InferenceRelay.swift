@@ -400,7 +400,8 @@ actor InferenceRelay {
         let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, shouldCancel: { state.isCancelled })
         let modelHashSource = RouterHandler.resolveModelHashSource(
             warmSwapEnabled: warmSwapEnabled,
-            snapshot: servedSnapshot
+            snapshot: servedSnapshot,
+            settlementMetadata: settlementMetadata
         )
         let unixTsSeconds = Int64(Date().timeIntervalSince1970)
         state.setUsage(completion)
@@ -683,7 +684,8 @@ actor InferenceRelay {
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     let modelHashSource = RouterHandler.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
-                        snapshot: handle.snapshot
+                        snapshot: handle.snapshot,
+                        settlementMetadata: settlementMetadata
                     )
                     let receiptHeader = Self.buildReceiptHeader(
                         receiptBuilder: receiptBuilder,
@@ -764,7 +766,8 @@ actor InferenceRelay {
                 ]
                 let modelHashSource = RouterHandler.resolveModelHashSource(
                     warmSwapEnabled: warmSwapEnabled,
-                    snapshot: handle.snapshot
+                    snapshot: handle.snapshot,
+                    settlementMetadata: settlementMetadata
                 )
                 let receiptHeader = Self.buildReceiptHeader(
                     receiptBuilder: receiptBuilder,
