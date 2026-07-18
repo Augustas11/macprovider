@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Security
 import XCTest
 @testable import macprovider_cli
 
@@ -83,6 +84,87 @@ final class SelfUpdateTests: XCTestCase {
     func testStagedCLIPreflightCannotLoadTheServingModel() {
         XCTAssertEqual(SelfUpdate.stagedCLIPreflightArguments, ["--version"])
         XCTAssertFalse(SelfUpdate.stagedCLIPreflightArguments.contains("self-test"))
+    }
+
+    func testCurrentTeamIDLookupValidatesBeforeRequestingCryptographicSigningInformation() throws {
+        XCTAssertEqual(
+            SelfUpdate.currentSigningInformationFlags.rawValue,
+            kSecCSSigningInformation
+        )
+        XCTAssertEqual(
+            SelfUpdate.currentCodeValidityFlags.rawValue,
+            kSecCSStrictValidate
+        )
+
+        var currentCode: SecCode?
+        XCTAssertEqual(SecCodeCopySelf([], &currentCode), errSecSuccess)
+        let unwrappedCurrentCode = try XCTUnwrap(currentCode)
+        var currentStaticCode: SecStaticCode?
+        XCTAssertEqual(
+            SecCodeCopyStaticCode(unwrappedCurrentCode, [], &currentStaticCode),
+            errSecSuccess
+        )
+        let unwrappedStaticCode = try XCTUnwrap(currentStaticCode)
+
+        var calls: [String] = []
+        let teamID = try SelfUpdate.signingTeamID(
+            for: unwrappedCurrentCode,
+            checkValidity: { _, flags, requirement in
+                calls.append("validity")
+                XCTAssertEqual(flags.rawValue, kSecCSStrictValidate)
+                XCTAssertNil(requirement)
+                return errSecSuccess
+            },
+            copyStaticCode: { _, flags, output in
+                calls.append("static")
+                XCTAssertEqual(flags.rawValue, 0)
+                output.pointee = unwrappedStaticCode
+                return errSecSuccess
+            },
+            copySigningInformation: { _, flags, output in
+                calls.append("signing")
+                XCTAssertEqual(flags.rawValue, kSecCSSigningInformation)
+                output.pointee = [
+                    kSecCodeInfoTeamIdentifier as String: "YF7XNRJUG4"
+                ] as CFDictionary
+                return errSecSuccess
+            }
+        )
+
+        XCTAssertEqual(teamID, "YF7XNRJUG4")
+        XCTAssertEqual(calls, ["validity", "static", "signing"])
+    }
+
+    func testCurrentTeamIDLookupFailsBeforeReadingInvalidRunningCode() throws {
+        var currentCode: SecCode?
+        XCTAssertEqual(SecCodeCopySelf([], &currentCode), errSecSuccess)
+        let unwrappedCurrentCode = try XCTUnwrap(currentCode)
+        var copiedStaticCode = false
+        var copiedSigningInformation = false
+
+        XCTAssertThrowsError(
+            try SelfUpdate.signingTeamID(
+                for: unwrappedCurrentCode,
+                checkValidity: { _, _, _ in errSecParam },
+                copyStaticCode: { _, _, _ in
+                    copiedStaticCode = true
+                    return errSecSuccess
+                },
+                copySigningInformation: { _, _, _ in
+                    copiedSigningInformation = true
+                    return errSecSuccess
+                }
+            )
+        ) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.stagedCLIIdentityInvalid(
+                    "running_cli_signing_identity_invalid"
+                ).description
+            )
+        }
+        XCTAssertFalse(copiedStaticCode)
+        XCTAssertFalse(copiedSigningInformation)
     }
 
     func testAcceptanceDirectoryRequiresOwnedFlatNonWritableRegularFiles() throws {

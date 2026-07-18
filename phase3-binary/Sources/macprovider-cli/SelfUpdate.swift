@@ -23,6 +23,10 @@ struct SelfUpdate {
     static let launchdLabel = "live.streamvc.macprovider"
     static let watchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
     static let stagedCLIPreflightArguments = ["--version"]
+    static let currentSigningInformationFlags = SecCSFlags(
+        rawValue: kSecCSSigningInformation
+    )
+    static let currentCodeValidityFlags = SecCSFlags(rawValue: kSecCSStrictValidate)
     static let checksumPublicKeyPEM = """
     -----BEGIN PUBLIC KEY-----
     MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwwd0Vzj35OP8DlZU+0lUa8vI9gHK
@@ -1065,21 +1069,53 @@ struct SelfUpdate {
         }
     }
 
-    private func currentSigningTeamID() throws -> String {
-        var currentCode: SecCode?
-        guard SecCodeCopySelf([], &currentCode) == errSecSuccess,
-              let currentCode
-        else {
-            throw UpdateError.stagedCLIIdentityInvalid("running_cli_signing_identity_unavailable")
+    typealias CodeValidityChecker = (
+        SecCode,
+        SecCSFlags,
+        SecRequirement?
+    ) -> OSStatus
+    typealias StaticCodeCopier = (
+        SecCode,
+        SecCSFlags,
+        UnsafeMutablePointer<SecStaticCode?>
+    ) -> OSStatus
+    typealias SigningInformationCopier = (
+        SecStaticCode,
+        SecCSFlags,
+        UnsafeMutablePointer<CFDictionary?>
+    ) -> OSStatus
+
+    static func signingTeamID(
+        for currentCode: SecCode,
+        checkValidity: CodeValidityChecker = { code, flags, requirement in
+            SecCodeCheckValidity(code, flags, requirement)
+        },
+        copyStaticCode: StaticCodeCopier = { code, flags, staticCode in
+            SecCodeCopyStaticCode(code, flags, staticCode)
+        },
+        copySigningInformation: SigningInformationCopier = { code, flags, information in
+            SecCodeCopySigningInformation(code, flags, information)
+        }
+    ) throws -> String {
+        guard checkValidity(
+            currentCode,
+            Self.currentCodeValidityFlags,
+            nil
+        ) == errSecSuccess else {
+            throw UpdateError.stagedCLIIdentityInvalid("running_cli_signing_identity_invalid")
         }
         var currentStaticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(currentCode, [], &currentStaticCode) == errSecSuccess,
+        guard copyStaticCode(currentCode, [], &currentStaticCode) == errSecSuccess,
               let currentStaticCode
         else {
             throw UpdateError.stagedCLIIdentityInvalid("running_cli_static_identity_unavailable")
         }
         var signingInfo: CFDictionary?
-        guard SecCodeCopySigningInformation(currentStaticCode, [], &signingInfo) == errSecSuccess,
+        guard copySigningInformation(
+            currentStaticCode,
+            Self.currentSigningInformationFlags,
+            &signingInfo
+        ) == errSecSuccess,
               let info = signingInfo as? [String: Any],
               let teamID = info[kSecCodeInfoTeamIdentifier as String] as? String,
               teamID.range(of: #"^[A-Z0-9]{10}$"#, options: .regularExpression) != nil
@@ -1087,6 +1123,16 @@ struct SelfUpdate {
             throw UpdateError.stagedCLIIdentityInvalid("running_cli_team_id_unavailable")
         }
         return teamID
+    }
+
+    private func currentSigningTeamID() throws -> String {
+        var currentCode: SecCode?
+        guard SecCodeCopySelf([], &currentCode) == errSecSuccess,
+              let currentCode
+        else {
+            throw UpdateError.stagedCLIIdentityInvalid("running_cli_signing_identity_unavailable")
+        }
+        return try Self.signingTeamID(for: currentCode)
     }
 
     static func validateStagedMalibuBundleForTest(
