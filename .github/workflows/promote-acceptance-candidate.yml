@@ -165,7 +165,7 @@ jobs:
           bash scripts/verify-release-checksums.sh \
             --acceptance-candidate \
             "$accepted/acceptance-candidate.json" \
-            "refs/heads/$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"candidate_ref\"].removeprefix(\"refs/heads/\"))' "$accepted/acceptance-candidate.json")" \
+            "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate_ref"])' "$accepted/acceptance-candidate.json")" \
             "$RUN_ID" "$RUN_ATTEMPT" "$CONTROL_SHA" \
             "$accepted/checksums.txt" \
             "$accepted/acceptance-candidate.json.sig" \
