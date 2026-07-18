@@ -23,13 +23,14 @@ import (
 )
 
 var (
-	ErrRelayBackpressure        = errors.New("provider websocket write buffer full")
-	ErrRelayNAKFallback         = errors.New("provider rejected ws-tunneled inference")
-	ErrRelayClosed              = errors.New("provider websocket closed")
-	ErrRelayTimeout             = errors.New("provider websocket inference timed out")
-	ErrRelayAEADFailed          = errors.New("tier2 aead decrypt failed")
-	ErrRelayBufferExceeded      = errors.New("relay_buffer_exceeded")
-	errTier2C2PCounterExhausted = errors.New("tier2 c2p frame counter exhausted")
+	ErrRelayBackpressure         = errors.New("provider websocket write buffer full")
+	ErrRelayNAKFallback          = errors.New("provider rejected ws-tunneled inference")
+	ErrRelayClosed               = errors.New("provider websocket closed")
+	ErrRelayTimeout              = errors.New("provider websocket inference timed out")
+	ErrRelayAEADFailed           = errors.New("tier2 aead decrypt failed")
+	ErrRelayBufferExceeded       = errors.New("relay_buffer_exceeded")
+	ErrRelaySettlementIDMismatch = errors.New("settlement request ID mismatch")
+	errTier2C2PCounterExhausted  = errors.New("tier2 c2p frame counter exhausted")
 )
 
 const retiredRelayRequestTTL = 5 * time.Minute
@@ -1262,7 +1263,15 @@ func (s *Server) DispatchInferenceWithSettlement(ctx context.Context, provider p
 }
 
 func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, settlementMetadata *SettlementReceiptMetadata) (*RelayStream, error) {
-	if !strings.HasPrefix(requestID, "req-") {
+	// Settlement receipts bind request_id to the durable route snapshot.
+	// Preserve that canonical ID on the wire; adding the legacy relay prefix
+	// would make the outer request and signed settlement metadata disagree,
+	// causing current providers to reject the request before inference.
+	if settlementMetadata != nil {
+		if requestID == "" || settlementMetadata.RequestID != requestID {
+			return nil, ErrRelaySettlementIDMismatch
+		}
+	} else if !strings.HasPrefix(requestID, "req-") {
 		requestID = "req-" + requestID
 	}
 	session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)

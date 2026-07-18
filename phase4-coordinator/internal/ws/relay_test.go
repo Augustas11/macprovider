@@ -630,7 +630,8 @@ func TestRelayDispatchCarriesSettlementMetadata(t *testing.T) {
 	go session.runWriter()
 
 	metadata := settlementMetadataFixture()
-	if _, err := s.DispatchInferenceWithSettlement(context.Background(), *provider, "req-settlement", []byte(`{"model":"model-a"}`), false, metadata); err != nil {
+	metadata.RequestID = "settlement"
+	if _, err := s.DispatchInferenceWithSettlement(context.Background(), *provider, metadata.RequestID, []byte(`{"model":"model-a"}`), false, metadata); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	payload, _, err := wsutil.ReadServerData(providerConn)
@@ -644,6 +645,9 @@ func TestRelayDispatchCarriesSettlementMetadata(t *testing.T) {
 	if req.Settlement == nil {
 		t.Fatal("settlement metadata missing")
 	}
+	if req.RequestID != metadata.RequestID || req.Settlement.RequestID != metadata.RequestID {
+		t.Fatalf("request IDs outer=%q settlement=%q want canonical=%q", req.RequestID, req.Settlement.RequestID, metadata.RequestID)
+	}
 	if req.Settlement.RouteSnapshotDigest != metadata.RouteSnapshotDigest || req.Settlement.PendingDeadlineSeconds != metadata.PendingDeadlineSeconds {
 		t.Fatalf("settlement metadata = %+v, want %+v", req.Settlement, metadata)
 	}
@@ -655,9 +659,10 @@ func TestRelayDispatchCarriesSettlementMetadata(t *testing.T) {
 func TestEncryptedRelayDispatchCarriesSettlementMetadataOutsideBody(t *testing.T) {
 	s, provider, providerConn := newEncryptedRelayHarness(t)
 	metadata := settlementMetadataFixture()
+	metadata.RequestID = "settlement-encrypted"
 
 	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"secret prompt"}]}`)
-	if _, err := s.DispatchInferenceWithSettlement(context.Background(), *provider, "req-settlement-encrypted", body, true, metadata); err != nil {
+	if _, err := s.DispatchInferenceWithSettlement(context.Background(), *provider, metadata.RequestID, body, true, metadata); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	payload, _, err := wsutil.ReadServerData(providerConn)
@@ -671,8 +676,20 @@ func TestEncryptedRelayDispatchCarriesSettlementMetadataOutsideBody(t *testing.T
 	if err := json.Unmarshal(payload, &req); err != nil {
 		t.Fatalf("encrypted request json: %v", err)
 	}
+	if req.RequestID != metadata.RequestID || req.Settlement == nil || req.Settlement.RequestID != metadata.RequestID {
+		t.Fatalf("request IDs outer=%q settlement=%v want canonical=%q", req.RequestID, req.Settlement, metadata.RequestID)
+	}
 	if req.Settlement == nil || req.Settlement.ProviderReceiptKeyID != metadata.ProviderReceiptKeyID {
 		t.Fatalf("settlement metadata = %+v, want %+v", req.Settlement, metadata)
+	}
+}
+
+func TestRelayDispatchRejectsSettlementRequestIDMismatch(t *testing.T) {
+	s, provider, _ := newEncryptedRelayHarness(t)
+	metadata := settlementMetadataFixture()
+
+	if _, err := s.DispatchInferenceWithSettlement(context.Background(), *provider, "different-request", []byte(`{"model":"model-a"}`), false, metadata); !errors.Is(err, ErrRelaySettlementIDMismatch) {
+		t.Fatalf("dispatch error = %v, want %v", err, ErrRelaySettlementIDMismatch)
 	}
 }
 
