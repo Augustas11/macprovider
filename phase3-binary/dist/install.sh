@@ -7733,10 +7733,15 @@ if not isinstance(catalog, dict):
     raise SystemExit(1)
 model = local.get("model")
 key = catalog.get("catalog_key")
+catalog_model_id = catalog.get("model_id")
 rows = candidates.get("rows")
 if not isinstance(rows, dict):
     raise SystemExit(1)
-if not isinstance(key, str) or key not in rows or rows[key].get("model_id") != model:
+if not isinstance(key, str) or key not in rows:
+    raise SystemExit(1)
+if not isinstance(model, str) or model != key:
+    raise SystemExit(1)
+if not isinstance(catalog_model_id, str) or catalog_model_id != rows[key].get("model_id"):
     raise SystemExit(1)
 row_identity = catalog.get("row_identity")
 if re.fullmatch(r"[0-9a-f]{64}", row_identity or "") is None:
