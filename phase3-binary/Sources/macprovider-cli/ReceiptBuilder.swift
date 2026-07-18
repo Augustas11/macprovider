@@ -9,8 +9,10 @@ import MacProviderCore
 /// - `.captured(hash)` — request-start container is known. Hash MUST
 ///   be raw 64-char lowercase hex (validated in ReceiptBuilder.build).
 /// - `.warmSwapDisabled` — provider running with
-///   `--enable-warm-swap=false` per SPEC-011 R-3.3.0. JSON `null`
-///   per §M.2.3.
+///   `--enable-warm-swap=false` and no settlement hash requirement, or
+///   a settlement path without a captured served hash. Legacy v0.3
+///   encodes this as JSON `null`; v0.4 settlement receipt construction
+///   rejects it fail-closed.
 /// - `.ambiguous` — runtime cannot disambiguate which container served
 ///   this request (e.g. a future regression of SPEC-011 R-3.4.1
 ///   in-flight tracking). Receipt-emission MUST refuse with

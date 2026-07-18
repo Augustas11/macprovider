@@ -68,7 +68,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
     }
 
-    func testHTTPNonStreamingHandlerWritesV04SettlementReceipt() async throws {
+    func testHTTPNonStreamingHandlerWritesV04SettlementReceiptWithWarmSwapDisabled() async throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
         let metadata = httpSettlementMetadataHeader(
@@ -89,7 +89,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 completionTokens: 3,
                 ttftMilliseconds: 7
             ),
-            warmSwapEnabled: true,
+            warmSwapEnabled: false,
             modelHash: modelHash
         )
 
@@ -110,7 +110,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
     }
 
-    func testHTTPStreamingHandlerWritesV04SettlementReceiptTrailer() async throws {
+    func testHTTPStreamingHandlerWritesV04SettlementReceiptTrailerWithWarmSwapDisabled() async throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
         let metadata = httpSettlementMetadataHeader(
@@ -132,7 +132,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 completionTokens: 3,
                 ttftMilliseconds: 7
             ),
-            warmSwapEnabled: true,
+            warmSwapEnabled: false,
             modelHash: modelHash,
             readStreamingBody: true
         )
@@ -152,11 +152,109 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(parsed.tuple["request_id"] as? String, "req-http-receipt")
         XCTAssertEqual(parsed.tuple["provider_id"] as? String, "provider-a")
         XCTAssertEqual(parsed.tuple["model_hash"] as? String, modelHash)
+        XCTAssertEqual(parsed.tuple["expected_catalog_model_hash"] as? String, modelHash)
         XCTAssertEqual(parsed.tuple["terminal_state"] as? String, "normal_done")
         XCTAssertEqual(httpTrailerValue(named: RouterHandler.receiptPendingDeadlineHeaderName, in: response.body), "120")
         XCTAssertEqual(httpTrailerValue(named: RouterHandler.lateReceiptSettlementHeaderName, in: response.body), "not_settled")
         XCTAssertNotNil(httpTrailerValue(named: RouterHandler.receiptTerminalStateTSHeaderName, in: response.body))
         XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
+    }
+
+    func testHTTPNonStreamingWarmSwapDisabledV03ReceiptKeepsNullModelHashWithoutSettlementMetadata() async throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let servedModelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            completion: CompletionResult(
+                content: "answer",
+                finishReason: "stop",
+                promptTokens: 8,
+                completionTokens: 3,
+                ttftMilliseconds: 7
+            ),
+            warmSwapEnabled: false,
+            modelHash: servedModelHash
+        )
+
+        let header = try XCTUnwrap(response.headers.first(name: RouterHandler.receiptHeaderName))
+        let parsed = try parseReceiptHeader(header, publicKey: key.publicKey)
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(parsed.tuple["receipt_version"] as? String, "3")
+        XCTAssertTrue(parsed.tuple["model_hash"] is NSNull)
+        XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
+    }
+
+    func testHTTPV04SettlementReceiptRefusesMissingServedHashWithWarmSwapDisabled() async throws {
+        let capture = ReceiptAuditCapture()
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let metadata = httpSettlementMetadataHeader(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: modelHash
+        )
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                ],
+                requestHeaders: [(RouterHandler.settlementMetadataHeaderName, metadata)],
+                receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+                completion: CompletionResult(
+                    content: "answer",
+                    finishReason: "stop",
+                    promptTokens: 8,
+                    completionTokens: 3,
+                    ttftMilliseconds: 7
+                ),
+                warmSwapEnabled: false,
+                modelHash: nil
+            )
+        }
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertNil(response.headers.first(name: RouterHandler.receiptHeaderName))
+        let event = try capture.singleEvent()
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted")
+        XCTAssertEqual(event["reason"] as? String, "construction_failed")
+        XCTAssertEqual(event["request_id"] as? String, "req-http-receipt")
+    }
+
+    func testHTTPV04SettlementReceiptThrowsForInvalidServedHashWithWarmSwapDisabled() throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let expectedModelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let metadata = try XCTUnwrap(SettlementReceiptMetadata(wire: httpSettlementMetadataWire(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: expectedModelHash
+        )))
+        let request = try parseRequest([
+            "model": "fixture-model",
+            "messages": [["role": "user", "content": "hello"]],
+        ])
+
+        XCTAssertThrowsError(try RouterHandler.receiptHeaderResult(
+            providerID: "provider-a",
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            request: request,
+            outputContent: "answer",
+            outputToolCalls: nil,
+            finishReason: "stop",
+            promptTokens: 8,
+            ttftMs: 7,
+            tokensOut: 3,
+            unixTsSeconds: 1_800_000_000,
+            modelHashSource: .captured("not-a-valid-sha256"),
+            requestID: "req-http-receipt",
+            settlementMetadata: metadata,
+            terminalStateTSUnixMS: 1_800_000_000_000
+        )) { error in
+            XCTAssertEqual("\(error)", "settlementFieldMismatch(\"model_hash\")")
+        }
     }
 
     func testHTTPPreKeypairOmissionDoesNotFailResponse() async throws {
@@ -590,6 +688,7 @@ final class HTTPServerReceiptTests: XCTestCase {
 
         XCTAssertLessThanOrEqual(header.utf8.count, RouterHandler.maxReceiptHeaderBytes)
         XCTAssertEqual(parsed.tuple["model_id"] as? String, "fixture-model")
+        XCTAssertTrue(parsed.tuple["model_hash"] is NSNull)
         XCTAssertEqual(parsed.tuple["tokens_out"] as? Int, 2)
         XCTAssertEqual(parsed.tuple["ttft_ms"] as? Int, 12)
         XCTAssertEqual(parsed.tuple["unix_ts"] as? Int, 1_800_000_000)
@@ -1189,7 +1288,13 @@ private func parseReceiptHeader(_ header: String, publicKey suppliedPublicKey: C
 }
 
 private func httpSettlementMetadataHeader(receiptKeyID: String, expectedModelHash: String) -> String {
-    let metadata: [String: Any] = [
+    let metadata = httpSettlementMetadataWire(receiptKeyID: receiptKeyID, expectedModelHash: expectedModelHash)
+    let data = try! JSONSerialization.data(withJSONObject: metadata, options: [.withoutEscapingSlashes])
+    return data.base64URLUnpadded()
+}
+
+private func httpSettlementMetadataWire(receiptKeyID: String, expectedModelHash: String) -> [String: Any] {
+    [
         "account_scope": "acct_sha256:" + String(repeating: "1", count: 64),
         "request_id": "req-http-receipt",
         "attempt_n": 0,
@@ -1206,8 +1311,6 @@ private func httpSettlementMetadataHeader(receiptKeyID: String, expectedModelHas
         "output_prefix_start_byte": 5,
         "pending_deadline_seconds": 120,
     ]
-    let data = try! JSONSerialization.data(withJSONObject: metadata, options: [.withoutEscapingSlashes])
-    return data.base64URLUnpadded()
 }
 
 private func httpReceiptKeyID(_ pubkey: Data) -> String {

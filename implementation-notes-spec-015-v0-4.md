@@ -756,7 +756,7 @@ Focused test coverage:
   settlement route metadata is rejected before inference starts.
 - `testHTTPNonStreamingHandlerWritesV04SettlementReceipt` proves direct HTTP
   non-streaming v0.4 receipt issuance and deadline/non-settlement headers.
-- `testHTTPStreamingHandlerWritesV04SettlementReceiptTrailer` proves direct
+- `testHTTPStreamingHandlerWritesV04SettlementReceiptTrailerWithWarmSwapDisabled` proves direct
   HTTP streaming v0.4 receipt trailers without changing the SSE body.
 - `TestRouteSnapshotSkippedForUppercaseModelHash` proves non-lowercase
   provider hashes cannot be repaired into settlement eligibility.

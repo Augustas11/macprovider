@@ -465,7 +465,7 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(sigBytes.count, 64)
     }
 
-    func testRelayNonStreamingEndFrameCarriesV04SettlementReceipt() async throws {
+    func testRelayNonStreamingEndFrameCarriesV04SettlementReceiptWithWarmSwapDisabled() async throws {
         let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
         let runtime = FakeReceiptCompletionRuntime(servedSnapshot: RuntimeSnapshot(
             state: .ready,
@@ -484,7 +484,7 @@ final class InferenceRelayTests: XCTestCase {
             modelRuntime: runtime,
             providerStatus: status,
             loadedModelID: "mlx-community/Test-Model",
-            warmSwapEnabled: true,
+            warmSwapEnabled: false,
             maxActiveRequests: 1,
             maxBodyBytes: 4096,
             receiptBuilder: ReceiptBuilder(keyStore: FixedRelayReceiptKeyStore(key: key)),
@@ -523,6 +523,7 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(tuple["receipt_version"] as? String, "4")
         XCTAssertEqual(tuple["signature_key_alg"] as? String, "Ed25519")
         XCTAssertEqual(tuple["model_hash"] as? String, hash)
+        XCTAssertEqual(tuple["expected_catalog_model_hash"] as? String, hash)
         XCTAssertEqual(tuple["provider_receipt_key_id"] as? String, receiptKeyID(key.publicKey.rawRepresentation))
         XCTAssertEqual((tuple["terminal_state_ts_unix_ms"] as? NSNumber)?.int64Value, terminalTS)
         XCTAssertEqual(Set(tuple.keys), [
@@ -535,6 +536,69 @@ final class InferenceRelayTests: XCTestCase {
             "route_snapshot_policy_version", "signature_key_alg",
             "terminal_state", "terminal_state_ts_unix_ms", "usage",
         ])
+        let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
+        XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
+    }
+
+    func testRelayStreamingEndFrameCarriesV04SettlementReceiptWithWarmSwapDisabled() async throws {
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let runtime = FakeReceiptCompletionRuntime(servedSnapshot: RuntimeSnapshot(
+            state: .ready,
+            container: nil,
+            modelID: "mlx-community/Test-Model",
+            modelHash: hash
+        ))
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            warmSwapEnabled: false,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            receiptBuilder: ReceiptBuilder(keyStore: FixedRelayReceiptKeyStore(key: key)),
+            receiptProviderID: "provider-relay-test",
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-relay-v04",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+            "settlement": settlementMetadataWire(
+                keyID: receiptKeyID(key.publicKey.rawRepresentation),
+                modelHash: hash
+            ),
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        let endFrame = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(endFrame["status"] as? String, "complete")
+        XCTAssertEqual((endFrame["receipt_pending_deadline_seconds"] as? NSNumber)?.int64Value, 120)
+        XCTAssertEqual(endFrame["late_receipt_settlement"] as? String, "not_settled")
+        let receiptHeader = try XCTUnwrap(endFrame["receipt"] as? String)
+        let pieces = receiptHeader.split(separator: ".")
+        XCTAssertEqual(pieces.count, 2)
+        let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(pieces[0])))
+        let signature = try XCTUnwrap(Data(base64Encoded: String(pieces[1])))
+        let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any])
+        XCTAssertEqual(tuple["receipt_version"] as? String, "4")
+        XCTAssertEqual(tuple["model_hash"] as? String, hash)
+        XCTAssertEqual(tuple["expected_catalog_model_hash"] as? String, hash)
+        XCTAssertEqual(tuple["provider_receipt_key_id"] as? String, receiptKeyID(key.publicKey.rawRepresentation))
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
     }
