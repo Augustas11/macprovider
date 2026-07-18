@@ -5438,6 +5438,9 @@ func TestTier2RequireHashVerifiedCatalogUnavailableLogsExclusion(t *testing.T) {
 	var logs bytes.Buffer
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
 	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	registry.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
+		return pool.HashStatusCatalogUnavailable
+	})
 	server := buyer.NewServer(
 		registry,
 		zerolog.New(&logs),

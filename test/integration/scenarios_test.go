@@ -3,6 +3,7 @@ package integration
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -172,11 +173,11 @@ func TestSpec015ReceiptEnabledCrossServiceHeaderVerifies(t *testing.T) {
 func TestSpec015V04SettlementReceiptCrossServiceVerifies(t *testing.T) {
 	s := newScenario(t, scenarioOpts{seedAccount: true, settlementReceiptProvider: true})
 
-	status, headers, body := s.chatRequest(nil, `{
-		"model":"llama-3.2-3b-instruct",
+	status, headers, body := s.chatRequest(nil, fmt.Sprintf(`{
+		"model":%q,
 		"max_tokens":32,
 		"messages":[{"role":"user","content":"SPEC-015 v0.4 settlement receipt"}]
-	}`)
+	}`, settlementFixtureModelID))
 	if status != http.StatusOK {
 		t.Fatalf("non-streaming chat status=%d body=%s", status, string(body))
 	}
@@ -184,12 +185,12 @@ func TestSpec015V04SettlementReceiptCrossServiceVerifies(t *testing.T) {
 		t.Fatalf("buyer response exposed non-streaming v0.4 receipt header %q", got)
 	}
 
-	status, headers, body = s.chatRequest(nil, `{
-		"model":"llama-3.2-3b-instruct",
+	status, headers, body = s.chatRequest(nil, fmt.Sprintf(`{
+		"model":%q,
 		"max_tokens":32,
 		"stream":true,
 		"messages":[{"role":"user","content":"SPEC-015 v0.4 streaming settlement receipt"}]
-	}`)
+	}`, settlementFixtureModelID))
 	if status != http.StatusOK {
 		t.Fatalf("streaming chat status=%d body=%s", status, string(body))
 	}
@@ -236,12 +237,12 @@ func TestSpec022V04StreamingSettlementReconcilerE2E(t *testing.T) {
 	})
 	const requestID = "77777777-7777-4777-8777-777777777777"
 
-	status, headers, body := s.chatRequest(map[string]string{"X-Request-ID": requestID}, `{
-		"model":"llama-3.2-3b-instruct",
+	status, headers, body := s.chatRequest(map[string]string{"X-Request-ID": requestID}, fmt.Sprintf(`{
+		"model":%q,
 		"max_tokens":32,
 		"stream":true,
 		"messages":[{"role":"user","content":"SPEC-022 local e2e streaming settlement receipt"}]
-	}`)
+	}`, settlementFixtureModelID))
 	if status != http.StatusOK {
 		t.Fatalf("streaming chat status=%d body=%s", status, string(body))
 	}

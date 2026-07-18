@@ -1470,6 +1470,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "status": snapshot.status.rawValue,
             "model": effectiveModelID ?? NSNull(),
             "model_loaded": effectiveModelLoaded,
+            "model_hash": jsonNullable(runtimeSnapshot?.modelHash ?? snapshot.modelHash),
+            "model_hash_algorithm": jsonNullable(
+                runtimeSnapshot?.modelHashAlgorithm ?? snapshot.modelHashAlgorithm
+            ),
+            "weights_manifest_sha256": jsonNullable(
+                runtimeSnapshot?.weightsManifestSHA256 ?? snapshot.weightsManifestSHA256
+            ),
+            "weights_manifest_algorithm": (runtimeSnapshot?.weightsManifestSHA256
+                ?? snapshot.weightsManifestSHA256) == nil
+                ? NSNull()
+                : ModelArtifactIdentity.safetensorsManifestV1,
             "uptime_s": snapshot.uptimeSeconds,
             "requests_total": snapshot.requestsTotal,
             "requests_today": snapshot.requestsToday,
@@ -1508,6 +1519,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 binaryVersion: CoordinatorClient.binaryVersion,
                 compatibilitySetID: compatibilitySetManifest?.compatibilitySetID,
                 modelHash: runtimeSnapshot?.modelHash ?? snapshot.modelHash,
+                modelHashAlgorithm: runtimeSnapshot?.modelHashAlgorithm ?? snapshot.modelHashAlgorithm,
+                weightsManifestSHA256: runtimeSnapshot?.weightsManifestSHA256 ?? snapshot.weightsManifestSHA256,
                 observationID: observationID,
                 observedAt: iso8601(observedAt),
                 validForMS: statusObservationValidityMS

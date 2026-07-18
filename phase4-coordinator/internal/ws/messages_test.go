@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
 
 func TestParseNakAcceptsSwiftSpecShape(t *testing.T) {
@@ -62,7 +64,7 @@ func TestParseHeartbeatAcceptsCompleteVersionedSafetyTelemetry(t *testing.T) {
 }
 
 func TestParseHeartbeatAcceptsBuildAndSessionBoundV2SafetyTelemetry(t *testing.T) {
-	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":12.5,"gpu_utilization_pct":null,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","model_hash_algorithm":"macprovider.snapshot-manifest.v1","safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":12.5,"gpu_utilization_pct":null,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","model_hash_algorithm":"macprovider.snapshot-manifest.v1","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
 
 	hb, _, field, err := ParseHeartbeat(payload)
 	if err != nil {
@@ -75,8 +77,95 @@ func TestParseHeartbeatAcceptsBuildAndSessionBoundV2SafetyTelemetry(t *testing.T
 	}
 }
 
+func validV2SafetyHeartbeat() map[string]any {
+	modelHash := strings.Repeat("a", 64)
+	return map[string]any{
+		"type": "heartbeat", "status": "ready", "model_id": "model-a", "model_params_b": 7.0,
+		"ram_gb": 16, "max_context_tokens": 50000, "max_concurrency": 2, "slots_free": 1, "slots_total": 2,
+		"throughput_tps_estimate": 19.8, "requests_served_since_last": 12,
+		"avg_latency_ms_since_last": 450.0, "throughput_tps_since_last": 18.5,
+		"model_hash": modelHash, "model_hash_algorithm": modelidentity.SnapshotManifestV1,
+		"safety_telemetry": map[string]any{
+			"schema_version": 2, "provider_id": "provider-a", "model_id": "model-a", "model_loaded": true,
+			"runtime_state": "ready", "hardware_tier": "16GB", "requests_in_flight": 0, "requests_queued": 0,
+			"memory_rss_mb": 2048, "memory_capacity_mb": 16384, "memory_pressure": "normal",
+			"thermal_state": "nominal", "thermally_throttled": false, "restart_count": 1, "uptime_s": 120,
+			"coordinator_connected": true, "coordinator_session_id": "session-a",
+			"cpu_utilization_pct": 12.5, "gpu_utilization_pct": nil, "gpu_utilization_scope": "host",
+			"power_source": "external", "binary_version": "1.8.33", "compatibility_set_id": "set-a",
+			"model_hash": modelHash, "model_hash_algorithm": modelidentity.SnapshotManifestV1,
+			"observation_id": "observation-a", "observed_at": "2026-07-14T12:00:00Z", "valid_for_ms": 90000,
+		},
+	}
+}
+
+func TestParseHeartbeatBindsV2SafetyTelemetryToOuterIdentity(t *testing.T) {
+	weightsHash := strings.Repeat("b", 64)
+	accepted := validV2SafetyHeartbeat()
+	accepted["weights_manifest_sha256"] = weightsHash
+	accepted["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+	acceptedTelemetry := accepted["safety_telemetry"].(map[string]any)
+	acceptedTelemetry["weights_manifest_sha256"] = weightsHash
+	acceptedTelemetry["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+	if _, _, field, err := ParseHeartbeat(mustAuthJSON(t, accepted)); err != nil {
+		t.Fatalf("ParseHeartbeat matched identities field=%q err=%v", field, err)
+	}
+
+	for name, mutate := range map[string]func(map[string]any, map[string]any){
+		"missing telemetry model algorithm": func(_ map[string]any, telemetry map[string]any) {
+			delete(telemetry, "model_hash_algorithm")
+		},
+		"unknown telemetry model algorithm": func(_ map[string]any, telemetry map[string]any) {
+			telemetry["model_hash_algorithm"] = "sha256"
+		},
+		"missing outer model algorithm": func(heartbeat map[string]any, _ map[string]any) {
+			delete(heartbeat, "model_hash_algorithm")
+		},
+		"mismatched model hash": func(_ map[string]any, telemetry map[string]any) {
+			telemetry["model_hash"] = strings.Repeat("c", 64)
+		},
+		"padded telemetry model hash": func(_ map[string]any, telemetry map[string]any) {
+			telemetry["model_hash"] = " " + strings.Repeat("a", 64)
+		},
+		"weights hash without algorithm": func(_ map[string]any, telemetry map[string]any) {
+			telemetry["weights_manifest_sha256"] = weightsHash
+		},
+		"unknown telemetry weights algorithm": func(heartbeat map[string]any, telemetry map[string]any) {
+			heartbeat["weights_manifest_sha256"] = weightsHash
+			heartbeat["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+			telemetry["weights_manifest_sha256"] = weightsHash
+			telemetry["weights_manifest_algorithm"] = "sha256"
+		},
+		"padded telemetry weights hash": func(heartbeat map[string]any, telemetry map[string]any) {
+			heartbeat["weights_manifest_sha256"] = weightsHash
+			heartbeat["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+			telemetry["weights_manifest_sha256"] = weightsHash + "\n"
+			telemetry["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+		},
+		"telemetry weights without outer authority": func(_ map[string]any, telemetry map[string]any) {
+			telemetry["weights_manifest_sha256"] = weightsHash
+			telemetry["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+		},
+		"mismatched weights hash": func(heartbeat map[string]any, telemetry map[string]any) {
+			heartbeat["weights_manifest_sha256"] = weightsHash
+			heartbeat["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+			telemetry["weights_manifest_sha256"] = strings.Repeat("c", 64)
+			telemetry["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := validV2SafetyHeartbeat()
+			telemetry := payload["safety_telemetry"].(map[string]any)
+			mutate(payload, telemetry)
+			if _, _, field, err := ParseHeartbeat(mustAuthJSON(t, payload)); err == nil || !strings.HasPrefix(field, "safety_telemetry.") {
+				t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+			}
+		})
+	}
+}
+
 func TestParseHeartbeatRejectsInvalidV2Utilization(t *testing.T) {
-	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":101,"gpu_utilization_pct":10,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","model_hash_algorithm":"macprovider.snapshot-manifest.v1","safety_telemetry":{"schema_version":2,"provider_id":"provider-a","model_id":"model-a","model_loaded":true,"runtime_state":"ready","hardware_tier":"16GB","requests_in_flight":0,"requests_queued":0,"memory_rss_mb":2048,"memory_capacity_mb":16384,"memory_pressure":"normal","thermal_state":"nominal","thermally_throttled":false,"restart_count":1,"uptime_s":120,"coordinator_connected":true,"coordinator_session_id":"session-a","cpu_utilization_pct":101,"gpu_utilization_pct":10,"gpu_utilization_scope":"host","power_source":"external","binary_version":"1.8.33","compatibility_set_id":"set-a","model_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","model_hash_algorithm":"macprovider.snapshot-manifest.v1","observation_id":"observation-a","observed_at":"2026-07-14T12:00:00Z","valid_for_ms":90000}}`)
 	_, _, field, err := ParseHeartbeat(payload)
 	if err == nil || field != "safety_telemetry.cpu_utilization_pct" {
 		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
@@ -289,6 +378,42 @@ func TestParseHeartbeatAcceptsSPEC011Fields(t *testing.T) {
 	}
 }
 
+func TestParseHeartbeatPreservesNamedModelIdentities(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	weights := strings.Repeat("b", 64)
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":3,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":10,"requests_served_since_last":0,"avg_latency_ms_since_last":0,"throughput_tps_since_last":0,"model_hash":"` + hash + `","model_hash_algorithm":"` + modelidentity.SnapshotManifestV1 + `","weights_manifest_sha256":"` + weights + `","weights_manifest_algorithm":"` + modelidentity.SafetensorsManifestV1 + `"}`)
+	hb, presence, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if !presence.ModelHash || !presence.ModelHashAlgorithm || !presence.WeightsManifestSHA256 || !presence.WeightsHashAlgorithm {
+		t.Fatalf("presence = %+v", presence)
+	}
+	if hb.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 ||
+		hb.WeightsManifestSHA256 != weights ||
+		hb.WeightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
+		t.Fatalf("identity metadata = %+v", hb)
+	}
+}
+
+func TestParseHeartbeatRejectsUnpairedIdentityMetadata(t *testing.T) {
+	base := `{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":3,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":10,"requests_served_since_last":0,"avg_latency_ms_since_last":0,"throughput_tps_since_last":0`
+	for name, suffix := range map[string]string{
+		"algorithm without model hash": `,"model_hash_algorithm":"` + modelidentity.SnapshotManifestV1 + `"}`,
+		"unknown model algorithm":      `,"model_hash":"` + strings.Repeat("a", 64) + `","model_hash_algorithm":"sha256"}`,
+		"malformed canonical hash":     `,"model_hash":"abc","model_hash_algorithm":"` + modelidentity.SnapshotManifestV1 + `"}`,
+		"weights without algorithm":    `,"weights_manifest_sha256":"` + strings.Repeat("b", 64) + `"}`,
+		"unknown weights algorithm":    `,"weights_manifest_sha256":"` + strings.Repeat("b", 64) + `","weights_manifest_algorithm":"sha256"}`,
+		"malformed weights hash":       `,"weights_manifest_sha256":"abc","weights_manifest_algorithm":"` + modelidentity.SafetensorsManifestV1 + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := ParseHeartbeat([]byte(base + suffix)); err == nil {
+				t.Fatal("ParseHeartbeat accepted invalid identity metadata")
+			}
+		})
+	}
+}
+
 func TestParseHeartbeatAcceptsLastAutoupdateEventObject(t *testing.T) {
 	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"last_autoupdate_event":{"event":"provider_autoupdate","phase":"download","outcome":"failure","failure_class":"target_release_not_found"}}`)
 
@@ -411,6 +536,102 @@ func TestParseAuthInitialAcceptsLegacyAbsentSpec010(t *testing.T) {
 	}
 	if req.ProviderAdmissionPublicKey != "" || req.ProviderAdmissionPubkey != nil {
 		t.Fatalf("admission key = (%q, %#v), want absent", req.ProviderAdmissionPublicKey, req.ProviderAdmissionPubkey)
+	}
+}
+
+func TestHandshakeParsersRejectUnknownModelHashAlgorithm(t *testing.T) {
+	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	authPayload := validAuthRequestInitial()
+	authPayload["model_hash"] = hash
+	authPayload["model_hash_algorithm"] = "sha256"
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, authPayload)); err == nil || field != "model_hash_algorithm" {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+
+	helloPayload := map[string]any{
+		"type": "hello", "version": 1, "tier": 1, "provider_id": "p-ok",
+		"hostname": "h-ok", "model_id": "m-ok", "model_hash": hash,
+		"model_hash_algorithm": "sha256", "model_params_b": 3.0, "ram_gb": 16,
+		"max_context_tokens": 4096, "max_concurrency": 1,
+		"throughput_tps_estimate": 10.0, "binary_version": "1.8.40",
+	}
+	raw, err := json.Marshal(helloPayload)
+	if err != nil {
+		t.Fatalf("marshal hello: %v", err)
+	}
+	if _, field, err := ParseHello(raw); err == nil || field != "model_hash_algorithm" {
+		t.Fatalf("ParseHello field=%q err=%v", field, err)
+	}
+}
+
+func TestWireParsersRejectWhitespacePaddedIdentityDigests(t *testing.T) {
+	modelHash := strings.Repeat("a", 64)
+	weightsHash := strings.Repeat("b", 64)
+	helloPayload := func() map[string]any {
+		return map[string]any{
+			"type": "hello", "version": 1, "tier": 1, "provider_id": "p-ok",
+			"hostname": "h-ok", "model_id": "m-ok", "model_hash": modelHash,
+			"model_hash_algorithm":    modelidentity.SnapshotManifestV1,
+			"weights_manifest_sha256": weightsHash, "weights_manifest_algorithm": modelidentity.SafetensorsManifestV1,
+			"model_params_b": 3.0, "ram_gb": 16, "max_context_tokens": 4096,
+			"max_concurrency": 1, "throughput_tps_estimate": 10.0, "binary_version": "1.8.40",
+		}
+	}
+	authPayload := func() map[string]any {
+		payload := validAuthRequestInitial()
+		payload["model_hash"] = modelHash
+		payload["model_hash_algorithm"] = modelidentity.SnapshotManifestV1
+		payload["weights_manifest_sha256"] = weightsHash
+		payload["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+		return payload
+	}
+	heartbeatPayload := func() map[string]any {
+		payload := validV2SafetyHeartbeat()
+		payload["weights_manifest_sha256"] = weightsHash
+		payload["weights_manifest_algorithm"] = modelidentity.SafetensorsManifestV1
+		return payload
+	}
+	type parserCase struct {
+		payload func() map[string]any
+		parse   func([]byte) (string, error)
+	}
+	parsers := map[string]parserCase{
+		"hello": {
+			payload: helloPayload,
+			parse: func(raw []byte) (string, error) {
+				_, field, err := ParseHello(raw)
+				return field, err
+			},
+		},
+		"auth": {
+			payload: authPayload,
+			parse: func(raw []byte) (string, error) {
+				_, _, field, err := ParseAuthRequest(raw)
+				return field, err
+			},
+		},
+		"heartbeat": {
+			payload: heartbeatPayload,
+			parse: func(raw []byte) (string, error) {
+				_, _, field, err := ParseHeartbeat(raw)
+				return field, err
+			},
+		},
+	}
+	for parserName, parser := range parsers {
+		for field, padded := range map[string]string{
+			"model_hash":              " " + modelHash,
+			"weights_manifest_sha256": weightsHash + "\n",
+		} {
+			t.Run(parserName+"/"+field, func(t *testing.T) {
+				payload := parser.payload()
+				payload[field] = padded
+				gotField, err := parser.parse(mustAuthJSON(t, payload))
+				if err == nil || gotField != field {
+					t.Fatalf("parser accepted padded digest: field=%q err=%v", gotField, err)
+				}
+			})
+		}
 	}
 }
 

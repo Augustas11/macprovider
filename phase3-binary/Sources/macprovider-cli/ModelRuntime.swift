@@ -199,6 +199,9 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let container: ModelContainer?
     public let modelID: String?
     public let modelHash: String?
+    public let modelHashAlgorithm: String?
+    public let weightsManifestSHA256: String?
+    public let weightsManifestAlgorithm: String?
     public let draftModelID: String?
     public let draftTargetModelID: String?
     public let draftContainer: ModelContainer?
@@ -210,6 +213,9 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         container: ModelContainer?,
         modelID: String?,
         modelHash: String?,
+        modelHashAlgorithm: String? = nil,
+        weightsManifestSHA256: String? = nil,
+        weightsManifestAlgorithm: String? = nil,
         draftModelID: String? = nil,
         draftTargetModelID: String? = nil,
         draftContainer: ModelContainer? = nil,
@@ -220,6 +226,11 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.container = container
         self.modelID = modelID
         self.modelHash = modelHash
+        self.modelHashAlgorithm = modelHashAlgorithm
+        self.weightsManifestSHA256 = weightsManifestSHA256
+        self.weightsManifestAlgorithm = weightsManifestSHA256 == nil
+            ? nil
+            : (weightsManifestAlgorithm ?? ModelArtifactIdentity.safetensorsManifestV1)
         self.draftModelID = draftModelID
         self.draftTargetModelID = draftTargetModelID
         self.draftContainer = draftContainer
@@ -338,6 +349,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
+    private var currentModelHashAlgorithm: String?
+    private var currentWeightsManifestSHA256: String?
+    private let verifiedCatalogArtifactSHA256: String?
     private let maxContextTokens: Int
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
     // quantization (mlx-swift default). maxBatch defaults to 1, the
@@ -365,6 +379,14 @@ actor ModelRuntime: ModelRuntimeServing {
 
     var loadedModelHash: String? {
         currentModelHash
+    }
+
+    var loadedModelHashAlgorithm: String? {
+        currentModelHashAlgorithm
+    }
+
+    var loadedWeightsManifestSHA256: String? {
+        currentWeightsManifestSHA256
     }
 
     var isLoaded: Bool {
@@ -401,7 +423,8 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
-        catalogModelIDAlias: String? = nil
+        catalogModelIDAlias: String? = nil,
+        verifiedModelArtifactSHA256: String? = nil
     ) async throws {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
@@ -422,9 +445,10 @@ actor ModelRuntime: ModelRuntimeServing {
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
         self.loader = { targetModelID in
             let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
-            let modelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
+            let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
             return (container, targetModelID, modelHash)
         }
         self.testLoader = nil
@@ -436,6 +460,8 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentContainer = nil
             self.stopTokenFilter = StopTokenFilter(tokens: [])
             self.currentModelHash = nil
+            self.currentModelHashAlgorithm = nil
+            self.currentWeightsManifestSHA256 = nil
             if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
@@ -451,7 +477,11 @@ actor ModelRuntime: ModelRuntimeServing {
         } else {
             self.stopTokenFilter = StopTokenFilter(tokens: [])
         }
-        self.currentModelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
+        self.currentModelHash = verifiedModelArtifactSHA256
+        self.currentModelHashAlgorithm = verifiedModelArtifactSHA256 == nil
+            ? nil
+            : ModelArtifactIdentity.snapshotManifestV1
+        self.currentWeightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: directory)
 
         if let draftModelID = normalizedDraftModelID {
             let (draftContainer, draftDirectory) = try await Self.loadLocalContainer(from: normalizedDraftModelLoadPath ?? draftModelID)
@@ -487,6 +517,8 @@ actor ModelRuntime: ModelRuntimeServing {
     init(
         modelID: String?,
         modelHash: String? = nil,
+        modelHashAlgorithm: String? = nil,
+        weightsManifestSHA256: String? = nil,
         draftModelID: String? = nil,
         numDraftTokens: Int = 3,
         maxContextTokensOverride: Int? = nil,
@@ -515,6 +547,9 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredDraftModelLoadPath = nil
         self.numDraftTokens = numDraftTokens
         self.currentModelHash = modelHash
+        self.currentModelHashAlgorithm = modelHashAlgorithm
+        self.currentWeightsManifestSHA256 = weightsManifestSHA256
+        self.verifiedCatalogArtifactSHA256 = nil
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
@@ -542,6 +577,8 @@ actor ModelRuntime: ModelRuntimeServing {
             container: currentContainer,
             modelID: currentModelID,
             modelHash: currentModelHash,
+            modelHashAlgorithm: currentModelHashAlgorithm,
+            weightsManifestSHA256: currentWeightsManifestSHA256,
             draftModelID: currentDraftModelID,
             draftTargetModelID: currentDraftTargetModelID,
             draftContainer: currentDraftContainer,
@@ -557,6 +594,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 container: currentContainer,
                 modelID: currentModelID,
                 modelHash: currentModelHash,
+                modelHashAlgorithm: currentModelHashAlgorithm,
+                weightsManifestSHA256: currentWeightsManifestSHA256,
                 draftModelID: nil,
                 draftTargetModelID: nil,
                 draftContainer: nil,
@@ -569,6 +608,8 @@ actor ModelRuntime: ModelRuntimeServing {
             container: currentContainer,
             modelID: currentModelID,
             modelHash: currentModelHash,
+            modelHashAlgorithm: currentModelHashAlgorithm,
+            weightsManifestSHA256: currentWeightsManifestSHA256,
             draftModelID: currentDraftModelID,
             draftTargetModelID: currentDraftTargetModelID,
             draftContainer: currentDraftContainer,
@@ -605,6 +646,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 let container: ModelContainer?
                 let modelID: String
                 let modelHash: String?
+                let modelHashAlgorithm: String?
+                let weightsManifestSHA256: String?
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
                 let draftFailureReason: String?
@@ -613,6 +656,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     container = nil
                     modelID = loaded.0
                     modelHash = loaded.1
+                    modelHashAlgorithm = await self.currentModelHashAlgorithm
+                    weightsManifestSHA256 = nil
                     if let configuredDraftModelID {
                         do {
                             let loadedDraft = try await testLoader(configuredDraftModelID)
@@ -633,7 +678,15 @@ actor ModelRuntime: ModelRuntimeServing {
                     let loaded = try await Self.loadLocalContainer(from: targetModelID)
                     container = loaded.0
                     modelID = targetModelID
-                    modelHash = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
+                    guard let expected = self.verifiedCatalogArtifactSHA256,
+                          await self.isConfiguredCatalogModel(targetModelID),
+                          (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == expected
+                    else {
+                        throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                    }
+                    modelHash = expected
+                    modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
+                    weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
                     if let configuredDraftModelID {
                         do {
                             let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
@@ -683,6 +736,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     container: container,
                     modelID: modelID,
                     modelHash: modelHash,
+                    modelHashAlgorithm: modelHashAlgorithm,
+                    weightsManifestSHA256: weightsManifestSHA256,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason
@@ -762,6 +817,8 @@ actor ModelRuntime: ModelRuntimeServing {
             container: container,
             modelID: modelID,
             modelHash: modelHash,
+            modelHashAlgorithm: nil,
+            weightsManifestSHA256: nil,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil
@@ -772,6 +829,8 @@ actor ModelRuntime: ModelRuntimeServing {
         container: ModelContainer?,
         modelID: String,
         modelHash: String?,
+        modelHashAlgorithm: String?,
+        weightsManifestSHA256: String?,
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?
@@ -780,6 +839,8 @@ actor ModelRuntime: ModelRuntimeServing {
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
+        currentModelHashAlgorithm = modelHash == nil ? nil : modelHashAlgorithm
+        currentWeightsManifestSHA256 = weightsManifestSHA256
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
         currentDraftContainer = draftContainer
@@ -796,6 +857,8 @@ actor ModelRuntime: ModelRuntimeServing {
         await providerStatus?.completeTargetSwap(
             modelID: modelID,
             modelHash: modelHash,
+            modelHashAlgorithm: currentModelHashAlgorithm,
+            weightsManifestSHA256: weightsManifestSHA256,
             specDecodeDraftModelID: draftModelID,
             specDecodeNumDraftTokens: draftModelID == nil ? nil : numDraftTokens
         )
@@ -811,6 +874,10 @@ actor ModelRuntime: ModelRuntimeServing {
         signal(SwapSignal(targetModelID: target, outcome: .failed(reason: reason)))
         state = .ready
         targetModelID = nil
+    }
+
+    private func isConfiguredCatalogModel(_ targetModelID: String) -> Bool {
+        targetModelID == modelID || targetModelID == catalogModelIDAlias
     }
 
     private nonisolated static func logDraftSwapFailure(targetModelID: String?, draftModelID: String?, reason: String) {

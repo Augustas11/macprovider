@@ -36,6 +36,10 @@
 #   T23 — C2b header timeout absent, request_seconds=400 (> effective 300)     -> FAIL
 #   T24 — C2b header timeout=120 < request_seconds=300                         -> FAIL
 #   T25 — C2b header timeout=300 = request_seconds=300                         -> pass
+#   T26 — mixed-fleet deadline env missing                                      -> FAIL
+#   T27 — mixed-fleet deadline malformed                                        -> FAIL
+#   T28 — mixed-fleet deadline expired                                          -> FAIL
+#   T29 — mixed-fleet deadline future                                           -> pass
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -50,6 +54,8 @@ CHECK_SH="$DIST_DIR/check-deploy-config.sh"
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed" >&2; exit 0; }
 
 HEX64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+PAST_RFC3339="$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+FUTURE_RFC3339="$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 
 PASS=0
 FAIL=0
@@ -476,6 +482,62 @@ EOF
   rm -rf "$wd"
 }
 
+test_model_hash_legacy_deadline_env_missing_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280
+  cat >> "$wd/coordinator.yaml" <<'EOF'
+tier2:
+  model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL_TEST
+EOF
+  write_gw "$wd"
+  run_check "$wd"
+  assert_exit 1 "T26 mixed-fleet deadline env missing -> FAIL"
+  assert_contains "mixed-version rollout requires an explicit future RFC3339 deadline" "T26 expected missing deadline message"
+  rm -rf "$wd"
+}
+
+test_model_hash_legacy_deadline_malformed_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280
+  cat >> "$wd/coordinator.yaml" <<'EOF'
+tier2:
+  model_hash_legacy_until: tomorrow
+EOF
+  write_gw "$wd"
+  run_check "$wd"
+  assert_exit 1 "T27 mixed-fleet deadline malformed -> FAIL"
+  assert_contains "must resolve to RFC3339" "T27 expected malformed deadline message"
+  rm -rf "$wd"
+}
+
+test_model_hash_legacy_deadline_expired_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280
+  cat >> "$wd/coordinator.yaml" <<EOF
+tier2:
+  model_hash_legacy_until: "$PAST_RFC3339"
+EOF
+  write_gw "$wd"
+  run_check "$wd"
+  assert_exit 1 "T28 mixed-fleet deadline expired -> FAIL"
+  assert_contains "model_hash_legacy_until is expired" "T28 expected expired deadline message"
+  rm -rf "$wd"
+}
+
+test_model_hash_legacy_deadline_future_passes() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280
+  cat >> "$wd/coordinator.yaml" <<'EOF'
+tier2:
+  model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL_TEST
+EOF
+  write_gw "$wd"
+  run_check "$wd" "MODEL_HASH_LEGACY_UNTIL_TEST=$FUTURE_RFC3339"
+  assert_exit 0 "T29 mixed-fleet deadline future -> pass"
+  assert_contains "explicit future migration deadline" "T29 expected future deadline message"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -507,6 +569,10 @@ test_c2b_absent_header_default_matches_request_passes
 test_c2b_absent_header_with_raised_request_fails
 test_c2b_explicit_header_below_request_fails
 test_c2b_explicit_header_equals_request_passes
+test_model_hash_legacy_deadline_env_missing_fails
+test_model_hash_legacy_deadline_malformed_fails
+test_model_hash_legacy_deadline_expired_fails
+test_model_hash_legacy_deadline_future_passes
 
 echo
 echo "== summary =="

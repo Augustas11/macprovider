@@ -590,6 +590,11 @@ type Tier2Config struct {
 	CatalogPath         string `yaml:"catalog_path"`
 	CatalogPublicKey    string `yaml:"catalog_public_key"`
 	RequireHashVerified bool   `yaml:"require_hash_verified"`
+	// ModelHashLegacyUntil is the explicit, finite RFC3339 deadline during
+	// which providers that omit model_hash_algorithm are treated as legacy
+	// untyped evidence and are never compared to the canonical catalog hash.
+	// Empty or expired means algorithm enforcement is active.
+	ModelHashLegacyUntil string `yaml:"model_hash_legacy_until"`
 	// PublicCatalogBaseURL is the public base URL the coordinator
 	// advertises for SPEC-015 §M.4 catalog endpoints
 	// (`GET /catalog/<catalog_id>` and `GET /catalog/pubkey`). When
@@ -1261,6 +1266,11 @@ func (c *Config) resolveEnv() error {
 	} else {
 		c.Referrals.XAPIBearerToken = v
 	}
+	if v, err := resolveEnvValue("tier2.model_hash_legacy_until", c.Tier2.ModelHashLegacyUntil); err != nil {
+		return err
+	} else {
+		c.Tier2.ModelHashLegacyUntil = v
+	}
 	// Round-1 SECURITY r1 MEDIUM 1: stats DSN fields go through
 	// the same env-indirection resolver. Operators inject DSNs
 	// at deploy time as `env:STATS_READER_DSN` etc.; storing
@@ -1696,6 +1706,11 @@ func (c Config) Validate() error {
 	}
 	if c.Tier2.RequireHashVerified && (c.Tier2.CatalogPath == "" || c.Tier2.CatalogPublicKey == "") {
 		return fmt.Errorf("tier2.require_hash_verified requires a valid signed catalog configuration")
+	}
+	if raw := strings.TrimSpace(c.Tier2.ModelHashLegacyUntil); raw != "" {
+		if _, err := time.Parse(time.RFC3339, raw); err != nil {
+			return fmt.Errorf("tier2.model_hash_legacy_until must be RFC3339")
+		}
 	}
 	if c.Tier2.EncryptedLegAEAD != "A256GCM" {
 		return fmt.Errorf("tier2.encrypted_leg_aead must be A256GCM")

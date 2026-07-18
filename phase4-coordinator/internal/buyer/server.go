@@ -6401,18 +6401,13 @@ func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) po
 	if !tier2.ModelHashActive(cfg) {
 		return p.HashStatus
 	}
-	// Prefer pool-stored status: it is set at connect time and refreshed on
-	// SIGHUP by RefreshTier2HashStatuses. Only fall back to live verification
-	// for providers that connected before tier2 was activated.
-	if p.HashStatus != "" {
-		return p.HashStatus
+	// Admission and heartbeat verification bind this status to the session's
+	// admitted signed autotune row. Empty remains unverified; buyer routing
+	// must never reconstruct authority from the independent Tier-2 catalog.
+	if p.HashStatus == "" {
+		return pool.HashStatusUncatalogued
 	}
-	// TODO(m3-8d-followup): legacy fallback uses the package-singleton shim
-	// (tier2.VerifyProviderHash → tier2.Default()) because buyer.Server is
-	// not yet threaded with an explicit *tier2.Catalog via DI. Migration is
-	// tracked separately (see beta/DECISION_CRITERIA.md); switching it here
-	// also unblocks t.Parallel() in internal/buyer/server_test.go.
-	return tier2.VerifyProviderHash(p.ModelID, p.ModelHash)
+	return p.HashStatus
 }
 
 func (s *Server) checkQuota(provider pool.Provider) bool {

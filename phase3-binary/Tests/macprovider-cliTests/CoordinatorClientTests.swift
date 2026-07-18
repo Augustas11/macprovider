@@ -1610,6 +1610,35 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(helloJSON, expectedHello)
     }
 
+    func testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat() async throws {
+        let artifactHash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+        let weightsHash = "0baf13715db1eeb56e6d0806b0d764aa1c44497aaaaf8d2ba90c21128d9fe2fe"
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: artifactHash,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            weightsManifestSHA256: weightsHash
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false)
+        await AutoUpdateEventStore.shared.clear()
+
+        let hello = await client.helloMessage()
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+
+        for frame in [hello, auth, heartbeat] {
+            XCTAssertEqual(frame["model_hash"] as? String, artifactHash)
+            XCTAssertEqual(frame["model_hash_algorithm"] as? String, ModelArtifactIdentity.snapshotManifestV1)
+            XCTAssertEqual(frame["weights_manifest_sha256"] as? String, weightsHash)
+            XCTAssertEqual(frame["weights_manifest_algorithm"] as? String, ModelArtifactIdentity.safetensorsManifestV1)
+        }
+    }
+
     func testHeartbeatOmitsSpecDecodeTelemetryUnlessOperatorOptsIn() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(

@@ -771,6 +771,7 @@ func loadSettlementRouteSnapshotConn(ctx context.Context, conn *sql.Conn, id Set
 	var r RouteSnapshot
 	var providerSession, providerGeneration sql.NullString
 	var digest string
+	var routeSnapshotJSON string
 	err := conn.QueryRowContext(ctx, `
 SELECT provider_session_id, provider_generation_id, paid_entrypoint,
        provider_receipt_key_id, provider_receipt_key_source, model_id,
@@ -780,7 +781,7 @@ SELECT provider_session_id, provider_generation_id, paid_entrypoint,
        spec008_hash_status, route_snapshot_policy_version, route_snapshot_mode,
        route_decision_ts_unix_ms, request_start_ts_unix_ms,
        pending_deadline_seconds, prompt_hash_basis, prompt_hash,
-       route_snapshot_digest
+       route_snapshot_digest, route_snapshot_json
 FROM settlement_route_snapshots
 WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
 		id.AccountScope, id.RequestID, id.AttemptN, id.ProviderID,
@@ -793,7 +794,7 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		&r.Spec008HashStatus, &r.RouteSnapshotPolicyVersion, &r.RouteSnapshotMode,
 		&r.RouteDecisionTSUnixMS, &r.RequestStartTSUnixMS,
 		&r.PendingDeadlineSeconds, &r.PromptHashBasis, &r.PromptHash,
-		&digest,
+		&digest, &routeSnapshotJSON,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -811,6 +812,15 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	if providerGeneration.Valid {
 		r.ProviderGenerationID = &providerGeneration.String
 	}
+	var algorithms struct {
+		ProviderReported string `json:"provider_reported_model_hash_algorithm"`
+		ExpectedCatalog  string `json:"expected_catalog_model_hash_algorithm"`
+	}
+	if err := json.Unmarshal([]byte(routeSnapshotJSON), &algorithms); err != nil {
+		return RouteSnapshot{}, "", fmt.Errorf("settlement route snapshot identity metadata invalid: %w", err)
+	}
+	r.ProviderReportedModelHashAlgorithm = algorithms.ProviderReported
+	r.ExpectedCatalogModelHashAlgorithm = algorithms.ExpectedCatalog
 	computed, _, err := r.Digest()
 	if err != nil {
 		return RouteSnapshot{}, "", err

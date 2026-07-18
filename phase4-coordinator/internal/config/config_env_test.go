@@ -134,6 +134,7 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	t.Setenv("ONBOARDING_HARDWARE_TRUST_REQUEST_DSN", "postgres://hwtrust_requester@localhost/macprovider")
 	t.Setenv("ONBOARDING_HARDWARE_TRUST_APPROVE_DSN", "postgres://hwtrust_approver@localhost/macprovider")
 	t.Setenv("APPLE_TEAM_ID", "TEAMID1234")
+	t.Setenv("MODEL_HASH_LEGACY_UNTIL", "2099-07-19T00:00:00Z")
 
 	cfg, err := Load(filepath.Join("..", "..", "dist", "coordinator.yaml"))
 	if err != nil {
@@ -147,6 +148,9 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	}
 	if cfg.Stats.RollupDSN != "postgres://rollup@localhost/macprovider" {
 		t.Fatalf("Stats.RollupDSN=%q", cfg.Stats.RollupDSN)
+	}
+	if cfg.Tier2.ModelHashLegacyUntil != "2099-07-19T00:00:00Z" {
+		t.Fatalf("Tier2.ModelHashLegacyUntil=%q", cfg.Tier2.ModelHashLegacyUntil)
 	}
 	if !slices.Contains(cfg.Stats.CORS.PartnerOriginAllowlist, "https://www.malibu.tech") {
 		t.Fatalf("Malibu origin missing from stats CORS allowlist: %#v", cfg.Stats.CORS.PartnerOriginAllowlist)

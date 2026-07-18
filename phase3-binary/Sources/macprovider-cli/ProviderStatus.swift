@@ -246,6 +246,9 @@ struct ProviderSnapshot: Sendable {
     let status: ProviderHealthState
     let modelID: String?
     let modelHash: String?
+    let modelHashAlgorithm: String?
+    let weightsManifestSHA256: String?
+    let weightsManifestAlgorithm: String?
     let modelLoaded: Bool
     let uptimeSeconds: Int
     let requestsTotal: Int
@@ -306,6 +309,8 @@ struct ProviderSnapshot: Sendable {
         binaryVersion: String? = nil,
         compatibilitySetID: String? = nil,
         modelHash: String? = nil,
+        modelHashAlgorithm: String? = nil,
+        weightsManifestSHA256: String? = nil,
         observationID: String,
         observedAt: String,
         validForMS: Int
@@ -344,6 +349,13 @@ struct ProviderSnapshot: Sendable {
             telemetry["binary_version"] = binaryVersion!
             telemetry["compatibility_set_id"] = compatibilitySetID!
             telemetry["model_hash"] = modelHash!
+            if let modelHashAlgorithm {
+                telemetry["model_hash_algorithm"] = modelHashAlgorithm
+            }
+            if let weightsManifestSHA256 {
+                telemetry["weights_manifest_sha256"] = weightsManifestSHA256
+                telemetry["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
+            }
         }
         return telemetry
     }
@@ -353,6 +365,8 @@ actor ProviderStatus {
     private let startedAt = Date()
     private var modelID: String?
     private var modelHash: String?
+    private var modelHashAlgorithm: String?
+    private var weightsManifestSHA256: String?
     private var modelLoaded: Bool
     private var capacity: ProviderCapacity
     private var status: ProviderHealthState
@@ -401,6 +415,8 @@ actor ProviderStatus {
         modelLoaded: Bool,
         capacity: ProviderCapacity,
         modelHash: String? = nil,
+        modelHashAlgorithm: String? = nil,
+        weightsManifestSHA256: String? = nil,
         thermalGate: ThermalGate? = nil,
         memoryPressureProvider: MemoryPressureProviding = SystemMemoryPressureMonitor.shared,
         workloadTelemetryProvider: ProviderWorkloadTelemetryProviding = SystemProviderWorkloadTelemetryMonitor.shared,
@@ -411,6 +427,8 @@ actor ProviderStatus {
     ) {
         self.modelID = modelID
         self.modelHash = modelHash
+        self.modelHashAlgorithm = modelHashAlgorithm
+        self.weightsManifestSHA256 = weightsManifestSHA256
         self.modelLoaded = modelLoaded
         self.capacity = capacity
         self.status = modelLoaded ? .ready : .unavailable
@@ -503,11 +521,15 @@ actor ProviderStatus {
     func completeTargetSwap(
         modelID: String,
         modelHash: String?,
+        modelHashAlgorithm: String? = nil,
+        weightsManifestSHA256: String? = nil,
         specDecodeDraftModelID: String? = nil,
         specDecodeNumDraftTokens: Int? = nil
     ) {
         self.modelID = modelID
         self.modelHash = modelHash
+        self.modelHashAlgorithm = modelHashAlgorithm
+        self.weightsManifestSHA256 = weightsManifestSHA256
         modelLoaded = true
         if status == .unavailable {
             transition(to: .ready, reason: "target_swap_completed")
@@ -605,6 +627,11 @@ actor ProviderStatus {
             status: effectiveStatus,
             modelID: modelID,
             modelHash: modelHash,
+            modelHashAlgorithm: modelHashAlgorithm,
+            weightsManifestSHA256: weightsManifestSHA256,
+            weightsManifestAlgorithm: weightsManifestSHA256 == nil
+                ? nil
+                : ModelArtifactIdentity.safetensorsManifestV1,
             modelLoaded: modelLoaded,
             uptimeSeconds: Int(Date().timeIntervalSince(startedAt)),
             requestsTotal: requestsTotal,

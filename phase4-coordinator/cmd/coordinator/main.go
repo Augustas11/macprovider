@@ -1701,8 +1701,9 @@ const (
 // reaches the field-class check. When Phase 2/3 removes those blocks, update
 // the field class here.
 var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
-	"ObserveEnabled":      tier2HotReloadable,
-	"RequireHashVerified": tier2HotReloadable,
+	"ObserveEnabled":       tier2HotReloadable,
+	"RequireHashVerified":  tier2HotReloadable,
+	"ModelHashLegacyUntil": tier2HotReloadable,
 
 	"CatalogPath":      tier2StartupOnly,
 	"CatalogPublicKey": tier2StartupOnly,

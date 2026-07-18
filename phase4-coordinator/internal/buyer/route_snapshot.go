@@ -11,6 +11,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -44,15 +45,21 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		return skipOrEnforceError("invalid provider receipt key")
 	}
 	reportedHash := strings.TrimSpace(provider.ModelHash)
-	if !isLowerHex64(reportedHash) {
-		return skipOrEnforceError("invalid provider model hash")
+	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
+	if provider.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 ||
+		!isLowerHex64(reportedHash) ||
+		!isLowerHex64(expectedHash) {
+		return skipOrEnforceError("invalid canonical provider model identity")
+	}
+	if reportedHash != expectedHash {
+		return skipOrEnforceError("provider model identity does not match signed admission row")
 	}
 	material, ok := tier2.SnapshotMaterial(provider.ModelID, reportedHash)
 	if !ok {
 		return skipOrEnforceError("missing catalog material")
 	}
-	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != reportedHash {
-		return skipOrEnforceError("model hash not verified")
+	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != expectedHash {
+		return skipOrEnforceError("tier2 catalog does not match signed admission row")
 	}
 	promptHash, err := coordinatorPromptHash(providerBody)
 	if err != nil {
@@ -77,31 +84,33 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
 	}
 	snapshot := billing.RouteSnapshot{
-		AccountScope:                      accountScopeForSettlement(b.accountID),
-		RequestID:                         b.requestID,
-		AttemptN:                          int64(attemptN),
-		ProviderID:                        provider.ProviderID,
-		ProviderSessionID:                 sessionID,
-		ProviderGenerationID:              nil,
-		PaidEntrypoint:                    "coordinator_buyer_v1_chat_completions",
-		ProviderReceiptKeyID:              keyID,
-		ProviderReceiptKeySource:          "auth_session",
-		ModelID:                           provider.ModelID,
-		ProviderReportedModelHash:         reportedHash,
-		ExpectedCatalogModelHash:          material.ExpectedModelHash,
-		CatalogID:                         material.CatalogID,
-		CatalogBodyDigest:                 material.CatalogBodyDigest,
-		CatalogSignatureKeyID:             material.CatalogSignatureKeyID,
-		CatalogSignaturePubkeyFingerprint: material.CatalogSignaturePubkeyFingerprint,
-		CatalogExpiresAtUnixMS:            material.CatalogExpiresAt.UnixMilli(),
-		Spec008HashStatus:                 string(material.HashStatus),
-		RouteSnapshotPolicyVersion:        billing.RouteSnapshotPolicyVersion,
-		RouteSnapshotMode:                 routeMode,
-		RouteDecisionTSUnixMS:             b.state.routingDone.UnixMilli(),
-		RequestStartTSUnixMS:              b.startedAt.UnixMilli(),
-		PendingDeadlineSeconds:            int64(pendingDeadline),
-		PromptHashBasis:                   promptHashBasisCoordinatorV1,
-		PromptHash:                        promptHash,
+		AccountScope:                       accountScopeForSettlement(b.accountID),
+		RequestID:                          b.requestID,
+		AttemptN:                           int64(attemptN),
+		ProviderID:                         provider.ProviderID,
+		ProviderSessionID:                  sessionID,
+		ProviderGenerationID:               nil,
+		PaidEntrypoint:                     "coordinator_buyer_v1_chat_completions",
+		ProviderReceiptKeyID:               keyID,
+		ProviderReceiptKeySource:           "auth_session",
+		ModelID:                            provider.ModelID,
+		ProviderReportedModelHash:          reportedHash,
+		ProviderReportedModelHashAlgorithm: modelidentity.SnapshotManifestV1,
+		ExpectedCatalogModelHash:           expectedHash,
+		ExpectedCatalogModelHashAlgorithm:  modelidentity.SnapshotManifestV1,
+		CatalogID:                          material.CatalogID,
+		CatalogBodyDigest:                  material.CatalogBodyDigest,
+		CatalogSignatureKeyID:              material.CatalogSignatureKeyID,
+		CatalogSignaturePubkeyFingerprint:  material.CatalogSignaturePubkeyFingerprint,
+		CatalogExpiresAtUnixMS:             material.CatalogExpiresAt.UnixMilli(),
+		Spec008HashStatus:                  string(material.HashStatus),
+		RouteSnapshotPolicyVersion:         billing.RouteSnapshotPolicyVersion,
+		RouteSnapshotMode:                  routeMode,
+		RouteDecisionTSUnixMS:              b.state.routingDone.UnixMilli(),
+		RequestStartTSUnixMS:               b.startedAt.UnixMilli(),
+		PendingDeadlineSeconds:             int64(pendingDeadline),
+		PromptHashBasis:                    promptHashBasisCoordinatorV1,
+		PromptHash:                         promptHash,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
 
 const (
@@ -33,31 +35,33 @@ var (
 )
 
 type RouteSnapshot struct {
-	AccountScope                      string  `json:"account_scope"`
-	RequestID                         string  `json:"request_id"`
-	AttemptN                          int64   `json:"attempt_n"`
-	ProviderID                        string  `json:"provider_id"`
-	ProviderSessionID                 *string `json:"provider_session_id"`
-	ProviderGenerationID              *string `json:"provider_generation_id"`
-	PaidEntrypoint                    string  `json:"paid_entrypoint"`
-	ProviderReceiptKeyID              string  `json:"provider_receipt_key_id"`
-	ProviderReceiptKeySource          string  `json:"provider_receipt_key_source"`
-	ModelID                           string  `json:"model_id"`
-	ProviderReportedModelHash         string  `json:"provider_reported_model_hash"`
-	ExpectedCatalogModelHash          string  `json:"expected_catalog_model_hash"`
-	CatalogID                         string  `json:"catalog_id"`
-	CatalogBodyDigest                 string  `json:"catalog_body_digest"`
-	CatalogSignatureKeyID             string  `json:"catalog_signature_key_id"`
-	CatalogSignaturePubkeyFingerprint string  `json:"catalog_signature_pubkey_fingerprint"`
-	CatalogExpiresAtUnixMS            int64   `json:"catalog_expires_at_unix_ms"`
-	Spec008HashStatus                 string  `json:"spec008_hash_status"`
-	RouteSnapshotPolicyVersion        string  `json:"route_snapshot_policy_version"`
-	RouteSnapshotMode                 string  `json:"route_snapshot_mode"`
-	RouteDecisionTSUnixMS             int64   `json:"route_decision_ts_unix_ms"`
-	RequestStartTSUnixMS              int64   `json:"request_start_ts_unix_ms"`
-	PendingDeadlineSeconds            int64   `json:"pending_deadline_seconds"`
-	PromptHashBasis                   string  `json:"prompt_hash_basis"`
-	PromptHash                        string  `json:"prompt_hash"`
+	AccountScope                       string  `json:"account_scope"`
+	RequestID                          string  `json:"request_id"`
+	AttemptN                           int64   `json:"attempt_n"`
+	ProviderID                         string  `json:"provider_id"`
+	ProviderSessionID                  *string `json:"provider_session_id"`
+	ProviderGenerationID               *string `json:"provider_generation_id"`
+	PaidEntrypoint                     string  `json:"paid_entrypoint"`
+	ProviderReceiptKeyID               string  `json:"provider_receipt_key_id"`
+	ProviderReceiptKeySource           string  `json:"provider_receipt_key_source"`
+	ModelID                            string  `json:"model_id"`
+	ProviderReportedModelHash          string  `json:"provider_reported_model_hash"`
+	ProviderReportedModelHashAlgorithm string  `json:"provider_reported_model_hash_algorithm"`
+	ExpectedCatalogModelHash           string  `json:"expected_catalog_model_hash"`
+	ExpectedCatalogModelHashAlgorithm  string  `json:"expected_catalog_model_hash_algorithm"`
+	CatalogID                          string  `json:"catalog_id"`
+	CatalogBodyDigest                  string  `json:"catalog_body_digest"`
+	CatalogSignatureKeyID              string  `json:"catalog_signature_key_id"`
+	CatalogSignaturePubkeyFingerprint  string  `json:"catalog_signature_pubkey_fingerprint"`
+	CatalogExpiresAtUnixMS             int64   `json:"catalog_expires_at_unix_ms"`
+	Spec008HashStatus                  string  `json:"spec008_hash_status"`
+	RouteSnapshotPolicyVersion         string  `json:"route_snapshot_policy_version"`
+	RouteSnapshotMode                  string  `json:"route_snapshot_mode"`
+	RouteDecisionTSUnixMS              int64   `json:"route_decision_ts_unix_ms"`
+	RequestStartTSUnixMS               int64   `json:"request_start_ts_unix_ms"`
+	PendingDeadlineSeconds             int64   `json:"pending_deadline_seconds"`
+	PromptHashBasis                    string  `json:"prompt_hash_basis"`
+	PromptHash                         string  `json:"prompt_hash"`
 }
 
 func ReceiptKeyID(pubkey []byte) (string, error) {
@@ -69,7 +73,7 @@ func ReceiptKeyID(pubkey []byte) (string, error) {
 }
 
 func (r RouteSnapshot) Value() map[string]any {
-	return map[string]any{
+	value := map[string]any{
 		"account_scope":                        r.AccountScope,
 		"request_id":                           r.RequestID,
 		"attempt_n":                            int64(r.AttemptN),
@@ -96,6 +100,11 @@ func (r RouteSnapshot) Value() map[string]any {
 		"prompt_hash_basis":                    r.PromptHashBasis,
 		"prompt_hash":                          r.PromptHash,
 	}
+	if r.ProviderReportedModelHashAlgorithm != "" || r.ExpectedCatalogModelHashAlgorithm != "" {
+		value["provider_reported_model_hash_algorithm"] = r.ProviderReportedModelHashAlgorithm
+		value["expected_catalog_model_hash_algorithm"] = r.ExpectedCatalogModelHashAlgorithm
+	}
+	return value
 }
 
 func (r RouteSnapshot) Digest() (digest string, canonical []byte, err error) {
@@ -142,6 +151,11 @@ func (r RouteSnapshot) Validate() error {
 	}
 	if r.RouteSnapshotMode != RouteSnapshotModeObserve && r.RouteSnapshotMode != RouteSnapshotModeEnforce {
 		return fmt.Errorf("route snapshot route_snapshot_mode invalid")
+	}
+	if (r.ProviderReportedModelHashAlgorithm != "" || r.ExpectedCatalogModelHashAlgorithm != "") &&
+		(r.ProviderReportedModelHashAlgorithm != modelidentity.SnapshotManifestV1 ||
+			r.ExpectedCatalogModelHashAlgorithm != modelidentity.SnapshotManifestV1) {
+		return fmt.Errorf("route snapshot model hash algorithm invalid")
 	}
 	for field, value := range map[string]string{
 		"provider_reported_model_hash": r.ProviderReportedModelHash,

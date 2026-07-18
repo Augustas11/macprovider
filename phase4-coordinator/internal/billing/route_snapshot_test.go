@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
 
 func TestRouteSnapshotStrictKeysAndDigestSensitivity(t *testing.T) {
@@ -29,7 +31,9 @@ func TestRouteSnapshotStrictKeysAndDigestSensitivity(t *testing.T) {
 		"provider_receipt_key_source",
 		"model_id",
 		"provider_reported_model_hash",
+		"provider_reported_model_hash_algorithm",
 		"expected_catalog_model_hash",
+		"expected_catalog_model_hash_algorithm",
 		"catalog_id",
 		"catalog_body_digest",
 		"catalog_signature_key_id",
@@ -171,31 +175,33 @@ func testRouteSnapshot() RouteSnapshot {
 	sessionID := "session-a"
 	generationID := "generation-a"
 	return RouteSnapshot{
-		AccountScope:                      "acct_sha256:" + strings.Repeat("1", 64),
-		RequestID:                         "req-a",
-		AttemptN:                          0,
-		ProviderID:                        "provider-a",
-		ProviderSessionID:                 &sessionID,
-		ProviderGenerationID:              &generationID,
-		PaidEntrypoint:                    "coordinator_buyer_v1_chat_completions",
-		ProviderReceiptKeyID:              "ed25519-sha256:" + strings.Repeat("2", 64),
-		ProviderReceiptKeySource:          "auth_session",
-		ModelID:                           "model-a",
-		ProviderReportedModelHash:         strings.Repeat("3", 64),
-		ExpectedCatalogModelHash:          strings.Repeat("3", 64),
-		CatalogID:                         "catalog-a",
-		CatalogBodyDigest:                 strings.Repeat("4", 64),
-		CatalogSignatureKeyID:             "catalog-key-a",
-		CatalogSignaturePubkeyFingerprint: "ed25519-sha256:" + strings.Repeat("5", 64),
-		CatalogExpiresAtUnixMS:            1800000000000,
-		Spec008HashStatus:                 "hash_verified",
-		RouteSnapshotPolicyVersion:        RouteSnapshotPolicyVersion,
-		RouteSnapshotMode:                 RouteSnapshotModeObserve,
-		RouteDecisionTSUnixMS:             1716768000100,
-		RequestStartTSUnixMS:              1716768000000,
-		PendingDeadlineSeconds:            30,
-		PromptHashBasis:                   "coordinator_prompt_canonical_v1",
-		PromptHash:                        strings.Repeat("6", 64),
+		AccountScope:                       "acct_sha256:" + strings.Repeat("1", 64),
+		RequestID:                          "req-a",
+		AttemptN:                           0,
+		ProviderID:                         "provider-a",
+		ProviderSessionID:                  &sessionID,
+		ProviderGenerationID:               &generationID,
+		PaidEntrypoint:                     "coordinator_buyer_v1_chat_completions",
+		ProviderReceiptKeyID:               "ed25519-sha256:" + strings.Repeat("2", 64),
+		ProviderReceiptKeySource:           "auth_session",
+		ModelID:                            "model-a",
+		ProviderReportedModelHash:          strings.Repeat("3", 64),
+		ProviderReportedModelHashAlgorithm: modelidentity.SnapshotManifestV1,
+		ExpectedCatalogModelHash:           strings.Repeat("3", 64),
+		ExpectedCatalogModelHashAlgorithm:  modelidentity.SnapshotManifestV1,
+		CatalogID:                          "catalog-a",
+		CatalogBodyDigest:                  strings.Repeat("4", 64),
+		CatalogSignatureKeyID:              "catalog-key-a",
+		CatalogSignaturePubkeyFingerprint:  "ed25519-sha256:" + strings.Repeat("5", 64),
+		CatalogExpiresAtUnixMS:             1800000000000,
+		Spec008HashStatus:                  "hash_verified",
+		RouteSnapshotPolicyVersion:         RouteSnapshotPolicyVersion,
+		RouteSnapshotMode:                  RouteSnapshotModeObserve,
+		RouteDecisionTSUnixMS:              1716768000100,
+		RequestStartTSUnixMS:               1716768000000,
+		PendingDeadlineSeconds:             30,
+		PromptHashBasis:                    "coordinator_prompt_canonical_v1",
+		PromptHash:                         strings.Repeat("6", 64),
 	}
 }
 

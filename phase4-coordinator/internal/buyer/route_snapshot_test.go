@@ -19,6 +19,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -1186,6 +1187,8 @@ func registerSettlementProvider(registry *pool.Registry, providerID, assignedID,
 		ConnectedAt:           now,
 		BinaryVersion:         "0.1.0",
 		ModelHash:             buyerTestHash,
+		ModelHashAlgorithm:    modelidentity.SnapshotManifestV1,
+		ExpectedModelHash:     buyerTestHash,
 		HashStatus:            pool.HashStatusVerified,
 		ReceiptPubkey:         append([]byte(nil), receiptPubkey...),
 	}, nil)
@@ -1215,6 +1218,8 @@ func registerSettlementWSProvider(registry *pool.Registry, providerID, assignedI
 		ConnectedAt:           now,
 		BinaryVersion:         "0.1.0",
 		ModelHash:             buyerTestHash,
+		ModelHashAlgorithm:    modelidentity.SnapshotManifestV1,
+		ExpectedModelHash:     buyerTestHash,
 		HashStatus:            pool.HashStatusVerified,
 		ReceiptPubkey:         append([]byte(nil), receiptPubkey...),
 	}, nil)

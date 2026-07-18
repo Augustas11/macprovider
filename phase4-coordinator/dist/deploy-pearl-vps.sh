@@ -46,6 +46,11 @@
 #   SKIP_C2_CHECK    default: 0   skip C2 cross-check (development only)
 #   ALLOW_CONFIG_DRIFT default: 0 push local coordinator.yaml over live one
 #   SKIP_TCP_TUNING default: 0    skip Pearl TCP sysctl install/apply step
+#   MODEL_HASH_LEGACY_UNTIL is read from /etc/macprovider/coordinator.env
+#                    when the production config declares the bounded
+#                    model-identity migration bridge. It must be a future
+#                    RFC3339 instant. Remove the config field after the
+#                    observed legacy-provider count reaches zero.
 #
 # Note: DOMAIN and STATS_DOMAIN are validated up-front (step 0) against
 # DNS-name regex AND against the baked-in vhost-template hostnames. The
@@ -645,7 +650,16 @@ else
   }
   GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
   echo "  validating installed Pearl gateway config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
-  bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
+  # The deadline is not a secret, but it is operator-owned runtime state. Read
+  # it as data from the same EnvironmentFile systemd uses; do not source the
+  # file. The deploy gate validates syntax and freshness before any upload.
+  MODEL_HASH_LEGACY_UNTIL_FOR_GATE="$($SSH \
+    'if [ -r /etc/macprovider/coordinator.env ]; then sed -n "s/^[[:space:]]*MODEL_HASH_LEGACY_UNTIL=//p" /etc/macprovider/coordinator.env | tail -n 1 | sed "s/^[[:space:]]*[\"'\"']//; s/[\"'\"'][[:space:]]*$//"; fi')" || {
+    echo "aborting deploy: could not read MODEL_HASH_LEGACY_UNTIL from Pearl coordinator.env" >&2
+    exit 5
+  }
+  env MODEL_HASH_LEGACY_UNTIL="$MODEL_HASH_LEGACY_UNTIL_FOR_GATE" \
+    bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting deploy: config-drift check failed" >&2; exit 5;
   }
 fi
