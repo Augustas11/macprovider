@@ -92,6 +92,16 @@ var (
 	binBuildErr       error
 )
 
+const (
+	snapshotManifestV1            = "macprovider.snapshot-manifest.v1"
+	defaultFakeModelID            = "llama-3.2-3b-instruct"
+	settlementFixtureModelID      = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	staticLlama32CandidateKey     = "meta-llama/llama-3.2-3b-instruct"
+	staticLlama32CandidateRowID   = "c17e31e3bb1e1b64809e0157b32f91d03c1f6db716f03a2eee3fe589e8fbe9e2"
+	staticAutotuneSignerKeyID     = "streamvc-autotune-static-v4"
+	staticAutotunePublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+)
+
 func TestMain(m *testing.M) {
 	tmpRoot, err := os.MkdirTemp("", "macprovider-integration-bins-*")
 	if err != nil {
@@ -269,9 +279,14 @@ type scenarioOpts struct {
 }
 
 type settlementCatalogFixture struct {
-	path      string
-	publicKey string
-	modelHash string
+	path                   string
+	publicKey              string
+	modelHash              string
+	autotuneCatalogPath    string
+	autotuneCatalogSigPath string
+	autotuneCatalogSHA256  string
+	autotuneCatalogVersion string
+	autotunePolicyVersion  string
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -404,7 +419,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 				fp.enableReceipts()
 			}
 			if opts.settlementReceiptProvider {
-				fp.enableSettlementReceipts(settlementCatalog.modelHash)
+				fp.enableSettlementReceipts(settlementCatalog)
 			}
 			fp.start(ctx)
 			s.fakeProvs = append(s.fakeProvs, fp)
@@ -576,6 +591,16 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 		// production has the provider in their providers: list.
 		"providers": providers,
 	}
+	if settlementCatalog.autotuneCatalogPath != "" {
+		cfg["autotune"] = map[string]any{
+			"autotune_candidates_path":     settlementCatalog.autotuneCatalogPath,
+			"autotune_candidates_sig_path": settlementCatalog.autotuneCatalogSigPath,
+			"enforce_provider_admission":   true,
+			"public_keys": map[string]string{
+				staticAutotuneSignerKeyID: staticAutotunePublicKeyBase64,
+			},
+		}
+	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
 		s.t.Fatalf("marshal coordinator yaml: %v", err)
@@ -594,16 +619,42 @@ func verifiedModelSettlementMode(enforce bool) string {
 
 func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 	s.t.Helper()
-	modelHash := randHex(s.t, 32)
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		s.t.Fatalf("find repo root for autotune fixture: %v", err)
+	}
+	autotuneCatalogPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "autotune-candidates.json")
+	autotuneCatalogSigPath := autotuneCatalogPath + ".sig"
+	autotuneCatalogJSON, err := os.ReadFile(autotuneCatalogPath)
+	if err != nil {
+		s.t.Fatalf("read signed autotune fixture: %v", err)
+	}
+	var autotuneCatalog struct {
+		Version       string `json:"version"`
+		PolicyVersion string `json:"policy_version"`
+		Rows          map[string]struct {
+			ModelSHA256 string `json:"model_sha256"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(autotuneCatalogJSON, &autotuneCatalog); err != nil {
+		s.t.Fatalf("parse signed autotune fixture: %v", err)
+	}
+	modelHash := autotuneCatalog.Rows[staticLlama32CandidateKey].ModelSHA256
+	if len(modelHash) != sha256.Size*2 {
+		s.t.Fatalf("signed autotune fixture model hash is invalid: %q", modelHash)
+	}
+	autotuneCatalogDigest := sha256.Sum256(autotuneCatalogJSON)
+
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		s.t.Fatalf("generate catalog key: %v", err)
 	}
+
 	minRAM := 16
 	models := []settlementCatalogModel{{
 		ArtifactKind: "mlx_weight_file",
 		HashScope:    "primary_weight_file",
-		ModelID:      "llama-3.2-3b-instruct",
+		ModelID:      settlementFixtureModelID,
 		MinRAMGB:     &minRAM,
 		SHA256:       modelHash,
 		Source:       "integration-test",
@@ -643,9 +694,14 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		s.t.Fatalf("write settlement catalog: %v", err)
 	}
 	return settlementCatalogFixture{
-		path:      path,
-		publicKey: base64.RawURLEncoding.EncodeToString(pub),
-		modelHash: modelHash,
+		path:                   path,
+		publicKey:              base64.RawURLEncoding.EncodeToString(pub),
+		modelHash:              modelHash,
+		autotuneCatalogPath:    autotuneCatalogPath,
+		autotuneCatalogSigPath: autotuneCatalogSigPath,
+		autotuneCatalogSHA256:  hex.EncodeToString(autotuneCatalogDigest[:]),
+		autotuneCatalogVersion: autotuneCatalog.Version,
+		autotunePolicyVersion:  autotuneCatalog.PolicyVersion,
 	}
 }
 
@@ -1082,7 +1138,11 @@ type fakeProvider struct {
 	hServer           *http.Server
 	receiptEnabled    bool
 	settlementEnabled bool
+	modelID           string
 	modelHash         string
+	catalogReleaseID  string
+	catalogPolicy     string
+	catalogSHA256     string
 	receiptPubkey     ed25519.PublicKey
 	receiptPrivkey    ed25519.PrivateKey
 	lastRequestBody   []byte
@@ -1125,6 +1185,7 @@ func newFakeProvider(t *testing.T, providerID string, httpPort int, coordProvURL
 		providerToken: providerToken,
 		httpPort:      httpPort,
 		wsURL:         fmt.Sprintf("%s://%s/ws/provider", wsScheme, u.Host),
+		modelID:       defaultFakeModelID,
 		hReady:        make(chan struct{}),
 		stopped:       make(chan struct{}),
 	}
@@ -1141,14 +1202,18 @@ func (p *fakeProvider) enableReceipts() {
 	p.receiptPrivkey = priv
 }
 
-func (p *fakeProvider) enableSettlementReceipts(modelHash string) {
+func (p *fakeProvider) enableSettlementReceipts(catalog settlementCatalogFixture) {
 	p.t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		p.t.Fatalf("generate fake settlement receipt key: %v", err)
 	}
 	p.settlementEnabled = true
-	p.modelHash = modelHash
+	p.modelID = settlementFixtureModelID
+	p.modelHash = catalog.modelHash
+	p.catalogReleaseID = catalog.autotuneCatalogVersion
+	p.catalogPolicy = catalog.autotunePolicyVersion
+	p.catalogSHA256 = catalog.autotuneCatalogSHA256
 	p.receiptPubkey = pub
 	p.receiptPrivkey = priv
 }
@@ -1638,12 +1703,12 @@ func escapeSpec015JCSString(s string) string {
 	return b.String()
 }
 
-func readyStateUpdate(modelHash string) map[string]any {
+func readyStateUpdate(modelID, modelHash string) map[string]any {
 	msg := map[string]any{
 		"type":  "state_update",
 		"state": "ready",
 		"metrics_snapshot": map[string]any{
-			"model_id":                   "llama-3.2-3b-instruct",
+			"model_id":                   modelID,
 			"model_params_b":             3.0,
 			"ram_gb":                     16,
 			"max_context_tokens":         8192,
@@ -1656,10 +1721,25 @@ func readyStateUpdate(modelHash string) map[string]any {
 			"throughput_tps_since_last":  0.0,
 		},
 	}
-	if modelHash != "" {
-		msg["metrics_snapshot"].(map[string]any)["model_hash"] = modelHash
-	}
+	addCanonicalModelIdentity(msg["metrics_snapshot"].(map[string]any), modelHash)
 	return msg
+}
+
+func addCanonicalModelIdentity(msg map[string]any, modelHash string) {
+	if modelHash == "" {
+		return
+	}
+	msg["model_hash"] = modelHash
+	msg["model_hash_algorithm"] = snapshotManifestV1
+}
+
+func TestAddCanonicalModelIdentity(t *testing.T) {
+	const hash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+	msg := map[string]any{}
+	addCanonicalModelIdentity(msg, hash)
+	if msg["model_hash"] != hash || msg["model_hash_algorithm"] != snapshotManifestV1 {
+		t.Fatalf("canonical identity frame = %#v", msg)
+	}
 }
 
 func chatBodyRequestsStream(body []byte) bool {
@@ -1821,7 +1901,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"stage":                       "initial",
 			"provider_id":                 p.providerID,
 			"hostname":                    "fake-provider",
-			"model_id":                    "llama-3.2-3b-instruct",
+			"model_id":                    p.modelID,
 			"model_params_b":              3.0,
 			"ram_gb":                      16,
 			"max_context_tokens":          8192,
@@ -1831,12 +1911,17 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"endpoint_url":                endpointURL,
 			"provider_ecdh_public_key":    base64.RawURLEncoding.EncodeToString(providerECDH),
 			"provider_receipt_public_key": base64.StdEncoding.EncodeToString(p.receiptPubkey),
-			"supported_models":            []string{"llama-3.2-3b-instruct"},
+			"supported_models":            []string{p.modelID},
 			"publishes_supported_models":  true,
 			"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
 		}
-		if p.modelHash != "" {
-			initial["model_hash"] = p.modelHash
+		addCanonicalModelIdentity(initial, p.modelHash)
+		if p.catalogReleaseID != "" {
+			initial["catalog_release_id"] = p.catalogReleaseID
+			initial["catalog_policy_version"] = p.catalogPolicy
+			initial["catalog_candidate_sha256"] = p.catalogSHA256
+			initial["catalog_signer_key_id"] = staticAutotuneSignerKeyID
+			initial["catalog_row_identity"] = staticLlama32CandidateRowID
 		}
 		if err := writeJSONFrame(conn, initial); err != nil {
 			p.t.Errorf("auth initial write: %v", err)
@@ -1861,7 +1946,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"auth_attempt_id":            challenge.AuthAttemptID,
 			"provider_id":                p.providerID,
 			"attestation_token":          nil,
-			"supported_models":           []string{"llama-3.2-3b-instruct"},
+			"supported_models":           []string{p.modelID},
 			"publishes_supported_models": true,
 		}
 		if err := writeJSONFrame(conn, proof); err != nil {
@@ -1880,7 +1965,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			p.t.Errorf("auth_response = %s err=%v", string(responsePayload), err)
 			return
 		}
-		if err := writeJSONFrame(conn, readyStateUpdate(p.modelHash)); err != nil {
+		if err := writeJSONFrame(conn, readyStateUpdate(p.modelID, p.modelHash)); err != nil {
 			p.t.Errorf("state_update write: %v", err)
 			return
 		}
@@ -1891,7 +1976,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"tier":                    1,
 			"provider_id":             p.providerID,
 			"hostname":                "fake-provider",
-			"model_id":                "llama-3.2-3b-instruct",
+			"model_id":                p.modelID,
 			"model_params_b":          3.0,
 			"ram_gb":                  16,
 			"max_context_tokens":      8192,
@@ -1947,7 +2032,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			hb := map[string]any{
 				"type":                       "heartbeat",
 				"status":                     "ready",
-				"model_id":                   "llama-3.2-3b-instruct",
+				"model_id":                   p.modelID,
 				"model_params_b":             3.0,
 				"ram_gb":                     16,
 				"max_context_tokens":         8192,
@@ -1959,9 +2044,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"avg_latency_ms_since_last":  0.0,
 				"throughput_tps_since_last":  0.0,
 			}
-			if p.modelHash != "" {
-				hb["model_hash"] = p.modelHash
-			}
+			addCanonicalModelIdentity(hb, p.modelHash)
 			if err := writeJSONFrame(conn, hb); err != nil {
 				return
 			}
