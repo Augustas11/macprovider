@@ -13,7 +13,23 @@ on:
       version:
         description: "Malibu marketing version, without a v prefix"
         required: true
-        default: "1.8.41"
+        default: "1.8.42"
+        type: string
+      cli_tag:
+        description: "Exact signed macprovider-cli release tag"
+        required: true
+        type: string
+      cli_version:
+        description: "Exact embedded macprovider-cli version, without a v prefix"
+        required: true
+        type: string
+      cli_sha256:
+        description: "Exact lowercase SHA-256 of the signed macprovider-cli binary"
+        required: true
+        type: string
+      cli_archive_sha256:
+        description: "Exact lowercase SHA-256 of the signed macprovider-cli archive"
+        required: true
         type: string
       source_commit:
         description: "Exact reviewed origin/main commit"
@@ -42,10 +58,10 @@ concurrency:
 
 env:
   TEAM_ID: YF7XNRJUG4
-  CLI_TAG: v1.8.40
-  CLI_VERSION: 1.8.40
-  CLI_SHA256: 4392cfff14abc7c4ee4e8992e2f264b465f754594397bfd4f92d5859f4d77ff1
-  CLI_ARCHIVE_SHA256: 1eee4900109f958c95c66830f17295bfba4dfe93e0a72aa720f0ed20a9b2b918
+  CLI_TAG: ${{ inputs.cli_tag }}
+  CLI_VERSION: ${{ inputs.cli_version }}
+  CLI_SHA256: ${{ inputs.cli_sha256 }}
+  CLI_ARCHIVE_SHA256: ${{ inputs.cli_archive_sha256 }}
 
 jobs:
   build_candidate:
@@ -75,6 +91,8 @@ jobs:
           set -euo pipefail
           [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          bash scripts/validate-malibu-release-cli-inputs.sh \
+            "$CLI_TAG" "$CLI_VERSION" "$CLI_SHA256" "$CLI_ARCHIVE_SHA256"
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
@@ -85,7 +103,6 @@ jobs:
           test "$project_version" = "$APP_VERSION"
           test "$project_build" = "${APP_VERSION##*.}"
           grep -Eq "^${APP_VERSION}[[:space:]]+${project_build}$" phase3-binary/app/release-builds.tsv
-          bash scripts/test-coordinator-advertised-version.sh "$CLI_TAG"
           if git ls-remote --exit-code --tags origin "refs/tags/v${APP_VERSION}" >/dev/null 2>&1; then
             echo "::error::release tag v${APP_VERSION} already exists" >&2
             exit 1
@@ -218,7 +235,7 @@ jobs:
             -S apple-tool:,apple:,codesign: \
             -s -k "$keychain_pass" build.keychain
 
-      - name: Restore exact signed CLI 1.8.40 payload
+      - name: Restore exact signed CLI payload
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -345,7 +362,8 @@ jobs:
           dmg_sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
           printf '%s  %s\n' "$dmg_sha" "$(basename "$dmg")" > "$dmg.sha256"
           APP_VERSION="$APP_VERSION" SOURCE_COMMIT="$SOURCE_COMMIT" \
-          CLI_VERSION="$CLI_VERSION" CLI_SHA256="$CLI_SHA256" \
+          CLI_TAG="$CLI_TAG" CLI_VERSION="$CLI_VERSION" \
+          CLI_SHA256="$CLI_SHA256" CLI_ARCHIVE_SHA256="$CLI_ARCHIVE_SHA256" \
           TEAM_ID="$TEAM_ID" DMG_SHA256="$dmg_sha" \
           GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
           python3 - "$dist/candidate-manifest.json" <<'PY'
@@ -361,8 +379,10 @@ jobs:
               "malibu_build": int(os.environ["APP_VERSION"].split(".")[-1]),
               "bundle_identifier": "tech.malibu.app",
               "team_id": os.environ["TEAM_ID"],
+              "cli_tag": os.environ["CLI_TAG"],
               "cli_version": os.environ["CLI_VERSION"],
               "cli_sha256": os.environ["CLI_SHA256"],
+              "cli_archive_sha256": os.environ["CLI_ARCHIVE_SHA256"],
               "dmg_asset": f"Malibu-v{os.environ['APP_VERSION']}.dmg",
               "dmg_sha256": os.environ["DMG_SHA256"],
               "candidate_run_id": int(os.environ["GITHUB_RUN_ID"]),
@@ -422,6 +442,8 @@ jobs:
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$EXPECTED_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          bash scripts/validate-malibu-release-cli-inputs.sh \
+            "$CLI_TAG" "$CLI_VERSION" "$CLI_SHA256" "$CLI_ARCHIVE_SHA256"
           test "$GITHUB_REF" = refs/heads/main
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
@@ -537,11 +559,24 @@ jobs:
           grep -qx "$EXPECTED_DMG_SHA256  Malibu-v${APP_VERSION}.dmg" "$checksum"
           python3 - "$manifest" "$APP_VERSION" "$SOURCE_COMMIT" \
             "$CANDIDATE_RUN_ID" "$CANDIDATE_RUN_ATTEMPT" "$EXPECTED_DMG_SHA256" \
-            "$CLI_SHA256" "$TEAM_ID" <<'PY'
+            "$CLI_TAG" "$CLI_VERSION" "$CLI_SHA256" "$CLI_ARCHIVE_SHA256" \
+            "$TEAM_ID" <<'PY'
           import json
           import sys
 
-          path, version, commit, run_id, run_attempt, dmg_sha, cli_sha, team_id = sys.argv[1:]
+          (
+              path,
+              version,
+              commit,
+              run_id,
+              run_attempt,
+              dmg_sha,
+              cli_tag,
+              cli_version,
+              cli_sha,
+              cli_archive_sha,
+              team_id,
+          ) = sys.argv[1:]
           manifest = json.load(open(path, encoding="utf-8"))
           expected = {
               "repository": "Augustas11/macprovider",
@@ -550,8 +585,10 @@ jobs:
               "malibu_build": int(version.split(".")[-1]),
               "bundle_identifier": "tech.malibu.app",
               "team_id": team_id,
-              "cli_version": "1.8.40",
+              "cli_tag": cli_tag,
+              "cli_version": cli_version,
               "cli_sha256": cli_sha,
+              "cli_archive_sha256": cli_archive_sha,
               "dmg_asset": f"Malibu-v{version}.dmg",
               "dmg_sha256": dmg_sha,
               "candidate_run_id": int(run_id),
@@ -639,13 +676,13 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           # Malibu ${APP_VERSION}
 
-          Malibu-only recovery for #611. This release requests complete macOS signing
-          metadata so Malibu can verify the production Team ID and monitor an existing
-          launchd-managed provider.
+          Malibu ${APP_VERSION} includes the reviewed provider onboarding and monitoring
+          changes from source commit \`${SOURCE_COMMIT}\`.
 
-          macprovider-cli remains independently versioned and unchanged. The supported
-          CLI in this release is 1.8.40 with SHA-256 \`${CLI_SHA256}\`; no CLI replacement
-          or Malibu/CLI marketing-version equality is required.
+          macprovider-cli remains independently versioned. This Malibu artifact embeds
+          exact release \`${CLI_TAG}\` (version \`${CLI_VERSION}\`) with binary SHA-256
+          \`${CLI_SHA256}\` and archive SHA-256 \`${CLI_ARCHIVE_SHA256}\`. Malibu and CLI
+          marketing versions are intentionally independent.
           EOF
           gh release create "$tag" \
             "$candidate/Malibu-v${APP_VERSION}.dmg" \
