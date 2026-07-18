@@ -276,9 +276,6 @@ jobs:
           cp "$payload_dir/compatibility-set-local/install.sh" \
             "$app/Contents/Resources/install.sh"
           chmod 755 "$app/Contents/Resources/install.sh"
-          /usr/libexec/PlistBuddy -c \
-            'Set :MalibuBundledReferralBootstrapV1 false' \
-            "$app/Contents/Info.plist"
           python3 - \
             "$app/Contents/Resources/compatibility-set.json" \
             "$app/Contents/Resources/install.sh" <<'PY'
@@ -295,6 +292,9 @@ jobs:
           if actual != expected:
               raise SystemExit("embedded install.sh does not match the signed compatibility set")
           PY
+          /usr/libexec/PlistBuddy -c \
+            'Set :MalibuBundledReferralBootstrapV1 true' \
+            "$app/Contents/Info.plist"
           embedded_cli="$app/Contents/MacOS/macprovider-cli"
           test "$(shasum -a 256 "$embedded_cli" | awk '{print $1}')" = "$CLI_SHA256"
 
@@ -602,7 +602,7 @@ jobs:
           codesign -dv --verbose=4 "$cli" 2>&1 | grep -q '^Runtime Version='
           test -f "$app/Contents/Resources/compatibility-set.json"
           test -x "$app/Contents/Resources/install.sh"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :MalibuBundledReferralBootstrapV1' "$plist")" = false
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MalibuBundledReferralBootstrapV1' "$plist")" = true
           python3 - \
             "$app/Contents/Resources/compatibility-set.json" \
             "$app/Contents/Resources/install.sh" <<'PY'

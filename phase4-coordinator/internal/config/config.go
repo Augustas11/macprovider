@@ -1161,7 +1161,7 @@ func Default() Config {
 			SocialBonusUses:          2,
 			ChallengeTTLS:            900,
 			SocialVerificationDwellS: 1800,
-			JoinBaseURL:              "https://coordinator.streamvc.live/j",
+			JoinBaseURL:              "https://malibu.tech/j",
 			PolicyVersion:            "v1",
 			HMACKeys:                 map[string]string{},
 		},

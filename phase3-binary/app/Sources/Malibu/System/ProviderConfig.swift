@@ -27,6 +27,11 @@ enum ProviderConfig {
         return parseTopLevelValue(named: "provider_id", from: contents)
     }
 
+    static func hasProviderToken(paths: ProviderPaths = .current) -> Bool {
+        guard let contents = try? String(contentsOf: paths.configFile) else { return false }
+        return parseTopLevelValue(named: "provider_token", from: contents) != nil
+    }
+
     static func readModel(paths: ProviderPaths = .current) -> String? {
         guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
         return parseTopLevelValue(named: "model", from: contents)

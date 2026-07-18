@@ -1,6 +1,14 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.18 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.19 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.19 (2026-07-18, private-prebeta referral intake).** Fresh
+Malibu onboarding exposes the signed bundled referral handoff, accepts the
+canonical `https://malibu.tech/j/<code>` origin, and requires a nonblank invite
+before starting the 10–30 minute installer/model path. A healthy incumbent still
+attaches without referral intake. Signed release assembly retains the bundled
+capability only after the exact installer bytes match the signed compatibility
+manifest.
 
 **Change log v0.18 (2026-07-17, provider-update authority reconciliation).**
 SPEC-020 owns update authorization and commit semantics. The signed monotonic
@@ -294,9 +302,11 @@ From reading `phase3-binary/`:
    (`MalibuApp.swift:30-140`, `LaunchProviderController.swift:302-372`). A fresh Mac
    (no config, no launchd evidence) routes to onboarding: a single window with a
    coral **Launch Provider** button (no wallet field, no node-link step, no browser).
-   When SPEC-034 referral admission is enabled, the same window may collect a
-   referral code and syntax-check it as untrusted input. It MUST label validation
-   as local until the coordinator accepts the CLI registration attempt.
+   When SPEC-034 private-prebeta referral admission is enabled, the same window
+   MUST collect a referral code or canonical `https://malibu.tech/j/<code>`
+   invite and syntax-check it as untrusted input before starting installation.
+   It MUST label validation as local until the coordinator accepts the CLI
+   registration attempt.
 5. User clicks **Launch Provider** → `LaunchProviderController.launch()` drives a
    stage machine whose normal-success order is
    `.idle → .runningCLIInstall → .startingAgent → .live(model, tier)`

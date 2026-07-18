@@ -103,7 +103,7 @@ referrals:
   social_bonus_uses: 2
   challenge_ttl_s: 900
   social_verification_dwell_s: 1800
-  join_base_url: "https://coordinator.streamvc.live/j"
+  join_base_url: "https://malibu.tech/j"
   join_download_url: ""
   x_api_bearer_token: ""
   request_access_url: ""

@@ -6,7 +6,7 @@ final class ReferralProjectionTests: XCTestCase {
         let status = try XCTUnwrap(makeStatus(
             socialState: ReferralStatusProjection.locked,
             firstServingSeen: false,
-            inviteURL: URL(string: "https://coordinator.streamvc.live/j/CODE")
+            inviteURL: URL(string: "https://malibu.tech/j/CODE")
         ))
 
         XCTAssertNil(status.availableInviteURL)
@@ -19,7 +19,7 @@ final class ReferralProjectionTests: XCTestCase {
     func testEligibleStatusUsesExactCoordinatorCapacity() throws {
         let status = try XCTUnwrap(makeStatus())
 
-        XCTAssertEqual(status.availableInviteURL?.absoluteString, "https://coordinator.streamvc.live/j/CODE")
+        XCTAssertEqual(status.availableInviteURL?.absoluteString, "https://malibu.tech/j/CODE")
         XCTAssertEqual(ReferralPanelPresenter.capacity(status), "1 remaining · 0 redeemed · 1 total")
         XCTAssertTrue(status.canStartSocialChallenge)
     }
@@ -63,7 +63,7 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertNil(makeStatus(remaining: 2))
         XCTAssertNil(makeStatus(inviteURL: URL(string: "https://evil.example/not-j/CODE")))
         XCTAssertNil(makeStatus(inviteURL: URL(string: "https://evil.example/j/CODE")))
-        XCTAssertNil(makeStatus(inviteURL: URL(string: "https://coordinator.streamvc.live/j/OTHER")))
+        XCTAssertNil(makeStatus(inviteURL: URL(string: "https://other.example/j/OTHER")))
     }
 
     func testPendingCopyNeverClaimsBonusWasEarned() throws {
@@ -238,9 +238,9 @@ final class ReferralProjectionTests: XCTestCase {
         firstServingSeen: Bool = true,
         redemptions: Int = 0,
         remaining: Int = 1,
-        joinBaseURL: URL = URL(string: "https://coordinator.streamvc.live/j")!,
+        joinBaseURL: URL = URL(string: "https://malibu.tech/j")!,
         joinLinksEnabled: Bool = true,
-        inviteURL: URL? = URL(string: "https://coordinator.streamvc.live/j/CODE"),
+        inviteURL: URL? = URL(string: "https://malibu.tech/j/CODE"),
         observedAt: Date = Date()
     ) -> ReferralStatusProjection? {
         ReferralStatusProjection(
