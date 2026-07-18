@@ -234,7 +234,8 @@ gh workflow run acceptance-candidate.yml --repo Augustas11/macprovider \
   -f candidate_ref="$ACCEPTANCE_REF" \
   -f candidate_sha="$ACCEPTANCE_COMMIT" \
   -f tag="$TAG" \
-  -f provider_admission_policy=strict_post_migration
+  -f provider_admission_policy=strict_post_migration \
+  -f promotion_ready=true
 ```
 
 Approve the `production-release` job only after independently reviewing the
@@ -306,6 +307,71 @@ bash scripts/verify-release-checksums.sh \
   "${release_assets[@]}"
 test ! -e "$ACCEPTANCE_ASSET_DIR/checksums.txt.sig"
 ```
+
+Set `promotion_ready=true` only when the candidate may become the stable
+release after physical acceptance. That mode does not publish anything and
+does not extend the one-day private envelope. It binds
+`release-provenance.json` to `prerelease=false`, emits `pearl-release.json`
+for the `production` updater channel, and signs Pearl metadata with the
+production updater key. The private artifact still deliberately omits
+`checksums.txt.sig`.
+
+After the complete physical journey succeeds, record the SHA-256 of the exact
+accepted `checksums.txt`:
+
+```bash
+export ACCEPTED_CHECKSUMS_SHA256="$(
+  shasum -a 256 "$ACCEPTANCE_ASSET_DIR/checksums.txt" | awk '{print $1}'
+)"
+test "${#ACCEPTED_CHECKSUMS_SHA256}" = 64
+```
+
+Merge the candidate source to `main` without rebuilding or altering the
+accepted commit. The configured owner/bypass actor must then create the
+protected tag at that exact accepted commit; the workflow token is
+intentionally unable to create, move, or delete protected tags:
+
+```bash
+git fetch origin main
+git merge-base --is-ancestor "$ACCEPTANCE_COMMIT" origin/main
+test -z "$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+git tag "$TAG" "$ACCEPTANCE_COMMIT"
+git push origin "refs/tags/$TAG"
+bash scripts/verify-release-tag-target.sh \
+  "$TAG" "$ACCEPTANCE_COMMIT" origin --require-existing
+
+gh workflow run promote-acceptance-candidate.yml \
+  --repo Augustas11/macprovider \
+  --ref main \
+  -f candidate_run_id="$ACCEPTANCE_RUN_ID" \
+  -f candidate_sha="$ACCEPTANCE_COMMIT" \
+  -f tag="$TAG" \
+  -f expected_checksums_sha256="$ACCEPTED_CHECKSUMS_SHA256" \
+  -f physical_acceptance_confirmed=true
+```
+
+Approve the `production-release` environment only after comparing the run ID,
+source SHA, tag, and checksums digest with the physical evidence. The promoter
+requires one successful, unexpired artifact from the exact
+`acceptance-candidate.yml` run; verifies the signed envelope, complete
+inventory, compatibility index, production Pearl signature/channel,
+provenance, and admission policy; and requires the accepted commit to be
+reachable from `origin/main` and the owner-created tag to target that exact
+commit. It generates only the missing production `checksums.txt.sig`, uploads
+the exact accepted bytes to a numeric draft, verifies GitHub's asset digests,
+revalidates the exact tag and numeric draft immediately before the sole-owner
+publication transition, publishes it immutable, and redownloads every public
+asset for byte comparison. A separate read-only, secretless job runs the
+existing Tier-2 public release verifier; the protected promoter never checks
+out or executes candidate code. GitHub does not expose a documented
+conditional release-PATCH revision contract, so repository rules, environment
+approval, the shared production-release concurrency group, immediate
+revalidation, and a single authorized owner remain the publication exclusion
+boundary.
+
+If the private artifact has expired, the accepted checksums digest differs,
+the source commit is not merged, or any tag/release identity is ambiguous, do
+not recover around the gate. Dispatch and physically accept a new candidate.
 
 Run both acceptance paths on separate clean snapshots or hosts. First prove a
 clean bootstrap with no existing CLI or provider support directory:

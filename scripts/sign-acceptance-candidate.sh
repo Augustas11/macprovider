@@ -6,7 +6,7 @@ die() {
   exit 1
 }
 
-[[ "$#" == 10 ]] || die "usage: UNSIGNED_DIR OUTPUT_DIR REPOSITORY TAG CANDIDATE_REF CANDIDATE_COMMIT CONTROL_COMMIT RUN_ID RUN_ATTEMPT PROVIDER_ADMISSION_POLICY"
+[[ "$#" == 11 ]] || die "usage: UNSIGNED_DIR OUTPUT_DIR REPOSITORY TAG CANDIDATE_REF CANDIDATE_COMMIT CONTROL_COMMIT RUN_ID RUN_ATTEMPT PROVIDER_ADMISSION_POLICY PROMOTION_READY"
 unsigned_dir="$1"
 output_dir="$2"
 repository="$3"
@@ -17,6 +17,7 @@ control_commit="$7"
 run_id="$8"
 run_attempt="$9"
 provider_admission_policy="${10}"
+promotion_ready="${11}"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 metadata="$root/scripts/acceptance-candidate-metadata.py"
@@ -39,6 +40,16 @@ case "$provider_admission_policy" in
   bridge_required|strict_post_migration) ;;
   *) die "invalid provider admission policy" ;;
 esac
+case "$promotion_ready" in
+  true|false) ;;
+  *) die "invalid promotion-ready state" ;;
+esac
+pearl_channel=private_acceptance
+release_prerelease=true
+if [[ "$promotion_ready" == true ]]; then
+  pearl_channel=production
+  release_prerelease=false
+fi
 
 for command in python3 security codesign xcrun ditto hdiutil tar shasum spctl base64 "$openssl_bin"; do
   command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"
@@ -272,14 +283,21 @@ python3 "$metadata" build-pearl \
   --commit "$candidate_commit" \
   --compatibility-manifest "$output_dir/compatibility-set.json" \
   --provider-admission-policy "$provider_admission_policy" \
+  --channel "$pearl_channel" \
   --catalog-directory "$output_dir" \
   --coordinator "$output_dir/coordinator-linux-amd64" \
   --coordinator-cli "$output_dir/coordinator-cli-linux-amd64" \
   --gateway "$output_dir/gateway-linux-amd64" \
   --output "$output_dir/pearl-release.json"
-"$openssl_bin" dgst -sha256 -sign "$private_key" \
+pearl_signing_key="$private_key"
+pearl_verification_key="$derived_public_key"
+if [[ "$promotion_ready" == true ]]; then
+  pearl_signing_key="$release_private_key"
+  pearl_verification_key="$release_public_key"
+fi
+"$openssl_bin" dgst -sha256 -sign "$pearl_signing_key" \
   -out "$output_dir/pearl-release.json.sig" "$output_dir/pearl-release.json"
-"$openssl_bin" dgst -sha256 -verify "$derived_public_key" \
+"$openssl_bin" dgst -sha256 -verify "$pearl_verification_key" \
   -signature "$output_dir/pearl-release.json.sig" "$output_dir/pearl-release.json"
 
 artifact_arguments=(
@@ -332,7 +350,7 @@ release_assets=(
   "$output_dir/compatibility-artifact-index.json"
 )
 python3 "$root/scripts/build-release-provenance.py" \
-  "$tag" "$candidate_commit" "$repository" true \
+  "$tag" "$candidate_commit" "$repository" "$release_prerelease" \
   "$output_dir/release-toolchain.json" \
   "$output_dir/release-provenance.json" \
   "${release_assets[@]}"
