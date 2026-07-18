@@ -1036,6 +1036,32 @@
       }
     },
     {
+      "requirement_id": "SPEC-023-R001",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func isEligible(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func advisoryBenchmarkWarnings(",
+        "phase4-coordinator/internal/autotune/gate.go:func benchmarkPassesGate("
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTPSBelowSignedCatalogGateWarnsWithoutBlockingRecommendation",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTTFTAboveSignedCatalogGateWarnsWithoutBlockingRecommendation",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTPSAndTTFTSignedCatalogGateMissesWarnWithoutBlockingRecommendation",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testThermalThrottleStillHardBlocksEligibility",
+        "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateTreatsTPSAndTTFTMissesAsAdvisory",
+        "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateRejectsThermalThrottle"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/612",
+        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired here, but the requirement remains pending until a signed candidate completes the physical referral/X acceptance journey."
+      }
+    },
+    {
       "requirement_id": "SPEC-033-R001",
       "spec_id": "SPEC-033",
       "state": "pending",
