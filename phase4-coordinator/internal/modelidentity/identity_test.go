@@ -24,3 +24,21 @@ func TestLegacyMissingAlgorithmAllowedRequiresFutureExplicitDeadline(t *testing.
 		})
 	}
 }
+
+func TestValidSHA256RequiresExactWireShape(t *testing.T) {
+	valid := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for name, value := range map[string]string{
+		"exact":            valid,
+		"leading space":    " " + valid,
+		"trailing newline": valid + "\n",
+		"uppercase":        "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+		"short":            valid[:63],
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := name == "exact"
+			if got := ValidSHA256(value); got != want {
+				t.Fatalf("ValidSHA256(%q) = %v, want %v", value, got, want)
+			}
+		})
+	}
+}

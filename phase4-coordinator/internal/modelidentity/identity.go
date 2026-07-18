@@ -15,7 +15,7 @@ const (
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func ValidSHA256(value string) bool {
-	return sha256Pattern.MatchString(strings.TrimSpace(value))
+	return sha256Pattern.MatchString(value)
 }
 
 func LegacyMissingAlgorithmAllowed(until string, now time.Time) bool {

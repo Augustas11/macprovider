@@ -1083,7 +1083,6 @@ func parseOptionalIdentityString(raw map[string]json.RawMessage, field string, o
 	if err := json.Unmarshal(v, out); err != nil {
 		return true, err
 	}
-	*out = strings.TrimSpace(*out)
 	if *out == "" || len([]byte(*out)) > 128 || containsControlChar(*out) {
 		return true, fmt.Errorf("%s must be a non-empty string of at most 128 bytes", field)
 	}
@@ -1099,7 +1098,7 @@ func parseModelIdentityMetadata(
 	if err != nil {
 		return "model_hash_algorithm", err
 	}
-	if modelAlgorithmPresent && strings.TrimSpace(modelHash) == "" {
+	if modelAlgorithmPresent && modelHash == "" {
 		return "model_hash_algorithm", fmt.Errorf("model_hash_algorithm requires model_hash")
 	}
 	if modelAlgorithmPresent && *modelHashAlgorithm != modelidentity.SnapshotManifestV1 {
@@ -1281,7 +1280,7 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		if schemaVersion == 2 {
 			for _, required := range []string{
 				"coordinator_session_id", "cpu_utilization_pct", "gpu_utilization_pct", "gpu_utilization_scope", "power_source",
-				"binary_version", "compatibility_set_id", "model_hash",
+				"binary_version", "compatibility_set_id", "model_hash", "model_hash_algorithm",
 			} {
 				if _, exists := telemetryRaw[required]; !exists {
 					return Heartbeat{}, presence, "safety_telemetry." + required, fmt.Errorf("missing safety telemetry field %s", required)
@@ -1308,12 +1307,48 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		if telemetry.SchemaVersion == 2 {
 			if telemetry.CoordinatorSessionID == "" || telemetry.GPUUtilizationScope != "host" ||
 				telemetry.BinaryVersion == "" || telemetry.CompatibilitySetID == "" ||
-				telemetry.ModelHash == "" || len(telemetry.CoordinatorSessionID) > 256 ||
+				len(telemetry.CoordinatorSessionID) > 256 ||
 				len(telemetry.BinaryVersion) > maxHandshakeBinaryVersionBytes || len(telemetry.CompatibilitySetID) > 1024 ||
-				len(telemetry.ModelHash) != 64 || containsControlChar(telemetry.CoordinatorSessionID) ||
-				containsControlChar(telemetry.BinaryVersion) || containsControlChar(telemetry.CompatibilitySetID) ||
-				!isLowerHex(telemetry.ModelHash) {
+				containsControlChar(telemetry.CoordinatorSessionID) ||
+				containsControlChar(telemetry.BinaryVersion) || containsControlChar(telemetry.CompatibilitySetID) {
 				return Heartbeat{}, presence, "safety_telemetry", fmt.Errorf("invalid version 2 safety telemetry identity")
+			}
+			if telemetry.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+				return Heartbeat{}, presence, "safety_telemetry.model_hash_algorithm", fmt.Errorf("unsupported safety telemetry model_hash_algorithm")
+			}
+			if !modelidentity.ValidSHA256(telemetry.ModelHash) {
+				return Heartbeat{}, presence, "safety_telemetry.model_hash", fmt.Errorf("invalid safety telemetry model_hash")
+			}
+			if !presence.ModelHash || !presence.ModelHashAlgorithm {
+				return Heartbeat{}, presence, "safety_telemetry.model_hash", fmt.Errorf("version 2 safety telemetry requires the outer heartbeat model identity")
+			}
+			if telemetry.ModelHash != hb.ModelHash {
+				return Heartbeat{}, presence, "safety_telemetry.model_hash", fmt.Errorf("safety telemetry model_hash does not match heartbeat")
+			}
+			if telemetry.ModelHashAlgorithm != hb.ModelHashAlgorithm {
+				return Heartbeat{}, presence, "safety_telemetry.model_hash_algorithm", fmt.Errorf("safety telemetry model_hash_algorithm does not match heartbeat")
+			}
+			_, telemetryWeightsPresent := telemetryRaw["weights_manifest_sha256"]
+			_, telemetryWeightsAlgorithmPresent := telemetryRaw["weights_manifest_algorithm"]
+			if telemetryWeightsPresent != telemetryWeightsAlgorithmPresent {
+				return Heartbeat{}, presence, "safety_telemetry.weights_manifest_algorithm", fmt.Errorf("safety telemetry weights identity must be reported together")
+			}
+			if telemetryWeightsPresent {
+				if telemetry.WeightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
+					return Heartbeat{}, presence, "safety_telemetry.weights_manifest_algorithm", fmt.Errorf("unsupported safety telemetry weights_manifest_algorithm")
+				}
+				if !modelidentity.ValidSHA256(telemetry.WeightsManifestSHA256) {
+					return Heartbeat{}, presence, "safety_telemetry.weights_manifest_sha256", fmt.Errorf("invalid safety telemetry weights_manifest_sha256")
+				}
+				if !presence.WeightsManifestSHA256 || !presence.WeightsHashAlgorithm {
+					return Heartbeat{}, presence, "safety_telemetry.weights_manifest_sha256", fmt.Errorf("safety telemetry weights identity requires the outer heartbeat weights identity")
+				}
+				if telemetry.WeightsManifestSHA256 != hb.WeightsManifestSHA256 {
+					return Heartbeat{}, presence, "safety_telemetry.weights_manifest_sha256", fmt.Errorf("safety telemetry weights_manifest_sha256 does not match heartbeat")
+				}
+				if telemetry.WeightsHashAlgorithm != hb.WeightsHashAlgorithm {
+					return Heartbeat{}, presence, "safety_telemetry.weights_manifest_algorithm", fmt.Errorf("safety telemetry weights_manifest_algorithm does not match heartbeat")
+				}
 			}
 			for field, value := range map[string]*float64{
 				"cpu_utilization_pct": telemetry.CPUUtilizationPct,
