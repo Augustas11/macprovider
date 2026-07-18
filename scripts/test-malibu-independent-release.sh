@@ -6,6 +6,7 @@ workflow="$root/.github/workflows/malibu-release.yml"
 
 python3 - "$workflow" <<'PY'
 import pathlib
+import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
@@ -15,10 +16,15 @@ required = (
     "operation:",
     "physical_acceptance_confirmed:",
     "environment: production-release",
-    "CLI_TAG: v1.8.40",
-    "CLI_VERSION: 1.8.40",
-    "CLI_SHA256: 4392cfff14abc7c4ee4e8992e2f264b465f754594397bfd4f92d5859f4d77ff1",
-    "CLI_ARCHIVE_SHA256: 1eee4900109f958c95c66830f17295bfba4dfe93e0a72aa720f0ed20a9b2b918",
+    "CLI_TAG: ${{ inputs.cli_tag }}",
+    "CLI_VERSION: ${{ inputs.cli_version }}",
+    "CLI_SHA256: ${{ inputs.cli_sha256 }}",
+    "CLI_ARCHIVE_SHA256: ${{ inputs.cli_archive_sha256 }}",
+    "scripts/validate-malibu-release-cli-inputs.sh",
+    '"cli_tag": os.environ["CLI_TAG"]',
+    '"cli_version": os.environ["CLI_VERSION"]',
+    '"cli_sha256": os.environ["CLI_SHA256"]',
+    '"cli_archive_sha256": os.environ["CLI_ARCHIVE_SHA256"]',
     "codesign --verify --strict --verbose=2",
     "scripts/notarytool-submit-with-retry.sh",
     "xcrun stapler staple",
@@ -53,6 +59,19 @@ required = (
 for item in required:
     if item not in text:
         raise SystemExit(f"independent Malibu release workflow is missing: {item}")
+
+dispatch_inputs = text.split("\n    inputs:\n", 1)[1].split("\npermissions:\n", 1)[0]
+for input_name in ("cli_tag", "cli_version", "cli_sha256", "cli_archive_sha256"):
+    matches = re.findall(
+        rf"^      {re.escape(input_name)}:\n((?:        .*\n)+)",
+        dispatch_inputs,
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise SystemExit(f"release workflow must declare exactly one {input_name} input")
+    block = matches[0]
+    if "required: true" not in block:
+        raise SystemExit(f"release workflow input must fail closed when omitted: {input_name}")
 
 build = text.split("\n  build_candidate:\n", 1)[1].split("\n  sign_candidate:\n", 1)[0]
 sign = text.split("\n  sign_candidate:\n", 1)[1].split("\n  publish:\n", 1)[0]
@@ -90,6 +109,36 @@ if 'releases/tags/$tag' in make_public[:patch_position]:
     raise SystemExit("REST tag lookup cannot discover the Malibu draft release")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must remain commit-pinned")
+if "CLI_TAG: v1.8.40" in text or "CLI_VERSION: 1.8.40" in text:
+    raise SystemExit("independent Malibu release workflow must not pin an old CLI release")
+if '"cli_version": "1.8.40"' in text:
+    raise SystemExit("candidate publication must validate the dispatched CLI version")
+if text.count("scripts/validate-malibu-release-cli-inputs.sh") != 2:
+    raise SystemExit("candidate and publication paths must both validate exact CLI inputs")
+if "Malibu/CLI marketing-version equality is required" in text:
+    raise SystemExit("Malibu release workflow must not couple app and CLI marketing versions")
 
 print("independent Malibu release workflow regression checks passed")
 PY
+
+validator="$root/scripts/validate-malibu-release-cli-inputs.sh"
+valid_sha="$(printf 'a%.0s' {1..64})"
+valid_archive_sha="$(printf 'b%.0s' {1..64})"
+
+"$validator" v1.8.48 1.8.48 "$valid_sha" "$valid_archive_sha" >/dev/null
+
+expect_failure() {
+  if "$validator" "$@" >/dev/null 2>&1; then
+    echo "Malibu release CLI input validation unexpectedly succeeded: $*" >&2
+    exit 1
+  fi
+}
+
+expect_failure 1.8.48 1.8.48 "$valid_sha" "$valid_archive_sha"
+expect_failure v1.8.47 1.8.48 "$valid_sha" "$valid_archive_sha"
+expect_failure v1.8.48 1.8.47 "$valid_sha" "$valid_archive_sha"
+expect_failure v1.8.48 1.8.48 "$(printf 'A%.0s' {1..64})" "$valid_archive_sha"
+expect_failure v1.8.48 1.8.48 "${valid_sha%?}" "$valid_archive_sha"
+expect_failure v1.8.48 1.8.48 "$valid_sha" "${valid_archive_sha}0"
+
+echo "independent Malibu release CLI input validation checks passed"
