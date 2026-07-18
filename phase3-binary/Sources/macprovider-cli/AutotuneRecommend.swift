@@ -46,18 +46,13 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     /// warning surfaces the discovery-tier pricing to the operator.
     case rateCardDefaultTierUsed = "rate_card_default_tier_used"
     /// v1.7.6 Track A2a: at least one recommended candidate observed
-    /// swap pageouts during the Stage 1 probe. The candidate still
-    /// cleared TPS/TTFT gates so eligibility passes, but the operator
-    /// should be aware that heavy real-world context loads may push
-    /// this Mac into swap.
+    /// swap pageouts during the Stage 1 probe. Swap is advisory; the
+    /// operator should be aware that heavy real-world context loads may
+    /// push this Mac into swap.
     case swapObservedUnderLoad = "swap_observed_under_load"
-    /// Retained for decoding recommendation artifacts written by older
-    /// binaries. Current recommendations treat the signed catalog's
-    /// `min_sustained_tps` as a hard eligibility gate.
+    /// Advisory QoS warning when measured TPS misses the signed catalog target.
     case tpsBelowGate = "tps_below_gate"
-    /// Retained for decoding recommendation artifacts written by older
-    /// binaries. Current recommendations treat the signed catalog's
-    /// `max_4k_ttft_ms` as a hard eligibility gate.
+    /// Advisory QoS warning when measured TTFT exceeds the signed catalog target.
     case ttftAboveGate = "ttft_above_gate"
 }
 
@@ -1502,7 +1497,8 @@ struct AutotuneRecommendEngine {
                 benchmark: benchmark,
                 request: request
             )
-            let tps = benchmark?.sustainedTPS ?? 0
+            let measuredTPS = benchmark?.sustainedTPS ?? 0
+            let tps = measuredTPS.isFinite ? measuredTPS : 0
             let rateRow = rateMatch?.row
             let promptUSD = rateRow?.usdPerMillionPromptTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
             let completionUSD = rateRow?.usdPerMillionCompletionTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
@@ -1580,6 +1576,10 @@ struct AutotuneRecommendEngine {
             if rateMatch?.key == "default", target.catalogKey != "default" {
                 warnings.insert(.rateCardDefaultTierUsed)
             }
+            if let benchmark = request.benchmarks[target.catalogKey],
+               let candidate = request.candidateCatalog.rows[target.catalogKey] {
+                warnings.formUnion(Self.advisoryBenchmarkWarnings(benchmark, candidate: candidate))
+            }
             if request.benchmarks[target.catalogKey]?.swapDetected == true {
                 warnings.insert(.swapObservedUnderLoad)
             }
@@ -1625,13 +1625,9 @@ struct AutotuneRecommendEngine {
         guard candidate.minRAMGB <= request.hardware.memoryGB - Self.safetyMarginGB else { return false }
         guard request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier) else { return false }
         guard let benchmark else { return false }
-        // Keep provider-side recommendation admission identical to the
-        // coordinator's benchmark gate: TPS below the signed minimum and
-        // TTFT above the signed maximum are hard failures. Equality passes.
-        // Thermal throttling remains a separate hard block because throttled
-        // measurements are unreliable; swap remains an operator warning.
+        // SPEC-023 v0.2: signed TPS/TTFT gates are advisory QoS warnings, not
+        // eligibility vetoes. Thermal throttling remains the runtime hard block.
         return !benchmark.thermalThrottleDetected
-            && Self.benchmarkClearsSignedCatalogGates(benchmark, candidate: candidate)
             && Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
     }
 
@@ -1648,9 +1644,6 @@ struct AutotuneRecommendEngine {
         candidate: CandidateCatalog.Row?,
         request: AutotuneRecommendRequest
     ) -> Bool {
-        // Donor recommendations use the same signed performance gates so a
-        // locally-applied fallback cannot later appear network-admissible with
-        // benchmark evidence the coordinator would reject.
         guard let candidate,
               ["candidate", "listed", "recommendable"].contains(candidate.runtimeStatus),
               candidate.modelRevision != nil,
@@ -1658,21 +1651,49 @@ struct AutotuneRecommendEngine {
               candidate.minRAMGB <= request.hardware.memoryGB - safetyMarginGB,
               request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier),
               let benchmark = request.benchmarks[modelKey],
-              !benchmark.thermalThrottleDetected,
-              benchmarkClearsSignedCatalogGates(benchmark, candidate: candidate)
+              !benchmark.thermalThrottleDetected
         else {
             return false
         }
         return cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
     }
 
-    static func benchmarkClearsSignedCatalogGates(
+    static func advisoryBenchmarkWarnings(
         _ benchmark: CandidateBenchmark,
         candidate: CandidateCatalog.Row
-    ) -> Bool {
-        benchmark.sustainedTPS.isFinite
-            && benchmark.sustainedTPS >= candidate.benchGate.minSustainedTPS
-            && benchmark.ttftMS <= candidate.benchGate.max4KTTFTMS
+    ) -> Set<AutotuneRecommendWarning> {
+        var warnings = Set<AutotuneRecommendWarning>()
+        if !benchmark.sustainedTPS.isFinite || benchmark.sustainedTPS < candidate.benchGate.minSustainedTPS {
+            warnings.insert(.tpsBelowGate)
+        }
+        if benchmark.ttftMS > candidate.benchGate.max4KTTFTMS {
+            warnings.insert(.ttftAboveGate)
+        }
+        return warnings
+    }
+
+    private static func advisoryBenchmarkWarningReasons(
+        _ benchmark: CandidateBenchmark,
+        candidate: CandidateCatalog.Row
+    ) -> [String] {
+        var reasons: [String] = []
+        if !benchmark.sustainedTPS.isFinite {
+            reasons.append("TPS evidence is non-finite")
+        } else if benchmark.sustainedTPS < candidate.benchGate.minSustainedTPS {
+            reasons.append(
+                String(
+                    format: "TPS %.3f is below advisory catalog target %.3f",
+                    benchmark.sustainedTPS,
+                    candidate.benchGate.minSustainedTPS
+                )
+            )
+        }
+        if benchmark.ttftMS > candidate.benchGate.max4KTTFTMS {
+            reasons.append(
+                "TTFT \(benchmark.ttftMS)ms exceeds advisory catalog target \(candidate.benchGate.max4KTTFTMS)ms"
+            )
+        }
+        return reasons
     }
 
     static func cachedBenchmarkAdmitted(_ benchmark: CandidateBenchmark, request: AutotuneRecommendRequest, modelKey: String) -> Bool {
@@ -1715,29 +1736,16 @@ struct AutotuneRecommendEngine {
         eligible: Bool
     ) -> String {
         if eligible {
+            if let benchmark {
+                let advisoryReasons = Self.advisoryBenchmarkWarningReasons(benchmark, candidate: candidate)
+                if !advisoryReasons.isEmpty {
+                    return ("\(modelKey) eligible with advisory QoS warning: " + advisoryReasons.joined(separator: "; ")).prefixString(140)
+                }
+            }
             return "\(modelKey) has the best expected provider earnings after measured throughput, buyer demand, and supply deficit.".prefixString(140)
         }
-        if let benchmark {
-            var signedGateFailures: [String] = []
-            if !benchmark.sustainedTPS.isFinite {
-                signedGateFailures.append("TPS evidence is non-finite")
-            } else if benchmark.sustainedTPS < candidate.benchGate.minSustainedTPS {
-                signedGateFailures.append(
-                    String(
-                        format: "TPS %.3f is below signed catalog minimum %.3f",
-                        benchmark.sustainedTPS,
-                        candidate.benchGate.minSustainedTPS
-                    )
-                )
-            }
-            if benchmark.ttftMS > candidate.benchGate.max4KTTFTMS {
-                signedGateFailures.append(
-                    "TTFT \(benchmark.ttftMS)ms exceeds signed catalog maximum \(candidate.benchGate.max4KTTFTMS)ms"
-                )
-            }
-            if !signedGateFailures.isEmpty {
-                return ("\(modelKey): " + signedGateFailures.joined(separator: "; ")).prefixString(140)
-            }
+        if benchmark?.thermalThrottleDetected == true {
+            return "\(modelKey) did not clear the thermal throttle recommendation gate.".prefixString(140)
         }
         return "\(modelKey) did not clear one or more recommendation gates.".prefixString(140)
     }
