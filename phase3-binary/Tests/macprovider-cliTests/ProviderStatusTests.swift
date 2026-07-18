@@ -436,7 +436,7 @@ final class ProviderStatusTests: XCTestCase {
     }
 
     func testStatusSeparatesLiveCatalogTrustFromBuyerServing() async {
-        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let status = ProviderStatus(modelID: "model-key", modelLoaded: true, capacity: makeCapacity())
         await status.setCoordinatorSession(connected: true, assignedID: "session-a")
         let trust = ServeCommand.CatalogRuntimeTrust(
             state: "live_verified",
@@ -467,9 +467,12 @@ final class ProviderStatusTests: XCTestCase {
         )
         let catalog = body["catalog"] as? [String: Any]
 
+        XCTAssertEqual(body["model"] as? String, "model-key")
         XCTAssertEqual(body["network_state"] as? String, "buyer_serving")
         XCTAssertEqual(body["buyer_serving_authority"] as? String, "coordinator")
         XCTAssertEqual(catalog?["state"] as? String, "live_verified")
+        XCTAssertEqual(catalog?["catalog_key"] as? String, "model-key")
+        XCTAssertEqual(catalog?["model_id"] as? String, "org/model")
         XCTAssertEqual(catalog?["signer_key_id"] as? String, "streamvc-autotune-static-v5")
         XCTAssertEqual(catalog?["policy_version"] as? String, "autotune-policy-v1")
         XCTAssertEqual(catalog?["row_identity"] as? String, String(repeating: "e", count: 64))

@@ -53,11 +53,12 @@ digest = hashlib.sha256(candidate_bytes).hexdigest()
 signer = release["feeds"]["autotune-candidates.json"]["signer_key_id"]
 local = {
     "provider_id": "provider-test",
-    "model": row["model_id"],
+    "model": key,
     "network_state": "buyer_serving",
     "coordinator": {"connected": True, "session": "session-test"},
     "catalog": {
         "catalog_key": key,
+        "model_id": row["model_id"],
         "release_id": release["release_id"],
         "digest": digest,
         "signer_key_id": signer,
@@ -130,6 +131,65 @@ run_wait() {
 run_wait "$TMP/coordinator.json"
 grep -F 'details=readiness' "$TMP/curl.log" >/dev/null
 grep -F 'assigned_id=session-test' "$TMP/curl.log" >/dev/null
+
+python3 - "$TMP/local.json" "$TMP/wrong-local-model.json" <<'PY'
+import json
+import sys
+source, destination = sys.argv[1:]
+payload = json.load(open(source, encoding="utf-8"))
+payload["model"] = "different-catalog-key"
+json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+if run_wait "$TMP/coordinator.json" "$TMP/wrong-local-model.json"; then
+  echo "mismatched local model and catalog key passed admission" >&2
+  exit 1
+fi
+
+python3 - "$TMP/local.json" "$TMP/wrong-catalog-model-id.json" <<'PY'
+import json
+import sys
+source, destination = sys.argv[1:]
+payload = json.load(open(source, encoding="utf-8"))
+payload["catalog"]["model_id"] = "different/model-id"
+json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+if run_wait "$TMP/coordinator.json" "$TMP/wrong-catalog-model-id.json"; then
+  echo "mismatched catalog model ID and signed row passed admission" >&2
+  exit 1
+fi
+
+python3 - "$TMP/local.json" "$TMP" <<'PY'
+import copy
+import json
+import os
+import sys
+
+source, destination = sys.argv[1:]
+baseline = json.load(open(source, encoding="utf-8"))
+fields = {
+    "local-model": ("model",),
+    "catalog-key": ("catalog", "catalog_key"),
+    "catalog-model-id": ("catalog", "model_id"),
+}
+for label, path in fields.items():
+    for mutation, value in (("missing", None), ("null", None), ("wrong-type", [])):
+        payload = copy.deepcopy(baseline)
+        target = payload
+        for component in path[:-1]:
+            target = target[component]
+        if mutation == "missing":
+            target.pop(path[-1])
+        else:
+            target[path[-1]] = value
+        output = os.path.join(destination, f"invalid-status-{label}-{mutation}.json")
+        json.dump(payload, open(output, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+for invalid_status in "$TMP"/invalid-status-*.json; do
+  if run_wait "$TMP/coordinator.json" "$invalid_status"; then
+    echo "$(basename "$invalid_status") passed admission" >&2
+    exit 1
+  fi
+done
 
 python3 - "$TMP/coordinator.json" "$TMP/wrong-session.json" <<'PY'
 import json
@@ -239,6 +299,10 @@ if 'catalog_admission_mode") != "legacy_bridge"' not in text:
     raise SystemExit("emergency rollback is not gated on legacy_bridge buyer admission")
 if 'response.get("assigned_id") != assigned_id' not in text or 'response.get("buyer_serving") is not True' not in text:
     raise SystemExit("emergency rollback is not bound to the exact buyer-serving coordinator session")
+if 'model != key' not in text:
+    raise SystemExit("normal admission does not bind the local served model to the catalog key")
+if 'catalog_model_id != rows[key].get("model_id")' not in text:
+    raise SystemExit("normal admission does not bind the status catalog model ID to the signed row")
 
 commit_start = text.index("commit_install_transaction() {")
 commit_end = text.index("\n}\n\nrun()", commit_start)
