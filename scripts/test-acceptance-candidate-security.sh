@@ -128,6 +128,10 @@ if signer.find('"$output_dir/release-assets.txt"') > signer.find('build-checksum
     raise SystemExit("acceptance asset selector is emitted after signed checksum construction")
 if re.search(r'\$cli_work/macprovider-cli["}]?\s+--', signer):
     raise SystemExit("protected signer executes the candidate CLI")
+if "codesign --force --deep" in signer:
+    raise SystemExit("acceptance signer must preserve the already-signed embedded CLI bytes")
+if signer.count('shasum -a 256 "$app/Contents/MacOS/macprovider-cli"') != 2:
+    raise SystemExit("acceptance signer must prove embedded CLI bytes before and after outer app signing")
 for value in (
     'keychain="acceptance-signing-${run_id}-${run_attempt}-${keychain_nonce}.keychain"',
     'acceptance_keychain_capture_default || die',
