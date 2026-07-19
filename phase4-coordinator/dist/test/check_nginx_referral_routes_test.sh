@@ -24,6 +24,7 @@ test "$(grep -c 'location = /v1/referrals/validate' "$config")" -eq 1
 validate_block="$(grep -A18 'location = /v1/referrals/validate' "$config")"
 grep -q 'limit_req zone=referral_validate_rate burst=10 nodelay;' <<<"$validate_block"
 grep -q 'proxy_pass http://127.0.0.1:8443/v1/referrals/validate;' <<<"$validate_block"
+grep -q 'proxy_pass_header Access-Control-Allow-Origin;' <<<"$validate_block"
 grep -q 'proxy_no_cache 1;' <<<"$validate_block"
 grep -q 'proxy_cache_bypass 1;' <<<"$validate_block"
 grep -q 'client_max_body_size 1k;' <<<"$validate_block"
