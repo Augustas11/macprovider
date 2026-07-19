@@ -154,7 +154,7 @@ func TestAdvocacyStatusIsReadOnlyAndCannotQualifyProvider(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"social_state":"eligible"`) ||
 		!strings.Contains(response.Body.String(), `"base_capacity":1`) ||
 		!strings.Contains(response.Body.String(), `"join_base_url":"https://malibu.tech/j"`) ||
-		!strings.Contains(response.Body.String(), `"invite_url":"https://malibu.tech/j/`+qualified.Code+`"`) {
+		!strings.Contains(response.Body.String(), `"invite_url":"https://malibu.tech/j#/`+qualified.Code+`"`) {
 		t.Fatalf("qualified status=%d body=%s", response.Code, response.Body.String())
 	}
 	if after := referralMutationCount(t, store); after != before {
@@ -183,7 +183,11 @@ func createAdvocacyChallenge(t *testing.T, handler *AdvocacyHandler) (shareURL, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	challenge = parsed.Query().Get("c")
+	codeFragment, challengeValue, ok := strings.Cut(parsed.Fragment, "?c=")
+	if !ok || !strings.HasPrefix(codeFragment, "/MAL1-") {
+		t.Fatalf("share URL fragment=%q", parsed.Fragment)
+	}
+	challenge = challengeValue
 	if len(challenge) != 64 || !strings.HasPrefix(body.Intent, "https://twitter.com/intent/tweet?") {
 		t.Fatalf("challenge body=%+v", body)
 	}

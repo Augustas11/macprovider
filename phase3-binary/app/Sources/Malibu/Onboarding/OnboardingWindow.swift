@@ -206,7 +206,7 @@ private struct OnboardingRootView: View {
                 .textFieldStyle(.roundedBorder)
                 .textContentType(.oneTimeCode)
                 .disableAutocorrection(true)
-            Text("Paste the code or malibu.tech/j link from the person who invited you. Malibu passes it once to the installed CLI and never stores the provider credential.")
+            Text("Paste the code or malibu.tech/j#… link from the person who invited you. Malibu passes it once to the installed CLI and never stores the provider credential.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

@@ -182,6 +182,7 @@ struct AgentSnapshot: Equatable {
         localStatusContractCompatible == true
             && localStatusLifecycleOwner == "macprovider_cli"
             && localStatusCapabilities.contains("referral_status_v1")
+            && localStatusCapabilities.contains("referral_fragment_links_v1")
             && localStatusCapabilities.contains("service_instance_v1")
             && serviceRole == "serve"
             && localProviderID != nil

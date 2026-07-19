@@ -46,6 +46,14 @@ func validationPolicy() auth.ReferralPolicy {
 	}
 }
 
+func validationRequest(method, body string) *http.Request {
+	request := httptest.NewRequest(method, "/v1/referrals/validate", strings.NewReader(body))
+	if method == http.MethodPost {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	return request
+}
+
 func TestValidationHandlerReturnsStableReasonWithoutReserving(t *testing.T) {
 	metrics := &validationMetrics{}
 	h := &ValidationHandler{
@@ -70,7 +78,7 @@ func TestValidationHandlerReturnsStableReasonWithoutReserving(t *testing.T) {
 		{`{"code":"good"}`, `"valid":true`},
 		{`{"code":"expired"}`, `"reason":"expired"`},
 	} {
-		req := httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(tc.body))
+		req := validationRequest(http.MethodPost, tc.body)
 		response := httptest.NewRecorder()
 		h.ServeHTTP(response, req)
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), tc.want) {
@@ -93,7 +101,7 @@ func TestValidationHandlerOptionalAccessURLCoversDisabledAndCanBeOmitted(t *test
 			RequestAccessURL: " https://access.example.test/waitlist ",
 		}
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":""}`)))
+		h.ServeHTTP(response, validationRequest(http.MethodPost, `{"code":""}`))
 		if response.Code != http.StatusOK ||
 			!strings.Contains(response.Body.String(), `"reason":"disabled"`) ||
 			!strings.Contains(response.Body.String(), `"request_access_url":"https://access.example.test/waitlist"`) {
@@ -110,7 +118,7 @@ func TestValidationHandlerOptionalAccessURLCoversDisabledAndCanBeOmitted(t *test
 			PublicLimiter: NewBoundedLimiter(10, time.Minute, 10),
 		}
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":"bad"}`)))
+		h.ServeHTTP(response, validationRequest(http.MethodPost, `{"code":"bad"}`))
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"reason":"invalid"`) {
 			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 		}
@@ -126,12 +134,12 @@ func TestValidationHandlerKeepsDisabledRouteBounded(t *testing.T) {
 		PublicLimiter: NewBoundedLimiter(1, time.Minute, 1),
 	}
 	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":""}`)))
+	h.ServeHTTP(first, validationRequest(http.MethodPost, `{"code":""}`))
 	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"reason":"disabled"`) {
 		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
 	}
 	second := httptest.NewRecorder()
-	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":""}`)))
+	h.ServeHTTP(second, validationRequest(http.MethodPost, `{"code":""}`))
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
 	}
@@ -142,7 +150,7 @@ func TestValidationHandlerFailsClosedWhenAuthorityMissing(t *testing.T) {
 		Policy:        validationPolicy(),
 		PublicLimiter: NewBoundedLimiter(1, time.Minute, 1),
 	}
-	request := httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":"x"}`))
+	request := validationRequest(http.MethodPost, `{"code":"x"}`)
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
@@ -161,12 +169,85 @@ func TestValidationHandlerDoesNotMisreportOperationalFailureAsInvalidCode(t *tes
 		Metrics:       metrics,
 	}
 	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":"well-formed"}`)))
+	h.ServeHTTP(response, validationRequest(http.MethodPost, `{"code":"well-formed"}`))
 	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), `"reason":"invalid"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	if !containsValidationEvent(metrics.events, "validate/unavailable") {
 		t.Fatalf("metrics=%v", metrics.events)
+	}
+}
+
+func TestValidationHandlerAllowsOnlyExactMalibuBrowserOrigin(t *testing.T) {
+	h := &ValidationHandler{
+		Store: validationStoreFunc(func(string) (auth.ReferralValidation, error) {
+			return auth.ReferralValidation{Valid: true, Reason: "valid"}, nil
+		}),
+		Policy:        validationPolicy(),
+		PublicLimiter: NewBoundedLimiter(10, time.Minute, 10),
+	}
+
+	preflight := validationRequest(http.MethodOptions, "")
+	preflight.Header.Set("Origin", validationBrowserOrigin)
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	preflight.Header.Set("Access-Control-Request-Headers", "content-type")
+	preflightResponse := httptest.NewRecorder()
+	h.ServeHTTP(preflightResponse, preflight)
+	if preflightResponse.Code != http.StatusNoContent ||
+		preflightResponse.Header().Get("Access-Control-Allow-Origin") != validationBrowserOrigin ||
+		preflightResponse.Header().Get("Access-Control-Allow-Credentials") != "" ||
+		preflightResponse.Header().Get("Access-Control-Max-Age") != "300" {
+		t.Fatalf("preflight status=%d headers=%v", preflightResponse.Code, preflightResponse.Header())
+	}
+
+	allowed := validationRequest(http.MethodPost, `{"code":"good"}`)
+	allowed.Header.Set("Origin", validationBrowserOrigin)
+	allowedResponse := httptest.NewRecorder()
+	h.ServeHTTP(allowedResponse, allowed)
+	if allowedResponse.Code != http.StatusOK ||
+		allowedResponse.Header().Get("Access-Control-Allow-Origin") != validationBrowserOrigin {
+		t.Fatalf("allowed status=%d headers=%v body=%s", allowedResponse.Code, allowedResponse.Header(), allowedResponse.Body.String())
+	}
+
+	for _, origin := range []string{
+		"https://www.malibu.tech",
+		"https://malibu.tech.evil.test",
+		"http://malibu.tech",
+		"null",
+	} {
+		request := validationRequest(http.MethodPost, `{"code":"good"}`)
+		request.Header.Set("Origin", origin)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden || response.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Fatalf("origin=%q status=%d headers=%v", origin, response.Code, response.Header())
+		}
+	}
+}
+
+func TestValidationHandlerRequiresJSONWithoutBreakingNativeClients(t *testing.T) {
+	h := &ValidationHandler{
+		Store: validationStoreFunc(func(string) (auth.ReferralValidation, error) {
+			return auth.ReferralValidation{Valid: true, Reason: "valid"}, nil
+		}),
+		Policy:        validationPolicy(),
+		PublicLimiter: NewBoundedLimiter(10, time.Minute, 10),
+	}
+	for _, contentType := range []string{"", "text/plain", "application/x-www-form-urlencoded"} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", strings.NewReader(`{"code":"good"}`))
+		request.Header.Set("Content-Type", contentType)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, request)
+		if response.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("content-type=%q status=%d body=%s", contentType, response.Code, response.Body.String())
+		}
+	}
+
+	native := validationRequest(http.MethodPost, `{"code":"good"}`)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, native)
+	if response.Code != http.StatusOK || response.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("native status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
 }
 

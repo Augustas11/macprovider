@@ -393,7 +393,7 @@ struct ReferralCoordinatorClient: Sendable {
 
     private static func isValidInviteURL(_ raw: String, code: String, expectedJoinBaseURL: URL) -> Bool {
         guard let inviteURL = URL(string: raw),
-              let expected = URL(string: expectedJoinBaseURL.absoluteString + "/" + code) else { return false }
+              let expected = URL(string: expectedJoinBaseURL.absoluteString + "#/" + code) else { return false }
         return inviteURL == expected
     }
 
@@ -402,10 +402,15 @@ struct ReferralCoordinatorClient: Sendable {
               components.scheme == "https",
               components.host?.lowercased() == expectedInviteURL.host?.lowercased(),
               components.port == expectedInviteURL.port,
-              components.user == nil, components.password == nil, components.fragment == nil,
+              components.user == nil, components.password == nil,
               components.path == expectedInviteURL.path,
-              let items = components.queryItems,
-              items.count == 1, items[0].name == "c", let challenge = items[0].value,
+              components.query == nil,
+              components.percentEncodedFragment == components.fragment,
+              let expectedFragment = URLComponents(url: expectedInviteURL, resolvingAgainstBaseURL: false)?.fragment,
+              let fragment = components.fragment,
+              fragment.hasPrefix(expectedFragment + "?c=") else { return nil }
+        let challenge = String(fragment.dropFirst(expectedFragment.count + 3))
+        guard !challenge.contains("?"), !challenge.contains("&"),
               isChallenge(challenge) else { return nil }
         return challenge
     }
@@ -445,10 +450,13 @@ struct ReferralCoordinatorClient: Sendable {
         guard raw.count <= 2048, let components = URLComponents(string: raw),
               components.scheme == "https", components.host?.isEmpty == false,
               components.user == nil, components.password == nil,
-              components.query == nil, components.fragment == nil else { return false }
+              components.query == nil,
+              components.percentEncodedFragment == components.fragment,
+              let fragment = components.fragment,
+              fragment.hasPrefix("/") else { return false }
         let parts = components.path.split(separator: "/", omittingEmptySubsequences: true)
-        guard parts.count >= 2, parts[parts.count - 2] == "j" else { return false }
-        return isInviteCode(String(parts[parts.count - 1]))
+        guard parts.last == "j", !fragment.dropFirst().contains("/") else { return false }
+        return isInviteCode(String(fragment.dropFirst()))
     }
 
     static func isValidXPostURL(_ raw: String) -> Bool {

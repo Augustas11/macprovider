@@ -9,7 +9,13 @@ final class ReferralOnboardingTests: XCTestCase {
     func testNormalizesExactCodeAndCanonicalJoinLink() throws {
         XCTAssertEqual(try ReferralOnboardingInput.normalize(validCode), validCode)
         XCTAssertEqual(
-            try ReferralOnboardingInput.normalize("https://malibu.tech/j/\(validCode)"),
+            try ReferralOnboardingInput.normalize("https://malibu.tech/j#/\(validCode)"),
+            validCode
+        )
+        XCTAssertEqual(
+            try ReferralOnboardingInput.normalize(
+                "https://malibu.tech/j#/\(validCode)?c=\(String(repeating: "a", count: 64))"
+            ),
             validCode
         )
         XCTAssertNil(try ReferralOnboardingInput.normalize("  \n"))
@@ -22,10 +28,12 @@ final class ReferralOnboardingTests: XCTestCase {
             "https://coordinator.streamvc.live/j/\(validCode)",
             "https://user@malibu.tech/j/\(validCode)",
             "https://malibu.tech:443/j/\(validCode)",
-            "https://malibu.tech/j/\(validCode)?next=evil",
-            "https://malibu.tech/j/%4D\(validCode.dropFirst())",
+            "https://malibu.tech/j#/\(validCode)?next=evil",
+            "https://malibu.tech/j#/\(validCode)?c=\(String(repeating: "a", count: 64))&next=evil",
+            "https://malibu.tech/j#/\(validCode)?c=\(String(repeating: "A", count: 64))",
+            "https://malibu.tech/j#/%4D\(validCode.dropFirst())",
             "https://malibu.tech//j/\(validCode)",
-            "https://malibu.tech/j/\(validCode)/",
+            "https://malibu.tech/j#/\(validCode)/",
             validCode.lowercased(),
         ] {
             XCTAssertThrowsError(try ReferralOnboardingInput.normalize(input), input)

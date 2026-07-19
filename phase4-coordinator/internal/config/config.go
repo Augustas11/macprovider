@@ -729,7 +729,6 @@ type ReferralConfig struct {
 	ChallengeTTLS            int               `yaml:"challenge_ttl_s"`
 	SocialVerificationDwellS int               `yaml:"social_verification_dwell_s"`
 	JoinBaseURL              string            `yaml:"join_base_url"`
-	JoinDownloadURL          string            `yaml:"join_download_url"`
 	XAPIBearerToken          string            `yaml:"x_api_bearer_token"`
 	RequestAccessURL         string            `yaml:"request_access_url"`
 }
@@ -1873,10 +1872,7 @@ func (c Config) validateCompatibilitySet() error {
 	return nil
 }
 
-var (
-	referralConfigPartPattern      = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
-	referralDownloadVersionPattern = regexp.MustCompile(`(^|[-_/])v?[0-9]+[.][0-9]+[.][0-9]+([-_.]|$)`)
-)
+var referralConfigPartPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
 
 func (c Config) validateReferrals() error {
 	r := c.Referrals
@@ -1884,30 +1880,28 @@ func (c Config) validateReferrals() error {
 	// referral gate is disabled, so validate it independently of launch flags.
 	if raw := strings.TrimSpace(r.RequestAccessURL); raw != "" {
 		reqURL, err := url.Parse(raw)
-		if err != nil || reqURL.Scheme != "https" || reqURL.Host == "" || reqURL.User != nil {
-			return fmt.Errorf("referrals.request_access_url must be an absolute https URL without credentials when set")
-		}
-	}
-	if raw := strings.TrimSpace(r.JoinDownloadURL); raw != "" {
-		downloadURL, err := url.Parse(raw)
-		if err != nil || downloadURL == nil {
-			return fmt.Errorf("referrals.join_download_url must be a fixed absolute https URL without credentials, query, fragment, trailing slash, or a moving latest path")
-		}
-		lowerPath := strings.ToLower(downloadURL.Path)
-		if downloadURL.Scheme != "https" || downloadURL.Host == "" || downloadURL.User != nil || downloadURL.RawQuery != "" || downloadURL.Fragment != "" || strings.HasSuffix(downloadURL.Path, "/") || strings.Contains(lowerPath, "latest") || !referralDownloadVersionPattern.MatchString(downloadURL.Path) {
-			return fmt.Errorf("referrals.join_download_url must be a fixed, versioned absolute https URL without credentials, query, fragment, trailing slash, or a moving latest path")
+		if err != nil ||
+			reqURL.Scheme != "https" ||
+			reqURL.Host == "" ||
+			reqURL.User != nil ||
+			reqURL.Port() != "" ||
+			reqURL.Fragment != "" ||
+			reqURL.EscapedPath() == "" ||
+			reqURL.Hostname() != strings.ToLower(reqURL.Hostname()) ||
+			reqURL.String() != raw {
+			return fmt.Errorf("referrals.request_access_url must be a canonical absolute https URL without credentials, port, or fragment when set")
 		}
 	}
 	if r.EnableJoinLinks {
 		if !r.RequireForRegistration {
 			return fmt.Errorf("referrals.enable_join_links requires require_for_registration=true")
 		}
-		if strings.TrimSpace(r.JoinDownloadURL) == "" {
-			return fmt.Errorf("referrals.join_download_url must be set when join links are enabled")
+		if !r.EnablePublicValidation {
+			return fmt.Errorf("referrals.enable_join_links requires enable_public_validation=true")
 		}
 	}
-	if r.EnableSocialInviteBonus && (!r.RequireForRegistration || !r.EnableJoinLinks) {
-		return fmt.Errorf("referrals.enable_social_invite_bonus requires referral admission and join links")
+	if r.EnableSocialInviteBonus && (!r.RequireForRegistration || !r.EnableJoinLinks || !r.EnablePublicValidation) {
+		return fmt.Errorf("referrals.enable_social_invite_bonus requires referral admission, public validation, and join links")
 	}
 	if !r.RequireForRegistration && !r.EnablePublicValidation && !r.EnableJoinLinks && !r.EnableSocialInviteBonus {
 		return nil
@@ -1946,9 +1940,8 @@ func (c Config) validateReferrals() error {
 			return fmt.Errorf("referrals.x_api_bearer_token must be set when social invite bonus is enabled")
 		}
 	}
-	joinURL, err := url.Parse(strings.TrimSpace(r.JoinBaseURL))
-	if err != nil || joinURL.Scheme != "https" || joinURL.Host == "" || joinURL.User != nil || joinURL.RawQuery != "" || joinURL.ForceQuery || joinURL.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinURL.Path, "/"), "/j") {
-		return fmt.Errorf("referrals.join_base_url must be a credential-free absolute https URL ending in /j")
+	if strings.TrimSpace(r.JoinBaseURL) != "https://malibu.tech/j" {
+		return fmt.Errorf("referrals.join_base_url must be exactly https://malibu.tech/j")
 	}
 	return nil
 }

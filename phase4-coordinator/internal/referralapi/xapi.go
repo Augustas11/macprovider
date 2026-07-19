@@ -180,12 +180,11 @@ func ShareURLDigest(raw, joinBaseURL string) (string, error) {
 }
 
 func parseJoinBaseURL(raw string) (*url.URL, error) {
-	joinBase, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
-	if err != nil || joinBase.Scheme != "https" || joinBase.Host == "" || joinBase.User != nil ||
-		joinBase.RawQuery != "" || joinBase.ForceQuery || joinBase.Fragment != "" || !strings.HasSuffix(strings.TrimRight(joinBase.Path, "/"), "/j") {
-		return nil, errors.New("join base URL must be a credential-free absolute https URL ending in /j")
+	const canonicalJoinBaseURL = "https://malibu.tech/j"
+	if strings.TrimSpace(raw) != canonicalJoinBaseURL {
+		return nil, errors.New("join base URL must be exactly https://malibu.tech/j")
 	}
-	return joinBase, nil
+	return url.Parse(canonicalJoinBaseURL)
 }
 
 func describesProtectedOrPrivatePost(body []byte) bool {
@@ -213,20 +212,25 @@ func describesProtectedOrPrivatePost(body []byte) bool {
 func canonicalShareURL(raw string, joinBase *url.URL) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || joinBase == nil || joinBase.Scheme != "https" || joinBase.Host == "" ||
-		u.Scheme != joinBase.Scheme || !strings.EqualFold(u.Host, joinBase.Host) || u.User != nil || u.ForceQuery || u.Fragment != "" {
+		u.Scheme != joinBase.Scheme || !strings.EqualFold(u.Host, joinBase.Host) || u.User != nil ||
+		u.ForceQuery || u.RawQuery != "" || u.Path != joinBase.Path ||
+		u.EscapedPath() != joinBase.EscapedPath() || !strings.HasPrefix(u.Fragment, "/") ||
+		u.EscapedFragment() != u.Fragment {
 		return "", errors.New("invalid share url")
 	}
-	wantPrefix := strings.TrimRight(joinBase.EscapedPath(), "/") + "/MAL1-"
-	if !strings.HasPrefix(u.EscapedPath(), wantPrefix) {
+	fragment := strings.TrimPrefix(u.Fragment, "/")
+	code, challenge, ok := strings.Cut(fragment, "?c=")
+	if !ok || !strings.HasPrefix(code, "MAL1-") || code == "" || len(code) > 256 ||
+		strings.ContainsAny(code, "/?&#%") || !socialChallengePattern.MatchString(challenge) {
 		return "", errors.New("invalid share url")
 	}
-	query := u.Query()
-	challenges, ok := query["c"]
-	if !ok || len(query) != 1 || len(challenges) != 1 || !socialChallengePattern.MatchString(challenges[0]) {
-		return "", errors.New("invalid share url")
-	}
-	u.Scheme = joinBase.Scheme
-	u.Host = joinBase.Host
-	u.RawQuery = query.Encode()
-	return u.String(), nil
+	return fragmentShareURL(joinBase.String(), code, challenge), nil
+}
+
+func fragmentInviteURL(joinBaseURL, code string) string {
+	return strings.TrimRight(strings.TrimSpace(joinBaseURL), "/") + "#/" + url.PathEscape(code)
+}
+
+func fragmentShareURL(joinBaseURL, code, challenge string) string {
+	return fragmentInviteURL(joinBaseURL, code) + "?c=" + url.QueryEscape(challenge)
 }

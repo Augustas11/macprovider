@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.0",
+      "version": "1.9.2",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -692,7 +692,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.19",
+      "version": "v0.21",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -943,7 +943,7 @@
     {
       "spec_id": "SPEC-034",
       "title": "Referral admission, provider invites, and advocacy rewards",
-      "version": "v0.4.2",
+      "version": "v0.4.5",
       "path": "specs/SPEC-034-referral-gated-prebeta.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1217,6 +1217,31 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/613",
         "rationale": "The signed 42efce21 acceptance candidate proved that both authenticated provider hardware-profile UPSERT paths failed under the intended provider_onboarding column-limited grants. This PR repairs the SQL without widening authority; conformance remains pending until a replacement signed candidate completes the physical referral journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-034-R001",
+      "spec_id": "SPEC-034",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/referralapi/xapi.go:parseJoinBaseURL",
+        "phase4-coordinator/internal/referralapi/validate.go:ValidationHandler",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:referral_fragment_links_v1",
+        "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:hasTrustedReferralBoundary"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/referralapi/xapi_test.go:TestNewXAPIClientRejectsUnsafeJoinBase",
+        "phase4-coordinator/internal/referralapi/validate_test.go:TestValidationHandlerAllowsOnlyExactMalibuBrowserOrigin",
+        "phase3-binary/Tests/macprovider-cliTests/ReferralCoordinatorClientTests.swift::testXPostURLValidationMatchesCoordinatorBoundary",
+        "phase3-binary/app/Tests/MalibuTests/ReferralProjectionTests.swift::testReferralBoundaryNegotiatesByCapabilityNotMarketingVersion"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested; conformance remains pending until the signed production deployment completes the real-X dwell reward and the missing fresh referred-provider journey."
       }
     }
   ]

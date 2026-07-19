@@ -6,7 +6,7 @@ final class ReferralProjectionTests: XCTestCase {
         let status = try XCTUnwrap(makeStatus(
             socialState: ReferralStatusProjection.locked,
             firstServingSeen: false,
-            inviteURL: URL(string: "https://malibu.tech/j/CODE")
+            inviteURL: URL(string: "https://malibu.tech/j#/CODE")
         ))
 
         XCTAssertNil(status.availableInviteURL)
@@ -19,14 +19,14 @@ final class ReferralProjectionTests: XCTestCase {
     func testEligibleStatusUsesExactCoordinatorCapacity() throws {
         let status = try XCTUnwrap(makeStatus())
 
-        XCTAssertEqual(status.availableInviteURL?.absoluteString, "https://malibu.tech/j/CODE")
+        XCTAssertEqual(status.availableInviteURL?.absoluteString, "https://malibu.tech/j#/CODE")
         XCTAssertEqual(ReferralPanelPresenter.capacity(status), "1 remaining · 0 redeemed · 1 total")
         XCTAssertTrue(status.canStartSocialChallenge)
     }
 
     func testInviteMayUseCoordinatorDeclaredPublicJoinDomain() throws {
         let joinBaseURL = try XCTUnwrap(URL(string: "https://malibu.tech/j"))
-        let inviteURL = try XCTUnwrap(URL(string: "https://malibu.tech/j/CODE"))
+        let inviteURL = try XCTUnwrap(URL(string: "https://malibu.tech/j#/CODE"))
         let status = try XCTUnwrap(makeStatus(
             joinBaseURL: joinBaseURL,
             inviteURL: inviteURL
@@ -202,7 +202,7 @@ final class ReferralProjectionTests: XCTestCase {
         snapshot.cliVersion = "99.1"
         snapshot.localStatusContractCompatible = true
         snapshot.localStatusLifecycleOwner = "macprovider_cli"
-        snapshot.localStatusCapabilities = ["referral_status_v1", "service_instance_v1", "status_observation_v1"]
+        snapshot.localStatusCapabilities = ["referral_status_v1", "referral_fragment_links_v1", "service_instance_v1", "status_observation_v1"]
         snapshot.localProviderID = "provider-1"
         snapshot.serviceRole = "serve"
         snapshot.statusObservationID = "obs"
@@ -215,6 +215,9 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertTrue(snapshot.hasTrustedReferralBoundary())
         snapshot.localStatusCapabilities.remove("referral_status_v1")
         XCTAssertFalse(snapshot.hasTrustedReferralBoundary())
+        snapshot.localStatusCapabilities.insert("referral_status_v1")
+        snapshot.localStatusCapabilities.remove("referral_fragment_links_v1")
+        XCTAssertFalse(snapshot.hasTrustedReferralBoundary())
     }
 
     private func trustedReferralSnapshot() -> AgentSnapshot {
@@ -224,6 +227,7 @@ final class ReferralProjectionTests: XCTestCase {
         snapshot.localStatusCapabilities = [
             "referral_status_v1",
             "referral_advocacy_v1",
+            "referral_fragment_links_v1",
             "service_instance_v1",
             "status_observation_v1",
         ]
@@ -240,7 +244,7 @@ final class ReferralProjectionTests: XCTestCase {
         remaining: Int = 1,
         joinBaseURL: URL = URL(string: "https://malibu.tech/j")!,
         joinLinksEnabled: Bool = true,
-        inviteURL: URL? = URL(string: "https://malibu.tech/j/CODE"),
+        inviteURL: URL? = URL(string: "https://malibu.tech/j#/CODE"),
         observedAt: Date = Date()
     ) -> ReferralStatusProjection? {
         ReferralStatusProjection(

@@ -47,14 +47,14 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 
 func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	disabled := withReferralValidation(base, nil, nil)
+	disabled := withReferralValidation(base, nil)
 	disabledResponse := httptest.NewRecorder()
 	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
 	if disabledResponse.Code != http.StatusNoContent {
 		t.Fatalf("disabled validation route unexpectedly mounted: status=%d", disabledResponse.Code)
 	}
 
-	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }, nil)
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
@@ -103,25 +103,13 @@ func (f appTrackReferralMintReconcilerFunc) ReconcilePendingAppTrackReferralMint
 	return f(ctx)
 }
 
-func TestWithReferralValidationMountsJoinRouteOnlyWhenEnabled(t *testing.T) {
+func TestWithReferralValidationNeverMountsLegacyCredentialPath(t *testing.T) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	disabled := withReferralValidation(base, nil, nil)
-	disabledResponse := httptest.NewRecorder()
-	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
-	if disabledResponse.Code != http.StatusNoContent {
-		t.Fatalf("disabled join route unexpectedly mounted: status=%d", disabledResponse.Code)
-	}
-
-	handler := withReferralValidation(
-		base,
-		nil,
-		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) },
-	)
-
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("join status=%d", response.Code)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("legacy join route unexpectedly mounted: status=%d", response.Code)
 	}
 }
 

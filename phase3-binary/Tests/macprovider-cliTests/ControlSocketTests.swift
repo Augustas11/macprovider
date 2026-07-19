@@ -197,7 +197,7 @@ final class ControlSocketTests: XCTestCase {
             joinLinksEnabled: true,
             socialBonusEnabled: true,
             inviteCode: "invite-1",
-            inviteURL: "https://join.example/j/invite-1",
+            inviteURL: "https://join.example/j#/invite-1",
             observedAt: "2027-01-15T08:00:00.000Z",
             pendingChallenge: ReferralPendingAdvocacy(
                 expiresAt: "2027-01-15T08:10:00.000Z"

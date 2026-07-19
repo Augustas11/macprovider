@@ -64,7 +64,7 @@ func TestXAPIRefusesRedirectsAndOversizedResponses(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(body)),
 		}, nil
 	})}
-	if _, err := client.VerifyPost(context.Background(), "123", "https://malibu.tech/j/MAL1-P-k1-issuer-TAG?c="+strings.Repeat("a", 64)); !errors.Is(err, ErrXPostTransient) {
+	if _, err := client.VerifyPost(context.Background(), "123", "https://malibu.tech/j#/MAL1-P-k1-issuer-TAG?c="+strings.Repeat("a", 64)); !errors.Is(err, ErrXPostTransient) {
 		t.Fatalf("oversized response err=%v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestXAPIRefusesRedirectsAndOversizedResponses(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader("{}")),
 		}, nil
 	})}
-	if _, err := client.VerifyPost(context.Background(), "123", "https://malibu.tech/j/MAL1-P-k1-issuer-TAG?c="+strings.Repeat("a", 64)); !errors.Is(err, ErrXPostTransient) {
+	if _, err := client.VerifyPost(context.Background(), "123", "https://malibu.tech/j#/MAL1-P-k1-issuer-TAG?c="+strings.Repeat("a", 64)); !errors.Is(err, ErrXPostTransient) {
 		t.Fatalf("content-type response err=%v", err)
 	}
 }
@@ -91,7 +91,7 @@ func mustURL(t *testing.T, raw string) *url.URL {
 
 func TestXAPIUsesFixedOriginAndRequiresAuthorAndExactInviteEntity(t *testing.T) {
 	challenge := strings.Repeat("a", 64)
-	wantShare := "https://malibu.tech/j/MAL1-P-k1-issuer-TAG?c=" + challenge
+	wantShare := "https://malibu.tech/j#/MAL1-P-k1-issuer-TAG?c=" + challenge
 	client := mustXClient(t, "secret", "https://malibu.tech/j")
 	client.client = &http.Client{Transport: xRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.Host != "api.x.com" || request.Host != "api.x.com" {
@@ -124,6 +124,20 @@ func TestXAPIUsesFixedOriginAndRequiresAuthorAndExactInviteEntity(t *testing.T) 
 	if _, err := canonicalShareURL(wantShare+"?", client.joinBase); err == nil {
 		t.Fatal("canonical share URL accepted malformed duplicate query")
 	}
+	for _, hostile := range []string{
+		"https://malibu.tech/j#MAL1-P-k1-issuer-TAG?c=" + challenge,
+		"https://malibu.tech/j#//MAL1-P-k1-issuer-TAG?c=" + challenge,
+		"https://malibu.tech/j#/%2fMAL1-P-k1-issuer-TAG?c=" + challenge,
+		"https://malibu.tech/j?c=" + challenge + "#/MAL1-P-k1-issuer-TAG?c=" + challenge,
+		wantShare + "&c=" + challenge,
+		wantShare + "&next=evil",
+		wantShare + "/suffix",
+		"https://malibu.tech/j/MAL1-P-k1-issuer-TAG?c=" + challenge,
+	} {
+		if _, err := canonicalShareURL(hostile, client.joinBase); err == nil {
+			t.Fatalf("canonical share URL accepted hostile alias %q", hostile)
+		}
+	}
 	digest, err := ShareURLDigest(wantShare, "https://malibu.tech/j")
 	if err != nil || len(digest) != 64 {
 		t.Fatalf("share URL digest=%q err=%v", digest, err)
@@ -132,7 +146,7 @@ func TestXAPIUsesFixedOriginAndRequiresAuthorAndExactInviteEntity(t *testing.T) 
 
 func TestXAPIRejectsResponseIdentityAndAuthorMismatch(t *testing.T) {
 	challenge := strings.Repeat("a", 64)
-	wantShare := "https://malibu.tech/j/MAL1-P-k1-issuer-TAG?c=" + challenge
+	wantShare := "https://malibu.tech/j#/MAL1-P-k1-issuer-TAG?c=" + challenge
 	client := mustXClient(t, "secret", "https://malibu.tech/j")
 	for _, payload := range []string{
 		`{"data":{"id":"999","author_id":"456","entities":{"urls":[{"expanded_url":"` + wantShare + `"}]}}}`,
@@ -179,7 +193,7 @@ func TestXAPIClassifiesOnlyConfirmedUnavailablePostsAsTerminal(t *testing.T) {
 
 func TestXAPIRecheckRequiresOriginalExactInviteURL(t *testing.T) {
 	challenge := strings.Repeat("a", 64)
-	original := "https://malibu.tech/j/MAL1-P-k1-issuer-TAG?c=" + challenge
+	original := "https://malibu.tech/j#/MAL1-P-k1-issuer-TAG?c=" + challenge
 	digest, err := ShareURLDigest(original, "https://malibu.tech/j")
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +207,7 @@ func TestXAPIRecheckRequiresOriginalExactInviteURL(t *testing.T) {
 	if author, err := client.RecheckPost(context.Background(), "123", digest); err != nil || author != "456" {
 		t.Fatalf("unchanged author=%q err=%v", author, err)
 	}
-	postURL = "https://malibu.tech/j/MAL1-P-k1-other-TAG?c=" + challenge
+	postURL = "https://malibu.tech/j#/MAL1-P-k1-other-TAG?c=" + challenge
 	if _, err := client.RecheckPost(context.Background(), "123", digest); !errors.Is(err, ErrXPostTerminal) {
 		t.Fatalf("changed invite error=%v", err)
 	}
@@ -211,6 +225,10 @@ func TestNewXAPIClientRejectsUnsafeJoinBase(t *testing.T) {
 		"https://malibu.tech/j?",
 		"https://malibu.tech/j#fragment",
 		"https://malibu.tech/invite",
+		"https://evil.test/j",
+		"https://malibu.tech:443/j",
+		"https://MALIBU.tech/j",
+		"https://malibu.tech/j/",
 	} {
 		if _, err := NewXAPIClient("secret", raw); err == nil {
 			t.Fatalf("accepted unsafe join base %q", raw)

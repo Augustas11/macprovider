@@ -952,25 +952,10 @@ func main() {
 		referralValidation := newReferralValidationHandler(tokenStore, referralPolicy, trustedReferralProxies, cfg.Referrals.RequestAccessURL, metricsHandle)
 		referralValidationHandler = referralValidation.ServeHTTP
 	}
-	var referralJoinHandler http.HandlerFunc
-	if cfg.Referrals.EnableJoinLinks {
-		referralJoin := &referralapi.JoinHandler{
-			Store:            tokenStore,
-			Policy:           referralPolicy,
-			PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
-			ValidateSlots:    make(chan struct{}, 4),
-			RequestAccessURL: cfg.Referrals.RequestAccessURL,
-			DownloadURL:      cfg.Referrals.JoinDownloadURL,
-			SourceIP: func(r *http.Request) string {
-				return onboarding.ClientIP(r, trustedReferralProxies)
-			},
-			ErrorLogger: func(op string, err error) {
-				logger.Error().Err(err).Str("op", op).Msg("referral join failed")
-			},
-		}
-		referralJoinHandler = referralJoin.ServeHTTP
-	}
-	buyerHandler = withReferralValidation(buyerHandler, referralValidationHandler, referralJoinHandler)
+	// Public invite credentials live exclusively in the browser fragment at
+	// malibu.tech/j. The coordinator exposes only body-based validation and
+	// must not mount the legacy credential-bearing /j/<code> route.
+	buyerHandler = withReferralValidation(buyerHandler, referralValidationHandler)
 	var referralStatus, referralChallenge, referralVerify http.HandlerFunc
 	if cfg.Referrals.RequireForRegistration {
 		advocacy := &referralapi.AdvocacyHandler{
@@ -1480,17 +1465,12 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	return mux
 }
 
-func withReferralValidation(base http.Handler, validate, join http.HandlerFunc) http.Handler {
-	if validate == nil && join == nil {
+func withReferralValidation(base http.Handler, validate http.HandlerFunc) http.Handler {
+	if validate == nil {
 		return base
 	}
 	mux := http.NewServeMux()
-	if validate != nil {
-		mux.HandleFunc("/v1/referrals/validate", validate)
-	}
-	if join != nil {
-		mux.HandleFunc("/j/", join)
-	}
+	mux.HandleFunc("/v1/referrals/validate", validate)
 	mux.Handle("/", base)
 	return mux
 }
