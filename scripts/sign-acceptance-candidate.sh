@@ -213,13 +213,16 @@ rm -f "$cli_notary"
 install -m 0755 "$cli_work/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
 install -m 0644 "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
 cmp "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
-codesign --force --deep \
+embedded_cli_sha256="$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
+codesign --force \
   --options runtime \
   --timestamp \
   --entitlements "$root/phase3-binary/app/Malibu.entitlements" \
   --keychain "$keychain" \
   --sign "$signing_identity" \
   "$app"
+[[ "$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')" == "$embedded_cli_sha256" ]] ||
+  die "outer Malibu signing changed the already-signed embedded CLI"
 codesign --verify --strict --verbose=2 --deep "$app"
 app_notary="$signing_tmp/Malibu-notary.zip"
 /usr/bin/ditto -c -k --keepParent "$app" "$app_notary"
