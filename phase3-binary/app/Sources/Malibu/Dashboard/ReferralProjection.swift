@@ -220,7 +220,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
 
     private static func isCanonicalInvite(_ url: URL, code: String, joinBaseURL: URL) -> Bool {
         guard isSafeInviteCode(code),
-              let expected = URL(string: joinBaseURL.absoluteString + "/" + code) else { return false }
+              let expected = URL(string: joinBaseURL.absoluteString + "#/" + code) else { return false }
         return url == expected
     }
 

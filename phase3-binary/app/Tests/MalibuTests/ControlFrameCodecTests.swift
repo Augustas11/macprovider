@@ -32,7 +32,7 @@ final class ControlFrameCodecTests: XCTestCase {
             joinLinksEnabled: true,
             socialBonusEnabled: true,
             inviteCode: "invite-123",
-            inviteURL: URL(string: "https://malibu.tech/j/invite-123"),
+            inviteURL: URL(string: "https://malibu.tech/j#/invite-123"),
             observedAt: observedAt,
             pendingChallenge: pending
         )!
@@ -232,7 +232,7 @@ final class ControlFrameCodecTests: XCTestCase {
             "join_links_enabled": true,
             "social_bonus_enabled": true,
             "invite_code": "CODE",
-            "invite_url": "https://malibu.tech/j/CODE",
+            "invite_url": "https://malibu.tech/j#/CODE",
             "observed_at": formatter.string(from: observedAt),
             "pending_challenge": ["expires_at": formatter.string(from: expiresAt)],
         ]

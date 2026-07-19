@@ -104,7 +104,6 @@ referrals:
   challenge_ttl_s: 900
   social_verification_dwell_s: 1800
   join_base_url: "https://malibu.tech/j"
-  join_download_url: ""
   x_api_bearer_token: ""
   request_access_url: ""
 
@@ -304,4 +303,4 @@ providers:
 # legacy cohort (DECISION_CRITERIA Entry 161). Setting this value does not, and
 # must not, re-arm the legacy binary-only updater.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.48"
+  latest_binary_version: "1.8.49"

@@ -112,7 +112,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         let harness = Harness()
         let controller = freshController(harness)
         let code = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
-        controller.referralInput = "https://malibu.tech/j/\(code)"
+        controller.referralInput = "https://malibu.tech/j#/\(code)"
 
         await controller.launch()
 

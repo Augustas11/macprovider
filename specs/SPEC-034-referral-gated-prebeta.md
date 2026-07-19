@@ -1,12 +1,23 @@
 # SPEC-034 — Referral admission, provider invites, and advocacy rewards
 
-Version: v0.4.2
-Status: recovery implementation; production activation prohibited
+Version: v0.4.5
+Status: recovery implementation; production activation prohibited except §8 one-time exception
 Owner: coordinator admission and referral services
 Product parent: https://github.com/MalibuAI/malibu/issues/46
 
 Changelog:
 
+- v0.4.5 (2026-07-19): adds stable requirement `SPEC-034-R001` for
+  fragment-only public referral authority, capability negotiation, immutable
+  download gating, and reversible activation.
+- v0.4.4 (2026-07-19): adds `referral_fragment_links_v1` as the fail-closed
+  negotiation boundary for the breaking URL grammar, makes reviewed Vercel
+  source the sole fixed download authority, and removes the obsolete Cloudflare
+  path/query edge authority and coordinator `join_download_url`.
+- v0.4.3 (2026-07-19): moves invite codes and X challenges into the exact
+  `https://malibu.tech/j#/<code>[?c=<challenge>]` fragment grammar, keeps them
+  out of website/CDN/referrer request URLs, and requires direct exact-origin
+  JSON validation against the coordinator.
 - v0.4.2 (2026-07-18): makes `https://malibu.tech/j` the canonical public
   invite origin and requires a referral before any expensive work in a fresh
   private-prebeta Malibu or direct installer journey. Restart-safe incumbents
@@ -52,7 +63,7 @@ capacity.
 ## 2. Canonical provider journey
 
 1. A user obtains a valid operator seed code or canonical provider invite URL
-   `https://malibu.tech/j/<code>`.
+   `https://malibu.tech/j#/<code>`.
 2. Malibu accepts the code as untrusted input and performs only bounded syntax
    validation. It does not claim server validity.
 3. Malibu invokes a supported signed installed-CLI/install onboarding
@@ -95,6 +106,14 @@ capacity.
     and rollback recover from durable state without deleting a working identity,
     starting another provider process, or duplicating a redemption or award.
 
+`SPEC-034-R001` — Public referral and X-share URLs MUST use the exact
+`https://malibu.tech/j#/<code>[?c=<challenge>]` fragment contract. The
+coordinator, CLI, and Malibu MUST reject legacy or alternate authorities;
+Malibu MUST require `referral_fragment_links_v1`; Vercel production MUST fail
+closed until the exact public immutable Malibu release, manifest, checksum, and
+DMG bytes agree; and activation or rollback MUST follow §8 without treating the
+one-time Air exception as #613 conformance.
+
 ## 3. State and authority matrix
 
 | State field | Authoritative writer | Durable source of truth | Reader / consumer | Idempotency key | Recovery behavior | User-visible state | Acceptance test |
@@ -106,7 +125,7 @@ capacity.
 | Provider bearer | Coordinator mints; CLI takes custody | Coordinator token store for verification; CLI Keychain for runtime custody | CLI and coordinator only | Provider/token uniqueness within the registration transaction | Persist-before-use; never disclose to Malibu, argv, token-fd, UI, or logs | Redacted credential condition only | Secret scan and process inspection find no Malibu bearer |
 | Referral policy | Coordinator/operator | Versioned coordinator configuration | Admission, reconciler, APIs, operator tooling | Config revision + campaign | Flags default false; disabling restores the prior admission policy and preserves committed state | `disabled` or `unavailable`, not zero balance | Missing/false flags leave incumbents unaffected |
 | Public code validation | Coordinator/operator deployment | `referrals.enable_public_validation` config, default false | HTTP router and edge/deploy checks | Config revision | False means `/v1/referrals/validate` is not mounted; CLI bootstrap still validates codes authoritatively | Local syntax-only or `unavailable` until activated | Default/off route absent; enabled route is bounded and rate-limited; rollback removes exposure |
-| Public join exposure | Coordinator/operator deployment | `referrals.enable_join_links` config, default false, plus reviewed route/download configuration | HTTP router, nginx/deploy checks, status/operator tooling | Config revision | False means `/j/` is not mounted and no open-beta or `latest.dmg` CTA is served; rollback returns to route absence without deleting issuers | Link unavailable until explicitly activated | Default/off route is 404; enabled route validates codes; disable rollback removes exposure |
+| Public join exposure | Coordinator/operator deployment | `referrals.enable_join_links` config, default false, plus reviewed Vercel route and fixed download configuration | Coordinator projection, Vercel `/j` page, status/operator tooling | Config revision | False means no invite URL is projected; rollback suppresses links without deleting issuers | Link unavailable until explicitly activated | Default/off status omits links; enabled page validates through the bounded body-only endpoint; disable rollback removes exposure |
 | Issuer and code | Coordinator/operator seed path or serving reconciler | Auth SQLite issuer row plus keyed code digest and policy version | Admission gate, join resolver, status, operator tooling | `(campaign, issuer_id)`; provider issuer additionally `(campaign, provider_id)` | Duplicate qualification is a no-op; raw code is not stored where a digest suffices | `locked`, `available`, `expired`, `revoked`, `exhausted` | Duplicate qualification creates one issuer |
 | Code validity | Coordinator | Issuer row, keyed digest, expiry, revocation, campaign, capacity | Admission transaction | Campaign + code digest | Invalid/expired/revoked/exhausted consumes nothing and returns a stable typed reason | Exact truthful failure with retry guidance | Valid, invalid, expired, revoked, exhausted cases have expected side effects |
 | Redemption and attribution | Coordinator | Auth SQLite redemption, referral-admission decision, bootstrap identity, token, and mint-log rows | Auth bootstrap, later operational admission, status, operator audit | `(campaign, referred_provider_id)` plus exact receipt key and same-code digest equality | Same code/provider/key is idempotent; different code conflicts; bootstrap commitment leaves no half-state but does not itself create a routable session | `credential_committed`; not yet operational | Concurrent last-capacity redemption produces one bootstrap winner and no pool entry |
@@ -115,7 +134,7 @@ capacity.
 | Buyer-serving display | CLI from its authoritative lifecycle | Versioned local `/v1/status` projection | Malibu | Status contract/capability + observation identity | Local-ready alone never implies reward qualification | `buyer_serving` only when CLI reports it | Malibu/CLI restart does not invent eligibility |
 | First-serving evidence | Buyer/coordinator settlement system | Closed `settlement_receipt_verdicts` row with verified outcome and valid receipt per SPEC-022 | Coordinator referral reconciler; status reads are observational | Receipt/request identity; qualification `(campaign, provider_id)` | Pending, invalid, or duplicate evidence grants nothing; reconciler retries safely | `locked_until_first_serving` until durable qualification | No invite before evidence; one invite after first verified receipt; replay no-op |
 | First-serving qualification | Coordinator reconciler | Issuer/qualification row with evidence reference and earliest qualifying time | Status, operator audit, invite service | `(campaign, provider_id)` conditional insert/update | Preserve earliest authoritative evidence under duplicates/out-of-order delivery | `eligible` with evidence-derived timestamp | Two reconcilers and duplicate evidence create one base grant |
-| Invite balance and link | Coordinator | Issuer base/bonus capacity minus committed redemptions plus configured HTTPS `join_base_url` | Authenticated CLI API, Malibu sanitized projection, `/j/<code>` resolver | Issuer/campaign and redemption IDs | Read is side-effect free; CLI and Malibu accept only the exact `join_base_url/<code>` projection; retry never decrements twice | Available, exhausted, disabled, or unavailable with exact remaining count | A public join origin distinct from the coordinator is accepted only when coordinator status declares it; redemption decrements exactly once |
+| Invite balance and link | Coordinator | Issuer base/bonus capacity minus committed redemptions plus configured HTTPS `join_base_url` | Authenticated CLI API, Malibu sanitized projection, `/j#/<code>` landing page | Issuer/campaign and redemption IDs | Read is side-effect free; CLI and Malibu accept only the exact `join_base_url#/<code>` projection; retry never decrements twice | Available, exhausted, disabled, or unavailable with exact remaining count | A public join origin distinct from the coordinator is accepted only when coordinator status declares it; redemption decrements exactly once |
 | X challenge | Coordinator | Hashed challenge, expiry, provider/campaign binding, issued/consumed times; CLI-owned 0600 pending-challenge journal holds the raw challenge, exact invite URL, and composer intent | CLI and verification service; Malibu sees expiry/state only | One active `(campaign, provider_id)` challenge + random digest | Replacement/expiry is explicit; CLI restores or reopens only after a fresh status read confirms social rewards and the exact invite binding; raw challenge, share URL, and composer intent never cross into Malibu | `challenge_ready`, `expired`, or retryable failure | Duplicate request and restart respect challenge and rate limits; flag disable or join/code rotation clears local pending state; local frames contain no nonce or intent URL |
 | X submission | Coordinator | Positively verified canonical post ID/URL digest and provider/campaign/challenge binding; terminal failures use a separate provider-scoped failure row | Verification/recheck worker, audit, status | Verified post ID is globally unique; terminal failure uses `(campaign, provider_id, challenge_digest, post_id)` without reserving the post globally | Duplicate same submission converges; a positively verified reused post or author mismatch rejects; an unverified rejected post cannot deny another provider's later legitimate verification | `pending`, `failed`, or `matured` with truthful reason | Success, bad URL, wrong author, wrong link, replay, cross-provider rejected-post reuse, and rate-limit cases |
 | X verification decision | Coordinator server-side verifier | Current verification or terminal-failure row plus append-only social decision audit | Bonus transaction, status, security/operator review | Verification attempt/event UUID and expected prior state | External transient failure is retryable; terminal failure is stable and response-loss safe without claiming global ownership of unverified evidence; redirects and untrusted origins fail closed | Pending/retryable/terminal failure separated | Audit records challenge, submit, recheck, decision, and redacted cause |
@@ -166,15 +185,21 @@ reconciler; a status GET MUST be read-only and MUST NOT be the action that creat
 an issuer or awards capacity.
 
 The first qualifying evidence creates/unlocks the provider issuer with the
-configured base capacity exactly once. An invite link resolves to a bounded
-landing surface only when the independent `referrals.enable_join_links` flag is
-true. The flag defaults false. When false, the coordinator does not mount `/j/`
-and nginx/deploy behavior returns route absence; it MUST NOT expose an open-beta
-page, `latest.dmg`, download, or redirect. Rollback disables the route without
-deleting referral state. Any download target is separate reviewed configuration,
-never a hard-coded moving release. Operator seed creation, replacement,
-adjustment, and revocation require actor/reason, dry-run where applicable,
-compare-and-swap protection, and append-only audit.
+configured base capacity exactly once. An invite link is projected only when the
+independent `referrals.enable_join_links` flag is true. The flag defaults false.
+The Vercel `/j` document is inert without a valid fragment, contains no
+third-party runtime, clears the fragment before coordinator or other
+credential-dependent network activity, and validates the code by direct
+exact-origin JSON POST to the coordinator. Static same-origin CSS/module
+requests may precede the scrub because browser fragments are not part of those
+HTTP requests. The coordinator
+MUST NOT mount the legacy credential-bearing `/j/<code>` route. Rollback
+suppresses link projection without deleting referral state. The download target
+is a fixed reviewed release owned by reviewed Vercel source, never a moving
+`latest` URL, and deployment MUST fail until that exact signed/notarized public
+asset exists. The coordinator has no second download-URL authority. Operator seed creation,
+replacement, adjustment, and revocation require actor/reason, dry-run where
+applicable, compare-and-swap protection, and append-only audit.
 
 ## 6. Advocacy and X reward
 
@@ -237,7 +262,9 @@ interface. The CLI owns all authenticated coordinator calls and exposes only a
 sanitized owner-only control-socket projection under `referral_status_v1`.
 Typed challenge/verify/cancel/reopen actions additionally require
 `referral_advocacy_v1`; a status-capable CLI without that capability remains
-read-only. Malibu and CLI marketing versions are independent;
+read-only. All referral projection and actions additionally require
+`referral_fragment_links_v1`; its absence suppresses referral UI rather than
+falling back to the legacy path/query grammar. Malibu and CLI marketing versions are independent;
 compatibility is negotiated by advertised protocol capabilities and schema
 versions. Missing or unknown capability means unavailable, never an inferred
 zero balance or eligibility decision.
@@ -255,7 +282,7 @@ this fresh-only prompt and continues its existing update/recovery path.
 Authenticated referral status includes a credential-free HTTPS
 `join_base_url` ending in `/j`; it may intentionally use a public host different
 from the coordinator API. The CLI validates the coordinator's invite URL as the
-exact `join_base_url/<code>` value and Malibu repeats that fail-closed binding on
+exact `join_base_url#/<code>` value and Malibu repeats that fail-closed binding on
 the sanitized projection. Malibu refreshes status no faster than once per 60
 seconds, stops presenting it as current after 90 seconds, and clears it when the
 owner-only control connection closes. Social-only rollback suppresses advocacy
@@ -307,6 +334,26 @@ then submits an X post and receives the bonus exactly once after server-side
 verification. Process inspection proves one provider process per Mac and secret
 inspection proves Malibu never holds the bearer. Only this complete result may
 authorize a later activation PR.
+
+One narrow exception applies only to the owner-authorized 2026-07-19
+fragment-link activation recorded in Decision Entry 172. Because the second
+acceptance Mac is unavailable, the controlled order is: deploy the exact signed
+client assets, coordinator, and Vercel source while flags remain off; keep the
+existing sponsor buyer-serving; enable public validation and join links; prove
+hostile-origin rejection, fragment-free edge requests, and Copy → Download →
+Paste; enable the social flag only for the sponsor test; then prove one real X
+initial-plus-dwell exactly-once reward. Passing that sequence may keep the
+reversible private-prebeta flags live. Any failure or expiry restores the prior
+values of `require_for_registration`, `enable_public_validation`,
+`enable_join_links`, and `enable_social_invite_bonus` immediately. This
+exception MUST NOT close #613, mark the two-Mac journey conformant, claim
+fresh-provider redemption evidence, or become precedent for another release.
+The first available fresh referred provider MUST complete the missing
+redemption journey. This exception expires at `2026-07-26T23:59:59Z`, on
+terminal success or failure of that first fresh referred-provider journey, or
+on any earlier controlled-sequence failure, whichever occurs first; keeping or
+re-enabling flags afterward requires the complete #613 journey or a new
+reviewed normative decision.
 
 ## 9. Recovery stack
 

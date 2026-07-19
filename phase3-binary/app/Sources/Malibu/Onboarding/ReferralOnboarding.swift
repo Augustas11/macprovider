@@ -7,7 +7,7 @@ enum ReferralOnboardingInput {
         case invalidCodeOrLink
 
         var errorDescription: String? {
-            "Enter a valid Malibu invite code or a https://malibu.tech/j/ invite link."
+            "Enter a valid Malibu invite code or a https://malibu.tech/j#/ invite link."
         }
     }
 
@@ -28,22 +28,27 @@ enum ReferralOnboardingInput {
               components.password == nil,
               components.port == nil,
               components.query == nil,
-              components.fragment == nil else {
+              components.percentEncodedPath == "/j",
+              components.percentEncodedFragment == components.fragment,
+              let fragment = components.fragment,
+              fragment.hasPrefix("/") else {
             throw ValidationError.invalidCodeOrLink
         }
-        let segments = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: true)
-        guard segments.count == 2,
-              segments[0] == "j",
-              !segments[1].contains("%"),
-              isValidCode(String(segments[1])),
-              components.percentEncodedPath == "/j/\(segments[1])" else {
+        let payload = String(fragment.dropFirst())
+        let pieces = payload.components(separatedBy: "?c=")
+        guard (pieces.count == 1 || (pieces.count == 2 && isChallenge(pieces[1]))),
+              isValidCode(pieces[0]) else {
             throw ValidationError.invalidCodeOrLink
         }
-        return String(segments[1])
+        return pieces[0]
     }
 
     static func isValidCode(_ value: String) -> Bool {
         value.range(of: codePattern, options: .regularExpression) != nil
+    }
+
+    private static func isChallenge(_ value: String) -> Bool {
+        value.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
     }
 }
 

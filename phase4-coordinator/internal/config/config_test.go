@@ -58,7 +58,7 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 	}
 }
 
-func TestReferralJoinLinksRequireAdmissionAndFixedDownload(t *testing.T) {
+func TestReferralJoinLinksRequireAdmissionAndPublicValidation(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Referrals.EnableJoinLinks = true
@@ -70,26 +70,12 @@ func TestReferralJoinLinksRequireAdmissionAndFixedDownload(t *testing.T) {
 	cfg.Referrals.Campaign = "prebeta_2026"
 	cfg.Referrals.CurrentKeyID = "k1"
 	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "join_download_url must be set") {
-		t.Fatalf("join without download error=%v", err)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires enable_public_validation") {
+		t.Fatalf("join without public validation error=%v", err)
 	}
-
-	cfg.Referrals.JoinDownloadURL = "https://download.malibu.tech/releases/Malibu-1.9.0.dmg"
+	cfg.Referrals.EnablePublicValidation = true
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("fixed join download URL: %v", err)
-	}
-
-	cfg.Referrals.EnableJoinLinks = false
-	cfg.Referrals.RequireForRegistration = false
-	for _, raw := range []string{
-		"https://download.malibu.tech/latest.dmg",
-		"https://download.malibu.tech/releases/Malibu-latest.dmg",
-		"https://download.malibu.tech/releases/Malibu.dmg",
-	} {
-		cfg.Referrals.JoinDownloadURL = raw
-		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "fixed, versioned") {
-			t.Fatalf("moving join download %q error=%v", raw, err)
-		}
+		t.Fatalf("join with admission and public validation: %v", err)
 	}
 }
 
@@ -97,16 +83,16 @@ func TestReferralSocialBonusRequiresDarkStackAndConfiguredDwell(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Referrals.EnableSocialInviteBonus = true
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires referral admission and join links") {
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires referral admission, public validation, and join links") {
 		t.Fatalf("social without server stack error=%v", err)
 	}
 
 	cfg.Referrals.RequireForRegistration = true
 	cfg.Referrals.EnableJoinLinks = true
+	cfg.Referrals.EnablePublicValidation = true
 	cfg.Referrals.Campaign = "prebeta_2026"
 	cfg.Referrals.CurrentKeyID = "k1"
 	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
-	cfg.Referrals.JoinDownloadURL = "https://download.malibu.tech/releases/Malibu-1.9.0.dmg"
 	cfg.Referrals.XAPIBearerToken = "secret"
 	cfg.Referrals.SocialBonusUses = 2
 	cfg.Referrals.ChallengeTTLS = 900
@@ -120,8 +106,21 @@ func TestReferralSocialBonusRequiresDarkStackAndConfiguredDwell(t *testing.T) {
 	}
 
 	cfg.Referrals.JoinBaseURL = "https://user:secret@malibu.tech/j"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "credential-free") {
-		t.Fatalf("credentialed join URL error=%v", err)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "exactly https://malibu.tech/j") {
+		t.Fatalf("noncanonical join URL error=%v", err)
+	}
+
+	for _, raw := range []string{
+		"https://evil.test/j",
+		"https://malibu.tech:443/j",
+		"https://MALIBU.tech/j",
+		"https://malibu.tech/j/",
+		"https://malibu.tech/other/j",
+	} {
+		cfg.Referrals.JoinBaseURL = raw
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "exactly https://malibu.tech/j") {
+			t.Fatalf("join_base_url=%q error=%v", raw, err)
+		}
 	}
 }
 
@@ -130,6 +129,10 @@ func TestReferralRequestAccessURLMustBeCredentialFreeHTTPSEvenWhenGateIsOff(t *t
 		"http://access.example.test/waitlist",
 		"/relative-access",
 		"https://user:secret@access.example.test/waitlist",
+		"https://access.example.test:443/waitlist",
+		"https://access.example.test/waitlist#invite",
+		"https://ACCESS.example.test/waitlist",
+		"https://access.example.test",
 	} {
 		cfg := Default()
 		cfg.Auth.OperatorKey = "operator-key"

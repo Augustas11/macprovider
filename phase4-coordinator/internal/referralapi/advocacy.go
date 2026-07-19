@@ -123,8 +123,7 @@ func (h *AdvocacyHandler) HandleChallenge(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusServiceUnavailable, "challenge_unavailable", "social challenge temporarily unavailable")
 		return
 	}
-	shareURL := strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" +
-		url.PathEscape(challenge.Code) + "?c=" + url.QueryEscape(challenge.Cleartext)
+	shareURL := fragmentShareURL(h.JoinBaseURL, challenge.Code, challenge.Cleartext)
 	copy := "My Mac just joined @malibuonbase’s pre-beta compute network. If you have a Mac and want early access: " + shareURL
 	h.observe("challenge", "created")
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -205,8 +204,7 @@ func (h *AdvocacyHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "referral_locked", "provider invite is not available")
 		return
 	}
-	expectedURL := strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" +
-		url.PathEscape(status.Code) + "?c=" + url.QueryEscape(request.Challenge)
+	expectedURL := fragmentShareURL(h.JoinBaseURL, status.Code, request.Challenge)
 	shareURLHash, err := ShareURLDigest(expectedURL, h.JoinBaseURL)
 	if err != nil {
 		h.observe("x_verify", "error")
@@ -335,7 +333,7 @@ func (h *AdvocacyHandler) writeStatus(w http.ResponseWriter, status auth.Provide
 		body["invite_code"] = status.Code
 	}
 	if status.Code != "" && h.JoinLinksEnabled {
-		body["invite_url"] = strings.TrimRight(strings.TrimSpace(h.JoinBaseURL), "/") + "/" + url.PathEscape(status.Code)
+		body["invite_url"] = fragmentInviteURL(h.JoinBaseURL, status.Code)
 	}
 	writeJSON(w, http.StatusOK, body)
 }

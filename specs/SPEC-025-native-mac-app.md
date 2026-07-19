@@ -1,10 +1,22 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.19 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.21 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.21 (2026-07-19, fragment capability negotiation).** Malibu
+requires `referral_fragment_links_v1` in addition to the referral status/action
+capabilities before rendering any referral UI. This fails closed for already
+shipped CLIs that accept only the superseded path/query grammar. Malibu advances
+independently to 1.8.43; the fragment-aware CLI advances independently to
+1.8.49.
+
+**Change log v0.20 (2026-07-19, fragment-only referral links).** Malibu accepts
+only the exact `https://malibu.tech/j#/<code>[?c=<challenge>]` grammar, strips
+an optional X challenge before onboarding, and rejects the legacy
+credential-bearing path/query shape.
 
 **Change log v0.19 (2026-07-18, private-prebeta referral intake).** Fresh
 Malibu onboarding exposes the signed bundled referral handoff, accepts the
-canonical `https://malibu.tech/j/<code>` origin, and requires a nonblank invite
+canonical `https://malibu.tech/j#/<code>` origin, and requires a nonblank invite
 before starting the 10–30 minute installer/model path. A healthy incumbent still
 attaches without referral intake. Signed release assembly retains the bundled
 capability only after the exact installer bytes match the signed compatibility
@@ -37,7 +49,7 @@ explicitly replaces it.
 
 **Change log v0.16 (2026-07-16, referral projection hardening).** The CLI
 projects the coordinator-authenticated public `join_base_url` and Malibu accepts
-only its exact `/j/<code>` invite, even when that public origin differs from the
+only its exact `/j#/<code>` invite, even when that public origin differs from the
 coordinator API host. Raw X challenges, share URLs, composer intents, and the
 provider bearer remain CLI-only. Malibu refreshes referral status at a bounded
 60-second cadence, expires it after 90 seconds, and clears it on control-channel
@@ -50,7 +62,9 @@ supported versioned onboarding request. The CLI performs registration and all
 authenticated coordinator referral operations, retains identity and bearer
 custody, and projects sanitized coordinator-authored referral state under a
 `referral_status_v1` capability; typed social actions additionally require
-`referral_advocacy_v1`. Malibu never receives the bearer, calls
+`referral_advocacy_v1`. All referral UI additionally requires
+`referral_fragment_links_v1`; its absence means unavailable rather than a
+legacy-link fallback. Malibu never receives the bearer, calls
 referral coordinator APIs directly, infers serving/invite eligibility, or starts
 a provider child. Malibu and CLI marketing versions are independent; local
 protocol capabilities and schema versions, not marketing-version equality,
@@ -303,7 +317,7 @@ From reading `phase3-binary/`:
    (no config, no launchd evidence) routes to onboarding: a single window with a
    coral **Launch Provider** button (no wallet field, no node-link step, no browser).
    When SPEC-034 private-prebeta referral admission is enabled, the same window
-   MUST collect a referral code or canonical `https://malibu.tech/j/<code>`
+   MUST collect a referral code or canonical `https://malibu.tech/j#/<code>`
    invite and syntax-check it as untrusted input before starting installation.
    It MUST label validation as local until the coordinator accepts the CLI
    registration attempt.
@@ -411,7 +425,8 @@ time (60–240 s for the first model) in the background.
   not send `switch_request`. Model selection is owned by `install.sh` / autotune
   and the CLI.
 - Referral UI is likewise capability-gated: Malibu renders the sanitized CLI
-  control-socket projection only when the CLI advertises `referral_status_v1`.
+  control-socket projection only when the CLI advertises `referral_status_v1`
+  and `referral_fragment_links_v1`.
   Typed challenge/verify/cancel/reopen actions additionally require
   `referral_advocacy_v1`; a status-capable CLI without that capability remains
   read-only. Malibu does not persist referral policy, read credentials, call

@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.0 (2026-07-16, referral bootstrap and sanitized status capability)
+**Version:** 1.9.2 (2026-07-19, fragment referral capability)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,19 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.9.2 (2026-07-19, fragment referral capability):** A
+fragment-aware CLI advertises `referral_fragment_links_v1` in addition to the
+status/action capabilities. Malibu suppresses all referral UI without it, so an
+already-shipped path/query client cannot falsely negotiate the incompatible
+fragment grammar. The first such CLI release is 1.8.49; this does not couple the
+independently versioned Malibu app to the CLI marketing version.
+
+**Change log v1.9.1 (2026-07-19, fragment-only referral links):** Public
+invite and X-share credentials use the exact
+`join_base_url#/<invite_code>[?c=<challenge>]` grammar so website, CDN, and
+referrer request URLs never contain referral material. The CLI rejects the
+legacy path/query form and validates the fragment before projecting it.
 
 **Change log v1.9.0 (2026-07-16, SPEC-034 integration):**
 - The v1 `hello` and v2 initial/proof `auth_request` bootstrap shapes gain an
@@ -1043,7 +1056,8 @@ The local `GET /v1/status` response includes a versioned envelope. Contract v1 h
 only fields a reader may trust through these capabilities:
 `buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
 `status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`,
-`referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`, and
+`referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`,
+`referral_fragment_links_v1`, and
 `legacy_reader_fallback_v1`. A reader MUST suppress a typed field when its capability
 is absent and MUST suppress all typed fields when the minimum reader exceeds its
 supported version. An absent envelope is the legacy-reader path.
@@ -1053,7 +1067,7 @@ supported version. An absent envelope is the legacy-reader path.
   "version": 1,
   "minimum_reader_version": 1,
   "lifecycle_owner": "macprovider_cli",
-  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1", "referral_bootstrap_v1", "referral_status_v1", "referral_advocacy_v1"]
+  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1", "referral_bootstrap_v1", "referral_status_v1", "referral_advocacy_v1", "referral_fragment_links_v1"]
 },
 "observation": {
   "id": "per-response UUID",
@@ -1114,7 +1128,7 @@ Malibu obtains that projection over the owner-only provider control socket with
   "first_serving_seen": true,
   "social_bonus_enabled": false,
   "invite_code": "shareable-code",
-  "invite_url": "https://configured-public-origin/j/shareable-code",
+  "invite_url": "https://configured-public-origin/j#/shareable-code",
   "observed_at": "RFC 3339 timestamp",
   "pending_challenge": {
     "expires_at": "RFC 3339 timestamp"
@@ -1130,16 +1144,22 @@ the complete typed `referral_challenge_request`,
 `referral_challenge_cancel_request` flows and their response/error frames.
 Malibu requires both capabilities before presenting any advocacy mutation; a
 status-capable CLI without `referral_advocacy_v1` remains read-only.
+`referral_fragment_links_v1` is additionally required for any referral UI and
+asserts that generation, projection, onboarding, and X verification use the
+exact fragment grammar. Its absence makes referral status unavailable rather
+than falling back to the legacy path/query representation.
 
-The invite URL is a shareable product artifact, not a credential; all other
-secrets and raw onboarding inputs remain omitted. A successful status response
+The invite URL is a shareable admission capability, distinct from the provider
+bearer; it remains reusable referral material and MUST stay out of request URLs,
+logs, storage, and diagnostics. All provider secrets and raw onboarding inputs
+remain omitted. A successful status response
 MUST contain the campaign, join base, social state, counts, serving/social
 booleans, and observation time. Invite code/URL and pending challenge are
 optional. Coordinator/authentication/unavailability failures use the typed
 `referral_error` frame; they MUST NOT be converted into zero balances or local
 eligibility. `join_base_url` MUST be credential-free HTTPS and end in `/j`
 without a trailing slash. When invite code and URL are present, `invite_url`
-MUST equal the exact `join_base_url/<invite_code>` value supplied by the
+MUST equal the exact `join_base_url#/<invite_code>` value supplied by the
 authenticated coordinator status. Malibu repeats that exact binding before
 presenting or copying the invite. `revoked` is distinct from `failed`:
 revocation is an authoritative issuer/policy action, while failure is a

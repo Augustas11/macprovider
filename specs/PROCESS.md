@@ -140,8 +140,11 @@ repository audit lanes at 0 CRITICAL, 0 HIGH, and 0 MEDIUM.
 A release may advance only when every affected requirement is conformant and
 all required journey evidence is current. The physical release gate tracked by
 GitHub issue #613 is the execution surface; this process does not create a
-competing waiver path. Missing, stale, skipped, or failed evidence blocks
-promotion.
+competing general waiver path. A one-time limited activation exception is valid
+only when the affected normative SPEC and decision log both name its exact
+scope, evidence, rollback, expiry, and unresolved journey. Such an exception
+cannot mark the missing evidence conformant or close #613. Missing, stale,
+skipped, or failed evidence otherwise blocks promotion.
 
 Every PR body contains exactly one raw, marker-delimited JSON declaration:
 

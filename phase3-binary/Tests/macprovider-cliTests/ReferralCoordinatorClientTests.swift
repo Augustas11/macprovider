@@ -40,7 +40,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         let body = statusJSON
             .replacingOccurrences(of: #""join_links_enabled":true"#, with: #""join_links_enabled":false"#)
             .replacingOccurrences(
-                of: #","invite_url":"https://malibu.tech/j/invite-1""#,
+                of: #","invite_url":"https://malibu.tech/j#/invite-1""#,
                 with: ""
             )
         let client = try makeClient(session: mockSession { request in
@@ -76,7 +76,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
 
     func testStatusRejectsInviteOutsideCoordinatorDeclaredJoinBase() async throws {
         let body = statusJSON.replacingOccurrences(
-            of: "https://malibu.tech/j/invite-1",
+            of: "https://malibu.tech/j#/invite-1",
             with: "https://phishing.example/j/invite-1"
         )
         let client = try makeClient(session: mockSession { request in
@@ -92,7 +92,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
 
     func testChallengePersistsAndOpensRawSecretInsideCLIWhileSocketProjectionOmitsIt() async throws {
         let challenge = String(repeating: "a", count: 64)
-        let share = "https://malibu.tech/j/invite-1?c=\(challenge)"
+        let share = "https://malibu.tech/j#/invite-1?c=\(challenge)"
         let intent = "https://twitter.com/intent/tweet?text=" + share.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
         let expires = now.addingTimeInterval(600)
         let challengeBody = """
@@ -135,7 +135,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         let store = ReferralChallengeStore(url: temporaryStoreURL())
         try store.save(providerID: "provider-1", payload: ReferralChallengePayload(
             challenge: challenge,
-            inviteURL: "https://malibu.tech/j/invite-1",
+            inviteURL: "https://malibu.tech/j#/invite-1",
             intentURL: intent,
             expiresAt: now.addingTimeInterval(600),
             expiresAtWire: "2027-01-15T08:10:00.000Z"
@@ -269,7 +269,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
 
         try store.save(providerID: "provider-a", payload: ReferralChallengePayload(
             challenge: String(repeating: "f", count: 64),
-            inviteURL: "https://malibu.tech/j/invite-1",
+            inviteURL: "https://malibu.tech/j#/invite-1",
             intentURL: "https://x.com/intent/tweet?text=x",
             expiresAt: now.addingTimeInterval(-1),
             expiresAtWire: "2027-01-15T07:59:59.000Z"
@@ -358,7 +358,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
 
     func testChallengeRejectsShareForDifferentInviteCode() async throws {
         let challenge = String(repeating: "6", count: 64)
-        let share = "https://malibu.tech/j/other-code?c=\(challenge)"
+        let share = "https://malibu.tech/j#/other-code?c=\(challenge)"
         let intent = "https://twitter.com/intent/tweet?text="
             + share.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
         let challengeBody = """
@@ -448,7 +448,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
     }
 
     private var statusJSON: String {
-        #"{"campaign":"prebeta","join_base_url":"https://malibu.tech/j","social_state":"eligible","base_capacity":1,"configured_bonus_capacity":2,"bonus_capacity":0,"redemptions":0,"remaining":1,"first_serving_seen":true,"join_links_enabled":true,"social_bonus_enabled":true,"invite_code":"invite-1","invite_url":"https://malibu.tech/j/invite-1"}"#
+        #"{"campaign":"prebeta","join_base_url":"https://malibu.tech/j","social_state":"eligible","base_capacity":1,"configured_bonus_capacity":2,"bonus_capacity":0,"redemptions":0,"remaining":1,"first_serving_seen":true,"join_links_enabled":true,"social_bonus_enabled":true,"invite_code":"invite-1","invite_url":"https://malibu.tech/j#/invite-1"}"#
     }
 
     private func makeClient(session: URLSession) throws -> ReferralCoordinatorClient {
@@ -497,7 +497,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
     private func payload(challenge: String) -> ReferralChallengePayload {
         ReferralChallengePayload(
             challenge: challenge,
-            inviteURL: "https://malibu.tech/j/invite-1",
+            inviteURL: "https://malibu.tech/j#/invite-1",
             intentURL: safeIntent(challenge: challenge),
             expiresAt: now.addingTimeInterval(600),
             expiresAtWire: "2027-01-15T08:10:00.000Z"
@@ -505,7 +505,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
     }
 
     private func safeIntent(challenge: String) -> String {
-        let share = "https://malibu.tech/j/invite-1?c=\(challenge)"
+        let share = "https://malibu.tech/j#/invite-1?c=\(challenge)"
         var components = URLComponents(string: "https://x.com/intent/tweet")!
         components.queryItems = [URLQueryItem(name: "text", value: "Join: \(share)")]
         return components.url!.absoluteString

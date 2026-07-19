@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,7 +39,7 @@ type ValidationHandler struct {
 	Now           func() time.Time
 	Metrics       ReferralMetrics
 	// RequestAccessURL is optional operator configuration shared with the
-	// durable /j/ page. It is informational only and never grants admission.
+	// public /j page. It is informational only and never grants admission.
 	RequestAccessURL string
 }
 
@@ -49,13 +50,45 @@ type validationResponse struct {
 	RequestAccessURL string `json:"request_access_url,omitempty"`
 }
 
+const validationBrowserOrigin = "https://malibu.tech"
+
 func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Vary", "Origin")
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin != "" {
+		if origin != validationBrowserOrigin {
+			writeError(w, http.StatusForbidden, "origin_forbidden", "browser origin is not allowed")
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", validationBrowserOrigin)
+		w.Header().Set("Access-Control-Allow-Methods", http.MethodPost)
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "300")
+	}
+	if r.Method == http.MethodOptions {
+		if origin == "" ||
+			r.Header.Get("Access-Control-Request-Method") != http.MethodPost ||
+			!onlyContentTypeRequested(r.Header.Values("Access-Control-Request-Headers")) {
+			writeError(w, http.StatusForbidden, "preflight_forbidden", "browser preflight is not allowed")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	mediaType, parameters, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" ||
+		(len(parameters) != 0 && !(len(parameters) == 1 && strings.EqualFold(parameters["charset"], "utf-8"))) {
+		h.observe("bad_request")
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "application/json required")
+		return
+	}
 	key := r.RemoteAddr
 	if h.SourceIP != nil {
 		key = h.SourceIP(r)
@@ -111,6 +144,21 @@ func (h *ValidationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.observe("valid")
 	h.writeValidation(w, validation.Valid, true, validation.Reason)
+}
+
+func onlyContentTypeRequested(values []string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	var requested []string
+	for _, value := range values {
+		for _, header := range strings.Split(value, ",") {
+			if trimmed := strings.TrimSpace(header); trimmed != "" {
+				requested = append(requested, trimmed)
+			}
+		}
+	}
+	return len(requested) == 1 && strings.EqualFold(requested[0], "content-type")
 }
 
 func (h *ValidationHandler) observe(outcome string) {

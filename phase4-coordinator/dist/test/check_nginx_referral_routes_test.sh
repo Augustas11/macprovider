@@ -6,18 +6,13 @@ config="$root/dist/nginx-coordinator.streamvc.live.conf"
 shared_config="$root/dist/nginx-snippets/stats-shared.conf"
 deploy="$root/dist/deploy-pearl-vps.sh"
 
-count="$(grep -c 'location \^~ /j/' "$config")"
-test "$count" -eq 2
-grep -A12 'location \^~ /j/' "$config" | grep -q 'access_log off;'
-grep -A12 'location \^~ /j/' "$config" | grep -q 'proxy_pass http://127.0.0.1:8443;'
-grep -A5 'location \^~ /j/' "$config" | grep -q 'add_header Cache-Control "no-store" always;'
-grep -A5 'location \^~ /j/' "$config" | grep -q 'return 307 https://coordinator\.streamvc\.live\$request_uri;'
-if grep -A5 'location \^~ /j/' "$config" | grep -q 'https://\$host'; then
-  echo "invite redirect must pin the trusted coordinator origin" >&2
-  exit 1
-fi
-if grep -A5 'location \^~ /j/' "$config" | grep -q 'return 301 '; then
-  echo "invite redirect must not be permanent" >&2
+test "$(grep -c 'location \^~ /j/' "$config")" -eq 2
+legacy_blocks="$(grep -A5 'location \^~ /j/' "$config")"
+test "$(grep -c 'access_log off;' <<<"$legacy_blocks")" -eq 2
+test "$(grep -c 'add_header Cache-Control "no-store" always;' <<<"$legacy_blocks")" -eq 2
+test "$(grep -c 'return 404;' <<<"$legacy_blocks")" -eq 2
+if grep -Eq 'proxy_pass|return 30[1278]' <<<"$legacy_blocks"; then
+  echo "legacy credential-bearing /j/<code> privacy tombstones must not proxy or redirect" >&2
   exit 1
 fi
 
