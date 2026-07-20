@@ -85,6 +85,8 @@ release_names=(
   "demand-rank.json"
   "demand-rank.json.sig"
   "gateway-linux-amd64"
+  "macprovider-release-discovery.json"
+  "macprovider-release-discovery.json.sig"
   "macprovider-cli-${tag}-darwin-arm64.tar.gz"
   "pearl-release.json"
   "pearl-release.json.sig"

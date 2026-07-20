@@ -9,6 +9,7 @@ keychain_helper="$root/scripts/acceptance-signing-keychain.sh"
 source_guard="$root/scripts/verify-acceptance-candidate-source.sh"
 remote_guard="$root/scripts/verify-acceptance-remote-state.sh"
 provisioner="$root/scripts/provision-acceptance-signing-key.sh"
+release_discovery="$root/scripts/build-release-discovery-head.py"
 work="$(mktemp -d "${TMPDIR:-/tmp}/acceptance-security.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -17,7 +18,7 @@ fail() {
   exit 1
 }
 
-python3 - "$workflow" "$metadata" "$signer" "$keychain_helper" "$provisioner" "$root/schemas/acceptance-candidate-v1.schema.json" <<'PY'
+python3 - "$workflow" "$metadata" "$signer" "$keychain_helper" "$provisioner" "$root/schemas/acceptance-candidate-v1.schema.json" "$release_discovery" <<'PY'
 import ast
 import pathlib
 import re
@@ -29,6 +30,7 @@ signer = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 keychain_helper = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 provisioner = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
 schema = __import__("json").loads(pathlib.Path(sys.argv[6]).read_text(encoding="utf-8"))
+release_discovery = pathlib.Path(sys.argv[7])
 
 if "\n  workflow_dispatch:\n" not in workflow or "\n  push:" in workflow:
     raise SystemExit("acceptance workflow must be manual dispatch only")
@@ -111,6 +113,27 @@ if (
     raise SystemExit("promotion-ready acceptance does not bind stable release provenance")
 if '--compatibility-manifest "$output_dir/compatibility-set.json"' not in signer:
     raise SystemExit("acceptance-only Pearl metadata is not bound to the signed compatibility manifest")
+for value in (
+    'release_discovery="$root/scripts/build-release-discovery-head.py"',
+    '"$release_discovery"',
+    '--attempt "$run_attempt"',
+    '--target-artifact-index "$output_dir/compatibility-artifact-index.json"',
+    '--private-key "$release_private_key"',
+    '--public-key "$release_public_key"',
+    '--output "$output_dir/macprovider-release-discovery.json"',
+    '--signature "$output_dir/macprovider-release-discovery.json.sig"',
+):
+    if value not in signer:
+        raise SystemExit(f"acceptance signer release-discovery contract is incomplete: {value}")
+if not release_discovery.is_file() or release_discovery.is_symlink():
+    raise SystemExit("main-owned release-discovery builder is absent or unsafe")
+release_asset_block = signer.split("release_assets=(", 1)[1].split("\n)", 1)[0]
+for value in (
+    '"$output_dir/macprovider-release-discovery.json"',
+    '"$output_dir/macprovider-release-discovery.json.sig"',
+):
+    if value not in release_asset_block:
+        raise SystemExit(f"release-discovery asset is omitted from the signed checksum selector: {value}")
 if 'tar -czf "$provider_asset" -C "$cli_work" .' in signer:
     raise SystemExit("acceptance signer can emit an ambiguous provider archive root")
 for value in (

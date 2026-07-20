@@ -336,9 +336,11 @@ python3 "$artifact_index" validate \
   "${artifact_arguments[@]}"
 python3 "$release_discovery" \
   --sequence "$run_id" \
+  --attempt "$run_attempt" \
   --compatibility-manifest "$output_dir/compatibility-set.json" \
   --target-artifact-index "$output_dir/compatibility-artifact-index.json" \
   --private-key "$release_private_key" \
+  --public-key "$release_public_key" \
   --openssl "$openssl_bin" \
   --output "$output_dir/macprovider-release-discovery.json" \
   --signature "$output_dir/macprovider-release-discovery.json.sig"

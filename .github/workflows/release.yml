@@ -1237,9 +1237,11 @@ jobs:
             "${artifact_index_arguments[@]}"
           python3 scripts/build-release-discovery-head.py \
             --sequence "$GITHUB_RUN_ID" \
+            --attempt "$GITHUB_RUN_ATTEMPT" \
             --compatibility-manifest "$compatibility_manifest" \
             --target-artifact-index "$compatibility_artifact_index" \
             --private-key "$release_signing_key" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
             --output macprovider-release-discovery.json \
             --signature macprovider-release-discovery.json.sig
           release_assets+=("$compatibility_artifact_index")

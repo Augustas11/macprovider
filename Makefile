@@ -64,6 +64,7 @@ test-dist:
 	bash scripts/test-release-publication-provenance.sh
 	bash scripts/test-compatibility-set-manifest.sh
 	bash scripts/test-compatibility-artifact-index.sh
+	bash scripts/test-release-discovery-head.sh
 	bash scripts/test-tier2-provider-artifact.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
