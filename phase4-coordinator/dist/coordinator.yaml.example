@@ -358,7 +358,7 @@ malibu_emission:
 # Use for security fixes that must not be optional. Leave unset for advisory
 # releases.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.53"
+  latest_binary_version: "1.8.54"
   # required_binary_version: "1.7.0"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that

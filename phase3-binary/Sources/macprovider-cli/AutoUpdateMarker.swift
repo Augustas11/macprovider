@@ -2071,11 +2071,6 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             let data = try JSONEncoder().encode(policy)
             try atomicWrite(data: data, finalURL: policyURL, mode: S_IRUSR | S_IWUSR)
         } catch {
-            if let marker = try? readPending(),
-               fileManager.fileExists(atPath: marker.backupPath)
-            {
-                _ = try? restoreBackupAwaitingPreviousReadiness(marker)
-            }
             let marker = try? readPending()
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                 updateID: marker?.updateID ?? UUID().uuidString.lowercased(),

@@ -4,6 +4,46 @@ import XCTest
 @testable import macprovider_cli
 
 final class ProviderLifecycleLeaseTests: XCTestCase {
+    func testLaunchdServiceProcessIDFailsClosedWhenBoundedLaunchctlTimesOut() {
+        let service = LeaseTestEnvironment.serviceIdentity
+        var observedArguments: [String]?
+
+        let pid = ProviderLifecycleLeaseEnvironment.launchdServiceProcessID(
+            service
+        ) { arguments in
+            observedArguments = arguments
+            throw UpdateError.processTimedOut("/bin/launchctl \(arguments.joined(separator: " "))", 5)
+        }
+
+        XCTAssertNil(pid)
+        XCTAssertEqual(
+            observedArguments,
+            ["print", "gui/\(getuid())/\(service)"]
+        )
+    }
+
+    func testLaunchdServiceProcessIDParsesOnlySuccessfulPositivePID() {
+        let service = LeaseTestEnvironment.serviceIdentity
+
+        XCTAssertEqual(
+            ProviderLifecycleLeaseEnvironment.launchdServiceProcessID(service) { _ in
+                LaunchctlCommandResult(
+                    terminationStatus: 0,
+                    output: "service = {\n\tpid = 4321\n}\n"
+                )
+            },
+            4_321
+        )
+        XCTAssertNil(
+            ProviderLifecycleLeaseEnvironment.launchdServiceProcessID(service) { _ in
+                LaunchctlCommandResult(
+                    terminationStatus: 113,
+                    output: "Could not find service"
+                )
+            }
+        )
+    }
+
     func testAcquirePersistsOwnerOnlyAtomicJSONAndInspectsAsValid() throws {
         let fixture = try makeFixture()
         let record = try fixture.store.acquire(
@@ -341,6 +381,82 @@ final class ProviderLifecycleLeaseTests: XCTestCase {
         XCTAssertEqual(fixture.store.inspect(), .valid(fresh))
     }
 
+    func testPendingUpdateRetainsStartupHandoffUntilCommitMarkerClears() async throws {
+        let fixture = try makeFixture()
+        _ = try prepareHandoff(fixture)
+        fixture.environment.setProcessStart(nil, for: 4_321)
+        fixture.environment.transitionToLaunchdService(pid: 5_321, processStart: 100_000_456)
+        let adopted = try ServeCommand.acquireStartupLifecycleLease(
+            store: fixture.store,
+            operationID: "provider-restart-1",
+            providerID: "provider-a",
+            duration: 5 * 60
+        )
+        let pending = makePendingMarker(targetPath: LeaseTestEnvironment.targetPath)
+
+        XCTAssertTrue(try ServeCommand.clearStartupLifecycleLeaseUnlessUpdatePending(
+            adopted,
+            store: fixture.store,
+            loadPending: { pending },
+            targetVersion: "1.8.54",
+            wallMilliseconds: 1_784_016_000_000
+        ))
+        XCTAssertEqual(fixture.store.inspect(), .valid(adopted))
+
+        var reads = 0
+        await ServeCommand.clearStartupLifecycleLeaseWhenUpdateCompletes(
+            adopted,
+            store: fixture.store,
+            loadPending: {
+                reads += 1
+                return reads == 1 ? pending : nil
+            },
+            targetVersion: "1.8.54",
+            wallMilliseconds: { 1_784_016_000_000 },
+            sleep: {}
+        )
+        XCTAssertEqual(fixture.store.inspect(), .missing)
+    }
+
+    func testAuthorizedAdoptedHandoffRecoversAcrossRestartBeforeCommit() throws {
+        let fixture = try makeFixture()
+        _ = try prepareHandoff(fixture)
+        fixture.environment.setProcessStart(nil, for: 4_321)
+        fixture.environment.transitionToLaunchdService(pid: 5_321, processStart: 100_000_456)
+        let adopted = try ServeCommand.acquireStartupLifecycleLease(
+            store: fixture.store,
+            operationID: "provider-restart-1",
+            providerID: "provider-a",
+            duration: 5 * 60
+        )
+
+        fixture.environment.setBootSession("boot-b")
+        fixture.environment.transitionToLaunchdService(pid: 6_321, processStart: 200_000_789)
+        fixture.environment.setTimes(
+            wallMilliseconds: 1_784_016_010_000,
+            monotonicNanoseconds: 10_000_000_000
+        )
+        XCTAssertEqual(
+            fixture.store.inspect(),
+            .invalidOrExpired(record: adopted, reason: .bootSessionChanged)
+        )
+
+        let recovered = try ServeCommand.acquireStartupLifecycleLease(
+            store: fixture.store,
+            operationID: "provider-restart-1",
+            providerID: "provider-a",
+            duration: 5 * 60,
+            allowAdoptedHandoffRecovery: true
+        )
+        XCTAssertNotEqual(recovered.leaseID, adopted.leaseID)
+        XCTAssertEqual(recovered.owner.pid, 6_321)
+        XCTAssertEqual(recovered.owner.bootSession, "boot-b")
+        XCTAssertEqual(recovered.startupHandoff?.handoffID, adopted.startupHandoff?.handoffID)
+        XCTAssertEqual(recovered.startupHandoff?.state, .adopted)
+        XCTAssertEqual(recovered.startupHandoff?.bootSession, "boot-b")
+        XCTAssertEqual(fixture.store.inspect(), .valid(recovered))
+    }
+
     /// A VALID live foreign owner (no handoff on disk) must still be a HARD
     /// failure: the leaseNotValid fallback path must NOT bypass acquire()'s
     /// refusal to displace a valid live owner. Here adoptStartupHandoff throws
@@ -664,6 +780,20 @@ final class ProviderLifecycleLeaseTests: XCTestCase {
             targetExecutableSHA256: LeaseTestEnvironment.targetSHA256,
             handoffDuration: handoffDuration,
             startupLeaseDuration: 5 * 60
+        )
+    }
+
+    private func makePendingMarker(targetPath: String) -> AutoUpdatePendingMarker {
+        AutoUpdatePendingMarker(
+            updateID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            targetVersion: "1.8.54",
+            targetPath: targetPath,
+            backupPath: "\(targetPath).rollback",
+            size: 1,
+            mode: 0o755,
+            sha256: String(repeating: "b", count: 64),
+            markerDeadline: "2026-07-21T12:00:00Z",
+            commitOwner: "self_update"
         )
     }
 

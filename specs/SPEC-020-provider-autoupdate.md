@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.8
+Version: v0.1.9
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -14,10 +14,15 @@ the bearerless-duplicate notify-only row is client-enforceable.
 v0.1.8 makes the signed release and compatibility manifest—not coordinator
 admission—the update authority, and separates local update success from network
 readiness.
+v0.1.9 makes the launchd provider reload explicitly one-shot, fences legacy
+reload helpers before mutation or rollback, bridges the already-public v1.8.53
+helper through an exact update/handoff-authorized first-hop fence, and requires
+a 20-second continuous listener-bound local-health observation before update
+commit.
 
 ## Goal
 
-SPEC-020 v0.1.8 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.9 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -460,6 +465,22 @@ R-3.7. After drain completes with zero in-flight requests, the provider MAY
 close the coordinator WebSocket with a normal going-away reason and invoke the
 validated update apply path. The provider MUST restart through launchd only
 after the rollback marker and rollback target have been durably staged.
+
+R-3.8. A launchd-managed provider restart MUST use an explicitly one-shot
+helper with `RunAtLoad:true`, `KeepAlive:false`, and `LaunchOnlyOnce:true`.
+The updater MUST own the shared provider-mutation lock before fencing any
+helper. The helper MUST issue at most one bootout of the canonical provider
+job, boundedly poll until `launchctl print` positively reports that exact
+service absent, then issue at most one bootstrap and remove its transient
+plist. A timeout or any unrecognized inspection result MUST fail closed
+without bootstrap. Before drain or live mutation, before rollback restoration,
+and before arming a new helper, the updater MUST boot out the stable helper
+label and every exact legacy
+`live.streamvc.macprovider-compatibility-reload.<lowercase-UUID>` label. A
+prefix-confusable or malformed label MUST NOT be touched. Failure to prove a
+matching loaded helper absent MUST fail closed before mutation or restoration.
+`launchctl submit` is forbidden for this restart because its inferred retry
+lifecycle is not a one-shot contract.
 
 ### R-4. Failure and rollback
 
@@ -1002,6 +1023,91 @@ revoked, recovery emits `rollback_target_disallowed`, restarts neither release,
 retains fenced recovery material, and requires an independently authorized
 emergency recovery target.
 
+AC-V0.1-30. Exactly-once launchd reload: a running launchd-managed provider
+updates through a plist-backed helper whose decoded policy has
+`RunAtLoad:true`, `KeepAlive:false`, and `LaunchOnlyOnce:true`, with no
+`SuccessfulExit`, demand, or throttle trigger. A nonzero helper exit does not
+run a second time after more than the historical ten-second retry cadence.
+Exact legacy UUID helper labels are fenced before any canonical job mutation;
+malformed and prefix-confusable labels are untouched. A delayed canonical
+bootout is polled until exact absence before the one bootstrap; timeout and
+unknown inspection errors perform no bootstrap. Manual and automatic update
+paths own the shared mutation lock before fencing, and rollback fences before
+restoration. Post-start commit requires eleven matching two-second
+target-version, compatibility-set, process, and instance samples, so a
+ten-second stop/restart loop cannot satisfy local health. Those samples MUST
+come from the live local HTTP listener and coordinator startup MUST begin only
+after that listener has bound; an in-memory status object or a process that
+failed to bind cannot commit recovery. The local commit gate MUST bind the
+exact compatibility-set digest when one is declared. Model warmth is not an
+update-integrity field: a target that reports the exact release and
+compatibility identity MAY commit before `model_loaded` becomes true, while
+model preparation remains governed by the ordinary serving/admission
+lifecycle.
+
+The first v1.8.54 target launched by the immutable public v1.8.53 updater MAY
+fence the recurring legacy helper before configuration or model work only when
+both durable authorities identify that exact executable: the pending marker
+has `commit_owner:"self_update"` or `commit_owner:"coordinator"` and the target
+version/path, while an unexpired same-boot prepared or adopted startup handoff
+binds the canonical service identity, target path, and target executable
+SHA-256. The current process MUST also be the positive PID reported by launchd
+for that exact service identity; an interactive or otherwise non-launchd
+process cannot consume the handoff. The pending marker's `sha256` continues to
+identify the preserved rollback binary and MUST NOT be compared to the new
+executable. Missing, expired, cross-boot, malformed, path-mismatched,
+hash-mismatched, owner-mismatched, or launchd-PID-mismatched authority fails
+closed without fencing.
+
+After an authorized launchd target adopts the startup handoff, it MUST retain
+that authority while the exact pending marker remains armed. A crash, logout,
+or reboot before commit MAY recover the adopted authority only when the same
+provider and operation, target path and executable SHA-256, pending owner, and
+current positive launchd PID all revalidate. The listener MUST remove the
+adopted handoff promptly after the exact pending marker disappears, changes, or
+expires; it MUST NOT retain a maintenance exclusion for the handoff's original
+maximum lifetime after commit.
+
+Every rollback entry point, including coordinator orphan recovery and the
+watchdog copy embedded in the installer, MUST fence the stable helper and exact
+lowercase-UUID legacy helpers before restoring bytes. Only bounded positive
+launchd absence proof permits helper-plist removal and restoration; unknown
+inspection results retain the marker, backup, and current bytes for a later
+bounded retry.
+
+When rollback retains a marker in `restoring_previous` or
+`awaiting_previous_readiness`, the restored previous binary MAY start only when
+the marker owner is authorized and its previous version, installed target path,
+rollback SHA-256, and current positive launchd PID all identify that exact
+process. It MUST fence stale reload helpers, but MUST NOT adopt or recover the
+failed target's startup handoff. Wrong previous bytes, version, path, owner, or
+PID fail closed without fencing.
+
+All Swift `launchctl` list, print, bootout, and bootstrap operations used by
+this transaction MUST share a hard-bounded runner that drains process output
+concurrently and escalates from termination to kill when the bound expires.
+Timeout is a distinct fail-closed error even for otherwise allowed bootout
+failure; it cannot authorize helper-plist removal, binary restoration, or
+first-hop fencing. The generated one-shot helper MUST independently bound each
+of its `bootout`, `print`, and `bootstrap` subprocesses with the same
+terminate-then-kill behavior. A service-loaded probe that times out or returns
+an unknown result MUST throw or otherwise stop the restart transaction; it
+MUST NOT be interpreted as service absence.
+
+After watchdog rollback restores the preserved release, its bootstrap and
+kickstart operations MUST also be bounded. Bootstrap success is accepted; a
+nonzero bootstrap is accepted only when a bounded exact-service print proves
+the canonical provider is already loaded. Kickstart MUST succeed. A timeout,
+unknown bootstrap state, or failed kickstart MUST retain the pending marker and
+rollback backup, emit a sanitized deferred-restart event, and leave recovery
+for a later bounded attempt rather than claiming rollback completion.
+
+Signed-policy persistence before mutation is side-effect-free with respect to
+pending markers, backups, and live release bytes. If signed-policy persistence
+fails after a release swap, only the updater orchestrator that still owns the
+shared mutation lock and has already fenced reload helpers MAY restore the
+preserved release.
+
 ## Threat model
 
 T-1. Attacker controls the GitHub release pipeline through signing-key
@@ -1114,6 +1220,24 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.9 (2026-07-20): Replaced the incident-producing `launchctl submit`
+  provider reload with an explicit one-shot LaunchAgent. Exact legacy UUID
+  helpers and the stable helper are fenced before mutation, rollback, and each
+  reload; the helper plist is mode 0600, atomically installed, self-removing,
+  and declares `KeepAlive:false` plus `LaunchOnlyOnce:true`. After bootout it
+  positively confirms canonical-service absence before its one bootstrap.
+  Manual and automatic paths own the mutation lock before fencing; rollback
+  fences before restoration. Local update commit now requires 20 seconds of
+  continuous exact-version/set/process-instance health, exceeding the observed
+  ten-second legacy retry cadence. The corrected provider CLI advances to
+  1.8.54 so its bytes cannot collide with the already-public 1.8.53 component.
+  Both automatic marker owners (`self_update` and `coordinator`) may consume
+  the first-hop bridge, but only from the exact launchd-owned service PID.
+  Swift launchctl operations are hard-bounded and drain output concurrently.
+  Signed-policy persistence cannot restore release bytes outside the
+  updater-owned lock-and-fence transaction.
+  This is the narrow implementation contract for issue #651; whole-set
+  convergence remains owned by #616.
 - v0.1.8 (2026-07-17): Reconciled the `provider-autoupdate` authority against
   #610. A signed expiring monotonic discovery head plus exact artifact index and
   compatibility manifest are the update authority; live or cached coordinator

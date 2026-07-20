@@ -303,4 +303,4 @@ providers:
 # legacy cohort (DECISION_CRITERIA Entry 161). Setting this value does not, and
 # must not, re-arm the legacy binary-only updater.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.53"
+  latest_binary_version: "1.8.54"
