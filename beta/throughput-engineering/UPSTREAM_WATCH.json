@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_checked_at": null,
+  "last_checked_at": "2026-07-20T06:02:22Z",
   "last_changed_at": "2026-07-07T17:00:00Z",
   "macprovider_pins": {
     "mlx_swift_lm": "3.31.4",
@@ -57,5 +57,10 @@
       "engine_delta_to_macprovider": 0.85,
       "notes": "Community board uses mlx-lm Python; macprovider mlx-swift-lm 3.31.4. Calibration source only — not a runtime dependency. See docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md."
     }
+  },
+  "last_discovery_summary": {
+    "checked_at": "2026-07-20T06:02:22Z",
+    "items_found": 0,
+    "notes": "Blocker checker unchanged; no new open upstream items found for KVCache compile offset or Gemma4 MoE beyond tracked mlx-swift-lm#406 and #364."
   }
 }
