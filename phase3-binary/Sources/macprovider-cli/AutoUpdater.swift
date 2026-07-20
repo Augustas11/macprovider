@@ -713,8 +713,14 @@ struct AutoUpdater: Sendable {
         try SelfUpdate.reloadCompatibilityLaunchdJobs(
             homeDirectory: homeDirectory,
             serviceLoaded: launchctlServiceLoaded,
-            runLaunchctl: { arguments in
-                try runProcess("/bin/launchctl", arguments: arguments)
+            servicePresent: SelfUpdate.launchctlServicePresent,
+            loadedServiceLabels: SelfUpdate.launchctlServiceLabels,
+            runLaunchctl: { arguments, allowFailure in
+                try runProcess(
+                    "/bin/launchctl",
+                    arguments: arguments,
+                    allowFailure: allowFailure
+                )
             }
         )
     }
