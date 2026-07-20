@@ -312,6 +312,26 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(snapshot.activeRequestIDCount, 0)
     }
 
+    func testSignedRecoveryDrainDoesNotRequireCoordinatorWebSocket() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            sendOverride: { _ in throw CoordinatorClientTestError.sendStateUpdateFailed }
+        )
+
+        let drained = await client.autoupdateLocalDrainForTest(target: "1.8.41")
+
+        XCTAssertTrue(drained)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .draining)
+        XCTAssertEqual(snapshot.activeRequestIDCount, 0)
+    }
+
     func testPostDrainReconnectLoopReentersConnectPath() async throws {
         let recorder = CoordinatorFrameRecorder()
         let attempts = ReconnectAttemptRecorder()

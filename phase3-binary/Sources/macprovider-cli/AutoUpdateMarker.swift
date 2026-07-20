@@ -37,6 +37,9 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
     let previousVersion: String?
     let previousCompatibilitySetID: String?
     let previousCompatibilitySetSHA256: String?
+    let discoveryHeadSequence: UInt64?
+    let discoveryHeadSHA256: String?
+    let updateAuthorityMode: String?
     let transactionState: CompatibilitySetTransactionState?
 
     init(
@@ -56,6 +59,9 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         previousVersion: String? = nil,
         previousCompatibilitySetID: String? = nil,
         previousCompatibilitySetSHA256: String? = nil,
+        discoveryHeadSequence: UInt64? = nil,
+        discoveryHeadSHA256: String? = nil,
+        updateAuthorityMode: String? = nil,
         transactionState: CompatibilitySetTransactionState? = nil
     ) {
         self.updateID = updateID
@@ -74,6 +80,9 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         self.previousVersion = previousVersion
         self.previousCompatibilitySetID = previousCompatibilitySetID
         self.previousCompatibilitySetSHA256 = previousCompatibilitySetSHA256
+        self.discoveryHeadSequence = discoveryHeadSequence
+        self.discoveryHeadSHA256 = discoveryHeadSHA256
+        self.updateAuthorityMode = updateAuthorityMode
         self.transactionState = transactionState
     }
 
@@ -94,6 +103,9 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         case previousVersion = "previous_version"
         case previousCompatibilitySetID = "previous_compatibility_set_id"
         case previousCompatibilitySetSHA256 = "previous_compatibility_set_sha256"
+        case discoveryHeadSequence = "discovery_head_sequence"
+        case discoveryHeadSHA256 = "discovery_head_sha256"
+        case updateAuthorityMode = "update_authority_mode"
         case transactionState = "transaction_state"
     }
 
@@ -118,6 +130,9 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
             previousVersion: previousVersion,
             previousCompatibilitySetID: previousCompatibilitySetID,
             previousCompatibilitySetSHA256: previousCompatibilitySetSHA256,
+            discoveryHeadSequence: discoveryHeadSequence,
+            discoveryHeadSHA256: discoveryHeadSHA256,
+            updateAuthorityMode: updateAuthorityMode,
             transactionState: state
         )
     }
@@ -153,6 +168,7 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
     case writeFailed(String, Int32)
     case invalidMarker
     case backupCorrupt
+    case rollbackTargetDisallowed
     case compatibilityAdmissionRequired(String)
 
     var description: String {
@@ -164,6 +180,7 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
         case let .writeFailed(path, errnoValue): return "write failed for \(path): errno \(errnoValue)"
         case .invalidMarker: return "pending marker is invalid"
         case .backupCorrupt: return "rollback backup is missing or hash-mismatched"
+        case .rollbackTargetDisallowed: return "rollback target is revoked or below the effective minimum"
         case let .compatibilityAdmissionRequired(reason):
             return "fresh coordinator compatibility-set admission required: \(reason)"
         }
@@ -208,6 +225,7 @@ enum AutoUpdateOrphanRecoveryOutcome: Equatable {
     case restoredAwaitingReadiness(AutoUpdatePendingMarker)
     case markerInvalid
     case backupCorrupt(AutoUpdatePendingMarker, String)
+    case rollbackTargetDisallowed(AutoUpdatePendingMarker)
 }
 
 enum CompatibilitySetCutoverPhase: String, CaseIterable, Sendable {
@@ -337,6 +355,10 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         root.appendingPathComponent("compatibility-admission.json")
     }
 
+    var discoveryStateURL: URL {
+        root.appendingPathComponent("release-discovery-state.json")
+    }
+
     private var providerPlistURL: URL {
         homeDirectory.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
     }
@@ -425,6 +447,49 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
 
     func readCompatibilityAdmissionForTest() throws -> CoordinatorCompatibilityAdmissionRecord {
         try readCompatibilityAdmission()
+    }
+
+    func acceptDiscoveryHead(_ head: SignedReleaseDiscoveryHead) throws {
+        try ensureTrustedRoot()
+        if let existing = try readDiscoveryState() {
+            if head.releaseSequence < existing.releaseSequence {
+                throw UpdateError.discoveryHeadReplay
+            }
+            if head.releaseSequence == existing.releaseSequence,
+               head.digest != existing.headSHA256 {
+                throw UpdateError.discoveryHeadEquivocation
+            }
+        }
+        let record = SignedReleaseDiscoveryState(
+            schemaVersion: 1,
+            releaseSequence: head.releaseSequence,
+            headSHA256: head.digest
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try atomicWrite(
+            data: try encoder.encode(record),
+            finalURL: discoveryStateURL,
+            mode: S_IRUSR | S_IWUSR
+        )
+    }
+
+    func readDiscoveryStateForTest() throws -> SignedReleaseDiscoveryState? {
+        try readDiscoveryState()
+    }
+
+    private func readDiscoveryState() throws -> SignedReleaseDiscoveryState? {
+        guard fileManager.fileExists(atPath: discoveryStateURL.path) else { return nil }
+        let data = try readRegularFileNoFollow(discoveryStateURL)
+        guard data.count <= 4096 else { throw UpdateError.discoveryHeadInvalid("state_too_large") }
+        let record = try JSONDecoder().decode(SignedReleaseDiscoveryState.self, from: data)
+        guard record.schemaVersion == 1,
+              record.releaseSequence > 0,
+              record.headSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+        else {
+            throw UpdateError.discoveryHeadInvalid("state_invalid")
+        }
+        return record
     }
 
     private func readCompatibilityAdmission() throws -> CoordinatorCompatibilityAdmissionRecord {
@@ -694,6 +759,9 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         commitOwner: String = "coordinator",
         targetCompatibilitySetID: String? = nil,
         targetCompatibilitySetSHA256: String? = nil,
+        discoveryHeadSequence: UInt64? = nil,
+        discoveryHeadSHA256: String? = nil,
+        updateAuthorityMode: String? = nil,
         readinessTimeoutSeconds: Int = 300
     ) throws -> AutoUpdatePendingMarker {
         let installDirectory = binaryURL.deletingLastPathComponent()
@@ -765,6 +833,9 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                 previousVersion: previousCompatibilityManifest?.providerCLIVersion,
                 previousCompatibilitySetID: previousCompatibilityManifest?.compatibilitySetID,
                 previousCompatibilitySetSHA256: previousCompatibilityManifest?.envelopeSHA256,
+                discoveryHeadSequence: discoveryHeadSequence,
+                discoveryHeadSHA256: discoveryHeadSHA256,
+                updateAuthorityMode: updateAuthorityMode,
                 transactionState: previousCompatibilityManifest == nil ? nil : .activatingTarget
             )
         } catch {
@@ -794,14 +865,30 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         try? fileManager.removeItem(at: pendingURL)
     }
 
-    func writeSuccessSentinel(binaryURL: URL, updateID: String, targetVersion: String) throws {
+    func writeSuccessSentinel(binaryURL: URL, marker: AutoUpdatePendingMarker) throws {
         let payload: [String: String] = [
-            "update_id": updateID,
-            "binary_version": targetVersion,
+            "update_id": marker.updateID,
+            "binary_version": marker.targetVersion,
+            "target_compatibility_set_id": marker.targetCompatibilitySetID ?? "",
+            "target_compatibility_set_sha256": marker.targetCompatibilitySetSHA256 ?? "",
             "success_at": ISO8601DateFormatter.autoupdate.string(from: Date()),
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-        try atomicWrite(data: data, finalURL: successSentinelPath(binaryURL: binaryURL, updateID: updateID), mode: S_IRUSR | S_IWUSR)
+        try atomicWrite(data: data, finalURL: successSentinelPath(binaryURL: binaryURL, updateID: marker.updateID), mode: S_IRUSR | S_IWUSR)
+    }
+
+    func writeSuccessSentinel(binaryURL: URL, updateID: String, targetVersion: String) throws {
+        let marker = AutoUpdatePendingMarker(
+            updateID: updateID,
+            targetVersion: targetVersion,
+            targetPath: binaryURL.path,
+            backupPath: rollbackBackupPath(binaryURL: binaryURL, updateID: updateID).path,
+            size: 0,
+            mode: 0o755,
+            sha256: String(repeating: "0", count: 64),
+            markerDeadline: ISO8601DateFormatter.autoupdate.string(from: Date().addingTimeInterval(300))
+        )
+        try writeSuccessSentinel(binaryURL: binaryURL, marker: marker)
     }
 
     func validateBackup(_ marker: AutoUpdatePendingMarker) throws {
@@ -818,6 +905,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     }
 
     func restoreBackup(_ marker: AutoUpdatePendingMarker) throws {
+        try ensureRollbackTargetAllowed(marker)
         try validateBackup(marker)
         let backupURL = URL(fileURLWithPath: marker.backupPath)
         let targetURL = URL(fileURLWithPath: marker.targetPath)
@@ -996,8 +1084,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         let binaryURL = URL(fileURLWithPath: marker.targetPath)
         try writeSuccessSentinel(
             binaryURL: binaryURL,
-            updateID: marker.updateID,
-            targetVersion: marker.targetVersion
+            marker: marker
         )
         clearPending()
         removeRollbackBackups(marker)
@@ -1046,6 +1133,9 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             removeRollbackBackups(marker)
             recordCooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)
             return .restored(marker)
+        } catch AutoUpdateMarkerError.rollbackTargetDisallowed {
+            recordCooldown(target: marker.targetVersion, failureClass: .rollbackTargetDisallowed)
+            return .rollbackTargetDisallowed(marker)
         } catch {
             quarantinePendingMarker()
             return .backupCorrupt(marker, String(describing: error))
@@ -2010,6 +2100,18 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         return (minimum, policy.persistedRevoked.union(localRevoked))
     }
 
+    func ensureRollbackTargetAllowed(_ marker: AutoUpdatePendingMarker) throws {
+        guard let previousVersion = marker.previousVersion else { return }
+        let policy = effectivePolicy()
+        if let minimum = policy.minimum,
+           SelfUpdate.compareSemver(previousVersion, minimum) == .orderedAscending {
+            throw AutoUpdateMarkerError.rollbackTargetDisallowed
+        }
+        if policy.revoked.contains(previousVersion) {
+            throw AutoUpdateMarkerError.rollbackTargetDisallowed
+        }
+    }
+
     func validateMarker(_ pending: AutoUpdatePendingMarker) throws {
         let uuidV4 = #"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#
         guard pending.updateID.range(of: uuidV4, options: .regularExpression) != nil else {
@@ -2023,13 +2125,32 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         case (nil, nil):
             break
         case let (.some(identifier), .some(digest)):
-            guard !identifier.isEmpty,
-                  identifier == identifier.trimmingCharacters(in: .whitespacesAndNewlines),
-                  identifier.utf8.count <= 512,
+            guard CompatibilitySetManifest.isCanonicalCompatibilitySetID(identifier),
                   digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
             else { throw AutoUpdateMarkerError.invalidMarker }
         default:
             throw AutoUpdateMarkerError.invalidMarker
+        }
+        switch (pending.discoveryHeadSequence, pending.discoveryHeadSHA256) {
+        case (nil, nil):
+            break
+        case let (.some(sequence), .some(digest)):
+            guard sequence > 0,
+                  digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+            else { throw AutoUpdateMarkerError.invalidMarker }
+        default:
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        if let mode = pending.updateAuthorityMode,
+           mode != "coordinator_recommendation", mode != "signed_release" {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        if pending.updateAuthorityMode == "signed_release" {
+            guard pending.discoveryHeadSequence != nil,
+                  pending.discoveryHeadSHA256 != nil,
+                  pending.targetCompatibilitySetID != nil,
+                  pending.targetCompatibilitySetSHA256 != nil
+            else { throw AutoUpdateMarkerError.invalidMarker }
         }
         switch (
             pending.previousVersion,
@@ -2112,7 +2233,12 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         }
     }
 
-    func readSuccessSentinel(_ url: URL) throws -> (updateID: String, binaryVersion: String) {
+    func readSuccessSentinel(_ url: URL) throws -> (
+        updateID: String,
+        binaryVersion: String,
+        targetCompatibilitySetID: String?,
+        targetCompatibilitySetSHA256: String?
+    ) {
         let data = try readRegularFileNoFollow(url)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let updateID = object["update_id"] as? String,
@@ -2121,7 +2247,22 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         else {
             throw AutoUpdateMarkerError.invalidMarker
         }
-        return (updateID, binaryVersion)
+        let setID = object["target_compatibility_set_id"] as? String
+        let setSHA = object["target_compatibility_set_sha256"] as? String
+        if let setID, !setID.isEmpty,
+           !CompatibilitySetManifest.isCanonicalCompatibilitySetID(setID) {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        if let setSHA, !setSHA.isEmpty,
+           setSHA.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        return (
+            updateID,
+            binaryVersion,
+            setID?.isEmpty == true ? nil : setID,
+            setSHA?.isEmpty == true ? nil : setSHA
+        )
     }
 
     private func ensureTrustedDirectory(_ url: URL) throws {

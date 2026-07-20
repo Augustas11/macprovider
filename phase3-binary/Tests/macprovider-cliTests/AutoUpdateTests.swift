@@ -20,12 +20,18 @@ final class AutoUpdateTests: XCTestCase {
             "target_revoked_or_below_minimum",
             "signature_invalid",
             "checksum_mismatch",
+            "release_payload_incomplete",
             "self_test_failed",
             "drain_timeout",
             "trust_state_lost",
             "post_start_crash",
             "post_start_health_failed",
-            "post_start_rejoin_timeout",
+            "post_start_network_unavailable",
+            "post_start_network_not_ready",
+            "rollback_target_disallowed",
+            "discovery_head_replay",
+            "discovery_head_equivocation",
+            "discovery_head_expired",
             "insufficient_disk_space",
             "event_payload_too_large",
             "other",
@@ -940,6 +946,211 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.compatibilityAdmissionURL.path))
     }
 
+    func testSignedReleaseDiscoveryVerifiesSignatureExpiryAndTamperResistance() throws {
+        let privateKey = P256.Signing.PrivateKey()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let signed = signedDiscoveryPayload(
+            sequence: 7,
+            targetSetID: "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            artifactIndexSHA256: String(repeating: "b", count: 64),
+            issuedAt: now.addingTimeInterval(-60),
+            expiresAt: now.addingTimeInterval(300),
+            minimum: "1.8.0",
+            revoked: ["1.7.9"]
+        )
+        let headData = try canonicalJSON(["schema_version": SignedReleaseDiscoveryHead.envelopeSchema, "signed": signed])
+        let signedBytes = try canonicalJSON(signed)
+        let signature = try privateKey.signature(for: SHA256.hash(data: signedBytes)).derRepresentation
+
+        let head = try SignedReleaseDiscoveryHead.loadVerified(
+            headData: headData,
+            signatureData: signature,
+            now: now,
+            publicKeyPEM: privateKey.publicKey.pemRepresentation
+        )
+
+        XCTAssertEqual(head.releaseSequence, 7)
+        XCTAssertEqual(head.targetVersion, "1.8.4")
+        XCTAssertEqual(head.targetArtifactIndexSHA256, String(repeating: "b", count: 64))
+        XCTAssertEqual(head.signedPolicyMinimum, "1.8.0")
+        XCTAssertEqual(head.signedPolicyRevoked, ["1.7.9"])
+
+        var tampered = headData
+        tampered[tampered.count - 2] = UInt8(ascii: "c")
+        XCTAssertThrowsError(try SignedReleaseDiscoveryHead.loadVerified(
+            headData: tampered,
+            signatureData: signature,
+            now: now,
+            publicKeyPEM: privateKey.publicKey.pemRepresentation
+        )) { error in
+            guard case .discoveryHeadInvalid? = error as? UpdateError else {
+                return XCTFail("expected discoveryHeadInvalid, got \(error)")
+            }
+        }
+
+        let expired = signedDiscoveryPayload(
+            sequence: 8,
+            targetSetID: "Augustas11/macprovider:v1.8.5@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            artifactIndexSHA256: String(repeating: "c", count: 64),
+            issuedAt: now.addingTimeInterval(-600),
+            expiresAt: now.addingTimeInterval(-1)
+        )
+        let expiredData = try canonicalJSON(["schema_version": SignedReleaseDiscoveryHead.envelopeSchema, "signed": expired])
+        let expiredSignature = try privateKey.signature(for: SHA256.hash(data: try canonicalJSON(expired))).derRepresentation
+        XCTAssertThrowsError(try SignedReleaseDiscoveryHead.loadVerified(
+            headData: expiredData,
+            signatureData: expiredSignature,
+            now: now,
+            publicKeyPEM: privateKey.publicKey.pemRepresentation
+        )) { error in
+            guard case .discoveryHeadExpired? = error as? UpdateError else {
+                return XCTFail("expected discoveryHeadExpired, got \(error)")
+            }
+        }
+    }
+
+    func testDiscoveryStateRejectsReplayAndEquivocationBeforeMutation() throws {
+        let privateKey = P256.Signing.PrivateKey()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let first = try signedDiscoveryHead(
+            sequence: 10,
+            targetSetID: "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            privateKey: privateKey,
+            now: now
+        )
+        let replay = try signedDiscoveryHead(
+            sequence: 9,
+            targetSetID: "Augustas11/macprovider:v1.8.3@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            privateKey: privateKey,
+            now: now
+        )
+        let equivocation = try signedDiscoveryHead(
+            sequence: 10,
+            targetSetID: "Augustas11/macprovider:v1.8.5@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            privateKey: privateKey,
+            now: now
+        )
+
+        try store.acceptDiscoveryHead(first)
+        XCTAssertEqual(try XCTUnwrap(store.readDiscoveryStateForTest()).releaseSequence, 10)
+        XCTAssertThrowsError(try store.acceptDiscoveryHead(replay)) { error in
+            guard case .discoveryHeadReplay? = error as? UpdateError else {
+                return XCTFail("expected discoveryHeadReplay, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try store.acceptDiscoveryHead(equivocation)) { error in
+            guard case .discoveryHeadEquivocation? = error as? UpdateError else {
+                return XCTFail("expected discoveryHeadEquivocation, got \(error)")
+            }
+        }
+    }
+
+    func testSignedReleasePendingMarkerRequiresDiscoveryAndExactTargetSetBinding() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let binary = fixture.url.appendingPathComponent("bin/macprovider-cli")
+        try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let backup = binary.deletingLastPathComponent().appendingPathComponent(".macprovider-cli.rollback-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        let base = AutoUpdatePendingMarker(
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.8.4",
+            targetPath: binary.path,
+            backupPath: backup.path,
+            size: 0,
+            mode: 0o755,
+            sha256: String(repeating: "a", count: 64),
+            markerDeadline: ISO8601DateFormatter.autoupdateTest.string(from: Date().addingTimeInterval(300)),
+            targetCompatibilitySetID: "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            targetCompatibilitySetSHA256: String(repeating: "b", count: 64),
+            updateAuthorityMode: "signed_release"
+        )
+
+        XCTAssertThrowsError(try store.validateMarker(base))
+
+        let bound = AutoUpdatePendingMarker(
+            updateID: base.updateID,
+            targetVersion: base.targetVersion,
+            targetPath: base.targetPath,
+            backupPath: base.backupPath,
+            size: base.size,
+            mode: base.mode,
+            sha256: base.sha256,
+            markerDeadline: base.markerDeadline,
+            targetCompatibilitySetID: base.targetCompatibilitySetID,
+            targetCompatibilitySetSHA256: base.targetCompatibilitySetSHA256,
+            discoveryHeadSequence: 12,
+            discoveryHeadSHA256: String(repeating: "c", count: 64),
+            updateAuthorityMode: "signed_release"
+        )
+        XCTAssertNoThrow(try store.validateMarker(bound))
+    }
+
+    func testRollbackTargetDisallowedByPersistedMinimumOrRevocation() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        var (marker, binary, _) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        marker = AutoUpdatePendingMarker(
+            updateID: marker.updateID,
+            targetVersion: marker.targetVersion,
+            targetPath: marker.targetPath,
+            backupPath: marker.backupPath,
+            size: marker.size,
+            mode: marker.mode,
+            sha256: marker.sha256,
+            markerDeadline: marker.markerDeadline,
+            previousVersion: "1.6.9"
+        )
+        try await store.updateSignedPolicy(minimum: "1.7.0", revoked: [])
+
+        XCTAssertThrowsError(try store.restoreBackupAwaitingPreviousReadiness(marker)) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .rollbackTargetDisallowed)
+        }
+        XCTAssertEqual(try String(contentsOf: binary), "new")
+    }
+
+    func testSuccessSentinelBindsExactCompatibilitySetIdentityAndDigest() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        var (marker, binary, _) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        marker = AutoUpdatePendingMarker(
+            updateID: marker.updateID,
+            targetVersion: marker.targetVersion,
+            targetPath: marker.targetPath,
+            backupPath: marker.backupPath,
+            size: marker.size,
+            mode: marker.mode,
+            sha256: marker.sha256,
+            markerDeadline: marker.markerDeadline,
+            targetCompatibilitySetID: "Augustas11/macprovider:v1.7.0@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            targetCompatibilitySetSHA256: String(repeating: "d", count: 64)
+        )
+
+        try store.writeSuccessSentinel(binaryURL: binary, marker: marker)
+        let payload = try store.readSuccessSentinel(store.successSentinelPath(binaryURL: binary, updateID: marker.updateID))
+        XCTAssertEqual(payload.targetCompatibilitySetID, marker.targetCompatibilitySetID)
+        XCTAssertEqual(payload.targetCompatibilitySetSHA256, marker.targetCompatibilitySetSHA256)
+
+        let sentinel = store.successSentinelPath(binaryURL: binary, updateID: marker.updateID)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: sentinel)) as? [String: Any])
+        object["target_compatibility_set_sha256"] = String(repeating: "e", count: 64)
+        try canonicalJSON(object).write(to: sentinel, options: .atomic)
+        let tampered = try store.readSuccessSentinel(sentinel)
+        XCTAssertNotEqual(tampered.targetCompatibilitySetSHA256, marker.targetCompatibilitySetSHA256)
+    }
+
     func testNotifyOnlyTrustDoesNotCreateAutoupdateState() async throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
@@ -1060,6 +1271,128 @@ final class AutoUpdateTests: XCTestCase {
         let event = await AutoUpdateEventStore.shared.lastWireObject()
         XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.trustStateLost.rawValue)
         XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
+    }
+
+    func testSignedReleaseDiscoverySwapDoesNotRequireCoordinatorTrust() async throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            compatibilityManifestPublicKeyPEM: manifestPublicKey
+        )
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: binaryDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.createDirectory(
+            at: payload,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        let priorManifestFixture = try CompatibilityManifestFixture(
+            root: binaryDirectory,
+            privateKey: manifestSigningKey,
+            version: "1.8.48",
+            providerCLIVersion: "1.8.48",
+            malibuAppVersion: "1.8.43",
+            commit: "1111111111111111111111111111111111111111",
+            populateResources: false
+        )
+        let manifestFixture = try CompatibilityManifestFixture(
+            root: payload,
+            privateKey: manifestSigningKey,
+            version: "1.8.50",
+            providerCLIVersion: "1.8.50",
+            malibuAppVersion: "1.8.43",
+            commit: "2222222222222222222222222222222222222222",
+            populateResources: false
+        )
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: payload,
+            expectedProviderVersion: "1.8.50",
+            publicKeyPEM: manifestPublicKey
+        )
+        XCTAssertEqual(priorManifestFixture.compatibilitySetID, "Augustas11/macprovider:v1.8.48@1111111111111111111111111111111111111111")
+        XCTAssertEqual(manifest.compatibilitySetID, manifestFixture.compatibilitySetID)
+        let prepared = PreparedSelfUpdate(
+            tempDir: fixture.url,
+            newBinary: newBinary,
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "a", count: 64)
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 12,
+            targetVersion: "1.8.50",
+            targetCompatibilitySetID: manifest.compatibilitySetID,
+            targetArtifactIndexSHA256: prepared.artifactIndexSHA256,
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date().addingTimeInterval(-30),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "b", count: 64)
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.48",
+            providerStatus: status,
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: false,
+                    tier: nil,
+                    encryptedLegValid: false,
+                    attestationRequired: false,
+                    attestationSatisfied: false,
+                    tokenConfigured: true,
+                    tokenValidated: false,
+                    bearerlessDuplicate: false,
+                    connected: false,
+                    stableReason: "coordinator_disconnected"
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        try await updater.preserveMarkerAndSwapForTest(
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            target: "1.8.50",
+            prepared: prepared,
+            authorityMode: "signed_release",
+            discoveryHead: head,
+            requireCurrentTrustAtSwap: false
+        )
+
+        XCTAssertEqual(try String(contentsOf: binary), "new-binary")
+        let marker = try XCTUnwrap(store.readPending())
+        XCTAssertEqual(marker.updateAuthorityMode, "signed_release")
+        XCTAssertEqual(marker.discoveryHeadSequence, 12)
+        XCTAssertEqual(marker.targetCompatibilitySetID, manifest.compatibilitySetID)
+        XCTAssertEqual(marker.targetCompatibilitySetSHA256, manifest.envelopeSHA256)
     }
 
     func testRestartFailureRollbackRestoresBinaryAndClearsPendingState() async throws {
@@ -1220,6 +1553,58 @@ final class AutoUpdateTests: XCTestCase {
         let release = try await update.resolveReleaseByTags(normalizedTarget: "1.7.0")
 
         XCTAssertEqual(release.tagName, "1.7.0")
+    }
+
+    private func signedDiscoveryPayload(
+        sequence: UInt64,
+        targetSetID: String,
+        artifactIndexSHA256: String = String(repeating: "a", count: 64),
+        issuedAt: Date,
+        expiresAt: Date,
+        minimum: String? = nil,
+        revoked: [String] = []
+    ) -> [String: Any] {
+        [
+            "schema_version": SignedReleaseDiscoveryHead.payloadSchema,
+            "release_sequence": NSNumber(value: sequence),
+            "target_compatibility_set_id": targetSetID,
+            "target_artifact_index_sha256": artifactIndexSHA256,
+            "signed_policy_minimum": minimum ?? NSNull(),
+            "signed_policy_revoked": revoked,
+            "issued_at": ISO8601DateFormatter.autoupdateTest.string(from: issuedAt),
+            "expires_at": ISO8601DateFormatter.autoupdateTest.string(from: expiresAt),
+        ]
+    }
+
+    private func signedDiscoveryHead(
+        sequence: UInt64,
+        targetSetID: String,
+        privateKey: P256.Signing.PrivateKey,
+        now: Date
+    ) throws -> SignedReleaseDiscoveryHead {
+        let payload = signedDiscoveryPayload(
+            sequence: sequence,
+            targetSetID: targetSetID,
+            issuedAt: now.addingTimeInterval(-60),
+            expiresAt: now.addingTimeInterval(300)
+        )
+        let headData = try canonicalJSON([
+            "schema_version": SignedReleaseDiscoveryHead.envelopeSchema,
+            "signed": payload,
+        ])
+        let signature = try privateKey.signature(for: SHA256.hash(data: try canonicalJSON(payload))).derRepresentation
+        return try SignedReleaseDiscoveryHead.loadVerified(
+            headData: headData,
+            signatureData: signature,
+            now: now,
+            publicKeyPEM: privateKey.publicKey.pemRepresentation
+        )
+    }
+
+    private func canonicalJSON(_ object: Any) throws -> Data {
+        var data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        data.append(0x0A)
+        return data
     }
 
     private func makePendingMarkerFixture(

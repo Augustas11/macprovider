@@ -29,7 +29,9 @@ final class SelfUpdateTests: XCTestCase {
         } catch let error as UpdateError {
             XCTAssertEqual(
                 error.description,
-                UpdateError.untrustedReleaseAPIURL("http://attacker.invalid/releases").description
+                UpdateError.untrustedReleaseAPIURL(
+                    "http://attacker.invalid/releases/tags/\(SignedReleaseDiscoveryHead.transportReleaseTag)"
+                ).description
             )
         }
     }
@@ -59,6 +61,56 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertThrowsError(try SelfUpdate.validateReleaseTag(" v1.2.1 "))
         XCTAssertThrowsError(try SelfUpdate.validateReleaseTag("release-1.2.1"))
         XCTAssertNoThrow(try SelfUpdate.requireStagedBinaryVersion("1.8.40\n", targetVersion: "1.8.40"))
+    }
+
+    func testDiscoveryHeadBindsSetVersionWhileCLIAndMalibuVersionsCanDiffer() throws {
+        let setID = "Augustas11/macprovider:v1.8.50@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: String(repeating: "b", count: 64),
+            version: "1.8.50",
+            catalogReleaseID: "catalog-2026-07-17",
+            catalogPolicyVersion: "policy-1",
+            maintenanceLeaseSeconds: 90,
+            readinessTimeoutSeconds: 300,
+            malibuAppVersion: "1.8.51",
+            providerCLIVersion: "1.8.49"
+        )
+        let prepared = PreparedSelfUpdate(
+            tempDir: FileManager.default.temporaryDirectory,
+            newBinary: URL(fileURLWithPath: "/tmp/macprovider-cli-test"),
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "c", count: 64)
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 1,
+            targetVersion: "1.8.50",
+            targetCompatibilitySetID: setID,
+            targetArtifactIndexSHA256: String(repeating: "c", count: 64),
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date(),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "d", count: 64)
+        )
+
+        XCTAssertNoThrow(try SelfUpdate.requireDiscoveryHead(head, matches: prepared))
+        let mismatched = PreparedSelfUpdate(
+            tempDir: prepared.tempDir,
+            newBinary: prepared.newBinary,
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "e", count: 64)
+        )
+        XCTAssertThrowsError(try SelfUpdate.requireDiscoveryHead(head, matches: mismatched)) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.discoveryHeadInvalid("target_identity_mismatch").description
+            )
+        }
     }
 
     func testAcceptanceProviderComponentAllowsEqualityAndUpgradeButRejectsDowngrade() throws {
@@ -549,8 +601,9 @@ final class SelfUpdateTests: XCTestCase {
 
     func testUpdateRequiresSignedChecksumAsset() async throws {
         let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let tagURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/tags/v1.2.1")!
         MockURLProtocol.responses = [
-            releaseURL: (
+            tagURL: (
                 200,
                 """
                 {
@@ -575,8 +628,37 @@ final class SelfUpdateTests: XCTestCase {
         let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: releaseURL.absoluteString, session: session)
 
         do {
-            try await update.run(checkOnly: false)
+            try await update.runByTag(tag: "v1.2.1")
             XCTFail("update unexpectedly accepted a release without checksums.txt.sig")
+        } catch let error as UpdateError {
+            XCTAssertEqual(error.description, UpdateError.missingAsset.description)
+        }
+    }
+
+    func testDefaultUpdateFetchesFixedSignedDiscoveryTransportBeforeLatestRelease() async throws {
+        let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let discoveryURL = URL(
+            string: "https://api.github.com/repos/Augustas11/macprovider/releases/tags/\(SignedReleaseDiscoveryHead.transportReleaseTag)"
+        )!
+        MockURLProtocol.responses = [
+            discoveryURL: (
+                200,
+                """
+                {
+                  "tag_name": "\(SignedReleaseDiscoveryHead.transportReleaseTag)",
+                  "assets": []
+                }
+                """.data(using: .utf8)!
+            ),
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: releaseURL.absoluteString, session: session)
+
+        do {
+            try await update.run(checkOnly: true)
+            XCTFail("update unexpectedly accepted a discovery transport without signed head assets")
         } catch let error as UpdateError {
             XCTAssertEqual(error.description, UpdateError.missingAsset.description)
         }

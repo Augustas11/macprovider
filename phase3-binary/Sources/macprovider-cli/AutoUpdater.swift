@@ -219,7 +219,10 @@ struct AutoUpdater: Sendable {
                 updateID: updateID,
                 target: target,
                 prepared: prepared,
-                tracker: commitTracker
+                tracker: commitTracker,
+                authorityMode: "coordinator_recommendation",
+                discoveryHead: nil,
+                requireCurrentTrustAtSwap: true
             )
             if let signedPolicy = prepared.signedPolicy {
                 try await markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
@@ -287,11 +290,162 @@ struct AutoUpdater: Sendable {
         }
     }
 
+    func handleSignedReleaseDiscovery() async {
+        let updateID = UUID().uuidString.lowercased()
+        guard !SessionAutoupdateGate.shared.isDisabled else {
+            await record(updateID: updateID, target: "<session-disabled>", source: .githubPoll, phase: .eligibility, outcome: .skipped, reason: "signed_policy_persist_failed", attempt: 1)
+            return
+        }
+        guard AutoUpdateConfig.enabled(config) else {
+            await record(updateID: updateID, target: "<disabled>", source: .githubPoll, phase: .eligibility, outcome: .skipped, reason: "autoupdate_disabled", attempt: 1)
+            return
+        }
+        let commitTracker = AutoUpdateCommitTracker()
+        var maintenanceLease: ProviderLifecycleLeaseRecord?
+        var startupHandoffPrepared = false
+        defer {
+            if let maintenanceLease, !startupHandoffPrepared {
+                _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
+            }
+        }
+
+        do {
+            guard launchdProviderAvailable() else {
+                await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .other, reason: "unsupported_install_topology")
+                return
+            }
+            guard rollbackObserverAvailable() else {
+                await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .rollbackObserverUnavailable, reason: "rollback_observer_unavailable")
+                return
+            }
+            try markerStore.ensureTrustedRoot()
+            let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
+            let head: SignedReleaseDiscoveryHead
+            do {
+                head = try await update.discoverSignedReleaseHead()
+                try await markerStore.updateSignedPolicy(
+                    minimum: head.signedPolicyMinimum,
+                    revoked: head.signedPolicyRevoked
+                )
+            } catch UpdateError.discoveryHeadReplay {
+                await fail(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .eligibility, failure: .discoveryHeadReplay, reason: "discovery_head_replay")
+                return
+            } catch UpdateError.discoveryHeadEquivocation {
+                await fail(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .eligibility, failure: .discoveryHeadEquivocation, reason: "discovery_head_equivocation")
+                return
+            } catch UpdateError.discoveryHeadExpired {
+                await fail(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .eligibility, failure: .discoveryHeadExpired, reason: "discovery_head_expired")
+                return
+            }
+            let target = head.targetVersion
+            await record(updateID: updateID, target: target, source: .githubPoll, phase: .detection, outcome: .inProgress, reason: "signed_release_discovery_detected", attempt: 1)
+            let installedReleaseVersion = currentBinaryURL().flatMap {
+                CompatibilitySetManifest.loadInstalled(
+                    executableURL: $0,
+                    expectedVersion: currentVersion
+                )?.version
+            } ?? currentVersion
+            guard SelfUpdate.compareSemver(installedReleaseVersion, target) == .orderedAscending else {
+                await record(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, outcome: .noop, reason: "target_not_newer", attempt: 1)
+                return
+            }
+            let policy = markerStore.effectivePolicy()
+            if let minimum = policy.minimum, SelfUpdate.compareSemver(target, minimum) == .orderedAscending || policy.revoked.contains(target) {
+                await fail(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum")
+                return
+            }
+            if let activeCooldown = markerStore.activeCooldown(target: target) {
+                await record(updateID: updateID, target: target, source: .githubPoll, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
+                return
+            }
+            let lock = try markerStore.acquireLock()
+            defer { withExtendedLifetime(lock) {} }
+            let release = try await update.resolveReleaseByTags(normalizedTarget: target)
+            let prepared = try await update.prepareValidatedUpdate(
+                from: release,
+                expectedArtifactIndexSHA256: head.targetArtifactIndexSHA256
+            )
+            defer { prepared.cleanup() }
+            try SelfUpdate.requireDiscoveryHead(head, matches: prepared)
+            let providerTarget = prepared.compatibilityManifest.providerCLIVersion
+            guard prepared.compatibilityManifest.compatibilitySetID == head.targetCompatibilitySetID else {
+                await fail(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, failure: .other, reason: "discovery_compatibility_target_mismatch")
+                return
+            }
+            if try markerStore.preflightInstalledMalibuAppReplacement() != nil,
+               prepared.stagedMalibuApp == nil {
+                await fail(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, failure: .other, reason: "signed_malibu_bundle_missing")
+                return
+            }
+            maintenanceLease = try lifecycleLeaseStore.acquire(
+                kind: .maintenance,
+                operationID: "autoupdate:\(updateID)",
+                duration: TimeInterval(prepared.compatibilityManifest.maintenanceLeaseSeconds)
+            )
+            let drained = try await drain(providerTarget)
+            guard drained else {
+                await fail(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .drain, failure: .drainTimeout, reason: "drain_timeout")
+                try? await sendReady()
+                return
+            }
+            try await preserveMarkerAndSwap(
+                updateID: updateID,
+                target: providerTarget,
+                prepared: prepared,
+                tracker: commitTracker,
+                authorityMode: "signed_release",
+                discoveryHead: head,
+                requireCurrentTrustAtSwap: false
+            )
+            await record(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
+            do {
+                guard let lease = maintenanceLease,
+                      let providerID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !providerID.isEmpty,
+                      let current = currentBinaryURL()
+                else {
+                    throw ProviderLifecycleLeaseError.invalidHandoffField("provider_id")
+                }
+                _ = try lifecycleLeaseStore.prepareStartupHandoff(
+                    maintenanceLeaseID: lease.leaseID,
+                    operationID: "autoupdate:\(updateID)",
+                    providerID: providerID,
+                    serviceIdentity: SelfUpdate.launchdLabel,
+                    targetExecutablePath: current.path,
+                    targetExecutableSHA256: try AutoUpdateMarkerStore.sha256(file: current),
+                    handoffDuration: 60,
+                    startupLeaseDuration: TimeInterval(prepared.compatibilityManifest.readinessTimeoutSeconds)
+                )
+                startupHandoffPrepared = true
+                try restartLaunchd()
+            } catch {
+                try? rollbackCommittedSwapAfterRestartFailure(commitTracker)
+                if let maintenanceLease {
+                    _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
+                }
+                startupHandoffPrepared = false
+                await fail(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .restart, failure: .other, reason: Self.redactedReason(for: error))
+                return
+            }
+            await record(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked", attempt: 1)
+        } catch AutoUpdateMarkerError.lockContended {
+            await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "provider_mutation_in_progress")
+        } catch AutoUpdateMarkerError.transactionPending {
+            await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
+        } catch {
+            let failure = Self.failureClass(for: error)
+            await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
+        }
+    }
+
     private func preserveMarkerAndSwap(
         updateID: String,
         target: String,
         prepared: PreparedSelfUpdate,
-        tracker: AutoUpdateCommitTracker
+        tracker: AutoUpdateCommitTracker,
+        authorityMode: String,
+        discoveryHead: SignedReleaseDiscoveryHead?,
+        requireCurrentTrustAtSwap: Bool
     ) async throws {
         guard let current = currentBinaryURL() else {
             throw AutoUpdateError.currentBinaryUnknown
@@ -303,6 +457,9 @@ struct AutoUpdater: Sendable {
             previousVersion: currentVersion,
             targetCompatibilitySetID: prepared.compatibilityManifest.compatibilitySetID,
             targetCompatibilitySetSHA256: prepared.compatibilityManifest.envelopeSHA256,
+            discoveryHeadSequence: discoveryHead?.releaseSequence,
+            discoveryHeadSHA256: discoveryHead?.digest,
+            updateAuthorityMode: authorityMode,
             readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds
         )
         tracker.marker = marker
@@ -310,7 +467,9 @@ struct AutoUpdater: Sendable {
         do {
             try markerStore.writePending(marker)
             tracker.committedMarker = true
-            try await ensureEligible(phase: .swap)
+            if requireCurrentTrustAtSwap {
+                try await ensureEligible(phase: .swap)
+            }
             try markerStore.activateReleasePayload(
                 from: prepared.newBinary.deletingLastPathComponent(),
                 newBinary: prepared.newBinary,
@@ -337,6 +496,25 @@ struct AutoUpdater: Sendable {
             }
             throw error
         }
+    }
+
+    func preserveMarkerAndSwapForTest(
+        updateID: String,
+        target: String,
+        prepared: PreparedSelfUpdate,
+        authorityMode: String,
+        discoveryHead: SignedReleaseDiscoveryHead?,
+        requireCurrentTrustAtSwap: Bool
+    ) async throws {
+        try await preserveMarkerAndSwap(
+            updateID: updateID,
+            target: target,
+            prepared: prepared,
+            tracker: AutoUpdateCommitTracker(),
+            authorityMode: authorityMode,
+            discoveryHead: discoveryHead,
+            requireCurrentTrustAtSwap: requireCurrentTrustAtSwap
+        )
     }
 
     func rollbackCommittedSwapAfterRestartFailureForTest(_ marker: AutoUpdatePendingMarker) {
@@ -368,17 +546,18 @@ struct AutoUpdater: Sendable {
         _ = phase
     }
 
-    private func fail(updateID: String, target: String, phase: AutoUpdatePhase, failure: AutoUpdateFailureClass, reason: String) async {
+    private func fail(updateID: String, target: String, source: AutoUpdateSource = .coordinator, phase: AutoUpdatePhase, failure: AutoUpdateFailureClass, reason: String) async {
         markerStore.recordCooldown(target: target, failureClass: failure)
-        await record(updateID: updateID, target: target, phase: phase, outcome: .failure, reason: reason, attempt: 1, failure: failure)
+        await record(updateID: updateID, target: target, source: source, phase: phase, outcome: .failure, reason: reason, attempt: 1, failure: failure)
     }
 
-    private func record(updateID: String, target: String, phase: AutoUpdatePhase, outcome: AutoUpdateOutcome, reason: String, attempt: Int, failure: AutoUpdateFailureClass? = nil, sha: String? = nil) async {
+    private func record(updateID: String, target: String, source: AutoUpdateSource = .coordinator, phase: AutoUpdatePhase, outcome: AutoUpdateOutcome, reason: String, attempt: Int, failure: AutoUpdateFailureClass? = nil, sha: String? = nil) async {
         let inflight = await providerStatus.snapshot().requestsInFlight
         await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
             updateID: updateID,
             currentVersion: currentVersion,
             targetVersion: target,
+            source: source,
             phase: phase,
             outcome: outcome,
             reason: reason,
@@ -401,6 +580,16 @@ struct AutoUpdater: Sendable {
             return .selfTestFailed
         case UpdateError.insufficientDiskSpace:
             return .insufficientDiskSpace
+        case UpdateError.discoveryHeadReplay:
+            return .discoveryHeadReplay
+        case UpdateError.discoveryHeadEquivocation:
+            return .discoveryHeadEquivocation
+        case UpdateError.discoveryHeadExpired:
+            return .discoveryHeadExpired
+        case UpdateError.missingReleaseResource,
+             UpdateError.compatibilityManifestInvalid,
+             UpdateError.compatibilityArtifactIndexInvalid:
+            return .releasePayloadIncomplete
         default:
             return .other
         }
@@ -444,6 +633,16 @@ struct AutoUpdater: Sendable {
             return "compatibility_set_invalid"
         case UpdateError.compatibilityManifestVersionMismatch:
             return "compatibility_set_version_mismatch"
+        case UpdateError.compatibilityArtifactIndexInvalid:
+            return "compatibility_artifact_index_invalid"
+        case UpdateError.discoveryHeadInvalid:
+            return "discovery_head_invalid"
+        case UpdateError.discoveryHeadReplay:
+            return "discovery_head_replay"
+        case UpdateError.discoveryHeadEquivocation:
+            return "discovery_head_equivocation"
+        case UpdateError.discoveryHeadExpired:
+            return "discovery_head_expired"
         case UpdateError.rollbackUnavailable:
             return "rollback_unavailable"
         case UpdateError.activationFailedRollbackFailed:
@@ -472,12 +671,16 @@ struct AutoUpdater: Sendable {
         case UpdateError.checksumMismatch, UpdateError.checksumMissing:
             return .checksum
         case UpdateError.unsafeArchiveEntry, UpdateError.missingExtractedBinary,
-             UpdateError.compatibilityManifestInvalid, UpdateError.compatibilityManifestVersionMismatch:
+             UpdateError.compatibilityManifestInvalid, UpdateError.compatibilityManifestVersionMismatch,
+             UpdateError.compatibilityArtifactIndexInvalid:
             return .archive
         case UpdateError.processFailed:
             return .selfTest
         case UpdateError.insufficientDiskSpace:
             return .freeSpace
+        case UpdateError.discoveryHeadInvalid, UpdateError.discoveryHeadReplay,
+             UpdateError.discoveryHeadEquivocation, UpdateError.discoveryHeadExpired:
+            return .eligibility
         default:
             return .download
         }

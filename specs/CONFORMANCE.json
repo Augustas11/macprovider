@@ -1116,7 +1116,9 @@
       "state": "nonconformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleCoordinatorRecommendation",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:recommended_binary_version"
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleSignedReleaseDiscovery",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runSignedRecoveryDiscoveryIfDue",
+        "phase3-binary/Sources/macprovider-cli/SignedReleaseDiscovery.swift:SignedReleaseDiscoveryHead"
       ],
       "tests": [],
       "journeys": [],
@@ -1125,7 +1127,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/610",
-        "rationale": "Automatic application is reachable only from an accepted coordinator recommendation; no default disconnected or rejected-provider loop or replay-resistant signed monotonic discovery head exists."
+        "rationale": "Implementation mappings now cover disconnected/rejected signed-release discovery in PR #631, but SPEC-020 requires signed physical journey evidence before this provider-autoupdate authority can be promoted."
       }
     },
     {
@@ -1134,7 +1136,8 @@
       "state": "nonconformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:struct UpdateCommand",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:requireFreshCoordinatorCompatibilityAdmission"
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:discoverSignedReleaseHead",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:acceptanceDiscoveryHeadIfPresent"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testCoordinatorCompatibilityAdmissionRequiresFreshExactCurrentAndTargetSets"
@@ -1145,7 +1148,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/610",
-        "rationale": "All manual application paths call the fresh coordinator compatibility-admission gate after signed release validation."
+        "rationale": "Implementation mappings now cover manual signed-release update without live or cached coordinator admission in PR #631, but signed physical journey evidence is still pending."
       }
     },
     {
@@ -1154,9 +1157,11 @@
       "state": "nonconformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:applyValidatedUpdate",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForBuyerServingIfManaged",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
         "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:writeSuccessSentinel",
         "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:readSuccessSentinel",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:localSignedSetRecoveryAllowed",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:commitPendingAutoupdateAfterServingProof",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runStartupAutoupdateRecovery"
       ],
       "tests": [
@@ -1170,7 +1175,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/610",
-        "rationale": "The updater treats missing buyer-serving readiness as rollback-worthy even when signed activation, launch, and local health succeeded; success sentinels bind only the CLI version rather than the exact compatibility set; rollback does not fail closed when the prior set is revoked or below the effective minimum."
+        "rationale": "Implementation mappings now cover local signed-set health, exact-set success binding, and rollback policy in PR #631, but signed physical journey evidence is still pending."
       }
     },
     {

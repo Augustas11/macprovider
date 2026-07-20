@@ -237,6 +237,7 @@ actor CoordinatorClient {
     private var autoupdateDisabledForSessionReason: String?
     private var autoupdateDrainExtensions = false
     private var autoupdateAttemptedTargets = Set<String>()
+    private var lastSignedRecoveryDiscoveryAttempt: Date?
     private var recommendedCompatibilitySetID: String?
     private var webSocket: ProviderWebSocketTask?
     private var coordinatorSessionAccepted = false
@@ -663,6 +664,7 @@ actor CoordinatorClient {
                 if failedAttempts >= 3 {
                     print("WARN coordinator reconnect failed attempt_count=\(failedAttempts) last_error=\(error)")
                 }
+                await runSignedRecoveryDiscoveryIfDue()
                 try? await Task.sleep(nanoseconds: backoffNanoseconds)
                 backoffNanoseconds = backoffNanoseconds >= 30 * 1_000_000_000
                     ? 60 * 1_000_000_000
@@ -2678,9 +2680,6 @@ actor CoordinatorClient {
         guard completedAutoupdate.commitOwner != "self_update" else {
             return .pendingRollback
         }
-        guard await waitForCoordinatorServingCapability() else {
-            return .pendingRollback
-        }
         guard pendingCompatibilitySetMatchesInstalled(completedAutoupdate) else {
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                 updateID: completedAutoupdate.updateID,
@@ -2694,11 +2693,19 @@ actor CoordinatorClient {
             ))
             return .pendingRollback
         }
+        if !localSignedSetRecoveryAllowed(completedAutoupdate) {
+            guard await waitForCoordinatorServingCapability() else {
+                return .pendingRollback
+            }
+        }
         do {
             let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
             defer { withExtendedLifetime(transactionLock) {} }
             guard let current = try autoupdateMarkerStore.readPending(),
-                  current == completedAutoupdate else {
+                  current.updateID == completedAutoupdate.updateID,
+                  current.targetVersion == completedAutoupdate.targetVersion,
+                  current.targetPath == completedAutoupdate.targetPath,
+                  current.backupPath == completedAutoupdate.backupPath else {
                 throw AutoUpdateMarkerError.invalidMarker
             }
             try autoupdateMarkerStore.completeSuccessfulUpdate(current)
@@ -2753,14 +2760,22 @@ actor CoordinatorClient {
         }
     }
 
+    private func localSignedSetRecoveryAllowed(_ marker: AutoUpdatePendingMarker) -> Bool {
+        marker.updateAuthorityMode == "signed_release"
+            && marker.targetCompatibilitySetID != nil
+            && marker.targetCompatibilitySetSHA256 != nil
+            && marker.discoveryHeadSequence != nil
+            && marker.discoveryHeadSHA256 != nil
+    }
+
     private func pendingCompatibilitySetMatchesInstalled(_ marker: AutoUpdatePendingMarker) -> Bool {
         switch (marker.targetCompatibilitySetID, marker.targetCompatibilitySetSHA256) {
         case (nil, nil):
             return true
         case let (.some(expectedID), .some(expectedDigest)):
-            guard let installed = CompatibilitySetManifest.loadInstalled(
-                executableURL: Bundle.main.executableURL,
-                expectedVersion: Self.binaryVersion
+            guard let installed = installedCompatibilityManifest(
+                URL(fileURLWithPath: marker.targetPath),
+                Self.binaryVersion
             ) else { return false }
             return installed.compatibilitySetID == expectedID
                 && installed.envelopeSHA256 == expectedDigest
@@ -2961,7 +2976,12 @@ actor CoordinatorClient {
             return
         }
         for sentinel in markerStore.successSentinels(in: binaryDir) {
-            let payload: (updateID: String, binaryVersion: String)
+            let payload: (
+                updateID: String,
+                binaryVersion: String,
+                targetCompatibilitySetID: String?,
+                targetCompatibilitySetSHA256: String?
+            )
             do {
                 payload = try markerStore.readSuccessSentinel(sentinel)
             } catch {
@@ -2995,6 +3015,35 @@ actor CoordinatorClient {
                 )
                 continue
             }
+            if let expectedID = payload.targetCompatibilitySetID,
+               expectedID != pending.targetCompatibilitySetID {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "success_set_id_mismatch",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            if let expectedSHA = payload.targetCompatibilitySetSHA256,
+               expectedSHA != pending.targetCompatibilitySetSHA256 {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "success_set_digest_mismatch",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            guard pendingCompatibilitySetMatchesInstalled(pending) else {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "installed_set_mismatch",
+                    sentinel: sentinel
+                )
+                continue
+            }
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                 updateID: payload.updateID,
                 currentVersion: Self.binaryVersion,
@@ -3005,7 +3054,9 @@ actor CoordinatorClient {
                 attempt: 1
             ))
             do {
-                try await sendStateUpdate(state: nil, reason: "autoupdate_post_start_success")
+                if !localSignedSetRecoveryAllowed(pending) {
+                    try await sendStateUpdate(state: nil, reason: "autoupdate_post_start_success")
+                }
                 try markerStore.completeSuccessfulUpdate(pending)
                 try markerStore.finalizeSuccessfulUpdate(pending)
             } catch {
@@ -3022,6 +3073,36 @@ actor CoordinatorClient {
             }
         }
         if let marker = pending {
+            if marker.targetVersion == Self.binaryVersion,
+               marker.commitOwner != "self_update",
+               localSignedSetRecoveryAllowed(marker),
+               pendingCompatibilitySetMatchesInstalled(marker) {
+                do {
+                    try markerStore.completeSuccessfulUpdate(marker)
+                    try markerStore.finalizeSuccessfulUpdate(marker)
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: marker.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: marker.targetVersion,
+                        phase: .postStart,
+                        outcome: .success,
+                        reason: "local_signed_set_health_succeeded",
+                        attempt: 1
+                    ))
+                } catch {
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: marker.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: marker.targetVersion,
+                        phase: .postStart,
+                        outcome: .failure,
+                        reason: "local_success_cleanup_failed",
+                        attempt: 1,
+                        failureClass: .other
+                    ))
+                }
+                return
+            }
             guard Self.autoupdateMarkerDeadlineExpired(marker.markerDeadline) else {
                 return
             }
@@ -3071,6 +3152,18 @@ actor CoordinatorClient {
                         reason: reason,
                         attempt: 1,
                         failureClass: .rollbackBackupCorrupt
+                    ))
+                case let .rollbackTargetDisallowed(recovered):
+                    autoupdateDisabledForSessionReason = "rollback_target_disallowed"
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: recovered.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: recovered.targetVersion,
+                        phase: .rollback,
+                        outcome: .failure,
+                        reason: "rollback_target_disallowed",
+                        attempt: 1,
+                        failureClass: .rollbackTargetDisallowed
                     ))
             }
         } else {
@@ -3541,11 +3634,38 @@ actor CoordinatorClient {
             currentVersion: Self.binaryVersion,
             providerStatus: providerStatus,
             expectedCompatibilitySetID: recommendedCompatibilitySetID,
+            markerStore: autoupdateMarkerStore,
             trustProvider: { await self.currentAutoupdateTrustState() },
             drain: { target in try await self.autoupdateDrain(target: target) },
             sendReady: { try await self.sendStateUpdate(state: .ready, reason: "autoupdate_timeout_skipped_ready") }
         )
         await updater.handleCoordinatorRecommendation(recommended)
+    }
+
+    private func runSignedRecoveryDiscoveryIfDue(now: Date = Date()) async {
+        guard !coordinatorSessionAccepted else { return }
+        if let lastSignedRecoveryDiscoveryAttempt,
+           now.timeIntervalSince(lastSignedRecoveryDiscoveryAttempt) < signedRecoveryDiscoveryIntervalSeconds() {
+            return
+        }
+        lastSignedRecoveryDiscoveryAttempt = now
+        let updater = AutoUpdater(
+            config: appConfig,
+            currentVersion: Self.binaryVersion,
+            providerStatus: providerStatus,
+            markerStore: autoupdateMarkerStore,
+            trustProvider: { await self.currentAutoupdateTrustState() },
+            drain: { target in await self.autoupdateLocalDrain(target: target) },
+            sendReady: {
+                await self.providerStatus.setState(.ready, reason: "autoupdate_timeout_skipped_ready")
+            }
+        )
+        await updater.handleSignedReleaseDiscovery()
+    }
+
+    private func signedRecoveryDiscoveryIntervalSeconds() -> TimeInterval {
+        let jitter = TimeInterval(Int.random(in: 0...30))
+        return 300 + jitter
     }
 
     private func currentAutoupdateTrustState() -> AutoUpdateTrustState {
@@ -3711,6 +3831,38 @@ actor CoordinatorClient {
         }
         try await sendDrainStatus(phase: autoupdateDrainExtensions ? "timeout_skipped" : "complete")
         return false
+    }
+
+    private func autoupdateLocalDrain(target: String) async -> Bool {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        heartbeatWatchdogTask?.cancel()
+        heartbeatWatchdogTask = nil
+        await providerStatus.setState(.draining, reason: "autoupdate_to_\(target)")
+        let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120)
+        if softDrained {
+            return true
+        }
+        let snapshot = await providerStatus.snapshot()
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: UUID().uuidString.lowercased(),
+            currentVersion: Self.binaryVersion,
+            targetVersion: target,
+            phase: .drain,
+            outcome: .inProgress,
+            reason: "soft_drain_timeout",
+            attempt: 1,
+            inflightRequests: snapshot.requestsInFlight
+        ))
+        let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30)
+        if !hardDrained {
+            await providerStatus.setState(.ready, reason: "autoupdate_drain_timeout")
+        }
+        return hardDrained
+    }
+
+    func autoupdateLocalDrainForTest(target: String) async -> Bool {
+        await autoupdateLocalDrain(target: target)
     }
 
     // resetWindow=true rolls the since-last metrics window (the coordinator-
