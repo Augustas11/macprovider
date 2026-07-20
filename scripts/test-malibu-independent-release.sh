@@ -124,8 +124,13 @@ PY
 validator="$root/scripts/validate-malibu-release-cli-inputs.sh"
 valid_sha="$(printf 'a%.0s' {1..64})"
 valid_archive_sha="$(printf 'b%.0s' {1..64})"
+valid_cli_version="$(
+  sed -nE 's/^[[:space:]]*static let binaryVersion = "([^"]+)".*$/\1/p' \
+    "$root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
+)"
+valid_cli_tag="v$valid_cli_version"
 
-"$validator" v1.8.54 1.8.54 "$valid_sha" "$valid_archive_sha" >/dev/null
+"$validator" "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" >/dev/null
 
 expect_failure() {
   if "$validator" "$@" >/dev/null 2>&1; then
@@ -134,11 +139,11 @@ expect_failure() {
   fi
 }
 
-expect_failure 1.8.54 1.8.54 "$valid_sha" "$valid_archive_sha"
-expect_failure v1.8.53 1.8.54 "$valid_sha" "$valid_archive_sha"
-expect_failure v1.8.54 1.8.53 "$valid_sha" "$valid_archive_sha"
-expect_failure v1.8.54 1.8.54 "$(printf 'A%.0s' {1..64})" "$valid_archive_sha"
-expect_failure v1.8.54 1.8.54 "${valid_sha%?}" "$valid_archive_sha"
-expect_failure v1.8.54 1.8.54 "$valid_sha" "${valid_archive_sha}0"
+expect_failure "$valid_cli_version" "$valid_cli_version" "$valid_sha" "$valid_archive_sha"
+expect_failure v0.0.1 "$valid_cli_version" "$valid_sha" "$valid_archive_sha"
+expect_failure "$valid_cli_tag" 0.0.1 "$valid_sha" "$valid_archive_sha"
+expect_failure "$valid_cli_tag" "$valid_cli_version" "$(printf 'A%.0s' {1..64})" "$valid_archive_sha"
+expect_failure "$valid_cli_tag" "$valid_cli_version" "${valid_sha%?}" "$valid_archive_sha"
+expect_failure "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "${valid_archive_sha}0"
 
 echo "independent Malibu release CLI input validation checks passed"
