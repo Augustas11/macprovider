@@ -136,6 +136,8 @@ def verify_directory(args: argparse.Namespace) -> None:
         "pearl-release.json",
         "pearl-release.json.sig",
         "compatibility-artifact-index.json",
+        "macprovider-release-discovery.json",
+        "macprovider-release-discovery.json.sig",
         "release-provenance.json",
     }
     if set(release_names) != required_release_names:
