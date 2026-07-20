@@ -23,6 +23,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 metadata="$root/scripts/acceptance-candidate-metadata.py"
 compatibility="$root/scripts/compatibility-set-manifest.py"
 artifact_index="$root/scripts/compatibility-artifact-index.py"
+release_discovery="$root/scripts/build-release-discovery-head.py"
 keychain_helper="$root/scripts/acceptance-signing-keychain.sh"
 acceptance_public_key="$root/security/acceptance-candidate-signing-public.pem"
 openssl_bin="${OPENSSL_BIN:-openssl}"
@@ -54,7 +55,7 @@ fi
 for command in python3 security codesign xcrun ditto hdiutil tar shasum spctl base64 "$openssl_bin"; do
   command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"
 done
-for path in "$metadata" "$compatibility" "$artifact_index" "$keychain_helper" "$acceptance_public_key"; do
+for path in "$metadata" "$compatibility" "$artifact_index" "$release_discovery" "$keychain_helper" "$acceptance_public_key"; do
   [[ -f "$path" && ! -L "$path" ]] || die "trusted signer input is absent or unsafe: $path"
 done
 [[ -d "$unsigned_dir" && ! -L "$unsigned_dir" ]] || die "unsigned input directory is absent or unsafe"
@@ -333,6 +334,16 @@ python3 "$artifact_index" validate \
   --tag "$tag" \
   --commit "$candidate_commit" \
   "${artifact_arguments[@]}"
+python3 "$release_discovery" \
+  --sequence "$run_id" \
+  --attempt "$run_attempt" \
+  --compatibility-manifest "$output_dir/compatibility-set.json" \
+  --target-artifact-index "$output_dir/compatibility-artifact-index.json" \
+  --private-key "$release_private_key" \
+  --public-key "$release_public_key" \
+  --openssl "$openssl_bin" \
+  --output "$output_dir/macprovider-release-discovery.json" \
+  --signature "$output_dir/macprovider-release-discovery.json.sig"
 
 release_assets=(
   "$provider_asset"
@@ -351,6 +362,8 @@ release_assets=(
   "$output_dir/pearl-release.json"
   "$output_dir/pearl-release.json.sig"
   "$output_dir/compatibility-artifact-index.json"
+  "$output_dir/macprovider-release-discovery.json"
+  "$output_dir/macprovider-release-discovery.json.sig"
 )
 python3 "$root/scripts/build-release-provenance.py" \
   "$tag" "$candidate_commit" "$repository" "$release_prerelease" \
