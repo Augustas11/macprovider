@@ -360,7 +360,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             executableURL: executable,
             expectedProviderID: "provider-a",
             incidentID: "incident-585",
-            reason: "Malibu admission identity recovery",
+            reason: "Malibu network verification repair",
             run: { executable, arguments in
                 await recorder.run(executable: executable, arguments: arguments)
             }
@@ -377,7 +377,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             "--config", config.path,
             "--expected-provider-id", "provider-a",
             "--incident-id", "incident-585",
-            "--reason", "Malibu admission identity recovery",
+            "--reason", "Malibu network verification repair",
             "--approval-ttl-minutes", "60",
         ]])
     }

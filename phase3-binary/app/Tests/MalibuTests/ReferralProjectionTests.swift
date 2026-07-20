@@ -2,6 +2,23 @@ import XCTest
 @testable import Malibu
 
 final class ReferralProjectionTests: XCTestCase {
+    private let prohibitedPublicTerms = [
+        "compatibility set",
+        "admission identity",
+        "watchdog",
+        "buyer-serving",
+        "spec-023",
+        "migration token",
+        "credential custody",
+        "coordinator admission",
+        "coordinator",
+        "provider cli",
+        "macprovider-cli",
+        "cli-owned",
+        "terminal path",
+        "referral_bootstrap_v1",
+    ]
+
     func testLockedStatusSuppressesUnexpectedInvite() throws {
         let status = try XCTUnwrap(makeStatus(
             socialState: ReferralStatusProjection.locked,
@@ -70,8 +87,35 @@ final class ReferralProjectionTests: XCTestCase {
         let status = try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.pending))
         XCTAssertEqual(
             ReferralPanelPresenter.detail(availability: .available, status: status),
-            "No bonus is earned until the coordinator verifies the public post."
+            "No bonus is earned until the public post is verified."
         )
+    }
+
+    func testReferralPublicCopyDoesNotExposeInternalTerms() throws {
+        let cases: [(ReferralAvailability, ReferralStatusProjection?)] = [
+            (.unsupported, nil),
+            (.disabled, nil),
+            (.unavailable, nil),
+            (.available, nil),
+            (.available, try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.locked, firstServingSeen: false))),
+            (.available, try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.eligible))),
+            (.available, try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.pending))),
+            (.available, try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.matured, remaining: 3, bonusCapacity: 2))),
+            (.available, try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.failed))),
+            (.available, try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.revoked))),
+            (.available, try XCTUnwrap(makeStatus(joinLinksEnabled: false, inviteURL: nil))),
+        ]
+
+        let publicCopy = cases.flatMap { availability, status in
+            [
+                ReferralPanelPresenter.headline(availability: availability, status: status),
+                ReferralPanelPresenter.detail(availability: availability, status: status),
+            ]
+        }.joined(separator: "\n").lowercased()
+
+        for term in prohibitedPublicTerms {
+            XCTAssertFalse(publicCopy.contains(term), "\(term) leaked in:\n\(publicCopy)")
+        }
     }
 
     func testCoordinatorProjectionExpiresBeforeItCanBePresentedAsCurrent() throws {
@@ -187,7 +231,7 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertNil(agent.snapshot.referralStatus)
         XCTAssertEqual(agent.snapshot.referralAvailability, .disabled)
         XCTAssertFalse(agent.snapshot.referralActionInProgress)
-        XCTAssertEqual(agent.snapshot.referralLastError, "Referral actions are not enabled by the coordinator.")
+        XCTAssertEqual(agent.snapshot.referralLastError, "Invite actions are not enabled yet.")
     }
 
     func testSocialRollbackSuppressesOnlyAdvocacyActions() throws {
@@ -242,6 +286,7 @@ final class ReferralProjectionTests: XCTestCase {
         firstServingSeen: Bool = true,
         redemptions: Int = 0,
         remaining: Int = 1,
+        bonusCapacity: Int = 0,
         joinBaseURL: URL = URL(string: "https://malibu.tech/j")!,
         joinLinksEnabled: Bool = true,
         inviteURL: URL? = URL(string: "https://malibu.tech/j#/CODE"),
@@ -253,7 +298,7 @@ final class ReferralProjectionTests: XCTestCase {
             socialState: socialState,
             baseCapacity: 1,
             configuredBonusCapacity: 2,
-            bonusCapacity: 0,
+            bonusCapacity: bonusCapacity,
             redemptions: redemptions,
             remaining: remaining,
             firstServingSeen: firstServingSeen,

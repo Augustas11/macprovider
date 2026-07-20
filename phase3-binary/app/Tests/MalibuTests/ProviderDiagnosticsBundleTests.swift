@@ -53,6 +53,9 @@ final class ProviderDiagnosticsBundleTests: XCTestCase {
         let text = try XCTUnwrap(String(data: data, encoding: .utf8))
 
         XCTAssertTrue(text.contains("watchdog_recovery"), text)
+        XCTAssertTrue(text.contains("Augustas11/macprovider:v1.8.33@abc123"), text)
+        XCTAssertTrue(text.contains("\"compatibility_set_id\" : \"Augustas11/macprovider:v1.8.33@abc123\""), text)
+        XCTAssertTrue(text.contains("\"admission_identity\""), text)
         XCTAssertTrue(text.contains("restored_prior_release"), text)
         XCTAssertTrue(text.contains("readiness_timeout"), text)
         XCTAssertTrue(text.contains("watchdog_rollback_post_start_rejoin_timeout"), text)

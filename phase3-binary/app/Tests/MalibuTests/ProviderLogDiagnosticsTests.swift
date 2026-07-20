@@ -9,7 +9,10 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         ])
 
         XCTAssertEqual(finding?.id, "stale_model_catalog")
-        XCTAssertTrue(finding?.userMessage.contains("autotune --recommend --apply") == true)
+        XCTAssertTrue(finding?.userMessage.contains("Model options changed") == true)
+        XCTAssertTrue(finding?.userMessage.contains("update provider software") == true)
+        XCTAssertFalse(finding?.userMessage.contains("macprovider-cli") == true)
+        XCTAssertFalse(finding?.userMessage.contains("autotune --recommend --apply") == true)
     }
 
     func testDiagnosePrefersMostRecentMatchingLine() {

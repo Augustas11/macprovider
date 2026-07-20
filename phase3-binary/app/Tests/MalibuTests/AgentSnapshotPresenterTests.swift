@@ -5,6 +5,24 @@ import XCTest
 // from authoritative "$0.00" when a supported legacy peer omits telemetry.
 
 final class AgentSnapshotPresenterTests: XCTestCase {
+    private let prohibitedPublicTerms = [
+        "compatibility set",
+        "admission identity",
+        "watchdog",
+        "buyer-serving",
+        "spec-023",
+        "spec-026",
+        "spec-027",
+        "migration token",
+        "credential custody",
+        "coordinator admission",
+        "provider cli",
+        "macprovider-cli",
+        "cli-owned",
+        "terminal path",
+        "referral_bootstrap_v1",
+    ]
+
     func testEarningsLineShowsZeroWhenBothMetricsMissingWhileServing() {
         var s = AgentSnapshot.empty
         s.state = .serving
@@ -28,12 +46,116 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(s))
         XCTAssertEqual(AgentSnapshotPresenter.short(s), "Connected")
-        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(s), "Connected")
+        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(s), "Checking customer availability")
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(s),
-            "Coordinator connected · buyer-serving status unknown"
+            "Malibu has not received a current network approval status yet."
         )
-        XCTAssertEqual(AgentSnapshotPresenter.stateLine(s), "Connected · buyer-serving status unknown")
+        XCTAssertEqual(AgentSnapshotPresenter.stateLine(s), "Checking customer availability")
+    }
+
+    func testPublicStatusPresentsRequiredUserStates() {
+        var waiting = AgentSnapshot.empty
+        waiting.state = .reconnecting
+        waiting.currentModelID = "llama"
+        waiting.networkState = "live_verified"
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(waiting).title, "Waiting for network approval")
+
+        var ineligible = AgentSnapshot.empty
+        ineligible.state = .reconnecting
+        ineligible.currentModelID = "llama"
+        ineligible.networkState = "not_buyer_serving"
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(ineligible).title, "This Mac is not currently eligible")
+
+        var preparing = AgentSnapshot.empty
+        preparing.state = .starting
+        preparing.lifecycleState = "loading_model"
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(preparing).title, "Model is preparing")
+
+        var ready = AgentSnapshot.empty
+        ready.state = .serving
+        ready.networkState = "buyer_serving"
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(ready).title, "Provider is ready")
+    }
+
+    func testBlockedPublicStatesExposeExactlyOneSafeAction() {
+        let snapshots: [AgentSnapshot] = [
+            {
+                var s = AgentSnapshot.empty
+                s.state = .reconnecting
+                s.currentModelID = "llama"
+                s.networkState = "live_verified"
+                return s
+            }(),
+            {
+                var s = AgentSnapshot.empty
+                s.state = .reconnecting
+                s.currentModelID = "llama"
+                s.networkState = "not_buyer_serving"
+                return s
+            }(),
+            {
+                var s = AgentSnapshot.empty
+                s.state = .starting
+                s.lifecycleState = "loading_model"
+                return s
+            }(),
+        ]
+
+        for snapshot in snapshots {
+            let action = AgentSnapshotPresenter.publicStatus(snapshot).safeNextAction
+            XCTAssertEqual([action].compactMap { $0 }.count, 1)
+        }
+    }
+
+    func testPausedPublicStateTakesPrecedenceOverPreparingFallback() {
+        var withoutModel = AgentSnapshot.empty
+        withoutModel.state = .paused
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(withoutModel).title, "Provider is paused")
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(withoutModel).safeNextAction, "Choose Resume when ready.")
+
+        var withModel = AgentSnapshot.empty
+        withModel.state = .paused
+        withModel.currentModelID = "llama"
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(withModel).title, "Provider is paused")
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(withModel).safeNextAction, "Choose Resume when ready.")
+    }
+
+    func testPublicStatusDoesNotTreatMissingNetworkStateAsApproval() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "llama"
+        snapshot.networkState = nil
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        XCTAssertEqual(status.title, "Checking customer availability")
+        XCTAssertEqual(status.safeNextAction, "Keep Malibu open while status updates.")
+    }
+
+    func testStaleBuyerServingUnknownDoesNotClaimNetworkApproval() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "llama"
+        snapshot.networkState = "buyer_serving_unknown"
+        snapshot.statusObservationFresh = false
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        XCTAssertEqual(status.title, "Checking customer availability")
+        XCTAssertEqual(status.safeNextAction, "Keep Malibu open while status updates.")
+    }
+
+    func testOptionalLatestReleaseDoesNotMakeProviderIneligible() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "llama"
+        snapshot.networkState = nil
+        snapshot.cliVersion = "1.8.40"
+        snapshot.latestReleaseVersion = "1.8.41"
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        XCTAssertEqual(status.title, "Checking customer availability")
+        XCTAssertEqual(status.safeNextAction, "Keep Malibu open while status updates.")
+        XCTAssertNotEqual(status.title, "This Mac is not currently eligible")
     }
 
     func testFailedReadinessRefreshInvalidatesPriorServingVerdict() {
@@ -73,7 +195,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         var s = AgentSnapshot.empty
         s.state = .error
         s.lastError = "boom"
-        XCTAssertEqual(AgentSnapshotPresenter.stateLine(s), "boom")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.stateLine(s),
+            "Details are available in Advanced diagnostics."
+        )
     }
 
     func testProvisionalMalibuIsRenderedLocked() {
@@ -98,12 +223,12 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
     func testCredentialConditionTableUsesPreciseRecoveryGuidance() {
         let cases: [(state: String, action: String, expected: String, repairable: Bool)] = [
-            ("ready", "none", "restart-safe", false),
-            ("missing", "repair_from_protected_source", "recovery source available", true),
+            ("ready", "none", "safe after restart", false),
+            ("missing", "repair_from_protected_source", "recovery available", true),
             ("locked", "unlock_keychain", "unlock and retry", false),
             ("not_logged_in", "login", "sign in and retry", false),
             ("permission_denied", "authorize_keychain", "access denied", false),
-            ("corrupt", "repair_from_protected_source", "recovery source available", true),
+            ("corrupt", "repair_from_protected_source", "recovery available", true),
             ("conflict", "restore_or_reenroll", "automatic repair refused", false),
             ("keychain_failure", "repair_keychain", "database failure", false),
             ("incompatible", "update_or_reinstall", "update or reinstall", false),
@@ -130,13 +255,13 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.coordinatorIdentityAdmissionMode = "signature"
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityLine(snapshot),
-            "Ready · CLI Keychain · signature proven"
+            "Ready · verified by this Mac"
         )
 
         snapshot.coordinatorIdentityAdmissionMode = "exemption"
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityLine(snapshot),
-            "Ready locally · coordinator exemption still active"
+            "Ready locally · temporary network approval active"
         )
     }
 
@@ -148,11 +273,11 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         let line = AgentSnapshotPresenter.admissionIdentityLine(snapshot)
         XCTAssertTrue(line.contains("Approval required"), line)
         XCTAssertTrue(line.contains("aaaaaaaaaaaa…"), line)
-        XCTAssertTrue(line.contains("Activate in Malibu"), line)
+        XCTAssertTrue(line.contains("activate in Malibu"), line)
         XCTAssertTrue(AgentSnapshotPresenter.canRepairAdmissionIdentity(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityRepairButtonTitle(snapshot),
-            "Activate approved identity"
+            "Activate approved verification"
         )
     }
 
@@ -163,7 +288,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertTrue(AgentSnapshotPresenter.canRepairAdmissionIdentity(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityRepairButtonTitle(snapshot),
-            "Repair admission identity"
+            "Repair network verification"
         )
 
         snapshot.admissionIdentityRecoveryApprovalInstruction = "distinct second operator approval required"
@@ -176,7 +301,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityRepairButtonTitle(snapshot),
-            "Activate approved identity"
+            "Activate approved verification"
         )
     }
 
@@ -217,7 +342,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertTrue(AgentSnapshotPresenter.canRepairAdmissionIdentity(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityRepairButtonTitle(snapshot),
-            "Activate approved identity"
+            "Activate approved verification"
         )
     }
 
@@ -227,7 +352,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
                 expectedProviderID: "provider-a",
                 configuredProviderID: "provider-b"
             ),
-            "Admission identity recovery refused because config provider_id provider-b does not match the active provider provider-a."
+            "Network verification repair refused because config provider_id provider-b does not match the active provider provider-a."
         )
         XCTAssertNotNil(AgentSnapshotPresenter.admissionIdentityRecoveryConfigError(
             expectedProviderID: "provider-a",
@@ -244,7 +369,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(
             AgentSnapshotPresenter.admissionIdentityLine(snapshot),
-            "Degraded previous key until 2026-07-21T12:00:00Z · use Repair admission identity"
+            "Using previous verification until 2026-07-21T12:00:00Z · repair network verification"
         )
     }
 
@@ -280,19 +405,19 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.lifecycleLeaseState = "invalid"
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleLine(snapshot),
-            "Lifecycle lease invalid · watchdog grace disabled"
+            "Provider recovery status needs a restart"
         )
 
         snapshot.lifecycleLeaseState = nil
         snapshot.lifecycleRecordState = "missing"
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleLine(snapshot),
-            "Lifecycle history missing · provider restart required"
+            "Provider history missing · restart required"
         )
         snapshot.lifecycleRecordState = "invalid"
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleLine(snapshot),
-            "Lifecycle history invalid · provider stopped trusting local state"
+            "Provider history invalid · restart required"
         )
 
         snapshot.localStatusContractCompatible = false
@@ -300,22 +425,23 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         snapshot.localStatusContractCompatible = true
         snapshot.statusObservationFresh = false
-        XCTAssertEqual(AgentSnapshotPresenter.statusContractLine(snapshot), "Compatible · stale observation")
+        XCTAssertEqual(AgentSnapshotPresenter.statusContractLine(snapshot), "Compatible · checking again")
     }
 
     func testCompatibilitySetLineDistinguishesSignedAndLegacyReleases() {
         var snapshot = AgentSnapshot.empty
         XCTAssertEqual(
             AgentSnapshotPresenter.compatibilitySetLine(snapshot),
-            "Legacy release · compatibility set not reported"
+            "Status not reported"
         )
 
+        snapshot.cliVersion = "1.9.0"
         snapshot.compatibilitySetID = "Augustas11/macprovider:v1.9.0@0123456789abcdef0123456789abcdef01234567"
         snapshot.compatibilitySetSHA256 = String(repeating: "a", count: 64)
         snapshot.catalogReleaseID = "published-2026-07-14"
         XCTAssertEqual(
             AgentSnapshotPresenter.compatibilitySetLine(snapshot),
-            "v1.9.0 · published-2026-07-14 · aaaaaaaaaaaa"
+            "v1.9.0 · up to date"
         )
     }
 
@@ -331,14 +457,14 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleLine(snapshot),
-            "Catalog incompatible or update required · startup catalog incompatible · Check for the signed compatibility update, then retry"
+            "Provider software update required · startup catalog incompatible · Update provider software, then retry"
         )
 
         snapshot.lifecycleState = "watchdog_recovery"
         snapshot.lifecycleReason = "watchdog_rollback_post_start_rejoin_timeout"
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleLine(snapshot),
-            "Watchdog recovery · watchdog rollback post start rejoin timeout · No action required while this completes"
+            "Provider recovery · provider recovery rollback post start rejoin timeout · No action required while this completes"
         )
     }
 
@@ -359,11 +485,11 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(
             AgentSnapshotPresenter.advertisedCapacityLine(snapshot),
-            "8 buyer slots · advertised to buyers"
+            "8 buyer slots · available to customers"
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleEventLine(event),
-            "watchdog rollback post start rejoin timeout · Watchdog recovery · watchdog-recovery:update-1"
+            "provider recovery rollback post start rejoin timeout · Provider recovery"
         )
     }
 
@@ -385,7 +511,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertFalse(AgentSnapshotPresenter.canRepairCredential(snapshot))
         XCTAssertNil(AgentSnapshotPresenter.serviceInstanceLine(snapshot))
         XCTAssertNil(AgentSnapshotPresenter.lifecycleLine(snapshot))
-        XCTAssertEqual(AgentSnapshotPresenter.statusContractLine(snapshot), "Compatible · stale observation")
+        XCTAssertEqual(AgentSnapshotPresenter.statusContractLine(snapshot), "Compatible · checking again")
     }
 
     func testCredentialDiagnosticRejectsFutureTimestamp() {
@@ -458,5 +584,128 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(decoded.trustTier, .trusted)
         XCTAssertEqual(decoded.unpaidLedgerBacklogUSDC, 12.5)
         XCTAssertEqual(decoded.unpaidLedgerBacklogMALIBU, 7.25)
+    }
+
+    func testDefaultPresenterStringsDoNotExposeInternalTerms() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .reconnecting
+        snapshot.currentModelID = "llama"
+        snapshot.networkState = "live_verified"
+        snapshot.cliVersion = "1.9.0"
+        snapshot.advertisedMaxConcurrency = 2
+        snapshot.lifecycleState = "watchdog_recovery"
+        snapshot.lifecycleReason = "watchdog_rollback_post_start_rejoin_timeout"
+        snapshot.credentialState = "ready"
+        snapshot.credentialRestartSafe = true
+        snapshot.admissionIdentityState = "ready"
+        snapshot.coordinatorIdentityAdmissionMode = "signature"
+
+        let publicStrings = [
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            AgentSnapshotPresenter.publicStatus(snapshot).detail,
+            AgentSnapshotPresenter.publicStatus(snapshot).safeNextAction,
+            AgentSnapshotPresenter.dashboardHeadline(snapshot),
+            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            AgentSnapshotPresenter.stateLine(snapshot),
+            AgentSnapshotPresenter.credentialLine(snapshot),
+            AgentSnapshotPresenter.admissionIdentityLine(snapshot),
+            AgentSnapshotPresenter.lifecycleLine(snapshot),
+            AgentSnapshotPresenter.compatibilitySetLine(snapshot),
+            AgentSnapshotPresenter.advertisedCapacityLine(snapshot),
+            AgentSnapshotPresenter.cliVersionLine(snapshot),
+            AgentSnapshotPresenter.cliVersionMenuLine(snapshot),
+        ].compactMap { $0 }.joined(separator: "\n").lowercased()
+
+        for term in prohibitedPublicTerms {
+            XCTAssertFalse(publicStrings.contains(term), "\(term) leaked in:\n\(publicStrings)")
+        }
+    }
+
+    func testDefaultDashboardAndOnboardingStringsDoNotExposeInternalTerms() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .error
+        snapshot.credentialState = "incompatible"
+        snapshot.cliUpdateLastError = CLIUpdateRunner.Error.cliNotFound.localizedDescription
+
+        let publicStrings = (
+            DashboardCopy.defaultPublicStrings(snapshot) + [
+                OnboardingCopy.intro,
+                OnboardingCopy.introDetail,
+                OnboardingCopy.idleDetail,
+                OnboardingCopy.installingFallback,
+                OnboardingCopy.importingProviderAccess,
+                OnboardingCopy.referralCaption,
+                OnboardingCopy.referralChecking,
+                OnboardingCopy.referralUnavailable,
+                AgentSnapshotPresenter.credentialLine(snapshot),
+                AgentSnapshotPresenter.cliUpdateStatusLine(snapshot),
+            ].compactMap { $0 }
+        ).joined(separator: "\n").lowercased()
+
+        for term in prohibitedPublicTerms {
+            XCTAssertFalse(publicStrings.contains(term), "\(term) leaked in:\n\(publicStrings)")
+        }
+    }
+
+    func testUnknownLifecycleIdentifiersDoNotAppearInDefaultStatusCopy() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .starting
+        snapshot.lifecycleState = "coordinator_admission_waiting"
+        snapshot.lifecycleReason = "compatibility_set_stale"
+
+        let publicStrings = [
+            AgentSnapshotPresenter.stateLine(snapshot),
+            AgentSnapshotPresenter.lifecycleLine(snapshot),
+        ].compactMap { $0 }.joined(separator: "\n").lowercased()
+
+        XCTAssertFalse(publicStrings.contains("coordinator_admission_waiting"), publicStrings)
+        XCTAssertFalse(publicStrings.contains("compatibility_set_stale"), publicStrings)
+        XCTAssertFalse(publicStrings.contains("coordinator"), publicStrings)
+        XCTAssertFalse(publicStrings.contains("compatibility"), publicStrings)
+        XCTAssertTrue(publicStrings.contains("provider status update"), publicStrings)
+    }
+
+    func testDashboardDefaultStringsExcludeAdvancedLogs() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "llama"
+        let logs = [
+            "watchdog recovery started",
+            "coordinator join requires model_artifact_sha256",
+        ]
+
+        let defaultCopy = DashboardCopy.defaultPublicStrings(snapshot)
+            .joined(separator: "\n")
+            .lowercased()
+        let advancedCopy = DashboardCopy.advancedDiagnosticsStrings(snapshot, logLines: logs)
+            .joined(separator: "\n")
+            .lowercased()
+
+        XCTAssertFalse(defaultCopy.contains("watchdog"), defaultCopy)
+        XCTAssertFalse(defaultCopy.contains("coordinator"), defaultCopy)
+        XCTAssertTrue(advancedCopy.contains("watchdog"), advancedCopy)
+        XCTAssertTrue(advancedCopy.contains("coordinator"), advancedCopy)
+    }
+
+    func testRawInternalErrorFallsBackToAdvancedDiagnosticsGuidance() {
+        let raw = "coordinator join requires model_artifact_sha256 in /tmp/macprovider.err.log"
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicErrorDetail(raw),
+            "Details are available in Advanced diagnostics."
+        )
+        XCTAssertEqual(LogTailBuffer.redacted(raw), raw)
+    }
+
+    func testOnboardingAdvancedFailureDiagnosticsKeepsRedactedDetails() {
+        let details = OnboardingCopy.advancedFailureDiagnostics(
+            message: "coordinator join requires model_artifact_sha256 in /tmp/macprovider.err.log",
+            installLogLines: ["provider_token: secret-token-value"],
+            providerLogLines: ["watchdog recovery started"]
+        )
+
+        XCTAssertTrue(details.contains("coordinator join requires model_artifact_sha256 in /tmp/macprovider.err.log"))
+        XCTAssertTrue(details.contains("[redacted]"))
+        XCTAssertTrue(details.contains("watchdog recovery started"))
     }
 }

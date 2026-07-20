@@ -139,7 +139,7 @@ enum BundledInstallContractVerifier {
             withJSONObject: signed,
             options: [.sortedKeys, .withoutEscapingSlashes]
         ) else {
-            throw VerificationError.unavailable("compatibility-set.json signed payload is invalid")
+            throw VerificationError.unavailable("Provider software verification payload is invalid")
         }
         signedBytes.append(0x0a)
         do {
@@ -148,17 +148,17 @@ enum BundledInstallContractVerifier {
             )
             let ecdsa = try P256.Signing.ECDSASignature(derRepresentation: signatureData)
             guard publicKey.isValidSignature(ecdsa, for: SHA256.hash(data: signedBytes)) else {
-                throw VerificationError.unavailable("compatibility-set.json signature is invalid")
+                throw VerificationError.unavailable("Provider software verification signature is invalid")
             }
         } catch let error as VerificationError {
             throw error
         } catch {
-            throw VerificationError.unavailable("compatibility-set.json signature is invalid")
+            throw VerificationError.unavailable("Provider software verification signature is invalid")
         }
 
         let actualDigest = SHA256.hash(data: scriptData).map { String(format: "%02x", $0) }.joined()
         guard actualDigest == expectedDigest else {
-            throw VerificationError.unavailable("install.sh does not match its signed compatibility set")
+            throw VerificationError.unavailable("Provider software installer could not be verified")
         }
         return scriptData
     }
@@ -204,7 +204,7 @@ enum ReferralCodeFile {
         case couldNotCreate
 
         var errorDescription: String? {
-            "Could not securely prepare the referral code for the provider CLI."
+            "Could not securely prepare the invite code for the provider."
         }
     }
 

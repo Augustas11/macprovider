@@ -2,6 +2,21 @@ import XCTest
 @testable import Malibu
 
 final class StartupRouteTests: XCTestCase {
+    private let prohibitedPublicTerms = [
+        "compatibility set",
+        "admission identity",
+        "watchdog",
+        "buyer-serving",
+        "spec-023",
+        "migration token",
+        "credential custody",
+        "coordinator admission",
+        "provider cli",
+        "macprovider-cli",
+        "cli-owned",
+        "terminal path",
+        "referral_bootstrap_v1",
+    ]
 
     func testStartupRouteInstallStates() {
         let cases: [(String, StartupState, StartupRoute)] = [
@@ -85,6 +100,62 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         let untouchedToken = await KeychainStore.readProviderToken(providerID: "p_keep")
         XCTAssertNil(untouchedToken)
+    }
+
+    func testExistingProviderDialogMakesUseExistingPrimaryAndStartFreshDestructive() {
+        XCTAssertEqual(MigrationDialogCopy.useExistingButton, "Use Existing Provider")
+        XCTAssertEqual(MigrationDialogCopy.startFreshButton, "Start Fresh")
+        XCTAssertTrue(MigrationDialogCopy.message.contains("keeps the same provider identity"))
+        XCTAssertTrue(MigrationDialogCopy.message.contains("payment history"))
+        XCTAssertTrue(MigrationDialogCopy.message.contains("saved access"))
+        XCTAssertTrue(MigrationDialogCopy.message.contains("local model setup"))
+        XCTAssertTrue(MigrationDialogCopy.message.contains("moves the old setup to a backup"))
+        XCTAssertTrue(MigrationDialogCopy.message.contains("creates a new provider"))
+
+        let publicDialog = [
+            MigrationDialogCopy.title,
+            MigrationDialogCopy.message,
+            MigrationDialogCopy.useExistingButton,
+            MigrationDialogCopy.startFreshButton,
+            MigrationDialogCopy.cancelButton,
+        ].joined(separator: "\n").lowercased()
+        for term in prohibitedPublicTerms {
+            XCTAssertFalse(publicDialog.contains(term), "\(term) leaked in:\n\(publicDialog)")
+        }
+    }
+
+    func testStartFreshBackupCopyUsesOrdinaryLanguage() {
+        let copy = [
+            StartFreshBackupCopy.title,
+            StartFreshBackupCopy.message(path: "/tmp/old-config.yaml"),
+        ].joined(separator: "\n").lowercased()
+
+        XCTAssertTrue(copy.contains("previous provider identity"))
+        XCTAssertTrue(copy.contains("payment history"))
+        XCTAssertTrue(copy.contains("saved access"))
+        for term in prohibitedPublicTerms {
+            XCTAssertFalse(copy.contains(term), "\(term) leaked in:\n\(copy)")
+        }
+    }
+
+    func testMigrationErrorCopyUsesOrdinaryLanguage() {
+        let error = NSError(
+            domain: "coordinator.admission",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "coordinator admission failed at /tmp/macprovider.err.log"]
+        )
+        let copy = [
+            MigrationErrorCopy.title,
+            MigrationErrorCopy.message(error),
+        ].joined(separator: "\n").lowercased()
+
+        XCTAssertTrue(copy.contains("current setup was not changed"))
+        XCTAssertTrue(copy.contains("create a new provider"))
+        XCTAssertFalse(copy.contains("coordinator"), copy)
+        XCTAssertFalse(copy.contains("/tmp"), copy)
+        for term in prohibitedPublicTerms {
+            XCTAssertFalse(copy.contains(term), "\(term) leaked in:\n\(copy)")
+        }
     }
 
     private func state(

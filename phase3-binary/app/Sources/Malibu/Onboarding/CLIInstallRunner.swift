@@ -31,7 +31,7 @@ enum CLIInstallRunner {
                 case .exhausted: return "This referral code has no redemptions left. Ask the sender for a different invite."
                 case .conflict: return "This provider identity is already bound to a different referral attempt. Retry the original invite or contact support."
                 case .rateLimited: return "Too many referral attempts were submitted. Wait before retrying."
-                case .unavailable: return "Referral admission is temporarily unavailable. Your provider identity is preserved; retry later."
+                case .unavailable: return "Invite setup is temporarily unavailable. Your provider identity is preserved; retry later."
                 }
             }
         }

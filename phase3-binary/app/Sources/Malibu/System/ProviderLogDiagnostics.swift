@@ -19,64 +19,64 @@ enum ProviderLogDiagnostics {
             id: "stale_model_catalog",
             needle: "model catalog provenance envelope is stale",
             userMessage:
-                "Model catalog was republished since autotune last wrote config. "
-                + "Serving continues while your model row is still admitted; "
-                + "run: macprovider-cli autotune --recommend --apply to refresh provenance."
+                "Model options changed since this Mac last picked a model. "
+                + "Customer work can continue if this model is still approved; "
+                + "update provider software if Malibu asks you to refresh it."
         ),
         Rule(
             id: "catalog_admission",
             needle: "model artifact is not admitted by the signed candidate catalog",
             userMessage:
-                "The configured model is not allowed by the signed catalog. "
-                + "Run: macprovider-cli autotune --recommend --apply"
+                "This model is not currently allowed for customer work. "
+                + "Update provider software and pick the recommended model again."
         ),
         Rule(
             id: "rate_card_admission",
             needle: "model artifact is not admitted by the signed rate card",
             userMessage:
-                "The configured model is not on the signed rate card. "
-                + "Run: macprovider-cli autotune --recommend --apply"
+                "This model is not currently eligible for paid customer work. "
+                + "Update provider software and pick the recommended model again."
         ),
         Rule(
             id: "catalog_key_mismatch",
             needle: "model must match model_catalog_key",
             userMessage:
-                "Config model does not match the catalog entry from autotune. "
-                + "Run: macprovider-cli autotune --recommend --apply"
+                "The selected model no longer matches the saved provider setup. "
+                + "Update provider software and pick the recommended model again."
         ),
         Rule(
             id: "artifact_hash_mismatch",
             needle: "model artifact hash mismatch",
             userMessage:
-                "Downloaded model weights do not match the catalog hash. "
-                + "Re-download the model or rerun autotune --recommend --apply."
+                "Downloaded model weights do not match the approved copy. "
+                + "Download the model again or pick the recommended model again."
         ),
         Rule(
             id: "artifact_verification_failed",
             needle: "model artifact verification failed",
             userMessage:
-                "Local model weights failed verification. Re-download the model or rerun autotune."
+                "Local model weights failed verification. Download the model again or pick the recommended model again."
         ),
         Rule(
             id: "missing_catalog_provenance",
             needle: "model_artifact_sha256 requires model_catalog_* provenance",
             userMessage:
-                "Serve config is missing catalog provenance from autotune. "
-                + "Run: macprovider-cli autotune --recommend --apply"
+                "Provider setup is missing model verification details. "
+                + "Update provider software and pick the recommended model again."
         ),
         Rule(
             id: "missing_artifact_sha",
             needle: "coordinator join requires model_artifact_sha256",
             userMessage:
-                "Serve config is missing a verified model artifact hash. "
-                + "Run: macprovider-cli autotune --recommend --apply"
+                "Provider setup is missing a verified model file. "
+                + "Update provider software and download the model again."
         ),
         Rule(
             id: "snapshot_path_mismatch",
             needle: "model must be the catalog-pinned hugging face snapshot path",
             userMessage:
-                "Config points at the wrong on-disk model path. "
-                + "Run: macprovider-cli autotune --recommend --apply"
+                "Provider setup points at the wrong local model path. "
+                + "Update provider software and pick the recommended model again."
         ),
     ]
 

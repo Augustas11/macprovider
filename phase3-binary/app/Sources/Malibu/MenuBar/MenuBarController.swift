@@ -169,10 +169,10 @@ final class MenuBarController {
                 && !snapshot.cliUpdateInProgress
             if AgentSnapshotPresenter.updateAvailable(snapshot) {
                 updateItem.title = snapshot.cliUpdateInProgress
-                    ? "Updating compatibility set…"
-                    : "Update compatibility set…"
+                    ? "Updating provider software…"
+                    : "Update provider software…"
             } else {
-                updateItem.title = "Compatibility set is current"
+                updateItem.title = "Provider software is current"
             }
         }
         if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),

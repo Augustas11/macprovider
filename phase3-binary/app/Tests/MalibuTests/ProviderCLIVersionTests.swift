@@ -65,11 +65,11 @@ final class AgentSnapshotCLIVersionPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.updateBadge(snapshot), "↑")
         XCTAssertEqual(
             AgentSnapshotPresenter.cliVersionLine(snapshot),
-            "v1.8.39 · compatibility repair available"
+            "v1.8.39 · provider software update required"
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.cliVersionMenuLine(snapshot),
-            "CLI v1.8.39 · compatibility repair available"
+            "Provider software v1.8.39 · update required"
         )
     }
 
