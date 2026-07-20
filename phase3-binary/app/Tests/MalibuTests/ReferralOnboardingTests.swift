@@ -131,6 +131,18 @@ final class ReferralOnboardingTests: XCTestCase {
         XCTAssertFalse(environment.values.contains(validCode))
     }
 
+    func testBundledInstallerEnablesReceiptsOnlyForFreshReferralBootstrap() throws {
+        let scriptURL = try CLIInstallRunner.resolveInstallScriptURL()
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains("FRESH_REFERRAL_BOOTSTRAP=0"))
+        XCTAssertTrue(script.contains("enable_fresh_referral_receipts"))
+        XCTAssertTrue(
+            script.contains(#"[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ] || return 0"#)
+        )
+        XCTAssertTrue(script.contains(#""enable_receipts"] = "true""#))
+    }
+
     private struct Fixture {
         let root: URL
         let script: URL

@@ -492,13 +492,29 @@ restored_config="$workdir/restored-token-bearing.yaml"
 restored_provider_id="$workdir/restored-provider-id"
 provider_id="mp-0123456789abcdef0123456789abcdef"
 legacy_token="$(printf 'a%.0s' {1..64})"
-printf 'provider_id: %s\nmodel: new-model\n' "$provider_id" > "$failed_config"
-printf 'provider_id: old-provider\nprovider_token: %s\nmodel: old-model\n' "$legacy_token" > "$restored_config"
+printf 'provider_id: %s\nmodel: new-model\nenable_receipts: true\n' "$provider_id" > "$failed_config"
+printf 'provider_id: old-provider\nprovider_token: %s\nmodel: old-model\nenable_receipts: false\ncustom_setting: keep-restored\n' "$legacy_token" > "$restored_config"
 preserve_failed_bootstrap_identity "$failed_config" "$restored_config" "$restored_provider_id"
 report "case16-tokenless-failure-preserves-restored-bearer" 1 \
   "$(grep -c "^provider_token: $legacy_token$" "$restored_config")"
 report "case16-tokenless-failure-preserves-new-provider-id" 1 \
   "$(grep -c "^provider_id: \"$provider_id\"$" "$restored_config")"
+report "case16-tokenless-failure-preserves-fresh-referral-receipts" 1 \
+  "$(grep -c '^enable_receipts: true$' "$restored_config")"
+report "case16-tokenless-failure-preserves-unrelated-restored-config" 1 \
+  "$(grep -c '^custom_setting: keep-restored$' "$restored_config")"
+
+for failed_receipt_value in false malformed; do
+  printf 'provider_id: %s\nmodel: new-model\nenable_receipts: %s\n' \
+    "$provider_id" "$failed_receipt_value" > "$failed_config"
+  printf 'provider_id: %s\nmodel: restored-model\nenable_receipts: false\ncustom_setting: keep-restored\n' \
+    "$provider_id" > "$restored_config"
+  preserve_failed_bootstrap_identity "$failed_config" "$restored_config" "$restored_provider_id"
+  report "case16-${failed_receipt_value}-receipt-not-promoted" 1 \
+    "$(grep -c '^enable_receipts: false$' "$restored_config")"
+  report "case16-${failed_receipt_value}-preserves-unrelated-config" 1 \
+    "$(grep -c '^custom_setting: keep-restored$' "$restored_config")"
+done
 
 ################################################################
 # Case 17 — protected acceptance assets require an exact version
