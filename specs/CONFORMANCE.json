@@ -544,7 +544,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.8",
+      "version": "v0.1.9",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1176,6 +1176,33 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/610",
         "rationale": "Implementation mappings now cover local signed-set health, exact-set success binding, and rollback policy in PR #631, but signed physical journey evidence is still pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R004",
+      "spec_id": "SPEC-020",
+      "state": "nonconformant",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:fenceProviderReloadLaunchdJobs",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:providerReloadLaunchAgentData",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadReloadsWatchdogBeforeProvider",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesLegacyJobsBeforeValidatingCanonicalPlists",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceFailsClosedWhenServiceInspectionFails",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceTreatsDisabledLoadedHelperAsPresent",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadCleansPartiallyBootstrappedHelperOnFailure",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesOnlyExactLegacyUUIDLabels",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testLocalHealthRequiresStableHealthyTargetInstance"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/651",
+        "rationale": "The one-shot reload implementation and regression coverage are present, but a signed private candidate must still prove stable physical upgrade and rollback on the legacy Air before conformance."
       }
     },
     {

@@ -529,20 +529,27 @@ final class SelfUpdateTests: XCTestCase {
         for label in [SelfUpdate.watchdogLaunchdLabel, SelfUpdate.launchdLabel] {
             try Data("plist".utf8).write(to: launchAgents.appendingPathComponent("\(label).plist"))
         }
-        var commands: [[String]] = []
+        var commands: [([String], Bool)] = []
 
         try SelfUpdate.reloadCompatibilityLaunchdJobs(
             homeDirectory: home,
             uid: 501,
-            reloadID: "reload-test",
-            serviceLoaded: { _ in true },
-            runLaunchctl: { commands.append($0) }
+            serviceLoaded: { $0 == SelfUpdate.watchdogLaunchdLabel },
+            servicePresent: { _ in false },
+            loadedServiceLabels: { [] },
+            runLaunchctl: { commands.append(($0, $1)) }
         )
 
-        XCTAssertEqual(commands.count, 3)
-        XCTAssertEqual(commands[0], ["bootout", "gui/501/live.streamvc.macprovider-watchdog"])
+        XCTAssertEqual(commands.count, 4)
         XCTAssertEqual(
-            commands[1],
+            commands[0].0,
+            ["bootout", "gui/501/live.streamvc.macprovider-compatibility-reload"]
+        )
+        XCTAssertTrue(commands[0].1)
+        XCTAssertEqual(commands[1].0, ["bootout", "gui/501/live.streamvc.macprovider-watchdog"])
+        XCTAssertFalse(commands[1].1)
+        XCTAssertEqual(
+            commands[2].0,
             [
                 "bootstrap",
                 "gui/501",
@@ -550,25 +557,48 @@ final class SelfUpdateTests: XCTestCase {
             ]
         )
         XCTAssertEqual(
-            Array(commands[2].prefix(10)),
+            commands[3].0,
             [
-                "submit",
-                "-l", "live.streamvc.macprovider-compatibility-reload.reload-test",
-                "-o", "/dev/null",
-                "-e", "/dev/null",
-                "--", "/bin/sh", "-c",
+                "bootstrap",
+                "gui/501",
+                launchAgents.appendingPathComponent(
+                    "live.streamvc.macprovider-compatibility-reload.plist"
+                ).path,
             ]
         )
-        let providerReloadScript = try XCTUnwrap(commands[2].last)
-        XCTAssertTrue(providerReloadScript.contains("bootout 'gui/501/live.streamvc.macprovider'"))
-        XCTAssertTrue(
-            providerReloadScript.contains(
-                "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.streamvc.macprovider.plist").path)'"
-            )
+        XCTAssertFalse(commands[3].1)
+        XCTAssertFalse(commands.flatMap(\.0).contains("submit"))
+
+        let helperURL = launchAgents.appendingPathComponent(
+            "live.streamvc.macprovider-compatibility-reload.plist"
+        )
+        let helper = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: Data(contentsOf: helperURL),
+                format: nil
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(helper["Label"] as? String, SelfUpdate.providerReloadLaunchdLabel)
+        XCTAssertEqual(helper["RunAtLoad"] as? Bool, true)
+        XCTAssertEqual(helper["KeepAlive"] as? Bool, false)
+        XCTAssertEqual(helper["LaunchOnlyOnce"] as? Bool, true)
+        XCTAssertNil(helper["SuccessfulExit"])
+        let arguments = try XCTUnwrap(helper["ProgramArguments"] as? [String])
+        XCTAssertEqual(Array(arguments.prefix(2)), ["/bin/sh", "-c"])
+        let script = try XCTUnwrap(arguments.last)
+        XCTAssertEqual(
+            script.components(separatedBy: "bootout 'gui/501/live.streamvc.macprovider'").count - 1,
+            1
+        )
+        XCTAssertEqual(
+            script.components(
+                separatedBy: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.streamvc.macprovider.plist").path)'"
+            ).count - 1,
+            1
         )
     }
 
-    func testCompatibilityReloadValidatesBothPlistsBeforeUnloadingEitherJob() throws {
+    func testCompatibilityReloadFencesLegacyJobsBeforeValidatingCanonicalPlists() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("launchd-reload-missing-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: home) }
@@ -577,15 +607,207 @@ final class SelfUpdateTests: XCTestCase {
         try Data("provider".utf8).write(
             to: launchAgents.appendingPathComponent("\(SelfUpdate.launchdLabel).plist")
         )
-        var commands: [[String]] = []
+        let legacyLabel = "live.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789abc"
+        var loaded = Set([legacyLabel])
+        var commands: [([String], Bool)] = []
 
         XCTAssertThrowsError(try SelfUpdate.reloadCompatibilityLaunchdJobs(
             homeDirectory: home,
             uid: 501,
-            serviceLoaded: { _ in true },
-            runLaunchctl: { commands.append($0) }
+            serviceLoaded: { loaded.contains($0) },
+            servicePresent: { loaded.contains($0) },
+            loadedServiceLabels: { Array(loaded) },
+            runLaunchctl: {
+                commands.append(($0, $1))
+                if $0 == ["bootout", "gui/501/\(legacyLabel)"] {
+                    loaded.remove(legacyLabel)
+                }
+            }
         ))
-        XCTAssertTrue(commands.isEmpty)
+        XCTAssertEqual(
+            commands.map(\.0),
+            [
+                ["bootout", "gui/501/\(legacyLabel)"],
+                ["bootout", "gui/501/live.streamvc.macprovider-compatibility-reload"],
+            ]
+        )
+        XCTAssertFalse(commands[0].1)
+        XCTAssertTrue(commands[1].1)
+    }
+
+    func testCompatibilityReloadFenceFailsClosedWhenServiceInspectionFails() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-fence-query-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        let helperPlist = launchAgents.appendingPathComponent(
+            "\(SelfUpdate.providerReloadLaunchdLabel).plist"
+        )
+        try Data("stale".utf8).write(to: helperPlist)
+        var commands: [([String], Bool)] = []
+
+        XCTAssertThrowsError(try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            servicePresent: { _ in
+                throw UpdateError.processFailed("launchctl print", 5)
+            },
+            loadedServiceLabels: { [] },
+            runLaunchctl: { commands.append(($0, $1)) }
+        ))
+
+        XCTAssertEqual(
+            commands.map(\.0),
+            [["bootout", "gui/501/live.streamvc.macprovider-compatibility-reload"]]
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: helperPlist.path))
+    }
+
+    func testCompatibilityReloadFenceTreatsDisabledLoadedHelperAsPresent() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-fence-disabled-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        let helperPlist = launchAgents.appendingPathComponent(
+            "\(SelfUpdate.providerReloadLaunchdLabel).plist"
+        )
+        try Data("stale".utf8).write(to: helperPlist)
+
+        XCTAssertThrowsError(try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            servicePresent: { $0 == SelfUpdate.providerReloadLaunchdLabel },
+            loadedServiceLabels: { [] },
+            runLaunchctl: { _, _ in }
+        ))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: helperPlist.path))
+    }
+
+    func testCompatibilityReloadCleansPartiallyBootstrappedHelperOnFailure() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-bootstrap-cleanup-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        for label in [SelfUpdate.watchdogLaunchdLabel, SelfUpdate.launchdLabel] {
+            try Data("plist".utf8).write(to: launchAgents.appendingPathComponent("\(label).plist"))
+        }
+        let helperLabel = SelfUpdate.providerReloadLaunchdLabel
+        let helperPlist = launchAgents.appendingPathComponent("\(helperLabel).plist")
+        var loaded = Set<String>()
+        var commands: [([String], Bool)] = []
+
+        XCTAssertThrowsError(try SelfUpdate.reloadCompatibilityLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            serviceLoaded: { _ in false },
+            servicePresent: { loaded.contains($0) },
+            loadedServiceLabels: { Array(loaded) },
+            runLaunchctl: { arguments, allowFailure in
+                commands.append((arguments, allowFailure))
+                if arguments == ["bootstrap", "gui/501", helperPlist.path] {
+                    loaded.insert(helperLabel)
+                    throw UpdateError.processFailed("launchctl bootstrap", 5)
+                }
+                if arguments == ["bootout", "gui/501/\(helperLabel)"] {
+                    loaded.remove(helperLabel)
+                }
+            }
+        ))
+
+        XCTAssertFalse(loaded.contains(helperLabel))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: helperPlist.path))
+        XCTAssertEqual(
+            commands.filter {
+                $0.0 == ["bootout", "gui/501/\(helperLabel)"] && !$0.1
+            }.count,
+            1
+        )
+    }
+
+    func testCompatibilityReloadFencesOnlyExactLegacyUUIDLabels() throws {
+        let output = """
+        PID\tStatus\tLabel
+        -\t0\tlive.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789abc
+        -\t0\tlive.streamvc.macprovider-compatibility-reload.not-a-uuid
+        -\t0\tattacker.live.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789abc
+        42\t0\tlive.streamvc.macprovider
+        """
+
+        let labels = SelfUpdate.launchctlServiceLabels(from: output)
+
+        XCTAssertEqual(labels.count, 4)
+        XCTAssertTrue(SelfUpdate.isLegacyProviderReloadLabel(labels[0]))
+        XCTAssertFalse(SelfUpdate.isLegacyProviderReloadLabel(labels[1]))
+        XCTAssertFalse(SelfUpdate.isLegacyProviderReloadLabel(labels[2]))
+        XCTAssertFalse(SelfUpdate.isLegacyProviderReloadLabel(labels[3]))
+        XCTAssertFalse(
+            SelfUpdate.isLegacyProviderReloadLabel(
+                "live.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789ABC"
+            )
+        )
+    }
+
+    func testLocalHealthRequiresStableHealthyTargetInstance() {
+        let matching: [String: Any] = [
+            "binary_version": "1.8.50",
+            "compatibility_set_id": "set-50",
+            "model_loaded": true,
+            "status": "ready",
+            "service_instance": [
+                "instance_id": "instance-a",
+                "pid": 123,
+            ],
+        ]
+
+        XCTAssertEqual(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                matching,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50"
+            ),
+            "123:instance-a"
+        )
+        XCTAssertNil(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                matching,
+                targetVersion: "1.8.49",
+                expectedCompatibilitySetID: "set-50"
+            )
+        )
+        XCTAssertNil(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                matching,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-49"
+            )
+        )
+        var restarted = matching
+        restarted["service_instance"] = [
+            "instance_id": "instance-b",
+            "pid": 456,
+        ]
+        XCTAssertEqual(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                restarted,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50"
+            ),
+            "456:instance-b"
+        )
+        var unavailable = matching
+        unavailable["status"] = "unavailable"
+        XCTAssertNil(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                unavailable,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50"
+            )
+        )
+        XCTAssertEqual(SelfUpdate.localHealthRequiredConsecutiveSamples, 11)
     }
 
     func testRestartFailureRecoveryCommandReloadsBothCompatibilityJobs() {

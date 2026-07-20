@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.8
+Version: v0.1.9
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -14,10 +14,13 @@ the bearerless-duplicate notify-only row is client-enforceable.
 v0.1.8 makes the signed release and compatibility manifest—not coordinator
 admission—the update authority, and separates local update success from network
 readiness.
+v0.1.9 makes the launchd provider reload explicitly one-shot, fences legacy
+reload helpers before mutation or rollback, and requires a 20-second continuous
+local-health observation before update commit.
 
 ## Goal
 
-SPEC-020 v0.1.8 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.9 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -460,6 +463,18 @@ R-3.7. After drain completes with zero in-flight requests, the provider MAY
 close the coordinator WebSocket with a normal going-away reason and invoke the
 validated update apply path. The provider MUST restart through launchd only
 after the rollback marker and rollback target have been durably staged.
+
+R-3.8. A launchd-managed provider restart MUST use an explicitly one-shot
+helper with `RunAtLoad:true`, `KeepAlive:false`, and `LaunchOnlyOnce:true`.
+The helper MUST issue at most one bootout and one bootstrap of the canonical
+provider job and MUST remove its transient plist. Before drain or live
+mutation, before rollback restoration, and before arming a new helper, the
+updater MUST boot out the stable helper label and every exact legacy
+`live.streamvc.macprovider-compatibility-reload.<lowercase-UUID>` label. A
+prefix-confusable or malformed label MUST NOT be touched. Failure to prove a
+matching loaded helper absent MUST fail closed before mutation or restoration.
+`launchctl submit` is forbidden for this restart because its inferred retry
+lifecycle is not a one-shot contract.
 
 ### R-4. Failure and rollback
 
@@ -1002,6 +1017,16 @@ revoked, recovery emits `rollback_target_disallowed`, restarts neither release,
 retains fenced recovery material, and requires an independently authorized
 emergency recovery target.
 
+AC-V0.1-30. Exactly-once launchd reload: a running launchd-managed provider
+updates through a plist-backed helper whose decoded policy has
+`RunAtLoad:true`, `KeepAlive:false`, and `LaunchOnlyOnce:true`, with no
+`SuccessfulExit`, demand, or throttle trigger. A nonzero helper exit does not
+run a second time after more than the historical ten-second retry cadence.
+Exact legacy UUID helper labels are fenced before any canonical job mutation;
+malformed and prefix-confusable labels are untouched. Post-start commit
+requires eleven matching two-second target-version and compatibility-set
+samples, so a ten-second stop/restart loop cannot satisfy local health.
+
 ## Threat model
 
 T-1. Attacker controls the GitHub release pipeline through signing-key
@@ -1114,6 +1139,16 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.9 (2026-07-20): Replaced the incident-producing `launchctl submit`
+  provider reload with an explicit one-shot LaunchAgent. Exact legacy UUID
+  helpers and the stable helper are fenced before mutation, rollback, and each
+  reload; the helper plist is mode 0600, atomically installed, self-removing,
+  and declares `KeepAlive:false` plus `LaunchOnlyOnce:true`. Local update commit
+  now requires 20 seconds of continuous exact-version/set health, exceeding the
+  observed ten-second legacy retry cadence. The corrected provider CLI advances
+  to 1.8.50 so its bytes cannot collide with the already-public 1.8.49
+  component. This is the narrow implementation contract for issue #651;
+  whole-set convergence remains owned by #616.
 - v0.1.8 (2026-07-17): Reconciled the `provider-autoupdate` authority against
   #610. A signed expiring monotonic discovery head plus exact artifact index and
   compatibility manifest are the update authority; live or cached coordinator
