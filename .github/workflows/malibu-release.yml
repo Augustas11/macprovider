@@ -13,7 +13,7 @@ on:
       version:
         description: "Malibu marketing version, without a v prefix"
         required: true
-        default: "1.8.43"
+        default: "1.8.44"
         type: string
       cli_tag:
         description: "Exact signed macprovider-cli release tag"

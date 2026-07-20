@@ -144,6 +144,7 @@ cat > "$CONFIG_PATH" <<'EOF'
 model: "old/model"
 provider_token: "secret-token"
 receipt_log_path: "/private/receipts.jsonl"
+enable_receipts: false
 enable_warm_swap: true
 auto_update: false
 custom_block:
@@ -162,6 +163,23 @@ grep -F 'model: "new/model"' "$CONFIG_PATH" >/dev/null
 grep -F 'provider_id: "provider-new"' "$CONFIG_PATH" >/dev/null
 grep -F 'coordinator_url: "wss://coordinator.example/ws/provider"' "$CONFIG_PATH" >/dev/null
 grep -F 'port: 19090' "$CONFIG_PATH" >/dev/null
+grep -F 'provider_token: "secret-token"' "$CONFIG_PATH" >/dev/null
+grep -F 'receipt_log_path: "/private/receipts.jsonl"' "$CONFIG_PATH" >/dev/null
+grep -F 'enable_receipts: false' "$CONFIG_PATH" >/dev/null
+grep -F 'enable_warm_swap: true' "$CONFIG_PATH" >/dev/null
+grep -F 'auto_update: false' "$CONFIG_PATH" >/dev/null
+grep -F '  nested: keep-me' "$CONFIG_PATH" >/dev/null
+
+semantic_merge_config \
+  "$CONFIG_PATH" \
+  "new/model" \
+  "provider-new" \
+  "wss://coordinator.example/ws/provider" \
+  "19090" \
+  "true"
+
+grep -F 'enable_receipts: true' "$CONFIG_PATH" >/dev/null
+[ "$(grep -c '^enable_receipts:' "$CONFIG_PATH")" -eq 1 ]
 grep -F 'provider_token: "secret-token"' "$CONFIG_PATH" >/dev/null
 grep -F 'receipt_log_path: "/private/receipts.jsonl"' "$CONFIG_PATH" >/dev/null
 grep -F 'enable_warm_swap: true' "$CONFIG_PATH" >/dev/null

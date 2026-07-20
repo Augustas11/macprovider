@@ -16,6 +16,7 @@ set -euo pipefail
 # arguments, environment, or logs; the CLI validates and consumes the file.
 REFERRAL_CODE_SOURCE_FILE="${MACPROVIDER_REFERRAL_CODE_FILE:-}"
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
+FRESH_REFERRAL_BOOTSTRAP=0
 unset MACPROVIDER_REFERRAL_CODE_FILE
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
@@ -3120,10 +3121,20 @@ def scalar(text, key):
             raise SystemExit(f"invalid {key} scalar") from error
     return raw
 
+def has_one_canonical_true(text, key):
+    prefix = key + ":"
+    values = [
+        line[len(prefix):].strip()
+        for line in text.splitlines()
+        if line.startswith(prefix)
+    ]
+    return values == ["true"]
+
 with open(failed_path, "r", encoding="utf-8") as handle:
     failed_text = handle.read()
 provider_id = scalar(failed_text, "provider_id")
 token = scalar(failed_text, "provider_token")
+receipts_enabled = has_one_canonical_true(failed_text, "enable_receipts")
 if not isinstance(provider_id, str) or re.fullmatch(r"mp-[0-9a-f]{32}", provider_id) is None:
     # Ordinary operator-issued identities are restored from the transaction
     # backup unchanged. Only installer-bootstrap identities participate in
@@ -3146,13 +3157,24 @@ if os.path.exists(restored_path):
         # carries an exact bootstrap token.
         if token is not None and line.startswith("provider_token:"):
             continue
+        if receipts_enabled and line.startswith("enable_receipts:"):
+            continue
         lines.append(line)
     lines.append("provider_id: " + json.dumps(provider_id))
     if token is not None:
         lines.append("provider_token: " + token)
+    if receipts_enabled:
+        lines.append("enable_receipts: true")
     updated = "\n".join(lines) + "\n"
 else:
-    updated = failed_text if failed_text.endswith("\n") else failed_text + "\n"
+    lines = [
+        line
+        for line in failed_text.splitlines()
+        if not line.startswith("enable_receipts:")
+    ]
+    if receipts_enabled:
+        lines.append("enable_receipts: true")
+    updated = "\n".join(lines) + "\n"
 
 parent = os.path.dirname(restored_path)
 os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -4105,6 +4127,7 @@ prepare_fresh_referral_code() {
   restart_safe_incumbent_present && return 0
   if [ -n "$REFERRAL_CODE_SOURCE_FILE" ]; then
     validate_supplied_referral_code_file
+    FRESH_REFERRAL_BOOTSTRAP=1
     return 0
   fi
 
@@ -4129,6 +4152,7 @@ prepare_fresh_referral_code() {
   umask "$previous_umask"
   REFERRAL_CODE_SOURCE_FILE="$referral_path"
   CREATED_REFERRAL_CODE_SOURCE_FILE=1
+  FRESH_REFERRAL_BOOTSTRAP=1
   chmod -N "$referral_path" 2>/dev/null || chmod 600 "$referral_path" \
     || die 70 "could not protect the invite-code handoff"
   printf "%s" "$referral_code" > "$referral_path" \
@@ -5459,14 +5483,15 @@ semantic_merge_config() {
   provider_id_value="$3"
   coordinator_url_value="$4"
   port_value="$5"
-  python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" <<'PY'
+  enable_receipts_value="${6:-}"
+  python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" "$enable_receipts_value" <<'PY'
 import json
 import os
 import re
 import sys
 import tempfile
 
-path, model, provider_id, coordinator_url, port = sys.argv[1:]
+path, model, provider_id, coordinator_url, port, enable_receipts = sys.argv[1:]
 owned = {
     "coordinator_url": json.dumps(coordinator_url),
     "provider_id": json.dumps(provider_id),
@@ -5474,6 +5499,10 @@ owned = {
 }
 if model:
     owned["model"] = json.dumps(model)
+if enable_receipts:
+    if enable_receipts != "true":
+        raise SystemExit("enable_receipts installer override must be true or empty")
+    owned["enable_receipts"] = "true"
 try:
     with open(path, "r", encoding="utf-8") as handle:
         lines = handle.read().splitlines()
@@ -5494,7 +5523,7 @@ for line in lines:
     merged.append(f"{key}: {owned[key]}")
     seen.add(key)
 
-for key in ("model", "coordinator_url", "provider_id", "port"):
+for key in ("model", "coordinator_url", "provider_id", "port", "enable_receipts"):
     if key not in owned:
         continue
     if key not in seen:
@@ -5516,6 +5545,18 @@ finally:
     except FileNotFoundError:
         pass
 PY
+}
+
+enable_fresh_referral_receipts() {
+  [ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ] || return 0
+  existing_model="$(read_config_model || true)"
+  semantic_merge_config \
+    "$CONFIG_PATH" \
+    "$existing_model" \
+    "$provider_id" \
+    "$coordinator_url" \
+    "$PORT" \
+    "true"
 }
 
 write_config() {
@@ -8378,6 +8419,7 @@ main() {
   clear_quarantine "$staging_dir"
   LIFECYCLE_STAGED_CLI_TRUSTED=1
   prepare_staged_config
+  enable_fresh_referral_receipts
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
     [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] \
       || die 7 "emergency rollback requires an existing provider installation to restore"

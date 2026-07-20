@@ -125,7 +125,7 @@ validator="$root/scripts/validate-malibu-release-cli-inputs.sh"
 valid_sha="$(printf 'a%.0s' {1..64})"
 valid_archive_sha="$(printf 'b%.0s' {1..64})"
 
-"$validator" v1.8.49 1.8.49 "$valid_sha" "$valid_archive_sha" >/dev/null
+"$validator" v1.8.53 1.8.53 "$valid_sha" "$valid_archive_sha" >/dev/null
 
 expect_failure() {
   if "$validator" "$@" >/dev/null 2>&1; then
@@ -134,11 +134,11 @@ expect_failure() {
   fi
 }
 
-expect_failure 1.8.49 1.8.49 "$valid_sha" "$valid_archive_sha"
-expect_failure v1.8.48 1.8.49 "$valid_sha" "$valid_archive_sha"
-expect_failure v1.8.49 1.8.48 "$valid_sha" "$valid_archive_sha"
-expect_failure v1.8.49 1.8.49 "$(printf 'A%.0s' {1..64})" "$valid_archive_sha"
-expect_failure v1.8.49 1.8.49 "${valid_sha%?}" "$valid_archive_sha"
-expect_failure v1.8.49 1.8.49 "$valid_sha" "${valid_archive_sha}0"
+expect_failure 1.8.53 1.8.53 "$valid_sha" "$valid_archive_sha"
+expect_failure v1.8.52 1.8.53 "$valid_sha" "$valid_archive_sha"
+expect_failure v1.8.53 1.8.52 "$valid_sha" "$valid_archive_sha"
+expect_failure v1.8.53 1.8.53 "$(printf 'A%.0s' {1..64})" "$valid_archive_sha"
+expect_failure v1.8.53 1.8.53 "${valid_sha%?}" "$valid_archive_sha"
+expect_failure v1.8.53 1.8.53 "$valid_sha" "${valid_archive_sha}0"
 
 echo "independent Malibu release CLI input validation checks passed"

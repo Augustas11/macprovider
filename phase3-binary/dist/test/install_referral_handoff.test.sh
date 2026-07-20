@@ -24,6 +24,10 @@ main = source[source.rindex("\nmain() {"):]
 assert main.index("prepare_fresh_referral_code") < main.index('tag="$(resolve_release_tag)"')
 assert main.index("prepare_fresh_referral_code") < main.index('download_release "$tag"')
 assert main.index("prepare_fresh_referral_code") < main.index("run_autotune_recommend_apply")
+assert main.index("prepare_staged_config") < main.index("enable_fresh_referral_receipts")
+assert main.index("enable_fresh_referral_receipts") < main.index(
+    "use_fresh_recommendation_if_available"
+)
 publish = "publish_bootstrap_identity_for_rollback"
 bootstrap = 'run_macprovider_cli_with_amfi_retry "${bootstrap_auth_args[@]}"'
 ensure_start = source.index("ensure_provider_credentials()")
@@ -36,6 +40,12 @@ prompt_source = source[prompt_start:prompt_end]
 assert prompt_source.index('CREATED_REFERRAL_CODE_SOURCE_FILE=1') < prompt_source.index(
     'chmod -N "$referral_path"'
 )
+assert prompt_source.count("FRESH_REFERRAL_BOOTSTRAP=1") == 2
+receipt_start = source.index("enable_fresh_referral_receipts()")
+receipt_end = source.index("write_config()", receipt_start)
+receipt_source = source[receipt_start:receipt_end]
+assert '[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ] || return 0' in receipt_source
+assert '"true"' in receipt_source
 
 # The path may be passed to the CLI, but install.sh must never open, print,
 # copy, hash, or persist the referral file itself.
@@ -54,6 +64,8 @@ workdir="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-install-referral.XXXXXX")"
 trap 'rm -f "$lib"; rm -rf "$workdir"' EXIT
 sed -n '/^restart_safe_incumbent_present()/,/^# v1.2.2/p' "$installer" \
   | sed '$d' > "$lib"
+sed -n '/^semantic_merge_config()/,/^write_config()/p' "$installer" \
+  | sed '$d' >> "$lib"
 
 die() {
   code="$1"
@@ -77,6 +89,11 @@ read_config_provider_id() {
 read_config_provider_token_line() {
   [ -f "$CONFIG_PATH" ] && grep '^provider_token[[:space:]]*:' "$CONFIG_PATH"
 }
+read_config_model() {
+  [ -f "$CONFIG_PATH" ] \
+    && sed -n 's/^model:[[:space:]]*//p' "$CONFIG_PATH" \
+    | tr -d '"'
+}
 
 # shellcheck source=/dev/null
 . "$lib"
@@ -93,10 +110,12 @@ EMERGENCY_ROLLBACK=0
 NO_PROMPT=0
 REFERRAL_CODE_SOURCE_FILE=""
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
+FRESH_REFERRAL_BOOTSTRAP=0
 read_line() { REPLY="$valid_code"; }
 
 prepare_fresh_referral_code
 [ "$CREATED_REFERRAL_CODE_SOURCE_FILE" -eq 1 ]
+[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ]
 [ -f "$REFERRAL_CODE_SOURCE_FILE" ] && [ ! -L "$REFERRAL_CODE_SOURCE_FILE" ]
 [ "$(cat "$REFERRAL_CODE_SOURCE_FILE")" = "$valid_code" ]
 [ "$(python3 - "$REFERRAL_CODE_SOURCE_FILE" <<'PY'
@@ -114,6 +133,24 @@ if env | grep -Fq "$valid_code"; then
   echo "referral code leaked into child environment" >&2
   exit 1
 fi
+
+mkdir -p "$(dirname "$CONFIG_PATH")"
+cat > "$CONFIG_PATH" <<'EOF'
+model: "fresh/model"
+enable_receipts: malformed
+receipt_log_path: "/private/fresh-receipts.jsonl"
+custom_block:
+  nested: keep-fresh
+EOF
+provider_id="mp-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+coordinator_url="wss://coordinator.example/ws/provider"
+PORT=18080
+enable_fresh_referral_receipts
+grep -Fx 'enable_receipts: true' "$CONFIG_PATH" >/dev/null
+[ "$(grep -c '^enable_receipts:' "$CONFIG_PATH")" -eq 1 ]
+grep -Fx 'receipt_log_path: "/private/fresh-receipts.jsonl"' "$CONFIG_PATH" >/dev/null
+grep -Fx '  nested: keep-fresh' "$CONFIG_PATH" >/dev/null
+
 rm -f "$REFERRAL_CODE_SOURCE_FILE"
 
 supplied_file="$workdir/supplied-referral"
@@ -128,9 +165,11 @@ CONFIG_PATH="$workdir/supplied/config.yaml"
 NO_PROMPT=1
 REFERRAL_CODE_SOURCE_FILE="$supplied_file"
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
+FRESH_REFERRAL_BOOTSTRAP=0
 prepare_fresh_referral_code
 [ "$REFERRAL_CODE_SOURCE_FILE" = "$supplied_file" ]
 [ "$CREATED_REFERRAL_CODE_SOURCE_FILE" -eq 0 ]
+[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ]
 
 set +e
 missing_file_output="$(
@@ -247,9 +286,26 @@ CONFIG_PATH="$workdir/existing/config.yaml"
 NO_PROMPT=1
 REFERRAL_CODE_SOURCE_FILE=""
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
+FRESH_REFERRAL_BOOTSTRAP=0
 prepare_fresh_referral_code
 [ -z "$REFERRAL_CODE_SOURCE_FILE" ]
 [ "$CREATED_REFERRAL_CODE_SOURCE_FILE" -eq 0 ]
+[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 0 ]
+
+for existing_receipt_config in \
+  "enable_receipts: false" \
+  "enable_receipts: true" \
+  "enable_receipts: malformed" \
+  ""; do
+  printf '%s\n' \
+    'model: "incumbent/model"' \
+    "$existing_receipt_config" \
+    'custom_setting: keep-incumbent' > "$CONFIG_PATH"
+  incumbent_config_before="$(shasum -a 256 "$CONFIG_PATH" | awk '{print $1}')"
+  enable_fresh_referral_receipts
+  incumbent_config_after="$(shasum -a 256 "$CONFIG_PATH" | awk '{print $1}')"
+  [ "$incumbent_config_after" = "$incumbent_config_before" ]
+done
 
 # A support directory left by an interrupted fresh attempt is not an incumbent.
 # It must still fail before release download/autotune when no invite is supplied.
