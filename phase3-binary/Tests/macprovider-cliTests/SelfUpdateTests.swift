@@ -81,7 +81,8 @@ final class SelfUpdateTests: XCTestCase {
             newBinary: URL(fileURLWithPath: "/tmp/macprovider-cli-test"),
             stagedMalibuApp: nil,
             signedPolicy: nil,
-            compatibilityManifest: manifest
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "c", count: 64)
         )
         let head = SignedReleaseDiscoveryHead(
             releaseSequence: 1,
@@ -96,6 +97,20 @@ final class SelfUpdateTests: XCTestCase {
         )
 
         XCTAssertNoThrow(try SelfUpdate.requireDiscoveryHead(head, matches: prepared))
+        let mismatched = PreparedSelfUpdate(
+            tempDir: prepared.tempDir,
+            newBinary: prepared.newBinary,
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "e", count: 64)
+        )
+        XCTAssertThrowsError(try SelfUpdate.requireDiscoveryHead(head, matches: mismatched)) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.discoveryHeadInvalid("target_identity_mismatch").description
+            )
+        }
     }
 
     func testAcceptanceProviderComponentAllowsEqualityAndUpgradeButRejectsDowngrade() throws {

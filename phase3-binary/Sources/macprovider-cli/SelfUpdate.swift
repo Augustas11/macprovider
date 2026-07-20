@@ -271,7 +271,8 @@ struct SelfUpdate {
                 expectedTarballSHA: expectedSHA,
                 expectedMalibuSHA: expectedMalibuSHA,
                 signedPolicy: release.signedPolicy,
-                targetVersion: targetVersion
+                targetVersion: targetVersion,
+                actualArtifactIndexSHA256: actualArtifactIndexSHA
             )
         } catch {
             try? FileManager.default.removeItem(at: tempDir)
@@ -376,6 +377,7 @@ struct SelfUpdate {
                 expectedMalibuSHA: Self.expectedSHA256(for: malibuDMGName, in: checksumsText),
                 signedPolicy: nil,
                 targetVersion: targetVersion,
+                actualArtifactIndexSHA256: actualArtifactIndexSHA,
                 expectedCompatibilitySetID: acceptanceMetadata.compatibilitySetID,
                 allowIndependentProviderVersion: true
             )
@@ -402,12 +404,12 @@ struct SelfUpdate {
             signatureData: Data(contentsOf: signatureURL),
             now: now
         )
+        try Self.requireDiscoveryHead(head, matches: prepared)
         try markerStore.acceptDiscoveryHead(head)
         try await markerStore.updateSignedPolicy(
             minimum: head.signedPolicyMinimum,
             revoked: head.signedPolicyRevoked
         )
-        try Self.requireDiscoveryHead(head, matches: prepared)
         return head
     }
 
@@ -422,6 +424,7 @@ struct SelfUpdate {
         expectedMalibuSHA: String,
         signedPolicy: GitHubSignedPolicy?,
         targetVersion: String,
+        actualArtifactIndexSHA256: String,
         expectedCompatibilitySetID: String? = nil,
         allowIndependentProviderVersion: Bool = false
     ) throws -> PreparedSelfUpdate {
@@ -489,7 +492,8 @@ struct SelfUpdate {
             newBinary: newBinary,
             stagedMalibuApp: stagedMalibuApp,
             signedPolicy: signedPolicy,
-            compatibilityManifest: compatibilityManifest
+            compatibilityManifest: compatibilityManifest,
+            artifactIndexSHA256: actualArtifactIndexSHA256
         )
     }
 
@@ -517,6 +521,7 @@ struct SelfUpdate {
     ) throws {
         guard prepared.compatibilityManifest.version == head.targetVersion,
               prepared.compatibilityManifest.compatibilitySetID == head.targetCompatibilitySetID,
+              prepared.artifactIndexSHA256.lowercased() == head.targetArtifactIndexSHA256.lowercased(),
               prepared.compatibilityManifest.envelopeSHA256.range(
                   of: #"^[0-9a-f]{64}$"#,
                   options: .regularExpression
@@ -1800,6 +1805,7 @@ struct PreparedSelfUpdate {
     let stagedMalibuApp: URL?
     let signedPolicy: GitHubSignedPolicy?
     let compatibilityManifest: CompatibilitySetManifest
+    let artifactIndexSHA256: String
 
     func cleanup() {
         try? FileManager.default.removeItem(at: tempDir)

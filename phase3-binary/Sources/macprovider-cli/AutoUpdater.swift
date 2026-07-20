@@ -221,7 +221,8 @@ struct AutoUpdater: Sendable {
                 prepared: prepared,
                 tracker: commitTracker,
                 authorityMode: "coordinator_recommendation",
-                discoveryHead: nil
+                discoveryHead: nil,
+                requireCurrentTrustAtSwap: true
             )
             if let signedPolicy = prepared.signedPolicy {
                 try await markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
@@ -393,7 +394,8 @@ struct AutoUpdater: Sendable {
                 prepared: prepared,
                 tracker: commitTracker,
                 authorityMode: "signed_release",
-                discoveryHead: head
+                discoveryHead: head,
+                requireCurrentTrustAtSwap: false
             )
             await record(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             do {
@@ -442,7 +444,8 @@ struct AutoUpdater: Sendable {
         prepared: PreparedSelfUpdate,
         tracker: AutoUpdateCommitTracker,
         authorityMode: String,
-        discoveryHead: SignedReleaseDiscoveryHead?
+        discoveryHead: SignedReleaseDiscoveryHead?,
+        requireCurrentTrustAtSwap: Bool
     ) async throws {
         guard let current = currentBinaryURL() else {
             throw AutoUpdateError.currentBinaryUnknown
@@ -464,7 +467,9 @@ struct AutoUpdater: Sendable {
         do {
             try markerStore.writePending(marker)
             tracker.committedMarker = true
-            try await ensureEligible(phase: .swap)
+            if requireCurrentTrustAtSwap {
+                try await ensureEligible(phase: .swap)
+            }
             try markerStore.activateReleasePayload(
                 from: prepared.newBinary.deletingLastPathComponent(),
                 newBinary: prepared.newBinary,
@@ -491,6 +496,25 @@ struct AutoUpdater: Sendable {
             }
             throw error
         }
+    }
+
+    func preserveMarkerAndSwapForTest(
+        updateID: String,
+        target: String,
+        prepared: PreparedSelfUpdate,
+        authorityMode: String,
+        discoveryHead: SignedReleaseDiscoveryHead?,
+        requireCurrentTrustAtSwap: Bool
+    ) async throws {
+        try await preserveMarkerAndSwap(
+            updateID: updateID,
+            target: target,
+            prepared: prepared,
+            tracker: AutoUpdateCommitTracker(),
+            authorityMode: authorityMode,
+            discoveryHead: discoveryHead,
+            requireCurrentTrustAtSwap: requireCurrentTrustAtSwap
+        )
     }
 
     func rollbackCommittedSwapAfterRestartFailureForTest(_ marker: AutoUpdatePendingMarker) {

@@ -1273,6 +1273,128 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
     }
 
+    func testSignedReleaseDiscoverySwapDoesNotRequireCoordinatorTrust() async throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            compatibilityManifestPublicKeyPEM: manifestPublicKey
+        )
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: binaryDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.createDirectory(
+            at: payload,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        let priorManifestFixture = try CompatibilityManifestFixture(
+            root: binaryDirectory,
+            privateKey: manifestSigningKey,
+            version: "1.8.48",
+            providerCLIVersion: "1.8.48",
+            malibuAppVersion: "1.8.43",
+            commit: "1111111111111111111111111111111111111111",
+            populateResources: false
+        )
+        let manifestFixture = try CompatibilityManifestFixture(
+            root: payload,
+            privateKey: manifestSigningKey,
+            version: "1.8.50",
+            providerCLIVersion: "1.8.50",
+            malibuAppVersion: "1.8.43",
+            commit: "2222222222222222222222222222222222222222",
+            populateResources: false
+        )
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: payload,
+            expectedProviderVersion: "1.8.50",
+            publicKeyPEM: manifestPublicKey
+        )
+        XCTAssertEqual(priorManifestFixture.compatibilitySetID, "Augustas11/macprovider:v1.8.48@1111111111111111111111111111111111111111")
+        XCTAssertEqual(manifest.compatibilitySetID, manifestFixture.compatibilitySetID)
+        let prepared = PreparedSelfUpdate(
+            tempDir: fixture.url,
+            newBinary: newBinary,
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "a", count: 64)
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 12,
+            targetVersion: "1.8.50",
+            targetCompatibilitySetID: manifest.compatibilitySetID,
+            targetArtifactIndexSHA256: prepared.artifactIndexSHA256,
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date().addingTimeInterval(-30),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "b", count: 64)
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.48",
+            providerStatus: status,
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: false,
+                    tier: nil,
+                    encryptedLegValid: false,
+                    attestationRequired: false,
+                    attestationSatisfied: false,
+                    tokenConfigured: true,
+                    tokenValidated: false,
+                    bearerlessDuplicate: false,
+                    connected: false,
+                    stableReason: "coordinator_disconnected"
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        try await updater.preserveMarkerAndSwapForTest(
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            target: "1.8.50",
+            prepared: prepared,
+            authorityMode: "signed_release",
+            discoveryHead: head,
+            requireCurrentTrustAtSwap: false
+        )
+
+        XCTAssertEqual(try String(contentsOf: binary), "new-binary")
+        let marker = try XCTUnwrap(store.readPending())
+        XCTAssertEqual(marker.updateAuthorityMode, "signed_release")
+        XCTAssertEqual(marker.discoveryHeadSequence, 12)
+        XCTAssertEqual(marker.targetCompatibilitySetID, manifest.compatibilitySetID)
+        XCTAssertEqual(marker.targetCompatibilitySetSHA256, manifest.envelopeSHA256)
+    }
+
     func testRestartFailureRollbackRestoresBinaryAndClearsPendingState() async throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
