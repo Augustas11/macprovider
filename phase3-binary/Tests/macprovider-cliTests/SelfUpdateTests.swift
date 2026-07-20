@@ -590,12 +590,125 @@ final class SelfUpdateTests: XCTestCase {
             script.components(separatedBy: "bootout 'gui/501/live.streamvc.macprovider'").count - 1,
             1
         )
+        let bootoutRange = try XCTUnwrap(
+            script.range(of: "bootout 'gui/501/live.streamvc.macprovider'")
+        )
+        let absenceRange = try XCTUnwrap(
+            script.range(of: "print 'gui/501/live.streamvc.macprovider'")
+        )
+        let bootstrapRange = try XCTUnwrap(
+            script.range(
+                of: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.streamvc.macprovider.plist").path)'"
+            )
+        )
+        XCTAssertLessThan(bootoutRange.lowerBound, absenceRange.lowerBound)
+        XCTAssertLessThan(absenceRange.lowerBound, bootstrapRange.lowerBound)
+        XCTAssertTrue(script.contains("while [ \"$attempt\" -lt 100 ]"))
+        XCTAssertTrue(script.contains("[ \"$status\" -eq 113 ]"))
+        XCTAssertTrue(script.contains("*\"Could not find service\"*"))
+        XCTAssertTrue(script.contains("[ \"$provider_absent\" -eq 1 ] || exit 75"))
         XCTAssertEqual(
             script.components(
                 separatedBy: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.streamvc.macprovider.plist").path)'"
             ).count - 1,
             1
         )
+    }
+
+    func testReloadHelperWaitsForCanonicalAbsenceThenBootstrapsExactlyOnce() throws {
+        let result = try runReloadHelperScenario(absentAfterCheck: 3, maxChecks: 5)
+
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(
+            result.log,
+            [
+                "bootout gui/501/live.streamvc.macprovider",
+                "print gui/501/live.streamvc.macprovider",
+                "sleep 0.1",
+                "print gui/501/live.streamvc.macprovider",
+                "sleep 0.1",
+                "print gui/501/live.streamvc.macprovider",
+                "bootstrap gui/501 \(result.providerPlistPath)",
+                "bootout gui/501/live.streamvc.macprovider-compatibility-reload",
+            ]
+        )
+        XCTAssertEqual(result.log.filter { $0.hasPrefix("bootstrap ") }.count, 1)
+        XCTAssertFalse(result.helperPlistExists)
+    }
+
+    func testReloadHelperFailsBoundedlyWithoutBootstrapWhenCanonicalNeverDisappears() throws {
+        let result = try runReloadHelperScenario(absentAfterCheck: nil, maxChecks: 3)
+
+        XCTAssertEqual(result.status, 75)
+        XCTAssertEqual(
+            result.log.filter { $0 == "print gui/501/live.streamvc.macprovider" }.count,
+            3
+        )
+        XCTAssertEqual(result.log.filter { $0 == "sleep 0.1" }.count, 2)
+        XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
+        XCTAssertFalse(result.helperPlistExists)
+    }
+
+    func testReloadHelperFailsClosedOnUnknownServiceInspectionError() throws {
+        let result = try runReloadHelperScenario(
+            absentAfterCheck: nil,
+            maxChecks: 3,
+            printFailureStatus: 5
+        )
+
+        XCTAssertEqual(result.status, 5)
+        XCTAssertEqual(
+            result.log.filter { $0 == "print gui/501/live.streamvc.macprovider" }.count,
+            1
+        )
+        XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
+        XCTAssertFalse(result.helperPlistExists)
+    }
+
+    func testReloadHelperTimesOutHungBootoutWithoutBootstrappingOrRemovingProviderPlist() throws {
+        let started = Date()
+        let result = try runReloadHelperScenario(
+            absentAfterCheck: 1,
+            maxChecks: 3,
+            hangOperation: "bootout"
+        )
+
+        XCTAssertEqual(result.status, 124)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertFalse(result.log.contains { $0.hasPrefix("print ") })
+        XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
+        XCTAssertTrue(result.providerPlistExists)
+        XCTAssertFalse(result.helperPlistExists)
+    }
+
+    func testReloadHelperTimesOutHungPrintWithoutBootstrappingOrRemovingProviderPlist() throws {
+        let started = Date()
+        let result = try runReloadHelperScenario(
+            absentAfterCheck: nil,
+            maxChecks: 3,
+            hangOperation: "print"
+        )
+
+        XCTAssertEqual(result.status, 124)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
+        XCTAssertTrue(result.providerPlistExists)
+        XCTAssertFalse(result.helperPlistExists)
+    }
+
+    func testReloadHelperTimesOutHungBootstrapWithoutRemovingProviderPlist() throws {
+        let started = Date()
+        let result = try runReloadHelperScenario(
+            absentAfterCheck: 1,
+            maxChecks: 3,
+            hangOperation: "bootstrap"
+        )
+
+        XCTAssertEqual(result.status, 124)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertEqual(result.log.filter { $0.hasPrefix("bootstrap ") }.count, 1)
+        XCTAssertTrue(result.providerPlistExists)
+        XCTAssertFalse(result.helperPlistExists)
     }
 
     func testCompatibilityReloadFencesLegacyJobsBeforeValidatingCanonicalPlists() throws {
@@ -631,8 +744,113 @@ final class SelfUpdateTests: XCTestCase {
                 ["bootout", "gui/501/live.streamvc.macprovider-compatibility-reload"],
             ]
         )
-        XCTAssertFalse(commands[0].1)
+        XCTAssertTrue(commands[0].1)
         XCTAssertTrue(commands[1].1)
+    }
+
+    func testCompatibilityReloadFenceWaitsForDelayedHelperDisappearance() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-fence-delayed-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        let helperPlist = launchAgents.appendingPathComponent(
+            "\(SelfUpdate.providerReloadLaunchdLabel).plist"
+        )
+        try Data("stale".utf8).write(to: helperPlist)
+        var inspections = 0
+        var sleeps: [TimeInterval] = []
+
+        try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            servicePresent: { label in
+                XCTAssertEqual(label, SelfUpdate.providerReloadLaunchdLabel)
+                inspections += 1
+                return inspections < 3
+            },
+            loadedServiceLabels: { [SelfUpdate.providerReloadLaunchdLabel] },
+            runLaunchctl: { arguments, allowFailure in
+                XCTAssertEqual(
+                    arguments,
+                    ["bootout", "gui/501/\(SelfUpdate.providerReloadLaunchdLabel)"]
+                )
+                XCTAssertTrue(allowFailure)
+            },
+            removalMaxChecks: 5,
+            sleep: { sleeps.append($0) }
+        )
+
+        XCTAssertEqual(inspections, 3)
+        XCTAssertEqual(sleeps, [0.1, 0.1])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: helperPlist.path))
+    }
+
+    func testCompatibilityReloadFenceAcceptsListBootoutAlreadyAbsentRace() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-fence-race-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        let helperPlist = launchAgents.appendingPathComponent(
+            "\(SelfUpdate.providerReloadLaunchdLabel).plist"
+        )
+        try Data("stale".utf8).write(to: helperPlist)
+        var inspected = false
+
+        try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            servicePresent: { label in
+                XCTAssertEqual(label, SelfUpdate.providerReloadLaunchdLabel)
+                inspected = true
+                return false
+            },
+            loadedServiceLabels: { [SelfUpdate.providerReloadLaunchdLabel] },
+            runLaunchctl: { arguments, allowFailure in
+                XCTAssertEqual(
+                    arguments,
+                    ["bootout", "gui/501/\(SelfUpdate.providerReloadLaunchdLabel)"]
+                )
+                XCTAssertTrue(allowFailure)
+            },
+            removalMaxChecks: 3,
+            sleep: { _ in XCTFail("already-absent helper should not sleep") }
+        )
+
+        XCTAssertTrue(inspected)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: helperPlist.path))
+    }
+
+    func testCompatibilityReloadFenceTimesOutBeforeUnlinkingHelperPlist() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-fence-timeout-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        let helperPlist = launchAgents.appendingPathComponent(
+            "\(SelfUpdate.providerReloadLaunchdLabel).plist"
+        )
+        try Data("stale".utf8).write(to: helperPlist)
+        var inspections = 0
+        var sleeps = 0
+
+        XCTAssertThrowsError(try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            servicePresent: { _ in
+                inspections += 1
+                return true
+            },
+            loadedServiceLabels: { [] },
+            runLaunchctl: { _, allowFailure in XCTAssertTrue(allowFailure) },
+            removalMaxChecks: 3,
+            sleep: { _ in sleeps += 1 }
+        ))
+
+        XCTAssertEqual(inspections, 3)
+        XCTAssertEqual(sleeps, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: helperPlist.path))
     }
 
     func testCompatibilityReloadFenceFailsClosedWhenServiceInspectionFails() throws {
@@ -680,10 +898,121 @@ final class SelfUpdateTests: XCTestCase {
             uid: 501,
             servicePresent: { $0 == SelfUpdate.providerReloadLaunchdLabel },
             loadedServiceLabels: { [] },
-            runLaunchctl: { _, _ in }
+            runLaunchctl: { _, allowFailure in XCTAssertTrue(allowFailure) },
+            removalMaxChecks: 3,
+            sleep: { _ in }
         ))
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: helperPlist.path))
+    }
+
+    func testBoundedLaunchctlRunnerReportsTimeoutDistinctly() throws {
+        let started = Date()
+
+        XCTAssertThrowsError(try SelfUpdate.runLaunchctlCommand(
+            arguments: ["10"],
+            executablePath: "/bin/sleep",
+            timeout: 0.05,
+            terminateGrace: 0.05
+        )) { error in
+            guard case let UpdateError.processTimedOut(command, timeout) = error else {
+                return XCTFail("expected processTimedOut, got \(error)")
+            }
+            XCTAssertEqual(command, "/bin/sleep 10")
+            XCTAssertEqual(timeout, 0.05)
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
+
+    func testServiceLoadedProbeFailsClosedOnTimeoutAndUnknownStatus() throws {
+        let started = Date()
+        XCTAssertFalse(SelfUpdate.launchctlServiceLoaded(
+            label: SelfUpdate.launchdLabel,
+            executablePath: "/usr/bin/yes",
+            timeout: 0.05
+        ))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+
+        XCTAssertFalse(SelfUpdate.launchctlServiceLoaded(
+            label: SelfUpdate.launchdLabel,
+            executablePath: "/usr/bin/false",
+            timeout: 0.5
+        ))
+    }
+
+    func testBoundedLaunchctlRunnerDrainsOutputWithoutPipeBackpressure() throws {
+        let byteCount = 1_048_576
+        let result = try SelfUpdate.runLaunchctlCommand(
+            arguments: [
+                "-c",
+                "/usr/bin/yes launchctl-output | /usr/bin/head -c \(byteCount)",
+            ],
+            allowFailure: false,
+            executablePath: "/bin/sh",
+            timeout: 2
+        )
+
+        XCTAssertEqual(result.terminationStatus, 0)
+        XCTAssertEqual(result.output.utf8.count, byteCount)
+        XCTAssertTrue(result.output.hasPrefix("launchctl-output"))
+    }
+
+    func testLaunchctlTimeoutFailsFenceBeforeUnlinkingHelperPlist() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchctl-command-timeout-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        let helperPlist = launchAgents.appendingPathComponent(
+            "\(SelfUpdate.providerReloadLaunchdLabel).plist"
+        )
+        try Data("stale".utf8).write(to: helperPlist)
+
+        XCTAssertThrowsError(try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            servicePresent: { _ in false },
+            loadedServiceLabels: { [SelfUpdate.providerReloadLaunchdLabel] },
+            runLaunchctl: { _, allowFailure in
+                XCTAssertTrue(allowFailure)
+                _ = try SelfUpdate.runLaunchctlCommand(
+                    arguments: ["10"],
+                    allowFailure: allowFailure,
+                    executablePath: "/bin/sleep",
+                    timeout: 0.05,
+                    terminateGrace: 0.05
+                )
+            }
+        )) { error in
+            guard case UpdateError.processTimedOut = error else {
+                return XCTFail("expected processTimedOut, got \(error)")
+            }
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: helperPlist.path))
+    }
+
+    func testLaunchctlServiceLoadedThrowsOnTimeoutForRestartPath() throws {
+        let script = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "hanging-launchctl-\(UUID().uuidString)"
+        )
+        defer { try? FileManager.default.removeItem(at: script) }
+        try Data("#!/bin/sh\nexec /bin/sleep 30\n".utf8).write(to: script)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: script.path
+        )
+
+        XCTAssertThrowsError(try SelfUpdate.launchctlServiceLoadedOrThrow(
+            label: SelfUpdate.watchdogLaunchdLabel,
+            executablePath: script.path,
+            timeout: 0.05
+        )) { error in
+            guard case UpdateError.processTimedOut = error else {
+                return XCTFail("expected processTimedOut, got \(error)")
+            }
+        }
     }
 
     func testCompatibilityReloadCleansPartiallyBootstrappedHelperOnFailure() throws {
@@ -722,9 +1051,9 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: helperPlist.path))
         XCTAssertEqual(
             commands.filter {
-                $0.0 == ["bootout", "gui/501/\(helperLabel)"] && !$0.1
+                $0.0 == ["bootout", "gui/501/\(helperLabel)"] && $0.1
             }.count,
-            1
+            2
         )
     }
 
@@ -755,7 +1084,7 @@ final class SelfUpdateTests: XCTestCase {
         let matching: [String: Any] = [
             "binary_version": "1.8.50",
             "compatibility_set_id": "set-50",
-            "model_loaded": true,
+            "compatibility_set_sha256": String(repeating: "a", count: 64),
             "status": "ready",
             "service_instance": [
                 "instance_id": "instance-a",
@@ -767,7 +1096,8 @@ final class SelfUpdateTests: XCTestCase {
             SelfUpdate.localHealthyTargetInstanceKey(
                 matching,
                 targetVersion: "1.8.50",
-                expectedCompatibilitySetID: "set-50"
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64)
             ),
             "123:instance-a"
         )
@@ -775,14 +1105,34 @@ final class SelfUpdateTests: XCTestCase {
             SelfUpdate.localHealthyTargetInstanceKey(
                 matching,
                 targetVersion: "1.8.49",
-                expectedCompatibilitySetID: "set-50"
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64)
+            )
+        )
+        var missingDigest = matching
+        missingDigest.removeValue(forKey: "compatibility_set_sha256")
+        XCTAssertNil(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                missingDigest,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64)
             )
         )
         XCTAssertNil(
             SelfUpdate.localHealthyTargetInstanceKey(
                 matching,
                 targetVersion: "1.8.50",
-                expectedCompatibilitySetID: "set-49"
+                expectedCompatibilitySetID: "set-49",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64)
+            )
+        )
+        XCTAssertNil(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                matching,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "b", count: 64)
             )
         )
         var restarted = matching
@@ -794,7 +1144,8 @@ final class SelfUpdateTests: XCTestCase {
             SelfUpdate.localHealthyTargetInstanceKey(
                 restarted,
                 targetVersion: "1.8.50",
-                expectedCompatibilitySetID: "set-50"
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64)
             ),
             "456:instance-b"
         )
@@ -804,7 +1155,8 @@ final class SelfUpdateTests: XCTestCase {
             SelfUpdate.localHealthyTargetInstanceKey(
                 unavailable,
                 targetVersion: "1.8.50",
-                expectedCompatibilitySetID: "set-50"
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64)
             )
         )
         XCTAssertEqual(SelfUpdate.localHealthRequiredConsecutiveSamples, 11)
@@ -885,6 +1237,119 @@ final class SelfUpdateTests: XCTestCase {
             XCTAssertEqual(error.description, UpdateError.missingAsset.description)
         }
     }
+}
+
+private struct ReloadHelperScenarioResult {
+    let status: Int32
+    let log: [String]
+    let providerPlistPath: String
+    let providerPlistExists: Bool
+    let helperPlistExists: Bool
+}
+
+private func runReloadHelperScenario(
+    absentAfterCheck: Int?,
+    maxChecks: Int,
+    printFailureStatus: Int? = nil,
+    hangOperation: String? = nil
+) throws -> ReloadHelperScenarioResult {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("reload-helper-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let logURL = root.appendingPathComponent("commands.log")
+    let countURL = root.appendingPathComponent("print-count")
+    let launchctlURL = root.appendingPathComponent("launchctl")
+    let sleepURL = root.appendingPathComponent("sleep")
+    let commandSleepURL = root.appendingPathComponent("command-sleep")
+    let providerPlist = root.appendingPathComponent("live.streamvc.macprovider.plist")
+    let helperPlist = root.appendingPathComponent(
+        "live.streamvc.macprovider-compatibility-reload.plist"
+    )
+    let absentAt = absentAfterCheck ?? (maxChecks + 1)
+    let forcedPrintFailure = printFailureStatus.map { "exit \($0)" } ?? ":"
+    let forcedHang = hangOperation.map {
+        "if [ \"$1\" = \"\($0)\" ]; then trap '' TERM; while :; do :; done; fi"
+    } ?? ":"
+    let launchctl = """
+    #!/bin/sh
+    set -eu
+    printf '%s\\n' "$*" >> '\(logURL.path)'
+    \(forcedHang)
+    if [ "$1" = "print" ]; then
+      \(forcedPrintFailure)
+      count=0
+      if [ -f '\(countURL.path)' ]; then count=$(/bin/cat '\(countURL.path)'); fi
+      count=$((count + 1))
+      printf '%s\\n' "$count" > '\(countURL.path)'
+      if [ "$count" -ge \(absentAt) ]; then
+        printf '%s\\n' 'Could not find service' >&2
+        exit 113
+      fi
+    fi
+    exit 0
+    """
+    let sleep = """
+    #!/bin/sh
+    set -eu
+    printf 'sleep %s\\n' "$*" >> '\(logURL.path)'
+    """
+    let commandSleep = """
+    #!/bin/sh
+    exit 0
+    """
+    try Data(launchctl.utf8).write(to: launchctlURL)
+    try Data(sleep.utf8).write(to: sleepURL)
+    try Data(commandSleep.utf8).write(to: commandSleepURL)
+    try Data("provider".utf8).write(to: providerPlist)
+    try Data("helper".utf8).write(to: helperPlist)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: launchctlURL.path
+    )
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: sleepURL.path
+    )
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: commandSleepURL.path
+    )
+
+    let data = try SelfUpdate.providerReloadLaunchAgentData(
+        providerPlistPath: providerPlist.path,
+        helperPlistPath: helperPlist.path,
+        uid: 501,
+        launchctlPath: launchctlURL.path,
+        sleepPath: sleepURL.path,
+        commandSleepPath: commandSleepURL.path,
+        providerRemovalMaxChecks: maxChecks,
+        commandTimeoutChecks: 3,
+        commandTerminateGraceChecks: 2
+    )
+    let propertyList = try XCTUnwrap(
+        PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+    )
+    let arguments = try XCTUnwrap(propertyList["ProgramArguments"] as? [String])
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: arguments[0])
+    process.arguments = Array(arguments.dropFirst())
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    try process.run()
+    process.waitUntilExit()
+
+    let log = (try? String(contentsOf: logURL, encoding: .utf8))?
+        .split(separator: "\n")
+        .map(String.init) ?? []
+    return ReloadHelperScenarioResult(
+        status: process.terminationStatus,
+        log: log,
+        providerPlistPath: providerPlist.path,
+        providerPlistExists: FileManager.default.fileExists(atPath: providerPlist.path),
+        helperPlistExists: FileManager.default.fileExists(atPath: helperPlist.path)
+    )
 }
 
 private final class UpdateActionRecorder: @unchecked Sendable {

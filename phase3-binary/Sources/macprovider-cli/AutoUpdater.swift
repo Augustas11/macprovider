@@ -32,6 +32,7 @@ struct AutoUpdater: Sendable {
     typealias Drain = @Sendable (_ target: String) async throws -> Bool
     typealias SendReady = @Sendable () async throws -> Void
     typealias Restart = @Sendable () throws -> Void
+    typealias FenceReloadJobs = @Sendable () throws -> Void
     typealias Availability = @Sendable () -> Bool
 
     let config: AppConfig
@@ -45,6 +46,7 @@ struct AutoUpdater: Sendable {
     let drain: Drain
     let sendReady: SendReady
     let restartLaunchd: Restart
+    let fenceReloadJobs: FenceReloadJobs
     let currentBinaryURL: @Sendable () -> URL?
     let rollbackObserverAvailable: Availability
     let launchdProviderAvailable: Availability
@@ -62,6 +64,7 @@ struct AutoUpdater: Sendable {
         drain: @escaping Drain,
         sendReady: @escaping SendReady,
         restartLaunchd: @escaping Restart = { try AutoUpdater.restartLaunchdIfInstalled() },
+        fenceReloadJobs: @escaping FenceReloadJobs = { try AutoUpdater.fenceReloadJobsIfInstalled() },
         currentBinaryURL: @escaping @Sendable () -> URL? = {
             CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
         },
@@ -80,6 +83,7 @@ struct AutoUpdater: Sendable {
         self.drain = drain
         self.sendReady = sendReady
         self.restartLaunchd = restartLaunchd
+        self.fenceReloadJobs = fenceReloadJobs
         self.currentBinaryURL = currentBinaryURL
         self.rollbackObserverAvailable = rollbackObserverAvailable
         self.launchdProviderAvailable = launchdProviderAvailable
@@ -114,6 +118,8 @@ struct AutoUpdater: Sendable {
         let target = validated.normalized
         await record(updateID: updateID, target: target, phase: .detection, outcome: .inProgress, reason: "recommended_binary_version_detected", attempt: 1)
         let commitTracker = AutoUpdateCommitTracker()
+        var mutationLock: AutoUpdateLock?
+        defer { withExtendedLifetime(mutationLock) {} }
         var maintenanceLease: ProviderLifecycleLeaseRecord?
         var startupHandoffPrepared = false
         defer {
@@ -151,8 +157,8 @@ struct AutoUpdater: Sendable {
                 return
             }
             try await ensureEligible(phase: .eligibility)
-            let lock = try markerStore.acquireLock()
-            defer { withExtendedLifetime(lock) {} }
+            let heldMutationLock = try acquireUpdateLockAndFenceReloadJobs()
+            mutationLock = heldMutationLock
             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
             let release: GitHubRelease
             do {
@@ -222,7 +228,8 @@ struct AutoUpdater: Sendable {
                 tracker: commitTracker,
                 authorityMode: "coordinator_recommendation",
                 discoveryHead: nil,
-                requireCurrentTrustAtSwap: true
+                requireCurrentTrustAtSwap: true,
+                whileHolding: heldMutationLock
             )
             if let signedPolicy = prepared.signedPolicy {
                 try await markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
@@ -250,7 +257,10 @@ struct AutoUpdater: Sendable {
                 startupHandoffPrepared = true
                 try restartLaunchd()
             } catch {
-                try? rollbackCommittedSwapAfterRestartFailure(commitTracker)
+                try? rollbackCommittedSwapAfterRestartFailure(
+                    commitTracker,
+                    whileHolding: heldMutationLock
+                )
                 if let maintenanceLease {
                     _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
                 }
@@ -264,26 +274,20 @@ struct AutoUpdater: Sendable {
         } catch AutoUpdateMarkerError.transactionPending {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
         } catch AutoUpdateError.trustStateLost(let reason) {
-            if let marker = commitTracker.marker ?? (try? markerStore.readPending()) {
-                var rollbackSafeToClean = !commitTracker.committedSwap
-                if commitTracker.committedSwap {
-                    do {
-                        let restored = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
-                        rollbackSafeToClean = restored.transactionState == nil
-                    } catch {
-                        // Keep the pending marker and both backups durable so
-                        // the watchdog can retry a failed in-process restore.
-                    }
-                }
-                if rollbackSafeToClean,
-                   commitTracker.committedMarker || commitTracker.committedBackup
-                {
-                    markerStore.clearPendingAndLock(target: nil)
-                    markerStore.removeRollbackBackups(marker)
-                }
+            if let mutationLock {
+                rollbackCommittedMutationAfterGuardFailure(
+                    commitTracker,
+                    whileHolding: mutationLock
+                )
             }
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .trustStateLost, reason: reason)
         } catch is AutoUpdateSignedPolicyPersistError {
+            if let mutationLock {
+                rollbackCommittedMutationAfterGuardFailure(
+                    commitTracker,
+                    whileHolding: mutationLock
+                )
+            }
             markerStore.recordCooldown(target: target, failureClass: .other)
         } catch {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: Self.redactedReason(for: error))
@@ -358,7 +362,7 @@ struct AutoUpdater: Sendable {
                 await record(updateID: updateID, target: target, source: .githubPoll, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
                 return
             }
-            let lock = try markerStore.acquireLock()
+            let lock = try acquireUpdateLockAndFenceReloadJobs()
             defer { withExtendedLifetime(lock) {} }
             let release = try await update.resolveReleaseByTags(normalizedTarget: target)
             let prepared = try await update.prepareValidatedUpdate(
@@ -395,7 +399,8 @@ struct AutoUpdater: Sendable {
                 tracker: commitTracker,
                 authorityMode: "signed_release",
                 discoveryHead: head,
-                requireCurrentTrustAtSwap: false
+                requireCurrentTrustAtSwap: false,
+                whileHolding: lock
             )
             await record(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             do {
@@ -419,7 +424,10 @@ struct AutoUpdater: Sendable {
                 startupHandoffPrepared = true
                 try restartLaunchd()
             } catch {
-                try? rollbackCommittedSwapAfterRestartFailure(commitTracker)
+                try? rollbackCommittedSwapAfterRestartFailure(
+                    commitTracker,
+                    whileHolding: lock
+                )
                 if let maintenanceLease {
                     _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
                 }
@@ -445,8 +453,10 @@ struct AutoUpdater: Sendable {
         tracker: AutoUpdateCommitTracker,
         authorityMode: String,
         discoveryHead: SignedReleaseDiscoveryHead?,
-        requireCurrentTrustAtSwap: Bool
+        requireCurrentTrustAtSwap: Bool,
+        whileHolding lock: AutoUpdateLock
     ) async throws {
+        defer { withExtendedLifetime(lock) {} }
         guard let current = currentBinaryURL() else {
             throw AutoUpdateError.currentBinaryUnknown
         }
@@ -481,8 +491,7 @@ struct AutoUpdater: Sendable {
         } catch {
             if tracker.committedMarker {
                 do {
-                    let restored = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
-                    if restored.transactionState == nil {
+                    if try restoreBackupAfterFencing(marker, whileHolding: lock) {
                         markerStore.clearPendingAndLock(target: nil)
                         markerStore.removeRollbackBackups(marker)
                     }
@@ -506,6 +515,8 @@ struct AutoUpdater: Sendable {
         discoveryHead: SignedReleaseDiscoveryHead?,
         requireCurrentTrustAtSwap: Bool
     ) async throws {
+        let lock = try acquireUpdateLockAndFenceReloadJobs()
+        defer { withExtendedLifetime(lock) {} }
         try await preserveMarkerAndSwap(
             updateID: updateID,
             target: target,
@@ -513,29 +524,140 @@ struct AutoUpdater: Sendable {
             tracker: AutoUpdateCommitTracker(),
             authorityMode: authorityMode,
             discoveryHead: discoveryHead,
-            requireCurrentTrustAtSwap: requireCurrentTrustAtSwap
+            requireCurrentTrustAtSwap: requireCurrentTrustAtSwap,
+            whileHolding: lock
         )
     }
 
     func rollbackCommittedSwapAfterRestartFailureForTest(_ marker: AutoUpdatePendingMarker) {
+        guard let lock = try? markerStore.acquireRecoveryLock() else { return }
+        defer { withExtendedLifetime(lock) {} }
         let tracker = AutoUpdateCommitTracker()
         tracker.marker = marker
         tracker.committedMarker = true
         tracker.committedBackup = true
         tracker.committedSwap = true
-        try? rollbackCommittedSwapAfterRestartFailure(tracker)
+        try? rollbackCommittedSwapAfterRestartFailure(tracker, whileHolding: lock)
     }
 
-    private func rollbackCommittedSwapAfterRestartFailure(_ tracker: AutoUpdateCommitTracker) throws {
-        guard tracker.committedSwap, let marker = tracker.marker ?? (try? markerStore.readPending()) else {
-            return
-        }
-        let restored = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
-        try restartLaunchd()
-        if restored.transactionState == nil {
+    func acquireUpdateLockAndFenceReloadJobsForTest() throws -> AutoUpdateLock {
+        try acquireUpdateLockAndFenceReloadJobs()
+    }
+
+    func rollbackAfterTrustLossForTest(
+        _ marker: AutoUpdatePendingMarker,
+        whileHolding lock: AutoUpdateLock,
+        cleanupObserver: () -> Void
+    ) {
+        let tracker = AutoUpdateCommitTracker()
+        tracker.marker = marker
+        tracker.committedMarker = true
+        tracker.committedBackup = true
+        tracker.committedSwap = true
+        rollbackCommittedMutationAfterGuardFailure(
+            tracker,
+            whileHolding: lock,
+            cleanupObserver: cleanupObserver
+        )
+    }
+
+    func rollbackAfterActivationFailureForTest(
+        _ marker: AutoUpdatePendingMarker,
+        whileHolding lock: AutoUpdateLock
+    ) throws {
+        defer { withExtendedLifetime(lock) {} }
+        if try restoreBackupAfterFencing(marker, whileHolding: lock) {
             markerStore.clearPendingAndLock(target: nil)
             markerStore.removeRollbackBackups(marker)
         }
+    }
+
+    func rollbackAfterSignedPolicyPersistFailureForTest(
+        _ marker: AutoUpdatePendingMarker,
+        whileHolding lock: AutoUpdateLock,
+        cleanupObserver: () -> Void
+    ) {
+        let tracker = AutoUpdateCommitTracker()
+        tracker.marker = marker
+        tracker.committedMarker = true
+        tracker.committedBackup = true
+        tracker.committedSwap = true
+        rollbackCommittedMutationAfterGuardFailure(
+            tracker,
+            whileHolding: lock,
+            cleanupObserver: cleanupObserver
+        )
+    }
+
+    private func acquireUpdateLockAndFenceReloadJobs() throws -> AutoUpdateLock {
+        let lock = try markerStore.acquireLock()
+        do {
+            try fenceReloadJobs()
+            return lock
+        } catch {
+            withExtendedLifetime(lock) {}
+            throw error
+        }
+    }
+
+    private func rollbackCommittedMutationAfterGuardFailure(
+        _ tracker: AutoUpdateCommitTracker,
+        whileHolding lock: AutoUpdateLock,
+        cleanupObserver: () -> Void = {}
+    ) {
+        defer { withExtendedLifetime(lock) {} }
+        guard let marker = tracker.marker ?? (try? markerStore.readPending()) else {
+            cleanupObserver()
+            return
+        }
+        var rollbackSafeToClean = !tracker.committedSwap
+        if tracker.committedSwap {
+            do {
+                rollbackSafeToClean = try restoreBackupAfterFencing(
+                    marker,
+                    whileHolding: lock
+                )
+            } catch {
+                // Keep the pending marker and both backups durable so
+                // the watchdog can retry a failed in-process restore.
+            }
+        }
+        if rollbackSafeToClean,
+           tracker.committedMarker || tracker.committedBackup
+        {
+            markerStore.clearPendingAndLock(target: nil)
+            markerStore.removeRollbackBackups(marker)
+        }
+        cleanupObserver()
+    }
+
+    private func rollbackCommittedSwapAfterRestartFailure(
+        _ tracker: AutoUpdateCommitTracker,
+        whileHolding lock: AutoUpdateLock
+    ) throws {
+        defer { withExtendedLifetime(lock) {} }
+        guard tracker.committedSwap, let marker = tracker.marker ?? (try? markerStore.readPending()) else {
+            return
+        }
+        let rollbackSafeToClean = try restoreBackupAfterFencing(
+            marker,
+            whileHolding: lock
+        )
+        try restartLaunchd()
+        if rollbackSafeToClean {
+            markerStore.clearPendingAndLock(target: nil)
+            markerStore.removeRollbackBackups(marker)
+        }
+    }
+
+    private func restoreBackupAfterFencing(
+        _ marker: AutoUpdatePendingMarker,
+        whileHolding lock: AutoUpdateLock
+    ) throws -> Bool {
+        defer { withExtendedLifetime(lock) {} }
+        try fenceReloadJobs()
+        let restored = try markerStore.restoreBackupAwaitingPreviousReadiness(marker)
+        return restored.transactionState == nil
     }
 
     private func ensureEligible(phase: AutoUpdatePhase) async throws {
@@ -712,12 +834,11 @@ struct AutoUpdater: Sendable {
         }
         try SelfUpdate.reloadCompatibilityLaunchdJobs(
             homeDirectory: homeDirectory,
-            serviceLoaded: launchctlServiceLoaded,
+            serviceLoaded: { try SelfUpdate.launchctlServiceLoadedOrThrow(label: $0) },
             servicePresent: SelfUpdate.launchctlServicePresent,
             loadedServiceLabels: SelfUpdate.launchctlServiceLabels,
             runLaunchctl: { arguments, allowFailure in
-                try runProcess(
-                    "/bin/launchctl",
+                _ = try SelfUpdate.runLaunchctlCommand(
                     arguments: arguments,
                     allowFailure: allowFailure
                 )
@@ -725,22 +846,36 @@ struct AutoUpdater: Sendable {
         )
     }
 
-    private static func launchctlServiceLoaded(label: String) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["print", "gui/\(getuid())/\(label)"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return false
+    static func fenceReloadJobsIfInstalled() throws {
+        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let plist = homeDirectory
+            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            return
         }
-        guard process.terminationStatus == 0 else { return false }
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        return !output.lowercased().contains("disabled = true")
+        try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: homeDirectory,
+            servicePresent: SelfUpdate.launchctlServicePresent,
+            loadedServiceLabels: SelfUpdate.launchctlServiceLabels,
+            runLaunchctl: { arguments, allowFailure in
+                _ = try SelfUpdate.runLaunchctlCommand(
+                    arguments: arguments,
+                    allowFailure: allowFailure
+                )
+            }
+        )
+    }
+
+    static func launchctlServiceLoaded(
+        label: String,
+        executablePath: String = "/bin/launchctl",
+        timeout: TimeInterval = 5
+    ) -> Bool {
+        SelfUpdate.launchctlServiceLoaded(
+            label: label,
+            executablePath: executablePath,
+            timeout: timeout
+        )
     }
 
     private static func runProcess(_ executable: String, arguments: [String], allowFailure: Bool = false) throws {

@@ -144,8 +144,9 @@ actor CoordinatorClient {
     ) async -> Bool?
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
+    typealias ReloadHelperFence = @Sendable () throws -> Void
 
-    static let binaryVersion = "1.8.53"
+    static let binaryVersion = "1.8.54"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -273,6 +274,10 @@ actor CoordinatorClient {
     private let coordinatorReadinessAttempts: Int
     private let coordinatorReadinessRetryNanoseconds: UInt64
     private let autoupdateMarkerStore: AutoUpdateMarkerStore
+    private let autoupdateLocalHealthRequiredConsecutiveSamples: Int
+    private let autoupdateLocalStatusProbe: @Sendable () async -> [String: Any]?
+    private let autoupdateLocalHealthSleep: @Sendable () async -> Void
+    private let autoupdateReloadHelperFence: ReloadHelperFence
     private let lifecycleStateStore: ProviderLifecycleStateStore
     private let lifecycleOperationID: String?
     private var operatorPaused: Bool
@@ -319,6 +324,14 @@ actor CoordinatorClient {
         coordinatorReadinessAttempts: Int = 15,
         coordinatorReadinessRetryNanoseconds: UInt64 = 2_000_000_000,
         autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
+        autoupdateLocalHealthRequiredConsecutiveSamples: Int = SelfUpdate.localHealthRequiredConsecutiveSamples,
+        autoupdateLocalStatusProbe: (@Sendable () async -> [String: Any]?)? = nil,
+        autoupdateLocalHealthSleep: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        },
+        autoupdateReloadHelperFence: @escaping ReloadHelperFence = {
+            try CoordinatorClient.fenceAutoupdateReloadHelpers()
+        },
         credentialBootstrap: Bool = false,
         bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
         bootstrapReferralCode: String? = nil,
@@ -429,6 +442,16 @@ actor CoordinatorClient {
         self.coordinatorReadinessAttempts = max(1, coordinatorReadinessAttempts)
         self.coordinatorReadinessRetryNanoseconds = coordinatorReadinessRetryNanoseconds
         self.autoupdateMarkerStore = autoupdateMarkerStore
+        self.autoupdateLocalHealthRequiredConsecutiveSamples = max(
+            1,
+            autoupdateLocalHealthRequiredConsecutiveSamples
+        )
+        let localStatusPort = config.port
+        self.autoupdateLocalStatusProbe = autoupdateLocalStatusProbe ?? {
+            try? await LocalStatusClient.fetch(port: localStatusPort)
+        }
+        self.autoupdateLocalHealthSleep = autoupdateLocalHealthSleep
+        self.autoupdateReloadHelperFence = autoupdateReloadHelperFence
         self.watchdogExitHook = watchdogExitHook
         self.streamInterval = max(1, config.streamInterval)
         self.credentialBootstrap = credentialBootstrap
@@ -2768,6 +2791,58 @@ actor CoordinatorClient {
             && marker.discoveryHeadSHA256 != nil
     }
 
+    private func waitForStableLocalAutoupdateHealth(
+        _ marker: AutoUpdatePendingMarker
+    ) async -> Bool {
+        let expectedInstanceKey = "\(getpid()):\(RouterHandler.serviceInstanceID)"
+        for sample in 0 ..< autoupdateLocalHealthRequiredConsecutiveSamples {
+            guard !Task.isCancelled else { return false }
+            let status = await autoupdateLocalStatusProbe()
+            guard Self.localHealthyTargetInstanceKey(
+                status,
+                targetVersion: marker.targetVersion,
+                expectedCompatibilitySetID: marker.targetCompatibilitySetID,
+                expectedCompatibilitySetSHA256: marker.targetCompatibilitySetSHA256,
+                expectedServiceInstanceID: RouterHandler.serviceInstanceID,
+                expectedProcessID: getpid()
+            ) == expectedInstanceKey else {
+                return false
+            }
+            if sample + 1 < autoupdateLocalHealthRequiredConsecutiveSamples {
+                await autoupdateLocalHealthSleep()
+            }
+        }
+        return true
+    }
+
+    static func localHealthyTargetInstanceKey(
+        _ status: [String: Any]?,
+        targetVersion: String,
+        expectedCompatibilitySetID: String?,
+        expectedCompatibilitySetSHA256: String?,
+        expectedServiceInstanceID: String,
+        expectedProcessID: pid_t
+    ) -> String? {
+        guard let status,
+              status["binary_version"] as? String == targetVersion,
+              expectedCompatibilitySetID == nil
+                || status["compatibility_set_id"] as? String == expectedCompatibilitySetID,
+              expectedCompatibilitySetSHA256 == nil
+                || status["compatibility_set_sha256"] as? String == expectedCompatibilitySetSHA256,
+              let health = status["status"] as? String,
+              ["ready", "busy", "degraded"].contains(health),
+              let serviceInstance = status["service_instance"] as? [String: Any],
+              serviceInstance["instance_id"] as? String == expectedServiceInstanceID,
+              let processID = serviceInstance["pid"] as? Int,
+              processID == Int(expectedProcessID),
+              !expectedServiceInstanceID.isEmpty,
+              expectedProcessID > 0
+        else {
+            return nil
+        }
+        return "\(processID):\(expectedServiceInstanceID)"
+    }
+
     private func pendingCompatibilitySetMatchesInstalled(_ marker: AutoUpdatePendingMarker) -> Bool {
         switch (marker.targetCompatibilitySetID, marker.targetCompatibilitySetSHA256) {
         case (nil, nil):
@@ -3044,21 +3119,28 @@ actor CoordinatorClient {
                 )
                 continue
             }
-            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                updateID: payload.updateID,
-                currentVersion: Self.binaryVersion,
-                targetVersion: pending.targetVersion,
-                phase: .postStart,
-                outcome: .success,
-                reason: "post_start_rejoin_succeeded",
-                attempt: 1
-            ))
+            if localSignedSetRecoveryAllowed(pending),
+               !(await waitForStableLocalAutoupdateHealth(pending)) {
+                return
+            }
             do {
                 if !localSignedSetRecoveryAllowed(pending) {
                     try await sendStateUpdate(state: nil, reason: "autoupdate_post_start_success")
                 }
                 try markerStore.completeSuccessfulUpdate(pending)
                 try markerStore.finalizeSuccessfulUpdate(pending)
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: payload.updateID,
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: pending.targetVersion,
+                    phase: .postStart,
+                    outcome: .success,
+                    reason: localSignedSetRecoveryAllowed(pending)
+                        ? "local_signed_set_health_succeeded"
+                        : "post_start_rejoin_succeeded",
+                    attempt: 1
+                ))
+                return
             } catch {
                 await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                     updateID: payload.updateID,
@@ -3077,6 +3159,9 @@ actor CoordinatorClient {
                marker.commitOwner != "self_update",
                localSignedSetRecoveryAllowed(marker),
                pendingCompatibilitySetMatchesInstalled(marker) {
+                guard await waitForStableLocalAutoupdateHealth(marker) else {
+                    return
+                }
                 do {
                     try markerStore.completeSuccessfulUpdate(marker)
                     try markerStore.finalizeSuccessfulUpdate(marker)
@@ -3104,6 +3189,21 @@ actor CoordinatorClient {
                 return
             }
             guard Self.autoupdateMarkerDeadlineExpired(marker.markerDeadline) else {
+                return
+            }
+            do {
+                try autoupdateReloadHelperFence()
+            } catch {
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: marker.updateID,
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: marker.targetVersion,
+                    phase: .rollback,
+                    outcome: .failure,
+                    reason: "reload_helper_fence_failed",
+                    attempt: 1,
+                    failureClass: .other
+                ))
                 return
             }
             let outcome = markerStore.recoverOrphanedMarker(marker)
@@ -3171,6 +3271,20 @@ actor CoordinatorClient {
                 try? FileManager.default.removeItem(at: backup)
             }
         }
+    }
+
+    private static func fenceAutoupdateReloadHelpers() throws {
+        try SelfUpdate.fenceProviderReloadLaunchdJobs(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            servicePresent: SelfUpdate.launchctlServicePresent,
+            loadedServiceLabels: SelfUpdate.launchctlServiceLabels,
+            runLaunchctl: { arguments, allowFailure in
+                _ = try SelfUpdate.runLaunchctlCommand(
+                    arguments: arguments,
+                    allowFailure: allowFailure
+                )
+            }
+        )
     }
 
     private func recordOrphanedSuccessSentinel(updateID: String, targetVersion: String, reason: String, sentinel: URL) async {

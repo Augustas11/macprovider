@@ -277,6 +277,18 @@ struct ProviderLifecycleLeaseEnvironment: @unchecked Sendable {
     )
 
     private static func liveLaunchdServiceProcessID(_ serviceIdentity: String) -> pid_t? {
+        launchdServiceProcessID(serviceIdentity) { arguments in
+            try SelfUpdate.runLaunchctlCommand(
+                arguments: arguments,
+                allowFailure: true
+            )
+        }
+    }
+
+    static func launchdServiceProcessID(
+        _ serviceIdentity: String,
+        runLaunchctl: ([String]) throws -> LaunchctlCommandResult
+    ) -> pid_t? {
         let trimmed = serviceIdentity.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed == serviceIdentity,
               !trimmed.isEmpty,
@@ -284,24 +296,14 @@ struct ProviderLifecycleLeaseEnvironment: @unchecked Sendable {
               !trimmed.contains("/") else {
             return nil
         }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["print", "gui/\(getuid())/\(serviceIdentity)"]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
+        guard let result = try? runLaunchctl([
+            "print",
+            "gui/\(getuid())/\(serviceIdentity)",
+        ]),
+        result.terminationStatus == 0 else {
             return nil
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let text = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        for line in text.split(whereSeparator: \.isNewline) {
+        for line in result.output.split(whereSeparator: \.isNewline) {
             let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard value.hasPrefix("pid = "),
                   let pid = Int32(value.dropFirst("pid = ".count)),
@@ -660,6 +662,101 @@ struct ProviderLifecycleLeaseStore: @unchecked Sendable {
             )
             try writeAtomically(startup)
             return startup
+        }
+    }
+
+    /// Rebinds an already-adopted startup handoff after the exact launchd
+    /// target restarted before its update transaction committed. The caller
+    /// must separately prove that the matching update marker is still armed.
+    /// This method only accepts a replaceable stale owner/window and still
+    /// requires the current process to be the named launchd service running
+    /// the exact executable bytes recorded by the original handoff.
+    func recoverAdoptedStartupHandoff(
+        operationID: String,
+        providerID: String,
+        serviceIdentity: String
+    ) throws -> ProviderLifecycleLeaseRecord {
+        try validateOperationID(operationID)
+        try validateHandoffIdentity(providerID, field: "provider_id")
+        try validateHandoffIdentity(serviceIdentity, field: "service_identity")
+
+        return try withExclusiveLock {
+            guard let current = try readRecordIfPresent(),
+                  current.kind == .startup,
+                  let handoff = current.startupHandoff,
+                  handoff.state == .adopted else {
+                throw ProviderLifecycleLeaseError.handoffNotPrepared
+            }
+            try validateRecordStructure(current)
+            try validateHandoffMatch(
+                handoff,
+                operationID: operationID,
+                providerID: providerID,
+                serviceIdentity: serviceIdentity
+            )
+            guard let failure = validationFailure(for: current),
+                  failure.permitsReplacement else {
+                throw ProviderLifecycleLeaseError.compareAndSwapFailed
+            }
+
+            let adopter = try currentOwner()
+            guard environment.launchdServiceProcessID(handoff.serviceIdentity) == adopter.pid else {
+                throw ProviderLifecycleLeaseError.launchdServiceOwnerMismatch
+            }
+            guard environment.executablePath(adopter.pid) == handoff.targetExecutablePath,
+                  environment.executableSHA256(handoff.targetExecutablePath)
+                    == handoff.targetExecutableSHA256 else {
+                throw ProviderLifecycleLeaseError.targetExecutableMismatch
+            }
+
+            let wallNow = environment.wallMilliseconds()
+            let monotonicNow = environment.monotonicNanoseconds()
+            let originalHandoffDuration = handoff.expiresWallMilliseconds
+                - handoff.issuedWallMilliseconds
+            guard wallNow > 0,
+                  monotonicNow >= 0,
+                  originalHandoffDuration > 0,
+                  originalHandoffDuration
+                    <= ProviderLifecycleStartupHandoff.maximumDurationMilliseconds else {
+                throw ProviderLifecycleLeaseError.handoffExpired
+            }
+            let (wallExpiry, wallOverflow) = wallNow.addingReportingOverflow(
+                originalHandoffDuration
+            )
+            let (durationNanoseconds, durationOverflow) = originalHandoffDuration
+                .multipliedReportingOverflow(by: 1_000_000)
+            let (monotonicExpiry, monotonicOverflow) = monotonicNow
+                .addingReportingOverflow(durationNanoseconds)
+            guard !wallOverflow, !durationOverflow, !monotonicOverflow else {
+                throw ProviderLifecycleLeaseError.handoffExpired
+            }
+            let recoveredHandoff = ProviderLifecycleStartupHandoff(
+                version: handoff.version,
+                handoffID: handoff.handoffID,
+                state: .adopted,
+                operationID: handoff.operationID,
+                providerID: handoff.providerID,
+                serviceIdentity: handoff.serviceIdentity,
+                bootSession: adopter.bootSession,
+                targetExecutablePath: handoff.targetExecutablePath,
+                targetExecutableSHA256: handoff.targetExecutableSHA256,
+                issuedWallMilliseconds: wallNow,
+                expiresWallMilliseconds: wallExpiry,
+                issuedMonotonicNanoseconds: monotonicNow,
+                expiresMonotonicNanoseconds: monotonicExpiry,
+                startupLeaseDurationMilliseconds: handoff.startupLeaseDurationMilliseconds
+            )
+            let recovered = try makeRecord(
+                leaseID: UUID().uuidString.lowercased(),
+                operationID: operationID,
+                kind: .startup,
+                owner: adopter,
+                durationMilliseconds: handoff.startupLeaseDurationMilliseconds,
+                startupHandoff: recoveredHandoff
+            )
+            try validateRecordStructure(recovered)
+            try writeAtomically(recovered)
+            return recovered
         }
     }
 

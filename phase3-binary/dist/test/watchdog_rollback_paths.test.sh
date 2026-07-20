@@ -36,9 +36,52 @@ EOF
   cat > "$root/bin/launchctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$MACPROVIDER_FAKE_LAUNCHCTL_LOG"
-if [ "${1:-}" = "print" ]; then
-  printf 'pid = 123\nlast exit status = 0\n'
+if [ "${MACPROVIDER_FAKE_LAUNCHCTL_HANG:-}" = "${1:-}" ]; then
+  exec /bin/sleep 30
 fi
+if [ "${MACPROVIDER_FAKE_LAUNCHCTL_FAIL:-}" = "${1:-}" ]; then
+  exit "${MACPROVIDER_FAKE_LAUNCHCTL_FAIL_STATUS:-42}"
+fi
+state_dir="$(dirname "$MACPROVIDER_FAKE_LAUNCHCTL_LOG")/launchctl-state"
+mkdir -p "$state_dir"
+stable_helper="live.streamvc.macprovider-compatibility-reload"
+legacy_helper="$stable_helper.123e4567-e89b-42d3-a456-426614174001"
+
+case "${1:-}" in
+  list)
+    printf -- '-\t0\t%s\n' "$stable_helper"
+    printf -- '-\t0\t%s\n' "$legacy_helper"
+    ;;
+  bootout)
+    target="${2:-}"
+    label="${target##*/}"
+    case "$label" in
+      "$stable_helper"|"$legacy_helper")
+        : > "$state_dir/booted-out-$label"
+        ;;
+    esac
+    ;;
+  print)
+    target="${2:-}"
+    label="${target##*/}"
+    case "$label" in
+      "$stable_helper"|"$legacy_helper")
+        if [ -e "$state_dir/booted-out-$label" ]; then
+          printf 'Could not find service "%s" in domain for user\n' "$label"
+          exit 113
+        fi
+        printf 'pid = 456\nlast exit status = 0\n'
+        ;;
+      *)
+        if [ "${MACPROVIDER_FAKE_PROVIDER_PRESENT:-1}" != "1" ]; then
+          printf 'Could not find service "%s" in domain for user\n' "$label"
+          exit 113
+        fi
+        printf 'pid = 123\nlast exit status = 0\n'
+        ;;
+    esac
+    ;;
+esac
 EOF
   chmod +x "$root/bin/launchctl"
 }
@@ -126,6 +169,15 @@ run_reconcile() {
   [ ! -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
   [ -e "$root/home/.local/share/macprovider/autoupdate/update.lock" ]
   [ "$(ls -di "$root/home/.local/share/macprovider/autoupdate/update.lock" | awk '{print $1}')" = "$lock_inode_before" ]
+  grep -Fx "list" "$root/launchctl.log" >/dev/null
+  grep -F "bootout gui/" "$root/launchctl.log" \
+    | grep -F "live.streamvc.macprovider-compatibility-reload" >/dev/null
+  grep -F "bootout gui/" "$root/launchctl.log" \
+    | grep -F "live.streamvc.macprovider-compatibility-reload.123e4567-e89b-42d3-a456-426614174001" >/dev/null
+  grep -F "print gui/" "$root/launchctl.log" \
+    | grep -F "live.streamvc.macprovider-compatibility-reload" >/dev/null
+  grep -F "print gui/" "$root/launchctl.log" \
+    | grep -F "live.streamvc.macprovider-compatibility-reload.123e4567-e89b-42d3-a456-426614174001" >/dev/null
   grep -F "bootstrap gui/" "$root/launchctl.log" >/dev/null
   grep -F "kickstart -k gui/" "$root/launchctl.log" >/dev/null
 }
@@ -137,6 +189,10 @@ invoke_reconcile() {
   MACPROVIDER_BINARY_PATH="$root/bin/macprovider-cli" \
   MACPROVIDER_LOG_DIR="$root/logs" \
   MACPROVIDER_FAKE_LAUNCHCTL_LOG="$root/launchctl.log" \
+  MACPROVIDER_FAKE_LAUNCHCTL_HANG="${MACPROVIDER_FAKE_LAUNCHCTL_HANG:-}" \
+  MACPROVIDER_FAKE_LAUNCHCTL_FAIL="${MACPROVIDER_FAKE_LAUNCHCTL_FAIL:-}" \
+  MACPROVIDER_FAKE_LAUNCHCTL_FAIL_STATUS="${MACPROVIDER_FAKE_LAUNCHCTL_FAIL_STATUS:-42}" \
+  MACPROVIDER_FAKE_PROVIDER_PRESENT="${MACPROVIDER_FAKE_PROVIDER_PRESENT:-1}" \
   PATH="$root/bin:$PATH" \
   bash "$script" --reconcile-autoupdate
 }
@@ -262,6 +318,43 @@ assert_unsafe_lock_rejected() {
   grep -F "recovery_error=mutation_lock_invalid:" "$root/logs/watchdog.log" >/dev/null
 }
 
+assert_restart_timeout_retains_recovery() {
+  script="$1"
+  root="$2"
+  started="$SECONDS"
+  MACPROVIDER_FAKE_LAUNCHCTL_HANG=bootstrap invoke_reconcile "$script" "$root"
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 10 ]
+  cmp -s "$root/bin/macprovider-cli" <(printf "old-binary")
+  [ -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
+  [ -e "$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000" ]
+  grep -F "restored_release_restart_deferred" "$root/logs/watchdog.log" >/dev/null
+}
+
+assert_restart_failure_retains_recovery() {
+  script="$1"
+  root="$2"
+  operation="$3"
+  provider_present="${4:-1}"
+  MACPROVIDER_FAKE_LAUNCHCTL_FAIL="$operation" \
+    MACPROVIDER_FAKE_PROVIDER_PRESENT="$provider_present" \
+    invoke_reconcile "$script" "$root"
+  cmp -s "$root/bin/macprovider-cli" <(printf "old-binary")
+  [ -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
+  [ -e "$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000" ]
+  grep -F "restored_release_restart_deferred" "$root/logs/watchdog.log" >/dev/null
+}
+
+assert_loaded_service_accepts_nonzero_bootstrap() {
+  script="$1"
+  root="$2"
+  MACPROVIDER_FAKE_LAUNCHCTL_FAIL=bootstrap invoke_reconcile "$script" "$root"
+  cmp -s "$root/bin/macprovider-cli" <(printf "old-binary")
+  [ ! -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
+  grep -F "print gui/" "$root/launchctl.log" | grep -F "live.streamvc.macprovider" >/dev/null
+  grep -F "kickstart -k gui/" "$root/launchctl.log" >/dev/null
+}
+
 make_fixture "$TMP/standalone"
 run_reconcile "$STANDALONE" "$TMP/standalone"
 
@@ -293,6 +386,17 @@ for script_name in standalone inline; do
   fi
   make_fixture "$TMP/live-owner-$script_name"
   assert_live_owner_fences_recovery "$script" "$TMP/live-owner-$script_name"
+  make_fixture "$TMP/restart-timeout-$script_name"
+  assert_restart_timeout_retains_recovery "$script" "$TMP/restart-timeout-$script_name"
+  make_fixture "$TMP/bootstrap-failure-$script_name"
+  assert_restart_failure_retains_recovery \
+    "$script" "$TMP/bootstrap-failure-$script_name" bootstrap 0
+  make_fixture "$TMP/kickstart-failure-$script_name"
+  assert_restart_failure_retains_recovery \
+    "$script" "$TMP/kickstart-failure-$script_name" kickstart
+  make_fixture "$TMP/bootstrap-loaded-$script_name"
+  assert_loaded_service_accepts_nonzero_bootstrap \
+    "$script" "$TMP/bootstrap-loaded-$script_name"
   for kind in hardlink fifo inner-readable outer-readable; do
     make_fixture "$TMP/unsafe-$script_name-$kind"
     assert_unsafe_lock_rejected "$script" "$TMP/unsafe-$script_name-$kind" "$kind"

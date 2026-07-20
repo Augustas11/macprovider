@@ -5,6 +5,338 @@ import XCTest
 @testable import macprovider_cli
 
 final class ServeCommandTests: XCTestCase {
+    func testV1853FirstHopFencesRecurringReloadHelperBeforeStartupWork() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(handoffState: .prepared)
+        var recurringHelperActive = true
+        var fenceCalls = 0
+
+        let fenced = try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: {
+                fenceCalls += 1
+                recurringHelperActive = false
+            }
+        )
+
+        XCTAssertTrue(fenced)
+        XCTAssertEqual(fenceCalls, 1)
+        XCTAssertFalse(recurringHelperActive)
+        XCTAssertNotEqual(
+            fixture.pending.sha256,
+            try AutoUpdateMarkerStore.sha256(file: fixture.executable),
+            "pending.sha256 is the preserved v1.8.53 rollback binary, not the v1.8.54 target"
+        )
+    }
+
+    func testV1853FirstHopFencesAfterRecurringHelperKilledFirstAdoptedTarget() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(handoffState: .adopted)
+        var fenceCalls = 0
+
+        let fenced = try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: {
+                .invalidOrExpired(
+                    record: fixture.lease,
+                    reason: .ownerProcessMissingOrReused
+                )
+            },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )
+
+        XCTAssertTrue(fenced)
+        XCTAssertEqual(fenceCalls, 1)
+    }
+
+    func testAdoptedRestartBeforeCommitFencesAfterOriginalHandoffExpires() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(
+            handoffState: .adopted,
+            handoffExpiresWallMilliseconds: 9_000,
+            handoffExpiresMonotonicNanoseconds: 9_000_000_000
+        )
+        var fenceCalls = 0
+
+        XCTAssertTrue(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: {
+                .invalidOrExpired(
+                    record: fixture.lease,
+                    reason: .ownerProcessMissingOrReused
+                )
+            },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        ))
+        XCTAssertEqual(fenceCalls, 1)
+    }
+
+    func testCoordinatorOwnedRecommendationFirstHopFencesExactLaunchdTarget() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(
+            handoffState: .prepared,
+            commitOwner: "coordinator",
+            updateAuthorityMode: "coordinator_recommendation"
+        )
+        try AutoUpdateMarkerStore().validateMarker(fixture.pending)
+        var fenceCalls = 0
+
+        XCTAssertTrue(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        ))
+        XCTAssertEqual(fenceCalls, 1)
+    }
+
+    func testCoordinatorOwnedSignedReleaseFirstHopFencesExactLaunchdTarget() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(
+            handoffState: .prepared,
+            commitOwner: "coordinator",
+            updateAuthorityMode: "signed_release"
+        )
+        try AutoUpdateMarkerStore().validateMarker(fixture.pending)
+        var fenceCalls = 0
+
+        XCTAssertTrue(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        ))
+        XCTAssertEqual(fenceCalls, 1)
+    }
+
+    func testManualServeProcessCannotUseUpdateHandoffToFenceLaunchdHelper() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(handoffState: .prepared)
+        var fenceCalls = 0
+
+        XCTAssertThrowsError(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(
+                processID: 5_321,
+                launchdServiceProcessID: 6_321
+            ),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )) { error in
+            XCTAssertEqual(
+                error as? SelfUpdateStartupFenceError,
+                .authorizationMismatch("launchd_service_owner")
+            )
+        }
+        XCTAssertEqual(fenceCalls, 0)
+    }
+
+    func testAdoptedRestartBeforeCommitFencesAfterReboot() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(handoffState: .adopted)
+        var fenceCalls = 0
+
+        XCTAssertTrue(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: {
+                .invalidOrExpired(
+                    record: fixture.lease,
+                    reason: .bootSessionChanged
+                )
+            },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(bootSession: "boot-b"),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        ))
+        XCTAssertEqual(fenceCalls, 1)
+    }
+
+    func testRestoredPreviousStartupFencesWithoutRecoveringFailedTargetHandoff() throws {
+        for rollbackState in [
+            CompatibilitySetTransactionState.restoringPrevious,
+            .awaitingPreviousReadiness,
+        ] {
+            let fixture = try makeSelfUpdateStartupFenceFixture(
+                handoffState: .adopted,
+                updateAuthorityMode: "coordinator_recommendation",
+                transactionState: rollbackState
+            )
+            try Data("v1.8.53 public".utf8).write(to: fixture.executable)
+            var inspectedLease = false
+            var fenceCalls = 0
+
+            let authorizesFailedTargetHandoff = try ServeCommand
+                .fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+                    loadPending: { fixture.pending },
+                    inspectLifecycleLease: {
+                        inspectedLease = true
+                        return .valid(fixture.lease)
+                    },
+                    currentExecutableURL: fixture.executable,
+                    targetVersion: "1.8.53",
+                    lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+                    executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+                    fenceReloadJobs: { fenceCalls += 1 }
+                )
+
+            XCTAssertFalse(authorizesFailedTargetHandoff)
+            XCTAssertFalse(inspectedLease)
+            XCTAssertEqual(fenceCalls, 1)
+        }
+    }
+
+    func testRestoredPreviousStartupRejectsWrongVersionAndBinary() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(
+            handoffState: .adopted,
+            updateAuthorityMode: "coordinator_recommendation",
+            transactionState: .awaitingPreviousReadiness
+        )
+        var fenceCalls = 0
+
+        XCTAssertThrowsError(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.52",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )) { error in
+            XCTAssertEqual(
+                error as? SelfUpdateStartupFenceError,
+                .authorizationMismatch("rollback_previous_version")
+            )
+        }
+
+        XCTAssertThrowsError(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.53",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )) { error in
+            XCTAssertEqual(
+                error as? SelfUpdateStartupFenceError,
+                .authorizationMismatch("rollback_previous_sha256")
+            )
+        }
+        XCTAssertEqual(fenceCalls, 0)
+    }
+
+    func testManualProcessCannotUseRetainedRollbackMarker() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(
+            handoffState: .adopted,
+            updateAuthorityMode: "coordinator_recommendation",
+            transactionState: .awaitingPreviousReadiness
+        )
+        try Data("v1.8.53 public".utf8).write(to: fixture.executable)
+        var fenceCalls = 0
+
+        XCTAssertThrowsError(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.53",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(
+                processID: 5_321,
+                launchdServiceProcessID: 6_321
+            ),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )) { error in
+            XCTAssertEqual(
+                error as? SelfUpdateStartupFenceError,
+                .authorizationMismatch("launchd_service_owner")
+            )
+        }
+        XCTAssertEqual(fenceCalls, 0)
+    }
+
+    func testSelfUpdateStartupFenceRejectsAuthorizationMismatchWithoutFencing() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(handoffState: .prepared)
+        var fenceCalls = 0
+
+        XCTAssertThrowsError(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .valid(fixture.lease) },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.55",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )) { error in
+            XCTAssertEqual(
+                error as? SelfUpdateStartupFenceError,
+                .authorizationMismatch("target_version")
+            )
+        }
+        XCTAssertEqual(fenceCalls, 0)
+    }
+
+    func testSelfUpdateStartupFenceRequiresMatchingHandoffBeforeFencing() throws {
+        let fixture = try makeSelfUpdateStartupFenceFixture(handoffState: .prepared)
+        var fenceCalls = 0
+
+        XCTAssertThrowsError(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { fixture.pending },
+            inspectLifecycleLease: { .missing },
+            currentExecutableURL: fixture.executable,
+            targetVersion: "1.8.54",
+            lifecycleEnvironment: selfUpdateStartupFenceEnvironment(),
+            executableSHA256: { try AutoUpdateMarkerStore.sha256(file: $0) },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )) { error in
+            XCTAssertEqual(
+                error as? SelfUpdateStartupFenceError,
+                .authorizationMismatch("startup_handoff")
+            )
+        }
+        XCTAssertEqual(fenceCalls, 0)
+    }
+
+    func testOrdinaryStartupWithoutPendingUpdateDoesNotFenceReloadJobs() throws {
+        var inspectedLease = false
+        var fenceCalls = 0
+
+        let fenced = try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+            loadPending: { nil },
+            inspectLifecycleLease: {
+                inspectedLease = true
+                return .missing
+            },
+            currentExecutableURL: nil,
+            targetVersion: "1.8.54",
+            executableSHA256: { _ in
+                XCTFail("ordinary startup must not hash an executable")
+                return ""
+            },
+            fenceReloadJobs: { fenceCalls += 1 }
+        )
+
+        XCTAssertFalse(fenced)
+        XCTAssertFalse(inspectedLease)
+        XCTAssertEqual(fenceCalls, 0)
+    }
+
     func testAdmissionIdentityStartupTopologyClassifiesMarkedPendingKeyAsRecovery() {
         let current = Data(repeating: 0x11, count: 32)
         let pending = Data(repeating: 0x22, count: 32)
@@ -210,6 +542,16 @@ final class ServeCommandTests: XCTestCase {
 
         XCTAssertNil(client)
         XCTAssertFalse(factoryInvoked)
+    }
+
+    func testCoordinatorStartIsScheduledByListeningCallback() async {
+        let started = expectation(description: "coordinator start scheduled")
+
+        ServeCommand.startCoordinatorAfterListening {
+            started.fulfill()
+        }
+
+        await fulfillment(of: [started], timeout: 1)
     }
 
     func testEstablishedBootstrapShapedProviderCannotServeWithoutCredential() {
@@ -746,5 +1088,114 @@ final class ServeCommandTests: XCTestCase {
             try? FileManager.default.removeItem(at: root)
         }
         return root
+    }
+
+    private func makeSelfUpdateStartupFenceFixture(
+        handoffState: ProviderLifecycleStartupHandoff.State,
+        handoffExpiresWallMilliseconds: Int64 = 61_000,
+        handoffExpiresMonotonicNanoseconds: Int64 = 61_000_000_000,
+        commitOwner: String = "self_update",
+        updateAuthorityMode: String? = nil,
+        transactionState: CompatibilitySetTransactionState? = nil
+    ) throws -> (
+        executable: URL,
+        pending: AutoUpdatePendingMarker,
+        lease: ProviderLifecycleLeaseRecord
+    ) {
+        let root = try tempDir()
+        let executable = root.appendingPathComponent("macprovider-cli")
+        try Data("v1.8.54 candidate".utf8).write(to: executable)
+        let digest = try AutoUpdateMarkerStore.sha256(file: executable)
+        let backup = root.appendingPathComponent("macprovider-cli.rollback")
+        let backupBytes = Data("v1.8.53 public".utf8)
+        try backupBytes.write(to: backup)
+        let backupDigest = try AutoUpdateMarkerStore.sha256(file: backup)
+        let compatibilityBound = updateAuthorityMode != nil
+        let releaseBackup = root.appendingPathComponent(
+            "macprovider-cli.release-rollback",
+            isDirectory: true
+        )
+        let handoff = ProviderLifecycleStartupHandoff(
+            version: ProviderLifecycleStartupHandoff.schemaVersion,
+            handoffID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            state: handoffState,
+            operationID: "self-update:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            providerID: "provider-a",
+            serviceIdentity: ServeCommand.providerLaunchdServiceIdentity,
+            bootSession: "boot-a",
+            targetExecutablePath: executable.path,
+            targetExecutableSHA256: digest,
+            issuedWallMilliseconds: 1_000,
+            expiresWallMilliseconds: handoffExpiresWallMilliseconds,
+            issuedMonotonicNanoseconds: 1_000_000_000,
+            expiresMonotonicNanoseconds: handoffExpiresMonotonicNanoseconds,
+            startupLeaseDurationMilliseconds: 300_000
+        )
+        let lease = ProviderLifecycleLeaseRecord(
+            version: ProviderLifecycleLeaseRecord.schemaVersion,
+            leaseID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            operationID: handoff.operationID,
+            kind: handoffState == .prepared ? .maintenance : .startup,
+            owner: ProviderLifecycleLeaseOwner(
+                pid: 4_321,
+                processStartMicroseconds: 100_000_123,
+                bootSession: "boot-a"
+            ),
+            issuedWallMilliseconds: 1_000,
+            expiresWallMilliseconds: 301_000,
+            issuedMonotonicNanoseconds: 1_000_000_000,
+            expiresMonotonicNanoseconds: 301_000_000_000,
+            startupHandoff: handoff
+        )
+        let pending = AutoUpdatePendingMarker(
+            updateID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            targetVersion: "1.8.54",
+            targetPath: executable.path,
+            backupPath: backup.path,
+            size: backupBytes.count,
+            mode: 0o755,
+            sha256: backupDigest,
+            markerDeadline: "2026-07-20T12:00:00Z",
+            releaseBackupPath: compatibilityBound ? releaseBackup.path : nil,
+            releaseBackupSHA256: compatibilityBound ? String(repeating: "f", count: 64) : nil,
+            commitOwner: commitOwner,
+            targetCompatibilitySetID: compatibilityBound
+                ? "Augustas11/macprovider:v1.8.54@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                : nil,
+            targetCompatibilitySetSHA256: compatibilityBound
+                ? String(repeating: "b", count: 64)
+                : nil,
+            previousVersion: compatibilityBound ? "1.8.53" : nil,
+            previousCompatibilitySetID: compatibilityBound
+                ? "Augustas11/macprovider:v1.8.53@cccccccccccccccccccccccccccccccccccccccc"
+                : nil,
+            previousCompatibilitySetSHA256: compatibilityBound
+                ? String(repeating: "d", count: 64)
+                : nil,
+            discoveryHeadSequence: updateAuthorityMode == "signed_release" ? 54 : nil,
+            discoveryHeadSHA256: updateAuthorityMode == "signed_release"
+                ? String(repeating: "e", count: 64)
+                : nil,
+            updateAuthorityMode: updateAuthorityMode,
+            transactionState: compatibilityBound
+                ? (transactionState ?? .activatingTarget)
+                : nil
+        )
+        return (executable, pending, lease)
+    }
+
+    private func selfUpdateStartupFenceEnvironment(
+        bootSession: String = "boot-a",
+        processID: pid_t = 5_321,
+        launchdServiceProcessID: pid_t? = 5_321
+    ) -> ProviderLifecycleLeaseEnvironment {
+        ProviderLifecycleLeaseEnvironment(
+            wallMilliseconds: { 10_000 },
+            monotonicNanoseconds: { 10_000_000_000 },
+            bootSession: { bootSession },
+            processStartMicroseconds: { _ in nil },
+            processID: { processID },
+            launchdServiceProcessID: { _ in launchdServiceProcessID }
+        )
     }
 }
