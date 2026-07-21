@@ -245,12 +245,30 @@ jobs:
                   print(f"--signed-policy-revoked={revoked}")
           PY
           )
+          read -r issued_at expires_at < <(
+            python3 - "$VALIDITY_HOURS" <<'PY'
+          import datetime as dt
+          import sys
+
+          hours = int(sys.argv[1])
+          if hours < 1 or hours > 168:
+              raise SystemExit("validity_hours must be between 1 and 168")
+          issued = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+          expires = issued + dt.timedelta(hours=hours)
+          print(
+              issued.strftime("%Y-%m-%dT%H:%M:%SZ"),
+              expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+          )
+          PY
+          )
           python3 scripts/build-release-discovery-head.py \
             --sequence "$GITHUB_RUN_ID" \
             --attempt "$GITHUB_RUN_ATTEMPT" \
             --compatibility-manifest "$WORK/latest/compatibility-set.json" \
             --target-artifact-index "$WORK/latest/compatibility-artifact-index.json" \
             "${policy_args[@]}" \
+            --issued-at "$issued_at" \
+            --expires-at "$expires_at" \
             --private-key "$key" \
             --public-key ops/pearl-updater/release-signing-public.pem \
             --openssl "$OPENSSL_BIN" \

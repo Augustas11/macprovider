@@ -147,6 +147,30 @@ openssl dgst -sha256 \
   -verify "$root/ops/pearl-updater/release-signing-public.pem" \
   -signature "$work/target-checksums.txt.sig" "$work/target-checksums.txt" >/dev/null ||
   die "target checksum signature is invalid"
+for name in \
+  macprovider-release-discovery.json \
+  macprovider-release-discovery.json.sig \
+  compatibility-artifact-index.json \
+  compatibility-set.json
+do
+  expected_sha="$(awk -v name="$name" '$2 == name { print $1 }' "$work/target-checksums.txt")"
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || die "target $name is absent from signed checksums"
+  actual_sha="$(shasum -a 256 "$work/target-$name" | awk '{print $1}')"
+  [[ "$actual_sha" == "$expected_sha" ]] || die "target $name checksum differs"
+done
+# Allow expired: the numeric release embeds the original head; current validity
+# is proved on the append-only transport above.
+python3 "$root/scripts/verify-release-discovery-transport.py" \
+  --head "$work/target-macprovider-release-discovery.json" \
+  --signature "$work/target-macprovider-release-discovery.json.sig" \
+  --artifact-index "$work/target-compatibility-artifact-index.json" \
+  --public-key "$root/ops/pearl-updater/release-signing-public.pem" \
+  --repository "$repository" \
+  --transport-tag "$transport_tag" \
+  --target-tag "$target_tag" \
+  --target-commit "$target_commit" \
+  --allow-expired \
+  >/dev/null
 python3 - \
   "$work/target-macprovider-release-discovery.json" \
   "$work/target-compatibility-set.json" \

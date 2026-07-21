@@ -57,12 +57,26 @@ if "contents: write" not in rest.split("verify_public:", 1)[0]:
 public = workflow.split("Verify renewed discovery without protected credentials", 1)[1]
 if "MACPROVIDER_RELEASE_SIGNING_KEY_PEM" in public or "RELEASE_POSTURE_TOKEN" in public:
     raise SystemExit("anonymous renewal verifier must not receive protected secrets")
+sign = workflow.split("- name: Sign a strictly greater renewal discovery head", 1)[1].split(
+    "- name: Publish one append-only immutable renewal transport", 1
+)[0]
+for requirement in (
+    "VALIDITY_HOURS",
+    "timedelta(hours=hours)",
+    '--issued-at "$issued_at"',
+    '--expires-at "$expires_at"',
+):
+    if requirement not in sign:
+        raise SystemExit(f"renewal signing omits non-24h validity wiring: {requirement}")
 for requirement in (
     "fixed release-discovery remains immutable",
     "cannot discover vNext through ordinary update --check",
     "verify-anonymous-release-discovery.sh",
     "target discovery head identity differs from the numeric release",
     "v1.8.55 ordinary discovery must not observe append-only",
+    "verify-release-discovery-transport.py",
+    "target $name is absent from signed checksums",
+    "--allow-expired",
 ):
     if requirement not in bridge:
         raise SystemExit(f"v1.8.55 bridge verifier omits: {requirement}")
@@ -70,6 +84,11 @@ if "--clobber" in bridge or "gh release upload" in bridge:
     raise SystemExit("bridge verifier must not mutate releases")
 if "/releases/latest" in bridge:
     raise SystemExit("bridge verifier must not treat unsigned latest as authority")
+numeric_proof = bridge.split('target_base="https://github.com/$repository/releases/download/$target_tag"', 1)[1]
+if "verify-release-discovery-transport.py" not in numeric_proof:
+    raise SystemExit("numeric release proof must verify the signed discovery head before trusting JSON")
+if "target-checksums.txt" not in numeric_proof or "macprovider-release-discovery.json" not in numeric_proof:
+    raise SystemExit("numeric release proof must bind discovery assets to signed checksums")
 PY
 
 bash -n "$workflow"

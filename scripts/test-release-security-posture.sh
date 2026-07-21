@@ -351,6 +351,9 @@ for requirement in (
     "--minimum-sequence",
     "--require-immutable",
     "scripts/verify-anonymous-release-discovery.sh",
+    '--issued-at "$issued_at"',
+    '--expires-at "$expires_at"',
+    "timedelta(hours=hours)",
 ):
     if requirement not in renewal:
         raise SystemExit(f"protected discovery renewal omits: {requirement}")
