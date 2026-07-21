@@ -127,23 +127,58 @@ enum AutotuneRecommendationRunner {
         )
     }
 
+    /// Cooperative cancel grace for corrective recovery. Must outlive
+    /// `drainGrace` plus CLI SIGTERM cascade so restore can run before the
+    /// App gives up; do not escalate to SIGKILL on this path.
+    static let recoveryCancelGraceSeconds: TimeInterval = 120
+
     /// Runs the CLI corrective recovery transaction. Drain/restore and evidence
     /// requirements are owned by macprovider-cli; Malibu only launches and
-    /// cancels the process group.
+    /// cooperatively cancels (no SIGKILL) so restore can complete.
     static func runHardwareAdmissionRecovery(
         cliURL: URL,
         configPath: URL = ProviderPaths.current.configFile
     ) async throws {
         _ = try await runProcess(
             executableURL: cliURL,
-            arguments: hardwareAdmissionRecoveryArguments(configPath: configPath)
+            arguments: hardwareAdmissionRecoveryArguments(configPath: configPath),
+            cancelGraceSeconds: recoveryCancelGraceSeconds,
+            escalateToSIGKILL: false
         )
+    }
+
+    /// Best-effort launchd bootstrap after cancelled/killed corrective recovery.
+    /// Safe if the job is already loaded; ignores nonzero exit.
+    static func bestEffortBootstrapLaunchdProvider(
+        uid: uid_t = getuid(),
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
+        plistURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+    ) {
+        let process = Process()
+        process.executableURL = launchctlURL
+        process.arguments = ["bootstrap", "gui/\(uid)", plistURL.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return
+        }
     }
 
     private final class ProcessHold: @unchecked Sendable {
         private let lock = NSLock()
         private var process: Process?
         private var cancelled = false
+        private let cancelGraceSeconds: TimeInterval
+        private let escalateToSIGKILL: Bool
+
+        init(cancelGraceSeconds: TimeInterval, escalateToSIGKILL: Bool) {
+            self.cancelGraceSeconds = cancelGraceSeconds
+            self.escalateToSIGKILL = escalateToSIGKILL
+        }
 
         var isCancelled: Bool {
             lock.lock(); defer { lock.unlock() }
@@ -156,7 +191,7 @@ enum AutotuneRecommendationRunner {
             let shouldTerminate = cancelled
             lock.unlock()
             if shouldTerminate {
-                Self.terminate(process)
+                terminate(process)
             }
         }
 
@@ -166,15 +201,16 @@ enum AutotuneRecommendationRunner {
             let process = self.process
             lock.unlock()
             if let process {
-                Self.terminate(process)
+                terminate(process)
             }
         }
 
-        private static func terminate(_ process: Process) {
+        private func terminate(_ process: Process) {
             guard process.isRunning else { return }
             AutotuneRecommendationRunner.terminateAutotuneSubtree(
                 process: process,
-                graceSeconds: AutotuneRecommendationRunner.subtreeGraceSeconds
+                graceSeconds: cancelGraceSeconds,
+                escalateToSIGKILL: escalateToSIGKILL
             )
         }
     }
@@ -183,10 +219,15 @@ enum AutotuneRecommendationRunner {
         executableURL: URL,
         arguments: [String],
         timeout: TimeInterval = processTimeout,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        cancelGraceSeconds: TimeInterval = subtreeGraceSeconds,
+        escalateToSIGKILL: Bool = true
     ) async throws -> Data {
         try Task.checkCancellation()
-        let hold = ProcessHold()
+        let hold = ProcessHold(
+            cancelGraceSeconds: cancelGraceSeconds,
+            escalateToSIGKILL: escalateToSIGKILL
+        )
         let result: Result<(Data, String), Error> = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .utility).async {
@@ -227,8 +268,19 @@ enum AutotuneRecommendationRunner {
                         }
                         if hold.isCancelled {
                             if process.isRunning {
-                                Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
-                                process.waitUntilExit()
+                                Self.terminateAutotuneSubtree(
+                                    process: process,
+                                    graceSeconds: cancelGraceSeconds,
+                                    escalateToSIGKILL: escalateToSIGKILL
+                                )
+                                if escalateToSIGKILL {
+                                    process.waitUntilExit()
+                                } else {
+                                    let waitDeadline = Date().addingTimeInterval(1)
+                                    while process.isRunning && Date() < waitDeadline {
+                                        Thread.sleep(forTimeInterval: 0.05)
+                                    }
+                                }
                             }
                             stdout.fileHandleForReading.readabilityHandler = nil
                             stderr.fileHandleForReading.readabilityHandler = nil
@@ -236,8 +288,14 @@ enum AutotuneRecommendationRunner {
                             return
                         }
                         if process.isRunning {
-                            Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
-                            process.waitUntilExit()
+                            Self.terminateAutotuneSubtree(
+                                process: process,
+                                graceSeconds: subtreeGraceSeconds,
+                                escalateToSIGKILL: escalateToSIGKILL
+                            )
+                            if escalateToSIGKILL {
+                                process.waitUntilExit()
+                            }
                             throw AutotuneRecommendationError.timedOut
                         }
                         process.waitUntilExit()
@@ -296,13 +354,18 @@ enum AutotuneRecommendationRunner {
     /// with a direct `SIGKILL` to the CLI pid in case `killpg` returned
     /// ESRCH before `setpgid` ran (race window between fork/exec and the
     /// CLI installing its group).
-    static func terminateAutotuneSubtree(process: Process, graceSeconds: TimeInterval) {
+    static func terminateAutotuneSubtree(
+        process: Process,
+        graceSeconds: TimeInterval,
+        escalateToSIGKILL: Bool = true
+    ) {
         process.terminate()
         let deadline = Date().addingTimeInterval(max(0, graceSeconds))
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
         guard process.isRunning else { return }
+        guard escalateToSIGKILL else { return }
         let cliPid = process.processIdentifier
         _ = Darwin.killpg(cliPid, SIGKILL)
         _ = Darwin.kill(cliPid, SIGKILL)

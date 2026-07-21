@@ -265,8 +265,15 @@ final class MalibuAgent: ObservableObject {
                     await self.applyProviderSnapshot(port: port)
                 }
             } catch is CancellationError {
+                // Corrective recovery may have booted out launchd before the
+                // CLI could restore; never leave that obligation to a killed
+                // child. Pending freshness never drains, so this is harmless.
+                AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
                 return
             } catch {
+                if pendingTrust == false {
+                    AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+                }
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.hardwareVerificationRetryLastError =
                     AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
@@ -427,6 +434,8 @@ final class MalibuAgent: ObservableObject {
         hardwareVerificationRetryTask = nil
         hardwareRetryTask?.cancel()
         await hardwareRetryTask?.value
+        // Belt-and-suspenders if cancellation raced the corrective CLI.
+        AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
         let admissionRecoveryTask = admissionIdentityRecoveryTask
         admissionIdentityRecoveryTask = nil
         admissionRecoveryTask?.cancel()
