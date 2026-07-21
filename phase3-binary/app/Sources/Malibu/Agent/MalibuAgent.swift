@@ -43,6 +43,7 @@ final class MalibuAgent: ObservableObject {
     private var lastRequestsRateSample: (total: Int, date: Date)?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
+    private var hardwareVerificationRetryTask: Task<Void, Never>?
     private var credentialRepairTask: Task<Void, Never>?
     private var admissionIdentityRecoveryTask: Task<Void, Never>?
     private var referralStatusExpiryTask: Task<Void, Never>?
@@ -219,6 +220,48 @@ final class MalibuAgent: ObservableObject {
             resumeReferralStatusExpiryOrRefresh()
             snapshot.referralLastError = "The pending X verification could not be cleared."
         }
+    }
+
+    /// Re-run online autotune recommend/apply/submit and restart launchd so a
+    /// locally healthy but admission-blocked provider can recover without a
+    /// fresh install (#582).
+    func retryHardwareVerification() async {
+        guard !isShuttingDown else { return }
+        guard AgentSnapshotPresenter.publicStatus(snapshot).executableAction == .retryHardwareVerification else {
+            return
+        }
+        guard !snapshot.hardwareVerificationRetryInProgress else { return }
+        if let previous = hardwareVerificationRetryTask {
+            previous.cancel()
+            await previous.value
+        }
+        guard !isShuttingDown, !Task.isCancelled else { return }
+        snapshot.hardwareVerificationRetryInProgress = true
+        snapshot.hardwareVerificationRetryLastError = nil
+        hardwareVerificationRetryTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let cliURL = URL(fileURLWithPath: CLIUpdateRunner.installedCLIPath())
+                try await AutotuneRecommendationRunner.runOnlineHardwareRemediation(cliURL: cliURL)
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                try AutotuneRecommendationRunner.kickstartLaunchdProvider()
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.snapshot.hardwareVerificationRetryLastError = nil
+                if let port = ProviderConfig.readHTTPPort() {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await self.applyProviderSnapshot(port: port)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.snapshot.hardwareVerificationRetryLastError = error.localizedDescription
+            }
+            if !self.isShuttingDown {
+                self.snapshot.hardwareVerificationRetryInProgress = false
+            }
+        }
+        await hardwareVerificationRetryTask?.value
     }
 
     func updateCLINow() async {

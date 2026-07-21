@@ -936,6 +936,22 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogFallbackUsed, .rateCardFallbackUsed]))
         XCTAssertTrue(AutotuneRecommendEngine.networkSubmissionBlocks([.candidateCatalogFallbackUsed]))
         XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks([.rateCardFallbackUsed, .candidateCatalogStale]))
+        XCTAssertTrue(
+            AutotuneRecommendEngine.shouldFailClosedBeforeBenchmarks(
+                [.candidateCatalogFallbackUsed],
+                apply: false,
+                submitHardwareEvidence: true,
+                requireHardwareEvidence: false
+            )
+        )
+        XCTAssertFalse(
+            AutotuneRecommendEngine.shouldFailClosedBeforeBenchmarks(
+                [.candidateCatalogFallbackUsed],
+                apply: false,
+                submitHardwareEvidence: false,
+                requireHardwareEvidence: false
+            )
+        )
     }
 
     func testCatalogFallbackBlocksNetworkSubmissionWithActionableMessage() throws {

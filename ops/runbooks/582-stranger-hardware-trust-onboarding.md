@@ -29,7 +29,7 @@ Other supported terminals (no gate disable):
 ## Operator trust approval (no YAML / DB edits)
 
 Prerequisites (Pearl): migration 019, hardware-trust roles/DSNs provisioned
-(`dist/hardware-trust-roles-bootstrap.sql`, `ONBOARDING_HARDWARE_TRUST_*_DSN`).
+(`phase4-coordinator/dist/hardware-trust-roles-bootstrap.sql`, `ONBOARDING_HARDWARE_TRUST_*_DSN`).
 See PR #627 deploy notes.
 
 Run requester and approver steps from **separate operator sessions/hosts**. Feed

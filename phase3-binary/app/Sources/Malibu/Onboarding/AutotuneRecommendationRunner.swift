@@ -93,6 +93,41 @@ enum AutotuneRecommendationRunner {
         return try AutotuneRecommendationResult.fromAutotuneJSON(data)
     }
 
+    /// Online #582 remediation: recommend, apply, and submit hardware evidence
+    /// (submit defaults on in the CLI). Does not install or replace provider identity.
+    static func runOnlineHardwareRemediation(
+        cliURL: URL,
+        configPath: URL = ProviderPaths.current.configFile
+    ) async throws {
+        _ = try await runProcess(
+            executableURL: cliURL,
+            arguments: [
+                "autotune",
+                "--recommend",
+                "--apply",
+                "--json",
+                "--config", configPath.path,
+            ]
+        )
+    }
+
+    /// Restart the launchd-managed provider so an applied model takes effect.
+    static func kickstartLaunchdProvider(
+        uid: uid_t = getuid(),
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl")
+    ) throws {
+        let process = Process()
+        process.executableURL = launchctlURL
+        process.arguments = ["kickstart", "-k", "gui/\(uid)/live.streamvc.macprovider"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw AutotuneRecommendationError.nonZeroExit(process.terminationStatus)
+        }
+    }
+
     private static func runProcess(
         executableURL: URL,
         arguments: [String],
@@ -212,10 +247,21 @@ enum AutotuneRecommendationRunner {
     }
 }
 
-enum AutotuneRecommendationError: Error {
+enum AutotuneRecommendationError: Error, LocalizedError {
     case invalidJSON
     case nonZeroExit(Int32)
     case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidJSON:
+            return "Provider setup returned invalid data."
+        case .nonZeroExit(let code):
+            return "Provider setup failed (exit \(code))."
+        case .timedOut:
+            return "Provider setup timed out."
+        }
+    }
 }
 
 struct ModelDownloadPlan: Equatable {

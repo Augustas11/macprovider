@@ -204,24 +204,36 @@ private struct DashboardView: View {
 
     @ViewBuilder
     private var primaryActionButton: some View {
-        let safeAction = AgentSnapshotPresenter.publicStatus(agent.snapshot).safeNextAction
-        if safeAction == "Update provider software.", AgentSnapshotPresenter.updateAvailable(agent.snapshot) {
-            Button(agent.snapshot.cliUpdateInProgress ? "Updating provider software..." : "Update provider software") {
-                Task { await agent.updateCLINow() }
+        let status = AgentSnapshotPresenter.publicStatus(agent.snapshot)
+        switch status.executableAction {
+        case .retryHardwareVerification:
+            Button(agent.snapshot.hardwareVerificationRetryInProgress
+                   ? "Retrying provider setup..."
+                   : "Retry provider setup while online") {
+                Task { await agent.retryHardwareVerification() }
             }
-            .disabled(agent.snapshot.cliUpdateInProgress)
-        } else if AgentSnapshotPresenter.canRepairCredential(agent.snapshot) {
+            .disabled(agent.snapshot.hardwareVerificationRetryInProgress)
+        case .updateProviderSoftware:
+            if AgentSnapshotPresenter.updateAvailable(agent.snapshot) {
+                Button(agent.snapshot.cliUpdateInProgress ? "Updating provider software..." : "Update provider software") {
+                    Task { await agent.updateCLINow() }
+                }
+                .disabled(agent.snapshot.cliUpdateInProgress)
+            }
+        case .repairCredential:
             Button("Repair saved access") {
                 Task { await agent.repairProviderCredential() }
             }
-        } else if AgentSnapshotPresenter.canRepairAdmissionIdentity(agent.snapshot) {
+        case .repairAdmissionIdentity:
             Button(AgentSnapshotPresenter.admissionIdentityRepairButtonTitle(agent.snapshot)) {
                 Task { await agent.repairAdmissionIdentity() }
             }
-        } else if AgentSnapshotPresenter.publicStatus(agent.snapshot).safeNextAction == "Export diagnostics for support." {
+        case .exportDiagnostics:
             Button("Export redacted diagnostics...") {
                 onExportDiagnostics()
             }
+        case nil:
+            EmptyView()
         }
     }
 

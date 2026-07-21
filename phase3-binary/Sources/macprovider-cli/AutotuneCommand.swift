@@ -793,6 +793,23 @@ struct AutotuneCommand: AsyncParsableCommand {
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
             throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
         }
+        // #582: baked-catalog / network-submission blocks are known before
+        // Stage-1 probes. Fail closed immediately when apply/submit is enabled
+        // so strangers do not wait hours for an already-rejected evidence class.
+        // Offline diagnostics remain available with --no-submit-hardware-evidence
+        // (and without --apply / --require-hardware-evidence).
+        if AutotuneRecommendEngine.shouldFailClosedBeforeBenchmarks(
+            warnings,
+            apply: apply,
+            submitHardwareEvidence: submitHardwareEvidence,
+            requireHardwareEvidence: requireHardwareEvidence
+        ) {
+            throw ValidationError(AutotuneRecommendEngine.networkSubmissionBlockMessage(warnings))
+        }
+        if AutotuneRecommendEngine.networkSubmissionBlocks(warnings) {
+            let message = AutotuneRecommendEngine.networkSubmissionBlockMessage(warnings)
+            FileHandle.standardError.write(Data("[warn] \(message)\n".utf8))
+        }
 
         var request = AutotuneRecommendRequest(
             hardware: hardware,

@@ -1489,6 +1489,18 @@ struct AutotuneRecommendEngine {
         !warnings.isDisjoint(with: networkSubmissionBlockingWarnings)
     }
 
+    /// True when recommend must abort before Stage-1 benchmarks because the
+    /// caller enabled apply/submit and catalog evidence would be rejected.
+    static func shouldFailClosedBeforeBenchmarks(
+        _ warnings: Set<AutotuneRecommendWarning>,
+        apply: Bool,
+        submitHardwareEvidence: Bool,
+        requireHardwareEvidence: Bool
+    ) -> Bool {
+        networkSubmissionBlocks(warnings)
+            && (apply || submitHardwareEvidence || requireHardwareEvidence)
+    }
+
     /// Operator-facing copy when network onboarding is blocked. Fallback uses
     /// stronger guidance because Pearl rejects that evidence class (#582).
     static func networkSubmissionBlockMessage(_ warnings: Set<AutotuneRecommendWarning>) -> String {

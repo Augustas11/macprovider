@@ -89,10 +89,15 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         let pendingStatus = AgentSnapshotPresenter.publicStatus(pending)
         XCTAssertEqual(pendingStatus.title, "Pending hardware verification")
         XCTAssertEqual(pendingStatus.safeNextAction, "Retry provider setup while online.")
+        XCTAssertEqual(pendingStatus.executableAction, .retryHardwareVerification)
         XCTAssertFalse(pendingStatus.safeNextAction?.contains("macprovider-cli") == true)
         XCTAssertFalse(pendingStatus.detail?.contains("wait for operator approval") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(pending), "llama")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(pending),
+            "Pending hardware verification · Retry provider setup while online"
+        )
 
         var rejected = AgentSnapshot.empty
         rejected.state = .reconnecting
@@ -102,10 +107,15 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let rejectedStatus = AgentSnapshotPresenter.publicStatus(rejected)
         XCTAssertEqual(rejectedStatus.title, "Not eligible: admission evidence failed")
-        XCTAssertTrue(rejectedStatus.safeNextAction?.contains("Retry provider setup") == true)
+        XCTAssertEqual(rejectedStatus.safeNextAction, "Retry provider setup while online.")
+        XCTAssertEqual(rejectedStatus.executableAction, .retryHardwareVerification)
         XCTAssertFalse(rejectedStatus.safeNextAction?.contains("macprovider-cli") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(rejected), "Ineligible")
         XCTAssertEqual(AgentSnapshotPresenter.stateLine(rejected), "Not eligible: admission evidence failed")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(rejected),
+            "Not eligible: admission evidence failed · Retry provider setup while online"
+        )
 
         var uncatalogued = AgentSnapshot.empty
         uncatalogued.state = .reconnecting
@@ -114,8 +124,25 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         uncatalogued.lifecycleReason = "autotune_model_uncatalogued"
         let uncataloguedStatus = AgentSnapshotPresenter.publicStatus(uncatalogued)
         XCTAssertEqual(uncataloguedStatus.title, "This Mac is not currently eligible")
-        XCTAssertTrue(uncataloguedStatus.safeNextAction?.contains("supported model") == true)
+        XCTAssertEqual(uncataloguedStatus.safeNextAction, "Retry provider setup while online.")
+        XCTAssertEqual(uncataloguedStatus.executableAction, .retryHardwareVerification)
+        XCTAssertTrue(uncataloguedStatus.detail?.contains("supported model") == true)
         XCTAssertEqual(AgentSnapshotPresenter.stateLine(uncatalogued), "This Mac is not currently eligible")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(uncatalogued),
+            "This Mac is not currently eligible · Retry setup to apply a supported model"
+        )
+
+        var capExceeded = AgentSnapshot.empty
+        capExceeded.state = .reconnecting
+        capExceeded.lifecycleState = "catalog_incompatible"
+        capExceeded.lifecycleReason = "autotune_model_cap_exceeded"
+        let capStatus = AgentSnapshotPresenter.publicStatus(capExceeded)
+        XCTAssertEqual(capStatus.executableAction, .retryHardwareVerification)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(capExceeded),
+            "Not eligible: admission evidence failed · Retry setup to apply a smaller admitted model"
+        )
     }
 
     func testBlockedPublicStatesExposeExactlyOneSafeAction() {

@@ -137,6 +137,9 @@ struct AgentSnapshot: Equatable {
     var latestReleaseVersion: String?
     var cliUpdateInProgress: Bool
     var cliUpdateLastError: String?
+    /// Dashboard-triggered online recommend/apply/submit for #582 hello-gate recovery.
+    var hardwareVerificationRetryInProgress: Bool = false
+    var hardwareVerificationRetryLastError: String? = nil
 
     // Coordinator-authoritative referral projection received only through the
     // launchd CLI's owner-only control socket. Malibu never receives the
@@ -350,10 +353,34 @@ struct AgentSnapshot: Equatable {
 }
 
 enum AgentSnapshotPresenter {
+    /// Dashboard-executable recovery. Presentation copy stays in `safeNextAction`;
+    /// buttons must key off this enum so #582 guidance cannot advertise a
+    /// non-wired action.
+    enum ExecutableRecoveryAction: Equatable {
+        case retryHardwareVerification
+        case updateProviderSoftware
+        case repairCredential
+        case repairAdmissionIdentity
+        case exportDiagnostics
+    }
+
     struct PublicStatus: Equatable {
         let title: String
         let detail: String?
         let safeNextAction: String?
+        let executableAction: ExecutableRecoveryAction?
+
+        init(
+            title: String,
+            detail: String?,
+            safeNextAction: String?,
+            executableAction: ExecutableRecoveryAction? = nil
+        ) {
+            self.title = title
+            self.detail = detail
+            self.safeNextAction = safeNextAction
+            self.executableAction = executableAction
+        }
     }
 
     private static func isActive(_ s: AgentSnapshot) -> Bool {
@@ -393,7 +420,8 @@ enum AgentSnapshotPresenter {
             return PublicStatus(
                 title: "Pending hardware verification",
                 detail: "Network hardware verification is incomplete. Retry provider setup while online so fresh evidence can be submitted; recently submitted evidence may still be awaiting operator approval.",
-                safeNextAction: "Retry provider setup while online."
+                safeNextAction: "Retry provider setup while online.",
+                executableAction: .retryHardwareVerification
             )
         }
         if isHardwareEvidenceRejected(s) {
@@ -401,32 +429,34 @@ enum AgentSnapshotPresenter {
             return PublicStatus(
                 title: "Not eligible: admission evidence failed",
                 detail: capExceeded
-                    ? "This Mac's verified capacity is below the selected model. Choose a smaller admitted model, apply it, then restart."
-                    : "Hardware evidence was rejected. Retry provider setup while online, then restart.",
-                safeNextAction: capExceeded
-                    ? "Apply a smaller admitted model, then restart."
-                    : "Retry provider setup while online."
+                    ? "This Mac's verified capacity is below the selected model. Retry setup while online to apply a smaller admitted model and resubmit evidence."
+                    : "Hardware evidence was rejected. Retry provider setup while online to generate and submit fresh evidence.",
+                safeNextAction: "Retry provider setup while online.",
+                executableAction: .retryHardwareVerification
             )
         }
         if isUncataloguedModel(s) {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
-                detail: "The selected model is not in the current signed catalog.",
-                safeNextAction: "Choose a supported model, or update provider software."
+                detail: "The selected model is not in the current signed catalog. Retry setup while online to apply a supported model and resubmit evidence.",
+                safeNextAction: "Retry provider setup while online.",
+                executableAction: .retryHardwareVerification
             )
         }
         if isSoftwareUpdateRequired(s) {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
                 detail: "Provider software must be updated before this Mac can receive customer work.",
-                safeNextAction: "Update provider software."
+                safeNextAction: "Update provider software.",
+                executableAction: updateAvailable(s) ? .updateProviderSoftware : nil
             )
         }
         if isIneligibleForCustomerWork(s) {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
                 detail: "This Mac cannot receive customer work in its current state.",
-                safeNextAction: "Export diagnostics for support."
+                safeNextAction: "Export diagnostics for support.",
+                executableAction: .exportDiagnostics
             )
         }
         if isWaitingForNetworkApproval(s) {
@@ -462,10 +492,21 @@ enum AgentSnapshotPresenter {
             } else {
                 action = "Export diagnostics for support."
             }
+            let executable: ExecutableRecoveryAction?
+            if canRepairCredential(s) {
+                executable = .repairCredential
+            } else if canRepairAdmissionIdentity(s) {
+                executable = .repairAdmissionIdentity
+            } else if updateAvailable(s) {
+                executable = .updateProviderSoftware
+            } else {
+                executable = .exportDiagnostics
+            }
             return PublicStatus(
                 title: "Provider needs attention",
                 detail: publicErrorDetail(s.lastError),
-                safeNextAction: action
+                safeNextAction: action,
+                executableAction: executable
             )
         case .paused:
             return PublicStatus(
@@ -860,6 +901,10 @@ enum AgentSnapshotPresenter {
         if s.lifecycleRecordState == "invalid" {
             return "Provider history invalid · restart required"
         }
+        // Keep Advanced diagnostics aligned with public #582 titles/actions.
+        if let outcome = hardwareOnboardingLifecycleLine(s) {
+            return outcome
+        }
         guard let state = s.lifecycleState else { return nil }
         let label = lifecycleStateLabel(state)
         var parts = [label]
@@ -870,6 +915,22 @@ enum AgentSnapshotPresenter {
             parts.append(guidance)
         }
         return parts.joined(separator: " · ")
+    }
+
+    private static func hardwareOnboardingLifecycleLine(_ s: AgentSnapshot) -> String? {
+        if isPendingHardwareVerification(s) {
+            return "Pending hardware verification · Retry provider setup while online"
+        }
+        if isHardwareEvidenceRejected(s) {
+            if s.lifecycleReason == "autotune_model_cap_exceeded" {
+                return "Not eligible: admission evidence failed · Retry setup to apply a smaller admitted model"
+            }
+            return "Not eligible: admission evidence failed · Retry provider setup while online"
+        }
+        if isUncataloguedModel(s) {
+            return "This Mac is not currently eligible · Retry setup to apply a supported model"
+        }
+        return nil
     }
 
     static func lifecycleEventLine(_ event: ProviderLifecycleEventSnapshot) -> String {
