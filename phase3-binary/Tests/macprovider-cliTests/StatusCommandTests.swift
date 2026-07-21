@@ -169,7 +169,7 @@ final class StatusCommandTests: XCTestCase {
         pending["model_loaded"] = true
         pending["coordinator"] = ["connected": false]
         pending["lifecycle"] = [
-            "state": "pending_hardware_verification",
+            "state": "coordinator_unavailable",
             "reason_code": "autotune_evidence_required",
         ]
 
@@ -183,13 +183,27 @@ final class StatusCommandTests: XCTestCase {
         rejected["model_loaded"] = true
         rejected["coordinator"] = ["connected": false]
         rejected["lifecycle"] = [
-            "state": "hardware_evidence_rejected",
+            "state": "catalog_incompatible",
             "reason_code": "autotune_evidence_invalid",
         ]
 
         let rejectedOutput = LocalStatusFormatter.format(rejected)
         XCTAssertTrue(rejectedOutput.contains("Not eligible: admission evidence failed"), rejectedOutput)
         XCTAssertTrue(rejectedOutput.contains("autotune --recommend"), rejectedOutput)
+
+        var uncatalogued = status(providerID: "provider-a")
+        uncatalogued["network_state"] = "live_verified"
+        uncatalogued["status"] = "ready"
+        uncatalogued["model_loaded"] = true
+        uncatalogued["coordinator"] = ["connected": false]
+        uncatalogued["lifecycle"] = [
+            "state": "catalog_incompatible",
+            "reason_code": "autotune_model_uncatalogued",
+        ]
+
+        let uncataloguedOutput = LocalStatusFormatter.format(uncatalogued)
+        XCTAssertTrue(uncataloguedOutput.contains("This Mac is not currently eligible"), uncataloguedOutput)
+        XCTAssertTrue(uncataloguedOutput.contains("catalog-supported model") || uncataloguedOutput.contains("update"), uncataloguedOutput)
     }
 
     func testRoutineCLIHelpUsesCanonicalPublicLanguage() {

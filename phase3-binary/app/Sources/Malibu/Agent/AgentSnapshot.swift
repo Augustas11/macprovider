@@ -389,25 +389,30 @@ enum AgentSnapshotPresenter {
                 safeNextAction: nil
             )
         }
+        if isPendingHardwareVerification(s) {
+            return PublicStatus(
+                title: "Pending hardware verification",
+                detail: "Network hardware verification is incomplete. If setup already submitted evidence, wait for operator approval; otherwise retry provider setup while online.",
+                safeNextAction: "Retry provider setup while online, or wait for operator approval."
+            )
+        }
+        if isHardwareEvidenceRejected(s) {
+            let capExceeded = s.lifecycleReason == "autotune_model_cap_exceeded"
+            return PublicStatus(
+                title: "Not eligible: admission evidence failed",
+                detail: capExceeded
+                    ? "This Mac's verified capacity is below the selected model. Choose a smaller admitted model, apply it, then restart."
+                    : "Hardware evidence was rejected. Retry provider setup while online, then restart.",
+                safeNextAction: capExceeded
+                    ? "Apply a smaller admitted model, then restart."
+                    : "Retry provider setup while online."
+            )
+        }
         if isSoftwareUpdateRequired(s) {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
                 detail: "Provider software must be updated before this Mac can receive customer work.",
                 safeNextAction: "Update provider software."
-            )
-        }
-        if isPendingHardwareVerification(s) {
-            return PublicStatus(
-                title: "Pending hardware verification",
-                detail: "Network hardware verification is incomplete. If setup already submitted evidence, wait for operator approval; otherwise refresh the signed recommendation while online.",
-                safeNextAction: "If evidence was not submitted yet, run macprovider-cli autotune --recommend while online."
-            )
-        }
-        if isHardwareEvidenceRejected(s) {
-            return PublicStatus(
-                title: "Not eligible: admission evidence failed",
-                detail: "Hardware evidence was rejected. Refresh the signed catalog recommendation while online, then try again.",
-                safeNextAction: "Run macprovider-cli autotune --recommend when online."
             )
         }
         if isIneligibleForCustomerWork(s) {
@@ -517,13 +522,18 @@ enum AgentSnapshotPresenter {
     }
 
     private static func isPendingHardwareVerification(_ s: AgentSnapshot) -> Bool {
-        s.lifecycleState == "pending_hardware_verification"
-            || s.lifecycleReason == "autotune_evidence_required"
+        guard s.isLocalStatusObservationCurrent() else { return false }
+        return s.lifecycleReason == "autotune_evidence_required"
     }
 
     private static func isHardwareEvidenceRejected(_ s: AgentSnapshot) -> Bool {
-        s.lifecycleState == "hardware_evidence_rejected"
-            || s.lifecycleReason == "autotune_evidence_invalid"
+        guard s.isLocalStatusObservationCurrent() else { return false }
+        switch s.lifecycleReason {
+        case "autotune_evidence_invalid", "autotune_model_cap_exceeded":
+            return true
+        default:
+            return false
+        }
     }
 
     private static func isIneligibleForCustomerWork(_ s: AgentSnapshot) -> Bool {
@@ -545,20 +555,18 @@ enum AgentSnapshotPresenter {
             return "Serving"
         case .paused:         return "Paused"
         case .reconnecting:
-            switch s.lifecycleState {
-            case "pending_hardware_verification": return "Pending"
-            case "hardware_evidence_rejected": return "Ineligible"
-            case "network_offline": return "Offline"
-            default: return s.networkState == "network_offline" ? "Offline" : "Reconnect"
-            }
+            if isPendingHardwareVerification(s) { return "Pending" }
+            if isHardwareEvidenceRejected(s) { return "Ineligible" }
+            return s.networkState == "network_offline" || s.lifecycleState == "network_offline"
+                ? "Offline" : "Reconnect"
         case .error:
+            if isPendingHardwareVerification(s) { return "Pending" }
+            if isHardwareEvidenceRejected(s) { return "Ineligible" }
             switch s.lifecycleState {
             case "authentication_required": return "Auth"
             case "keychain_unavailable": return "Keychain"
             case "identity_migration_required": return "Identity"
             case "catalog_incompatible": return "Catalog"
-            case "pending_hardware_verification": return "Pending"
-            case "hardware_evidence_rejected": return "Ineligible"
             default: return "Failed"
             }
         }
@@ -871,8 +879,6 @@ enum AgentSnapshotPresenter {
         case "keychain_unavailable": return "Keychain locked or permission denied"
         case "identity_migration_required": return "Network verification needs repair"
         case "catalog_incompatible": return "Provider software update required"
-        case "pending_hardware_verification": return "Pending hardware verification"
-        case "hardware_evidence_rejected": return "Not eligible: admission evidence failed"
         case "serving_buyers": return "Provider is ready"
         case "update_in_progress": return "Update in progress"
         case "rollback_in_progress": return "Rollback in progress"
@@ -898,10 +904,6 @@ enum AgentSnapshotPresenter {
             return "Use Repair network verification"
         case "catalog_incompatible":
             return "Update provider software, then retry"
-        case "pending_hardware_verification":
-            return "Submit signed recommendation evidence if missing; otherwise wait for operator approval"
-        case "hardware_evidence_rejected":
-            return "Refresh the signed catalog recommendation while online"
         case "paused_by_operator":
             return "Choose Resume when ready"
         case "network_offline":

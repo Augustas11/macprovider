@@ -789,16 +789,18 @@ actor CoordinatorClient {
         switch authError {
         case .rejected(let code, _):
             let normalized = code.lowercased()
+            // Keep lifecycle wire states on the v1 enum so older Malibu readers
+            // stay valid. Distinguish #582 onboarding outcomes via reason codes.
             if normalized == "autotune_evidence_required" {
                 return ConnectionLifecycleClassification(
-                    state: .pendingHardwareVerification,
+                    state: .coordinatorUnavailable,
                     reasonCode: "autotune_evidence_required"
                 )
             }
             if normalized == "autotune_evidence_invalid"
                 || normalized == "autotune_model_cap_exceeded" {
                 return ConnectionLifecycleClassification(
-                    state: .hardwareEvidenceRejected,
+                    state: .catalogIncompatible,
                     reasonCode: normalized
                 )
             }

@@ -22,8 +22,8 @@ hardware-trust API), Malibu public-status shell (#655).
 
 Other supported terminals (no gate disable):
 
-- **Not eligible: admission evidence failed** — verified evidence fails the live catalog / model-cap gate (`autotune_evidence_invalid`, `autotune_model_cap_exceeded`). Fix: refresh signed recommendation online, then restart.
-- **This Mac is not currently eligible** / software update — uncatalogued model (`autotune_model_uncatalogued`) or catalog update required.
+- **Not eligible: admission evidence failed** — verified evidence fails the live catalog / model-cap gate (`autotune_evidence_invalid`, `autotune_model_cap_exceeded`). Cap exceeded requires applying a smaller admitted model; invalid evidence needs a fresh signed recommendation.
+- **This Mac is not currently eligible** — uncatalogued model (`autotune_model_uncatalogued`) or catalog/software update required.
 - Identity / signing setup remains under the existing repair paths (out of scope for this runbook).
 
 ## Operator trust approval (no YAML / DB edits)
@@ -44,32 +44,33 @@ API path.
 
 ```bash
 {
-  printf 'url = "https://coordinator.streamvc.live/admin/hardware-trust/waiting?limit=50"\n'
-  printf 'header = "Authorization: Bearer %s"\n' "$OPERATOR_TOKEN"
+  printf '%s\n' 'url = "https://coordinator.streamvc.live/admin/hardware-trust/waiting?limit=50"'
+  printf '%s\n' "header = \"Authorization: Bearer ${OPERATOR_TOKEN}\""
 } | curl --silent --show-error --fail-with-body --config -
 ```
 
 Dual-control approve (requester ≠ approver). The approve-confirm endpoint
-requires a JSON body (`{}` is valid).
+requires a JSON body (`{}` is valid). Use `printf '%s\n'` so JSON quotes are
+not consumed by bash `printf` escapes.
 
 ```bash
 # Requester (separate session)
 JOB_ID=12345   # numeric job_id from an approvable waiting_trust row
 {
-  printf 'url = "https://coordinator.streamvc.live/admin/hardware-trust/approve"\n'
-  printf 'request = "POST"\n'
-  printf 'header = "Authorization: Bearer %s"\n' "$REQUESTER_TOKEN"
-  printf 'header = "Content-Type: application/json"\n'
-  printf 'data = "{\"job_id\":%s,\"reason\":\"operator approved waiting_trust job\"}"\n' "$JOB_ID"
+  printf '%s\n' 'url = "https://coordinator.streamvc.live/admin/hardware-trust/approve"'
+  printf '%s\n' 'request = "POST"'
+  printf '%s\n' "header = \"Authorization: Bearer ${REQUESTER_TOKEN}\""
+  printf '%s\n' 'header = "Content-Type: application/json"'
+  printf '%s\n' "data = \"{\\\"job_id\\\":${JOB_ID},\\\"reason\\\":\\\"operator approved waiting_trust job\\\"}\""
 } | curl --silent --show-error --fail-with-body --config -
 
 # Approver (separate session; PENDING_ID from request response)
 {
-  printf 'url = "https://coordinator.streamvc.live/admin/hardware-trust/approve/%s/approve"\n' "$PENDING_ID"
-  printf 'request = "POST"\n'
-  printf 'header = "Authorization: Bearer %s"\n' "$APPROVER_TOKEN"
-  printf 'header = "Content-Type: application/json"\n'
-  printf 'data = "{}"\n'
+  printf '%s\n' "url = \"https://coordinator.streamvc.live/admin/hardware-trust/approve/${PENDING_ID}/approve\""
+  printf '%s\n' 'request = "POST"'
+  printf '%s\n' "header = \"Authorization: Bearer ${APPROVER_TOKEN}\""
+  printf '%s\n' 'header = "Content-Type: application/json"'
+  printf '%s\n' 'data = "{}"'
 } | curl --silent --show-error --fail-with-body --config -
 ```
 
@@ -81,12 +82,15 @@ Do **not**:
 
 ## CLI / Malibu surfaces (#582 follow-up)
 
-| Lifecycle / reason | Public title |
-|--------------------|--------------|
-| `pending_hardware_verification` / `autotune_evidence_required` | Pending hardware verification |
-| `hardware_evidence_rejected` / `autotune_evidence_invalid` / `autotune_model_cap_exceeded` | Not eligible: admission evidence failed |
-| `catalog_incompatible` / `autotune_model_uncatalogued` | This Mac is not currently eligible / software update |
-| Catalog fallback on recommend+submit/apply | Fail closed — signed live catalog unavailable… cannot be submitted |
+Onboarding outcomes keep lifecycle **v1 wire states** and distinguish via
+`reason_code` so older Malibu readers remain valid.
+
+| Reason code | Lifecycle state (v1) | Public title |
+|-------------|----------------------|--------------|
+| `autotune_evidence_required` | `coordinator_unavailable` | Pending hardware verification |
+| `autotune_evidence_invalid` / `autotune_model_cap_exceeded` | `catalog_incompatible` | Not eligible: admission evidence failed |
+| `autotune_model_uncatalogued` | `catalog_incompatible` | This Mac is not currently eligible |
+| Catalog fallback on recommend+submit/apply | n/a | Fail closed — signed live catalog unavailable… cannot be submitted |
 
 ## Physical acceptance (still required to close #582)
 

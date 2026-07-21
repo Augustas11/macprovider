@@ -450,9 +450,7 @@ enum InstalledProviderMonitor {
     private static let lifecycleStates: Set<String> = [
         "installing", "importing_credentials", "starting_provider", "validating_catalog", "loading_model",
         "locally_ready_connecting", "authentication_required", "keychain_unavailable",
-        "identity_migration_required", "catalog_incompatible",
-        "pending_hardware_verification", "hardware_evidence_rejected",
-        "serving_buyers", "update_in_progress",
+        "identity_migration_required", "catalog_incompatible", "serving_buyers", "update_in_progress",
         "rollback_in_progress", "paused_by_operator", "watchdog_recovery", "network_offline",
         "coordinator_unavailable", "degraded_serving", "failed", "uninstalled",
     ]

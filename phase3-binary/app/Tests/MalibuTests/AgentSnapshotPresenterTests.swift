@@ -83,27 +83,29 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         pending.state = .reconnecting
         pending.currentModelID = "llama"
         pending.networkState = "live_verified"
-        pending.lifecycleState = "pending_hardware_verification"
+        pending.lifecycleState = "coordinator_unavailable"
         pending.lifecycleReason = "autotune_evidence_required"
 
         let pendingStatus = AgentSnapshotPresenter.publicStatus(pending)
         XCTAssertEqual(pendingStatus.title, "Pending hardware verification")
         XCTAssertTrue(
-            pendingStatus.safeNextAction?.contains("autotune --recommend") == true,
+            pendingStatus.safeNextAction?.contains("Retry provider setup") == true,
             pendingStatus.safeNextAction ?? ""
         )
+        XCTAssertFalse(pendingStatus.safeNextAction?.contains("macprovider-cli") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(pending), "llama")
 
         var rejected = AgentSnapshot.empty
         rejected.state = .reconnecting
         rejected.currentModelID = "llama"
-        rejected.lifecycleState = "hardware_evidence_rejected"
+        rejected.lifecycleState = "catalog_incompatible"
         rejected.lifecycleReason = "autotune_evidence_invalid"
 
         let rejectedStatus = AgentSnapshotPresenter.publicStatus(rejected)
         XCTAssertEqual(rejectedStatus.title, "Not eligible: admission evidence failed")
-        XCTAssertTrue(rejectedStatus.safeNextAction?.contains("autotune --recommend") == true)
+        XCTAssertTrue(rejectedStatus.safeNextAction?.contains("Retry provider setup") == true)
+        XCTAssertFalse(rejectedStatus.safeNextAction?.contains("macprovider-cli") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(rejected), "Ineligible")
     }
 

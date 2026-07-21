@@ -64,7 +64,7 @@ final class CoordinatorClientTests: XCTestCase {
                 message: "autotune_evidence_required"
             )
         )
-        XCTAssertEqual(pendingHardware.state, .pendingHardwareVerification)
+        XCTAssertEqual(pendingHardware.state, .coordinatorUnavailable)
         XCTAssertEqual(pendingHardware.reasonCode, "autotune_evidence_required")
 
         let evidenceRejected = CoordinatorClient.lifecycleClassification(
@@ -73,7 +73,7 @@ final class CoordinatorClientTests: XCTestCase {
                 message: "autotune_evidence_invalid"
             )
         )
-        XCTAssertEqual(evidenceRejected.state, .hardwareEvidenceRejected)
+        XCTAssertEqual(evidenceRejected.state, .catalogIncompatible)
         XCTAssertEqual(evidenceRejected.reasonCode, "autotune_evidence_invalid")
 
         let uncatalogued = CoordinatorClient.lifecycleClassification(
@@ -91,7 +91,7 @@ final class CoordinatorClientTests: XCTestCase {
                 message: "autotune_model_cap_exceeded"
             )
         )
-        XCTAssertEqual(capExceeded.state, .hardwareEvidenceRejected)
+        XCTAssertEqual(capExceeded.state, .catalogIncompatible)
         XCTAssertEqual(capExceeded.reasonCode, "autotune_model_cap_exceeded")
     }
 
