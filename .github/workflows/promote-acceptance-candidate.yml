@@ -40,6 +40,9 @@ jobs:
     environment: production-release
     outputs:
       tag: ${{ steps.request.outputs.tag }}
+      candidate_sha: ${{ steps.request.outputs.candidate_sha }}
+      previous_tag: ${{ steps.discovery_base.outputs.previous_tag }}
+      transport_tag: ${{ steps.discovery_base.outputs.transport_tag }}
     steps:
       - name: Checkout reviewed promotion controls
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -172,6 +175,116 @@ jobs:
             "$accepted/release-provenance.json" \
             "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
             "${release_assets[@]}"
+
+      - name: Require an advancing immutable discovery head
+        id: discovery_base
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          accepted="$RUNNER_TEMP/accepted"
+          previous="$RUNNER_TEMP/previous-discovery"
+          mkdir "$previous"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$previous/release.json"
+          read -r previous_tag previous_commit < <(
+            python3 - "$previous/release.json" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = release.get("tag_name")
+          commit = release.get("target_commitish")
+          if not isinstance(tag, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+              raise SystemExit("latest public release does not have a stable semantic tag")
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("latest public release is not bound to an exact commit")
+          if release.get("draft") is not False or release.get("prerelease") is not False:
+              raise SystemExit("latest public release is not stable")
+          if release.get("immutable") is not True:
+              raise SystemExit("latest public release is not immutable")
+          print(tag, commit)
+          PY
+          )
+          python3 - "$previous/release.json" "$previous/assets.tsv" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          required = {
+              "compatibility-artifact-index.json",
+              "macprovider-release-discovery.json",
+              "macprovider-release-discovery.json.sig",
+          }
+          rows = []
+          for name in sorted(required):
+              matches = [asset for asset in release.get("assets", []) if asset.get("name") == name]
+              if len(matches) != 1 or type(matches[0].get("id")) is not int:
+                  raise SystemExit(f"latest immutable release does not have one numeric asset ID for {name}")
+              rows.append(f"{name}\t{matches[0]['id']}\n")
+          pathlib.Path(sys.argv[2]).write_text("".join(rows), encoding="ascii")
+          PY
+          while IFS=$'\t' read -r name asset_id; do
+            gh api -H 'Accept: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$previous/$name"
+          done < "$previous/assets.tsv"
+          previous_sequence="$(python3 - "$previous/macprovider-release-discovery.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          sequence = value.get("signed", {}).get("release_sequence")
+          if type(sequence) is not int or sequence <= 0:
+              raise SystemExit("prior signed discovery sequence is invalid")
+          print(sequence)
+          PY
+          )"
+          python3 scripts/verify-release-discovery-transport.py \
+            --head "$previous/macprovider-release-discovery.json" \
+            --signature "$previous/macprovider-release-discovery.json.sig" \
+            --artifact-index "$previous/compatibility-artifact-index.json" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "release-discovery-v1-$previous_sequence" \
+            --target-tag "$previous_tag" \
+            --target-commit "$previous_commit" \
+            --allow-expired \
+            --openssl "$OPENSSL_BIN" >/dev/null
+          candidate_sequence="$(python3 - "$accepted/macprovider-release-discovery.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          sequence = value.get("signed", {}).get("release_sequence")
+          if type(sequence) is not int or sequence <= 0:
+              raise SystemExit("candidate signed discovery sequence is invalid")
+          print(sequence)
+          PY
+          )"
+          transport_tag="release-discovery-v1-$candidate_sequence"
+          verified_sequence="$(python3 scripts/verify-release-discovery-transport.py \
+            --head "$accepted/macprovider-release-discovery.json" \
+            --signature "$accepted/macprovider-release-discovery.json.sig" \
+            --artifact-index "$accepted/compatibility-artifact-index.json" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "$transport_tag" \
+            --target-tag "$TAG" \
+            --target-commit "$CANDIDATE_SHA" \
+            --minimum-sequence "$previous_sequence" \
+            --openssl "$OPENSSL_BIN")"
+          [[ "$verified_sequence" == "$candidate_sequence" ]]
+          printf 'previous_tag=%s\n' "$previous_tag" >> "$GITHUB_OUTPUT"
+          printf 'transport_tag=%s\n' "$transport_tag" >> "$GITHUB_OUTPUT"
 
       - name: Verify accepted source and owner-created protected tag
         shell: bash
@@ -375,6 +488,72 @@ jobs:
             cmp "$accepted/$name" "$download/$name"
           done < "$RUNNER_TEMP/assets.tsv"
 
+      - name: Publish one append-only immutable discovery transport
+        id: discovery_transport
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+          TRANSPORT_TAG: ${{ steps.discovery_base.outputs.transport_tag }}
+        run: |
+          set -euo pipefail
+          accepted="$RUNNER_TEMP/accepted"
+          remote_tag="$(git ls-remote --tags origin "$TRANSPORT_TAG")"
+          [ -z "$remote_tag" ] || {
+            echo "::error::append-only discovery tag already exists" >&2
+            exit 1
+          }
+          gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > "$RUNNER_TEMP/releases-before-discovery.json"
+          python3 - "$RUNNER_TEMP/releases-before-discovery.json" "$TRANSPORT_TAG" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if any(
+              isinstance(release, dict) and release.get("tag_name") == sys.argv[2]
+              for page in pages if isinstance(page, list)
+              for release in page
+          ):
+              raise SystemExit("append-only discovery release already exists")
+          PY
+          notes="$RUNNER_TEMP/discovery-notes.md"
+          printf 'Signed append-only discovery transport for %s.\n' "$TAG" > "$notes"
+          gh release create "$TRANSPORT_TAG" \
+            "$accepted/compatibility-artifact-index.json" \
+            "$accepted/macprovider-release-discovery.json" \
+            "$accepted/macprovider-release-discovery.json.sig" \
+            --title "macprovider signed release discovery" \
+            --notes-file "$notes" \
+            --target "$CANDIDATE_SHA" \
+            --draft \
+            --prerelease \
+            --latest=false
+          transport_id="$(gh release view "$TRANSPORT_TAG" --json databaseId --jq .databaseId)"
+          [[ "$transport_id" =~ ^[1-9][0-9]*$ ]]
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+            -F draft=false -F prerelease=true -f make_latest=false \
+            > "$RUNNER_TEMP/discovery-published.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+            > "$RUNNER_TEMP/discovery-immutable.json"
+          python3 scripts/verify-release-discovery-transport.py \
+            --release-json "$RUNNER_TEMP/discovery-immutable.json" \
+            --head "$accepted/macprovider-release-discovery.json" \
+            --signature "$accepted/macprovider-release-discovery.json.sig" \
+            --artifact-index "$accepted/compatibility-artifact-index.json" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "$TRANSPORT_TAG" \
+            --target-tag "$TAG" \
+            --target-commit "$CANDIDATE_SHA" \
+            --require-immutable \
+            --openssl "$OPENSSL_BIN" >/dev/null
+
   verify_public:
     name: Verify published bytes without protected credentials
     needs: promote
@@ -399,3 +578,19 @@ jobs:
             DOWNLOAD_ATTEMPTS=6 \
             DOWNLOAD_RETRY_SLEEP=5 \
             scripts/verify-tier2-provider-release.sh --tag "$TAG"
+
+      - name: Prove anonymous signed release discovery
+        shell: bash
+        env:
+          TAG: ${{ needs.promote.outputs.tag }}
+          CANDIDATE_SHA: ${{ needs.promote.outputs.candidate_sha }}
+          PREVIOUS_TAG: ${{ needs.promote.outputs.previous_tag }}
+          TRANSPORT_TAG: ${{ needs.promote.outputs.transport_tag }}
+        run: |
+          set -euo pipefail
+          scripts/verify-anonymous-release-discovery.sh "$TAG" "$CANDIDATE_SHA" "$TAG" "$TRANSPORT_TAG"
+          if [[ "$PREVIOUS_TAG" == v1.8.55 ]]; then
+            echo "::notice::v1.8.55 uses the permanently immutable fixed release-discovery tag and requires the documented one-time supported bridge"
+          else
+            scripts/verify-anonymous-release-discovery.sh "$TAG" "$CANDIDATE_SHA" "$PREVIOUS_TAG" "$TRANSPORT_TAG"
+          fi

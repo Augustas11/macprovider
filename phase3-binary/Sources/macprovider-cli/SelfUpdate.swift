@@ -55,6 +55,10 @@ struct SelfUpdate {
         rawValue: kSecCSSigningInformation
     )
     static let currentCodeValidityFlags = SecCSFlags(rawValue: kSecCSStrictValidate)
+    static let releaseDiscoveryPageSize = 20
+    static let maxReleaseDiscoveryListingBytes = 2 * 1_024 * 1_024
+    static let maxReleaseDiscoveryHeadBytes = 64 * 1_024
+    static let maxReleaseDiscoverySignatureBytes = 4 * 1_024
     static let checksumPublicKeyPEM = """
     -----BEGIN PUBLIC KEY-----
     MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwwd0Vzj35OP8DlZU+0lUa8vI9gHK
@@ -607,9 +611,27 @@ struct SelfUpdate {
     }
 
     func discoverSignedReleaseHead(now: Date = Date()) async throws -> SignedReleaseDiscoveryHead {
-        let release = try await releaseByTag(SignedReleaseDiscoveryHead.transportReleaseTag)
-        guard let headAsset = release.assets.first(where: { $0.name == SignedReleaseDiscoveryHead.assetName }),
-              let signatureAsset = release.assets.first(where: { $0.name == SignedReleaseDiscoveryHead.signatureAssetName })
+        let releases = try await releaseDiscoveryTransports()
+        guard let release = releases.compactMap({ candidate -> (GitHubRelease, UInt64)? in
+            guard let sequence = SignedReleaseDiscoveryHead.transportSequence(from: candidate.tagName) else {
+                return nil
+            }
+            return (candidate, sequence)
+        }).max(by: { $0.1 < $1.1 }) else {
+            throw UpdateError.discoveryHeadInvalid("transport_absent")
+        }
+        guard release.0.isDraft == false,
+              release.0.isPrerelease == true,
+              release.0.isImmutable == true
+        else {
+            throw UpdateError.discoveryHeadInvalid("transport_not_immutable")
+        }
+        let headAssets = release.0.assets.filter { $0.name == SignedReleaseDiscoveryHead.assetName }
+        let signatureAssets = release.0.assets.filter { $0.name == SignedReleaseDiscoveryHead.signatureAssetName }
+        guard headAssets.count == 1,
+              signatureAssets.count == 1,
+              let headAsset = headAssets.first,
+              let signatureAsset = signatureAssets.first
         else {
             throw UpdateError.missingAsset
         }
@@ -619,17 +641,68 @@ struct SelfUpdate {
         if let http = headResponse as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
         }
+        guard headData.count <= Self.maxReleaseDiscoveryHeadBytes else {
+            throw UpdateError.discoveryHeadInvalid("transport_head_oversized")
+        }
         let (signatureData, signatureResponse) = try await session.data(from: signatureAsset.browserDownloadURL)
         if let http = signatureResponse as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
+        }
+        guard signatureData.count <= Self.maxReleaseDiscoverySignatureBytes else {
+            throw UpdateError.discoveryHeadInvalid("transport_signature_oversized")
         }
         let head = try SignedReleaseDiscoveryHead.loadVerified(
             headData: headData,
             signatureData: signatureData,
             now: now
         )
+        try Self.requireAppendOnlyDiscoveryTransport(
+            transportTag: release.0.tagName,
+            transportSequence: release.1,
+            head: head
+        )
         try markerStore.acceptDiscoveryHead(head)
         return head
+    }
+
+    static func requireAppendOnlyDiscoveryTransport(
+        transportTag: String,
+        transportSequence: UInt64,
+        head: SignedReleaseDiscoveryHead
+    ) throws {
+        guard SignedReleaseDiscoveryHead.transportSequence(from: transportTag) == transportSequence,
+              transportSequence == head.releaseSequence
+        else {
+            throw UpdateError.discoveryHeadInvalid("transport_sequence_mismatch")
+        }
+    }
+
+    private func releaseDiscoveryTransports() async throws -> [GitHubRelease] {
+        guard var components = URLComponents(string: releasesAPIURL) else {
+            throw UpdateError.invalidURL(releasesAPIURL)
+        }
+        if components.path.hasSuffix("/releases/latest") {
+            components.path = String(components.path.dropLast("/latest".count))
+        } else if components.path.contains("/releases/tags/") {
+            components.path = String(components.path.split(separator: "/").dropLast(2).joined(separator: "/"))
+            if !components.path.hasPrefix("/") { components.path = "/" + components.path }
+        }
+        components.queryItems = [URLQueryItem(name: "per_page", value: String(Self.releaseDiscoveryPageSize))]
+        guard let url = components.url else {
+            throw UpdateError.invalidURL(releasesAPIURL)
+        }
+        try validateReleaseAPIURL(url)
+        var request = URLRequest(url: url)
+        request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
+        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        guard data.count <= Self.maxReleaseDiscoveryListingBytes else {
+            throw UpdateError.discoveryHeadInvalid("transport_listing_oversized")
+        }
+        return try JSONDecoder().decode([GitHubRelease].self, from: data)
     }
 
     private func releaseByTag(_ tag: String) async throws -> GitHubRelease {
@@ -2265,11 +2338,17 @@ struct GitHubRelease: Decodable {
     let assets: [GitHubAsset]
     let body: String?
     let signedPolicy: GitHubSignedPolicy?
+    let isDraft: Bool?
+    let isPrerelease: Bool?
+    let isImmutable: Bool?
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
         case assets
         case body
+        case isDraft = "draft"
+        case isPrerelease = "prerelease"
+        case isImmutable = "immutable"
     }
 
     init(from decoder: Decoder) throws {
@@ -2277,6 +2356,9 @@ struct GitHubRelease: Decodable {
         tagName = try container.decode(String.self, forKey: .tagName)
         assets = try container.decode([GitHubAsset].self, forKey: .assets)
         body = try container.decodeIfPresent(String.self, forKey: .body)
+        isDraft = try container.decodeIfPresent(Bool.self, forKey: .isDraft)
+        isPrerelease = try container.decodeIfPresent(Bool.self, forKey: .isPrerelease)
+        isImmutable = try container.decodeIfPresent(Bool.self, forKey: .isImmutable)
         // Release JSON/body metadata is not covered by checksums.txt.sig.
         // Persisting policy from those unsigned fields would let a tampered
         // release response change local trust state before signature proof.
