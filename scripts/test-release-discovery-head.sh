@@ -74,4 +74,32 @@ openssl dgst -sha256 -verify "$work/public.pem" \
   -signature "$work/macprovider-release-discovery.json.sig" \
   "$work/signed-payload.json" >/dev/null
 
+# Same-target renewal must advance the composite sequence without changing the set.
+python3 "$root/scripts/build-release-discovery-head.py" \
+  --sequence 611 \
+  --attempt 1 \
+  --compatibility-manifest "$work/compatibility-set.json" \
+  --target-artifact-index "$work/compatibility-artifact-index.json" \
+  --signed-policy-minimum 1.8.40 \
+  --signed-policy-revoked v1.8.39 \
+  --issued-at 2026-07-18T00:00:00Z \
+  --expires-at 2026-07-19T00:00:00Z \
+  --private-key "$work/private.pem" \
+  --public-key "$work/public.pem" \
+  --output "$work/macprovider-release-discovery-renewal.json" \
+  --signature "$work/macprovider-release-discovery-renewal.json.sig"
+python3 - "$work" <<'PY'
+import json
+import pathlib
+import sys
+
+work = pathlib.Path(sys.argv[1])
+original = json.loads(work.joinpath("macprovider-release-discovery.json").read_bytes())
+renewal = json.loads(work.joinpath("macprovider-release-discovery-renewal.json").read_bytes())
+assert renewal["signed"]["target_compatibility_set_id"] == original["signed"]["target_compatibility_set_id"]
+assert renewal["signed"]["target_artifact_index_sha256"] == original["signed"]["target_artifact_index_sha256"]
+assert renewal["signed"]["release_sequence"] > original["signed"]["release_sequence"]
+assert renewal["signed"]["expires_at"] != original["signed"]["expires_at"]
+PY
+
 printf '[test-release-discovery-head] PASS\n'

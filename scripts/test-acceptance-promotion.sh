@@ -94,10 +94,14 @@ if 'transport_tag="release-discovery-v1-$candidate_sequence"' not in protected[d
     raise SystemExit("promotion does not derive the transport tag from the signed sequence")
 if '[[ "$PREVIOUS_TAG" == v1.8.55 ]]' not in public_verify:
     raise SystemExit("anonymous proof does not bound the immutable v1.8.55 bridge")
+if "scripts/verify-v1855-discovery-bridge.sh" not in public_verify:
+    raise SystemExit("promotion must anonymously prove the v1.8.55 trust-preserving bridge")
 if public_verify.count("scripts/verify-anonymous-release-discovery.sh") != 2:
     raise SystemExit("public verifier must prove target and prior clients")
 if '"$TAG" "$CANDIDATE_SHA" "$TAG" "$TRANSPORT_TAG"' not in public_verify:
     raise SystemExit("public verifier does not bind the anonymous target proof to its transport")
+if 'scripts/verify-v1855-discovery-bridge.sh "$TAG" "$CANDIDATE_SHA" "$TRANSPORT_TAG"' not in public_verify:
+    raise SystemExit("v1.8.55 bridge proof is not bound to the promoted transport")
 PY
 
 repository=Augustas11/macprovider
