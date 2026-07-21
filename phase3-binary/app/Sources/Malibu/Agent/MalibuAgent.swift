@@ -223,8 +223,8 @@ final class MalibuAgent: ObservableObject {
     }
 
     /// Online #582 recovery without reinstalling provider identity.
-    /// Pending trust resubmits stored evidence first; corrective paths stop the
-    /// incumbent provider, recommend/apply with required evidence, then restart.
+    /// Lifecycle ownership (freshness → drain → recommend/apply → restore)
+    /// lives in `macprovider-cli autotune --recover-hardware-admission`.
     func retryHardwareVerification() async {
         guard !isShuttingDown else { return }
         guard AgentSnapshotPresenter.publicStatus(snapshot).executableAction == .retryHardwareVerification else {
@@ -236,7 +236,6 @@ final class MalibuAgent: ObservableObject {
             await previous.value
         }
         guard !isShuttingDown, !Task.isCancelled else { return }
-        let pendingTrust = snapshot.lifecycleReason == "autotune_evidence_required"
         snapshot.hardwareVerificationRetryInProgress = true
         snapshot.hardwareVerificationRetryLastError = nil
         hardwareVerificationRetryTask = Task { [weak self] in
@@ -248,38 +247,7 @@ final class MalibuAgent: ObservableObject {
             }
             do {
                 let cliURL = URL(fileURLWithPath: CLIUpdateRunner.installedCLIPath())
-                var needsFullRemediation = !pendingTrust
-                if pendingTrust {
-                    do {
-                        try await AutotuneRecommendationRunner.runFreshnessEvidenceResubmit(cliURL: cliURL)
-                        guard !Task.isCancelled, !self.isShuttingDown else { return }
-                        self.snapshot.hardwareVerificationRetryLastError = nil
-                        if let port = ProviderConfig.readHTTPPort() {
-                            await self.applyProviderSnapshot(port: port)
-                        }
-                        return
-                    } catch let AutotuneRecommendationError.nonZeroExit(code)
-                        where code == AutotuneRecommendationRunner.freshnessRequiresRerunExitCode
-                    {
-                        needsFullRemediation = true
-                    }
-                }
-                guard needsFullRemediation else { return }
-                try await AutotuneRecommendationRunner.stopLaunchdProvider()
-                guard !Task.isCancelled, !self.isShuttingDown else { return }
-                do {
-                    try await AutotuneRecommendationRunner.runOnlineHardwareRemediation(cliURL: cliURL)
-                } catch {
-                    // Always attempt restore so a failed probe does not leave
-                    // the launchd provider stopped.
-                    try? await AutotuneRecommendationRunner.kickstartLaunchdProvider()
-                    throw error
-                }
-                guard !Task.isCancelled, !self.isShuttingDown else {
-                    try? await AutotuneRecommendationRunner.kickstartLaunchdProvider()
-                    return
-                }
-                try await AutotuneRecommendationRunner.kickstartLaunchdProvider()
+                try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.hardwareVerificationRetryLastError = nil
                 if let port = ProviderConfig.readHTTPPort() {
@@ -287,7 +255,6 @@ final class MalibuAgent: ObservableObject {
                     await self.applyProviderSnapshot(port: port)
                 }
             } catch is CancellationError {
-                try? await AutotuneRecommendationRunner.kickstartLaunchdProvider()
                 return
             } catch {
                 guard !Task.isCancelled, !self.isShuttingDown else { return }

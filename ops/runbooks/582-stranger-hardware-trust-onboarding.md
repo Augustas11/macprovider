@@ -14,7 +14,7 @@ hardware-trust API), Malibu public-status shell (#655).
 | Step | Actor | What happens | User-visible terminal (if stuck) |
 |------|-------|--------------|----------------------------------|
 | 1. Install | Stranger | Installer / Malibu bootstrap installs CLI + config | Model is preparing |
-| 2. Autotune evidence | Stranger / installer | `macprovider-cli autotune --recommend` loads the **signed live** candidate catalog, probes, and submits hardware evidence | If only the baked catalog is available, CLI **fail-closes before submit/apply** with actionable copy (offline `--no-submit-hardware-evidence` diagnostics remain allowed) |
+| 2. Autotune evidence | Stranger / installer | `macprovider-cli autotune --recommend` (or Malibu **Retry provider setup** → `--recover-hardware-admission`) loads the **signed live** candidate catalog, probes, and submits hardware evidence | If only the baked catalog is available, CLI **fail-closes before submit/apply** with actionable copy (offline `--no-submit-hardware-evidence` diagnostics remain allowed) |
 | 3. Trust park | Pearl | Verifier parks unknown hardware as `waiting_trust` | **Pending hardware verification** |
 | 4. Operator approve | Operator | Dual-control admin API (below) — durable `source=operator_api` trust root | Still **Pending hardware verification** until verifier promotes |
 | 5. Verifier promote | Pearl | `stats-hardware-verifier` moves job → `verified` when trust is live | Waiting for network approval → reconnect |
@@ -22,8 +22,8 @@ hardware-trust API), Malibu public-status shell (#655).
 
 Other supported terminals (no gate disable):
 
-- **Not eligible: admission evidence failed** — verified evidence fails the live catalog / model-cap gate (`autotune_evidence_invalid`, `autotune_model_cap_exceeded`). Cap exceeded requires applying a smaller admitted model; invalid evidence needs a fresh signed recommendation.
-- **This Mac is not currently eligible** — uncatalogued model (`autotune_model_uncatalogued`) or catalog/software update required.
+- **Not eligible: admission evidence failed** — verified evidence fails the live catalog / model-cap gate (`autotune_evidence_invalid`, `autotune_model_cap_exceeded`). Recover with `macprovider-cli autotune --recommend --recover-hardware-admission` (freshness resubmit, else drain → recommend/apply with required evidence → restore).
+- **This Mac is not currently eligible** — uncatalogued model (`autotune_model_uncatalogued`) uses the same recovery command; catalog/software update required remains `macprovider-cli update`.
 - Identity / signing setup remains under the existing repair paths (out of scope for this runbook).
 
 ## Operator trust approval (no YAML / DB edits)

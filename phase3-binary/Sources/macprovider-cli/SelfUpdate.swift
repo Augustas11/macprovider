@@ -2582,18 +2582,19 @@ struct LocalStatusFormatter {
             nextStep = nil
         } else if lifecycleReason == "autotune_evidence_required" {
             title = "Pending hardware verification"
-            nextStep = "Run `macprovider-cli autotune --recommend` while online. Recently submitted evidence may still be awaiting operator approval."
-        } else if lifecycleReason == "autotune_evidence_invalid" {
+            nextStep = "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online. Recently submitted evidence may still be awaiting operator approval."
+        } else if lifecycleReason == "autotune_evidence_invalid"
+            || lifecycleReason == "autotune_model_cap_exceeded"
+        {
             title = "Not eligible: admission evidence failed"
-            nextStep = "Run `macprovider-cli autotune --recommend` while online, then restart the provider."
-        } else if lifecycleReason == "autotune_model_cap_exceeded" {
-            title = "Not eligible: admission evidence failed"
-            nextStep = "Apply a smaller admitted model with `macprovider-cli autotune --recommend --apply`, then restart."
+            nextStep = "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online."
         } else if lifecycleState == "catalog_incompatible"
             || lifecycleReason == "autotune_model_uncatalogued"
             || ["catalog_update_required", "compatibility_update_required"].contains(networkState) {
             title = "This Mac is not currently eligible"
-            nextStep = "Run `macprovider-cli update`, or choose a catalog-supported model."
+            nextStep = lifecycleReason == "autotune_model_uncatalogued"
+                ? "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online."
+                : "Run `macprovider-cli update`, or choose a catalog-supported model."
         } else if networkState == "not_buyer_serving" {
             title = "This Mac is not currently eligible"
             nextStep = "Open Malibu to review the recommended next step."

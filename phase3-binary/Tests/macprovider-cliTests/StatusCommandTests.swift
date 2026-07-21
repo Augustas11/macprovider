@@ -175,7 +175,7 @@ final class StatusCommandTests: XCTestCase {
 
         let pendingOutput = LocalStatusFormatter.format(pending)
         XCTAssertTrue(pendingOutput.contains("Pending hardware verification"), pendingOutput)
-        XCTAssertTrue(pendingOutput.contains("autotune --recommend"), pendingOutput)
+        XCTAssertTrue(pendingOutput.contains("autotune --recommend --recover-hardware-admission"), pendingOutput)
 
         var rejected = status(providerID: "provider-a")
         rejected["network_state"] = "live_verified"
@@ -189,7 +189,7 @@ final class StatusCommandTests: XCTestCase {
 
         let rejectedOutput = LocalStatusFormatter.format(rejected)
         XCTAssertTrue(rejectedOutput.contains("Not eligible: admission evidence failed"), rejectedOutput)
-        XCTAssertTrue(rejectedOutput.contains("autotune --recommend"), rejectedOutput)
+        XCTAssertTrue(rejectedOutput.contains("autotune --recommend --recover-hardware-admission"), rejectedOutput)
 
         var uncatalogued = status(providerID: "provider-a")
         uncatalogued["network_state"] = "live_verified"
@@ -203,7 +203,10 @@ final class StatusCommandTests: XCTestCase {
 
         let uncataloguedOutput = LocalStatusFormatter.format(uncatalogued)
         XCTAssertTrue(uncataloguedOutput.contains("This Mac is not currently eligible"), uncataloguedOutput)
-        XCTAssertTrue(uncataloguedOutput.contains("catalog-supported model") || uncataloguedOutput.contains("update"), uncataloguedOutput)
+        XCTAssertTrue(
+            uncataloguedOutput.contains("autotune --recommend --recover-hardware-admission"),
+            uncataloguedOutput
+        )
     }
 
     func testRoutineCLIHelpUsesCanonicalPublicLanguage() {

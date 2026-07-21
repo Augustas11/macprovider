@@ -78,6 +78,12 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend, check whether the stored recommendation is fresh without benchmarking.")
     var freshnessCheck = false
 
+    @Flag(
+        name: .customLong("recover-hardware-admission"),
+        help: "With --recommend, run the no-exception stranger recovery transaction: resubmit fresh stored evidence when possible; otherwise drain the running provider, recommend/apply with required evidence submission, and restore the provider."
+    )
+    var recoverHardwareAdmission = false
+
     @Flag(help: "With --recommend and --candidate-models, download and verify the exact signed model artifacts without loading or benchmarking them.")
     var prefetch = false
 
@@ -134,6 +140,10 @@ struct AutotuneCommand: AsyncParsableCommand {
 
     func run(dependencies: AutotuneRunDependencies) async throws {
         if recommend {
+            if recoverHardwareAdmission {
+                try await runHardwareAdmissionRecovery()
+                return
+            }
             if freshnessCheck {
                 try await runRecommendationFreshnessCheck()
                 return
@@ -694,6 +704,18 @@ struct AutotuneCommand: AsyncParsableCommand {
         if freshnessCheck && !recommend {
             throw ValidationError("--freshness-check requires --recommend")
         }
+        if recoverHardwareAdmission && !recommend {
+            throw ValidationError("--recover-hardware-admission requires --recommend")
+        }
+        if recoverHardwareAdmission && freshnessCheck {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --freshness-check")
+        }
+        if recoverHardwareAdmission && prefetch {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --prefetch")
+        }
+        if recoverHardwareAdmission && !submitHardwareEvidence {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --no-submit-hardware-evidence")
+        }
         if prefetch && !recommend {
             throw ValidationError("--prefetch requires --recommend")
         }
@@ -1023,6 +1045,48 @@ struct AutotuneCommand: AsyncParsableCommand {
             modelCatalogVersion: catalogVersion,
             modelCatalogHash: catalogHash
         )
+    }
+
+    /// No-exception #582 recovery owned by the CLI: freshness resubmit first,
+    /// otherwise drain → recommend/apply with required evidence → restore.
+    private func runHardwareAdmissionRecovery() async throws {
+        do {
+            try await runRecommendationFreshnessCheck()
+            return
+        } catch let exitCode as ExitCode where exitCode.rawValue == 10 {
+            // Stored recommendation/evidence missing or stale — fall through.
+        }
+
+        let conflict = try ProviderConflictDetector().detect()
+        let drainResult = try ProviderDrainer().drain(
+            conflict,
+            port: port,
+            graceSeconds: TimeInterval(drainGrace)
+        )
+        if case .portStillOpen(let openPort) = drainResult {
+            throw ValidationError(
+                "provider port \(openPort) still open after drain; cannot recover hardware admission safely"
+            )
+        }
+
+        var restoreError: Error?
+        defer {
+            do {
+                _ = try ProviderDrainer().restore(conflict, restartForeground: true)
+            } catch {
+                restoreError = error
+            }
+        }
+
+        var recovery = self
+        recovery.apply = true
+        recovery.requireHardwareEvidence = true
+        recovery.submitHardwareEvidence = true
+        try await recovery.runAutotuneRecommend()
+
+        if let restoreError {
+            throw restoreError
+        }
     }
 
     private func runRecommendationFreshnessCheck() async throws {

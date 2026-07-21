@@ -112,17 +112,13 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         XCTAssertGreaterThan(AutotuneRecommendationRunner.subtreeGraceSeconds, 0)
     }
 
-    func testOnlineRemediationArgumentsRequireHardwareEvidenceAndFreshnessFirst() {
+    func testHardwareAdmissionRecoveryUsesCLIOwnedTransactionFlag() {
         let config = URL(fileURLWithPath: "/tmp/macprovider-config.yaml")
-        let freshness = AutotuneRecommendationRunner.freshnessResubmitArguments(configPath: config)
-        XCTAssertTrue(freshness.contains("--freshness-check"))
-        XCTAssertTrue(freshness.contains("--require-hardware-evidence"))
-        XCTAssertFalse(freshness.contains("--apply"))
-
-        let full = AutotuneRecommendationRunner.fullRemediationArguments(configPath: config)
-        XCTAssertTrue(full.contains("--apply"))
-        XCTAssertTrue(full.contains("--require-hardware-evidence"))
-        XCTAssertEqual(AutotuneRecommendationRunner.freshnessRequiresRerunExitCode, 10)
+        let args = AutotuneRecommendationRunner.hardwareAdmissionRecoveryArguments(configPath: config)
+        XCTAssertTrue(args.contains("--recover-hardware-admission"))
+        XCTAssertTrue(args.contains("--recommend"))
+        XCTAssertFalse(args.contains("--apply"))
+        XCTAssertFalse(args.contains("--freshness-check"))
     }
 
     func testProcessTimeoutIsNotUntenable() {
