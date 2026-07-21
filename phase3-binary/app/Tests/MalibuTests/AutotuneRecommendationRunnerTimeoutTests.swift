@@ -85,11 +85,14 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         // ARCH-M-1 regression: if the CLI ignores SIGTERM (wedged handler,
         // pathological state), the runner must escalate to SIGKILL so
         // orphan grandchildren cannot outlive the timeout. Simulate this
-        // with a shell that traps SIGTERM to a no-op and blocks on wait.
+        // with a shell that ignores SIGTERM and stays alive until SIGKILL.
+        //
+        // Do NOT use `sleep … & wait`: on some /bin/sh builds, an ignored
+        // SIGTERM still interrupts `wait`, so the script exits before grace
+        // and the wall-clock assertion flakes (CI saw ~0.06s elapsed).
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        // trap ignores SIGTERM (15); the subshell then wait's forever.
-        process.arguments = ["-c", "trap '' 15; sleep 60 & wait"]
+        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
         try process.run()
         Thread.sleep(forTimeInterval: 0.1)
         let before = Date()
