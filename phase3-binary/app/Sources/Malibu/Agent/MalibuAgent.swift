@@ -223,8 +223,8 @@ final class MalibuAgent: ObservableObject {
     }
 
     /// Online #582 recovery without reinstalling provider identity.
-    /// Lifecycle ownership (freshness → drain → recommend/apply → restore)
-    /// lives in `macprovider-cli autotune --recover-hardware-admission`.
+    /// Pending trust resubmits stored evidence; corrective paths use the CLI
+    /// `--recover-hardware-admission` drain/recommend/restore transaction.
     func retryHardwareVerification() async {
         guard !isShuttingDown else { return }
         guard AgentSnapshotPresenter.publicStatus(snapshot).executableAction == .retryHardwareVerification else {
@@ -236,6 +236,7 @@ final class MalibuAgent: ObservableObject {
             await previous.value
         }
         guard !isShuttingDown, !Task.isCancelled else { return }
+        let pendingTrust = snapshot.lifecycleReason == "autotune_evidence_required"
         snapshot.hardwareVerificationRetryInProgress = true
         snapshot.hardwareVerificationRetryLastError = nil
         hardwareVerificationRetryTask = Task { [weak self] in
@@ -247,7 +248,16 @@ final class MalibuAgent: ObservableObject {
             }
             do {
                 let cliURL = URL(fileURLWithPath: CLIUpdateRunner.installedCLIPath())
-                try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
+                if pendingTrust {
+                    do {
+                        try await AutotuneRecommendationRunner.runPendingEvidenceResubmit(cliURL: cliURL)
+                    } catch let AutotuneRecommendationError.nonZeroExit(code, _) where code == 10 {
+                        // Stored recommendation/evidence missing or stale.
+                        try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
+                    }
+                } else {
+                    try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
+                }
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.hardwareVerificationRetryLastError = nil
                 if let port = ProviderConfig.readHTTPPort() {

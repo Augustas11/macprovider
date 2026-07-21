@@ -80,7 +80,7 @@ struct AutotuneCommand: AsyncParsableCommand {
 
     @Flag(
         name: .customLong("recover-hardware-admission"),
-        help: "With --recommend, run the no-exception stranger recovery transaction: resubmit fresh stored evidence when possible; otherwise drain the running provider, recommend/apply with required evidence submission, and restore the provider."
+        help: "With --recommend, run corrective stranger recovery: drain the running provider, recommend/apply with required evidence submission, and restore the provider. Pending-trust resubmit uses --freshness-check --require-hardware-evidence instead."
     )
     var recoverHardwareAdmission = false
 
@@ -1047,30 +1047,54 @@ struct AutotuneCommand: AsyncParsableCommand {
         )
     }
 
-    /// No-exception #582 recovery owned by the CLI: freshness resubmit first,
-    /// otherwise drain → recommend/apply with required evidence → restore.
+    /// Corrective #582 recovery owned by the CLI:
+    /// drain (bootout) → recommend/apply with required evidence → restore.
+    /// Pending-trust resubmit is a separate freshness-check path so rejected /
+    /// cap / uncatalogued models cannot false-complete via stored evidence.
     private func runHardwareAdmissionRecovery() async throws {
-        do {
-            try await runRecommendationFreshnessCheck()
-            return
-        } catch let exitCode as ExitCode where exitCode.rawValue == 10 {
-            // Stored recommendation/evidence missing or stale — fall through.
-        }
+        // Own the process group and cooperative cancellation before mutating
+        // launchd so SIGTERM can restore instead of stranding a bootout.
+        _ = autotuneBecomeProcessGroupLeader()
+        let interruptFlag = AutotuneInterruptFlag()
+        let signalSources = AutotuneSignalSources(flag: interruptFlag, cascadeToProcessGroup: true)
+        defer { _ = signalSources }
 
         let conflict = try ProviderConflictDetector().detect()
+        let shouldRestore: Bool
+        switch conflict {
+        case .none:
+            shouldRestore = false
+        case .launchdManaged, .foreground:
+            shouldRestore = true
+        }
+
         let drainResult = try ProviderDrainer().drain(
             conflict,
             port: port,
             graceSeconds: TimeInterval(drainGrace)
         )
+
+        var recoveryError: Error?
         if case .portStillOpen(let openPort) = drainResult {
-            throw ValidationError(
+            recoveryError = ValidationError(
                 "provider port \(openPort) still open after drain; cannot recover hardware admission safely"
             )
+        } else if interruptFlag.isSet() {
+            recoveryError = ExitCode(130)
+        } else {
+            do {
+                var recovery = self
+                recovery.apply = true
+                recovery.requireHardwareEvidence = true
+                recovery.submitHardwareEvidence = true
+                try await recovery.runAutotuneRecommend()
+            } catch {
+                recoveryError = error
+            }
         }
 
         var restoreError: Error?
-        defer {
+        if shouldRestore {
             do {
                 _ = try ProviderDrainer().restore(conflict, restartForeground: true)
             } catch {
@@ -1078,14 +1102,16 @@ struct AutotuneCommand: AsyncParsableCommand {
             }
         }
 
-        var recovery = self
-        recovery.apply = true
-        recovery.requireHardwareEvidence = true
-        recovery.submitHardwareEvidence = true
-        try await recovery.runAutotuneRecommend()
-
         if let restoreError {
+            if let recoveryError {
+                FileHandle.standardError.write(
+                    Data("hardware_admission_recovery_failed: \(recoveryError)\n".utf8)
+                )
+            }
             throw restoreError
+        }
+        if let recoveryError {
+            throw recoveryError
         }
     }
 

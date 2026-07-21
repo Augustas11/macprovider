@@ -114,11 +114,16 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
 
     func testHardwareAdmissionRecoveryUsesCLIOwnedTransactionFlag() {
         let config = URL(fileURLWithPath: "/tmp/macprovider-config.yaml")
-        let args = AutotuneRecommendationRunner.hardwareAdmissionRecoveryArguments(configPath: config)
-        XCTAssertTrue(args.contains("--recover-hardware-admission"))
-        XCTAssertTrue(args.contains("--recommend"))
-        XCTAssertFalse(args.contains("--apply"))
-        XCTAssertFalse(args.contains("--freshness-check"))
+        let pending = AutotuneRecommendationRunner.pendingEvidenceResubmitArguments(configPath: config)
+        XCTAssertTrue(pending.contains("--freshness-check"))
+        XCTAssertTrue(pending.contains("--require-hardware-evidence"))
+        XCTAssertFalse(pending.contains("--recover-hardware-admission"))
+
+        let corrective = AutotuneRecommendationRunner.hardwareAdmissionRecoveryArguments(configPath: config)
+        XCTAssertTrue(corrective.contains("--recover-hardware-admission"))
+        XCTAssertTrue(corrective.contains("--recommend"))
+        XCTAssertFalse(corrective.contains("--apply"))
+        XCTAssertFalse(corrective.contains("--freshness-check"))
     }
 
     func testProcessTimeoutIsNotUntenable() {

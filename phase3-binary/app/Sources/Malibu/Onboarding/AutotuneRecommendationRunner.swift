@@ -93,7 +93,19 @@ enum AutotuneRecommendationRunner {
         return try AutotuneRecommendationResult.fromAutotuneJSON(data)
     }
 
-    /// CLI-owned #582 recovery transaction invoked by Malibu.
+    /// Pending-trust path: resubmit stored evidence without rebenchmarking.
+    static func pendingEvidenceResubmitArguments(configPath: URL) -> [String] {
+        [
+            "autotune",
+            "--recommend",
+            "--freshness-check",
+            "--require-hardware-evidence",
+            "--json",
+            "--config", configPath.path,
+        ]
+    }
+
+    /// Corrective #582 recovery transaction owned by the CLI.
     static func hardwareAdmissionRecoveryArguments(configPath: URL) -> [String] {
         [
             "autotune",
@@ -104,7 +116,18 @@ enum AutotuneRecommendationRunner {
         ]
     }
 
-    /// Runs the CLI recovery transaction. Drain/restore and evidence
+    static func runPendingEvidenceResubmit(
+        cliURL: URL,
+        configPath: URL = ProviderPaths.current.configFile
+    ) async throws {
+        _ = try await runProcess(
+            executableURL: cliURL,
+            arguments: pendingEvidenceResubmitArguments(configPath: configPath),
+            timeout: 120
+        )
+    }
+
+    /// Runs the CLI corrective recovery transaction. Drain/restore and evidence
     /// requirements are owned by macprovider-cli; Malibu only launches and
     /// cancels the process group.
     static func runHardwareAdmissionRecovery(

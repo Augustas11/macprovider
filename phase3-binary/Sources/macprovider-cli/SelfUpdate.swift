@@ -2582,7 +2582,7 @@ struct LocalStatusFormatter {
             nextStep = nil
         } else if lifecycleReason == "autotune_evidence_required" {
             title = "Pending hardware verification"
-            nextStep = "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online. Recently submitted evidence may still be awaiting operator approval."
+            nextStep = "Run `macprovider-cli autotune --recommend --freshness-check --require-hardware-evidence` while online. Recently submitted evidence may still be awaiting operator approval."
         } else if lifecycleReason == "autotune_evidence_invalid"
             || lifecycleReason == "autotune_model_cap_exceeded"
         {

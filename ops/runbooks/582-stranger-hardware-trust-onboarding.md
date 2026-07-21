@@ -22,8 +22,9 @@ hardware-trust API), Malibu public-status shell (#655).
 
 Other supported terminals (no gate disable):
 
-- **Not eligible: admission evidence failed** — verified evidence fails the live catalog / model-cap gate (`autotune_evidence_invalid`, `autotune_model_cap_exceeded`). Recover with `macprovider-cli autotune --recommend --recover-hardware-admission` (freshness resubmit, else drain → recommend/apply with required evidence → restore).
-- **This Mac is not currently eligible** — uncatalogued model (`autotune_model_uncatalogued`) uses the same recovery command; catalog/software update required remains `macprovider-cli update`.
+- **Pending hardware verification** — resubmit with `macprovider-cli autotune --recommend --freshness-check --require-hardware-evidence` (Malibu Retry uses the same). Exit 10 falls through to corrective recovery.
+- **Not eligible: admission evidence failed** — `autotune_evidence_invalid` / `autotune_model_cap_exceeded`. Recover with `macprovider-cli autotune --recommend --recover-hardware-admission` (drain → recommend/apply with required evidence → restore).
+- **This Mac is not currently eligible** — uncatalogued model uses corrective recovery; catalog/software update required remains `macprovider-cli update`.
 - Identity / signing setup remains under the existing repair paths (out of scope for this runbook).
 
 ## Operator trust approval (no YAML / DB edits)
