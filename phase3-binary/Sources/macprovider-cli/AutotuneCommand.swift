@@ -791,14 +791,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         warnings.formUnion(rateCard.warnings)
 
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
-            let failures = warnings
-                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
-                .map(\.rawValue)
-                .sorted()
-                .joined(separator: ", ")
-            throw ValidationError(
-                "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
-            )
+            throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
         }
 
         var request = AutotuneRecommendRequest(
@@ -934,14 +927,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         warnings.formUnion(catalog.warnings)
 
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
-            let failures = warnings
-                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
-                .map(\.rawValue)
-                .sorted()
-                .joined(separator: ", ")
-            throw ValidationError(
-                "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
-            )
+            throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
         }
 
         guard let requestedModelIDs = try recommendCandidateModelFilter(), !requestedModelIDs.isEmpty else {

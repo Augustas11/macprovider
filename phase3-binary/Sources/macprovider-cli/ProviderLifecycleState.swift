@@ -13,6 +13,12 @@ enum ProviderLifecycleState: String, Codable, CaseIterable, Sendable, Expressibl
     case keychainUnavailable = "keychain_unavailable"
     case identityMigrationRequired = "identity_migration_required"
     case catalogIncompatible = "catalog_incompatible"
+    /// Hello closed with `autotune_evidence_required` — evidence missing or
+    /// parked waiting for durable operator hardware-trust approval (#582).
+    case pendingHardwareVerification = "pending_hardware_verification"
+    /// Hello closed with `autotune_evidence_invalid` — verified evidence exists
+    /// but fails the live catalog / admission gate (#582).
+    case hardwareEvidenceRejected = "hardware_evidence_rejected"
     case servingBuyers = "serving_buyers"
     case updateInProgress = "update_in_progress"
     case rollbackInProgress = "rollback_in_progress"
@@ -222,6 +228,8 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         .authenticationRequired,
         .identityMigrationRequired,
         .catalogIncompatible,
+        .pendingHardwareVerification,
+        .hardwareEvidenceRejected,
         .failed,
     ]
 
@@ -241,7 +249,8 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             [
                 .startingProvider, .importingCredentials, .validatingCatalog, .loadingModel,
                 .locallyReadyConnecting, .authenticationRequired, .keychainUnavailable,
-                .identityMigrationRequired, .catalogIncompatible, .servingBuyers,
+                .identityMigrationRequired, .catalogIncompatible,
+                .pendingHardwareVerification, .hardwareEvidenceRejected, .servingBuyers,
                 .networkOffline, .coordinatorUnavailable, .degradedServing, .failed,
             ].contains(state)
         case .installer:
@@ -307,17 +316,21 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         case .servingBuyers:
             [
                 .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
+                .pendingHardwareVerification, .hardwareEvidenceRejected,
                 .degradedServing, .pausedByOperator, .servingBuyers, .updateInProgress,
             ]
         case .authenticationRequired, .identityMigrationRequired:
             [
                 .loadingModel, .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
+                .pendingHardwareVerification, .hardwareEvidenceRejected,
                 .authenticationRequired, .identityMigrationRequired, .catalogIncompatible,
                 .servingBuyers, .degradedServing, .pausedByOperator, .importingCredentials,
             ]
-        case .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable, .catalogIncompatible:
+        case .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable, .catalogIncompatible,
+             .pendingHardwareVerification, .hardwareEvidenceRejected:
             [
                 .loadingModel, .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
+                .pendingHardwareVerification, .hardwareEvidenceRejected,
                 .authenticationRequired, .identityMigrationRequired, .catalogIncompatible,
                 .servingBuyers, .degradedServing, .pausedByOperator,
             ]

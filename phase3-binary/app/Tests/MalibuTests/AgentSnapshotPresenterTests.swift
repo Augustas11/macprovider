@@ -78,6 +78,35 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(ready).title, "Provider is ready")
     }
 
+    func testPublicStatusDistinguishesHardwareVerificationFromGenericReconnect() {
+        var pending = AgentSnapshot.empty
+        pending.state = .reconnecting
+        pending.currentModelID = "llama"
+        pending.networkState = "live_verified"
+        pending.lifecycleState = "pending_hardware_verification"
+        pending.lifecycleReason = "autotune_evidence_required"
+
+        let pendingStatus = AgentSnapshotPresenter.publicStatus(pending)
+        XCTAssertEqual(pendingStatus.title, "Pending hardware verification")
+        XCTAssertEqual(
+            pendingStatus.safeNextAction,
+            "Keep Malibu open. No local action is needed while verification finishes."
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
+        XCTAssertEqual(AgentSnapshotPresenter.modelLine(pending), "llama")
+
+        var rejected = AgentSnapshot.empty
+        rejected.state = .reconnecting
+        rejected.currentModelID = "llama"
+        rejected.lifecycleState = "hardware_evidence_rejected"
+        rejected.lifecycleReason = "autotune_evidence_invalid"
+
+        let rejectedStatus = AgentSnapshotPresenter.publicStatus(rejected)
+        XCTAssertEqual(rejectedStatus.title, "Not eligible: admission evidence failed")
+        XCTAssertTrue(rejectedStatus.safeNextAction?.contains("autotune --recommend") == true)
+        XCTAssertEqual(AgentSnapshotPresenter.short(rejected), "Ineligible")
+    }
+
     func testBlockedPublicStatesExposeExactlyOneSafeAction() {
         let snapshots: [AgentSnapshot] = [
             {

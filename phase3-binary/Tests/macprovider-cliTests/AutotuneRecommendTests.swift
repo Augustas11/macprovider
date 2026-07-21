@@ -930,10 +930,25 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(result.allCandidates.allSatisfy { !$0.eligible })
     }
 
-    func testPaidTrustBlockRecognizesCatalogAndDemandFailuresOnly() {
+    func testPaidTrustBlockRecognizesCatalogFallbackAndDemandFailures() {
         XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogIntegrityFailure]))
         XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.demandRankUpdateRequired]))
-        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogFallbackUsed, .rateCardFallbackUsed]))
+        XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogFallbackUsed]))
+        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks([.rateCardFallbackUsed, .candidateCatalogStale]))
+    }
+
+    func testCatalogFallbackBlocksPaidRecommendationWithActionableMessage() throws {
+        var request = try makeRequest(modelKey: "qwen3-coder-30b-a3b-instruct")
+        request.warnings.insert(.candidateCatalogFallbackUsed)
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let message = AutotuneRecommendEngine.paidTrustBlockMessage([.candidateCatalogFallbackUsed])
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.allCandidates.allSatisfy { !$0.eligible })
+        XCTAssertTrue(message.contains("signed live catalog unavailable"))
+        XCTAssertTrue(message.contains("candidate_catalog_fallback_used"))
+        XCTAssertTrue(message.contains("rejected before submission"))
     }
 
     func testRecommendationIsDeterministicForSameDiversificationID() throws {

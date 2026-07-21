@@ -162,6 +162,36 @@ final class StatusCommandTests: XCTestCase {
         XCTAssertTrue(output.contains("Open Malibu to review the recommended next step."), output)
     }
 
+    func testDefaultStatusSurfacesHardwareVerificationLifecycle() {
+        var pending = status(providerID: "provider-a")
+        pending["network_state"] = "live_verified"
+        pending["status"] = "ready"
+        pending["model_loaded"] = true
+        pending["coordinator"] = ["connected": false]
+        pending["lifecycle"] = [
+            "state": "pending_hardware_verification",
+            "reason_code": "autotune_evidence_required",
+        ]
+
+        let pendingOutput = LocalStatusFormatter.format(pending)
+        XCTAssertTrue(pendingOutput.contains("Pending hardware verification"), pendingOutput)
+        XCTAssertTrue(pendingOutput.contains("No local action is needed"), pendingOutput)
+
+        var rejected = status(providerID: "provider-a")
+        rejected["network_state"] = "live_verified"
+        rejected["status"] = "ready"
+        rejected["model_loaded"] = true
+        rejected["coordinator"] = ["connected": false]
+        rejected["lifecycle"] = [
+            "state": "hardware_evidence_rejected",
+            "reason_code": "autotune_evidence_invalid",
+        ]
+
+        let rejectedOutput = LocalStatusFormatter.format(rejected)
+        XCTAssertTrue(rejectedOutput.contains("Not eligible: admission evidence failed"), rejectedOutput)
+        XCTAssertTrue(rejectedOutput.contains("autotune --recommend"), rejectedOutput)
+    }
+
     func testRoutineCLIHelpUsesCanonicalPublicLanguage() {
         let policy = try! publicLanguagePolicy()
         let helpMessages = [

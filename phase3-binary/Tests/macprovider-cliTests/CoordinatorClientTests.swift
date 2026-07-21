@@ -57,6 +57,24 @@ final class CoordinatorClientTests: XCTestCase {
         )
         XCTAssertEqual(unavailable.state, .coordinatorUnavailable)
         XCTAssertEqual(unavailable.reasonCode, "coordinator_unavailable")
+
+        let pendingHardware = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "autotune_evidence_required",
+                message: "autotune_evidence_required"
+            )
+        )
+        XCTAssertEqual(pendingHardware.state, .pendingHardwareVerification)
+        XCTAssertEqual(pendingHardware.reasonCode, "autotune_evidence_required")
+
+        let evidenceRejected = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "autotune_evidence_invalid",
+                message: "autotune_evidence_invalid"
+            )
+        )
+        XCTAssertEqual(evidenceRejected.state, .hardwareEvidenceRejected)
+        XCTAssertEqual(evidenceRejected.reasonCode, "autotune_evidence_invalid")
     }
 
     func testOperatorPauseAndResumeFenceRequestsAndPublishCoordinatorState() async throws {

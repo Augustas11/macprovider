@@ -2561,6 +2561,9 @@ struct LocalStatusFormatter {
         staleRecommendationSince: Date?
     ) -> String {
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
+        let lifecycle = status["lifecycle"] as? [String: Any] ?? [:]
+        let lifecycleState = string(lifecycle["state"])
+        let lifecycleReason = string(lifecycle["reason_code"])
         let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
         let providerID = string(status["provider_id"])
         let model = string(status["model"])
@@ -2577,6 +2580,14 @@ struct LocalStatusFormatter {
         } else if networkState == "buyer_serving" && connected && modelLoaded && !["draining", "unavailable"].contains(localState) {
             title = "Provider is ready"
             nextStep = nil
+        } else if lifecycleState == "pending_hardware_verification"
+            || lifecycleReason == "autotune_evidence_required" {
+            title = "Pending hardware verification"
+            nextStep = "Keep this Mac awake. No local action is needed while operator verification finishes."
+        } else if lifecycleState == "hardware_evidence_rejected"
+            || lifecycleReason == "autotune_evidence_invalid" {
+            title = "Not eligible: admission evidence failed"
+            nextStep = "Run `macprovider-cli autotune --recommend` while online, then restart the provider."
         } else if networkState == "not_buyer_serving" {
             title = "This Mac is not currently eligible"
             nextStep = "Open Malibu to review the recommended next step."

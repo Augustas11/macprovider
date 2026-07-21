@@ -157,6 +157,23 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         )
     }
 
+    func testResultSubmitterFailsClosedBeforeNetworkOnCatalogFallbackEvidence() async {
+        let fixture = makeFixture()
+        var result = fixture.result
+        result.warnings = [.candidateCatalogFallbackUsed]
+
+        let submission = await AutotuneHardwareEvidenceSubmitter(
+            config: try? makeTokenlessConfig(providerID: "mac"),
+            credentialStore: InMemoryProviderCredentialStore()
+        ).submit(result: result, benchmarks: fixture.benchmarks)
+
+        guard case .failed(let reason) = submission else {
+            return XCTFail("expected failed submission, got \(submission)")
+        }
+        XCTAssertTrue(reason.contains("signed live catalog unavailable"), reason)
+        XCTAssertTrue(reason.contains("candidate_catalog_fallback_used"), reason)
+    }
+
     func testInitialRecommendationHydratesTokenlessConfigFromKeychainBeforeEvidenceSubmission() async throws {
         let providerID = "mp-0123456789abcdef0123456789abcdef"
         let token = "keychain-bootstrap-bearer"

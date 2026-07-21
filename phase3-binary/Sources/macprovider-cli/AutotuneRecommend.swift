@@ -1464,7 +1464,12 @@ struct AutotuneRecommendResult: Equatable {
 struct AutotuneRecommendEngine {
     static let safetyMarginGB = 4
     static let maxBenchmarkAge: TimeInterval = 7 * 24 * 3600
+    /// Warnings that must fail closed before paid recommend / evidence submit /
+    /// freshness. Includes transport fallback onto the baked candidate catalog:
+    /// Pearl's hello gate rejects that SHA class as `autotune_evidence_invalid`
+    /// (#582), so local CLI must not submit or apply it silently.
     static let paidTrustBlockingWarnings: Set<AutotuneRecommendWarning> = [
+        .candidateCatalogFallbackUsed,
         .candidateCatalogIntegrityFailure,
         .candidateCatalogUpdateRequired,
         .demandRankIntegrityFailure,
@@ -1473,6 +1478,21 @@ struct AutotuneRecommendEngine {
 
     static func paidTrustBlocks(_ warnings: Set<AutotuneRecommendWarning>) -> Bool {
         !warnings.isDisjoint(with: paidTrustBlockingWarnings)
+    }
+
+    /// Operator-facing copy when paid-trust / network-onboarding warnings block
+    /// recommend, apply, prefetch, or freshness. Fallback uses stronger guidance
+    /// because Pearl rejects that evidence class after submit (#582).
+    static func paidTrustBlockMessage(_ warnings: Set<AutotuneRecommendWarning>) -> String {
+        let failures = warnings
+            .intersection(paidTrustBlockingWarnings)
+            .map(\.rawValue)
+            .sorted()
+            .joined(separator: ", ")
+        if warnings.contains(.candidateCatalogFallbackUsed) {
+            return "signed live catalog unavailable (\(failures)); reconnect and retry when the coordinator candidate catalog is reachable — unsigned fallback evidence is rejected before submission"
+        }
+        return "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
     }
 
     func recommend(_ request: AutotuneRecommendRequest) -> AutotuneRecommendResult {

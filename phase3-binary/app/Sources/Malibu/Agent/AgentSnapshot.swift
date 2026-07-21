@@ -396,6 +396,20 @@ enum AgentSnapshotPresenter {
                 safeNextAction: "Update provider software."
             )
         }
+        if isPendingHardwareVerification(s) {
+            return PublicStatus(
+                title: "Pending hardware verification",
+                detail: "This Mac is waiting for network operator approval before it can receive customer work.",
+                safeNextAction: "Keep Malibu open. No local action is needed while verification finishes."
+            )
+        }
+        if isHardwareEvidenceRejected(s) {
+            return PublicStatus(
+                title: "Not eligible: admission evidence failed",
+                detail: "Hardware evidence was rejected. Refresh the signed catalog recommendation while online, then try again.",
+                safeNextAction: "Run macprovider-cli autotune --recommend when online."
+            )
+        }
         if isIneligibleForCustomerWork(s) {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
@@ -502,6 +516,16 @@ enum AgentSnapshotPresenter {
             || compatibilityRepairAvailable(s)
     }
 
+    private static func isPendingHardwareVerification(_ s: AgentSnapshot) -> Bool {
+        s.lifecycleState == "pending_hardware_verification"
+            || s.lifecycleReason == "autotune_evidence_required"
+    }
+
+    private static func isHardwareEvidenceRejected(_ s: AgentSnapshot) -> Bool {
+        s.lifecycleState == "hardware_evidence_rejected"
+            || s.lifecycleReason == "autotune_evidence_invalid"
+    }
+
     private static func isIneligibleForCustomerWork(_ s: AgentSnapshot) -> Bool {
         switch s.networkState {
         case "not_buyer_serving", "local_donor", "safe_offline_fallback", "catalog_integrity_failure":
@@ -520,13 +544,21 @@ enum AgentSnapshotPresenter {
             if let usdc = s.earningsUsdcToday { return String(format: "$%.2f", usdc) }
             return "Serving"
         case .paused:         return "Paused"
-        case .reconnecting:   return s.networkState == "network_offline" ? "Offline" : "Reconnect"
+        case .reconnecting:
+            switch s.lifecycleState {
+            case "pending_hardware_verification": return "Pending"
+            case "hardware_evidence_rejected": return "Ineligible"
+            case "network_offline": return "Offline"
+            default: return s.networkState == "network_offline" ? "Offline" : "Reconnect"
+            }
         case .error:
             switch s.lifecycleState {
             case "authentication_required": return "Auth"
             case "keychain_unavailable": return "Keychain"
             case "identity_migration_required": return "Identity"
             case "catalog_incompatible": return "Catalog"
+            case "pending_hardware_verification": return "Pending"
+            case "hardware_evidence_rejected": return "Ineligible"
             default: return "Failed"
             }
         }
@@ -618,6 +650,8 @@ enum AgentSnapshotPresenter {
     static func modelLine(_ s: AgentSnapshot) -> String {
         if let model = s.currentModelID { return model }
         if isNetworkReady(s) { return "Connected" }
+        if isPendingHardwareVerification(s) { return "Waiting for verification" }
+        if isHardwareEvidenceRejected(s) { return "Evidence rejected" }
         if isLocalOnly(s) { return "Local only" }
         return isActive(s) ? "Connected" : "Not running"
     }
@@ -837,6 +871,8 @@ enum AgentSnapshotPresenter {
         case "keychain_unavailable": return "Keychain locked or permission denied"
         case "identity_migration_required": return "Network verification needs repair"
         case "catalog_incompatible": return "Provider software update required"
+        case "pending_hardware_verification": return "Pending hardware verification"
+        case "hardware_evidence_rejected": return "Not eligible: admission evidence failed"
         case "serving_buyers": return "Provider is ready"
         case "update_in_progress": return "Update in progress"
         case "rollback_in_progress": return "Rollback in progress"
@@ -862,6 +898,10 @@ enum AgentSnapshotPresenter {
             return "Use Repair network verification"
         case "catalog_incompatible":
             return "Update provider software, then retry"
+        case "pending_hardware_verification":
+            return "Keep Malibu open while operator verification finishes"
+        case "hardware_evidence_rejected":
+            return "Refresh the signed catalog recommendation while online"
         case "paused_by_operator":
             return "Choose Resume when ready"
         case "network_offline":

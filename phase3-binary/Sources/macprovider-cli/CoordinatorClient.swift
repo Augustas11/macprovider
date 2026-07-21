@@ -789,6 +789,24 @@ actor CoordinatorClient {
         switch authError {
         case .rejected(let code, _):
             let normalized = code.lowercased()
+            if normalized == "autotune_evidence_required" {
+                return ConnectionLifecycleClassification(
+                    state: .pendingHardwareVerification,
+                    reasonCode: "autotune_evidence_required"
+                )
+            }
+            if normalized == "autotune_evidence_invalid" {
+                return ConnectionLifecycleClassification(
+                    state: .hardwareEvidenceRejected,
+                    reasonCode: "autotune_evidence_invalid"
+                )
+            }
+            if normalized == "autotune_gate_unavailable" {
+                return ConnectionLifecycleClassification(
+                    state: .coordinatorUnavailable,
+                    reasonCode: "autotune_gate_unavailable"
+                )
+            }
             if normalized.contains("catalog") || normalized.contains("compatibility") {
                 return ConnectionLifecycleClassification(
                     state: .catalogIncompatible,
@@ -1432,6 +1450,14 @@ actor CoordinatorClient {
                 code: "invalid_auth_request",
                 message: reason.isEmpty ? "coordinator closed invalid auth_request" : reason
             )
+        case 4001 where reason == "autotune_evidence_required"
+            || reason == "autotune_evidence_invalid"
+            || reason == "autotune_gate_unavailable"
+            || reason == "catalog_incompatible":
+            // Pearl hello-gate / catalog admission closes use CloseInvalidHello
+            // (4001). Remap them so lifecycle UX can distinguish pending
+            // hardware verification from generic reconnect (#582).
+            return .rejected(code: reason, message: reason)
         case 4005 where reason == "invalid_token" ||
             reason == "bootstrap_identity_mismatch" ||
             reason == "bootstrap_token_used" ||
@@ -1459,8 +1485,15 @@ actor CoordinatorClient {
         inBandAEADRekeyEnabled = false
         // endpoint_url legacy mode — no relay needed.
         inferenceRelay = nil
-        try await send(await helloMessage())
-        try await receiveLoop(socket)
+        do {
+            try await send(await helloMessage())
+            try await receiveLoop(socket)
+        } catch {
+            if let closeError = Self.authProtocolErrorFromCloseDiagnostics(socket) {
+                throw closeError
+            }
+            throw error
+        }
     }
 
     // Receive/handle decoupling (provider WS drain fix). Previously this loop

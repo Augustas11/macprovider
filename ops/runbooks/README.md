@@ -10,3 +10,4 @@
 | **Catalog release + provider upgrade** | [`catalog-release-provider-upgrade.md`](./catalog-release-provider-upgrade.md) | Signed publication, coordinator activation, provider transaction, rollback |
 | **B — Entry 172 referrals** | [`entry-172-referral-activation.md`](./entry-172-referral-activation.md) | Reversible private-prebeta referral activation checklist |
 | **#615 production exceptions** | [`production-exception-register.md`](./production-exception-register.md) | Machine-readable production exception register maintenance |
+| **#582 stranger onboarding** | [`582-stranger-hardware-trust-onboarding.md`](./582-stranger-hardware-trust-onboarding.md) | No-exception install → evidence → durable trust approve → admit → ready |

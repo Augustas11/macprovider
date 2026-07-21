@@ -22,7 +22,12 @@ struct AutotuneHardwareEvidenceSubmitter {
     }()
 
     func submit(result: AutotuneRecommendResult, benchmarks: [String: CandidateBenchmark]) async -> AutotuneHardwareEvidenceSubmission {
-        await submit(snapshot: AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks))
+        // Defense in depth: recommend already fails closed on fallback, but
+        // refuse submit if a caller still passes a blocked warning set (#582).
+        if AutotuneRecommendEngine.paidTrustBlocks(Set(result.warnings)) {
+            return .failed(AutotuneRecommendEngine.paidTrustBlockMessage(Set(result.warnings)))
+        }
+        return await submit(snapshot: AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks))
     }
 
     func submit(snapshot: AutotuneHardwareEvidenceSnapshot) async -> AutotuneHardwareEvidenceSubmission {
