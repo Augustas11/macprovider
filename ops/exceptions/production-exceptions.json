@@ -1,8 +1,8 @@
 {
   "$schema": "./production-exceptions.schema.json",
   "schema_version": "macprovider-production-exceptions-v1",
-  "updated_at": "2026-07-21T10:35:43Z",
-  "updated_by": "codex-lane-c",
+  "updated_at": "2026-07-21T12:49:12Z",
+  "updated_by": "codex-lane-d",
   "environment": "pearl-production",
   "exceptions": [
     {
@@ -203,7 +203,7 @@
       "issue": "https://github.com/Augustas11/macprovider/issues/615",
       "created_at": "2026-07-19T00:00:00Z",
       "expires_at": "2026-07-26T23:59:59Z",
-      "scope": "Entry 172 private-prebeta referral campaign only; no broad stable release, no #613 closure, no fresh-provider redemption evidence claim.",
+      "scope": "Entry 172 private-prebeta referral campaign only; flags may remain live under the Air exception, with no broad stable release, no #613 closure, and no first fresh referred-provider redemption evidence claim.",
       "removal_condition": "Expires at deadline, terminal success/failure of the first fresh referred-provider journey, or any earlier controlled-sequence failure; keeping/re-enabling flags afterward requires complete #613 evidence or a new reviewed decision.",
       "rollback_command": "Restore the prior recorded Pearl referral flag values for `require_for_registration`, `enable_public_validation`, `enable_join_links`, and `enable_social_invite_bonus`; do not print HMAC secrets or referral codes.",
       "post_removal_validation": "Pearl flags match the recorded prior/off values, Vercel `/j` remains fragment-only/static, coordinator validation rejects disallowed origins, and no server logs contain invite code or challenge material.",
@@ -212,6 +212,7 @@
         "beta/DECISION_CRITERIA.md Entry 172",
         "specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance",
         "ops/runbooks/entry-172-referral-activation.md",
+        "ops/runbooks/entry-172-activation-evidence-20260721.md",
         "https://github.com/Augustas11/macprovider/issues/615"
       ]
     }
@@ -263,8 +264,8 @@
       "id": "oq-entry172-live-flags",
       "question": "If Entry 172 activation has started, what exact prior/live referral flag values and campaign metadata were recorded without exposing HMAC secrets or referral codes?",
       "owner": "referral activation/security",
-      "status": "pending",
-      "evidence_target": "Update `exc-entry172-air-referral-activation.evidence` and removal status before expiry."
+      "status": "answered",
+      "evidence_target": "`ops/runbooks/entry-172-activation-evidence-20260721.md` records redacted PASS LIVE evidence; keep `exc-entry172-air-referral-activation` active until expiry, terminal fresh journey result, or earlier controlled-sequence failure."
     }
   ]
 }
