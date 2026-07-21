@@ -15,10 +15,10 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.00")
         XCTAssertEqual(AgentSnapshotPresenter.queueChip(snapshot), "0 queued")
         XCTAssertEqual(AgentSnapshotPresenter.thermalChip(snapshot), "Thermal OK")
-        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Serving")
+        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Provider is ready")
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Connected to coordinator · waiting for first paid job"
+            "Ready for customer work · waiting for the first paid job"
         )
     }
 
@@ -27,16 +27,16 @@ final class DashboardViewTests: XCTestCase {
         snapshot.state = .reconnecting
         snapshot.coordinatorConnected = false
         snapshot.currentModelID = "qwen3-coder-30b-a3b-instruct"
-        snapshot.lastError = "Model loaded locally · not connected to coordinator"
+        snapshot.lastError = "Model loaded locally · not connected to the network"
 
-        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Local only")
+        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Checking customer availability")
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Model loaded locally · not connected to coordinator"
+            "Details are available in Advanced diagnostics."
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.stateLine(snapshot),
-            "Local only · qwen3-coder-30b-a3b-instruct"
+            "Checking customer availability · qwen3-coder-30b-a3b-instruct"
         )
         XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Reconnect")
     }

@@ -106,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func confirmUninstall() -> Bool {
         let alert = NSAlert()
         alert.messageText = "Uninstall Malibu and stop this provider?"
-        alert.informativeText = "This removes the launchd provider, Malibu settings, and local provider configuration. It preserves the CLI Keychain credential so the same provider ownership can be recovered by reinstalling. Downloaded model caches are not removed."
+        alert.informativeText = "This removes the background provider, Malibu settings, and local provider setup. It preserves saved provider access so the same provider ownership can be recovered by reinstalling. Downloaded model caches are not removed."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Quit and Uninstall")
         alert.addButton(withTitle: "Cancel")
@@ -158,14 +158,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentMigrationDialog() -> MigrationDecision {
         let alert = NSAlert()
-        alert.messageText = "Existing provider config found"
-        alert.informativeText = """
-        Malibu found a macprovider config that was not installed by the app. Import asks the installed provider CLI to verify restart-safe credential custody; the CLI removes any migration token only after coordinator admission. Start fresh moves the old config aside.
-        """
+        alert.messageText = MigrationDialogCopy.title
+        alert.informativeText = MigrationDialogCopy.message
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Import")
-        alert.addButton(withTitle: "Start Fresh")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: MigrationDialogCopy.useExistingButton)
+        alert.addButton(withTitle: MigrationDialogCopy.startFreshButton)
+        alert.addButton(withTitle: MigrationDialogCopy.cancelButton)
         switch alert.runModal() {
         case .alertFirstButtonReturn: return .importExisting
         case .alertSecondButtonReturn: return .startFresh
@@ -175,16 +173,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentStartFreshBackup(path: String) {
         let alert = NSAlert()
-        alert.messageText = "Old provider config moved aside"
-        alert.informativeText = "Backup: \(path)\n\nTo reclaim it manually, run:\nmacprovider-cli --config \"\(path)\""
+        alert.messageText = StartFreshBackupCopy.title
+        alert.informativeText = StartFreshBackupCopy.message(path: path)
         alert.alertStyle = .informational
         alert.runModal()
     }
 
     private func presentMigrationError(_ error: Error) {
         let alert = NSAlert()
-        alert.messageText = "Could not migrate provider config"
-        alert.informativeText = error.localizedDescription
+        alert.messageText = MigrationErrorCopy.title
+        alert.informativeText = MigrationErrorCopy.message(error)
         alert.alertStyle = .warning
         alert.runModal()
     }
@@ -279,5 +277,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let buildNumber = bundle.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
         NSLog("[malibu] startup app_version=%@ build=%@ managed_by=malibu-app",
               appVersion, buildNumber)
+    }
+}
+
+enum MigrationDialogCopy {
+    static let title = "Use your existing provider?"
+    static let message = """
+    Malibu found an existing provider on this Mac. Use Existing Provider keeps the same provider identity, payment history, saved access, and local model setup.
+
+    Start Fresh moves the old setup to a backup and creates a new provider. The new provider will not reuse the previous identity, payment history, saved access, or local model setup unless you restore the backup.
+    """
+    static let useExistingButton = "Use Existing Provider"
+    static let startFreshButton = "Start Fresh"
+    static let cancelButton = "Cancel"
+}
+
+enum StartFreshBackupCopy {
+    static let title = "Old provider setup moved aside"
+
+    static func message(path: String) -> String {
+        """
+        Backup: \(path)
+
+        Keep this backup if you may need the previous provider identity, payment history, saved access, or local model setup restored later.
+        """
+    }
+}
+
+enum MigrationErrorCopy {
+    static let title = "Could not use existing provider"
+
+    static func message(_: Error) -> String {
+        "Malibu could not use the existing provider. Your current setup was not changed. Try again, or choose Start Fresh only if you want Malibu to create a new provider."
     }
 }

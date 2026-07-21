@@ -350,6 +350,12 @@ struct AgentSnapshot: Equatable {
 }
 
 enum AgentSnapshotPresenter {
+    struct PublicStatus: Equatable {
+        let title: String
+        let detail: String?
+        let safeNextAction: String?
+    }
+
     private static func isActive(_ s: AgentSnapshot) -> Bool {
         s.state == .serving || s.state == .paused || isLocalOnly(s)
     }
@@ -366,6 +372,143 @@ enum AgentSnapshotPresenter {
     private static func authoritativeLifecycleLabel(_ s: AgentSnapshot) -> String? {
         guard s.isLocalStatusObservationCurrent(), let state = s.lifecycleState else { return nil }
         return lifecycleStateLabel(state)
+    }
+
+    static func publicStatus(_ s: AgentSnapshot) -> PublicStatus {
+        if s.state == .paused {
+            return PublicStatus(
+                title: "Provider is paused",
+                detail: "This Mac will not receive customer work until it is resumed.",
+                safeNextAction: "Choose Resume when ready."
+            )
+        }
+        if isNetworkReady(s) {
+            return PublicStatus(
+                title: "Provider is ready",
+                detail: "This Mac is approved and available for customer work.",
+                safeNextAction: nil
+            )
+        }
+        if isSoftwareUpdateRequired(s) {
+            return PublicStatus(
+                title: "This Mac is not currently eligible",
+                detail: "Provider software must be updated before this Mac can receive customer work.",
+                safeNextAction: "Update provider software."
+            )
+        }
+        if isIneligibleForCustomerWork(s) {
+            return PublicStatus(
+                title: "This Mac is not currently eligible",
+                detail: "This Mac cannot receive customer work in its current state.",
+                safeNextAction: "Export diagnostics for support."
+            )
+        }
+        if isWaitingForNetworkApproval(s) {
+            return PublicStatus(
+                title: "Waiting for network approval",
+                detail: "The model is loaded. Network verification is still in progress.",
+                safeNextAction: "Keep Malibu open while verification finishes."
+            )
+        }
+        if isCheckingCustomerAvailability(s) {
+            return PublicStatus(
+                title: "Checking customer availability",
+                detail: "Malibu has not received a current network approval status yet.",
+                safeNextAction: "Keep Malibu open while status updates."
+            )
+        }
+        if isModelPreparing(s) {
+            return PublicStatus(
+                title: "Model is preparing",
+                detail: "The provider is starting locally before network verification.",
+                safeNextAction: "Keep Malibu open while setup continues."
+            )
+        }
+        switch s.state {
+        case .error:
+            let action: String
+            if canRepairCredential(s) {
+                action = "Repair saved access."
+            } else if canRepairAdmissionIdentity(s) {
+                action = "\(admissionIdentityRepairButtonTitle(s))."
+            } else if updateAvailable(s) {
+                action = "Update provider software."
+            } else {
+                action = "Export diagnostics for support."
+            }
+            return PublicStatus(
+                title: "Provider needs attention",
+                detail: publicErrorDetail(s.lastError),
+                safeNextAction: action
+            )
+        case .paused:
+            return PublicStatus(
+                title: "Provider is paused",
+                detail: "This Mac will not receive customer work until it is resumed.",
+                safeNextAction: "Choose Resume when ready."
+            )
+        case .idle:
+            return PublicStatus(
+                title: "Provider stopped",
+                detail: nil,
+                safeNextAction: "Start provider setup."
+            )
+        default:
+            return PublicStatus(
+                title: "Model is preparing",
+                detail: "Malibu is checking the local provider.",
+                safeNextAction: "Keep Malibu open while setup continues."
+            )
+        }
+    }
+
+    private static func isModelPreparing(_ s: AgentSnapshot) -> Bool {
+        switch s.lifecycleState {
+        case "installing", "importing_credentials", "starting_provider",
+             "validating_catalog", "loading_model", "locally_ready_connecting",
+             "update_in_progress", "rollback_in_progress":
+            return true
+        default:
+            break
+        }
+        return s.state == .starting
+    }
+
+    private static func isWaitingForNetworkApproval(_ s: AgentSnapshot) -> Bool {
+        guard s.isLocalStatusObservationCurrent() else { return false }
+        guard s.currentModelID != nil || s.state == .serving || s.state == .reconnecting else {
+            return false
+        }
+        switch s.networkState {
+        case "live_verified":
+            return true
+        case "buyer_serving_unknown":
+            return s.statusObservationFresh != false
+        default:
+            return false
+        }
+    }
+
+    private static func isCheckingCustomerAvailability(_ s: AgentSnapshot) -> Bool {
+        guard s.state == .serving || s.state == .reconnecting else { return false }
+        if s.networkState == nil { return true }
+        return s.networkState == "buyer_serving_unknown"
+            && (s.statusObservationFresh == false || !s.isLocalStatusObservationCurrent())
+    }
+
+    private static func isSoftwareUpdateRequired(_ s: AgentSnapshot) -> Bool {
+        s.networkState == "catalog_update_required"
+            || s.lifecycleState == "catalog_incompatible"
+            || compatibilityRepairAvailable(s)
+    }
+
+    private static func isIneligibleForCustomerWork(_ s: AgentSnapshot) -> Bool {
+        switch s.networkState {
+        case "not_buyer_serving", "local_donor", "safe_offline_fallback", "catalog_integrity_failure":
+            return true
+        default:
+            return false
+        }
     }
 
     static func short(_ s: AgentSnapshot) -> String {
@@ -391,33 +534,34 @@ enum AgentSnapshotPresenter {
 
     static func dashboardHeadline(_ s: AgentSnapshot) -> String {
         switch s.state {
-        case .idle:         return authoritativeLifecycleLabel(s) ?? "Provider stopped"
-        case .starting:     return authoritativeLifecycleLabel(s) ?? "Starting provider…"
+        case .idle:         return publicStatus(s).title
+        case .starting:     return publicStatus(s).title
         case .serving:
-            return isNetworkReady(s) ? "Serving" : "Connected"
+            return publicStatus(s).title
         case .paused:       return "Paused"
         case .reconnecting:
-            return authoritativeLifecycleLabel(s) ?? (isLocalOnly(s) ? "Local only" : "Reconnecting to coordinator…")
-        case .error:        return authoritativeLifecycleLabel(s) ?? "Provider failed"
+            return publicStatus(s).title
+        case .error:        return publicStatus(s).title
         }
     }
 
     static func dashboardSubtitle(_ s: AgentSnapshot) -> String? {
+        let status = publicStatus(s)
         switch s.state {
         case .serving where !isNetworkReady(s):
-            return "Coordinator connected · buyer-serving status unknown"
+            return status.detail
         case .serving where s.earningsUsdcToday == nil:
-            return "Connected to coordinator · waiting for first paid job"
+            return "Ready for customer work · waiting for the first paid job"
         case .serving:
             return s.currentModelID
         case .reconnecting where isLocalOnly(s):
-            return s.lastError ?? "Model loaded locally · reconnecting to coordinator"
+            return publicErrorDetail(s.lastError) ?? status.detail
         case .reconnecting:
-            return s.lastError ?? "Checking background provider…"
+            return publicErrorDetail(s.lastError) ?? status.detail
         case .starting:
-            return s.lastError ?? "Waiting for the background provider to respond…"
+            return publicErrorDetail(s.lastError) ?? status.detail
         case .error:
-            return s.lastError
+            return status.detail
         default:
             return nil
         }
@@ -429,19 +573,19 @@ enum AgentSnapshotPresenter {
         case .starting:     return authoritativeLifecycleLabel(s) ?? "Starting provider…"
         case .serving:
             if isNetworkReady(s) {
-                return "Serving " + (s.currentModelID ?? "model")
+                return "Provider is ready" + (s.currentModelID.map { " · \($0)" } ?? "")
             }
-            return "Connected · buyer-serving status unknown"
+            return publicStatus(s).title
         case .paused:       return "Paused"
         case .reconnecting:
             if let label = authoritativeLifecycleLabel(s) {
                 return label
             }
             if isLocalOnly(s) {
-                return "Local only · " + (s.currentModelID ?? "model loaded")
+                return publicStatus(s).title + " · " + (s.currentModelID ?? "model loaded")
             }
             return "Reconnecting…"
-        case .error:        return authoritativeLifecycleLabel(s) ?? s.lastError ?? "Provider failed"
+        case .error:        return authoritativeLifecycleLabel(s) ?? publicErrorDetail(s.lastError) ?? "Provider failed"
         }
     }
 
@@ -480,33 +624,33 @@ enum AgentSnapshotPresenter {
 
     static func credentialLine(_ s: AgentSnapshot) -> String {
         guard s.isCredentialStatusCurrent() else {
-            return "Credential status expired · checking again"
+            return "Provider access expired · checking again"
         }
         switch s.credentialState {
         case "ready":
             return s.credentialRestartSafe == true
-                ? "Ready · restart-safe CLI Keychain custody"
+                ? "Ready · safe after restart"
                 : "Ready · restart safety not confirmed"
         case "missing":
             return s.credentialRecoveryAction == "repair_from_protected_source"
-                ? "Missing · protected recovery source available"
-                : "Missing · restore custody or re-enroll"
+                ? "Missing · recovery available"
+                : "Missing · restore access or set up again"
         case "locked":
             return "Login Keychain locked · unlock and retry"
         case "not_logged_in":
             return "Login Keychain unavailable · sign in and retry"
         case "permission_denied":
-            return "Keychain access denied · authorize the provider CLI"
+            return "Keychain access denied · authorize the provider"
         case "corrupt":
             return s.credentialRecoveryAction == "repair_from_protected_source"
-                ? "Corrupt · protected recovery source available"
-                : "Corrupt · restore custody or re-enroll"
+                ? "Damaged · recovery available"
+                : "Damaged · restore access or set up again"
         case "conflict":
-            return "Credential conflict · automatic repair refused"
+            return "Provider access conflict · automatic repair refused"
         case "keychain_failure":
             return "Keychain database failure · repair Keychain before retrying"
         case "incompatible":
-            return "Provider CLI lacks Keychain access · update or reinstall"
+            return "Provider software lacks Keychain access · update or reinstall"
         case "degraded":
             return "Degraded · using a compatibility source"
         case "unavailable":
@@ -514,7 +658,7 @@ enum AgentSnapshotPresenter {
         case "unconfigured":
             return "Not configured"
         case .some(let state):
-            return "Unknown credential condition (\(state))"
+            return "Unknown provider access condition (\(state))"
         case nil:
             return "Not reported by this provider version"
         }
@@ -531,36 +675,36 @@ enum AgentSnapshotPresenter {
             let candidate = abbreviatedDigest(
                 s.admissionIdentityPendingPublicKeySHA256 ?? s.admissionIdentityPublicKeySHA256
             )
-            return "Approval required · candidate \(candidate) · approve via coordinator, then Activate in Malibu"
+            return "Approval required · candidate \(candidate) · ask support to approve, then activate in Malibu"
         }
         if s.admissionIdentityRecoveryJournalState == "committed_cleanup" {
-            return "Recovery committed · finalize the local recovery journal"
+            return "Recovery approved · finish activation in Malibu"
         }
         guard s.isLocalStatusObservationCurrent() else {
-            return "Admission identity expired · checking again"
+            return "Network verification expired · checking again"
         }
         switch (s.admissionIdentityState, s.coordinatorIdentityAdmissionMode) {
         case ("ready", "signature"):
-            return "Ready · CLI Keychain · signature proven"
+            return "Ready · verified by this Mac"
         case ("ready", "exemption"):
-            return "Ready locally · coordinator exemption still active"
+            return "Ready locally · temporary network approval active"
         case ("ready", _):
-            return "Ready · CLI Keychain · admission proof pending"
+            return "Ready locally · network approval pending"
         case ("missing", _):
-            return "Missing · re-enrollment or audited recovery required"
+            return "Missing · restore verification or set up again"
         case ("recovery_pending", _):
             let candidate = abbreviatedDigest(s.admissionIdentityPendingPublicKeySHA256 ?? s.admissionIdentityPublicKeySHA256)
-            return "Approval required · candidate \(candidate) · approve via coordinator, then Activate in Malibu"
+            return "Approval required · candidate \(candidate) · ask support to approve, then activate in Malibu"
         case ("degraded_previous_key", _):
             let deadline = s.admissionIdentityPreviousValidUntil.map(ISO8601DateFormatter().string(from:))
                 ?? "expiry unknown"
-            return "Degraded previous key until \(deadline) · use Repair admission identity"
+            return "Using previous verification until \(deadline) · repair network verification"
         case ("recovery_required", _):
-            return "Recovery required · \(s.admissionIdentityTransitionError ?? s.admissionIdentityRecoveryAction ?? "run macprovider-cli recovery")"
+            return "Recovery required · repair network verification"
         case ("unconfigured", _), (nil, _):
             return "Not reported by this provider version"
         case (.some(let state), _):
-            return "Admission identity condition: \(state)"
+            return "Network verification condition: \(state)"
         }
     }
 
@@ -579,9 +723,9 @@ enum AgentSnapshotPresenter {
         if ["approval_required", "committed_cleanup"]
             .contains(s.admissionIdentityRecoveryJournalState)
             || s.admissionIdentityState == "recovery_pending" {
-            return "Activate approved identity"
+            return "Activate approved verification"
         }
-        return "Repair admission identity"
+        return "Repair network verification"
     }
 
     static func admissionIdentityRecoveryConfigError(
@@ -589,13 +733,13 @@ enum AgentSnapshotPresenter {
         configuredProviderID: String?
     ) -> String? {
         guard let expectedProviderID, !expectedProviderID.isEmpty else {
-            return "Admission identity recovery requires a current provider identity observation."
+            return "Network verification repair requires the current provider ID."
         }
         guard let configuredProviderID, !configuredProviderID.isEmpty else {
-            return "Admission identity recovery requires ~/.config/macprovider/config.yaml with provider_id \(expectedProviderID)."
+            return "Network verification repair requires provider_id \(expectedProviderID) in ~/.config/macprovider/config.yaml."
         }
         guard configuredProviderID == expectedProviderID else {
-            return "Admission identity recovery refused because config provider_id \(configuredProviderID) does not match the active provider \(expectedProviderID)."
+            return "Network verification repair refused because config provider_id \(configuredProviderID) does not match the active provider \(expectedProviderID)."
         }
         return nil
     }
@@ -610,10 +754,10 @@ enum AgentSnapshotPresenter {
             return "Incompatible · update Malibu"
         }
         if !s.isLocalStatusObservationCurrent() {
-            return "Compatible · stale observation"
+            return "Compatible · checking again"
         }
         guard let version = s.localStatusContractVersion else {
-            return "Legacy provider status"
+            return "Older provider status"
         }
         let owner = s.localStatusLifecycleOwner ?? "owner not reported"
         return "v\(version) · \(owner)"
@@ -641,19 +785,19 @@ enum AgentSnapshotPresenter {
             return label
         }
         if s.lifecycleLeaseState == "invalid" {
-            return "Lifecycle lease invalid · watchdog grace disabled"
+            return "Provider recovery status needs a restart"
         }
         if s.lifecycleRecordState == "missing" {
-            return "Lifecycle history missing · provider restart required"
+            return "Provider history missing · restart required"
         }
         if s.lifecycleRecordState == "invalid" {
-            return "Lifecycle history invalid · provider stopped trusting local state"
+            return "Provider history invalid · restart required"
         }
         guard let state = s.lifecycleState else { return nil }
         let label = lifecycleStateLabel(state)
         var parts = [label]
         if let reason = s.lifecycleReason {
-            parts.append(reason.replacingOccurrences(of: "_", with: " "))
+            parts.append(publicReason(reason))
         }
         if let guidance = lifecycleGuidance(state) {
             parts.append(guidance)
@@ -662,11 +806,8 @@ enum AgentSnapshotPresenter {
     }
 
     static func lifecycleEventLine(_ event: ProviderLifecycleEventSnapshot) -> String {
-        var parts = [event.reason.replacingOccurrences(of: "_", with: " ")]
+        var parts = [publicReason(event.reason)]
         parts.append(lifecycleStateLabel(event.state))
-        if let operationID = event.operationID {
-            parts.append(operationID)
-        }
         return parts.joined(separator: " · ")
     }
 
@@ -676,11 +817,11 @@ enum AgentSnapshotPresenter {
         } ?? "Capacity not reported"
         switch s.networkState {
         case "buyer_serving":
-            return "\(capacity) · advertised to buyers"
+            return "\(capacity) · available to customers"
         case "buyer_serving_unknown", nil:
-            return "\(capacity) · advertisement unconfirmed"
+            return "\(capacity) · availability unconfirmed"
         default:
-            return "\(capacity) · not advertised"
+            return "\(capacity) · not available to customers"
         }
     }
 
@@ -689,24 +830,25 @@ enum AgentSnapshotPresenter {
         case "installing": return "Installing provider"
         case "importing_credentials": return "Importing credentials"
         case "starting_provider": return "Starting provider"
-        case "validating_catalog": return "Validating catalog"
-        case "loading_model": return "Loading model"
-        case "locally_ready_connecting": return "Locally ready, connecting to coordinator"
+        case "validating_catalog": return "Checking provider software"
+        case "loading_model": return "Model is preparing"
+        case "locally_ready_connecting": return "Waiting for network approval"
         case "authentication_required": return "Authentication missing or expired"
         case "keychain_unavailable": return "Keychain locked or permission denied"
-        case "identity_migration_required": return "Identity migration required"
-        case "catalog_incompatible": return "Catalog incompatible or update required"
-        case "serving_buyers": return "Serving buyers"
+        case "identity_migration_required": return "Network verification needs repair"
+        case "catalog_incompatible": return "Provider software update required"
+        case "serving_buyers": return "Provider is ready"
         case "update_in_progress": return "Update in progress"
         case "rollback_in_progress": return "Rollback in progress"
         case "paused_by_operator": return "Paused by operator"
-        case "watchdog_recovery": return "Watchdog recovery"
+        case "watchdog_recovery": return "Provider recovery"
         case "network_offline": return "Network offline"
-        case "coordinator_unavailable": return "Coordinator unavailable"
-        case "degraded_serving": return "Degraded but still serving"
+        case "coordinator_unavailable": return "Network unavailable"
+        case "degraded_serving": return "Provider ready with limited capacity"
+        case "busy": return "busy"
         case "failed": return "Failed"
         case "uninstalled": return "Uninstalled"
-        default: return state
+        default: return "Provider status update"
         }
     }
 
@@ -717,9 +859,9 @@ enum AgentSnapshotPresenter {
         case "keychain_unavailable":
             return "Unlock or authorize Keychain, then retry Repair credential"
         case "identity_migration_required":
-            return "Use Repair admission identity"
+            return "Use Repair network verification"
         case "catalog_incompatible":
-            return "Check for the signed compatibility update, then retry"
+            return "Update provider software, then retry"
         case "paused_by_operator":
             return "Choose Resume when ready"
         case "network_offline":
@@ -736,14 +878,16 @@ enum AgentSnapshotPresenter {
     }
 
     static func compatibilitySetLine(_ s: AgentSnapshot) -> String {
-        guard let identifier = s.compatibilitySetID else {
-            return "Legacy release · compatibility set not reported"
+        if let target = updateTargetVersion(s) {
+            return "Update to v\(target) available"
         }
-        let version = identifier.split(separator: ":").last?.split(separator: "@").first.map(String.init)
-            ?? "signed set"
-        let digest = s.compatibilitySetSHA256.map { String($0.prefix(12)) } ?? "digest unavailable"
-        let catalog = s.catalogReleaseID ?? "catalog unavailable"
-        return "\(version) · \(catalog) · \(digest)"
+        if compatibilityRepairAvailable(s) {
+            return "Update required"
+        }
+        guard let current = s.cliVersion else {
+            return "Status not reported"
+        }
+        return "v\(current) · up to date"
     }
 
     static func requestsLine(_ s: AgentSnapshot) -> String {
@@ -908,11 +1052,11 @@ enum AgentSnapshotPresenter {
         if let target = updateTargetVersion(s) {
             parts.append("→ v\(target) available")
         } else if compatibilityRepairAvailable(s) {
-            parts.append("compatibility repair available")
+            parts.append("provider software update required")
         } else if let latest = s.latestReleaseVersion {
             parts.append("latest v\(latest)")
         } else if let recommended = s.coordinatorRecommendedVersion {
-            parts.append("coordinator v\(recommended)")
+            parts.append("network recommends v\(recommended)")
         } else {
             parts.append("up to date")
         }
@@ -921,10 +1065,10 @@ enum AgentSnapshotPresenter {
 
     static func cliUpdateStatusLine(_ s: AgentSnapshot) -> String? {
         if s.cliUpdateInProgress {
-            return "Updating provider CLI…"
+            return "Updating provider software…"
         }
         if let error = s.cliUpdateLastError {
-            return error
+            return publicErrorDetail(error)
         }
         return nil
     }
@@ -932,12 +1076,87 @@ enum AgentSnapshotPresenter {
     static func cliVersionMenuLine(_ s: AgentSnapshot) -> String? {
         guard let current = s.cliVersion else { return nil }
         if let target = updateTargetVersion(s) {
-            return "CLI v\(current) · v\(target) available"
+            return "Provider software v\(current) · v\(target) available"
         }
         if compatibilityRepairAvailable(s) {
-            return "CLI v\(current) · compatibility repair available"
+            return "Provider software v\(current) · update required"
         }
-        return "CLI v\(current) · up to date"
+        return "Provider software v\(current) · up to date"
+    }
+
+    private static func publicReason(_ reason: String) -> String {
+        reason
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "watchdog", with: "provider recovery")
+            .replacingOccurrences(of: "buyer serving", with: "customer availability")
+            .replacingOccurrences(of: "coordinator", with: "network")
+            .replacingOccurrences(of: "compatibility set", with: "provider software")
+            .replacingOccurrences(of: "admission identity", with: "network verification")
+    }
+
+    static func publicErrorDetail(_ error: String?) -> String? {
+        guard let error, !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let redacted = LogTailBuffer.redacted(error)
+        guard redacted != "[redacted]" else {
+            return "Details are available in Advanced diagnostics."
+        }
+        let lower = redacted.lowercased()
+        let internalMarkers = [
+            "compatibility set",
+            "admission identity",
+            "watchdog",
+            "buyer-serving",
+            "buyer serving",
+            "spec-",
+            "migration token",
+            "credential custody",
+            "coordinator admission",
+            "coordinator",
+            "provider cli",
+            "macprovider-cli",
+            "cli-owned",
+            "terminal path",
+            "referral_bootstrap_v1",
+            "provider_token",
+            "authorization:",
+            "/users/",
+            "/tmp/",
+            ".log",
+            "--",
+        ]
+        if internalMarkers.contains(where: { lower.contains($0) }) {
+            return "Details are available in Advanced diagnostics."
+        }
+        let allowedPrefixes = [
+            "Invite code",
+            "Invite entry",
+            "Invite setup",
+            "A referral code",
+            "This referral code",
+            "Too many referral",
+            "Invite actions",
+            "Invite status",
+            "X rewards",
+            "A new X verification",
+            "The X verification",
+            "Enter a public x.com",
+            "Complete one network-verified",
+            "The network",
+            "The post",
+            "Provider software",
+            "Provider setup",
+            "Provider import",
+            "Could not use existing provider",
+            "Could not start provider import",
+            "Saved provider access",
+            "Network verification",
+        ]
+        if allowedPrefixes.contains(where: { redacted.hasPrefix($0) }) {
+            return redacted
+        }
+        return "Details are available in Advanced diagnostics."
     }
 
     private static func malibuDisplay(_ amount: Double, tier: AgentSnapshot.TrustTier, compact: Bool = false) -> String {
@@ -1005,7 +1224,7 @@ extension AgentSnapshot {
         case "expired":
             admissionIdentityRecoveryApprovalInstruction = nil
             admissionIdentityRecoveryOperatorRequest = nil
-            admissionIdentityRecoveryLastError = "The staged admission identity recovery request expired. Stage a new request."
+            admissionIdentityRecoveryLastError = "The staged network verification repair request expired. Stage a new request."
         case "not_staged", "committed":
             admissionIdentityRecoveryApprovalInstruction = nil
             admissionIdentityRecoveryOperatorRequest = nil

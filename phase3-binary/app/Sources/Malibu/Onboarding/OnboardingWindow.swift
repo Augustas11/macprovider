@@ -19,6 +19,29 @@ enum OnboardingWindow {
     }
 }
 
+enum OnboardingCopy {
+    static let intro = "Launch Provider installs and configures provider software on this Mac."
+    static let introDetail = "Malibu monitors the background provider and shows earnings here while setup continues."
+    static let idleDetail = "Installs provider software, picks a model, and registers this Mac for customer work."
+    static let installingFallback = "Installing provider software. First model download and local checks can take 10-30 minutes with little visible progress."
+    static let importingProviderAccess = "Confirming saved provider access before Malibu attaches."
+    static let liveDetailPrefix = "Using"
+    static let referralCaption = "Paste the code or malibu.tech/j#... link from the person who invited you. Malibu sends it once during setup and does not store the invite."
+    static let referralChecking = "Checking provider software..."
+    static let referralUnavailable = "Invite entry is unavailable with the currently installed provider software. Update Malibu and provider software, then check again."
+
+    static func advancedFailureDiagnostics(
+        message: String,
+        installLogLines: [String],
+        providerLogLines: [String]
+    ) -> [String] {
+        var details = [LogTailBuffer.redacted(message)]
+        details.append(contentsOf: installLogLines.map(LogTailBuffer.redacted))
+        details.append(contentsOf: providerLogLines.map(LogTailBuffer.redacted))
+        return details.filter { !$0.isEmpty }
+    }
+}
+
 private struct OnboardingRootView: View {
     @ObservedObject var agent: MalibuAgent
     let onDone: () -> Void
@@ -44,8 +67,8 @@ private struct OnboardingRootView: View {
                         .font(.system(size: 28, weight: .semibold))
                 }
             }
-            Text("Launch Provider installs and configures the macprovider CLI on this Mac.")
-            Text("Malibu monitors the background provider and shows earnings here — setup runs via the same installer as the terminal path.")
+            Text(OnboardingCopy.intro)
+            Text(OnboardingCopy.introDetail)
                 .foregroundStyle(.secondary)
 
             Divider()
@@ -65,7 +88,7 @@ private struct OnboardingRootView: View {
     private var content: some View {
         switch controller.stage {
         case .idle:
-            stageRow(title: "Ready", detail: "Installs the provider CLI, picks a model, and registers a background service.") {
+            stageRow(title: "Ready", detail: OnboardingCopy.idleDetail) {
                 VStack(alignment: .leading, spacing: 8) {
                     referralAvailability
                     launchButton(title: "Launch Provider")
@@ -78,7 +101,7 @@ private struct OnboardingRootView: View {
             stageRow(
                 title: "Installing provider",
                 detail: controller.installProgressHint
-                    ?? "Running the macprovider installer. Autotune and first model download can take 10–30 minutes with little log output."
+                    ?? OnboardingCopy.installingFallback
             ) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 12) {
@@ -90,47 +113,32 @@ private struct OnboardingRootView: View {
                                 .monospacedDigit()
                         }
                     }
-                    if !controller.installLogLines.isEmpty {
-                        ScrollView {
-                            Text(controller.installLogLines.suffix(20).joined(separator: "\n"))
-                                .font(.system(.caption, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                        .frame(maxHeight: 160)
-                    }
+                    advancedLogDisclosure(lines: controller.installLogLines)
                 }
             }
         case .startingAgent:
             stageRow(
                 title: "Starting",
-                detail: agent.providerStartFailure
-                    ?? agent.snapshot.lastError
+                detail: AgentSnapshotPresenter.publicErrorDetail(
+                    agent.providerStartFailure ?? agent.snapshot.lastError
+                )
                     ?? "Waiting for the background provider to become healthy."
             ) {
                 VStack(alignment: .leading, spacing: 8) {
                     ProgressView().controlSize(.small)
-                    if !agent.logLines.isEmpty {
-                        ScrollView {
-                            Text(agent.logLines.suffix(20).joined(separator: "\n"))
-                                .font(.system(.caption, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                        .frame(maxHeight: 160)
-                    }
+                    advancedLogDisclosure(lines: agent.logLines)
                 }
             }
         case .importingProviderCredential:
             stageRow(
-                title: "Confirming provider identity",
-                detail: "Waiting for the CLI-owned provider identity to become restart-safe before Malibu attaches."
+                title: "Confirming provider access",
+                detail: OnboardingCopy.importingProviderAccess
             ) {
                 ProgressView().controlSize(.small)
             }
-        case let .live(model, tier):
+        case let .live(model, _):
             VStack(alignment: .leading, spacing: 16) {
-                stageRow(title: "Provider live", detail: "Serving \(model). Trust tier: \(tier.rawValue).") {
+                stageRow(title: "Provider live", detail: "\(OnboardingCopy.liveDetailPrefix) \(model).") {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 }
                 HStack(spacing: 12) {
@@ -145,7 +153,11 @@ private struct OnboardingRootView: View {
                     .tint(MalibuBrand.coral)
             }
         case let .failed(stage, retryable, message):
-            stageRow(title: retryable ? "Needs retry" : "Setup failed", detail: message) {
+            stageRow(
+                title: retryable ? "Needs retry" : "Setup failed",
+                detail: AgentSnapshotPresenter.publicErrorDetail(message)
+                    ?? "Details are available in Advanced diagnostics."
+            ) {
                 VStack(alignment: .leading, spacing: 8) {
                     if stage == "referral" {
                         referralAvailability
@@ -153,7 +165,43 @@ private struct OnboardingRootView: View {
                     if retryable {
                         launchButton(title: "Retry")
                     }
+                    advancedFailureDisclosure(message: message)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func advancedLogDisclosure(lines: [String]) -> some View {
+        if !lines.isEmpty {
+            DisclosureGroup("Advanced diagnostics") {
+                ScrollView {
+                    Text(lines.suffix(20).map(LogTailBuffer.redacted).joined(separator: "\n"))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 160)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func advancedFailureDisclosure(message: String) -> some View {
+        let visibleDetails = OnboardingCopy.advancedFailureDiagnostics(
+            message: message,
+            installLogLines: controller.installLogLines,
+            providerLogLines: agent.logLines
+        )
+        if !visibleDetails.isEmpty {
+            DisclosureGroup("Advanced diagnostics") {
+                ScrollView {
+                    Text(visibleDetails.suffix(20).joined(separator: "\n"))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 160)
             }
         }
     }
@@ -206,7 +254,7 @@ private struct OnboardingRootView: View {
                 .textFieldStyle(.roundedBorder)
                 .textContentType(.oneTimeCode)
                 .disableAutocorrection(true)
-            Text("Paste the code or malibu.tech/j#… link from the person who invited you. Malibu passes it once to the installed CLI and never stores the provider credential.")
+            Text(OnboardingCopy.referralCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -215,14 +263,14 @@ private struct OnboardingRootView: View {
     @ViewBuilder
     private var referralAvailability: some View {
         if !controller.referralAvailabilityChecked {
-            Text("Checking installed CLI capabilities…")
+            Text(OnboardingCopy.referralChecking)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else if controller.referralInputAvailable {
             referralField
         } else {
             VStack(alignment: .leading, spacing: 5) {
-                Text("Invite entry is unavailable until the authenticated launchd CLI advertises referral_bootstrap_v1. Malibu and CLI versions are checked by capability, not by marketing version.")
+                Text(OnboardingCopy.referralUnavailable)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Check again") {

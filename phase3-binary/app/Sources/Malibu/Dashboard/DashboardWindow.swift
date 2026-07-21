@@ -21,6 +21,32 @@ enum DashboardWindow {
     }
 }
 
+enum DashboardCopy {
+    static let currentStateTitle = "Current state"
+    static let meaningTitle = "What this means"
+    static let nextActionTitle = "Next safe action"
+
+    static func defaultPublicStrings(_ snapshot: AgentSnapshot) -> [String] {
+        let publicStatus = AgentSnapshotPresenter.publicStatus(snapshot)
+        return [
+            currentStateTitle,
+            publicStatus.title,
+            meaningTitle,
+            publicStatus.detail,
+            nextActionTitle,
+            publicStatus.safeNextAction,
+        ].compactMap { $0 }
+    }
+
+    static func advancedDiagnosticsStrings(_ snapshot: AgentSnapshot, logLines: [String]) -> [String] {
+        var strings = ["Advanced diagnostics"]
+        strings.append(contentsOf: logLines.map(LogTailBuffer.redacted))
+        strings.append(AgentSnapshotPresenter.modelLine(snapshot))
+        strings.append(AgentSnapshotPresenter.compatibilitySetLine(snapshot))
+        return strings
+    }
+}
+
 private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
     let onExportDiagnostics: () -> Void
@@ -67,108 +93,102 @@ private struct DashboardView: View {
                 }
 
                 statsPanel {
-                    MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
-                    if let path = agent.snapshot.weightsPath {
-                        DisclosureGroup("Weights path") {
-                            Text(path)
-                                .font(.caption.monospaced())
-                                .textSelection(.enabled)
-                        }
-                    } else if agent.snapshot.state == .serving || agent.snapshot.state == .paused {
-                        MetricRow(title: "Weights path", value: "Managed by provider")
+                    let publicStatus = AgentSnapshotPresenter.publicStatus(agent.snapshot)
+                    MetricRow(title: DashboardCopy.currentStateTitle, value: publicStatus.title)
+                    if let detail = publicStatus.detail {
+                        MetricRow(title: DashboardCopy.meaningTitle, value: detail)
                     }
-                    MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
-                    MetricRow(
-                        title: "Malibu app",
-                        value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
-                    )
-                    MetricRow(title: "Provider CLI", value: AgentSnapshotPresenter.cliVersionLine(agent.snapshot))
-                    MetricRow(title: "Compatibility set", value: AgentSnapshotPresenter.compatibilitySetLine(agent.snapshot))
-                    MetricRow(title: "Buyer capacity", value: AgentSnapshotPresenter.advertisedCapacityLine(agent.snapshot))
-                    MetricRow(title: "Status protocol", value: AgentSnapshotPresenter.statusContractLine(agent.snapshot))
-                    if let instance = AgentSnapshotPresenter.serviceInstanceLine(agent.snapshot) {
-                        MetricRow(title: "Service instance", value: instance)
+                    if let action = publicStatus.safeNextAction {
+                        MetricRow(title: DashboardCopy.nextActionTitle, value: action)
                     }
-                    if let lifecycle = AgentSnapshotPresenter.lifecycleLine(agent.snapshot) {
-                        MetricRow(title: "Lifecycle", value: lifecycle)
-                    }
-                    if let event = agent.snapshot.lifecycleLastRestart {
-                        MetricRow(title: "Last restart", value: AgentSnapshotPresenter.lifecycleEventLine(event))
-                    }
-                    if let event = agent.snapshot.lifecycleLastRejection {
-                        MetricRow(title: "Last rejection", value: AgentSnapshotPresenter.lifecycleEventLine(event))
-                    }
-                    if let event = agent.snapshot.lifecycleLastUpdate {
-                        MetricRow(title: "Last update", value: AgentSnapshotPresenter.lifecycleEventLine(event))
-                    }
-                    if let event = agent.snapshot.lifecycleLastWatchdog {
-                        MetricRow(title: "Last watchdog action", value: AgentSnapshotPresenter.lifecycleEventLine(event))
-                    }
-                    MetricRow(title: "Credential", value: AgentSnapshotPresenter.credentialLine(agent.snapshot))
-                    MetricRow(title: "Admission identity", value: AgentSnapshotPresenter.admissionIdentityLine(agent.snapshot))
-                    if AgentSnapshotPresenter.canRepairCredential(agent.snapshot)
-                        || AgentSnapshotPresenter.canRepairAdmissionIdentity(agent.snapshot) {
-                        Button("Repair") {
-                            Task {
-                                if AgentSnapshotPresenter.canRepairCredential(agent.snapshot) {
-                                    await agent.repairProviderCredential()
-                                } else {
-                                    await agent.repairAdmissionIdentity()
+                    primaryActionButton
+                    DisclosureGroup("Advanced diagnostics") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
+                            if let path = agent.snapshot.weightsPath {
+                                DisclosureGroup("Weights path") {
+                                    Text(path)
+                                        .font(.caption.monospaced())
+                                        .textSelection(.enabled)
                                 }
+                            } else if agent.snapshot.state == .serving || agent.snapshot.state == .paused {
+                                MetricRow(title: "Weights path", value: "Managed by provider")
                             }
+                            MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
+                            MetricRow(
+                                title: "Malibu app",
+                                value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
+                            )
+                            MetricRow(title: "Provider software", value: AgentSnapshotPresenter.compatibilitySetLine(agent.snapshot))
+                            MetricRow(title: "Customer capacity", value: AgentSnapshotPresenter.advertisedCapacityLine(agent.snapshot))
+                            if let lifecycle = AgentSnapshotPresenter.lifecycleLine(agent.snapshot) {
+                                MetricRow(title: "Provider status", value: lifecycle)
+                            }
+                            if let event = agent.snapshot.lifecycleLastRestart {
+                                MetricRow(title: "Last restart", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                            }
+                            if let event = agent.snapshot.lifecycleLastRejection {
+                                MetricRow(title: "Last rejection", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                            }
+                            if let event = agent.snapshot.lifecycleLastUpdate {
+                                MetricRow(title: "Last update", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                            }
+                            if let event = agent.snapshot.lifecycleLastWatchdog {
+                                MetricRow(title: "Last provider recovery", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                            }
+                            MetricRow(title: "Provider access", value: AgentSnapshotPresenter.credentialLine(agent.snapshot))
+                            MetricRow(title: "Network verification", value: AgentSnapshotPresenter.admissionIdentityLine(agent.snapshot))
+                            if agent.snapshot.credentialRepairInProgress
+                                || agent.snapshot.admissionIdentityRecoveryInProgress {
+                                ProgressView("Repairing provider...")
+                                    .controlSize(.small)
+                            }
+                            if let error = agent.snapshot.credentialRepairLastError {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                            if let instruction = agent.snapshot.admissionIdentityRecoveryApprovalInstruction {
+                                Text(instruction)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                            if let request = agent.snapshot.admissionIdentityRecoveryOperatorRequest {
+                                Text(request)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                            if let error = agent.snapshot.admissionIdentityRecoveryLastError {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                            if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
+                                Text(status)
+                                    .font(.caption)
+                                    .foregroundStyle(agent.snapshot.cliUpdateLastError == nil ? Color.secondary : Color.red)
+                            }
+                            if !agent.logLines.isEmpty {
+                                LogTailView(lines: agent.logLines)
+                                    .frame(minHeight: 120, maxHeight: 180)
+                            }
+                            Button("Export redacted diagnostics...") {
+                                onExportDiagnostics()
+                            }
+                            MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
+                            MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
+                            MetricRow(title: "Uptime", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))
+                            HStack(spacing: 8) {
+                                MetricChip(text: AgentSnapshotPresenter.queueChip(agent.snapshot), tone: queueTone)
+                                MetricChip(text: AgentSnapshotPresenter.thermalChip(agent.snapshot), tone: thermalTone)
+                                MetricChip(text: AgentSnapshotPresenter.gpuChip(agent.snapshot), tone: .neutral)
+                                MetricChip(text: AgentSnapshotPresenter.latencyChip(agent.snapshot), tone: .neutral)
+                            }
+                            .fixedSize(horizontal: false, vertical: true)
                         }
-                    } else if agent.snapshot.credentialRepairInProgress
-                        || agent.snapshot.admissionIdentityRecoveryInProgress {
-                        ProgressView("Repairing provider…")
-                            .controlSize(.small)
                     }
-                    if let error = agent.snapshot.credentialRepairLastError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                    if let instruction = agent.snapshot.admissionIdentityRecoveryApprovalInstruction {
-                        Text(instruction)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    if let request = agent.snapshot.admissionIdentityRecoveryOperatorRequest {
-                        Text(request)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    if let error = agent.snapshot.admissionIdentityRecoveryLastError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                    if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
-                        Text(status)
-                            .font(.caption)
-                            .foregroundStyle(agent.snapshot.cliUpdateLastError == nil ? Color.secondary : Color.red)
-                    }
-                    Button(agent.snapshot.cliUpdateInProgress ? "Updating compatibility set…" : "Update compatibility set") {
-                        Task { await agent.updateCLINow() }
-                    }
-                    .disabled(
-                        !AgentSnapshotPresenter.updateAvailable(agent.snapshot)
-                            || agent.snapshot.cliUpdateInProgress
-                    )
-                    Button("Export redacted diagnostics…") {
-                        onExportDiagnostics()
-                    }
-                    MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
-                    MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
-                    MetricRow(title: "Uptime", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))
-                    HStack(spacing: 8) {
-                        MetricChip(text: AgentSnapshotPresenter.queueChip(agent.snapshot), tone: queueTone)
-                        MetricChip(text: AgentSnapshotPresenter.thermalChip(agent.snapshot), tone: thermalTone)
-                        MetricChip(text: AgentSnapshotPresenter.gpuChip(agent.snapshot), tone: .neutral)
-                        MetricChip(text: AgentSnapshotPresenter.latencyChip(agent.snapshot), tone: .neutral)
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(minHeight: 280)
@@ -177,13 +197,32 @@ private struct DashboardView: View {
                 ReferralPanel(agent: agent)
             }
 
-            if !agent.logLines.isEmpty {
-                LogTailView(lines: agent.logLines)
-                    .frame(minHeight: 120, maxHeight: 180)
-            }
             Spacer(minLength: 0)
         }
         .padding(20)
+    }
+
+    @ViewBuilder
+    private var primaryActionButton: some View {
+        let safeAction = AgentSnapshotPresenter.publicStatus(agent.snapshot).safeNextAction
+        if safeAction == "Update provider software.", AgentSnapshotPresenter.updateAvailable(agent.snapshot) {
+            Button(agent.snapshot.cliUpdateInProgress ? "Updating provider software..." : "Update provider software") {
+                Task { await agent.updateCLINow() }
+            }
+            .disabled(agent.snapshot.cliUpdateInProgress)
+        } else if AgentSnapshotPresenter.canRepairCredential(agent.snapshot) {
+            Button("Repair saved access") {
+                Task { await agent.repairProviderCredential() }
+            }
+        } else if AgentSnapshotPresenter.canRepairAdmissionIdentity(agent.snapshot) {
+            Button(AgentSnapshotPresenter.admissionIdentityRepairButtonTitle(agent.snapshot)) {
+                Task { await agent.repairAdmissionIdentity() }
+            }
+        } else if AgentSnapshotPresenter.publicStatus(agent.snapshot).safeNextAction == "Export diagnostics for support." {
+            Button("Export redacted diagnostics...") {
+                onExportDiagnostics()
+            }
+        }
     }
 
     @ViewBuilder
@@ -331,7 +370,7 @@ private struct ReferralPanel: View {
                 }
             }
 
-            if let error = agent.snapshot.referralLastError {
+            if let error = AgentSnapshotPresenter.publicErrorDetail(agent.snapshot.referralLastError) {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)

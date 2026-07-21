@@ -230,7 +230,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
         } catch let error as CLIUpdateRunner.Error {
             XCTAssertEqual(
                 error.localizedDescription,
-                "Provider update installed but did not reach buyer-serving readiness."
+                "Provider update installed but did not become ready for customer work."
             )
         }
     }

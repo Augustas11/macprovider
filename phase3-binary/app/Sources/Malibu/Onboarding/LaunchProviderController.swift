@@ -120,7 +120,7 @@ final class LaunchProviderController: ObservableObject {
             stage = .failed(
                 stage: "referral",
                 retryable: true,
-                message: "Referral entry is unavailable until the installed provider CLI advertises referral_bootstrap_v1. Update the CLI, then retry."
+                message: "Invite entry is unavailable with the currently installed provider software. Update Malibu and provider software, then retry."
             )
             return
         }
@@ -139,9 +139,9 @@ final class LaunchProviderController: ObservableObject {
 
     func setPayoutWallet(_ address: String) async throws {
         throw NSError(
-            domain: "SPEC-027",
+            domain: "Malibu.WalletBinding",
             code: 0,
-            userInfo: [NSLocalizedDescriptionKey: "Wallet binding is a guarded SPEC-027 follow-up route."]
+            userInfo: [NSLocalizedDescriptionKey: "Wallet setup is not available in this Malibu build."]
         )
     }
 
@@ -164,7 +164,7 @@ final class LaunchProviderController: ObservableObject {
             installLogLines = []
             try await dependencies.runCLIInstall(referralCode) { [weak self] line in
                 guard let self else { return }
-                self.installLogLines.append(line)
+                self.installLogLines.append(LogTailBuffer.redacted(line))
                 if self.installLogLines.count > 200 {
                     self.installLogLines.removeFirst(self.installLogLines.count - 200)
                 }
@@ -299,7 +299,7 @@ final class LaunchProviderController: ObservableObject {
             domain: "Malibu.LaunchProviderController",
             code: 4,
             userInfo: [
-                NSLocalizedDescriptionKey: "Provider identity was not fully imported after the background provider became healthy. Retry setup once the provider token is available.",
+                NSLocalizedDescriptionKey: "The existing provider was not fully imported after the background provider became healthy. Retry setup once saved provider access is available.",
                 NSUnderlyingErrorKey: underlying,
             ]
         )
@@ -307,9 +307,9 @@ final class LaunchProviderController: ObservableObject {
 
     private func deferredImportMessage(for error: Error) -> String {
         if isMissingProviderToken(error) {
-            return "Provider token not in config yet; waiting for the background provider before Keychain import."
+            return "Saved provider access is not available yet; waiting for the background provider before import."
         }
-        return "Provider identity import failed; waiting for the background provider before retrying Keychain import."
+        return "Provider import failed; waiting for the background provider before retrying."
     }
 
     private static func waitForInstalledProviderHealth(timeout: TimeInterval) async -> Bool {

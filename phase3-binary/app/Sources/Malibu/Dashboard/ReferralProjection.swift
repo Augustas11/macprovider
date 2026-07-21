@@ -234,7 +234,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
 enum ReferralPanelPresenter {
     static func headline(availability: ReferralAvailability, status: ReferralStatusProjection?) -> String {
         switch availability {
-        case .unsupported: return "Invites unavailable with this provider CLI"
+        case .unsupported: return "Invites unavailable with this provider software"
         case .disabled: return "Invites are not available yet"
         case .unavailable: return "Referral status unavailable"
         case .available:
@@ -243,7 +243,7 @@ enum ReferralPanelPresenter {
             switch status.socialState {
             case ReferralStatusProjection.locked: return "Serve once to unlock invites"
             case ReferralStatusProjection.eligible: return status.remaining == 0 ? "Invite capacity used" : "Invites ready"
-            case ReferralStatusProjection.pending: return "X post awaiting coordinator review"
+            case ReferralStatusProjection.pending: return "X post awaiting network review"
             case ReferralStatusProjection.matured: return "X bonus awarded"
             case ReferralStatusProjection.failed: return "X post was not verified"
             case ReferralStatusProjection.revoked: return "Invites revoked"
@@ -255,23 +255,23 @@ enum ReferralPanelPresenter {
     static func detail(availability: ReferralAvailability, status: ReferralStatusProjection?) -> String {
         switch availability {
         case .unsupported:
-            return "Update the CLI compatibility set to view coordinator-authoritative referral status."
+            return "Update provider software to view current invite status."
         case .disabled:
-            return "The coordinator has not enabled referral actions. Provider serving is unaffected."
+            return "Invites are not enabled yet. Provider serving is unaffected."
         case .unavailable:
             return "Malibu cannot confirm invite capacity right now. Provider serving is unaffected."
         case .available:
             guard let status else { return "Malibu cannot confirm invite capacity right now." }
             if !status.joinLinksEnabled {
-                return "The coordinator preserved your invite balance while public join links are disabled."
+                return "Your invite balance is preserved while public join links are disabled."
             }
             switch status.socialState {
             case ReferralStatusProjection.locked:
-                return "The coordinator has not yet confirmed a verified buyer-serving receipt."
+                return "The network has not yet confirmed this provider can receive customer work."
             case ReferralStatusProjection.pending:
-                return "No bonus is earned until the coordinator verifies the public post."
+                return "No bonus is earned until the public post is verified."
             case ReferralStatusProjection.matured:
-                return "The coordinator reports \(invitePhrase(status.bonusCapacity)) earned from the X reward."
+                return "\(invitePhrase(status.bonusCapacity)) earned from the X reward."
             case ReferralStatusProjection.failed:
                 return "No bonus was awarded. You can create a new verification post when available."
             case ReferralStatusProjection.revoked:

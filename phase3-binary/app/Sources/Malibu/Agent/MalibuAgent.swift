@@ -167,7 +167,7 @@ final class MalibuAgent: ObservableObject {
         } catch {
             finishReferralAction()
             resumeReferralStatusExpiryOrRefresh()
-            snapshot.referralLastError = "The X verification request could not reach the provider CLI."
+            snapshot.referralLastError = "The X verification request could not reach the provider."
         }
     }
 
@@ -184,7 +184,7 @@ final class MalibuAgent: ObservableObject {
         } catch {
             finishReferralAction()
             resumeReferralStatusExpiryOrRefresh()
-            snapshot.referralLastError = "The X composer could not be reopened by the provider CLI."
+            snapshot.referralLastError = "The X composer could not be reopened by the provider."
         }
     }
 
@@ -201,7 +201,7 @@ final class MalibuAgent: ObservableObject {
         } catch {
             finishReferralAction()
             resumeReferralStatusExpiryOrRefresh()
-            snapshot.referralLastError = "The X post could not be submitted to the provider CLI."
+            snapshot.referralLastError = "The X post could not be submitted to the provider."
         }
     }
 
@@ -339,7 +339,7 @@ final class MalibuAgent: ObservableObject {
                         configURL: ProviderPaths.current.configFile,
                         expectedProviderID: expectedProviderID,
                         incidentID: incidentID,
-                        reason: "Malibu admission identity recovery"
+                        reason: "Malibu network verification repair"
                     )
                     guard !Task.isCancelled, !self.isShuttingDown else { return }
                     self.snapshot.applyAdmissionIdentityRecoveryJournal(result)
@@ -576,7 +576,7 @@ final class MalibuAgent: ObservableObject {
               let expectedProviderID = ProviderConfig.readProviderID() else {
             if snapshot.admissionIdentityRecoveryJournalState != nil {
                 snapshot.admissionIdentityRecoveryLastError =
-                    "Admission identity recovery requires the canonical provider config."
+                    "Network verification repair requires the current provider setup."
             }
             return
         }
@@ -669,39 +669,39 @@ final class MalibuAgent: ObservableObject {
 
     private func coordinatorDisconnectMessage() -> String {
         if snapshot.localStatusContractCompatible == false {
-            return "Provider running · status contract requires a newer Malibu version"
+            return "Provider running · Malibu needs an update to read its status"
         }
         if !snapshot.isLocalStatusObservationCurrent() {
-            return "Provider running · local status observation expired; retrying"
+            return "Provider running · checking status again"
         }
         switch snapshot.networkState {
         case "safe_offline_fallback":
-            return "Model loaded locally · signed catalog is offline fallback; not serving buyers"
+            return "Model loaded locally · provider software is using an offline fallback"
         case "catalog_update_required":
-            return "Model loaded locally · provider update required for the current catalog"
+            return "Model loaded locally · provider software update required"
         case "catalog_integrity_failure":
-            return "Model loaded locally · catalog integrity check failed; not serving buyers"
+            return "Model loaded locally · provider software check failed"
         case "local_donor":
-            return "Model loaded locally · local donor mode does not serve buyer traffic"
+            return "Model loaded locally · this mode does not receive customer work"
         case "not_buyer_serving":
-            return "Model loaded locally · coordinator has not admitted this provider for buyer traffic"
+            return "Model loaded locally · this Mac is not currently eligible for customer work"
         case "buyer_serving_unknown":
-            return "Model loaded locally · coordinator buyer-serving status is temporarily unknown"
+            return "Model loaded locally · checking customer availability"
         case "live_verified":
             return snapshot.coordinatorConnected == true
-                ? "Model loaded locally · waiting for buyer-serving admission"
-                : "Model loaded locally · catalog verified; reconnecting to coordinator"
+                ? "Model loaded locally · waiting for network approval"
+                : "Model loaded locally · provider software verified; reconnecting to the network"
         default:
             break
         }
         switch snapshot.coordinatorConnected {
         case .some(false):
-            return "Model loaded locally · not connected to coordinator"
+            return "Model loaded locally · not connected to the network"
         case .none:
-            return "Model loaded locally · checking coordinator connection…"
+            return "Model loaded locally · checking network connection…"
         case .some(true):
             return snapshot.networkState == nil
-                ? "Model loaded locally · coordinator connected; buyer-serving status unknown"
+                ? "Model loaded locally · checking customer availability"
                 : "Checking background provider…"
         }
     }
@@ -887,7 +887,7 @@ final class MalibuAgent: ObservableObject {
                 ? .unavailable
                 : .unsupported
             self.snapshot.referralLastError =
-                "The provider CLI did not return a supported referral response in time."
+                "The provider did not return a supported invite response in time."
         }
     }
 
@@ -904,7 +904,7 @@ final class MalibuAgent: ObservableObject {
         snapshot.referralAvailability = snapshot.hasTrustedReferralBoundary() ? .unavailable : .unsupported
         snapshot.referralStatus = nil
         if snapshot.hasTrustedReferralBoundary() {
-            snapshot.referralLastError = "Referral status is unavailable while Malibu reconnects to the provider CLI."
+            snapshot.referralLastError = "Invite status is unavailable while Malibu reconnects to the provider."
         }
     }
 
@@ -1023,7 +1023,7 @@ final class MalibuAgent: ObservableObject {
                       ReferralPendingChallengeProjection(expiresAt: expiry)
                   ),
                   expiry > Date() else {
-                snapshot.referralLastError = "The provider CLI returned an invalid X verification expiry."
+                snapshot.referralLastError = "The provider returned an invalid X verification expiry."
                 return
             }
             snapshot.referralStatus = next
@@ -1033,7 +1033,7 @@ final class MalibuAgent: ObservableObject {
             finishReferralAction()
             defer { resumeReferralStatusExpiryOrRefresh() }
             guard ReferralWireDate.parse(expiresAt).map({ $0 > Date() }) == true else {
-                snapshot.referralLastError = "The provider CLI could not reopen an active X verification."
+                snapshot.referralLastError = "The provider could not reopen an active X verification."
                 return
             }
             snapshot.referralLastError = nil
@@ -1105,7 +1105,7 @@ final class MalibuAgent: ObservableObject {
             self.snapshot.referralAvailability = self.snapshot.hasTrustedReferralBoundary()
                 ? .unavailable
                 : .unsupported
-            self.snapshot.referralLastError = "Referral status expired while Malibu waited for the provider CLI."
+            self.snapshot.referralLastError = "Invite status expired while Malibu waited for the provider."
             self.referralStatusExpiryTask = nil
         }
     }
@@ -1131,10 +1131,10 @@ final class MalibuAgent: ObservableObject {
     ) -> String {
         switch code {
         case .authenticationRequired:
-            return "The CLI-owned provider credential needs repair before referral status can be read."
+            return "Saved provider access needs repair before invite status can be read."
         case .featureUnavailable:
             return operation == .status
-                ? "Referral actions are not enabled by the coordinator."
+                ? "Invite actions are not enabled yet."
                 : "X rewards are not enabled. Existing invite capacity remains available."
         case .rateLimited:
             if let retryAfterSeconds { return "Too many referral requests. Retry in \(retryAfterSeconds) seconds." }
@@ -1142,11 +1142,11 @@ final class MalibuAgent: ObservableObject {
         case .temporarilyUnavailable:
             return "Referral status is temporarily unavailable."
         case .invalidResponse:
-            return "The provider CLI rejected an invalid referral response."
+            return "The provider rejected an invalid invite response."
         case .invalidPostURL:
             return "Enter a public x.com post URL."
         case .firstServingRequired:
-            return "Complete one coordinator-verified serving receipt before sharing."
+            return "Complete one network-verified customer job before sharing."
         case .challengeUnavailable:
             return "A new X verification link is not available yet."
         case .challengeInvalid:
@@ -1154,7 +1154,7 @@ final class MalibuAgent: ObservableObject {
         case .postNotVerified:
             return "The post is unavailable or does not contain the exact invite link."
         case .referralLocked:
-            return "The coordinator has not unlocked this provider's invite yet."
+            return "The network has not unlocked this provider's invite yet."
         }
     }
 

@@ -28,23 +28,23 @@ enum CLIUpdateRunner {
         var errorDescription: String? {
             switch self {
             case .cliNotFound:
-                return "macprovider-cli was not found at the expected install path."
+                return "Provider software was not found at the expected install path."
             case let .invalidInstalledVersion(version):
-                return "Installed provider CLI version is invalid: \(version ?? "unknown")."
+                return "Installed provider software version is invalid: \(version ?? "unknown")."
             case let .legacyBootstrapUnavailable(appVersion):
-                return "This legacy provider requires Malibu v\(legacyBootstrapTarget) to install the complete compatibility set (running \(appVersion.map { "v\($0)" } ?? "an unknown app version"))."
+                return "This provider requires Malibu v\(legacyBootstrapTarget) to install the required provider software (running \(appVersion.map { "v\($0)" } ?? "an unknown app version"))."
             case let .legacyBootstrapWouldDowngrade(installedVersion):
-                return "Malibu v\(legacyBootstrapTarget) will not downgrade provider CLI v\(installedVersion)."
+                return "Malibu v\(legacyBootstrapTarget) will not downgrade provider software v\(installedVersion)."
             case let .nonZeroExit(code):
-                return "CLI update failed (exit \(code))."
+                return "Provider software update failed (exit \(code))."
             case let .rollbackRestored(code):
                 return "Provider update failed; the previous release was restored (rollback_restored, exit \(code))."
             case let .rollbackFailed(code):
                 return "Provider update and rollback both failed (rollback_failed, exit \(code))."
             case .readinessFailed:
-                return "Provider update installed but did not reach buyer-serving readiness."
+                return "Provider update installed but did not become ready for customer work."
             case let .launchFailed(message):
-                return "Could not start CLI update: \(message)"
+                return "Could not start provider software update: \(message)"
             }
         }
     }

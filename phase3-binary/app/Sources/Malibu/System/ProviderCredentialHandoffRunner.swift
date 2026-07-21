@@ -21,25 +21,25 @@ enum ProviderCredentialHandoffRunner {
         var errorDescription: String? {
             switch self {
             case .cliNotFound:
-                return "The installed provider CLI does not support secure credential handoff yet. Update the provider and retry."
-            case .invalidCLI(let reason):
-                return "The installed provider CLI failed identity validation (\(reason)). Repair the provider and retry."
+                return "The installed provider does not support this import yet. Update the provider and retry."
+            case .invalidCLI:
+                return "The installed provider could not be verified. Repair the provider and retry."
             case .importFailed(let code):
-                return "The provider CLI could not stage its credential (exit \(code)); the original config was preserved."
+                return "The provider could not prepare the saved access for import (exit \(code)); the original setup was preserved."
             case .freshProcessVerificationFailed(let code):
-                return "A fresh provider CLI process could not read the staged credential (exit \(code)); the original config was preserved."
+                return "A restarted provider could not read the saved access (exit \(code)); the original setup was preserved."
             case .statusFailed(let code):
-                return "The provider CLI could not inspect credential custody (exit \(code))."
+                return "The provider could not check saved access (exit \(code))."
             case .repairFailed(let code):
-                return "The provider CLI refused or could not complete credential repair (exit \(code))."
+                return "The provider could not repair saved access (exit \(code))."
             case .admissionRecoveryFailed(let code):
-                return "The provider CLI refused or could not complete admission identity recovery (exit \(code))."
+                return "The provider could not repair network verification (exit \(code))."
             case .invalidOutput(let reason):
-                return "The provider CLI returned an incompatible credential result (\(reason))."
+                return "The provider returned an incompatible import result (\(reason))."
             case .timedOut:
-                return "The provider credential handoff timed out; the original config was preserved."
+                return "Provider import timed out; the original setup was preserved."
             case .launchFailed(let message):
-                return "Could not start the provider credential handoff: \(message)"
+                return "Could not start provider import: \(message)"
             }
         }
     }
@@ -664,7 +664,7 @@ enum ProviderCredentialHandoffRunner {
             }
         )
         guard try validateInstalledExecutable(installed) == expectedIdentity else {
-            throw Error.invalidCLI("executable changed during admission identity recovery")
+            throw Error.invalidCLI("executable changed during network verification repair")
         }
         return try decodeAdmissionIdentityRecoveryResult(
             output,
@@ -693,7 +693,7 @@ enum ProviderCredentialHandoffRunner {
             }
         )
         guard try validateInstalledExecutable(installed) == expectedIdentity else {
-            throw Error.invalidCLI("executable changed during admission identity recovery status")
+            throw Error.invalidCLI("executable changed while checking network verification repair")
         }
         return try decodeAdmissionIdentityRecoveryResult(
             output,

@@ -18,6 +18,20 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
+    func testInstallLogsAreRedactedBeforeOnboardingStoresThem() async {
+        let harness = Harness()
+        harness.emittedInstallLogLines = [
+            "provider_token: secret-token-value",
+            "spec-023 probe completed",
+        ]
+        let controller = freshController(harness)
+
+        await controller.launch()
+
+        XCTAssertEqual(controller.installLogLines.first, "[redacted]")
+        XCTAssertEqual(controller.installLogLines.last, "spec-023 probe completed")
+    }
+
     func testLaunchSkipsInstallerWhenLocalProviderAlreadyHealthy() async {
         let harness = Harness()
         harness.localInstallSucceeded = true
@@ -164,7 +178,9 @@ final class LaunchProviderControllerTests: XCTestCase {
         if case let .failed(stage, retryable, message) = controller.stage {
             XCTAssertEqual(stage, "referral")
             XCTAssertTrue(retryable)
-            XCTAssertTrue(message.contains("referral_bootstrap_v1"))
+            XCTAssertTrue(message.contains("Invite entry is unavailable"))
+            XCTAssertTrue(message.contains("provider software"))
+            XCTAssertFalse(message.contains("referral_bootstrap_v1"))
         } else {
             XCTFail("expected unavailable referral correction state")
         }
@@ -312,7 +328,7 @@ final class LaunchProviderControllerTests: XCTestCase {
             XCTAssertTrue(retryable)
             XCTAssertEqual(
                 message,
-                "Provider identity was not fully imported after the background provider became healthy. Retry setup once the provider token is available."
+                "The existing provider was not fully imported after the background provider became healthy. Retry setup once saved provider access is available."
             )
         } else {
             XCTFail("expected retryable failed stage after retry exhausts identity import again")
@@ -410,7 +426,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         var cliInstallError: Error?
         var cliImportErrors: [Error] = []
         var configModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
-        var installLogLines: [String] = []
+        var emittedInstallLogLines: [String] = ["install.sh finished"]
         var installedReferralCode: String?
 
         func dependencies() -> LaunchProviderController.Dependencies {
@@ -428,7 +444,9 @@ final class LaunchProviderControllerTests: XCTestCase {
                     self.installedReferralCode = referralCode
                     if let error = self.cliInstallError { throw error }
                     self.localInstallSucceededAfterInstall = self.markLocalInstallSucceededAfterInstall
-                    onLogLine("install.sh finished")
+                    for line in self.emittedInstallLogLines {
+                        onLogLine(line)
+                    }
                 },
                 importCLIConfigAfterInstall: {
                     self.cliImportRuns += 1
