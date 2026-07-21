@@ -93,38 +93,176 @@ enum AutotuneRecommendationRunner {
         return try AutotuneRecommendationResult.fromAutotuneJSON(data)
     }
 
-    /// Online #582 remediation: recommend, apply, and submit hardware evidence
-    /// (submit defaults on in the CLI). Does not install or replace provider identity.
+    /// Exit 10 from `--freshness-check`: stored recommendation/evidence is
+    /// missing or stale and a full recommend/apply is required.
+    static let freshnessRequiresRerunExitCode: Int32 = 10
+
+    static func freshnessResubmitArguments(configPath: URL) -> [String] {
+        [
+            "autotune",
+            "--recommend",
+            "--freshness-check",
+            "--require-hardware-evidence",
+            "--json",
+            "--config", configPath.path,
+        ]
+    }
+
+    static func fullRemediationArguments(configPath: URL) -> [String] {
+        [
+            "autotune",
+            "--recommend",
+            "--apply",
+            "--require-hardware-evidence",
+            "--json",
+            "--config", configPath.path,
+        ]
+    }
+
+    /// Pending-trust path: resubmit the exact stored evidence SHA when fresh.
+    /// Throws `nonZeroExit(10)` when a full recommend/apply is required.
+    static func runFreshnessEvidenceResubmit(
+        cliURL: URL,
+        configPath: URL = ProviderPaths.current.configFile
+    ) async throws {
+        _ = try await runProcess(
+            executableURL: cliURL,
+            arguments: freshnessResubmitArguments(configPath: configPath),
+            timeout: 120
+        )
+    }
+
+    /// Corrective #582 remediation: recommend, apply, and require hardware
+    /// evidence submission. Does not install or replace provider identity.
     static func runOnlineHardwareRemediation(
         cliURL: URL,
         configPath: URL = ProviderPaths.current.configFile
     ) async throws {
         _ = try await runProcess(
             executableURL: cliURL,
-            arguments: [
-                "autotune",
-                "--recommend",
-                "--apply",
-                "--json",
-                "--config", configPath.path,
-            ]
+            arguments: fullRemediationArguments(configPath: configPath)
         )
+    }
+
+    /// Stop the launchd-managed provider before corrective benchmarking so
+    /// capacity evidence is not distorted by the incumbent model.
+    static func stopLaunchdProvider(
+        uid: uid_t = getuid(),
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl")
+    ) async throws {
+        try await runLaunchctl(
+            arguments: ["kill", "SIGTERM", "gui/\(uid)/live.streamvc.macprovider"],
+            launchctlURL: launchctlURL,
+            timeout: 5,
+            allowNonZeroExit: true
+        )
+        try await Task.sleep(nanoseconds: 2_000_000_000)
     }
 
     /// Restart the launchd-managed provider so an applied model takes effect.
     static func kickstartLaunchdProvider(
         uid: uid_t = getuid(),
         launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl")
-    ) throws {
-        let process = Process()
-        process.executableURL = launchctlURL
-        process.arguments = ["kickstart", "-k", "gui/\(uid)/live.streamvc.macprovider"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw AutotuneRecommendationError.nonZeroExit(process.terminationStatus)
+    ) async throws {
+        try await runLaunchctl(
+            arguments: ["kickstart", "-k", "gui/\(uid)/live.streamvc.macprovider"],
+            launchctlURL: launchctlURL,
+            timeout: 15,
+            allowNonZeroExit: false
+        )
+    }
+
+    private static func runLaunchctl(
+        arguments: [String],
+        launchctlURL: URL,
+        timeout: TimeInterval,
+        allowNonZeroExit: Bool
+    ) async throws {
+        try Task.checkCancellation()
+        let cancellation = ProcessHold()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global(qos: .utility).async {
+                    let process = Process()
+                    process.executableURL = launchctlURL
+                    process.arguments = arguments
+                    process.standardOutput = FileHandle.nullDevice
+                    process.standardError = FileHandle.nullDevice
+                    do {
+                        try process.run()
+                    } catch {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    cancellation.register(process)
+                    let deadline = Date().addingTimeInterval(max(1, timeout))
+                    while process.isRunning && Date() < deadline && !cancellation.isCancelled {
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                    if process.isRunning {
+                        process.terminate()
+                        let killDeadline = Date().addingTimeInterval(1)
+                        while process.isRunning && Date() < killDeadline {
+                            Thread.sleep(forTimeInterval: 0.02)
+                        }
+                        if process.isRunning {
+                            _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                        }
+                        process.waitUntilExit()
+                        continuation.resume(throwing: AutotuneRecommendationError.timedOut)
+                        return
+                    }
+                    process.waitUntilExit()
+                    if cancellation.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    if !allowNonZeroExit && process.terminationStatus != 0 {
+                        continuation.resume(
+                            throwing: AutotuneRecommendationError.nonZeroExit(process.terminationStatus)
+                        )
+                        return
+                    }
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
+        try Task.checkCancellation()
+    }
+
+    private final class ProcessHold: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private(set) var isCancelled = false
+
+        func register(_ process: Process) {
+            lock.lock()
+            self.process = process
+            let cancelled = isCancelled
+            lock.unlock()
+            if cancelled {
+                Self.terminate(process)
+            }
+        }
+
+        func cancel() {
+            lock.lock()
+            isCancelled = true
+            let process = self.process
+            lock.unlock()
+            if let process {
+                Self.terminate(process)
+            }
+        }
+
+        private static func terminate(_ process: Process) {
+            guard process.isRunning else { return }
+            AutotuneRecommendationRunner.terminateAutotuneSubtree(
+                process: process,
+                graceSeconds: AutotuneRecommendationRunner.subtreeGraceSeconds
+            )
         }
     }
 
@@ -134,78 +272,97 @@ enum AutotuneRecommendationRunner {
         timeout: TimeInterval = processTimeout,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                let stdout = Pipe()
-                let stderr = Pipe()
-                let output = ProcessOutputBuffer()
+        try Task.checkCancellation()
+        let hold = ProcessHold()
+        let data: Data = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    let process = Process()
+                    let stdout = Pipe()
+                    let stderr = Pipe()
+                    let output = ProcessOutputBuffer()
 
-                process.executableURL = executableURL
-                process.arguments = arguments
-                do {
-                    process.environment = try sanitizedProcessEnvironment(from: environment)
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                process.standardOutput = stdout
-                process.standardError = stderr
-
-                stdout.fileHandleForReading.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    guard !chunk.isEmpty else { return }
-                    output.append(chunk)
-                }
-                stderr.fileHandleForReading.readabilityHandler = { handle in
-                    _ = handle.availableData
-                }
-
-                do {
-                    try process.run()
-                    let deadline = Date().addingTimeInterval(max(1, timeout))
-                    while process.isRunning && Date() < deadline {
-                        Thread.sleep(forTimeInterval: 0.05)
+                    process.executableURL = executableURL
+                    process.arguments = arguments
+                    do {
+                        process.environment = try sanitizedProcessEnvironment(from: environment)
+                    } catch {
+                        continuation.resume(throwing: error)
+                        return
                     }
-                    if process.isRunning {
-                        // ARCH-M-1 orphan-child fix: SIGTERM to the CLI first —
-                        // the CLI's `--recommend` path installs a signal
-                        // handler that cascades SIGTERM to its process group
-                        // via `killpg(0, SIGTERM)`, tearing down every
-                        // `CandidateProviderRunner` `serve --no-join` grandchild
-                        // before the CLI exits. If the CLI is wedged and does
-                        // not exit within the grace window, escalate to
-                        // `killpg(cliPid, SIGKILL)` so orphaned probe
-                        // subprocesses cannot outlive the runner.
-                        Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
+                    process.standardOutput = stdout
+                    process.standardError = stderr
+
+                    stdout.fileHandleForReading.readabilityHandler = { handle in
+                        let chunk = handle.availableData
+                        guard !chunk.isEmpty else { return }
+                        output.append(chunk)
+                    }
+                    stderr.fileHandleForReading.readabilityHandler = { handle in
+                        _ = handle.availableData
+                    }
+
+                    do {
+                        try process.run()
+                        hold.register(process)
+                        let deadline = Date().addingTimeInterval(max(1, timeout))
+                        while process.isRunning && Date() < deadline && !hold.isCancelled {
+                            Thread.sleep(forTimeInterval: 0.05)
+                        }
+                        if hold.isCancelled {
+                            if process.isRunning {
+                                Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
+                                process.waitUntilExit()
+                            }
+                            stdout.fileHandleForReading.readabilityHandler = nil
+                            stderr.fileHandleForReading.readabilityHandler = nil
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        if process.isRunning {
+                            // ARCH-M-1 orphan-child fix: SIGTERM to the CLI first —
+                            // the CLI's `--recommend` path installs a signal
+                            // handler that cascades SIGTERM to its process group
+                            // via `killpg(0, SIGTERM)`, tearing down every
+                            // `CandidateProviderRunner` `serve --no-join` grandchild
+                            // before the CLI exits. If the CLI is wedged and does
+                            // not exit within the grace window, escalate to
+                            // `killpg(cliPid, SIGKILL)` so orphaned probe
+                            // subprocesses cannot outlive the runner.
+                            Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
+                            process.waitUntilExit()
+                            throw AutotuneRecommendationError.timedOut
+                        }
                         process.waitUntilExit()
-                        throw AutotuneRecommendationError.timedOut
+                        stdout.fileHandleForReading.readabilityHandler = nil
+                        stderr.fileHandleForReading.readabilityHandler = nil
+                        let remainingOutput = stdout.fileHandleForReading.readDataToEndOfFile()
+                        _ = stderr.fileHandleForReading.readDataToEndOfFile()
+                        let data = output.value(appending: remainingOutput)
+                        guard process.terminationStatus == 0 else {
+                            throw AutotuneRecommendationError.nonZeroExit(process.terminationStatus)
+                        }
+                        continuation.resume(returning: data)
+                    } catch {
+                        // If the process is still running when something else
+                        // failed (e.g. output-buffer error, sanitization mid-flight),
+                        // ensure we also tear down the whole subtree instead of
+                        // leaving a live CLI + grandchildren behind.
+                        if process.isRunning {
+                            Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
+                            process.waitUntilExit()
+                        }
+                        stdout.fileHandleForReading.readabilityHandler = nil
+                        stderr.fileHandleForReading.readabilityHandler = nil
+                        continuation.resume(throwing: error)
                     }
-                    process.waitUntilExit()
-                    stdout.fileHandleForReading.readabilityHandler = nil
-                    stderr.fileHandleForReading.readabilityHandler = nil
-                    let remainingOutput = stdout.fileHandleForReading.readDataToEndOfFile()
-                    _ = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let data = output.value(appending: remainingOutput)
-                    guard process.terminationStatus == 0 else {
-                        throw AutotuneRecommendationError.nonZeroExit(process.terminationStatus)
-                    }
-                    continuation.resume(returning: data)
-                } catch {
-                    // If the process is still running when something else
-                    // failed (e.g. output-buffer error, sanitization mid-flight),
-                    // ensure we also tear down the whole subtree instead of
-                    // leaving a live CLI + grandchildren behind.
-                    if process.isRunning {
-                        Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
-                        process.waitUntilExit()
-                    }
-                    stdout.fileHandleForReading.readabilityHandler = nil
-                    stderr.fileHandleForReading.readabilityHandler = nil
-                    continuation.resume(throwing: error)
                 }
             }
+        } onCancel: {
+            hold.cancel()
         }
+        try Task.checkCancellation()
+        return data
     }
 
     static func sanitizedProcessEnvironment(from environment: [String: String]) throws -> [String: String] {

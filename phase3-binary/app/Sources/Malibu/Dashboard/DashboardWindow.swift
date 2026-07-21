@@ -207,12 +207,20 @@ private struct DashboardView: View {
         let status = AgentSnapshotPresenter.publicStatus(agent.snapshot)
         switch status.executableAction {
         case .retryHardwareVerification:
-            Button(agent.snapshot.hardwareVerificationRetryInProgress
-                   ? "Retrying provider setup..."
-                   : "Retry provider setup while online") {
-                Task { await agent.retryHardwareVerification() }
+            VStack(alignment: .leading, spacing: 6) {
+                Button(agent.snapshot.hardwareVerificationRetryInProgress
+                       ? "Retrying provider setup..."
+                       : "Retry provider setup while online") {
+                    Task { await agent.retryHardwareVerification() }
+                }
+                .disabled(agent.snapshot.hardwareVerificationRetryInProgress)
+                if let error = agent.snapshot.hardwareVerificationRetryLastError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .disabled(agent.snapshot.hardwareVerificationRetryInProgress)
         case .updateProviderSoftware:
             if AgentSnapshotPresenter.updateAvailable(agent.snapshot) {
                 Button(agent.snapshot.cliUpdateInProgress ? "Updating provider software..." : "Update provider software") {

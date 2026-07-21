@@ -112,6 +112,19 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         XCTAssertGreaterThan(AutotuneRecommendationRunner.subtreeGraceSeconds, 0)
     }
 
+    func testOnlineRemediationArgumentsRequireHardwareEvidenceAndFreshnessFirst() {
+        let config = URL(fileURLWithPath: "/tmp/macprovider-config.yaml")
+        let freshness = AutotuneRecommendationRunner.freshnessResubmitArguments(configPath: config)
+        XCTAssertTrue(freshness.contains("--freshness-check"))
+        XCTAssertTrue(freshness.contains("--require-hardware-evidence"))
+        XCTAssertFalse(freshness.contains("--apply"))
+
+        let full = AutotuneRecommendationRunner.fullRemediationArguments(configPath: config)
+        XCTAssertTrue(full.contains("--apply"))
+        XCTAssertTrue(full.contains("--require-hardware-evidence"))
+        XCTAssertEqual(AutotuneRecommendationRunner.freshnessRequiresRerunExitCode, 10)
+    }
+
     func testProcessTimeoutIsNotUntenable() {
         // Belt-and-suspenders: if the constant is ever set to some
         // multi-hour value, the user is trapped in an indefinite

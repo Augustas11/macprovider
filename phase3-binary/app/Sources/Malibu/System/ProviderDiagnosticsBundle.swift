@@ -99,6 +99,10 @@ enum ProviderDiagnosticsBundle {
                 "coordinator_recommended_version": json(snapshot.coordinatorRecommendedVersion),
                 "restart_count": json(snapshot.restartCount),
                 "last_error": json(redacted(snapshot.lastError)),
+                "hardware_verification_retry_in_progress": snapshot.hardwareVerificationRetryInProgress,
+                "hardware_verification_retry_last_error": json(
+                    redacted(snapshot.hardwareVerificationRetryLastError)
+                ),
             ],
             "compatibility": compatibility,
             "service": service,

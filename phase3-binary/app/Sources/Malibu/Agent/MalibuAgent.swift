@@ -222,9 +222,9 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
-    /// Re-run online autotune recommend/apply/submit and restart launchd so a
-    /// locally healthy but admission-blocked provider can recover without a
-    /// fresh install (#582).
+    /// Online #582 recovery without reinstalling provider identity.
+    /// Pending trust resubmits stored evidence first; corrective paths stop the
+    /// incumbent provider, recommend/apply with required evidence, then restart.
     func retryHardwareVerification() async {
         guard !isShuttingDown else { return }
         guard AgentSnapshotPresenter.publicStatus(snapshot).executableAction == .retryHardwareVerification else {
@@ -236,15 +236,50 @@ final class MalibuAgent: ObservableObject {
             await previous.value
         }
         guard !isShuttingDown, !Task.isCancelled else { return }
+        let pendingTrust = snapshot.lifecycleReason == "autotune_evidence_required"
         snapshot.hardwareVerificationRetryInProgress = true
         snapshot.hardwareVerificationRetryLastError = nil
         hardwareVerificationRetryTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if !self.isShuttingDown {
+                    self.snapshot.hardwareVerificationRetryInProgress = false
+                }
+            }
             do {
                 let cliURL = URL(fileURLWithPath: CLIUpdateRunner.installedCLIPath())
-                try await AutotuneRecommendationRunner.runOnlineHardwareRemediation(cliURL: cliURL)
+                var needsFullRemediation = !pendingTrust
+                if pendingTrust {
+                    do {
+                        try await AutotuneRecommendationRunner.runFreshnessEvidenceResubmit(cliURL: cliURL)
+                        guard !Task.isCancelled, !self.isShuttingDown else { return }
+                        self.snapshot.hardwareVerificationRetryLastError = nil
+                        if let port = ProviderConfig.readHTTPPort() {
+                            await self.applyProviderSnapshot(port: port)
+                        }
+                        return
+                    } catch let AutotuneRecommendationError.nonZeroExit(code)
+                        where code == AutotuneRecommendationRunner.freshnessRequiresRerunExitCode
+                    {
+                        needsFullRemediation = true
+                    }
+                }
+                guard needsFullRemediation else { return }
+                try await AutotuneRecommendationRunner.stopLaunchdProvider()
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
-                try AutotuneRecommendationRunner.kickstartLaunchdProvider()
+                do {
+                    try await AutotuneRecommendationRunner.runOnlineHardwareRemediation(cliURL: cliURL)
+                } catch {
+                    // Always attempt restore so a failed probe does not leave
+                    // the launchd provider stopped.
+                    try? await AutotuneRecommendationRunner.kickstartLaunchdProvider()
+                    throw error
+                }
+                guard !Task.isCancelled, !self.isShuttingDown else {
+                    try? await AutotuneRecommendationRunner.kickstartLaunchdProvider()
+                    return
+                }
+                try await AutotuneRecommendationRunner.kickstartLaunchdProvider()
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.hardwareVerificationRetryLastError = nil
                 if let port = ProviderConfig.readHTTPPort() {
@@ -252,13 +287,13 @@ final class MalibuAgent: ObservableObject {
                     await self.applyProviderSnapshot(port: port)
                 }
             } catch is CancellationError {
+                try? await AutotuneRecommendationRunner.kickstartLaunchdProvider()
                 return
             } catch {
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
-                self.snapshot.hardwareVerificationRetryLastError = error.localizedDescription
-            }
-            if !self.isShuttingDown {
-                self.snapshot.hardwareVerificationRetryInProgress = false
+                self.snapshot.hardwareVerificationRetryLastError =
+                    AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
+                    ?? "Provider setup could not be completed. Export diagnostics for support."
             }
         }
         await hardwareVerificationRetryTask?.value
@@ -411,6 +446,10 @@ final class MalibuAgent: ObservableObject {
         healthPollTask?.cancel(); healthPollTask = nil
         cliUpdateTask?.cancel(); cliUpdateTask = nil
         referralStatusExpiryTask?.cancel(); referralStatusExpiryTask = nil
+        let hardwareRetryTask = hardwareVerificationRetryTask
+        hardwareVerificationRetryTask = nil
+        hardwareRetryTask?.cancel()
+        await hardwareRetryTask?.value
         let admissionRecoveryTask = admissionIdentityRecoveryTask
         admissionIdentityRecoveryTask = nil
         admissionRecoveryTask?.cancel()
