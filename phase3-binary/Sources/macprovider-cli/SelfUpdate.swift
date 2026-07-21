@@ -80,6 +80,7 @@ struct SelfUpdate {
     private let lifecycleLeaseStore: ProviderLifecycleLeaseStore
     private let malibuBundleStager: ((URL, URL, CompatibilitySetManifest, URL) throws -> URL)?
     private let stagedCLIValidator: ((URL) throws -> Void)?
+    private let currentBinaryURL: (() -> URL?)?
 
     init(
         currentVersion: String,
@@ -95,7 +96,8 @@ struct SelfUpdate {
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
         malibuBundleStager: ((URL, URL, CompatibilitySetManifest, URL) throws -> URL)? = nil,
-        stagedCLIValidator: ((URL) throws -> Void)? = nil
+        stagedCLIValidator: ((URL) throws -> Void)? = nil,
+        currentBinaryURL: (() -> URL?)? = nil
     ) {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
@@ -111,6 +113,7 @@ struct SelfUpdate {
         self.lifecycleLeaseStore = lifecycleLeaseStore
         self.malibuBundleStager = malibuBundleStager
         self.stagedCLIValidator = stagedCLIValidator
+        self.currentBinaryURL = currentBinaryURL
     }
 
     func run(checkOnly: Bool) async throws {
@@ -804,7 +807,9 @@ struct SelfUpdate {
 
         var pendingMarker: AutoUpdatePendingMarker?
         let current = replaceBinary == nil
-            ? CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
+            ? (currentBinaryURL?() ?? markerStore.resolveCanonicalInstallBinary(
+                launchedExecutableURL: Bundle.main.executableURL
+            ))
             : nil
         if replaceBinary == nil {
             guard let current else { throw UpdateError.currentBinaryUnknown }
