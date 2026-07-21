@@ -829,7 +829,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         request.benchmarks = outcomes.benchmarks
         for modelKey in outcomes.diagnostics.keys.sorted() {
             let reason = outcomes.diagnostics[modelKey]!
-            FileHandle.standardError.write(Data("[warn] spec-023 probe: \(modelKey): \(reason)\n".utf8))
+            FileHandle.standardError.write(Data("[warn] Model readiness check: \(modelKey): \(reason)\n".utf8))
         }
         var result = AutotuneRecommendEngine().recommend(request)
         result.probeDiagnostics = outcomes.diagnostics

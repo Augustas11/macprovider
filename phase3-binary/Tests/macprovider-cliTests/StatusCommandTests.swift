@@ -11,7 +11,8 @@ final class StatusCommandTests: XCTestCase {
         let output = LocalStatusFormatter.format(
             status(providerID: "provider-a"),
             latestVersion: nil,
-            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath)
+            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath),
+            advanced: true
         )
 
         XCTAssertTrue(output.contains("Provider ID:  provider-a"), output)
@@ -28,7 +29,8 @@ final class StatusCommandTests: XCTestCase {
         let output = LocalStatusFormatter.format(
             status(providerID: "provider-a"),
             latestVersion: nil,
-            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath)
+            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath),
+            advanced: true
         )
 
         XCTAssertTrue(output.contains("Owner: (unclaimed — run `macprovider-cli claim`)"), output)
@@ -42,7 +44,8 @@ final class StatusCommandTests: XCTestCase {
         let output = LocalStatusFormatter.format(
             status(providerID: "provider-a"),
             latestVersion: nil,
-            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath)
+            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath),
+            advanced: true
         )
 
         XCTAssertTrue(output.contains("Owner: (unclaimed — run `macprovider-cli claim`)"), output)
@@ -56,7 +59,8 @@ final class StatusCommandTests: XCTestCase {
         let output = LocalStatusFormatter.format(
             status(providerID: "provider-a"),
             latestVersion: nil,
-            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath)
+            ownerLogin: OwnerFileReader.githubLogin(configPath: fixture.configPath),
+            advanced: true
         )
 
         XCTAssertTrue(output.contains("Owner: (unclaimed — run `macprovider-cli claim`)"), output)
@@ -66,7 +70,8 @@ final class StatusCommandTests: XCTestCase {
         let output = LocalStatusFormatter.format(
             status(providerID: "provider-a"),
             latestVersion: nil,
-            donorMode: true
+            donorMode: true,
+            advanced: true
         )
 
         XCTAssertTrue(output.contains("Model:       model-a DONOR MODE"), output)
@@ -78,7 +83,8 @@ final class StatusCommandTests: XCTestCase {
         let output = LocalStatusFormatter.format(
             status(providerID: "provider-a"),
             latestVersion: nil,
-            staleRecommendationSince: staleSince
+            staleRecommendationSince: staleSince,
+            advanced: true
         )
 
         XCTAssertTrue(output.contains("Recommendation stale: recommendation inputs changed since 2026-07-01T00:00:00Z."), output)
@@ -102,7 +108,8 @@ final class StatusCommandTests: XCTestCase {
 
         let output = LocalStatusFormatter.format(
             payload,
-            configPath: "/tmp/provider config.yaml"
+            configPath: "/tmp/provider config.yaml",
+            advanced: true
         )
 
         XCTAssertTrue(output.contains("State:       recovery_pending"), output)
@@ -110,6 +117,109 @@ final class StatusCommandTests: XCTestCase {
         XCTAssertTrue(output.contains("Previous until: 2026-07-21T12:00:00Z"), output)
         XCTAssertTrue(output.contains("POST /admin/provider-admission-identity/recover"), output)
         XCTAssertTrue(output.contains("--config '/tmp/provider config.yaml' --expected-provider-id 'provider-a' --activate"), output)
+    }
+
+    func testDefaultStatusUsesPublicLifecycleLanguage() {
+        let policy = try! publicLanguagePolicy()
+        let prohibited = policy.terms.map(\.internalTerm)
+        let cases: [(String, String, Bool, Bool, String)] = [
+            ("buyer_serving", "ready", true, true, "Provider is ready"),
+            ("not_buyer_serving", "ready", true, true, "This Mac is not currently eligible"),
+            ("buyer_serving_unknown", "ready", true, true, "Waiting for network approval"),
+            ("catalog_update_required", "ready", true, true, "This Mac is not currently eligible"),
+            ("live_verified", "unavailable", true, false, "Model is preparing"),
+            ("live_verified", "ready", false, true, "Provider is connecting"),
+            ("buyer_serving", "ready", false, true, "Provider is connecting"),
+        ]
+
+        for (networkState, localState, connected, modelLoaded, expectedTitle) in cases {
+            var payload = status(providerID: "provider-a")
+            payload["network_state"] = networkState
+            payload["status"] = localState
+            payload["model_loaded"] = modelLoaded
+            var coordinator = payload["coordinator"] as! [String: Any]
+            coordinator["connected"] = connected
+            payload["coordinator"] = coordinator
+
+            let output = LocalStatusFormatter.format(payload, latestVersion: "1.5.0")
+
+            XCTAssertTrue(output.contains(expectedTitle), output)
+            XCTAssertTrue(output.contains("Advanced diagnostics: macprovider-cli status --advanced"), output)
+            for term in prohibited {
+                XCTAssertFalse(output.lowercased().contains(term), "\(term) leaked in:\n\(output)")
+            }
+            XCTAssertNil(output.range(of: policy.specificationIdentifierPattern, options: [.regularExpression, .caseInsensitive]), output)
+        }
+    }
+
+    func testDefaultBlockedStatusShowsOneSafeNextStep() {
+        var payload = status(providerID: "provider-a")
+        payload["network_state"] = "not_buyer_serving"
+
+        let output = LocalStatusFormatter.format(payload)
+
+        XCTAssertEqual(output.components(separatedBy: "Next step:").count - 1, 1, output)
+        XCTAssertTrue(output.contains("Open Malibu to review the recommended next step."), output)
+    }
+
+    func testRoutineCLIHelpUsesCanonicalPublicLanguage() {
+        let policy = try! publicLanguagePolicy()
+        let helpMessages = [
+            MacProviderCLI.helpMessage(),
+            ServeCommand.helpMessage(),
+            StatusCommand.helpMessage(),
+            ModelsSwitchCommand.helpMessage(),
+            AutotuneCommand.helpMessage(),
+            Spec028CanaryCommand.helpMessage(),
+            Spec028BenchmarkCommand.helpMessage(),
+        ]
+
+        for help in helpMessages {
+            XCTAssertNil(help.range(of: policy.specificationIdentifierPattern, options: [.regularExpression, .caseInsensitive]), help)
+            XCTAssertNil(help.range(of: #"\bAC-[0-9]+\b"#, options: [.regularExpression, .caseInsensitive]), help)
+            for term in policy.terms.map(\.internalTerm) {
+                XCTAssertFalse(help.lowercased().contains(term), "\(term) leaked in:\n\(help)")
+            }
+        }
+        XCTAssertTrue(MacProviderCLI.helpMessage().contains("hardware-check"))
+        XCTAssertTrue(MacProviderCLI.helpMessage().contains("performance-check"))
+        XCTAssertFalse(MacProviderCLI.helpMessage().contains("spec028"))
+        XCTAssertTrue(Spec028CanaryCommand.helpMessage().contains("supported-16gb"))
+        XCTAssertFalse(Spec028CanaryCommand.helpMessage().contains("ac10"))
+        for hiddenCommand in ["bootstrap-auth", "credentials", "decode-bench", "enroll", "lifecycle-state", "lifecycle-lease", "rotate-key"] {
+            XCTAssertFalse(MacProviderCLI.helpMessage().contains(hiddenCommand), MacProviderCLI.helpMessage())
+        }
+    }
+
+    func testHardwareCheckKeepsLegacyAutomationProfileAliases() {
+        XCTAssertEqual(Spec028CanaryCommand.HardwareProfile(argument: "ac10"), .supported16GB)
+        XCTAssertEqual(Spec028CanaryCommand.HardwareProfile(argument: "ac11"), .supported8GB)
+        XCTAssertEqual(Spec028CanaryCommand.HardwareProfile(argument: "supported-16gb"), .supported16GB)
+        XCTAssertEqual(Spec028CanaryCommand.HardwareProfile(argument: "supported-8gb"), .supported8GB)
+    }
+
+    func testLegacyHardwareCommandsRemainParseableButHidden() throws {
+        let canary = try MacProviderCLI.parseAsRoot([
+            "spec028-canary", "ac10", "--baseline-runs", "1", "--spec-runs", "1",
+        ])
+        let benchmark = try MacProviderCLI.parseAsRoot([
+            "spec028-benchmark", "--baseline-runs", "1", "--spec-runs", "1",
+        ])
+
+        XCTAssertTrue(canary is LegacySpec028CanaryCommand)
+        XCTAssertTrue(benchmark is LegacySpec028BenchmarkCommand)
+        XCTAssertFalse(MacProviderCLI.helpMessage().contains("spec028-canary"))
+        XCTAssertFalse(MacProviderCLI.helpMessage().contains("spec028-benchmark"))
+    }
+
+    private func publicLanguagePolicy() throws -> PublicLanguagePolicy {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let policyURL = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("public-language.json")
+        return try JSONDecoder().decode(PublicLanguagePolicy.self, from: Data(contentsOf: policyURL))
     }
 
     private func makeFixture(prefix: String) throws -> StatusFixture {
@@ -142,6 +252,24 @@ final class StatusCommandTests: XCTestCase {
                 "recommended_binary_version": "1.5.0",
             ],
         ]
+    }
+}
+
+private struct PublicLanguagePolicy: Decodable {
+    struct Term: Decodable {
+        let internalTerm: String
+
+        enum CodingKeys: String, CodingKey {
+            case internalTerm = "internal"
+        }
+    }
+
+    let terms: [Term]
+    let specificationIdentifierPattern: String
+
+    enum CodingKeys: String, CodingKey {
+        case terms
+        case specificationIdentifierPattern = "specification_identifier_pattern"
     }
 }
 

@@ -8,7 +8,8 @@ import MacProviderCore
 struct BootstrapAuthCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bootstrap-auth",
-        abstract: "Acquire and persist a first-install provider credential."
+        abstract: "Acquire and persist a first-install provider credential.",
+        shouldDisplay: false
     )
 
     @Option(help: "YAML config path. Defaults to ~/.config/macprovider/config.yaml.")

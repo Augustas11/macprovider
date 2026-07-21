@@ -8,6 +8,7 @@ struct EnrollCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "enroll",
         abstract: "Enroll this Mac in the macprovider MDM for hardware attestation.",
+        shouldDisplay: false,
         subcommands: [EnrollRunCommand.self, EnrollStatusCommand.self],
         defaultSubcommand: EnrollRunCommand.self
     )

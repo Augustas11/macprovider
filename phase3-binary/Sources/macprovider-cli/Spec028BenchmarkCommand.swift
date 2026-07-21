@@ -4,11 +4,11 @@ import MacProviderCore
 
 struct Spec028BenchmarkCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "spec028-benchmark",
-        abstract: "Measure SPEC-028 speculative decoding impact against the baseline path."
+        commandName: "performance-check",
+        abstract: "Compare speculative-decoding performance with the baseline path."
     )
 
-    @Option(name: .customLong("fixture"), help: "Fixture JSON path. May be repeated. Defaults to the AC-10 fixture.")
+    @Option(name: .customLong("fixture"), help: "Test fixture JSON path. May be repeated. Defaults to the supported 16 GB profile.")
     var fixturePaths: [String] = []
 
     @Option(help: "Target model local snapshot path. Overrides each fixture target model load path.")
@@ -233,6 +233,25 @@ struct Spec028BenchmarkCommand: AsyncParsableCommand {
 
     private static func evidenceModelRef(_ value: String) -> String {
         ProviderStatus.publicSpecDecodeDraftModelID(value) ?? "unknown"
+    }
+}
+
+/// Compatibility entry point for existing automation. Hidden from routine help so
+/// provider-facing surfaces use the public `performance-check` name.
+struct LegacySpec028BenchmarkCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "spec028-benchmark",
+        shouldDisplay: false
+    )
+
+    @OptionGroup var command: Spec028BenchmarkCommand
+
+    mutating func validate() throws {
+        try command.validate()
+    }
+
+    mutating func run() async throws {
+        try await command.run()
     }
 }
 

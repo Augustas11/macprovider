@@ -2438,7 +2438,112 @@ struct LocalStatusClient {
 }
 
 struct LocalStatusFormatter {
-    static func format(_ status: [String: Any], latestVersion: String? = nil, ownerLogin: String? = nil, donorMode: Bool = false, staleRecommendationSince: Date? = nil, configPath: String? = nil) -> String {
+    static func format(
+        _ status: [String: Any],
+        latestVersion: String? = nil,
+        ownerLogin: String? = nil,
+        donorMode: Bool = false,
+        staleRecommendationSince: Date? = nil,
+        configPath: String? = nil,
+        advanced: Bool = false
+    ) -> String {
+        guard advanced else {
+            return publicFormat(
+                status,
+                latestVersion: latestVersion,
+                ownerLogin: ownerLogin,
+                donorMode: donorMode,
+                staleRecommendationSince: staleRecommendationSince
+            )
+        }
+        return advancedFormat(
+            status,
+            latestVersion: latestVersion,
+            ownerLogin: ownerLogin,
+            donorMode: donorMode,
+            staleRecommendationSince: staleRecommendationSince,
+            configPath: configPath
+        )
+    }
+
+    private static func publicFormat(
+        _ status: [String: Any],
+        latestVersion: String?,
+        ownerLogin: String?,
+        donorMode: Bool,
+        staleRecommendationSince: Date?
+    ) -> String {
+        let coordinator = status["coordinator"] as? [String: Any] ?? [:]
+        let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
+        let providerID = string(status["provider_id"])
+        let model = string(status["model"])
+        let localState = string(status["status"])
+        let networkState = string(status["network_state"])
+        let connected = (coordinator["connected"] as? Bool) == true
+        let modelLoaded = (status["model_loaded"] as? Bool) ?? ["ready", "busy", "degraded"].contains(localState)
+        let title: String
+        let nextStep: String?
+
+        if donorMode || networkState == "local_donor" {
+            title = "Provider is running locally"
+            nextStep = "Open Malibu when you are ready to join the network."
+        } else if networkState == "buyer_serving" && connected && modelLoaded && !["draining", "unavailable"].contains(localState) {
+            title = "Provider is ready"
+            nextStep = nil
+        } else if networkState == "not_buyer_serving" {
+            title = "This Mac is not currently eligible"
+            nextStep = "Open Malibu to review the recommended next step."
+        } else if ["catalog_update_required", "compatibility_update_required"].contains(networkState) {
+            title = "This Mac is not currently eligible"
+            nextStep = "Run `macprovider-cli update`."
+        } else if !modelLoaded || ["draining", "unavailable"].contains(localState) {
+            title = "Model is preparing"
+            nextStep = "Keep this Mac awake while preparation completes."
+        } else if !connected {
+            title = "Provider is connecting"
+            nextStep = "Check this Mac's internet connection."
+        } else {
+            title = "Waiting for network approval"
+            nextStep = "No action is needed while approval completes."
+        }
+
+        let owner = ownerLogin.map { "@\($0)" } ?? "Not linked"
+        let update: String
+        if let latestVersion,
+           SelfUpdate.compareSemver(version, latestVersion) == .orderedAscending {
+            update = "v\(version) · v\(latestVersion) available"
+        } else if latestVersion != nil {
+            update = "v\(version) · up to date"
+        } else {
+            update = "v\(version) · update status unavailable"
+        }
+        let recommendation = staleRecommendationSince == nil
+            ? ""
+            : "\nRecommendation: Refresh with `macprovider-cli autotune --recommend`."
+        let action = nextStep.map { "\nNext step: \($0)" } ?? ""
+
+        return """
+        macprovider-cli v\(version)
+
+        \(title)
+        Provider: \(providerID)
+        Owner: \(owner)
+        Model: \(model)
+        Provider software: \(update)
+        Requests: \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors\(recommendation)\(action)
+
+        Advanced diagnostics: macprovider-cli status --advanced
+        """
+    }
+
+    private static func advancedFormat(
+        _ status: [String: Any],
+        latestVersion: String?,
+        ownerLogin: String?,
+        donorMode: Bool,
+        staleRecommendationSince: Date?,
+        configPath: String?
+    ) -> String {
         let capacity = status["capacity"] as? [String: Any] ?? [:]
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
         let catalog = status["catalog"] as? [String: Any] ?? [:]

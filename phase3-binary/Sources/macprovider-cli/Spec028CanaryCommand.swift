@@ -5,58 +5,66 @@ import MacProviderCore
 
 struct Spec028CanaryCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "spec028-canary",
-        abstract: "Run SPEC-028 hardware acceptance canaries."
+        commandName: "hardware-check",
+        abstract: "Run the supported-Mac model readiness checks."
     )
 
-    enum CanaryKind: String, ExpressibleByArgument {
-        case ac10
-        case ac11
+    enum HardwareProfile: String, CaseIterable, ExpressibleByArgument {
+        case supported16GB = "supported-16gb"
+        case supported8GB = "supported-8gb"
+
+        init?(argument: String) {
+            switch argument {
+            case Self.supported16GB.rawValue, "ac10": self = .supported16GB
+            case Self.supported8GB.rawValue, "ac11": self = .supported8GB
+            default: return nil
+            }
+        }
     }
 
-    @Argument(help: "Canary to run. Currently: ac10, ac11.")
-    var kind: CanaryKind = .ac10
+    @Argument(help: "Hardware profile to check: supported-16gb or supported-8gb.")
+    var kind: HardwareProfile = .supported16GB
 
-    @Option(help: "Target model ID or local snapshot path. Defaults to the AC-10 fixture target.")
+    @Option(help: "Target model ID or local snapshot path. Defaults to the 16 GB test target.")
     var target: String?
 
-    @Option(help: "Draft model ID or local snapshot path. Defaults to the AC-10 fixture draft.")
+    @Option(help: "Draft model ID or local snapshot path. Defaults to the 16 GB test draft.")
     var draft: String?
 
-    @Option(help: "Speculative draft tokens. AC-10 default: 3.")
+    @Option(help: "Speculative draft tokens. Default: 3.")
     var numDraftTokens: Int = 3
 
     @Option(help: "Maximum prompt context tokens. Defaults to the 16 GB draft cap.")
     var maxContextTokens: Int = ProviderCapacity.draftContextCap(forPhysicalMemoryGB: 16)
 
-    @Option(help: "Number of warm baseline runs. AC-10 default: 5.")
+    @Option(help: "Number of warm baseline runs. Default: 5.")
     var baselineRuns: Int = 5
 
-    @Option(help: "Number of warm speculative runs. AC-10 default: 5.")
+    @Option(help: "Number of warm speculative runs. Default: 5.")
     var specRuns: Int = 5
 
-    @Option(help: "Sustained speculative window in seconds. AC-10 default: 300.")
+    @Option(help: "Sustained speculative window in seconds. Default: 300.")
     var sustainedSeconds: Double = 300
 
-    @Option(help: "Trailing sustained window in seconds. AC-10 default: 60.")
+    @Option(help: "Trailing sustained window in seconds. Default: 60.")
     var lastWindowSeconds: Double = 60
 
-    @Option(help: "Median speculative TPS / baseline TPS floor. AC-10 default: 1.4.")
+    @Option(help: "Median speculative TPS / baseline TPS floor. Default: 1.4.")
     var ratioFloor: Double = 1.4
 
-    @Option(help: "Trailing sustained TPS / baseline TPS floor. AC-10 default: 1.2.")
+    @Option(help: "Trailing sustained TPS / baseline TPS floor. Default: 1.2.")
     var sustainedRatioFloor: Double = 1.2
 
-    @Option(help: "Speculative accepted/drafted token floor. AC-10 default: 0.30.")
+    @Option(help: "Speculative accepted/drafted token floor. Default: 0.30.")
     var acceptanceFloor: Double = 0.30
 
-    @Option(help: "Override AC-10 fixture path.")
+    @Option(help: "Override the test fixture path.")
     var fixturePath: String?
 
-    @Flag(help: "Allow running on non-16 GB Apple Silicon for diagnostics. Evidence does not satisfy AC-10.")
+    @Flag(help: "Allow running the 16 GB profile on other Apple Silicon for diagnostics only.")
     var allowNon16GBHost = false
 
-    @Flag(help: "Allow running AC-11 on non-8 GB Apple Silicon for diagnostics. Evidence does not satisfy AC-11.")
+    @Flag(help: "Allow running the 8 GB profile on other Apple Silicon for diagnostics only.")
     var allowNon8GBHost = false
 
     mutating func validate() throws {
@@ -79,9 +87,9 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         switch kind {
-        case .ac10:
+        case .supported16GB:
             try await runAC10()
-        case .ac11:
+        case .supported8GB:
             try await runAC11()
         }
     }
@@ -90,7 +98,7 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
         let host = HostEvidence.current()
         if !allowNon16GBHost {
             guard host.isAppleSilicon16GB else {
-                throw ValidationError("AC-10 requires M4 16 GB Apple Silicon; host=\(host.machine) chip=\(host.chip) memory_gb=\(host.memoryGB). Re-run on M4 16 GB hardware, or pass --allow-non16-gb-host for non-acceptance diagnostics.")
+                throw ValidationError("The 16 GB hardware check requires an M4 Mac with 16 GB memory. Re-run on supported hardware, or pass --allow-non16-gb-host for diagnostics only.")
             }
         }
 
@@ -160,7 +168,7 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
         )
         try Self.emit(result)
         guard finalEvaluation.passed else {
-            throw ValidationError("AC-10 failed: \(finalEvaluation.failureReasons.joined(separator: "; "))")
+            throw ValidationError("The 16 GB hardware check failed. See the generated diagnostic report for details.")
         }
     }
 
@@ -168,7 +176,7 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
         let host = HostEvidence.current()
         if !allowNon8GBHost {
             guard host.isAppleSilicon8GB else {
-                throw ValidationError("AC-11 requires M1 8 GB Apple Silicon; host=\(host.machine) chip=\(host.chip) memory_gb=\(host.memoryGB). Re-run on an 8 GB M1 Air, or pass --allow-non8-gb-host for non-acceptance diagnostics.")
+                throw ValidationError("The 8 GB hardware check requires an M1 Mac with 8 GB memory. Re-run on supported hardware, or pass --allow-non8-gb-host for diagnostics only.")
             }
         }
 
@@ -337,6 +345,25 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
 
     private static func evidenceModelRef(_ value: String) -> String {
         ProviderStatus.publicSpecDecodeDraftModelID(value) ?? "unknown"
+    }
+}
+
+/// Compatibility entry point for existing automation. Hidden from routine help so
+/// provider-facing surfaces use the public `hardware-check` name.
+struct LegacySpec028CanaryCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "spec028-canary",
+        shouldDisplay: false
+    )
+
+    @OptionGroup var command: Spec028CanaryCommand
+
+    mutating func validate() throws {
+        try command.validate()
+    }
+
+    mutating func run() async throws {
+        try await command.run()
     }
 }
 

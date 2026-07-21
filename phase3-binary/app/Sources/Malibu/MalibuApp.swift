@@ -143,15 +143,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .quit:
             NSApp.terminate(nil)
         case .showImportDialog:
-            let decision = presentMigrationDialog()
-            do {
-                let result = try await StartupState.applyMigrationDecision(decision)
-                if let backupPath = result.backupPath {
-                    presentStartFreshBackup(path: backupPath)
+            while true {
+                let decision = presentMigrationDialog()
+                if decision == .startFresh, !presentStartFreshConfirmation() {
+                    continue
                 }
-                await handleStartupRoute(result.route)
-            } catch {
-                presentMigrationError(error)
+                do {
+                    let result = try await StartupState.applyMigrationDecision(decision)
+                    if let backupPath = result.backupPath {
+                        presentStartFreshBackup(path: backupPath)
+                    }
+                    await handleStartupRoute(result.route)
+                    return
+                } catch {
+                    guard presentMigrationError(error) else {
+                        NSApp.terminate(nil)
+                        return
+                    }
+                }
             }
         }
     }
@@ -179,12 +188,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
-    private func presentMigrationError(_ error: Error) {
+    private func presentStartFreshConfirmation() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = StartFreshConfirmationCopy.title
+        alert.informativeText = StartFreshConfirmationCopy.message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: StartFreshConfirmationCopy.cancelButton)
+        alert.addButton(withTitle: StartFreshConfirmationCopy.startFreshButton)
+        return StartFreshConfirmationCopy.confirms(alert.runModal())
+    }
+
+    private func presentMigrationError(_ error: Error) -> Bool {
         let alert = NSAlert()
         alert.messageText = MigrationErrorCopy.title
         alert.informativeText = MigrationErrorCopy.message(error)
         alert.alertStyle = .warning
-        alert.runModal()
+        alert.addButton(withTitle: MigrationErrorCopy.cancelButton)
+        alert.addButton(withTitle: MigrationErrorCopy.retryButton)
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     private func presentDashboard() {
@@ -304,10 +325,46 @@ enum StartFreshBackupCopy {
     }
 }
 
+enum StartFreshConfirmationCopy {
+    static let title = "Create a new provider instead?"
+    static let message = """
+    This moves the existing setup to a reversible backup before Malibu creates a new provider.
+
+    The new provider will have a different identity and will not include the previous payment history, saved access, or local model setup unless you restore the backup.
+    """
+    static let cancelButton = "Keep Existing Provider"
+    static let startFreshButton = "Create New Provider"
+
+    static func confirms(_ response: NSApplication.ModalResponse) -> Bool {
+        response == .alertSecondButtonReturn
+    }
+}
+
 enum MigrationErrorCopy {
     static let title = "Could not use existing provider"
+    static let cancelButton = "Cancel"
+    static let retryButton = "Try Again"
 
-    static func message(_: Error) -> String {
-        "Malibu could not use the existing provider. Your current setup was not changed. Try again, or choose Start Fresh only if you want Malibu to create a new provider."
+    static func message(_ error: Error) -> String {
+        let reason: String
+        if let handoffError = error as? ProviderCredentialHandoffRunner.Error {
+            reason = publicHandoffReason(handoffError)
+        } else {
+            reason = AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
+                ?? "Technical details are available in Advanced diagnostics."
+        }
+        return "\(reason)\n\nYour current setup was not changed."
+    }
+
+    private static func publicHandoffReason(_ error: ProviderCredentialHandoffRunner.Error) -> String {
+        switch error {
+        case .cliNotFound, .invalidCLI, .importFailed, .freshProcessVerificationFailed,
+             .statusFailed, .repairFailed, .admissionRecoveryFailed, .timedOut:
+            return error.localizedDescription
+        case .invalidOutput:
+            return "The installed provider returned an incompatible import result. Update the provider and retry."
+        case .launchFailed:
+            return "Could not start provider import. Update the provider and retry."
+        }
     }
 }

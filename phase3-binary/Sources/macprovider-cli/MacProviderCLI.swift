@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -49,6 +49,7 @@ struct LifecycleStateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lifecycle-state",
         abstract: "Read or transition the CLI-owned persisted provider lifecycle state.",
+        shouldDisplay: false,
         subcommands: [LifecycleStateStatusCommand.self, LifecycleStateTransitionCommand.self]
     )
 }
@@ -137,6 +138,7 @@ struct LifecycleLeaseCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lifecycle-lease",
         abstract: "Inspect the CLI-owned provider lifecycle lease.",
+        shouldDisplay: false,
         subcommands: [LifecycleLeaseStatusCommand.self]
     )
 }
@@ -217,7 +219,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Speculative decoding draft tokens per verification round. Default 3 when --draft-model is set; valid range 1...16.")
     var numDraftTokens: Int?
 
-    @Flag(name: .customLong("publish-spec-decode-telemetry"), inversion: .prefixedNo, help: "Opt into publishing SPEC-028 speculative decoding telemetry on coordinator heartbeats after compatibility is verified. Default off.")
+    @Flag(name: .customLong("publish-spec-decode-telemetry"), inversion: .prefixedNo, help: "Opt into publishing speculative-decoding performance telemetry after provider software is verified. Default off.")
     var publishSpecDecodeTelemetry: Bool?
 
     @Option(help: "Coordinator WebSocket URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
@@ -235,19 +237,19 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Log level: trace, debug, info, notice, warning, error, critical.")
     var logLevel: String?
 
-    @Option(help: "Comma-separated list of HuggingFace model IDs (or local paths) this provider can serve. Overrides MACPROVIDER_SUPPORTED_MODELS and config key supported_models. When unset, the binary publishes supported_models: [model_id] (single-entry, per SPEC-010 v1.5 R-3.6.2).")
+    @Option(help: "Comma-separated list of HuggingFace model IDs (or local paths) this provider can serve. Overrides MACPROVIDER_SUPPORTED_MODELS and config key supported_models. When unset, only the configured model is advertised.")
     var supportedModels: String?
 
-    @Flag(name: .customLong("publish-supported-models"), inversion: .prefixedNo, help: "Opt into publishing the supported_models catalog to the coordinator's /v1/status echo (SPEC-010 v1.5 R-3.6.4). Default off.")
+    @Flag(name: .customLong("publish-supported-models"), inversion: .prefixedNo, help: "Opt into publishing the supported model list to the network status service. Default off.")
     var publishSupportedModels: Bool?
 
-    @Flag(name: .customLong("enable-warm-swap"), inversion: .prefixedNo, help: "Opt into the operator-pushed warm model swap workflow (SPEC-011 v0.5). Default off. When off, the binary follows the SPEC-001 v1.2.4 synchronous-load path; no control socket is opened.")
+    @Flag(name: .customLong("enable-warm-swap"), inversion: .prefixedNo, help: "Opt into switching models without a full provider restart. Default off. When off, no model-control socket is opened.")
     var enableWarmSwap: Bool?
 
-    @Flag(name: .customLong("enable-receipts"), inversion: .prefixedNo, help: "Opt into SPEC-015 non-streaming receipt emission. Default off for v0.1.x rollout.")
+    @Flag(name: .customLong("enable-receipts"), inversion: .prefixedNo, help: "Opt into signed non-streaming request receipts. Default off for staged rollout.")
     var enableReceipts: Bool?
 
-    @Option(help: "Drain timeout in seconds for an in-flight warm swap (SPEC-011 v0.5 §3.4 / §3.9). Default 30. Only meaningful when --enable-warm-swap is set.")
+    @Option(help: "Drain timeout in seconds for an in-flight model switch. Default 30. Only meaningful when --enable-warm-swap is set.")
     var swapDrainTimeoutSeconds: Int?
 
     @Option(help: "Control socket path. Overrides MACPROVIDER_CTL_SOCKET_PATH and config ctl_socket_path. Default $TMPDIR/macprovider-cli/ctl.sock. Only meaningful when --enable-warm-swap is set.")
@@ -1964,6 +1966,9 @@ struct StatusCommand: AsyncParsableCommand {
     @Option(help: "Local HTTP port to query. Overrides MACPROVIDER_PORT and config file port.")
     var port: Int?
 
+    @Flag(help: "Show exact technical fields for diagnostics and support.")
+    var advanced = false
+
     func run() async throws {
         let resolved = try ConfigLoader.load(
             cli: CLIOverrides(port: port, configPath: config)
@@ -1971,7 +1976,15 @@ struct StatusCommand: AsyncParsableCommand {
         let status = try await LocalStatusClient.fetch(port: resolved.port)
         let latest = try? await SelfUpdate(currentVersion: CoordinatorClient.binaryVersion, releasesAPIURL: nil).latestVersionCached()
         let staleSince = await Self.staleRecommendationSince(providerID: resolved.providerID)
-        print(LocalStatusFormatter.format(status, latestVersion: latest, ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath), donorMode: resolved.donorMode, staleRecommendationSince: staleSince, configPath: resolved.configPath))
+        print(LocalStatusFormatter.format(
+            status,
+            latestVersion: latest,
+            ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath),
+            donorMode: resolved.donorMode,
+            staleRecommendationSince: staleSince,
+            configPath: resolved.configPath,
+            advanced: advanced
+        ))
     }
 
     static func staleRecommendationSince(
