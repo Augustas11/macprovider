@@ -5,6 +5,21 @@ import XCTest
 @testable import macprovider_cli
 
 final class AutoUpdateTests: XCTestCase {
+    func testAutoUpdaterServiceLoadedProbeFailsClosedOnTimeoutAndUnknownStatus() {
+        let started = Date()
+        XCTAssertFalse(AutoUpdater.launchctlServiceLoaded(
+            label: SelfUpdate.launchdLabel,
+            executablePath: "/usr/bin/yes",
+            timeout: 0.05
+        ))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        XCTAssertFalse(AutoUpdater.launchctlServiceLoaded(
+            label: SelfUpdate.launchdLabel,
+            executablePath: "/usr/bin/false",
+            timeout: 0.5
+        ))
+    }
+
     func testFailureClassEnumMatchesSpecR65() {
         XCTAssertEqual(AutoUpdateFailureClass.allCases.map(\.rawValue), [
             "rollback_observer_unavailable",
@@ -1188,6 +1203,7 @@ final class AutoUpdateTests: XCTestCase {
             drain: { _ in true },
             sendReady: {},
             restartLaunchd: {},
+            fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true }
@@ -1259,6 +1275,7 @@ final class AutoUpdateTests: XCTestCase {
             drain: { _ in true },
             sendReady: {},
             restartLaunchd: {},
+            fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true }
@@ -1373,6 +1390,7 @@ final class AutoUpdateTests: XCTestCase {
             drain: { _ in true },
             sendReady: {},
             restartLaunchd: {},
+            fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true }
@@ -1393,6 +1411,277 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(marker.discoveryHeadSequence, 12)
         XCTAssertEqual(marker.targetCompatibilitySetID, manifest.compatibilitySetID)
         XCTAssertEqual(marker.targetCompatibilitySetSHA256, manifest.envelopeSHA256)
+    }
+
+    func testAutoUpdaterOwnsMutationLockBeforeFencingReloadJobs() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let fenceObservedOwnedLock = LockedInvocationCounter()
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {
+                do {
+                    let unexpectedLock = try store.acquireLock()
+                    withExtendedLifetime(unexpectedLock) {}
+                    throw SimulatedCutoverInterruption.stop
+                } catch AutoUpdateMarkerError.lockContended {
+                    fenceObservedOwnedLock.record()
+                }
+            },
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        let lock = try updater.acquireUpdateLockAndFenceReloadJobsForTest()
+        defer { withExtendedLifetime(lock) {} }
+
+        XCTAssertEqual(fenceObservedOwnedLock.value, 1)
+    }
+
+    func testTrustLossRollbackAndCleanupRemainUnderMutationLock() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        let fenceObservedOwnedLock = LockedInvocationCounter()
+        let fenceObservedNewBinary = LockedInvocationCounter()
+        let cleanupObservedOwnedLock = LockedInvocationCounter()
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {
+                do {
+                    let unexpectedLock = try store.acquireRecoveryLock()
+                    withExtendedLifetime(unexpectedLock) {}
+                } catch AutoUpdateMarkerError.lockContended {
+                    fenceObservedOwnedLock.record()
+                } catch {
+                    XCTFail("Unexpected competing lock error: \(error)")
+                }
+                if (try? String(contentsOf: binary)) == "new" {
+                    fenceObservedNewBinary.record()
+                }
+            },
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+        let lock = try store.acquireRecoveryLock()
+        defer { withExtendedLifetime(lock) {} }
+
+        updater.rollbackAfterTrustLossForTest(marker, whileHolding: lock) {
+            do {
+                let unexpectedLock = try store.acquireRecoveryLock()
+                withExtendedLifetime(unexpectedLock) {}
+            } catch AutoUpdateMarkerError.lockContended {
+                cleanupObservedOwnedLock.record()
+            } catch {
+                XCTFail("Unexpected competing lock error: \(error)")
+            }
+        }
+
+        XCTAssertEqual(fenceObservedOwnedLock.value, 1)
+        XCTAssertEqual(fenceObservedNewBinary.value, 1)
+        XCTAssertEqual(cleanupObservedOwnedLock.value, 1)
+        XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testActivationFailureRefencesBeforeRestoringUnderMutationLock() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        let fenceObservedOwnedLock = LockedInvocationCounter()
+        let fenceObservedNewBinary = LockedInvocationCounter()
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {
+                do {
+                    let unexpectedLock = try store.acquireRecoveryLock()
+                    withExtendedLifetime(unexpectedLock) {}
+                } catch AutoUpdateMarkerError.lockContended {
+                    fenceObservedOwnedLock.record()
+                } catch {
+                    XCTFail("Unexpected competing lock error: \(error)")
+                }
+                if (try? String(contentsOf: binary)) == "new" {
+                    fenceObservedNewBinary.record()
+                }
+            },
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+        let lock = try store.acquireRecoveryLock()
+        defer { withExtendedLifetime(lock) {} }
+
+        try updater.rollbackAfterActivationFailureForTest(marker, whileHolding: lock)
+
+        XCTAssertEqual(fenceObservedOwnedLock.value, 1)
+        XCTAssertEqual(fenceObservedNewBinary.value, 1)
+        XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testPostSwapPolicyPersistFailureUsesHeldMutationLockAndRefencesBeforeRestore() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let fenceObservedOwnedLock = LockedInvocationCounter()
+        let fenceObservedNewBinary = LockedInvocationCounter()
+        let rollbackObservedOwnedLock = LockedInvocationCounter()
+        let binary = fixture.url.appendingPathComponent("bin/macprovider-cli")
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {
+                do {
+                    let unexpectedLock = try store.acquireRecoveryLock()
+                    withExtendedLifetime(unexpectedLock) {}
+                } catch AutoUpdateMarkerError.lockContended {
+                    fenceObservedOwnedLock.record()
+                } catch {
+                    XCTFail("Unexpected competing lock error: \(error)")
+                }
+                if (try? String(contentsOf: binary)) == "new" {
+                    fenceObservedNewBinary.record()
+                }
+            },
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+        let lock = try updater.acquireUpdateLockAndFenceReloadJobsForTest()
+        defer { withExtendedLifetime(lock) {} }
+        let (marker, _, backup) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+
+        updater.rollbackAfterSignedPolicyPersistFailureForTest(
+            marker,
+            whileHolding: lock
+        ) {
+            do {
+                let unexpectedLock = try store.acquireRecoveryLock()
+                withExtendedLifetime(unexpectedLock) {}
+            } catch AutoUpdateMarkerError.lockContended {
+                rollbackObservedOwnedLock.record()
+            } catch {
+                XCTFail("Unexpected competing lock error: \(error)")
+            }
+        }
+
+        XCTAssertEqual(fenceObservedOwnedLock.value, 2)
+        XCTAssertEqual(fenceObservedNewBinary.value, 1)
+        XCTAssertEqual(rollbackObservedOwnedLock.value, 1)
+        XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
     }
 
     func testRestartFailureRollbackRestoresBinaryAndClearsPendingState() async throws {
@@ -1431,6 +1720,7 @@ final class AutoUpdateTests: XCTestCase {
             drain: { _ in true },
             sendReady: {},
             restartLaunchd: { reloads.record() },
+            fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true }
@@ -1479,6 +1769,7 @@ final class AutoUpdateTests: XCTestCase {
             drain: { _ in true },
             sendReady: {},
             restartLaunchd: { throw SimulatedCutoverInterruption.stop },
+            fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true }
@@ -1487,6 +1778,60 @@ final class AutoUpdateTests: XCTestCase {
         updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
 
         XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testRestartFailureRollbackDoesNotRestoreBeforeReloadJobsAreFenced() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        let fenceAttempts = LockedInvocationCounter()
+        let reloads = LockedInvocationCounter()
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: { reloads.record() },
+            fenceReloadJobs: {
+                fenceAttempts.record()
+                throw SimulatedCutoverInterruption.stop
+            },
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
+
+        XCTAssertEqual(fenceAttempts.value, 1)
+        XCTAssertEqual(reloads.value, 0)
+        XCTAssertEqual(try String(contentsOf: binary), "new")
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
     }
@@ -1520,6 +1865,38 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(policy.minimum, "1.8.0")
         XCTAssertTrue(policy.revoked.contains("1.6.1"))
         XCTAssertTrue(policy.revoked.contains("1.7.1"))
+    }
+
+    func testPreLockSignedPolicyPersistFailureNeverRestoresPendingReleaseBytes() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        try FileManager.default.createDirectory(
+            at: store.policyURL,
+            withIntermediateDirectories: false
+        )
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+
+        do {
+            try await store.updateSignedPolicy(minimum: "1.7.0", revoked: [])
+            XCTFail("Expected signed policy persistence to fail")
+        } catch is AutoUpdateSignedPolicyPersistError {
+            // Expected.
+        }
+
+        XCTAssertEqual(try String(contentsOf: binary), "new")
+        XCTAssertEqual(try String(contentsOf: backup), "old")
+        XCTAssertEqual(try store.readPending(), marker)
+        XCTAssertTrue(SessionAutoupdateGate.shared.isDisabled)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "signed_policy_persist_failed")
     }
 
     func testUnsignedReleasePolicyMetadataIsIgnored() throws {

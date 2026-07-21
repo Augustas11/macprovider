@@ -13,6 +13,28 @@ struct LaunchdRestartFailure: Error, CustomStringConvertible {
     }
 }
 
+private final class LaunchctlOutputAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    func snapshot() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
+}
+
+struct LaunchctlCommandResult {
+    let terminationStatus: Int32
+    let output: String
+}
+
 private enum ReleaseSignatureEncoding {
     case der
     case canonicalBase64DER
@@ -22,6 +44,12 @@ struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
     static let launchdLabel = "live.streamvc.macprovider"
     static let watchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
+    static let providerReloadLaunchdLabel = "\(launchdLabel)-compatibility-reload"
+    static let legacyProviderReloadLaunchdLabelPrefix = "\(providerReloadLaunchdLabel)."
+    // Eleven samples at the two-second poll interval prove 20 seconds of
+    // uninterrupted health, exceeding launchd's observed ten-second retry
+    // cadence for legacy `submit` jobs.
+    static let localHealthRequiredConsecutiveSamples = 11
     static let stagedCLIPreflightArguments = ["--version"]
     static let currentSigningInformationFlags = SecCSFlags(
         rawValue: kSecCSSigningInformation
@@ -670,7 +698,11 @@ struct SelfUpdate {
         let lifecycleOperationID = "self-update:\(UUID().uuidString.lowercased())"
         var maintenanceLease: ProviderLifecycleLeaseRecord?
         var startupHandoffPrepared = false
+        var updateLock: AutoUpdateLock?
+        defer { withExtendedLifetime(updateLock) {} }
         if replaceBinary == nil {
+            updateLock = try markerStore.acquireLock()
+            try fenceProviderReloadJobsIfLaunchdInstalled()
             if try markerStore.preflightInstalledMalibuAppReplacement() != nil,
                stagedMalibuApp == nil {
                 throw UpdateError.missingReleaseResource("signed Malibu.app")
@@ -698,14 +730,11 @@ struct SelfUpdate {
         }
 
         var pendingMarker: AutoUpdatePendingMarker?
-        var updateLock: AutoUpdateLock?
-        defer { withExtendedLifetime(updateLock) {} }
         let current = replaceBinary == nil
             ? CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
             : nil
         if replaceBinary == nil {
             guard let current else { throw UpdateError.currentBinaryUnknown }
-            updateLock = try markerStore.acquireLock()
             let updateID = UUID().uuidString.lowercased()
             let marker = try markerStore.preserveReleaseRollbackBackup(
                 binaryURL: current,
@@ -824,6 +853,7 @@ struct SelfUpdate {
             await Self.waitForLocalHealthIfManaged(
                 targetVersion: targetVersion,
                 expectedCompatibilitySetID: compatibilityManifest?.compatibilitySetID,
+                expectedCompatibilitySetSHA256: compatibilityManifest?.envelopeSHA256,
                 timeout: TimeInterval(compatibilityManifest?.readinessTimeoutSeconds ?? 90)
             )
         }
@@ -880,6 +910,7 @@ struct SelfUpdate {
             }
             return
         }
+        try fenceProviderReloadJobsIfLaunchdInstalled()
         guard let pendingMarker else {
             throw UpdateError.rollbackUnavailable
         }
@@ -900,6 +931,7 @@ struct SelfUpdate {
     private static func waitForLocalHealthIfManaged(
         targetVersion: String,
         expectedCompatibilitySetID: String?,
+        expectedCompatibilitySetSHA256: String?,
         timeout: TimeInterval = 90
     ) async -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -908,16 +940,57 @@ struct SelfUpdate {
         let config = try? ConfigLoader.load(cli: CLIOverrides())
         guard let port = config?.port else { return false }
         let deadline = Date().addingTimeInterval(timeout)
+        var consecutiveHealthySamples = 0
+        var stableInstanceKey: String?
         while Date() < deadline {
-            if let status = try? await LocalStatusClient.fetch(port: port),
-               status["binary_version"] as? String == targetVersion,
-               expectedCompatibilitySetID == nil
-                    || status["compatibility_set_id"] as? String == expectedCompatibilitySetID {
-                return true
+            let status = try? await LocalStatusClient.fetch(port: port)
+            if let instanceKey = localHealthyTargetInstanceKey(
+                status,
+                targetVersion: targetVersion,
+                expectedCompatibilitySetID: expectedCompatibilitySetID,
+                expectedCompatibilitySetSHA256: expectedCompatibilitySetSHA256
+            ) {
+                if stableInstanceKey == instanceKey {
+                    consecutiveHealthySamples += 1
+                } else {
+                    stableInstanceKey = instanceKey
+                    consecutiveHealthySamples = 1
+                }
+                if consecutiveHealthySamples >= localHealthRequiredConsecutiveSamples {
+                    return true
+                }
+            } else {
+                stableInstanceKey = nil
+                consecutiveHealthySamples = 0
             }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
         return false
+    }
+
+    static func localHealthyTargetInstanceKey(
+        _ status: [String: Any]?,
+        targetVersion: String,
+        expectedCompatibilitySetID: String?,
+        expectedCompatibilitySetSHA256: String?
+    ) -> String? {
+        guard let status,
+              status["binary_version"] as? String == targetVersion,
+              expectedCompatibilitySetID == nil
+                || status["compatibility_set_id"] as? String == expectedCompatibilitySetID,
+              expectedCompatibilitySetSHA256 == nil
+                || status["compatibility_set_sha256"] as? String == expectedCompatibilitySetSHA256,
+              let health = status["status"] as? String,
+              ["ready", "busy", "degraded"].contains(health),
+              let serviceInstance = status["service_instance"] as? [String: Any],
+              let instanceID = serviceInstance["instance_id"] as? String,
+              !instanceID.isEmpty,
+              let pid = serviceInstance["pid"] as? Int,
+              pid > 0
+        else {
+            return nil
+        }
+        return "\(pid):\(instanceID)"
     }
 
     private func restartLaunchdIfInstalled() throws {
@@ -931,8 +1004,13 @@ struct SelfUpdate {
             try Self.reloadCompatibilityLaunchdJobs(
                 homeDirectory: homeDirectory,
                 serviceLoaded: launchctlServiceLoaded,
-                runLaunchctl: { arguments in
-                    try runProcess("/bin/launchctl", arguments: arguments)
+                servicePresent: Self.launchctlServicePresent,
+                loadedServiceLabels: Self.launchctlServiceLabels,
+                runLaunchctl: { arguments, allowFailure in
+                    _ = try Self.runLaunchctlCommand(
+                        arguments: arguments,
+                        allowFailure: allowFailure
+                    )
                 }
             )
         } catch {
@@ -941,6 +1019,27 @@ struct SelfUpdate {
                 recoveryCommand: Self.launchdRestartRecoveryCommand(homeDirectory: homeDirectory)
             )
         }
+    }
+
+    private func fenceProviderReloadJobsIfLaunchdInstalled() throws {
+        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let providerPlist = homeDirectory.appendingPathComponent(
+            "Library/LaunchAgents/\(Self.launchdLabel).plist"
+        )
+        guard FileManager.default.fileExists(atPath: providerPlist.path) else {
+            return
+        }
+        try Self.fenceProviderReloadLaunchdJobs(
+            homeDirectory: homeDirectory,
+            servicePresent: Self.launchctlServicePresent,
+            loadedServiceLabels: Self.launchctlServiceLabels,
+            runLaunchctl: { arguments, allowFailure in
+                _ = try Self.runLaunchctlCommand(
+                    arguments: arguments,
+                    allowFailure: allowFailure
+                )
+            }
+        )
     }
 
     private func restartRecoveryCommand() -> String {
@@ -958,22 +1057,8 @@ struct SelfUpdate {
         }
     }
 
-    private func launchctlServiceLoaded(label: String) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["print", Self.launchdServiceTarget(label: label)]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return false
-        }
-        guard process.terminationStatus == 0 else { return false }
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        return !output.lowercased().contains("disabled = true")
+    private func launchctlServiceLoaded(label: String) throws -> Bool {
+        try Self.launchctlServiceLoadedOrThrow(label: label)
     }
 
     static func launchdReloadArguments(
@@ -995,56 +1080,419 @@ struct SelfUpdate {
     static func reloadCompatibilityLaunchdJobs(
         homeDirectory: URL,
         uid: uid_t = getuid(),
-        reloadID: String = UUID().uuidString.lowercased(),
-        serviceLoaded: (String) -> Bool,
-        runLaunchctl: ([String]) throws -> Void
+        serviceLoaded: (String) throws -> Bool,
+        servicePresent: (String) throws -> Bool,
+        loadedServiceLabels: () throws -> [String],
+        runLaunchctl: ([String], Bool) throws -> Void
     ) throws {
         let launchAgents = homeDirectory.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
         let watchdogPlist = launchAgents.appendingPathComponent("\(watchdogLaunchdLabel).plist")
         let providerPlist = launchAgents.appendingPathComponent("\(launchdLabel).plist")
+        let providerReloadPlist = launchAgents.appendingPathComponent(
+            "\(providerReloadLaunchdLabel).plist"
+        )
+        let domain = "gui/\(uid)"
+        try fenceProviderReloadLaunchdJobs(
+            homeDirectory: homeDirectory,
+            uid: uid,
+            servicePresent: servicePresent,
+            loadedServiceLabels: loadedServiceLabels,
+            runLaunchctl: runLaunchctl
+        )
         for plist in [watchdogPlist, providerPlist]
             where !FileManager.default.fileExists(atPath: plist.path) {
             throw UpdateError.missingReleaseResource(plist.lastPathComponent)
         }
+        try writeProviderReloadLaunchAgent(
+            to: providerReloadPlist,
+            providerPlistPath: providerPlist.path,
+            uid: uid
+        )
 
         // Reload the rollback observer synchronously while the provider is
         // still alive. The provider must be reloaded by an independent
-        // launchd job because booting out its own service terminates this
-        // process before it can issue the matching bootstrap.
+        // one-shot launchd job because booting out its own service terminates
+        // this process before it can issue the matching bootstrap.
         for arguments in launchdReloadArguments(
             label: watchdogLaunchdLabel,
-            serviceLoaded: serviceLoaded(watchdogLaunchdLabel),
+            serviceLoaded: try serviceLoaded(watchdogLaunchdLabel),
             uid: uid,
             plistPath: watchdogPlist.path
         ) {
-            try runLaunchctl(arguments)
+            do {
+                try runLaunchctl(arguments, false)
+            } catch {
+                try? removeLaunchdHelperIfPresent(providerReloadPlist)
+                throw error
+            }
         }
-        try runLaunchctl(providerReloadSubmissionArguments(
-            plistPath: providerPlist.path,
-            uid: uid,
-            reloadID: reloadID
-        ))
+        do {
+            try runLaunchctl(["bootstrap", domain, providerReloadPlist.path], false)
+        } catch let bootstrapError {
+            do {
+                try fenceProviderReloadLaunchdJobs(
+                    homeDirectory: homeDirectory,
+                    uid: uid,
+                    servicePresent: servicePresent,
+                    loadedServiceLabels: loadedServiceLabels,
+                    runLaunchctl: runLaunchctl
+                )
+            } catch let cleanupError {
+                throw UpdateError.launchdReloadHelperCleanupFailed(
+                    bootstrap: String(describing: bootstrapError),
+                    cleanup: String(describing: cleanupError)
+                )
+            }
+            throw bootstrapError
+        }
     }
 
-    static func providerReloadSubmissionArguments(
-        plistPath: String,
+    static func fenceProviderReloadLaunchdJobs(
+        homeDirectory: URL,
         uid: uid_t = getuid(),
-        reloadID: String
-    ) -> [String] {
+        servicePresent: (String) throws -> Bool,
+        loadedServiceLabels: () throws -> [String],
+        runLaunchctl: ([String], Bool) throws -> Void,
+        removalMaxChecks: Int = 100,
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) throws {
+        guard removalMaxChecks > 0 else {
+            throw UpdateError.processFailed("provider reload helper absence check", EINVAL)
+        }
+        let domain = "gui/\(uid)"
+        let loadedLabels = try loadedServiceLabels()
+        let staleReloadLabels = loadedLabels.filter {
+            $0 == providerReloadLaunchdLabel || isLegacyProviderReloadLabel($0)
+        }
+        var labelsToFence = staleReloadLabels
+        if !labelsToFence.contains(providerReloadLaunchdLabel) {
+            labelsToFence.append(providerReloadLaunchdLabel)
+        }
+        for label in labelsToFence {
+            try runLaunchctl(
+                ["bootout", "\(domain)/\(label)"],
+                true
+            )
+            var absent = false
+            for attempt in 0 ..< removalMaxChecks {
+                if try !servicePresent(label) {
+                    absent = true
+                    break
+                }
+                if attempt + 1 < removalMaxChecks {
+                    sleep(0.1)
+                }
+            }
+            guard absent else {
+                throw UpdateError.processFailed("fence provider reload launch agent", EBUSY)
+            }
+        }
+        let launchAgents = homeDirectory.appendingPathComponent(
+            "Library/LaunchAgents",
+            isDirectory: true
+        )
+        try removeLaunchdHelperIfPresent(
+            launchAgents.appendingPathComponent("\(providerReloadLaunchdLabel).plist")
+        )
+    }
+
+    static func providerReloadLaunchAgentData(
+        providerPlistPath: String,
+        helperPlistPath: String,
+        uid: uid_t = getuid(),
+        launchctlPath: String = "/bin/launchctl",
+        sleepPath: String = "/bin/sleep",
+        commandSleepPath: String = "/bin/sleep",
+        providerRemovalMaxChecks: Int = 100,
+        commandTimeoutChecks: Int = 50,
+        commandTerminateGraceChecks: Int = 5
+    ) throws -> Data {
+        guard providerRemovalMaxChecks > 0,
+              commandTimeoutChecks > 0,
+              commandTerminateGraceChecks > 0 else {
+            throw UpdateError.processFailed("provider reload absence check", EINVAL)
+        }
         let domain = "gui/\(uid)"
         let target = "\(domain)/\(launchdLabel)"
+        let helperTarget = "\(domain)/\(providerReloadLaunchdLabel)"
+        let launchctl = shellQuote(launchctlPath)
+        let sleep = shellQuote(sleepPath)
+        let commandSleep = shellQuote(commandSleepPath)
+        let runBounded = """
+        run_bounded() { \
+        "$@" & command_pid=$!; command_check=0; \
+        while /bin/kill -0 "$command_pid" >/dev/null 2>&1; do \
+        if [ "$command_check" -ge \(commandTimeoutChecks) ]; then \
+        /bin/kill -TERM "$command_pid" >/dev/null 2>&1 || true; grace_check=0; \
+        while /bin/kill -0 "$command_pid" >/dev/null 2>&1 && [ "$grace_check" -lt \(commandTerminateGraceChecks) ]; do \
+        \(commandSleep) 0.1; grace_check=$((grace_check + 1)); done; \
+        /bin/kill -KILL "$command_pid" >/dev/null 2>&1 || true; \
+        wait "$command_pid" >/dev/null 2>&1 || true; return 124; fi; \
+        \(commandSleep) 0.1; command_check=$((command_check + 1)); done; \
+        if wait "$command_pid"; then return 0; else return $?; fi; }
+        """
+        let waitForProviderRemoval = """
+        provider_absent=0; attempt=0; while [ "$attempt" -lt \(providerRemovalMaxChecks) ]; do \
+        if output=$(run_bounded \(launchctl) print \(shellQuote(target)) 2>&1); then status=0; else status=$?; fi; \
+        if [ "$status" -eq 113 ]; then \
+        case "$output" in *"Could not find service"*) provider_absent=1; break ;; *) exit "$status" ;; esac; \
+        elif [ "$status" -ne 0 ]; then exit "$status"; fi; \
+        attempt=$((attempt + 1)); \
+        if [ "$attempt" -lt \(providerRemovalMaxChecks) ]; then \(sleep) 0.1; fi; \
+        done; [ "$provider_absent" -eq 1 ] || exit 75
+        """
         let script = [
-            "set -e",
-            "/bin/launchctl bootout \(shellQuote(target)) >/dev/null 2>&1 || true",
-            "/bin/launchctl bootstrap \(shellQuote(domain)) \(shellQuote(plistPath))",
+            "set -eu",
+            "cleanup() { /bin/rm -f \(shellQuote(helperPlistPath)) >/dev/null 2>&1 || true; }",
+            "trap cleanup EXIT HUP INT TERM",
+            runBounded,
+            "if run_bounded \(launchctl) bootout \(shellQuote(target)) >/dev/null 2>&1; then :; else status=$?; [ \"$status\" -ne 124 ] || exit \"$status\"; fi",
+            waitForProviderRemoval,
+            "run_bounded \(launchctl) bootstrap \(shellQuote(domain)) \(shellQuote(providerPlistPath))",
+            "/bin/rm -f \(shellQuote(helperPlistPath))",
+            "trap - EXIT HUP INT TERM",
+            "if run_bounded \(launchctl) bootout \(shellQuote(helperTarget)) >/dev/null 2>&1; then :; else status=$?; [ \"$status\" -ne 124 ] || exit \"$status\"; fi",
         ].joined(separator: "; ")
-        return [
-            "submit",
-            "-l", "\(launchdLabel)-compatibility-reload.\(reloadID)",
-            "-o", "/dev/null",
-            "-e", "/dev/null",
-            "--", "/bin/sh", "-c", script,
+        let propertyList: [String: Any] = [
+            "Label": providerReloadLaunchdLabel,
+            "ProgramArguments": ["/bin/sh", "-c", script],
+            "RunAtLoad": true,
+            "KeepAlive": false,
+            "LaunchOnlyOnce": true,
+            "ProcessType": "Background",
+            "StandardOutPath": "/dev/null",
+            "StandardErrorPath": "/dev/null",
         ]
+        return try PropertyListSerialization.data(
+            fromPropertyList: propertyList,
+            format: .xml,
+            options: 0
+        )
+    }
+
+    static func launchctlServiceLabels() throws -> [String] {
+        let result = try runLaunchctlCommand(arguments: ["list"])
+        guard result.terminationStatus == 0 else {
+            throw UpdateError.processFailed("/bin/launchctl list", result.terminationStatus)
+        }
+        return launchctlServiceLabels(from: result.output)
+    }
+
+    static func launchctlServicePresent(label: String) throws -> Bool {
+        let target = launchdServiceTarget(label: label)
+        let result = try runLaunchctlCommand(arguments: ["print", target], allowFailure: true)
+        if result.terminationStatus == 0 {
+            return true
+        }
+        if result.terminationStatus == 113,
+           result.output.contains("Could not find service") {
+            return false
+        }
+        throw UpdateError.processFailed(
+            "/bin/launchctl print \(target)",
+            result.terminationStatus
+        )
+    }
+
+    static func launchctlServiceLoaded(
+        label: String,
+        executablePath: String = "/bin/launchctl",
+        timeout: TimeInterval = 5
+    ) -> Bool {
+        (try? launchctlServiceLoadedOrThrow(
+            label: label,
+            executablePath: executablePath,
+            timeout: timeout
+        )) == true
+    }
+
+    static func launchctlServiceLoadedOrThrow(
+        label: String,
+        executablePath: String = "/bin/launchctl",
+        timeout: TimeInterval = 5
+    ) throws -> Bool {
+        let target = launchdServiceTarget(label: label)
+        let result = try runLaunchctlCommand(
+            arguments: ["print", target],
+            allowFailure: true,
+            executablePath: executablePath,
+            timeout: timeout
+        )
+        if result.terminationStatus == 113,
+           result.output.contains("Could not find service") {
+            return false
+        }
+        guard result.terminationStatus == 0 else {
+            throw UpdateError.processFailed(
+                "\(executablePath) print \(target)",
+                result.terminationStatus
+            )
+        }
+        return !result.output.lowercased().contains("disabled = true")
+    }
+
+    static func runLaunchctlCommand(
+        arguments: [String],
+        allowFailure: Bool = false,
+        executablePath: String = "/bin/launchctl",
+        timeout: TimeInterval = 5,
+        terminateGrace: TimeInterval = 0.5
+    ) throws -> LaunchctlCommandResult {
+        guard executablePath.hasPrefix("/"), timeout > 0, timeout.isFinite,
+              terminateGrace >= 0, terminateGrace.isFinite else {
+            throw UpdateError.processFailed("bounded launchctl runner arguments", EINVAL)
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        let combinedOutput = Pipe()
+        process.standardOutput = combinedOutput
+        process.standardError = combinedOutput
+        let termination = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in termination.signal() }
+        try process.run()
+
+        let accumulator = LaunchctlOutputAccumulator()
+        let drainGroup = DispatchGroup()
+        drainGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            defer { drainGroup.leave() }
+            let handle = combinedOutput.fileHandleForReading
+            while true {
+                do {
+                    guard let chunk = try handle.read(upToCount: 64 * 1024),
+                          !chunk.isEmpty else {
+                        return
+                    }
+                    accumulator.append(chunk)
+                } catch {
+                    return
+                }
+            }
+        }
+
+        let timeoutMilliseconds = max(1, Int((timeout * 1_000).rounded(.up)))
+        if termination.wait(timeout: .now() + .milliseconds(timeoutMilliseconds)) == .timedOut {
+            process.terminate()
+            let graceMilliseconds = max(1, Int((terminateGrace * 1_000).rounded(.up)))
+            if termination.wait(timeout: .now() + .milliseconds(graceMilliseconds)) == .timedOut {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                _ = termination.wait(timeout: .now() + .milliseconds(graceMilliseconds))
+            }
+            combinedOutput.fileHandleForReading.closeFile()
+            _ = drainGroup.wait(timeout: .now() + .milliseconds(graceMilliseconds))
+            throw UpdateError.processTimedOut(
+                "\(executablePath) \(arguments.joined(separator: " "))",
+                timeout
+            )
+        }
+
+        if drainGroup.wait(timeout: .now() + .seconds(1)) == .timedOut {
+            combinedOutput.fileHandleForReading.closeFile()
+            throw UpdateError.processTimedOut(
+                "\(executablePath) \(arguments.joined(separator: " ")) output drain",
+                1
+            )
+        }
+        let result = LaunchctlCommandResult(
+            terminationStatus: process.terminationStatus,
+            output: String(decoding: accumulator.snapshot(), as: UTF8.self)
+        )
+        if !allowFailure, result.terminationStatus != 0 {
+            throw UpdateError.processFailed(
+                "\(executablePath) \(arguments.joined(separator: " "))",
+                result.terminationStatus
+            )
+        }
+        return result
+    }
+
+    static func launchctlServiceLabels(from output: String) -> [String] {
+        output.split(whereSeparator: \.isNewline).compactMap { line in
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 3, fields.last != "Label" else { return nil }
+            return String(fields.last!)
+        }
+    }
+
+    static func isLegacyProviderReloadLabel(_ label: String) -> Bool {
+        guard label.hasPrefix(legacyProviderReloadLaunchdLabelPrefix) else {
+            return false
+        }
+        let suffix = label.dropFirst(legacyProviderReloadLaunchdLabelPrefix.count)
+        let groups = suffix.split(separator: "-", omittingEmptySubsequences: false)
+        guard groups.map(\.count) == [8, 4, 4, 4, 12] else {
+            return false
+        }
+        return groups.joined().allSatisfy {
+            ("0" ... "9").contains($0) || ("a" ... "f").contains($0)
+        }
+    }
+
+    private static func writeProviderReloadLaunchAgent(
+        to helperPlist: URL,
+        providerPlistPath: String,
+        uid: uid_t
+    ) throws {
+        let data = try providerReloadLaunchAgentData(
+            providerPlistPath: providerPlistPath,
+            helperPlistPath: helperPlist.path,
+            uid: uid
+        )
+        let temporary = helperPlist.deletingLastPathComponent().appendingPathComponent(
+            ".\(helperPlist.lastPathComponent).tmp-\(UUID().uuidString.lowercased())"
+        )
+        let fd = open(temporary.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else {
+            throw UpdateError.processFailed("create provider reload launch agent", errno)
+        }
+        var descriptorOpen = true
+        defer {
+            if descriptorOpen {
+                close(fd)
+            }
+            try? FileManager.default.removeItem(at: temporary)
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = write(
+                    fd,
+                    bytes.baseAddress!.advanced(by: offset),
+                    bytes.count - offset
+                )
+                guard count > 0 else {
+                    throw UpdateError.processFailed(
+                        "write provider reload launch agent",
+                        errno
+                    )
+                }
+                offset += count
+            }
+        }
+        guard fchmod(fd, 0o600) == 0, fsync(fd) == 0 else {
+            throw UpdateError.processFailed("sync provider reload launch agent", errno)
+        }
+        guard close(fd) == 0 else {
+            descriptorOpen = false
+            throw UpdateError.processFailed("close provider reload launch agent", errno)
+        }
+        descriptorOpen = false
+        guard rename(temporary.path, helperPlist.path) == 0 else {
+            throw UpdateError.processFailed("activate provider reload launch agent", errno)
+        }
+        let directoryFD = open(helperPlist.deletingLastPathComponent().path, O_RDONLY)
+        if directoryFD >= 0 {
+            _ = fsync(directoryFD)
+            close(directoryFD)
+        }
+    }
+
+    private static func removeLaunchdHelperIfPresent(_ url: URL) throws {
+        if unlink(url.path) != 0, errno != ENOENT {
+            throw UpdateError.processFailed("remove provider reload launch agent", errno)
+        }
     }
 
     static func launchdRestartRecoveryCommand(
@@ -1868,6 +2316,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case missingExtractedBinary
     case currentBinaryUnknown
     case processFailed(String, Int32)
+    case processTimedOut(String, TimeInterval)
     case renameFailed(Int32)
     case untrustedDownloadURL(String)
     case untrustedReleaseAPIURL(String)
@@ -1890,6 +2339,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case activationFailedRollbackFailed(update: String, rollback: String)
     case restartFailedRollbackRestored(restart: String, recoveryCommand: String)
     case restartFailedRollbackFailed(restart: String, rollback: String)
+    case launchdReloadHelperCleanupFailed(bootstrap: String, cleanup: String)
 
     var description: String {
         switch self {
@@ -1921,6 +2371,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Unable to locate the running binary path"
         case let .processFailed(executable, status):
             return "\(executable) exited with status \(status)"
+        case let .processTimedOut(executable, timeout):
+            return "\(executable) timed out after \(timeout) seconds"
         case .renameFailed(let errnoValue):
             return "Atomic binary replacement failed with errno \(errnoValue)"
         case .untrustedDownloadURL(let url):
@@ -1965,6 +2417,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "rollback_restored: restart failed (\(restart)); previous provider release restored. If needed, run: \(recoveryCommand)"
         case let .restartFailedRollbackFailed(restart, rollback):
             return "rollback_failed: restart failed (\(restart)) and rollback failed (\(rollback))"
+        case let .launchdReloadHelperCleanupFailed(bootstrap, cleanup):
+            return "launchd reload helper bootstrap failed (\(bootstrap)) and helper cleanup failed (\(cleanup))"
         }
     }
 }

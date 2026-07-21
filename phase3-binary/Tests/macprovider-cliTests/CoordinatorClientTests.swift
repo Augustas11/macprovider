@@ -2357,6 +2357,101 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(frames.isEmpty)
     }
 
+    func testExpiredOrphanRecoveryFencesReloadHelpersBeforeRestoringBinary() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: "9.9.9")
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        try Self.expireAutoupdateMarker(at: fixture.store.pendingURL)
+        let fenceCalled = LockedBox(false)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            autoupdateReloadHelperFence: {
+                XCTAssertEqual(try String(contentsOf: fixture.binary), "new")
+                fenceCalled.set(true)
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        await client.runStartupAutoupdateRecoveryForTest(
+            binaryURL: fixture.binary,
+            markerStore: fixture.store
+        )
+
+        XCTAssertTrue(fenceCalled.get())
+        XCTAssertEqual(try String(contentsOf: fixture.binary), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "orphaned_pending_marker_recovered")
+    }
+
+    func testExpiredOrphanRecoveryFailsClosedWhenReloadHelperFenceFails() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: "9.9.9")
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        try Self.expireAutoupdateMarker(at: fixture.store.pendingURL)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            autoupdateReloadHelperFence: {
+                throw UpdateError.processFailed("reload helper fence", EBUSY)
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        await client.runStartupAutoupdateRecoveryForTest(
+            binaryURL: fixture.binary,
+            markerStore: fixture.store
+        )
+
+        XCTAssertEqual(try String(contentsOf: fixture.binary), "new")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "reload_helper_fence_failed")
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.other.rawValue)
+    }
+
+    func testExpiredOrphanRecoveryDoesNotRestoreBinaryWhenReloadHelperFenceTimesOut() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: "9.9.9")
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        try Self.expireAutoupdateMarker(at: fixture.store.pendingURL)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            autoupdateReloadHelperFence: {
+                throw UpdateError.processTimedOut("/bin/launchctl list", 5)
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        await client.runStartupAutoupdateRecoveryForTest(
+            binaryURL: fixture.binary,
+            markerStore: fixture.store
+        )
+
+        XCTAssertEqual(try String(contentsOf: fixture.binary), "new")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "reload_helper_fence_failed")
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.other.rawValue)
+    }
+
     func testSuccessFinalizeOnlyAfterCoordSendReturns() async throws {
         let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
         try fixture.store.writeSuccessSentinel(
@@ -2403,6 +2498,254 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: sentinel.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+    }
+
+    func testSignedStartupRecoveryCommitsStableLocalIdentityBeforeModelIsLoaded() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            signedRelease: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let setID = try XCTUnwrap(fixture.marker.targetCompatibilitySetID)
+        let setDigest = try XCTUnwrap(fixture.marker.targetCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: setDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 90
+        )
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let sleepGate = LocalAutoupdateHealthSleepGate()
+        let recorder = CoordinatorFrameRecorder()
+        let expectedInstanceID = RouterHandler.serviceInstanceID
+        let expectedPID = getpid()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: setID,
+                    compatibilitySetSHA256: setDigest,
+                    instanceID: expectedInstanceID,
+                    processID: expectedPID,
+                    modelLoaded: false
+                )
+            },
+            autoupdateLocalHealthSleep: {
+                await sleepGate.waitForRelease()
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        let recovery = Task {
+            await client.runStartupAutoupdateRecoveryForTest(
+                binaryURL: fixture.binary,
+                markerStore: fixture.store
+            )
+        }
+        try await Self.waitUntil {
+            await sleepGate.started
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.lockURL.path))
+
+        await sleepGate.release()
+        await recovery.value
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "local_signed_set_health_succeeded")
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.isEmpty)
+    }
+
+    func testSignedStartupRecoveryKeepsRollbackArmedWhenLocallyUnhealthy() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            signedRelease: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let setID = try XCTUnwrap(fixture.marker.targetCompatibilitySetID)
+        let setDigest = try XCTUnwrap(fixture.marker.targetCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: setDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 90
+        )
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                nil
+            },
+            autoupdateLocalHealthSleep: {
+                XCTFail("an unhealthy first sample must not wait or commit")
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        await client.runStartupAutoupdateRecoveryForTest(
+            binaryURL: fixture.binary,
+            markerStore: fixture.store
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.lockURL.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertNil(event)
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.isEmpty)
+    }
+
+    func testSignedStartupRecoveryRejectsDifferentLiveListenerInstance() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            signedRelease: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let setID = try XCTUnwrap(fixture.marker.targetCompatibilitySetID)
+        let setDigest = try XCTUnwrap(fixture.marker.targetCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: setDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 90
+        )
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: setID,
+                    compatibilitySetSHA256: setDigest,
+                    instanceID: "different-provider-instance",
+                    processID: getpid()
+                )
+            },
+            autoupdateLocalHealthSleep: {
+                XCTFail("a different listener instance must fail on the first sample")
+            }
+        )
+
+        await client.runStartupAutoupdateRecoveryForTest(
+            binaryURL: fixture.binary,
+            markerStore: fixture.store
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.lockURL.path))
+    }
+
+    func testLocalAutoupdateHealthRequiresExactListenerEnvelope() {
+        let expectedPID = getpid()
+        let expectedInstanceID = RouterHandler.serviceInstanceID
+        let status = Self.localAutoupdateStatus(
+            version: CoordinatorClient.binaryVersion,
+            compatibilitySetID: "set-a",
+            compatibilitySetSHA256: "digest-a",
+            instanceID: expectedInstanceID,
+            processID: expectedPID,
+            modelLoaded: false
+        )
+        let expectedKey = "\(expectedPID):\(expectedInstanceID)"
+
+        XCTAssertEqual(
+            CoordinatorClient.localHealthyTargetInstanceKey(
+                status,
+                targetVersion: CoordinatorClient.binaryVersion,
+                expectedCompatibilitySetID: "set-a",
+                expectedCompatibilitySetSHA256: "digest-a",
+                expectedServiceInstanceID: expectedInstanceID,
+                expectedProcessID: expectedPID
+            ),
+            expectedKey
+        )
+        for mismatch in [
+            Self.localAutoupdateStatus(
+                version: "wrong-version",
+                compatibilitySetID: "set-a",
+                compatibilitySetSHA256: "digest-a",
+                instanceID: expectedInstanceID,
+                processID: expectedPID
+            ),
+            Self.localAutoupdateStatus(
+                version: CoordinatorClient.binaryVersion,
+                compatibilitySetID: "wrong-set",
+                compatibilitySetSHA256: "digest-a",
+                instanceID: expectedInstanceID,
+                processID: expectedPID
+            ),
+            Self.localAutoupdateStatus(
+                version: CoordinatorClient.binaryVersion,
+                compatibilitySetID: "set-a",
+                compatibilitySetSHA256: "wrong-digest",
+                instanceID: expectedInstanceID,
+                processID: expectedPID
+            ),
+            Self.localAutoupdateStatus(
+                version: CoordinatorClient.binaryVersion,
+                compatibilitySetID: "set-a",
+                compatibilitySetSHA256: "digest-a",
+                instanceID: expectedInstanceID,
+                processID: expectedPID + 1
+            ),
+        ] {
+            XCTAssertNil(
+                CoordinatorClient.localHealthyTargetInstanceKey(
+                    mismatch,
+                    targetVersion: CoordinatorClient.binaryVersion,
+                    expectedCompatibilitySetID: "set-a",
+                    expectedCompatibilitySetSHA256: "digest-a",
+                    expectedServiceInstanceID: expectedInstanceID,
+                    expectedProcessID: expectedPID
+                )
+            )
+        }
     }
 
     func testReceiptRotationRestoreTimeoutDoesNotHangAfterCandidateRejection() async throws {
@@ -3661,10 +4004,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.53")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.53")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.53")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.53")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.55")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.55")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.55")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.55")
     }
 
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
@@ -4465,7 +4808,8 @@ final class CoordinatorClientTests: XCTestCase {
     private static func makeAutoupdateRecoveryFixture(
         targetVersion: String,
         commitOwner: String? = nil,
-        transactionState: CompatibilitySetTransactionState? = nil
+        transactionState: CompatibilitySetTransactionState? = nil,
+        signedRelease: Bool = false
     ) throws -> (home: URL, store: AutoUpdateMarkerStore, marker: AutoUpdatePendingMarker, binary: URL, backup: URL) {
         let home = try makeTemporaryDirectory(prefix: "coordinator-autoupdate-")
         let store = AutoUpdateMarkerStore(homeDirectory: home)
@@ -4491,6 +4835,9 @@ final class CoordinatorClientTests: XCTestCase {
             )
         }
         let previousID = "Augustas11/macprovider:v\(CoordinatorClient.binaryVersion)@0123456789abcdef0123456789abcdef01234567"
+        let targetCompatibilitySetID = signedRelease
+            ? "Augustas11/macprovider:v\(targetVersion)@fedcba9876543210fedcba9876543210fedcba98"
+            : "Augustas11/macprovider:v9.9.9@fedcba9876543210fedcba9876543210fedcba98"
         let marker = AutoUpdatePendingMarker(
             updateID: updateID,
             targetVersion: targetVersion,
@@ -4503,10 +4850,10 @@ final class CoordinatorClientTests: XCTestCase {
             releaseBackupPath: transactionState == nil ? nil : releaseBackup.path,
             releaseBackupSHA256: transactionState == nil ? nil : AutoUpdateEvent.sha256Hex(""),
             commitOwner: commitOwner,
-            targetCompatibilitySetID: transactionState == nil
+            targetCompatibilitySetID: transactionState == nil && !signedRelease
                 ? nil
-                : "Augustas11/macprovider:v9.9.9@fedcba9876543210fedcba9876543210fedcba98",
-            targetCompatibilitySetSHA256: transactionState == nil
+                : targetCompatibilitySetID,
+            targetCompatibilitySetSHA256: transactionState == nil && !signedRelease
                 ? nil
                 : String(repeating: "9", count: 64),
             previousVersion: transactionState == nil ? nil : CoordinatorClient.binaryVersion,
@@ -4514,10 +4861,27 @@ final class CoordinatorClientTests: XCTestCase {
             previousCompatibilitySetSHA256: transactionState == nil
                 ? nil
                 : String(repeating: "8", count: 64),
+            discoveryHeadSequence: signedRelease ? 12 : nil,
+            discoveryHeadSHA256: signedRelease ? String(repeating: "7", count: 64) : nil,
+            updateAuthorityMode: signedRelease ? "signed_release" : nil,
             transactionState: transactionState
         )
         try store.writePending(marker)
         return (home, store, marker, binary, backup)
+    }
+
+    private static func expireAutoupdateMarker(at markerURL: URL) throws {
+        let data = try Data(contentsOf: markerURL)
+        guard var marker = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        marker["marker_deadline"] = "2000-01-01T00:00:00Z"
+        let expired = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+        try expired.write(to: markerURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: markerURL.path
+        )
     }
 
     private static func minimalDERSequenceBase64URL() -> String {
@@ -4655,6 +5019,12 @@ final class CoordinatorClientTests: XCTestCase {
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 1,
         autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
+        autoupdateLocalHealthRequiredConsecutiveSamples: Int = SelfUpdate.localHealthRequiredConsecutiveSamples,
+        autoupdateLocalStatusProbe: (@Sendable () async -> [String: Any]?)? = nil,
+        autoupdateLocalHealthSleep: @escaping @Sendable () async -> Void = {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        },
+        autoupdateReloadHelperFence: @escaping CoordinatorClient.ReloadHelperFence = {},
         configPath: String = "/tmp/macprovider-test.yaml",
         providerToken: String? = nil,
         providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
@@ -4713,6 +5083,10 @@ final class CoordinatorClientTests: XCTestCase {
             coordinatorReadinessAttempts: coordinatorReadinessAttempts,
             coordinatorReadinessRetryNanoseconds: 0,
             autoupdateMarkerStore: autoupdateMarkerStore,
+            autoupdateLocalHealthRequiredConsecutiveSamples: autoupdateLocalHealthRequiredConsecutiveSamples,
+            autoupdateLocalStatusProbe: autoupdateLocalStatusProbe,
+            autoupdateLocalHealthSleep: autoupdateLocalHealthSleep,
+            autoupdateReloadHelperFence: autoupdateReloadHelperFence,
             credentialBootstrap: credentialBootstrap,
             bootstrapReceiptSigningKey: bootstrapReceiptSigningKey,
             bootstrapReferralCode: bootstrapReferralCode,
@@ -4723,6 +5097,27 @@ final class CoordinatorClientTests: XCTestCase {
             admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
             watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook
         ))
+    }
+
+    private static func localAutoupdateStatus(
+        version: String,
+        compatibilitySetID: String,
+        compatibilitySetSHA256: String,
+        instanceID: String,
+        processID: pid_t,
+        modelLoaded: Bool = true
+    ) -> [String: Any] {
+        [
+            "binary_version": version,
+            "compatibility_set_id": compatibilitySetID,
+            "compatibility_set_sha256": compatibilitySetSHA256,
+            "model_loaded": modelLoaded,
+            "status": "ready",
+            "service_instance": [
+                "instance_id": instanceID,
+                "pid": Int(processID),
+            ],
+        ]
     }
 
     private func makeRuntime(
@@ -4798,6 +5193,22 @@ private actor SentinelSendGate {
 
     func markSendReturned() {
         events.append("send-return")
+    }
+
+    func release() {
+        released = true
+    }
+}
+
+private actor LocalAutoupdateHealthSleepGate {
+    private(set) var started = false
+    private var released = false
+
+    func waitForRelease() async {
+        started = true
+        while !released {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
     }
 
     func release() {

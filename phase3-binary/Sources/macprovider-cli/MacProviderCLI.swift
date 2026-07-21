@@ -178,6 +178,17 @@ struct ServeCatalogPreflightError: Error {
     let underlying: Error
 }
 
+enum SelfUpdateStartupFenceError: Error, Equatable, CustomStringConvertible {
+    case authorizationMismatch(String)
+
+    var description: String {
+        switch self {
+        case .authorizationMismatch(let reason):
+            return "self-update startup reload fence authorization mismatch: \(reason)"
+        }
+    }
+}
+
 struct ServeCommand: AsyncParsableCommand {
     // SPEC-028 AC-8: the bundled coordinator decoder and state-update path
     // accept these optional heartbeat fields without changing routing,
@@ -685,6 +696,14 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        // v1.8.53 can leave its one-shot reload helper alive long enough to
+        // restart the newly installed target repeatedly. The target fences that
+        // helper before configuration/model work, but only while two durable
+        // authorities agree that this exact executable is the intended
+        // self-update child. Ordinary launches never touch reload jobs.
+        let startupReloadFenceAuthorized =
+            try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
+
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
                 port: port,
@@ -851,7 +870,8 @@ struct ServeCommand: AsyncParsableCommand {
                         store: lifecycleLeaseStore,
                         operationID: lifecycleOperationID,
                         providerID: startupProviderID,
-                        duration: 30 * 60
+                        duration: 30 * 60,
+                        allowAdoptedHandoffRecovery: startupReloadFenceAuthorized
                     )
                 }
             )
@@ -889,7 +909,12 @@ struct ServeCommand: AsyncParsableCommand {
         guard let startupLease = acquiredStartupLease else {
             throw ProviderLifecycleLeaseError.currentOwnerUnavailable
         }
-        defer { _ = try? lifecycleLeaseStore.clear(ifLeaseID: startupLease.leaseID) }
+        defer {
+            _ = try? Self.clearStartupLifecycleLeaseUnlessUpdatePending(
+                startupLease,
+                store: lifecycleLeaseStore
+            )
+        }
         let verifiedDraftModelLoadPath = startupPreflight.verifiedDraftModelLoadPath
 
         printResolvedConfiguration(resolved)
@@ -1361,7 +1386,6 @@ struct ServeCommand: AsyncParsableCommand {
             }
             throw ExitCode(1)
         }
-        await coordinatorClient?.start()
         await idlePrewarmer.start()
         let lifecycleProviderID = resolved.providerID
         let lifecycleModelID = resolved.model
@@ -1398,8 +1422,20 @@ struct ServeCommand: AsyncParsableCommand {
                     compatibilitySetID: lifecycleCompatibilitySetID,
                     operationID: lifecycleOperationID
                 )
-                guard try lifecycleLeaseStore.clear(ifLeaseID: startupLease.leaseID) else {
+                guard try Self.clearStartupLifecycleLeaseUnlessUpdatePending(
+                    startupLease,
+                    store: lifecycleLeaseStore
+                ) else {
                     throw ProviderLifecycleLeaseError.compareAndSwapFailed
+                }
+                Task {
+                    await Self.clearStartupLifecycleLeaseWhenUpdateCompletes(
+                        startupLease,
+                        store: lifecycleLeaseStore
+                    )
+                }
+                Self.startCoordinatorAfterListening {
+                    await coordinatorClient?.start()
                 }
             }
         )
@@ -1417,6 +1453,15 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    static func startCoordinatorAfterListening(
+        _ start: (@Sendable () async -> Void)?
+    ) {
+        guard let start else { return }
+        Task {
+            await start()
+        }
+    }
+
     static func acquireProviderServeLock(_ config: AppConfig) throws -> ProviderServeLock {
         do {
             return try ProviderServeLock.acquire(providerID: config.providerID, port: config.port)
@@ -1429,6 +1474,276 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     static let providerLaunchdServiceIdentity = "live.streamvc.macprovider"
+
+    @discardableResult
+    static func fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+        loadPending: () throws -> AutoUpdatePendingMarker? = {
+            try AutoUpdateMarkerStore().readPending()
+        },
+        inspectLifecycleLease: () -> ProviderLifecycleLeaseInspection = {
+            ProviderLifecycleLeaseStore().inspect()
+        },
+        currentExecutableURL: URL? = Bundle.main.executableURL,
+        targetVersion: String = CoordinatorClient.binaryVersion,
+        lifecycleEnvironment: ProviderLifecycleLeaseEnvironment = .live,
+        executableSHA256: (URL) throws -> String = {
+            try AutoUpdateMarkerStore.sha256(file: $0)
+        },
+        fenceReloadJobs: () throws -> Void = {
+            try AutoUpdater.fenceReloadJobsIfInstalled()
+        }
+    ) throws -> Bool {
+        guard let pending = try loadPending() else {
+            return false
+        }
+        if pending.transactionState == .restoringPrevious
+            || pending.transactionState == .awaitingPreviousReadiness
+        {
+            try fenceRestoredPreviousReloadJobsAtStartup(
+                pending: pending,
+                currentExecutableURL: currentExecutableURL,
+                currentVersion: targetVersion,
+                lifecycleEnvironment: lifecycleEnvironment,
+                executableSHA256: executableSHA256,
+                fenceReloadJobs: fenceReloadJobs
+            )
+            // The retained handoff names the failed target, not the restored
+            // previous binary. Fence stale helpers, but do not authorize that
+            // handoff's recovery; startup will replace its stale owner through
+            // the ordinary invalid-lease path.
+            return false
+        }
+        guard pending.commitOwner == "self_update"
+                || pending.commitOwner == "coordinator" else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("commit_owner")
+        }
+        guard pending.targetVersion == targetVersion else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("target_version")
+        }
+        guard let executable = CompatibilitySetManifest.resolvedExecutableURL(currentExecutableURL)
+        else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("current_executable")
+        }
+        let executableDigest = try executableSHA256(executable)
+        let pendingTarget = CompatibilitySetManifest.resolvedExecutableURL(
+            URL(fileURLWithPath: pending.targetPath)
+        )
+        guard pendingTarget == executable else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("pending_target_path")
+        }
+
+        let leaseRecord: ProviderLifecycleLeaseRecord
+        let adoptedRecovery: Bool
+        switch inspectLifecycleLease() {
+        case .valid(let record):
+            leaseRecord = record
+            adoptedRecovery = false
+        case .invalidOrExpired(let record?, let reason)
+            where record.startupHandoff?.state == .adopted
+                && Self.adoptedStartupHandoffRecoveryReasonAllowed(reason):
+            // The exact launchd target can restart while the dual-authority
+            // update marker is still armed. Structural/storage failures remain
+            // unauthorized; stale owner, clock window, and boot-session state
+            // are rebound later only after this exact target passes every
+            // marker, path, digest, and launchd-PID check.
+            leaseRecord = record
+            adoptedRecovery = true
+        case .missing, .invalidOrExpired:
+            throw SelfUpdateStartupFenceError.authorizationMismatch("startup_handoff")
+        }
+        guard let handoff = leaseRecord.startupHandoff,
+              handoff.state == .prepared || handoff.state == .adopted,
+              handoff.serviceIdentity == providerLaunchdServiceIdentity
+        else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("startup_handoff")
+        }
+        let processID = lifecycleEnvironment.processID()
+        guard processID > 0,
+              lifecycleEnvironment.launchdServiceProcessID(handoff.serviceIdentity) == processID
+        else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("launchd_service_owner")
+        }
+        guard let bootSession = lifecycleEnvironment.bootSession(),
+              !bootSession.isEmpty,
+              leaseRecord.owner.bootSession == handoff.bootSession,
+              adoptedRecovery || bootSession == handoff.bootSession else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("startup_handoff_boot_session")
+        }
+        let wallNow = lifecycleEnvironment.wallMilliseconds()
+        let monotonicNow = lifecycleEnvironment.monotonicNanoseconds()
+        if adoptedRecovery {
+            guard wallNow >= leaseRecord.issuedWallMilliseconds,
+                  wallNow >= handoff.issuedWallMilliseconds,
+                  Self.pendingMarkerDeadlineIsFuture(pending, wallMilliseconds: wallNow),
+                  bootSession != handoff.bootSession
+                    || (monotonicNow >= leaseRecord.issuedMonotonicNanoseconds
+                        && monotonicNow >= handoff.issuedMonotonicNanoseconds) else {
+                throw SelfUpdateStartupFenceError.authorizationMismatch("startup_handoff_window")
+            }
+        } else {
+            guard wallNow >= leaseRecord.issuedWallMilliseconds,
+                  wallNow < leaseRecord.expiresWallMilliseconds,
+                  monotonicNow >= leaseRecord.issuedMonotonicNanoseconds,
+                  monotonicNow < leaseRecord.expiresMonotonicNanoseconds,
+                  wallNow >= handoff.issuedWallMilliseconds,
+                  wallNow < handoff.expiresWallMilliseconds,
+                  monotonicNow >= handoff.issuedMonotonicNanoseconds,
+                  monotonicNow < handoff.expiresMonotonicNanoseconds else {
+                throw SelfUpdateStartupFenceError.authorizationMismatch("startup_handoff_window")
+            }
+        }
+        let handoffTarget = CompatibilitySetManifest.resolvedExecutableURL(
+            URL(fileURLWithPath: handoff.targetExecutablePath)
+        )
+        guard handoffTarget == executable else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("handoff_target_path")
+        }
+        guard handoff.targetExecutableSHA256 == executableDigest else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("handoff_target_sha256")
+        }
+
+        try fenceReloadJobs()
+        return true
+    }
+
+    private static func fenceRestoredPreviousReloadJobsAtStartup(
+        pending: AutoUpdatePendingMarker,
+        currentExecutableURL: URL?,
+        currentVersion: String,
+        lifecycleEnvironment: ProviderLifecycleLeaseEnvironment,
+        executableSHA256: (URL) throws -> String,
+        fenceReloadJobs: () throws -> Void
+    ) throws {
+        guard pending.commitOwner == "self_update"
+                || pending.commitOwner == "coordinator" else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("commit_owner")
+        }
+        guard pending.previousVersion == currentVersion else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("rollback_previous_version")
+        }
+        guard let executable = CompatibilitySetManifest.resolvedExecutableURL(currentExecutableURL)
+        else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("current_executable")
+        }
+        let pendingTarget = CompatibilitySetManifest.resolvedExecutableURL(
+            URL(fileURLWithPath: pending.targetPath)
+        )
+        guard pendingTarget == executable else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("pending_target_path")
+        }
+        let processID = lifecycleEnvironment.processID()
+        guard processID > 0,
+              lifecycleEnvironment.launchdServiceProcessID(
+                providerLaunchdServiceIdentity
+              ) == processID else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("launchd_service_owner")
+        }
+        guard try executableSHA256(executable) == pending.sha256 else {
+            throw SelfUpdateStartupFenceError.authorizationMismatch("rollback_previous_sha256")
+        }
+        try fenceReloadJobs()
+    }
+
+    private static func adoptedStartupHandoffRecoveryReasonAllowed(
+        _ reason: ProviderLifecycleLeaseInvalidReason
+    ) -> Bool {
+        switch reason {
+        case .wallExpired, .monotonicExpired, .bootSessionChanged,
+             .ownerProcessMissingOrReused:
+            return true
+        case .malformedRecord, .unsupportedVersion, .invalidField,
+             .durationOutOfRange, .wallClockBeforeIssue,
+             .monotonicClockBeforeIssue, .unsafeStorage, .storageFailure:
+            return false
+        }
+    }
+
+    private static func pendingMarkerDeadlineIsFuture(
+        _ pending: AutoUpdatePendingMarker,
+        wallMilliseconds: Int64
+    ) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        guard wallMilliseconds > 0,
+              let deadline = formatter.date(from: pending.markerDeadline) else {
+            return false
+        }
+        return deadline.timeIntervalSince1970 * 1_000 > Double(wallMilliseconds)
+    }
+
+    static func startupLifecycleLeaseMatchesPendingUpdate(
+        _ lease: ProviderLifecycleLeaseRecord,
+        loadPending: () throws -> AutoUpdatePendingMarker? = {
+            try AutoUpdateMarkerStore().readPending()
+        },
+        targetVersion: String = CoordinatorClient.binaryVersion,
+        wallMilliseconds: Int64 = Int64(
+            (Date().timeIntervalSince1970 * 1_000).rounded(.down)
+        )
+    ) -> Bool {
+        guard let handoff = lease.startupHandoff,
+              handoff.state == .adopted,
+              let pending = try? loadPending(),
+              pending.commitOwner == "self_update"
+                || pending.commitOwner == "coordinator",
+              pending.targetVersion == targetVersion,
+              pending.targetPath == handoff.targetExecutablePath,
+              pendingMarkerDeadlineIsFuture(
+                pending,
+                wallMilliseconds: wallMilliseconds
+              ) else {
+            return false
+        }
+        return true
+    }
+
+    @discardableResult
+    static func clearStartupLifecycleLeaseUnlessUpdatePending(
+        _ lease: ProviderLifecycleLeaseRecord,
+        store: ProviderLifecycleLeaseStore,
+        loadPending: () throws -> AutoUpdatePendingMarker? = {
+            try AutoUpdateMarkerStore().readPending()
+        },
+        targetVersion: String = CoordinatorClient.binaryVersion,
+        wallMilliseconds: Int64 = Int64(
+            (Date().timeIntervalSince1970 * 1_000).rounded(.down)
+        )
+    ) throws -> Bool {
+        guard !startupLifecycleLeaseMatchesPendingUpdate(
+            lease,
+            loadPending: loadPending,
+            targetVersion: targetVersion,
+            wallMilliseconds: wallMilliseconds
+        ) else {
+            return true
+        }
+        return try store.clear(ifLeaseID: lease.leaseID)
+    }
+
+    static func clearStartupLifecycleLeaseWhenUpdateCompletes(
+        _ lease: ProviderLifecycleLeaseRecord,
+        store: ProviderLifecycleLeaseStore,
+        loadPending: @escaping () throws -> AutoUpdatePendingMarker? = {
+            try AutoUpdateMarkerStore().readPending()
+        },
+        targetVersion: String = CoordinatorClient.binaryVersion,
+        wallMilliseconds: @escaping () -> Int64 = {
+            Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        },
+        sleep: @escaping () async -> Void = {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    ) async {
+        while startupLifecycleLeaseMatchesPendingUpdate(
+            lease,
+            loadPending: loadPending,
+            targetVersion: targetVersion,
+            wallMilliseconds: wallMilliseconds()
+        ) {
+            await sleep()
+        }
+        _ = try? store.clear(ifLeaseID: lease.leaseID)
+    }
 
     static func startupHandoffOperationID(in store: ProviderLifecycleLeaseStore) -> String? {
         switch store.inspect() {
@@ -1447,7 +1762,8 @@ struct ServeCommand: AsyncParsableCommand {
         store: ProviderLifecycleLeaseStore,
         operationID: String,
         providerID: String?,
-        duration: TimeInterval
+        duration: TimeInterval,
+        allowAdoptedHandoffRecovery: Bool = false
     ) throws -> ProviderLifecycleLeaseRecord {
         let trimmedProviderID = providerID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1473,6 +1789,13 @@ struct ServeCommand: AsyncParsableCommand {
                 duration: duration
             )
         } catch ProviderLifecycleLeaseError.leaseNotValid {
+            if allowAdoptedHandoffRecovery {
+                return try store.recoverAdoptedStartupHandoff(
+                    operationID: operationID,
+                    providerID: adoptionProviderID,
+                    serviceIdentity: providerLaunchdServiceIdentity
+                )
+            }
             // The on-disk record IS a matching handoff, but its OWNER identity is
             // no longer valid (adoptStartupHandoff's adopted branch,
             // ProviderLifecycleLease.swift ~620, rethrows validationFailure as

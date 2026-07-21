@@ -209,6 +209,15 @@ lifecycle_root = os.path.expanduser("~/Library/Application Support/macprovider/l
 lifecycle_lock_path = os.path.join(lifecycle_root, ".lease.json.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
+reload_helper_label = "live.streamvc.macprovider-compatibility-reload"
+legacy_reload_helper_label = re.compile(
+    rf"^{re.escape(reload_helper_label)}\."
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+reload_helper_removal_max_checks = 100
+
+class ReloadHelperFenceError(RuntimeError):
+    pass
 
 def ts():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -232,6 +241,87 @@ def event(outcome, phase, failure_class, reason, marker=None):
         payload["update_id"] = marker.get("update_id", "")
         payload["target_version"] = marker.get("target_version", "")
     log(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+def fence_reload_helpers():
+    try:
+        listed = subprocess.run(
+            ["launchctl", "list"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        raise ReloadHelperFenceError(f"reload_helper_list_failed:{type(exc).__name__}") from exc
+    if listed.returncode != 0:
+        raise ReloadHelperFenceError(f"reload_helper_list_failed:{listed.returncode}")
+    labels = set()
+    for line in listed.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) != 3:
+            continue
+        candidate = fields[2]
+        if candidate == reload_helper_label or legacy_reload_helper_label.fullmatch(candidate):
+            labels.add(candidate)
+    labels.add(reload_helper_label)
+    ordered_labels = [reload_helper_label] + sorted(labels - {reload_helper_label})
+    domain = f"gui/{uid}"
+    for helper_label in ordered_labels:
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", f"{domain}/{helper_label}"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception as exc:
+            raise ReloadHelperFenceError(
+                f"reload_helper_bootout_failed:{helper_label}:{type(exc).__name__}"
+            ) from exc
+        absent = False
+        for attempt in range(reload_helper_removal_max_checks):
+            try:
+                inspected = subprocess.run(
+                    ["launchctl", "print", f"{domain}/{helper_label}"],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception as exc:
+                raise ReloadHelperFenceError(
+                    f"reload_helper_inspection_failed:{helper_label}:{type(exc).__name__}"
+                ) from exc
+            if (
+                inspected.returncode == 113
+                and "Could not find service" in inspected.stdout
+            ):
+                absent = True
+                break
+            if inspected.returncode != 0:
+                raise ReloadHelperFenceError(
+                    f"reload_helper_inspection_failed:{helper_label}:{inspected.returncode}"
+                )
+            if attempt + 1 < reload_helper_removal_max_checks:
+                time.sleep(0.1)
+        if not absent:
+            raise ReloadHelperFenceError(f"reload_helper_removal_timeout:{helper_label}")
+    launch_agents = os.path.expanduser("~/Library/LaunchAgents")
+    for helper_label in ordered_labels:
+        helper_plist = os.path.join(launch_agents, f"{helper_label}.plist")
+        if not os.path.lexists(helper_plist):
+            continue
+        if os.path.isdir(helper_plist) and not os.path.islink(helper_plist):
+            raise ReloadHelperFenceError(f"reload_helper_plist_not_file:{helper_label}")
+        try:
+            os.unlink(helper_plist)
+        except Exception as exc:
+            raise ReloadHelperFenceError(
+                f"reload_helper_plist_remove_failed:{helper_label}:{type(exc).__name__}"
+            ) from exc
 
 def record_watchdog_recovery(marker, failure_class):
     target = marker["target_path"]
@@ -1097,6 +1187,7 @@ def atomic_copy_binary(source, target, mode):
 
 def restore(marker, failure_class):
     backup, target, release_backup = validate_restore_inputs(marker)
+    fence_reload_helpers()
     exact_compatibility_transaction = marker.get("transaction_state") is not None
     if exact_compatibility_transaction and marker.get("transaction_state") != "restoring_previous":
         marker = transition_marker(marker, "restoring_previous")
@@ -1132,10 +1223,42 @@ def restore(marker, failure_class):
     # binaries that predate lifecycle-state; recovery itself must still run.
     record_watchdog_recovery(marker, failure_class)
     try:
-        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        bootstrap = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        if bootstrap.returncode != 0:
+            loaded = subprocess.run(
+                ["launchctl", "print", f"gui/{uid}/{label}"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            if loaded.returncode != 0:
+                raise RuntimeError(f"bootstrap_failed:{bootstrap.returncode}")
+        kickstart = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        if kickstart.returncode != 0:
+            raise RuntimeError(f"kickstart_failed:{kickstart.returncode}")
     except Exception as exc:
         log(f"launchctl_restore_warning={exc}")
+        event(
+            "failure",
+            "rollback",
+            failure_class,
+            "restored_release_restart_deferred",
+            marker,
+        )
+        return
     reason = "restored_prior_release" if release_backup else "restored_prior_binary"
     if exact_compatibility_transaction:
         marker = transition_marker(marker, "awaiting_previous_readiness", readiness_seconds=300)
@@ -1262,6 +1385,9 @@ try:
             sys.exit(0)
         failure_class = classify_post_start_failure(marker)
         restore(marker, failure_class)
+    except ReloadHelperFenceError as exc:
+        event("failure", "rollback", "other", str(exc), marker)
+        log(f"recovery_deferred={exc}")
     except Exception as exc:
         unsupported_topology = str(exc).startswith("unsupported_install_topology")
         failure_class = "other" if unsupported_topology else "rollback_backup_corrupt"

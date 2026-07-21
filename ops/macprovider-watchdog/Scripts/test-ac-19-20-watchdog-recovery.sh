@@ -28,7 +28,26 @@ chmod 700 "$HOME_DIR" "$HOME_DIR/.local" "$HOME_DIR/.local/share" "$HOME_DIR/.lo
 
 cat > "$FAKE_BIN/launchctl" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = "print" ]; then
+if [ "${1:-}" = "list" ]; then
+  printf '%s\n' \
+    "-	0	live.streamvc.macprovider-compatibility-reload" \
+    "-	0	live.streamvc.macprovider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab" \
+    "-	0	live.streamvc.macprovider-compatibility-reload.01234567-89AB-4CDE-8FAB-0123456789AB" \
+    "-	0	live.streamvc.macprovider-compatibility-reload.not-a-uuid"
+elif [ "${1:-}" = "bootout" ]; then
+  printf 'bootout:%s\n' "${2:-}" >> "${TEST_LAUNCHCTL_LOG:?}"
+elif [ "${1:-}" = "print" ] && [[ "${2:-}" == *"-compatibility-reload"* ]]; then
+  printf 'print:%s:plist_%s\n' \
+    "${2:-}" \
+    "$([ -e "${TEST_STABLE_RELOAD_PLIST:?}" ] && printf present || printf absent)" \
+    >> "${TEST_LAUNCHCTL_LOG:?}"
+  if [ "${TEST_RELOAD_HELPER_INSPECTION_ERROR:-0}" = "1" ]; then
+    printf 'unexpected launchctl inspection error\n' >&2
+    exit 78
+  fi
+  printf 'Could not find service "%s" in domain for user\n' "${2:-}" >&2
+  exit 113
+elif [ "${1:-}" = "print" ]; then
   case "${TEST_LAUNCHCTL_PRINT:-healthy}" in
     crash)
       printf 'pid = 123\nlast exit status = 7\n'
@@ -361,6 +380,9 @@ run_watchdog_tick() {
   MACPROVIDER_DITTO="$FAKE_BIN/ditto" \
   MACPROVIDER_LOG_DIR="$LOG_DIR" \
   MACPROVIDER_WATCHDOG_STATE_DIR="$WATCHDOG_STATE" \
+  TEST_LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log" \
+  TEST_STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.plist" \
+  TEST_RELOAD_HELPER_INSPECTION_ERROR="${TEST_RELOAD_HELPER_INSPECTION_ERROR:-0}" \
   TEST_LIFECYCLE_LEASE_KIND="${TEST_LIFECYCLE_LEASE_KIND:-}" \
   TEST_LIFECYCLE_LEASE_OWNER_PID="${TEST_LIFECYCLE_LEASE_OWNER_PID:-}" \
   bash "$WATCHDOG"
@@ -378,8 +400,17 @@ run_watchdog_tick_with_health() {
   MACPROVIDER_HEALTHCHECK_URL="http://127.0.0.1:9/healthz" \
   MACPROVIDER_LOG_DIR="$LOG_DIR" \
   MACPROVIDER_WATCHDOG_STATE_DIR="$WATCHDOG_STATE" \
+  TEST_LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log" \
+  TEST_STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.plist" \
+  TEST_RELOAD_HELPER_INSPECTION_ERROR="${TEST_RELOAD_HELPER_INSPECTION_ERROR:-0}" \
   bash "$WATCHDOG"
 }
+
+mkdir -p "$HOME_DIR/Library/LaunchAgents"
+STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.plist"
+LEGACY_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab.plist"
+NEAR_MATCH_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.not-a-uuid.plist"
+touch "$STABLE_RELOAD_PLIST" "$LEGACY_RELOAD_PLIST" "$NEAR_MATCH_RELOAD_PLIST"
 
 write_fixture $'old-version\n' $'new-version\n'
 LOCK_INODE_BEFORE="$(ls -di "$STATE_ROOT/update.lock" | awk '{print $1}')"
@@ -399,6 +430,34 @@ if [ "$(ls -di "$STATE_ROOT/update.lock" | awk '{print $1}')" != "$LOCK_INODE_BE
   echo "AC-19 FAIL: recovery split the stable update.lock inode" >&2
   exit 1
 fi
+grep -q "bootout:gui/$(id -u)/live.streamvc.macprovider-compatibility-reload$" "$TMP_ROOT/launchctl.log"
+grep -q "bootout:gui/$(id -u)/live.streamvc.macprovider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab$" "$TMP_ROOT/launchctl.log"
+if grep -q 'bootout:.*89AB-4CDE' "$TMP_ROOT/launchctl.log" || \
+   grep -q 'bootout:.*not-a-uuid' "$TMP_ROOT/launchctl.log"; then
+  echo "AC-19 FAIL: reload fence targeted a non-canonical helper label" >&2
+  exit 1
+fi
+grep -q 'print:.*compatibility-reload:plist_present$' "$TMP_ROOT/launchctl.log"
+if [ -e "$STABLE_RELOAD_PLIST" ] || [ -e "$LEGACY_RELOAD_PLIST" ]; then
+  echo "AC-19 FAIL: reload helper plist remained after positive absence proof" >&2
+  exit 1
+fi
+if [ ! -e "$NEAR_MATCH_RELOAD_PLIST" ]; then
+  echo "AC-19 FAIL: reload fence removed a non-canonical helper plist" >&2
+  exit 1
+fi
+
+rm -f "$LOG_DIR/watchdog.log"
+write_fixture $'old-version\n' $'new-version\n'
+touch "$STABLE_RELOAD_PLIST"
+TEST_RELOAD_HELPER_INSPECTION_ERROR=1 run_watchdog_tick
+if [ "$(cat "$TARGET")" != $'new-version' ] || \
+   [ ! -e "$STATE_ROOT/pending.json" ] || [ ! -e "$BACKUP" ] || \
+   [ ! -e "$STABLE_RELOAD_PLIST" ]; then
+  echo "AC-19 FAIL: helper fence inspection error did not fail closed before restore" >&2
+  exit 1
+fi
+grep -q '"reason":"reload_helper_inspection_failed:live.streamvc.macprovider-compatibility-reload:78"' "$LOG_DIR/watchdog.log"
 
 rm -f "$LOG_DIR/watchdog.log"
 write_fixture $'old-version\n' $'new-version\n'
