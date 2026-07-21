@@ -4028,10 +4028,12 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.56")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.56")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.56")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.56")
+        // Advertise the live marketing version on both handshake frames; do not
+        // hardcode the number so ordinary candidate bumps do not break this gate.
+        XCTAssertFalse(CoordinatorClient.binaryVersion.isEmpty)
+        XCTAssertEqual(MacProviderCLI.configuration.version, CoordinatorClient.binaryVersion)
+        XCTAssertEqual(hello["binary_version"] as? String, CoordinatorClient.binaryVersion)
+        XCTAssertEqual(auth["binary_version"] as? String, CoordinatorClient.binaryVersion)
     }
 
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
