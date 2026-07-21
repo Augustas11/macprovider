@@ -1214,6 +1214,8 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
+        let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+        let watchdogCleanup = ControlSocketWatchdogCleanup(socketPath: socketURL)
         let coordinatorClient = Self.makeCoordinatorClient(
             noJoin: noJoin,
             donorMode: resolved.donorMode,
@@ -1250,7 +1252,10 @@ struct ServeCommand: AsyncParsableCommand {
                 admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
                 lifecycleStateStore: lifecycleStateStore,
                 lifecycleOperationID: lifecycleOperationID,
-                operatorPausedInitially: operatorPausedInitially
+                operatorPausedInitially: operatorPausedInitially,
+                watchdogExitPreparation: {
+                    watchdogCleanup.prepareForWatchdogExit()
+                }
             )
         }
         let idlePrewarmLogger = IdlePrewarmLogger { object in
@@ -1342,7 +1347,6 @@ struct ServeCommand: AsyncParsableCommand {
         // Every serve instance exposes the same owner-only control contract.
         // Malibu must not lose lifecycle/earnings visibility merely because
         // warm swap or receipt rotation is disabled for this provider.
-        let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
         let providerEarningsClient = resolved.providerID.flatMap {
             try? ProviderEarningsClient(
                 coordinatorURL: resolved.coordinatorURL,
@@ -1377,7 +1381,8 @@ struct ServeCommand: AsyncParsableCommand {
             malibuAccrualClient: malibuAccrualClient,
             providerToken: resolved.providerToken,
             pauseProvider: pauseProvider,
-            resumeProvider: resumeProvider
+            resumeProvider: resumeProvider,
+            watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup
         )
         do {
             try await controlSocket?.start()
