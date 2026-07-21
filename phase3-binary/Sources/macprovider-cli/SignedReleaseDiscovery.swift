@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 struct SignedReleaseDiscoveryHead: Equatable, Sendable {
-    static let transportReleaseTag = "release-discovery"
+    static let transportTagPrefix = "release-discovery-v1-"
     static let assetName = "macprovider-release-discovery.json"
     static let signatureAssetName = "macprovider-release-discovery.json.sig"
     static let envelopeSchema = "macprovider.release-discovery-envelope.v1"
@@ -19,6 +19,20 @@ struct SignedReleaseDiscoveryHead: Equatable, Sendable {
     let issuedAt: Date
     let expiresAt: Date
     let digest: String
+
+    static func transportSequence(from tag: String) -> UInt64? {
+        guard tag.hasPrefix(transportTagPrefix) else { return nil }
+        let suffix = tag.dropFirst(transportTagPrefix.count)
+        guard !suffix.isEmpty,
+              suffix.allSatisfy(\.isNumber),
+              suffix.first != "0",
+              let sequence = UInt64(suffix),
+              sequence > 0
+        else {
+            return nil
+        }
+        return sequence
+    }
 
     static func loadVerified(
         headData: Data,

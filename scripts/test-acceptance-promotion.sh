@@ -30,6 +30,8 @@ for required in (
     "scripts/verify-acceptance-promotion.py verify-run",
     "scripts/verify-acceptance-promotion.py verify-directory",
     "scripts/verify-release-checksums.sh",
+    "scripts/verify-release-discovery-transport.py",
+    "scripts/verify-anonymous-release-discovery.sh",
     "scripts/verify-tier2-provider-release.sh",
     'cmp "$accepted/$name" "$download/$name"',
 ):
@@ -63,6 +65,39 @@ if '[\\"candidate_ref\\"]' in protected or '.removeprefix(\\"refs/heads/\\")' in
     raise SystemExit("candidate ref extraction contains shell-literal Python escapes")
 if 'print(json.load(open(sys.argv[1]))["candidate_ref"])' not in protected:
     raise SystemExit("promoter does not pass the signed candidate ref directly to verification")
+discovery_gate = protected.find("- name: Require an advancing immutable discovery head")
+draft_create = protected.find("- name: Create and fully verify a numeric draft")
+if discovery_gate < 0 or draft_create < 0 or discovery_gate > draft_create:
+    raise SystemExit("monotonic discovery validation must precede numeric draft creation")
+for requirement in (
+    "--minimum-sequence",
+    "--allow-expired",
+    '"repos/$GITHUB_REPOSITORY/releases/latest"',
+    'release.get("immutable") is not True',
+):
+    if requirement not in protected[discovery_gate:draft_create]:
+        raise SystemExit(f"promotion discovery gate omits: {requirement}")
+transport_publish = protected.find("- name: Publish one append-only immutable discovery transport")
+if transport_publish < draft_create:
+    raise SystemExit("append-only discovery transport must publish after the numeric release")
+for requirement in (
+    'git ls-remote --tags origin "$TRANSPORT_TAG"',
+    "--prerelease",
+    "--latest=false",
+    "--require-immutable",
+):
+    if requirement not in protected[transport_publish:]:
+        raise SystemExit(f"append-only promotion transport omits: {requirement}")
+if "--clobber" in protected[transport_publish:]:
+    raise SystemExit("append-only discovery transport must never overwrite an asset")
+if 'transport_tag="release-discovery-v1-$candidate_sequence"' not in protected[discovery_gate:draft_create]:
+    raise SystemExit("promotion does not derive the transport tag from the signed sequence")
+if '[[ "$PREVIOUS_TAG" == v1.8.55 ]]' not in public_verify:
+    raise SystemExit("anonymous proof does not bound the immutable v1.8.55 bridge")
+if public_verify.count("scripts/verify-anonymous-release-discovery.sh") != 2:
+    raise SystemExit("public verifier must prove target and prior clients")
+if '"$TAG" "$CANDIDATE_SHA" "$TAG" "$TRANSPORT_TAG"' not in public_verify:
+    raise SystemExit("public verifier does not bind the anonymous target proof to its transport")
 PY
 
 repository=Augustas11/macprovider
