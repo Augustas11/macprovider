@@ -171,6 +171,7 @@ func main() {
 		Str("compatibility_policy", compatibilityPolicyMode).
 		Str("recommended_compatibility_set_id", cfg.Coordinator.CompatibilitySet.TargetID).
 		Int("accepted_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.AcceptedIDs)).
+		Int("first_hop_bridge_set_count", len(cfg.Coordinator.CompatibilitySet.FirstHopBridgeIDs)).
 		Msg("provider compatibility-set admission policy initialized")
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)

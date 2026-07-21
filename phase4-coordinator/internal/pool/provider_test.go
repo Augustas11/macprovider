@@ -390,6 +390,11 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	if legacyCatalog.RoutingEligible() || legacyCatalog.CapacityEligible() {
 		t.Fatal("metadata-free legacy catalog sessions must remain visible but receive no buyer traffic or serving-capacity credit")
 	}
+	updateBridge := base
+	updateBridge.CatalogAdmissionMode = "update_bridge"
+	if updateBridge.RoutingEligible() || updateBridge.CapacityEligible() || updateBridge.ServingCapable() {
+		t.Fatal("#610 first-hop update_bridge sessions must remain visible but receive no buyer traffic or serving-capacity credit")
+	}
 	for _, mode := range []string{"", "not_required", "current", "previous"} {
 		admitted := base
 		admitted.CatalogAdmissionMode = mode

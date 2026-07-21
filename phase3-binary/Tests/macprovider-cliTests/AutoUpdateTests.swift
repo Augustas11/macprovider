@@ -1425,6 +1425,45 @@ final class AutoUpdateTests: XCTestCase {
         ))
     }
 
+    /// #610 first-hop: public pre-fix CLI 1.8.48 still requires a fresh
+    /// coordinator admission whose accepted set is the installed v1.8.48 set
+    /// and whose recommended set is the recovery target. Production exposes
+    /// that contract via coordinator `first_hop_bridge_ids` without widening
+    /// buyer-serving acceptance. After the hop, #631 signed_release authority
+    /// no longer needs this record (`testSignedReleaseDiscoverySwapDoesNotRequireCoordinatorTrust`).
+    func testPublicPreFixFirstHopAdmissionMatchesExactV1848SetAndRecoveryTarget() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let publicPreFixSet = "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
+        let recoveryTargetSet = "Augustas11/macprovider:v1.8.56@0937d230cb7bbfe779480ffb72dbb6ea78d0a14b"
+        let observed = Date(timeIntervalSince1970: 1_800_000_000)
+
+        try store.persistCompatibilityAdmission(
+            acceptedCompatibilitySetID: publicPreFixSet,
+            recommendedCompatibilitySetID: recoveryTargetSet,
+            now: observed,
+            validitySeconds: 90
+        )
+
+        XCTAssertNoThrow(try store.requireCoordinatorCompatibilityTarget(
+            recoveryTargetSet,
+            currentCompatibilitySetID: publicPreFixSet,
+            now: observed.addingTimeInterval(30)
+        ))
+        // A mismatched recommendation (for example latest drifted from Pearl
+        // target_id) must keep the immutable 1.8.48 updater fail-closed.
+        XCTAssertThrowsError(try store.requireCoordinatorCompatibilityTarget(
+            "Augustas11/macprovider:v1.8.55@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            currentCompatibilitySetID: publicPreFixSet,
+            now: observed.addingTimeInterval(30)
+        )) { error in
+            guard case AutoUpdateMarkerError.compatibilityAdmissionRequired(let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "recommended_set_mismatch")
+        }
+    }
+
     func testCoordinatorCompatibilityAdmissionRejectsUnknownFieldsAndClearsDurably() throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)

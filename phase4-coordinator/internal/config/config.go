@@ -23,6 +23,10 @@ var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 const (
 	maxCompatibilitySetIDBytes   = 256
 	maxAcceptedCompatibilitySets = 8
+	// maxFirstHopBridgeSets bounds the temporary pre-fix update bridge
+	// (#610). It is intentionally smaller than accepted_ids so production
+	// cannot silently widen buyer-serving admission via the bridge list.
+	maxFirstHopBridgeSets = 4
 )
 
 var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}$`)
@@ -121,18 +125,25 @@ type CoordinatorConfig struct {
 // is the set providers should converge on; AcceptedIDs includes that target and
 // at least one distinct rollback set so a rollout can be reversed without
 // disabling strict compatibility admission.
+//
+// FirstHopBridgeIDs is the production #610 pre-fix bootstrap: exact set IDs
+// (for example the last public pre-fix CLI set v1.8.48) that may open a
+// session solely to receive the recommended target admission. Bridge-only
+// sessions are never buyer-routable. They are distinct from AcceptedIDs.
 type CompatibilitySetConfig struct {
-	TargetID    string   `yaml:"target_id"`
-	AcceptedIDs []string `yaml:"accepted_ids"`
+	TargetID          string   `yaml:"target_id"`
+	AcceptedIDs       []string `yaml:"accepted_ids"`
+	FirstHopBridgeIDs []string `yaml:"first_hop_bridge_ids"`
 }
 
 // Configured distinguishes an explicit strict policy from the legacy
 // unconfigured mode. Partial configurations fail validation.
 func (c CompatibilitySetConfig) Configured() bool {
-	return c.TargetID != "" || len(c.AcceptedIDs) != 0
+	return c.TargetID != "" || len(c.AcceptedIDs) != 0 || len(c.FirstHopBridgeIDs) != 0
 }
 
-// Accepts performs the exact, case-sensitive compatibility-set comparison.
+// Accepts performs the exact, case-sensitive compatibility-set comparison for
+// buyer-serving admission.
 func (c CompatibilitySetConfig) Accepts(id string) bool {
 	for _, accepted := range c.AcceptedIDs {
 		if id == accepted {
@@ -140,6 +151,29 @@ func (c CompatibilitySetConfig) Accepts(id string) bool {
 		}
 	}
 	return false
+}
+
+// IsFirstHopBridge reports whether id is listed for the temporary pre-fix
+// update bootstrap. Bridge membership alone never implies Accepts.
+func (c CompatibilitySetConfig) IsFirstHopBridge(id string) bool {
+	for _, bridge := range c.FirstHopBridgeIDs {
+		if id == bridge {
+			return true
+		}
+	}
+	return false
+}
+
+// IsFirstHopBridgeOnly is true when the set may open an update-only session
+// but is not part of the buyer-serving accepted set.
+func (c CompatibilitySetConfig) IsFirstHopBridgeOnly(id string) bool {
+	return c.IsFirstHopBridge(id) && !c.Accepts(id)
+}
+
+// AllowsSession admits either a buyer-serving accepted set or a first-hop
+// bridge set through the hello/auth compatibility gate.
+func (c CompatibilitySetConfig) AllowsSession(id string) bool {
+	return c.Accepts(id) || c.IsFirstHopBridge(id)
 }
 
 // OnboardingConfig gates SPEC-026 App-track `/v1/providers/register`.
@@ -1868,6 +1902,25 @@ func (c Config) validateCompatibilitySet() error {
 	}
 	if _, ok := seen[policy.TargetID]; !ok {
 		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain target_id")
+	}
+	if len(policy.FirstHopBridgeIDs) > maxFirstHopBridgeSets {
+		return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must contain at most %d entries", maxFirstHopBridgeSets)
+	}
+	bridgeSeen := make(map[string]struct{}, len(policy.FirstHopBridgeIDs))
+	for i, id := range policy.FirstHopBridgeIDs {
+		if err := ValidateCompatibilitySetID(id); err != nil {
+			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids[%d]: %w", i, err)
+		}
+		if _, duplicate := bridgeSeen[id]; duplicate {
+			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids contains duplicate %q", id)
+		}
+		bridgeSeen[id] = struct{}{}
+		if id == policy.TargetID {
+			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must not contain target_id")
+		}
+		if _, overlap := seen[id]; overlap {
+			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must not overlap accepted_ids (%q)", id)
+		}
 	}
 	return nil
 }

@@ -83,6 +83,16 @@ The installer:
 - Runs a local `/v1/models` check and a coordinator pool visibility check
 - Enrolls the provider in autoupdate (SPEC-020): once the coordinator advertises a newer `recommended_binary_version`, the provider validates the signed release, drains in-flight traffic, and swaps itself in place
 
+Normal recovery for an already-installed provider:
+
+```bash
+macprovider-cli update
+macprovider-cli --version
+macprovider-cli status
+```
+
+If the installed CLI is still public **1.8.48** and cannot reach the coordinator, re-run the signed installer upgrade-in-place (see `ops/runbooks/entry-610-first-hop-recovery.md`).
+
 **Security note:** `curl | bash` gives the downloaded script control of your user account. Inspect first if you prefer:
 
 ```bash

@@ -422,7 +422,7 @@ func (p Provider) RoutingEligible() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
 		return false
 	}
-	if p.CatalogAdmissionMode == "legacy" {
+	if p.CatalogAdmissionMode == "legacy" || p.CatalogAdmissionMode == "update_bridge" {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {
@@ -441,7 +441,7 @@ func (p Provider) ServingCapable() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
 		return false
 	}
-	if p.CatalogAdmissionMode == "legacy" {
+	if p.CatalogAdmissionMode == "legacy" || p.CatalogAdmissionMode == "update_bridge" {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {

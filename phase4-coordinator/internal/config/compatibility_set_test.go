@@ -98,3 +98,84 @@ func TestUnconfiguredCompatibilitySetPolicyRetainsLegacyValidation(t *testing.T)
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
+
+const compatibilitySetFirstHop = "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
+
+func TestCompatibilitySetFirstHopBridgeAllowsSessionWithoutBuyerAcceptance(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
+		TargetID:          compatibilitySetTarget,
+		AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
+		FirstHopBridgeIDs: []string{compatibilitySetFirstHop},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	policy := cfg.Coordinator.CompatibilitySet
+	if policy.Accepts(compatibilitySetFirstHop) {
+		t.Fatal("first-hop bridge must not imply buyer-serving Accepts")
+	}
+	if !policy.IsFirstHopBridge(compatibilitySetFirstHop) {
+		t.Fatal("first-hop bridge id was not recognized")
+	}
+	if !policy.IsFirstHopBridgeOnly(compatibilitySetFirstHop) {
+		t.Fatal("first-hop bridge-only predicate failed")
+	}
+	if !policy.AllowsSession(compatibilitySetFirstHop) {
+		t.Fatal("first-hop bridge must allow an update session")
+	}
+	if !policy.AllowsSession(compatibilitySetRollback) {
+		t.Fatal("accepted rollback set must still allow a session")
+	}
+	if policy.AllowsSession(strings.ToUpper(compatibilitySetFirstHop)) {
+		t.Fatal("first-hop bridge admission must be exact and case-sensitive")
+	}
+}
+
+func TestCompatibilitySetFirstHopBridgeRejectsOverlapAndTarget(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy CompatibilitySetConfig
+		want   string
+	}{
+		{
+			name: "overlap accepted",
+			policy: CompatibilitySetConfig{
+				TargetID:          compatibilitySetTarget,
+				AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
+				FirstHopBridgeIDs: []string{compatibilitySetRollback},
+			},
+			want: "must not overlap accepted_ids",
+		},
+		{
+			name: "contains target",
+			policy: CompatibilitySetConfig{
+				TargetID:          compatibilitySetTarget,
+				AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
+				FirstHopBridgeIDs: []string{compatibilitySetTarget},
+			},
+			want: "must not contain target_id",
+		},
+		{
+			name: "duplicate bridge",
+			policy: CompatibilitySetConfig{
+				TargetID:          compatibilitySetTarget,
+				AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
+				FirstHopBridgeIDs: []string{compatibilitySetFirstHop, compatibilitySetFirstHop},
+			},
+			want: "duplicate",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Auth.OperatorKey = "test-operator-key"
+			cfg.Coordinator.CompatibilitySet = test.policy
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
