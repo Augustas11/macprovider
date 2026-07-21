@@ -383,6 +383,50 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         homeDirectory.appendingPathComponent(".local/bin/macprovider-cli")
     }
 
+    /// Installer-contract live binary (`install.sh` `INSTALL_DIR`).
+    var installerContractBinaryURL: URL {
+        homeDirectory.appendingPathComponent("macprovider/macprovider-cli")
+    }
+
+    /// Resolves the activation/rollback target from install authority, not
+    /// from whatever PATH copy happened to launch this process (#616).
+    /// Preference order:
+    /// 1. Validated launchd `ProgramArguments[0]`
+    /// 2. Install manifest `binary_path`
+    /// 3. Installer contract `~/macprovider/macprovider-cli`
+    /// 4. Symlink-resolved launched executable, when it is not a stale
+    ///    regular file at `pathEntrypointURL`
+    ///
+    /// Never returns `pathEntrypointURL` itself as the activation target
+    /// unless that path is a symlink whose resolved target is a usable
+    /// canonical binary (in which case the resolved target is returned).
+    func resolveCanonicalInstallBinary(
+        launchedExecutableURL: URL? = Bundle.main.executableURL
+    ) -> URL? {
+        let authorities: [URL?] = [
+            launchdProgramBinaryURL(),
+            installManifestBinaryURL(),
+            installerContractBinaryURL,
+        ]
+        for candidate in authorities.compactMap({ $0 }) {
+            if let usable = usableCanonicalBinary(candidate) {
+                return usable
+            }
+        }
+
+        guard let launched = launchedExecutableURL else { return nil }
+        if isPathEntrypointRegularFile(launched) {
+            return nil
+        }
+        guard let resolved = CompatibilitySetManifest.resolvedExecutableURL(launched) else {
+            return nil
+        }
+        if isPathEntrypointRegularFile(resolved) {
+            return nil
+        }
+        return usableCanonicalBinary(resolved)
+    }
+
     func ensureTrustedRoot() throws {
         try ensureTrustedDirectory(homeDirectory.appendingPathComponent(".local", isDirectory: true))
         try ensureTrustedDirectory(homeDirectory.appendingPathComponent(".local/share", isDirectory: true))
@@ -947,6 +991,10 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             fsyncDirectory(targetURL.deletingLastPathComponent())
         }
         try atomicCopyNoFollow(from: backupURL, to: targetURL, mode: marker.mode)
+        // PATH must re-converge to the restored canonical binary. Leaving a
+        // stale `~/.local/bin/macprovider-cli` after rollback recreates the
+        // #616 mixed-state (security MEDIUM on PR #672).
+        try convergePathEntrypoint(to: targetURL)
     }
 
     /// Moves an exact compatibility-set rollback through durable phases. The
@@ -1054,6 +1102,70 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         ) {
             try cutoverCheckpoint?(.malibuAppActivated)
         }
+    }
+
+    private func launchdProgramBinaryURL() -> URL? {
+        guard fileManager.fileExists(atPath: providerPlistURL.path) else { return nil }
+        guard let data = try? readRegularFileNoFollow(providerPlistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              plist["Label"] as? String == "live.streamvc.macprovider",
+              let args = plist["ProgramArguments"] as? [String],
+              let program = args.first,
+              !program.isEmpty,
+              isCanonicalAbsolutePath(program)
+        else { return nil }
+        let url = URL(fileURLWithPath: program).standardizedFileURL
+        guard url.lastPathComponent == "macprovider-cli" else { return nil }
+        if let workingDirectory = plist["WorkingDirectory"] as? String,
+           isCanonicalAbsolutePath(workingDirectory) {
+            let expected = URL(fileURLWithPath: workingDirectory)
+                .appendingPathComponent("macprovider-cli")
+                .standardizedFileURL
+            guard expected.path == url.path else { return nil }
+        }
+        return url
+    }
+
+    private func installManifestBinaryURL() -> URL? {
+        guard let manifest = UninstallCommand.loadManifest(home: homeDirectory),
+              let binaryPath = manifest.binaryPath,
+              isCanonicalAbsolutePath(binaryPath)
+        else { return nil }
+        let url = URL(fileURLWithPath: binaryPath).standardizedFileURL
+        guard url.lastPathComponent == "macprovider-cli" else { return nil }
+        return url
+    }
+
+    private func isPathEntrypointRegularFile(_ url: URL) -> Bool {
+        let standardized = url.standardizedFileURL
+        guard standardized.path == pathEntrypointURL.standardizedFileURL.path else {
+            return false
+        }
+        var info = stat()
+        guard lstat(standardized.path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) == S_IFREG
+    }
+
+    private func usableCanonicalBinary(_ url: URL) -> URL? {
+        let standardized = url.standardizedFileURL
+        // Never activate/rollback *to* the PATH entrypoint path itself.
+        // A symlink there must be resolved first; a regular copy is the
+        // stale #616 divergence and is not install authority.
+        if standardized.path == pathEntrypointURL.standardizedFileURL.path {
+            return nil
+        }
+        guard standardized.lastPathComponent == "macprovider-cli" else { return nil }
+        var info = stat()
+        guard lstat(standardized.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid()
+        else { return nil }
+        do {
+            try validateTrustedBinaryDirectory(standardized.deletingLastPathComponent())
+        } catch {
+            return nil
+        }
+        return standardized
     }
 
     /// Converges the user PATH entrypoint to a symlink at `canonicalBinary`

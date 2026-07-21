@@ -66,7 +66,9 @@ struct AutoUpdater: Sendable {
         restartLaunchd: @escaping Restart = { try AutoUpdater.restartLaunchdIfInstalled() },
         fenceReloadJobs: @escaping FenceReloadJobs = { try AutoUpdater.fenceReloadJobsIfInstalled() },
         currentBinaryURL: @escaping @Sendable () -> URL? = {
-            CompatibilitySetManifest.resolvedExecutableURL(Bundle.main.executableURL)
+            AutoUpdateMarkerStore().resolveCanonicalInstallBinary(
+                launchedExecutableURL: Bundle.main.executableURL
+            )
         },
         rollbackObserverAvailable: @escaping Availability = { AutoUpdater.defaultRollbackObserverAvailable() },
         launchdProviderAvailable: @escaping Availability = { AutoUpdater.defaultLaunchdProviderAvailable() },
