@@ -582,6 +582,176 @@ final class AutoUpdateTests: XCTestCase {
         )
     }
 
+    func testActivationConvergesStalePathEntrypointCopyWithNoSiblingSetToSymlink() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let live = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let liveBinary = live.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: liveBinary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: liveBinary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: live, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+
+        // Legacy pre-symlink install: a standalone stale copy at the PATH
+        // entrypoint with no sibling compatibility-set.json (the exact #616
+        // reproduction).
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localBin.appendingPathComponent(CompatibilitySetManifest.fileName).path))
+
+        let marker = try store.preserveReleaseRollbackBackup(
+            binaryURL: liveBinary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        try store.writePending(marker)
+
+        try store.activateReleasePayload(from: payload, newBinary: newBinary, to: liveBinary)
+
+        var entrypointInfo = stat()
+        XCTAssertEqual(lstat(entrypoint.path, &entrypointInfo), 0)
+        XCTAssertEqual(entrypointInfo.st_mode & S_IFMT, S_IFLNK)
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: entrypoint.path),
+            liveBinary.path
+        )
+        XCTAssertEqual(try String(contentsOf: entrypoint), "new-binary")
+        // The PATH entrypoint must now resolve to a sibling compatibility-set.json --
+        // the exact gap the issue reports ("PATH binary ... no sibling set").
+        let resolvedDirectory = entrypoint.resolvingSymlinksInPath().deletingLastPathComponent()
+        XCTAssertEqual(resolvedDirectory.standardizedFileURL, live.standardizedFileURL)
+        XCTAssertEqual(
+            try String(contentsOf: resolvedDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)),
+            "new-compatibility-set"
+        )
+    }
+
+    func testActivationIsIdempotentWhenPathEntrypointAlreadyConverged() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let live = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let liveBinary = live.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: liveBinary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: liveBinary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: live, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try FileManager.default.createSymbolicLink(at: entrypoint, withDestinationURL: liveBinary)
+
+        let marker = try store.preserveReleaseRollbackBackup(
+            binaryURL: liveBinary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        try store.writePending(marker)
+
+        // Already converged: activation must not need to touch the
+        // entrypoint again; the symlink identity is preserved exactly.
+        try store.activateReleasePayload(from: payload, newBinary: newBinary, to: liveBinary)
+
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: entrypoint.path),
+            liveBinary.path
+        )
+        XCTAssertEqual(try String(contentsOf: entrypoint), "new-binary")
+    }
+
+    func testActivationSkipsPathEntrypointConvergenceWhenNoneIsInstalled() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let live = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let liveBinary = live.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: liveBinary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: liveBinary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: live, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        // No ~/.local/bin at all: nothing to converge, must not be created here.
+
+        let marker = try store.preserveReleaseRollbackBackup(
+            binaryURL: liveBinary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        try store.writePending(marker)
+
+        try store.activateReleasePayload(from: payload, newBinary: newBinary, to: liveBinary)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.url.appendingPathComponent(".local/bin").path))
+    }
+
+    func testActivationFailsClosedWhenPathEntrypointDirectoryIsUnsafe() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let live = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let liveBinary = live.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: liveBinary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: liveBinary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: live, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+
+        // A world-writable ~/.local/bin is unsafe to repair into: activation
+        // must fail closed (and the caller rolls back) rather than silently
+        // declare success with a mixed PATH/payload state.
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o777])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy".utf8).write(to: entrypoint)
+
+        let marker = try store.preserveReleaseRollbackBackup(
+            binaryURL: liveBinary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        try store.writePending(marker)
+
+        XCTAssertThrowsError(
+            try store.activateReleasePayload(from: payload, newBinary: newBinary, to: liveBinary)
+        ) { error in
+            guard case AutoUpdateMarkerError.trustedRootInvalid = error else {
+                return XCTFail("expected trustedRootInvalid, got \(error)")
+            }
+        }
+        // The stale copy must be left untouched rather than partially repaired.
+        XCTAssertEqual(try String(contentsOf: entrypoint), "stale-path-copy")
+
+        try store.restoreBackup(marker)
+        XCTAssertEqual(try String(contentsOf: liveBinary), "old-binary")
+    }
+
     func testInterruptedCompatibilitySetCutoverRecoversAtEveryDestructivePhase() throws {
         for phase in CompatibilitySetCutoverPhase.allCases {
             let fixture = try TempHome()

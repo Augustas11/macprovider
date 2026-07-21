@@ -170,6 +170,7 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
     case backupCorrupt
     case rollbackTargetDisallowed
     case compatibilityAdmissionRequired(String)
+    case pathEntrypointUnsafe(String)
 
     var description: String {
         switch self {
@@ -183,6 +184,8 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
         case .rollbackTargetDisallowed: return "rollback target is revoked or below the effective minimum"
         case let .compatibilityAdmissionRequired(reason):
             return "fresh coordinator compatibility-set admission required: \(reason)"
+        case let .pathEntrypointUnsafe(reason):
+            return "PATH entrypoint convergence refused: \(reason)"
         }
     }
 }
@@ -369,6 +372,15 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
 
     private var watchdogPlistURL: URL {
         homeDirectory.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist")
+    }
+
+    /// Canonical PATH entrypoint (SPEC-003 FR-C2). `install.sh` always
+    /// places a symlink here so PATH users and the launchd plist resolve
+    /// into the same live install directory. Self-update activation must
+    /// keep it converged or a stale pre-symlink copy can drift to a
+    /// different version with no sibling `compatibility-set.json` (#616).
+    var pathEntrypointURL: URL {
+        homeDirectory.appendingPathComponent(".local/bin/macprovider-cli")
     }
 
     func ensureTrustedRoot() throws {
@@ -1034,6 +1046,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         )
         try atomicCopyNoFollow(from: newBinary, to: currentBinary, mode: 0o755)
         try cutoverCheckpoint?(.binaryActivated)
+        try convergePathEntrypoint(to: currentBinary)
         if try activateMalibuAppIfInstalled(
             stagedMalibuApp,
             from: liveDirectory,
@@ -1041,6 +1054,74 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         ) {
             try cutoverCheckpoint?(.malibuAppActivated)
         }
+    }
+
+    /// Converges the user PATH entrypoint to a symlink at `canonicalBinary`
+    /// so every supported entrypoint resolves into the one just-activated
+    /// compatibility set (#616). Because it is a symlink rather than a copy,
+    /// it stays correct across future updates and rollbacks with no
+    /// additional bookkeeping: it always resolves to whatever is currently
+    /// live at `canonicalBinary`.
+    ///
+    /// Returns `true` if a repair was performed, `false` if the entrypoint
+    /// was already converged or there is no PATH entrypoint to converge
+    /// (no `~/.local/bin` directory, or nothing installed at that path --
+    /// out of scope here; see #610). Throws rather than silently leaving a
+    /// divergent entrypoint if the existing entrypoint or its directory is
+    /// unsafe to repair.
+    @discardableResult
+    func convergePathEntrypoint(to canonicalBinary: URL) throws -> Bool {
+        let entrypoint = pathEntrypointURL
+        let binDirectory = entrypoint.deletingLastPathComponent()
+
+        var binInfo = stat()
+        guard lstat(binDirectory.path, &binInfo) == 0 else {
+            return false
+        }
+        try validateTrustedBinaryDirectory(binDirectory)
+
+        var entrypointInfo = stat()
+        guard lstat(entrypoint.path, &entrypointInfo) == 0 else {
+            return false
+        }
+        guard entrypointInfo.st_uid == getuid() else {
+            throw AutoUpdateMarkerError.pathEntrypointUnsafe("owner")
+        }
+
+        let canonicalPath = canonicalBinary.standardizedFileURL.path
+        switch entrypointInfo.st_mode & S_IFMT {
+        case S_IFLNK:
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+            let length = readlink(entrypoint.path, &buffer, buffer.count - 1)
+            guard length > 0 else {
+                throw AutoUpdateMarkerError.pathEntrypointUnsafe("readlink_failed")
+            }
+            buffer[length] = 0
+            let target = String(cString: buffer)
+            let resolvedTarget = target.hasPrefix("/")
+                ? URL(fileURLWithPath: target).standardizedFileURL.path
+                : binDirectory.appendingPathComponent(target).standardizedFileURL.path
+            if resolvedTarget == canonicalPath {
+                return false
+            }
+        case S_IFREG:
+            break
+        default:
+            throw AutoUpdateMarkerError.pathEntrypointUnsafe("unexpected_type")
+        }
+
+        let temporaryLink = binDirectory.appendingPathComponent(
+            ".macprovider-cli.entrypoint-\(UUID().uuidString.lowercased())"
+        )
+        guard symlink(canonicalPath, temporaryLink.path) == 0 else {
+            throw AutoUpdateMarkerError.pathEntrypointUnsafe("symlink_create_failed")
+        }
+        guard rename(temporaryLink.path, entrypoint.path) == 0 else {
+            unlink(temporaryLink.path)
+            throw AutoUpdateMarkerError.pathEntrypointUnsafe("symlink_swap_failed")
+        }
+        fsyncDirectory(binDirectory)
+        return true
     }
 
     func cooldown(target: String, failureClass: AutoUpdateFailureClass) -> (attempt: Int, until: Date)? {
