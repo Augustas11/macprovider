@@ -342,6 +342,20 @@ for requirement in (
         raise SystemExit(f"append-only release transport omits: {requirement}")
 if "--clobber" in transport_publish:
     raise SystemExit("append-only discovery transport must never overwrite an asset")
+renewal = (
+    pathlib.Path(sys.argv[1]).resolve().parent / "renew-release-discovery-head.yml"
+).read_text(encoding="utf-8")
+for requirement in (
+    "environment: production-release",
+    "scripts/build-release-discovery-head.py",
+    "--minimum-sequence",
+    "--require-immutable",
+    "scripts/verify-anonymous-release-discovery.sh",
+):
+    if requirement not in renewal:
+        raise SystemExit(f"protected discovery renewal omits: {requirement}")
+if "--clobber" in renewal or 'gh release create "release-discovery"' in renewal:
+    raise SystemExit("protected discovery renewal must stay append-only")
 if "--draft" not in create or create.find("scripts/verify-release-checksums.sh") > create.find("gh release create"):
     raise SystemExit("GitHub publication must verify canonical checksums before creating a draft")
 if (

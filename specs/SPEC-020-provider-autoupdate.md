@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.10
+Version: v0.1.11
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -25,10 +25,13 @@ only; the signed head, transport-sequence binding, exact numeric target binding,
 and persisted monotonic sequence remain update authority. It also records the
 one-time supported bridge required for v1.8.55, whose shipped fixed discovery
 release is permanently immutable.
+v0.1.11 adds the protected recurring renewal signer and the anonymous v1.8.55
+bridge proof required before treating discovery as continuously renewable under
+immutable releases (Partial #658 until the physical journey closes).
 
 ## Goal
 
-SPEC-020 v0.1.10 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.11 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -270,10 +273,15 @@ promotion or reports the already-public release as unfit for rollout.
 
 A head renewal MUST use a newly signed, strictly greater sequence and append a
 new immutable transport even when the numeric target is unchanged. No existing
-transport may be refreshed in place. The client MUST fail closed when the
-greatest located transport is mutable, malformed, expired, incorrectly signed,
-or inconsistent with its sequence-bound tag; it MUST NOT silently fall back to
-an older located transport.
+transport may be refreshed in place. The protected
+`renew-release-discovery-head.yml` workflow is the recurring signer for that
+append-only renewal path: it binds the current latest immutable stable target,
+requires the new sequence to exceed the greatest public transport sequence,
+publishes exactly one new immutable prerelease, and anonymously proves the
+same-target CLI still discovers the renewed head. The client MUST fail closed
+when the greatest located transport is mutable, malformed, expired, incorrectly
+signed, or inconsistent with its sequence-bound tag; it MUST NOT silently fall
+back to an older located transport.
 
 **Frozen v1.8.55 bridge.** CLI v1.8.55 shipped with discovery fixed to the
 `release-discovery` tag. GitHub made that release immutable, so neither its
@@ -1266,6 +1274,11 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.11 (2026-07-21): Adds the protected `renew-release-discovery-head.yml`
+  recurring signer and the anonymous v1.8.55 bridge verifier. Renewal appends a
+  greater sequence-bound transport for the unchanged latest stable target;
+  promotion proves the fixed-tag bridge instead of skipping prior-client checks.
+  Physical update/rollback/buyer-serving evidence remains open under Partial #658.
 - v0.1.10 (2026-07-21): Replaced the fixed mutable discovery-release
   assumption with append-only immutable prerelease transports named from each
   signed sequence. The bounded GitHub release listing is only a locator; the
