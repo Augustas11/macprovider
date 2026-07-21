@@ -12,15 +12,18 @@ Register row: [`exc-entry172-air-referral-activation`](../exceptions/production-
 
 Expiry: this exception expires at `2026-07-26T23:59:59Z`, on terminal success or failure of the first fresh referred-provider journey, or on any earlier controlled-sequence failure, whichever occurs first.
 
+Last successful activation evidence: [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md) records the redacted PASS LIVE result for the v1.8.56 execution baseline. Future re-runs must still re-confirm current release tags, asset hashes, deploy IDs, and live flag state before any operation.
+
 Fail closed if any checklist item below is unmet.
 
 ## 1. Preconditions
 
-- [ ] Base includes merge `87bc3fa2` / #660 or newer. #660 is a prerequisite note only: append-only release discovery transport is merged, but #658 remains open for the trust-preserving bridge and physical journey needed for continuous discovery.
+- [ ] Base includes merge `f91b7b6c` / #663 or newer. #663 is the #615 production exception register baseline; #658 remains open for the trust-preserving bridge and physical journey needed for continuous discovery.
 - [ ] Exact fragment-aware signed clients are public and verified before any flag change.
-  - Current `origin/main` evidence at `87bc3fa2`: CLI `CoordinatorClient.binaryVersion = "1.8.55"` and Malibu `MARKETING_VERSION = "1.8.44"`, build `44`.
-  - Current GitHub release evidence checked for this runbook: `macprovider-cli v1.8.55` published 2026-07-20T21:18:49Z and `Malibu 1.8.44` published 2026-07-21T07:41:13Z.
-  - Operator must re-confirm latest releases at execution time and record exact tags, asset names, SHA-256 values, notarization/signature evidence, and fixed Vercel download asset.
+  - Last executed public release tag: `v1.8.56`.
+  - Last executed CLI baseline: `1.8.56`; CLI darwin-arm64 SHA-256 `55b642c3a600fac8a2dc170971c6c2f990d47dc9075e05cad001b9d596c2ffc8`.
+  - Last executed Malibu asset: `Malibu-v1.8.56.dmg`; SHA-256 `b5889de597363b2ecb1df823da93a5ecc555e91d75f8e5eb7208917071f1867b`.
+  - Operator must re-confirm latest releases at future execution time and record exact tags, asset names, SHA-256 values, notarization/signature evidence, deploy IDs, and fixed Vercel download asset.
 - [ ] Coordinator route and nginx route are present: `location = /v1/referrals/validate` proxies to `127.0.0.1:8443`; historical `/j/` remains an access-log-off, `Cache-Control: no-store`, HTTP 404 tombstone.
 - [ ] Vercel `malibu.tech/j` is the only public download authority for the join landing page; invite material uses fragment-only URLs:
   - `https://malibu.tech/j#/<code>`
@@ -225,7 +228,7 @@ curl -I -sS '<FIXED_PUBLIC_MALIBU_DOWNLOAD_URL>'
 
 Expected: landing page is reachable; fixed download URL resolves to the reviewed signed/notarized Malibu asset.
 
-Copy -> Download -> Paste path:
+Copy -> Download -> Paste path (headed/manual proof, not headless CDP download-event proof):
 
 ```text
 1. Copy exactly: https://malibu.tech/j#/<REDACTED_TEST_CODE>
