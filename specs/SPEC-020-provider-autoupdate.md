@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.9
+Version: v0.1.10
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -19,10 +19,16 @@ reload helpers before mutation or rollback, bridges the already-public v1.8.53
 helper through an exact update/handoff-authorized first-hop fence, and requires
 a 20-second continuous listener-bound local-health observation before update
 commit.
+v0.1.10 defines append-only immutable GitHub prereleases named from the signed
+discovery sequence. The bounded GitHub release listing is an untrusted locator
+only; the signed head, transport-sequence binding, exact numeric target binding,
+and persisted monotonic sequence remain update authority. It also records the
+one-time supported bridge required for v1.8.55, whose shipped fixed discovery
+release is permanently immutable.
 
 ## Goal
 
-SPEC-020 v0.1.9 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.10 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -225,6 +231,14 @@ coordinator-recommended update.
 
 Discovery MUST begin from a signature-authenticated monotonic discovery head
 under the pinned release trust root, not from mutable GitHub `latest` ordering.
+The client MAY use a bounded GitHub public-release listing only to locate
+append-only transports whose tags match
+`release-discovery-v1-<positive-decimal-sequence>`. It MUST select the greatest
+well-formed sequence in that bounded response and require that release to be
+public, prerelease, and immutable. It MUST require the selected transport tag
+sequence to equal the verified signed-head sequence. The unsigned listing,
+release timestamp, and GitHub ordering MUST NOT authorize a target, policy,
+downgrade, or mutation.
 The head MUST bind a schema version, monotonically increasing unsigned
 `release_sequence`, target compatibility-set ID, target artifact-index SHA-256,
 signed-policy minimum and revocation set, `issued_at`, and `expires_at`.
@@ -240,6 +254,38 @@ A trusted coordinator recommendation remains the preferred target while an
 accepted session exists; otherwise this signed discovery head is sufficient
 update authority. This requirement supersedes the v0.1.7 R-1.2 prohibition on
 disconnected automatic application.
+
+Each protected stable promotion MUST validate the candidate head signature,
+exact numeric target tag/commit/set binding, artifact-index digest, and active
+validity window before publication. Its sequence MUST be greater than the head
+in the prior public stable immutable release. After publishing the numeric
+release, promotion MUST create exactly one public immutable prerelease named
+`release-discovery-v1-<verified-sequence>` containing exactly the signed head,
+signature, and bound artifact index. It MUST reject a pre-existing tag or
+release and MUST NOT overwrite, delete, or recreate a discovery asset or tag.
+After publication, an anonymous verifier MUST download the public transport,
+reproduce those checks, and prove both the new CLI and—except for the bridge
+below—the prior CLI discover the exact new version. Failure of any check blocks
+promotion or reports the already-public release as unfit for rollout.
+
+A head renewal MUST use a newly signed, strictly greater sequence and append a
+new immutable transport even when the numeric target is unchanged. No existing
+transport may be refreshed in place. The client MUST fail closed when the
+greatest located transport is mutable, malformed, expired, incorrectly signed,
+or inconsistent with its sequence-bound tag; it MUST NOT silently fall back to
+an older located transport.
+
+**Frozen v1.8.55 bridge.** CLI v1.8.55 shipped with discovery fixed to the
+`release-discovery` tag. GitHub made that release immutable, so neither its
+assets nor tag can advance, and deletion would permanently tombstone the tag.
+Therefore ordinary coordinator-independent `macprovider-cli update` from
+v1.8.55 cannot discover the first append-only transport release. Exactly one
+supported trust-preserving bridge is required: either an already-authenticated
+coordinator recommendation resolving the exact signed numeric release, or an
+operator-installed exact signed acceptance candidate through the supported
+installer. No unsigned URL, mutable asset, recreated tag, or validation bypass
+is permitted. Once the bridged CLI is running, all later stable releases MUST
+pass the prior-client anonymous proof above.
 
 R-1.3. Before accepting a coordinator-recommended target, the provider MUST
 validate `recommended_binary_version` against
@@ -1220,6 +1266,15 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.10 (2026-07-21): Replaced the fixed mutable discovery-release
+  assumption with append-only immutable prerelease transports named from each
+  signed sequence. The bounded GitHub release listing is only a locator; the
+  signed head, sequence-bound transport tag, exact numeric target-set binding,
+  and persisted monotonic sequence remain authority. Protected publication
+  rejects non-advancing heads before draft creation, forbids tag/asset reuse,
+  and anonymously verifies the public target afterward. Records the unavoidable
+  one-time supported bridge from v1.8.55, whose shipped fixed discovery tag is
+  permanently immutable.
 - v0.1.9 (2026-07-20): Replaced the incident-producing `launchctl submit`
   provider reload with an explicit one-shot LaunchAgent. Exact legacy UUID
   helpers and the stable helper are fenced before mutation, rollback, and each

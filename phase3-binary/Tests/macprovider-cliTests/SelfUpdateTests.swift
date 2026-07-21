@@ -30,7 +30,7 @@ final class SelfUpdateTests: XCTestCase {
             XCTAssertEqual(
                 error.description,
                 UpdateError.untrustedReleaseAPIURL(
-                    "http://attacker.invalid/releases/tags/\(SignedReleaseDiscoveryHead.transportReleaseTag)"
+                    "http://attacker.invalid/releases?per_page=20"
                 ).description
             )
         }
@@ -111,6 +111,43 @@ final class SelfUpdateTests: XCTestCase {
                 UpdateError.discoveryHeadInvalid("target_identity_mismatch").description
             )
         }
+    }
+
+    func testAppendOnlyDiscoveryTransportRequiresTagSequenceToMatchSignedHead() throws {
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 1,
+            targetVersion: "1.8.56",
+            targetCompatibilitySetID: "Augustas11/macprovider:v1.8.56@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            targetArtifactIndexSHA256: String(repeating: "b", count: 64),
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date(),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "c", count: 64)
+        )
+
+        XCTAssertNoThrow(
+            try SelfUpdate.requireAppendOnlyDiscoveryTransport(
+                transportTag: "release-discovery-v1-1",
+                transportSequence: 1,
+                head: head
+            )
+        )
+        XCTAssertThrowsError(
+            try SelfUpdate.requireAppendOnlyDiscoveryTransport(
+                transportTag: "release-discovery-v1-2",
+                transportSequence: 2,
+                head: head
+            )
+        ) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.discoveryHeadInvalid("transport_sequence_mismatch").description
+            )
+        }
+        XCTAssertNil(SignedReleaseDiscoveryHead.transportSequence(from: "release-discovery-v1-01"))
+        XCTAssertNil(SignedReleaseDiscoveryHead.transportSequence(from: "release-discovery-v1-0"))
+        XCTAssertNil(SignedReleaseDiscoveryHead.transportSequence(from: "v1.8.56"))
     }
 
     func testAcceptanceProviderComponentAllowsEqualityAndUpgradeButRejectsDowngrade() throws {
@@ -1209,19 +1246,20 @@ final class SelfUpdateTests: XCTestCase {
         }
     }
 
-    func testDefaultUpdateFetchesFixedSignedDiscoveryTransportBeforeLatestRelease() async throws {
+    func testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing() async throws {
         let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
-        let discoveryURL = URL(
-            string: "https://api.github.com/repos/Augustas11/macprovider/releases/tags/\(SignedReleaseDiscoveryHead.transportReleaseTag)"
-        )!
+        let discoveryURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=20")!
         MockURLProtocol.responses = [
             discoveryURL: (
                 200,
                 """
-                {
-                  "tag_name": "\(SignedReleaseDiscoveryHead.transportReleaseTag)",
+                [{
+                  "tag_name": "release-discovery-v1-200",
+                  "draft": false,
+                  "prerelease": true,
+                  "immutable": true,
                   "assets": []
-                }
+                }]
                 """.data(using: .utf8)!
             ),
         ]
@@ -1235,6 +1273,48 @@ final class SelfUpdateTests: XCTestCase {
             XCTFail("update unexpectedly accepted a discovery transport without signed head assets")
         } catch let error as UpdateError {
             XCTAssertEqual(error.description, UpdateError.missingAsset.description)
+        }
+    }
+
+    func testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack() async throws {
+        let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let discoveryURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=20")!
+        MockURLProtocol.responses = [
+            discoveryURL: (
+                200,
+                """
+                [
+                  {
+                    "tag_name": "release-discovery-v1-200",
+                    "draft": false,
+                    "prerelease": true,
+                    "immutable": true,
+                    "assets": []
+                  },
+                  {
+                    "tag_name": "release-discovery-v1-201",
+                    "draft": false,
+                    "prerelease": true,
+                    "immutable": false,
+                    "assets": []
+                  }
+                ]
+                """.data(using: .utf8)!
+            ),
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: releaseURL.absoluteString, session: session)
+
+        do {
+            try await update.run(checkOnly: true)
+            XCTFail("update unexpectedly fell back from a mutable highest transport")
+        } catch let error as UpdateError {
+            XCTAssertEqual(
+                error.description,
+                UpdateError.discoveryHeadInvalid("transport_not_immutable").description
+            )
         }
     }
 }

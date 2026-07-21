@@ -313,6 +313,35 @@ if publish.find("Clean Apple signing material after notarization") > publish.fin
 create = publish.split("- name: Create verified draft GitHub release", 1)[1].split("\n      - name:", 1)[0]
 verify_draft = publish.split("- name: Verify draft release assets by numeric ID", 1)[1].split("\n      - name:", 1)[0]
 make_public = publish.split("- name: Publish only the revalidated numeric draft", 1)[1].split("\n      - name:", 1)[0]
+discovery_gate = publish.find("- name: Require an advancing immutable discovery head")
+draft_position = publish.find("- name: Create verified draft GitHub release")
+if discovery_gate < 0 or draft_position < 0 or discovery_gate > draft_position:
+    raise SystemExit("stable release must verify monotonic discovery before draft creation")
+for requirement in (
+    "scripts/verify-release-discovery-transport.py",
+    "--minimum-sequence",
+    "--allow-expired",
+    'release.get("immutable") is not True',
+):
+    if requirement not in publish[discovery_gate:draft_position]:
+        raise SystemExit(f"stable release discovery gate omits: {requirement}")
+if 'discovery_tag="release-discovery"' in publish or "gh release upload \"$discovery_tag\"" in publish:
+    raise SystemExit("release workflow still mutates the permanently immutable fixed discovery release")
+transport_position = publish.find("- name: Publish one append-only immutable discovery transport")
+if transport_position < draft_position:
+    raise SystemExit("append-only discovery transport must publish after the numeric release")
+transport_publish = publish[transport_position:].split("\n      - name:", 1)[0]
+for requirement in (
+    'git ls-remote --tags origin "$transport_tag"',
+    "--prerelease",
+    "--latest=false",
+    "--transport-tag \"$transport_tag\"",
+    "--require-immutable",
+):
+    if requirement not in transport_publish:
+        raise SystemExit(f"append-only release transport omits: {requirement}")
+if "--clobber" in transport_publish:
+    raise SystemExit("append-only discovery transport must never overwrite an asset")
 if "--draft" not in create or create.find("scripts/verify-release-checksums.sh") > create.find("gh release create"):
     raise SystemExit("GitHub publication must verify canonical checksums before creating a draft")
 if (
@@ -362,6 +391,9 @@ for requirement in (
 ):
     if make_public.find(requirement, patch_position) < 0:
         raise SystemExit(f"post-publication release-state verification is missing: {requirement}")
+anonymous = publish.find("- name: Verify anonymous signed discovery for stable release")
+if anonymous < transport_position or '"$(cat discovery-transport-tag.txt)"' not in publish[anonymous:]:
+    raise SystemExit("anonymous client proof is not bound to the published append-only transport")
 PY
 
 for requirement in \
