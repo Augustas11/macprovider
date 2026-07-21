@@ -55,14 +55,70 @@ Campaign metadata:
 
 ## Boundaries
 
-- #613 NOT closed by Entry 172; Air exception only.
-- The first fresh referred-provider journey is still required.
-- The exception remains active until the earliest of
-  `2026-07-26T23:59:59Z`, terminal success/failure of the first fresh
-  referred-provider journey, or any earlier controlled-sequence failure.
+- #613 NOT closed by Entry 172; Air exception only. This file does not claim
+  complete two-Mac physical-journey conformance.
+- First fresh referred-provider invite-earn journey: PASS (see section below).
+- Exception register row `exc-entry172-air-referral-activation` is `expired` on
+  that terminal journey success per SPEC-034 §8 / Entry 172. Status is not
+  `removed` until Pearl referral flags are rolled back and
+  `post_removal_validation` passes.
+- Pearl flags were still live at the time of the journey PASS evidence below;
+  flag roll-off remains an operator follow-up.
 - #658 was not started or modified.
 - This evidence file records docs/register evidence only; it does not implement
   #615 enforcement.
+
+## Fresh referred-provider invite-earn PASS (2026-07-21)
+
+Result: PASS for the Entry 172 first fresh referred-provider journey on Air5.
+Invite earn closed. Secrets, invite codes, challenges, HMAC material, and
+provider bearers are omitted.
+
+Provider and model:
+
+- Host: Air5 (`MacBook-Air-5.local`)
+- `provider_id`: `mp-90542c0bcf7c4d303795cd10bda3830d`
+- Model: `mlx-community/Qwen3-8B-4bit`
+- Model hash:
+  `1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877`
+- Campaign: `prebeta_20260719`
+- Issuer: `tn6skbiu4cfeiffs` (`base_capacity=1`)
+
+Buyer / settlement evidence (Pearl):
+
+- Buyer hit: HTTP 200
+- `request_log.id=19241`
+- `settlement_attempt_outputs.id=6020` (`terminal_state=normal_done`)
+- `settlement_route_snapshots.id=458` (`spec008_hash_status=hash_verified`,
+  hash `1f591f9c…`)
+- `settlement_receipt_verdicts.id=458` (`settlement_outcome=verified`,
+  `receipt_result=valid`, `closed=1`)
+
+454 → 458 nuance (honest):
+
+- Serving qualification and issuer rows for this fresh provider already existed
+  from an earlier Qwen verified verdict `454`
+  (`evidence_id=settlement-verdict:454`, `issuer_id=tn6skbiu4cfeiffs`,
+  `qualified_at=2026-07-21T14:13:04Z`).
+- Those tables are one row per `(campaign, provider_id)`, so buyer hit
+  `request_log.id=19241` / verdict `458` did not create duplicate
+  qualification or issuer rows.
+- The issuer remained valid after verdict `458`; invite earn for this fresh
+  journey is closed on issuer `tn6skbiu4cfeiffs`.
+
+Operator-local evidence pointers (path names only; not committed):
+
+- Scratchpad:
+  `/Users/augstar/macprovider-entry172-ops/scratchpad/air5-fresh-referred-journey-20260721.md`
+- Buyer-proof artifact dir:
+  `/Users/augstar/macprovider-entry172-ops/scratchpad/air5-buyer-proof-qwen-20260721T142102Z`
+
+Register follow-up:
+
+- Exception id: `exc-entry172-air-referral-activation` (#615 register).
+- Status transition: `active` → `expired` on terminal journey PASS.
+- Do not mark `removed` until flag roll-off + post-removal validation.
+- Do not treat this PASS as #613 two-Mac conformance.
 
 ## Backup Path Names
 

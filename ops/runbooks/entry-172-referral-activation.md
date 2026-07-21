@@ -6,13 +6,17 @@ Docs-only activation checklist for Decision Entry 172 and [SPEC-034 §8](../../s
 
 This runbook does not flip production flags, deploy services, create seed codes, write live databases, or cut a release. It describes the operator path for a later controlled private-prebeta activation.
 
-Air exception is not #613 complete. It does not close #613, mark the two-Mac journey conformant, or claim fresh-provider redemption evidence.
+Air exception is not #613 complete. It does not close #613 or mark the two-Mac
+journey conformant. The first fresh referred-provider invite-earn journey has
+PASSed; see the evidence file below.
 
-Register row: [`exc-entry172-air-referral-activation`](../exceptions/production-exceptions.json) in the #615 production exception register.
+Register row: [`exc-entry172-air-referral-activation`](../exceptions/production-exceptions.json) in the #615 production exception register (`status: expired` on terminal journey PASS; remains `expired` until flag roll-off + post-removal validation allow `removed`).
 
-Expiry: this exception expires at `2026-07-26T23:59:59Z`, on terminal success or failure of the first fresh referred-provider journey, or on any earlier controlled-sequence failure, whichever occurs first.
+Expiry condition met by terminal journey PASS (calendar expiry was
+`2026-07-26T23:59:59Z`). Keeping or re-enabling referral flags afterward
+requires complete #613 evidence or a new reviewed decision.
 
-Last successful activation evidence: [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md) records the redacted PASS LIVE result for the v1.8.56 execution baseline. Future re-runs must still re-confirm current release tags, asset hashes, deploy IDs, and live flag state before any operation.
+Last successful activation evidence: [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md) records the redacted PASS LIVE activation result for the v1.8.56 baseline plus the Air5 fresh invite-earn PASS. Future re-runs must still re-confirm current release tags, asset hashes, deploy IDs, and live flag state before any operation.
 
 Fail closed if any checklist item below is unmet.
 
@@ -354,7 +358,7 @@ durable-state preservation check:
 
 - This runbook does not close #613, #658, #582, #617, #661, or any Lane C work.
 - #658 still needs the trust-preserving bridge plus physical update, rollback, buyer-serving, and renewal evidence for continuous discovery.
-- The first available fresh referred provider must still complete the missing redemption journey.
+- The first available fresh referred-provider invite-earn journey PASSed on Air5 (`mp-90542c0bcf7c4d303795cd10bda3830d`); see [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md#fresh-referred-provider-invite-earn-pass-2026-07-21). That PASS expires `exc-entry172-air-referral-activation` but does not claim #613 two-Mac conformance; Pearl flag roll-off remains an operator follow-up before `removed`.
 - Lane C / #615 owns exception inventory. Do not implement #615 from this runbook.
 - This runbook does not implement the #658 discovery bridge.
 - This runbook does not deploy, tag, publish, change nginx, change checked-in flag defaults, write live DB rows, create real HMAC secrets, or create real seed codes.
