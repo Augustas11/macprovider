@@ -91,7 +91,7 @@ if "target-checksums.txt" not in numeric_proof or "macprovider-release-discovery
     raise SystemExit("numeric release proof must bind discovery assets to signed checksums")
 PY
 
-bash -n "$workflow"
+# Workflow YAML is not a shell script; do not bash -n it (Linux rejects indented <<'PY' terminators).
 bash -n "$bridge"
 if command -v shellcheck >/dev/null; then
   shellcheck -x "$bridge"
