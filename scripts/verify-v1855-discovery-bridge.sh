@@ -13,6 +13,8 @@
 #   5) the bridged (target) CLI discovers the exact head anonymously
 set -euo pipefail
 
+# Mapping selector (specs/CONFORMANCE.json): anonymous v1.8.55 bridge proof
+
 die() {
   printf '[verify-v1855-discovery-bridge] ERROR: %s\n' "$*" >&2
   exit 1
