@@ -31,7 +31,8 @@ struct DecodeBenchCommand: AsyncParsableCommand {
 
             TPS semantics: generation-only (excludes TTFT), matching Stage1Iterator
             v1.7.8 Track A4 semantics.
-            """
+            """,
+        shouldDisplay: false
     )
 
     @Option(help: "HuggingFace model ID or local path. Falls back to MACPROVIDER_MODEL.")

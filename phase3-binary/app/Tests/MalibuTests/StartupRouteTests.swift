@@ -138,6 +138,29 @@ final class StartupRouteTests: XCTestCase {
         }
     }
 
+    func testStartFreshRequiresASeparateDestructiveConfirmation() {
+        XCTAssertEqual(StartFreshConfirmationCopy.cancelButton, "Keep Existing Provider")
+        XCTAssertEqual(StartFreshConfirmationCopy.startFreshButton, "Create New Provider")
+        XCTAssertFalse(StartFreshConfirmationCopy.confirms(.alertFirstButtonReturn))
+        XCTAssertTrue(StartFreshConfirmationCopy.confirms(.alertSecondButtonReturn))
+        XCTAssertFalse(StartFreshConfirmationCopy.confirms(.abort))
+
+        let copy = [
+            StartFreshConfirmationCopy.title,
+            StartFreshConfirmationCopy.message,
+            StartFreshConfirmationCopy.cancelButton,
+            StartFreshConfirmationCopy.startFreshButton,
+        ].joined(separator: "\n").lowercased()
+        XCTAssertTrue(copy.contains("reversible backup"), copy)
+        XCTAssertTrue(copy.contains("different identity"), copy)
+        XCTAssertTrue(copy.contains("payment history"), copy)
+        XCTAssertTrue(copy.contains("saved access"), copy)
+        XCTAssertTrue(copy.contains("local model setup"), copy)
+        for term in prohibitedPublicTerms {
+            XCTAssertFalse(copy.contains(term), "\(term) leaked in:\n\(copy)")
+        }
+    }
+
     func testMigrationErrorCopyUsesOrdinaryLanguage() {
         let error = NSError(
             domain: "coordinator.admission",
@@ -150,11 +173,70 @@ final class StartupRouteTests: XCTestCase {
         ].joined(separator: "\n").lowercased()
 
         XCTAssertTrue(copy.contains("current setup was not changed"))
-        XCTAssertTrue(copy.contains("create a new provider"))
+        XCTAssertTrue(copy.contains("advanced diagnostics"))
+        XCTAssertEqual(MigrationErrorCopy.cancelButton, "Cancel")
+        XCTAssertEqual(MigrationErrorCopy.retryButton, "Try Again")
         XCTAssertFalse(copy.contains("coordinator"), copy)
         XCTAssertFalse(copy.contains("/tmp"), copy)
         for term in prohibitedPublicTerms {
             XCTAssertFalse(copy.contains(term), "\(term) leaked in:\n\(copy)")
+        }
+    }
+
+    func testMigrationErrorCopyShowsASanitizedActualReason() {
+        let error = ProviderCredentialHandoffRunner.Error.importFailed(7)
+
+        let copy = MigrationErrorCopy.message(error)
+
+        XCTAssertTrue(copy.contains("could not prepare the saved access"), copy)
+        XCTAssertTrue(copy.contains("exit 7"), copy)
+        XCTAssertTrue(copy.contains("original setup was preserved"), copy)
+        XCTAssertTrue(copy.contains("current setup was not changed"), copy)
+    }
+
+    func testMigrationErrorCopyRedactsEveryUnboundedHandoffReason() {
+        let secret = "provider_token=secret /Users/name/config.yaml?token=secret"
+        let cases: [ProviderCredentialHandoffRunner.Error] = [
+            .invalidCLI(secret),
+            .invalidOutput(secret),
+            .launchFailed(secret),
+        ]
+
+        for error in cases {
+            let copy = MigrationErrorCopy.message(error).lowercased()
+            XCTAssertFalse(copy.contains("secret"), copy)
+            XCTAssertFalse(copy.contains("/users/"), copy)
+            XCTAssertFalse(copy.contains("provider_token"), copy)
+            XCTAssertTrue(copy.contains("retry"), copy)
+            XCTAssertTrue(copy.contains("current setup was not changed"), copy)
+        }
+    }
+
+    func testCanonicalPublicLanguagePolicyContainsTheMalibuCoreTerms() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let policyURL = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("public-language.json")
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: policyURL)) as? [String: Any]
+        )
+        let terms = try XCTUnwrap(object["terms"] as? [[String: String]])
+        let internalTerms = Set(terms.compactMap { $0["internal"] })
+
+        for term in [
+            "compatibility set",
+            "admission identity",
+            "watchdog",
+            "buyer-serving",
+            "spec-023 probe",
+            "coordinator admission",
+            "credential custody",
+            "migration token",
+        ] {
+            XCTAssertTrue(internalTerms.contains(term), "missing canonical mapping for \(term)")
         }
     }
 

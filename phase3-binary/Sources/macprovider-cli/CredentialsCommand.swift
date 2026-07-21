@@ -7,6 +7,7 @@ struct CredentialsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "credentials",
         abstract: "Manage CLI-owned provider credentials.",
+        shouldDisplay: false,
         subcommands: [
             CredentialsImportCommand.self,
             CredentialsVerifyCommand.self,

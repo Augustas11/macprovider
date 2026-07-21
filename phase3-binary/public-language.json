@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "terms": [
+    {
+      "internal": "compatibility set",
+      "public": "provider software"
+    },
+    {
+      "internal": "admission identity",
+      "public": "network verification"
+    },
+    {
+      "internal": "watchdog",
+      "public": "provider health monitor"
+    },
+    {
+      "internal": "buyer-serving",
+      "public": "available to customers"
+    },
+    {
+      "internal": "spec-023 probe",
+      "public": "Model readiness check"
+    },
+    {
+      "internal": "coordinator admission",
+      "public": "network approval"
+    },
+    {
+      "internal": "credential custody",
+      "public": "saved provider access"
+    },
+    {
+      "internal": "migration token",
+      "public": "saved provider access"
+    }
+  ],
+  "specification_identifier_pattern": "spec-?[0-9]+",
+  "advanced_boundary": "Internal protocol, storage, and lifecycle values may appear only in explicitly labeled Advanced diagnostics or machine-readable JSON."
+}

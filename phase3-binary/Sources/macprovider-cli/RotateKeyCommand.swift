@@ -29,7 +29,8 @@ enum ReceiptKeyRotationError: Error, CustomStringConvertible, Equatable {
 struct RotateKeyCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "rotate-key",
-        abstract: "Ask the running provider process to rotate its receipt signing key."
+        abstract: "Ask the running provider process to rotate its receipt signing key.",
+        shouldDisplay: false
     )
 
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG. Defaults to ~/.config/macprovider/config.yaml.")

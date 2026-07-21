@@ -64,7 +64,7 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
     @Argument(help: "Target HuggingFace model ID or local path.")
     var targetModelID: String
 
-    @Flag(help: "Bypass the CLI-side cooldown soft guard AND the local RAM fit guard (SPEC-001 v1.4 R-6.13.2): wontFit becomes a warning, tight is silenced, and HF-shape unknown fail-closed is overridden. Does NOT bypass --supported-models membership or server-side concurrency rejection.")
+    @Flag(help: "Bypass local cooldown and RAM-fit checks. This does not allow unsupported models or override network concurrency limits.")
     var force = false
 
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
