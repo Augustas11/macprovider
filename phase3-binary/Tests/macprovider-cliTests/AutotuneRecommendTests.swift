@@ -466,9 +466,12 @@ final class AutotuneRecommendTests: XCTestCase {
         catalogMismatch.candidateCatalogSHA256 = "mismatch"
         XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(catalogMismatch, request: request, modelKey: modelKey))
 
-        var binaryMismatch = baseline
-        binaryMismatch.binaryVersion = "other"
-        XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(binaryMismatch, request: request, modelKey: modelKey))
+        // binaryVersion is the independently-versioned CLI marketing release
+        // number, not a compatibility input — a version-only difference must
+        // not discard otherwise-valid cached benchmark evidence (#612).
+        var binaryVersionOnlyChange = baseline
+        binaryVersionOnlyChange.binaryVersion = "other"
+        XCTAssertTrue(AutotuneRecommendEngine.cachedBenchmarkAdmitted(binaryVersionOnlyChange, request: request, modelKey: modelKey))
 
         var modelMismatch = baseline
         modelMismatch.modelID = "other/model"
@@ -485,6 +488,72 @@ final class AutotuneRecommendTests: XCTestCase {
         var stale = baseline
         stale.generatedAt = request.generatedAt.addingTimeInterval(-(AutotuneRecommendEngine.maxBenchmarkAge + 1))
         XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(stale, request: request, modelKey: modelKey))
+    }
+
+    func testCachedBenchmarkAdmittedAcrossCLIVersionOnlyBump() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        let benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        XCTAssertEqual(benchmark.binaryVersion, request.hardware.binaryVersion)
+
+        // Simulate a CLI update: the running binary's marketing version moves
+        // forward while every compatibility input (catalog, model artifact,
+        // hardware identity) stays the same as when the benchmark was recorded.
+        request.hardware = AutotuneRecommendHardware(
+            machine: request.hardware.machine,
+            chip: request.hardware.chip,
+            memoryGB: request.hardware.memoryGB,
+            bandwidthTier: request.hardware.bandwidthTier,
+            osVersion: request.hardware.osVersion,
+            binaryVersion: "1.8.57",
+            diversificationID: request.hardware.diversificationID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+
+        XCTAssertNotEqual(benchmark.binaryVersion, request.hardware.binaryVersion)
+        XCTAssertTrue(AutotuneRecommendEngine.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey))
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        XCTAssertEqual(result.recommendedModel, modelKey)
+    }
+
+    func test8GBLlama32FeasibleFallbackSurvivesCLIVersionOnlyBump() throws {
+        let modelKey = "meta-llama/llama-3.2-3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware = AutotuneRecommendHardware(
+            machine: request.hardware.machine,
+            chip: "Apple M1",
+            memoryGB: 8,
+            bandwidthTier: request.hardware.bandwidthTier,
+            osVersion: request.hardware.osVersion,
+            binaryVersion: request.hardware.binaryVersion,
+            diversificationID: request.hardware.diversificationID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+        // The cached benchmark was recorded under the pre-update CLI version.
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.swapDetected = true
+        request.benchmarks[modelKey] = benchmark
+
+        // A CLI update alone advances the marketing version with every
+        // compatibility input (catalog, model artifact, hardware) unchanged.
+        request.hardware = AutotuneRecommendHardware(
+            machine: request.hardware.machine,
+            chip: request.hardware.chip,
+            memoryGB: request.hardware.memoryGB,
+            bandwidthTier: request.hardware.bandwidthTier,
+            osVersion: request.hardware.osVersion,
+            binaryVersion: "1.8.57",
+            diversificationID: request.hardware.diversificationID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertNotEqual(result.recommendedModel, "none")
+        XCTAssertFalse(result.humanTranscript().contains("donor mode only"))
+        XCTAssertTrue(result.warnings.contains(.swapObservedUnderLoad))
     }
 
     func testRowIdentityPreservesEvidenceAcrossUnrelatedCatalogChange() throws {
@@ -2030,6 +2099,61 @@ final class AutotuneRecommendTests: XCTestCase {
         )
 
         XCTAssertEqual(staleSince, Optional(Self.date("2026-07-01T00:00:00Z")))
+    }
+
+    func testIsStaleIgnoresCLIVersionOnlyChange() throws {
+        let generatedAt = Self.date("2026-07-01T00:00:00Z")
+        let stored = LastRecommendationState(
+            generatedAt: generatedAt,
+            rateCardVersion: "rate-1",
+            demandRankVersion: "demand-1",
+            candidateCatalogVersion: "catalog-1",
+            candidateCatalogSHA256: "catalog-sha-1",
+            benchmarkID: "bench-1",
+            benchmarkGeneratedAt: generatedAt,
+            binaryVersion: "1.8.55",
+            hardwareIdentityHash: "hw-1",
+            recommendedModel: "meta-llama/llama-3.2-3b-instruct"
+        )
+        // Only the CLI marketing version advances; every compatibility input
+        // (rate card, demand rank, catalog identity/digest, hardware identity)
+        // and the cached benchmark stay the same.
+        var current = stored
+        current.binaryVersion = "1.8.56"
+
+        XCTAssertFalse(RecommendationStateStore.isStale(
+            stored: stored,
+            current: current,
+            now: generatedAt
+        ))
+    }
+
+    func testIsStaleDetectsCompatibilityInputChanges() throws {
+        let generatedAt = Self.date("2026-07-01T00:00:00Z")
+        let stored = LastRecommendationState(
+            generatedAt: generatedAt,
+            rateCardVersion: "rate-1",
+            demandRankVersion: "demand-1",
+            candidateCatalogVersion: "catalog-1",
+            candidateCatalogSHA256: "catalog-sha-1",
+            benchmarkID: "bench-1",
+            benchmarkGeneratedAt: generatedAt,
+            binaryVersion: "1.8.55",
+            hardwareIdentityHash: "hw-1",
+            recommendedModel: "meta-llama/llama-3.2-3b-instruct"
+        )
+
+        var catalogDigestChanged = stored
+        catalogDigestChanged.candidateCatalogSHA256 = "catalog-sha-2"
+        XCTAssertTrue(RecommendationStateStore.isStale(stored: stored, current: catalogDigestChanged, now: generatedAt))
+
+        var hardwareChanged = stored
+        hardwareChanged.hardwareIdentityHash = "hw-2"
+        XCTAssertTrue(RecommendationStateStore.isStale(stored: stored, current: hardwareChanged, now: generatedAt))
+
+        var catalogVersionChanged = stored
+        catalogVersionChanged.candidateCatalogVersion = "catalog-2"
+        XCTAssertTrue(RecommendationStateStore.isStale(stored: stored, current: catalogVersionChanged, now: generatedAt))
     }
 
     func testStatusStaleHelperMarksStoredStateStaleWhenSecretCannotBeReused() async throws {
