@@ -175,7 +175,7 @@ final class StatusCommandTests: XCTestCase {
 
         let pendingOutput = LocalStatusFormatter.format(pending)
         XCTAssertTrue(pendingOutput.contains("Pending hardware verification"), pendingOutput)
-        XCTAssertTrue(pendingOutput.contains("No local action is needed"), pendingOutput)
+        XCTAssertTrue(pendingOutput.contains("autotune --recommend"), pendingOutput)
 
         var rejected = status(providerID: "provider-a")
         rejected["network_state"] = "live_verified"

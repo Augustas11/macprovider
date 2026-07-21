@@ -88,9 +88,9 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let pendingStatus = AgentSnapshotPresenter.publicStatus(pending)
         XCTAssertEqual(pendingStatus.title, "Pending hardware verification")
-        XCTAssertEqual(
-            pendingStatus.safeNextAction,
-            "Keep Malibu open. No local action is needed while verification finishes."
+        XCTAssertTrue(
+            pendingStatus.safeNextAction?.contains("autotune --recommend") == true,
+            pendingStatus.safeNextAction ?? ""
         )
         XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(pending), "llama")

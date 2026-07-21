@@ -172,6 +172,7 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("signed live catalog unavailable"), reason)
         XCTAssertTrue(reason.contains("candidate_catalog_fallback_used"), reason)
+        XCTAssertTrue(reason.contains("cannot be submitted"), reason)
     }
 
     func testInitialRecommendationHydratesTokenlessConfigFromKeychainBeforeEvidenceSubmission() async throws {

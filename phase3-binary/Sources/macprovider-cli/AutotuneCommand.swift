@@ -827,6 +827,13 @@ struct AutotuneCommand: AsyncParsableCommand {
         var result = AutotuneRecommendEngine().recommend(request)
         result.probeDiagnostics = outcomes.diagnostics
         try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
+        if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
+            let message = AutotuneRecommendEngine.networkSubmissionBlockMessage(Set(result.warnings))
+            if apply || submitHardwareEvidence || requireHardwareEvidence {
+                throw ValidationError(message)
+            }
+            FileHandle.standardError.write(Data("[warn] \(message)\n".utf8))
+        }
         if submitHardwareEvidence {
             let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(
                 result: result,
@@ -1059,7 +1066,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             )
         case .trustBlocked(_, let warnings):
             let failures = warnings
-                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+                .intersection(AutotuneRecommendEngine.networkSubmissionBlockingWarnings)
                 .map(\.rawValue)
                 .sorted()
                 .joined(separator: ", ")

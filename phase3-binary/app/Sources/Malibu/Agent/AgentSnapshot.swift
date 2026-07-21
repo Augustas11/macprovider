@@ -399,8 +399,8 @@ enum AgentSnapshotPresenter {
         if isPendingHardwareVerification(s) {
             return PublicStatus(
                 title: "Pending hardware verification",
-                detail: "This Mac is waiting for network operator approval before it can receive customer work.",
-                safeNextAction: "Keep Malibu open. No local action is needed while verification finishes."
+                detail: "Network hardware verification is incomplete. If setup already submitted evidence, wait for operator approval; otherwise refresh the signed recommendation while online.",
+                safeNextAction: "If evidence was not submitted yet, run macprovider-cli autotune --recommend while online."
             )
         }
         if isHardwareEvidenceRejected(s) {
@@ -899,7 +899,7 @@ enum AgentSnapshotPresenter {
         case "catalog_incompatible":
             return "Update provider software, then retry"
         case "pending_hardware_verification":
-            return "Keep Malibu open while operator verification finishes"
+            return "Submit signed recommendation evidence if missing; otherwise wait for operator approval"
         case "hardware_evidence_rejected":
             return "Refresh the signed catalog recommendation while online"
         case "paused_by_operator":

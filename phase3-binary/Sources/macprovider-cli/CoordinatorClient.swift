@@ -795,10 +795,17 @@ actor CoordinatorClient {
                     reasonCode: "autotune_evidence_required"
                 )
             }
-            if normalized == "autotune_evidence_invalid" {
+            if normalized == "autotune_evidence_invalid"
+                || normalized == "autotune_model_cap_exceeded" {
                 return ConnectionLifecycleClassification(
                     state: .hardwareEvidenceRejected,
-                    reasonCode: "autotune_evidence_invalid"
+                    reasonCode: normalized
+                )
+            }
+            if normalized == "autotune_model_uncatalogued" {
+                return ConnectionLifecycleClassification(
+                    state: .catalogIncompatible,
+                    reasonCode: "autotune_model_uncatalogued"
                 )
             }
             if normalized == "autotune_gate_unavailable" {
@@ -1452,6 +1459,8 @@ actor CoordinatorClient {
             )
         case 4001 where reason == "autotune_evidence_required"
             || reason == "autotune_evidence_invalid"
+            || reason == "autotune_model_uncatalogued"
+            || reason == "autotune_model_cap_exceeded"
             || reason == "autotune_gate_unavailable"
             || reason == "catalog_incompatible":
             // Pearl hello-gate / catalog admission closes use CloseInvalidHello

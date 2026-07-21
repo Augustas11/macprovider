@@ -930,25 +930,26 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(result.allCandidates.allSatisfy { !$0.eligible })
     }
 
-    func testPaidTrustBlockRecognizesCatalogFallbackAndDemandFailures() {
+    func testPaidTrustBlockLeavesCatalogFallbackForLocalDiagnostics() {
         XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogIntegrityFailure]))
         XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.demandRankUpdateRequired]))
-        XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogFallbackUsed]))
-        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks([.rateCardFallbackUsed, .candidateCatalogStale]))
+        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogFallbackUsed, .rateCardFallbackUsed]))
+        XCTAssertTrue(AutotuneRecommendEngine.networkSubmissionBlocks([.candidateCatalogFallbackUsed]))
+        XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks([.rateCardFallbackUsed, .candidateCatalogStale]))
     }
 
-    func testCatalogFallbackBlocksPaidRecommendationWithActionableMessage() throws {
+    func testCatalogFallbackBlocksNetworkSubmissionWithActionableMessage() throws {
         var request = try makeRequest(modelKey: "qwen3-coder-30b-a3b-instruct")
         request.warnings.insert(.candidateCatalogFallbackUsed)
 
         let result = AutotuneRecommendEngine().recommend(request)
-        let message = AutotuneRecommendEngine.paidTrustBlockMessage([.candidateCatalogFallbackUsed])
+        let message = AutotuneRecommendEngine.networkSubmissionBlockMessage([.candidateCatalogFallbackUsed])
 
-        XCTAssertNil(result.recommendedModel)
-        XCTAssertTrue(result.allCandidates.allSatisfy { !$0.eligible })
+        // Offline recommend diagnostics remain available; only network submit/apply fail closed.
+        XCTAssertNotNil(result.recommendedModel)
         XCTAssertTrue(message.contains("signed live catalog unavailable"))
         XCTAssertTrue(message.contains("candidate_catalog_fallback_used"))
-        XCTAssertTrue(message.contains("rejected before submission"))
+        XCTAssertTrue(message.contains("cannot be submitted"))
     }
 
     func testRecommendationIsDeterministicForSameDiversificationID() throws {
@@ -2232,7 +2233,9 @@ final class AutotuneRecommendTests: XCTestCase {
             now: Self.date("2026-07-02T00:00:00Z")
         )
 
-        XCTAssertNil(staleSince)
+        // Offline transport uses baked catalog fallback, which blocks network
+        // evidence freshness even when the stored SHA matches baked (#582).
+        XCTAssertEqual(staleSince, Optional(Self.date("2026-07-02T00:00:00Z")))
         XCTAssertEqual(staleWithDifferentProvider, Optional(Self.date("2026-07-02T00:00:00Z")))
     }
 
@@ -2284,7 +2287,11 @@ final class AutotuneRecommendTests: XCTestCase {
             status,
             .trustBlocked(
                 Optional(Self.date("2026-07-02T00:00:00Z")),
-                [.candidateCatalogUpdateRequired, .demandRankUpdateRequired]
+                [
+                    .candidateCatalogFallbackUsed,
+                    .candidateCatalogUpdateRequired,
+                    .demandRankUpdateRequired,
+                ]
             )
         )
 
@@ -2299,7 +2306,14 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertEqual(
             missingStateStatus,
-            .trustBlocked(nil, [.candidateCatalogUpdateRequired, .demandRankUpdateRequired])
+            .trustBlocked(
+                nil,
+                [
+                    .candidateCatalogFallbackUsed,
+                    .candidateCatalogUpdateRequired,
+                    .demandRankUpdateRequired,
+                ]
+            )
         )
     }
 

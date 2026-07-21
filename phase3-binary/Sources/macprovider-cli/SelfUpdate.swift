@@ -2583,7 +2583,7 @@ struct LocalStatusFormatter {
         } else if lifecycleState == "pending_hardware_verification"
             || lifecycleReason == "autotune_evidence_required" {
             title = "Pending hardware verification"
-            nextStep = "Keep this Mac awake. No local action is needed while operator verification finishes."
+            nextStep = "If evidence was not submitted yet, run `macprovider-cli autotune --recommend` while online; otherwise wait for operator approval."
         } else if lifecycleState == "hardware_evidence_rejected"
             || lifecycleReason == "autotune_evidence_invalid" {
             title = "Not eligible: admission evidence failed"
