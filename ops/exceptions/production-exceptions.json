@@ -1,8 +1,8 @@
 {
   "$schema": "./production-exceptions.schema.json",
   "schema_version": "macprovider-production-exceptions-v1",
-  "updated_at": "2026-07-21T14:30:02Z",
-  "updated_by": "cursor-entry172-journey-pass",
+  "updated_at": "2026-07-21T18:30:00Z",
+  "updated_by": "cursor-610-first-hop",
   "environment": "pearl-production",
   "exceptions": [
     {
@@ -189,6 +189,32 @@
         "beta/DECISION_CRITERIA.md Entry 162",
         "phase4-coordinator/internal/ws/server.go",
         "phase3-binary/Sources/macprovider-cli/CompatibilitySetManifest.swift"
+      ]
+    },
+    {
+      "id": "exc-v1848-first-hop-update-bridge",
+      "status": "planned",
+      "environment": "pearl-production",
+      "component": "coordinator",
+      "policy_delta": "Exact public pre-fix compatibility set `Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8` may be listed in `coordinator.compatibility_set.first_hop_bridge_ids` so rejected 1.8.48 providers can open an update-only session, receive `recommended_compatibility_set_id=target_id`, and complete ordinary `macprovider-cli update`. Bridge-only sessions use `catalog_admission_mode=update_bridge` and are never buyer-routable.",
+      "authority_surface": "Pearl overlay `coordinator.compatibility_set.first_hop_bridge_ids` plus `target_id` / `accepted_ids` / `coordinator_advertised_version.latest_binary_version` alignment; runtime `catalog_admission_mode=update_bridge`.",
+      "reason": "#610 remains open because public 1.8.48 cannot use #631 signed discovery; the first hop was proven only against an isolated acceptance coordinator. Production needs this temporary server bridge (or the install.sh fallback) before the ordinary user update journey is complete.",
+      "owner": "provider lifecycle/release recovery",
+      "issue": "https://github.com/Augustas11/macprovider/issues/610",
+      "created_at": "2026-07-21T00:00:00Z",
+      "expires_at": null,
+      "expiry_unknown_reason": "Pending Pearl enablement and physical first-hop evidence; activate with a finite bridge window once the overlay is live.",
+      "scope": "Exact public v1.8.48 set only; must not overlap accepted_ids or equal target_id; must not widen arbitrary unaccepted sets.",
+      "removal_condition": "Zero production providers remain on the v1.8.48 set, physical #610 journeys pass, and `first_hop_bridge_ids` is emptied through reviewed deploy.",
+      "rollback_command": "ssh pearl 'sudo grep -A30 \"compatibility_set:\" /etc/macprovider/coordinator.yaml' # read-only; remove first_hop_bridge_ids via reviewed overlay deploy/restart.",
+      "post_removal_validation": "No `compatibility_set_first_hop_bridge` events, no `update_bridge` pool rows, and provider recovery uses signed discovery on CLI ≥1.8.49 without the bridge list.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/610",
+        "ops/runbooks/entry-610-first-hop-recovery.md",
+        "beta/DECISION_CRITERIA.md Entry 176",
+        "phase4-coordinator/internal/config/config.go",
+        "phase4-coordinator/internal/ws/server.go"
       ]
     },
     {

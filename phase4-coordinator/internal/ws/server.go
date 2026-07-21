@@ -1928,24 +1928,37 @@ func (s *Server) observeCredentialBootstrap(outcome string) {
 }
 
 func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
-	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
-		cmp, ok := compareSemver(hello.BinaryVersion, required)
-		if !ok || cmp < 0 {
-			s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
-			return nil, false
+	// Exact pre-fix sets listed in first_hop_bridge_ids may open an
+	// update-only session so public 1.8.48 can persist coordinator
+	// compatibility admission and run ordinary `macprovider-cli update`
+	// (#610). They never become buyer-routable.
+	firstHopOnly := s.cfg.Coordinator.CompatibilitySet.IsFirstHopBridgeOnly(hello.CompatibilitySetID)
+	if !firstHopOnly {
+		if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
+			cmp, ok := compareSemver(hello.BinaryVersion, required)
+			if !ok || cmp < 0 {
+				s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
+				return nil, false
+			}
 		}
 	}
 	catalogAdmissionMode, catalogCompatible := s.catalogAdmission(hello)
 	if !catalogCompatible {
-		s.log.Warn().
-			Str("provider_id", hello.ProviderID).
-			Str("catalog_release_id", hello.CatalogReleaseID).
-			Str("catalog_policy_version", hello.CatalogPolicyVersion).
-			Str("catalog_candidate_sha256", hello.CandidateCatalogSHA256).
-			Str("catalog_signer_key_id", hello.CatalogSignerKeyID).
-			Msg("provider catalog release is incompatible with coordinator")
-		s.close(conn, CloseInvalidHello, "catalog_incompatible")
-		return nil, false
+		if firstHopOnly {
+			catalogAdmissionMode = "update_bridge"
+		} else {
+			s.log.Warn().
+				Str("provider_id", hello.ProviderID).
+				Str("catalog_release_id", hello.CatalogReleaseID).
+				Str("catalog_policy_version", hello.CatalogPolicyVersion).
+				Str("catalog_candidate_sha256", hello.CandidateCatalogSHA256).
+				Str("catalog_signer_key_id", hello.CatalogSignerKeyID).
+				Msg("provider catalog release is incompatible with coordinator")
+			s.close(conn, CloseInvalidHello, "catalog_incompatible")
+			return nil, false
+		}
+	} else if firstHopOnly {
+		catalogAdmissionMode = "update_bridge"
 	}
 	now := s.now()
 	expectedModelHash := s.expectedAdmissionModelHash(hello, catalogAdmissionMode)
@@ -2018,9 +2031,24 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		}
 	}
-	maxAdmittedModelKey, maxAdmittedModelID, admittedTuple, gateOK := s.checkAutotuneHelloGate(conn, hello)
-	if !gateOK {
-		return nil, false
+	var (
+		maxAdmittedModelKey string
+		maxAdmittedModelID  string
+		admittedTuple       onboarding.AdmittedTuple
+	)
+	if firstHopOnly {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("event", "compatibility_set_first_hop_bridge").
+			Str("compatibility_set_id", hello.CompatibilitySetID).
+			Str("recommended_compatibility_set_id", s.cfg.Coordinator.CompatibilitySet.TargetID).
+			Msg("admitting update-only first-hop bridge session")
+	} else {
+		var gateOK bool
+		maxAdmittedModelKey, maxAdmittedModelID, admittedTuple, gateOK = s.checkAutotuneHelloGate(conn, hello)
+		if !gateOK {
+			return nil, false
+		}
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -2275,7 +2303,10 @@ func (s *Server) requireCompatibleSet(conn net.Conn, providedID string, authV2 b
 	if err := config.ValidateCompatibilitySetID(providedID); err != nil {
 		return reject("compatibility_set_invalid")
 	}
-	if !policy.Accepts(providedID) {
+	// Buyer-serving accepted sets and the temporary #610 first-hop bridge both
+	// pass the hello/auth gate. Bridge-only sessions still receive the
+	// recommended target admission but are marked non-routable later.
+	if !policy.AllowsSession(providedID) {
 		return reject("compatibility_set_unaccepted")
 	}
 	return true

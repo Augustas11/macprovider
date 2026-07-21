@@ -12,6 +12,22 @@ coordinator:
   # Require gateway-supplied internal bearer auth plus X-MacProvider-Account
   # before accepting buyer chat completions directly on the coordinator.
   require_gateway_context: true
+  #
+  # Live Pearl overlays supply exact compatibility_set.target_id / accepted_ids.
+  # Optional temporary #610 first-hop bootstrap (not buyer-serving):
+  #
+  #   compatibility_set:
+  #     target_id: "Augustas11/macprovider:vX.Y.Z@<40-hex>"
+  #     accepted_ids:
+  #       - "<target_id>"
+  #       - "<rollback_set_id>"
+  #     first_hop_bridge_ids:
+  #       - "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
+  #
+  # Bridge-only sessions receive recommended_compatibility_set_id=target_id so
+  # public CLI 1.8.48 can persist admission and run ordinary
+  # `macprovider-cli update`, then are marked catalog_admission_mode=update_bridge
+  # (never RoutingEligible). See ops/runbooks/entry-610-first-hop-recovery.md.
 
 pool:
   heartbeat_interval_s: 30
