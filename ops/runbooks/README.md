@@ -9,3 +9,4 @@
 | **C — MALIBU Pearl** | [`malibu-pearl-deploy.md`](./malibu-pearl-deploy.md) | Session C4 Pearl migration + overlay |
 | **Catalog release + provider upgrade** | [`catalog-release-provider-upgrade.md`](./catalog-release-provider-upgrade.md) | Signed publication, coordinator activation, provider transaction, rollback |
 | **B — Entry 172 referrals** | [`entry-172-referral-activation.md`](./entry-172-referral-activation.md) | Reversible private-prebeta referral activation checklist |
+| **#615 production exceptions** | [`production-exception-register.md`](./production-exception-register.md) | Machine-readable production exception register maintenance |

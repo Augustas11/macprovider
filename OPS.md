@@ -42,6 +42,14 @@ for the docs-only, reversible private-prebeta referral activation checklist. Do
 not duplicate the procedure here; the runbook is the operator surface for Entry
 172 / SPEC-034 §8 and does not flip flags by itself.
 
+### 1.2 Production Exception Register
+
+Use [`ops/exceptions/production-exceptions.json`](./ops/exceptions/production-exceptions.json)
+and [`ops/runbooks/production-exception-register.md`](./ops/runbooks/production-exception-register.md)
+as the #615 operator-facing inventory of temporary production exceptions. This
+is docs/schema truth only for now; it does not enforce expiry, block promotion,
+mutate Pearl, or close #615.
+
 ## 2. Safe coordinator restart
 
 The scripted path is `phase4-coordinator/dist/deploy-pearl-vps.sh`. Two
