@@ -35,6 +35,13 @@ deliberately allowlists public paths).
 External monitor: a Python `macprovider-monitor.py` runs on the same VPS as a
 `systemd` timer, alerting via Gmail SMTP (see §5).
 
+### 1.1 Entry 172 Referral Activation
+
+Use [`ops/runbooks/entry-172-referral-activation.md`](./ops/runbooks/entry-172-referral-activation.md)
+for the docs-only, reversible private-prebeta referral activation checklist. Do
+not duplicate the procedure here; the runbook is the operator surface for Entry
+172 / SPEC-034 §8 and does not flip flags by itself.
+
 ## 2. Safe coordinator restart
 
 The scripted path is `phase4-coordinator/dist/deploy-pearl-vps.sh`. Two
