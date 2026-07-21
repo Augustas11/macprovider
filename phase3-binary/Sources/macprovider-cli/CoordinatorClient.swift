@@ -146,7 +146,7 @@ actor CoordinatorClient {
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
 
-    static let binaryVersion = "1.8.55"
+    static let binaryVersion = "1.8.56"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -344,6 +344,7 @@ actor CoordinatorClient {
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
         lifecycleOperationID: String? = nil,
         operatorPausedInitially: Bool = false,
+        watchdogExitPreparation: @escaping @Sendable () -> Void = {},
         // Issue #189: injectable in tests; production uses Darwin.exit(1)
         // so the launchd KeepAlive contract recovers the wedged process.
         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
@@ -452,7 +453,10 @@ actor CoordinatorClient {
         }
         self.autoupdateLocalHealthSleep = autoupdateLocalHealthSleep
         self.autoupdateReloadHelperFence = autoupdateReloadHelperFence
-        self.watchdogExitHook = watchdogExitHook
+        self.watchdogExitHook = { reason in
+            watchdogExitPreparation()
+            watchdogExitHook(reason)
+        }
         self.streamInterval = max(1, config.streamInterval)
         self.credentialBootstrap = credentialBootstrap
         if credentialBootstrap {
@@ -1956,6 +1960,10 @@ actor CoordinatorClient {
         startHeartbeatWatchdog(intervalSeconds: intervalSeconds)
     }
 
+    static func heartbeatWatchdogToleranceNanosecondsForTest(intervalSeconds: Int) -> UInt64 {
+        heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds)
+    }
+
     func seedLastHeartbeatSuccessForTest(ageNanoseconds: UInt64) {
         let now = DispatchTime.now().uptimeNanoseconds
         lastHeartbeatSuccessNanoseconds = now > ageNanoseconds ? now - ageNanoseconds : 1
@@ -1964,6 +1972,10 @@ actor CoordinatorClient {
     func cancelHeartbeatWatchdogForTest() {
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
+    }
+
+    func suppressSignedRecoveryDiscoveryForTest() {
+        lastSignedRecoveryDiscoveryAttempt = Date()
     }
 
     // Issue #189 R1 security MEDIUM: assert that any inbound frame
@@ -3348,6 +3360,13 @@ actor CoordinatorClient {
     // coordinator-configured heartbeat interval and is always well
     // below the 90s coordinator inactivity drop.
     private static let heartbeatWatchdogToleranceMultiplier: Int = 3
+    // A one-second coordinator heartbeat previously produced a three-second
+    // watchdog tolerance even though a single bounded send is allowed five
+    // seconds. Brief post-boot or inference contention could therefore kill a
+    // healthy provider before the send timeout had a chance to reconnect it.
+    // Keep the historical 15-second upper bound as the minimum as well: it is
+    // still far below coordinator inactivity while exceeding the send bound.
+    private static let heartbeatWatchdogMinimumToleranceSeconds: Int = 15
     private func startHeartbeat(intervalSeconds: Int) {
         heartbeatTask?.cancel()
         heartbeatWatchdogTask?.cancel()
@@ -3399,8 +3418,7 @@ actor CoordinatorClient {
     // extremes (Int.max heartbeat_interval_s no longer traps).
     private func startHeartbeatWatchdog(intervalSeconds: Int) {
         let tickSeconds = max(1, min(intervalSeconds, Self.keepaliveTickCeilingSeconds))
-        let tolerance = UInt64(tickSeconds * Self.heartbeatWatchdogToleranceMultiplier)
-            * 1_000_000_000
+        let tolerance = Self.heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds)
         // Check at a sub-tick cadence so an overrun is detected within
         // one extra tick rather than after the next full tick boundary.
         let checkNanoseconds = UInt64(tickSeconds) * 500_000_000
@@ -3426,6 +3444,15 @@ actor CoordinatorClient {
 
     private func recordHeartbeatSuccess() {
         lastHeartbeatSuccessNanoseconds = DispatchTime.now().uptimeNanoseconds
+    }
+
+    private static func heartbeatWatchdogToleranceNanoseconds(intervalSeconds: Int) -> UInt64 {
+        let tickSeconds = max(1, min(intervalSeconds, keepaliveTickCeilingSeconds))
+        let toleranceSeconds = max(
+            tickSeconds * heartbeatWatchdogToleranceMultiplier,
+            heartbeatWatchdogMinimumToleranceSeconds
+        )
+        return UInt64(toleranceSeconds) * 1_000_000_000
     }
 
     private func nanosecondsSinceLastHeartbeatSuccess() -> UInt64 {

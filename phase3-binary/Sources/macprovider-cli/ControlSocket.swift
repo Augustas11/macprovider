@@ -480,6 +480,170 @@ public enum ControlSocketPaths {
     }
 }
 
+private struct ControlSocketFileIdentity: Equatable, Sendable {
+    let device: dev_t
+    let inode: ino_t
+    let owner: uid_t
+    let mode: mode_t
+
+    init(_ info: stat) {
+        device = info.st_dev
+        inode = info.st_ino
+        owner = info.st_uid
+        mode = info.st_mode
+    }
+}
+
+// Fatal watchdog exits cannot await actor/defer cleanup. This object is armed
+// only after the server has bound and listened, and records that exact socket
+// identity through a pinned 0700 parent-directory descriptor. Exit cleanup
+// atomically quarantines the pathname before verifying and unlinking it, so a
+// same-user replacement cannot win an lstat-to-unlink race. Ordinary startup
+// remains fail-closed and never reclaims unknown paths.
+final class ControlSocketWatchdogCleanup: @unchecked Sendable {
+    private let socketPath: URL
+    private let socketName: String
+    private let lock = NSLock()
+    private var parentFD: Int32?
+    private var expectedIdentity: ControlSocketFileIdentity?
+
+    init(socketPath: URL) {
+        self.socketPath = socketPath
+        self.socketName = socketPath.lastPathComponent
+    }
+
+    deinit {
+        disarm()
+    }
+
+    @discardableResult
+    func arm() -> Bool {
+        let parentPath = socketPath.deletingLastPathComponent().path
+        let fd = Darwin.open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else {
+            log("could not open control socket directory", error: errno)
+            return false
+        }
+
+        var parentInfo = stat()
+        guard Darwin.fstat(fd, &parentInfo) == 0 else {
+            let error = errno
+            Darwin.close(fd)
+            log("could not inspect control socket directory", error: error)
+            return false
+        }
+        guard parentInfo.st_uid == geteuid(),
+              (parentInfo.st_mode & S_IFMT) == S_IFDIR,
+              (parentInfo.st_mode & 0o777) == 0o700
+        else {
+            Darwin.close(fd)
+            log("refused unverified control socket directory")
+            return false
+        }
+
+        var socketInfo = stat()
+        guard Darwin.fstatat(fd, socketName, &socketInfo, AT_SYMLINK_NOFOLLOW) == 0 else {
+            let error = errno
+            Darwin.close(fd)
+            log("could not inspect control socket", error: error)
+            return false
+        }
+        guard socketInfo.st_uid == geteuid(),
+              (socketInfo.st_mode & S_IFMT) == S_IFSOCK,
+              (socketInfo.st_mode & 0o777) == 0o600
+        else {
+            Darwin.close(fd)
+            log("refused unverified control socket")
+            return false
+        }
+
+        lock.lock()
+        let oldFD = parentFD
+        parentFD = fd
+        expectedIdentity = ControlSocketFileIdentity(socketInfo)
+        lock.unlock()
+        if let oldFD { Darwin.close(oldFD) }
+        return true
+    }
+
+    func disarm() {
+        lock.lock()
+        let fd = parentFD
+        parentFD = nil
+        expectedIdentity = nil
+        lock.unlock()
+        if let fd { Darwin.close(fd) }
+    }
+
+    @discardableResult
+    func prepareForWatchdogExit() -> Bool {
+        lock.lock()
+        let fd = parentFD
+        let expected = expectedIdentity
+        parentFD = nil
+        expectedIdentity = nil
+        lock.unlock()
+
+        guard let fd, let expected else {
+            log("refused unarmed control socket cleanup")
+            return false
+        }
+        defer { Darwin.close(fd) }
+
+        let quarantineName = ".\(socketName).watchdog-\(getpid())-\(UUID().uuidString.lowercased())"
+        guard Darwin.renameatx_np(
+            fd, socketName,
+            fd, quarantineName,
+            UInt32(RENAME_EXCL)
+        ) == 0 else {
+            let error = errno
+            if error == ENOENT { return true }
+            log("could not quarantine control socket", error: error)
+            return false
+        }
+
+        var quarantinedInfo = stat()
+        guard Darwin.fstatat(fd, quarantineName, &quarantinedInfo, AT_SYMLINK_NOFOLLOW) == 0 else {
+            let error = errno
+            if Darwin.renameatx_np(
+                fd, quarantineName,
+                fd, socketName,
+                UInt32(RENAME_EXCL)
+            ) != 0 {
+                log("preserved mismatched control socket as \(quarantineName)", error: errno)
+            } else {
+                log("could not inspect quarantined control socket", error: error)
+            }
+            return false
+        }
+        guard ControlSocketFileIdentity(quarantinedInfo) == expected else {
+            if Darwin.renameatx_np(
+                fd, quarantineName,
+                fd, socketName,
+                UInt32(RENAME_EXCL)
+            ) != 0 {
+                log("preserved mismatched control socket as \(quarantineName)", error: errno)
+            } else {
+                log("refused replacement control socket cleanup")
+            }
+            return false
+        }
+
+        guard Darwin.unlinkat(fd, quarantineName, 0) == 0 else {
+            let error = errno
+            if error == ENOENT { return true }
+            log("could not remove quarantined control socket", error: error)
+            return false
+        }
+        return true
+    }
+
+    private func log(_ message: String, error: Int32? = nil) {
+        let detail = error.map { ": \(String(cString: strerror($0)))" } ?? ""
+        FileHandle.standardError.write(Data("watchdog cleanup \(message)\(detail)\n".utf8))
+    }
+}
+
 public enum ControlSocketConnectError: Error, Equatable {
     case socketAbsent(path: String)
     case connectionRefused(path: String)
@@ -492,6 +656,7 @@ public enum ControlSocketServerError: Error, CustomStringConvertible, Equatable 
     case bindFailed(path: String, errno: Int32)
     case listenFailed(errno: Int32)
     case socketFailed(errno: Int32)
+    case watchdogCleanupFailed(path: String)
 
     public var description: String {
         switch self {
@@ -503,6 +668,8 @@ public enum ControlSocketServerError: Error, CustomStringConvertible, Equatable 
             return "control socket listen failed: \(String(cString: strerror(errno)))"
         case let .socketFailed(errno):
             return "control socket creation failed: \(String(cString: strerror(errno)))"
+        case let .watchdogCleanupFailed(path):
+            return "control socket \(path) could not arm restart cleanup"
         }
     }
 }
@@ -527,6 +694,7 @@ actor ControlSocketServer {
     private let providerToken: String?
     private let pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?
     private let resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?
+    private let watchdogCleanup: ControlSocketWatchdogCleanup?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
@@ -546,7 +714,8 @@ actor ControlSocketServer {
         malibuAccrualClient: MalibuAccrualClient? = nil,
         providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
-        resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil
+        resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
+        watchdogCleanup: ControlSocketWatchdogCleanup? = nil
     ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
@@ -561,6 +730,7 @@ actor ControlSocketServer {
         self.providerToken = providerToken
         self.pauseProvider = pauseProvider
         self.resumeProvider = resumeProvider
+        self.watchdogCleanup = watchdogCleanup
     }
 
     func start() async throws {
@@ -599,6 +769,11 @@ actor ControlSocketServer {
             throw ControlSocketServerError.listenFailed(errno: err)
         }
 
+        guard watchdogCleanup?.arm() ?? true else {
+            close(fd)
+            throw ControlSocketServerError.watchdogCleanupFailed(path: socketPath.path)
+        }
+
         listenerFD = fd
         let runtime = modelRuntime
         let tracker = tracker
@@ -635,6 +810,7 @@ actor ControlSocketServer {
     }
 
     func stop() async {
+        watchdogCleanup?.disarm()
         acceptTask?.cancel()
         acceptTask = nil
         for task in clientTasks.values {

@@ -418,6 +418,137 @@ final class ControlSocketTests: XCTestCase {
         try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
     }
 
+    func testWatchdogCleanupRemovesOwnedUnixSocket() async throws {
+        let socketPath = try makeSocketPath()
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            watchdogCleanup: cleanup
+        )
+        try await server.start()
+
+        XCTAssertTrue(cleanup.prepareForWatchdogExit())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath.path))
+        await server.stop()
+    }
+
+    func testWatchdogCleanupRefusesWhenNotArmed() throws {
+        let socketPath = try makeSocketPath()
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
+        XCTAssertFalse(cleanup.prepareForWatchdogExit())
+    }
+
+    func testWatchdogCleanupPreservesRegularFile() throws {
+        let socketPath = try makeSocketPath()
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
+        try FileManager.default.createDirectory(at: socketPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        chmod(socketPath.deletingLastPathComponent().path, 0o700)
+        XCTAssertTrue(FileManager.default.createFile(atPath: socketPath.path, contents: Data("keep".utf8)))
+
+        XCTAssertFalse(cleanup.arm())
+        XCTAssertFalse(cleanup.prepareForWatchdogExit())
+        XCTAssertEqual(try Data(contentsOf: socketPath), Data("keep".utf8))
+        try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
+    }
+
+    func testWatchdogCleanupPreservesSymlink() throws {
+        let socketPath = try makeSocketPath()
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
+        try FileManager.default.createDirectory(at: socketPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        chmod(socketPath.deletingLastPathComponent().path, 0o700)
+        try FileManager.default.createSymbolicLink(atPath: socketPath.path, withDestinationPath: "/tmp/not-a-provider-socket")
+
+        XCTAssertFalse(cleanup.arm())
+        XCTAssertFalse(cleanup.prepareForWatchdogExit())
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: socketPath.path), "/tmp/not-a-provider-socket")
+        try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
+    }
+
+    func testWatchdogCleanupPreservesReplacementSocket() async throws {
+        let socketPath = try makeSocketPath()
+        let originalPath = socketPath.deletingLastPathComponent().appendingPathComponent("original.sock")
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
+        let originalServer = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "original"),
+            watchdogCleanup: cleanup
+        )
+        try await originalServer.start()
+        try FileManager.default.moveItem(at: socketPath, to: originalPath)
+
+        let replacementServer = makeServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "replacement")
+        )
+        try await replacementServer.start()
+
+        XCTAssertFalse(cleanup.prepareForWatchdogExit())
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.statusRequest)
+        let response = try await connection.receive(timeout: 1)
+        XCTAssertEqual(
+            response,
+            .statusResponse(currentModelID: "replacement", runtimeState: .ready)
+        )
+        await connection.close()
+
+        await replacementServer.stop()
+        await originalServer.stop()
+        try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
+    }
+
+    func testServerPreservesSocketPathWhenWatchdogCleanupCannotArm() async throws {
+        let socketPath = try makeSocketPath()
+        let unrelatedPath = socketPath.deletingLastPathComponent().appendingPathComponent("unrelated.sock")
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: unrelatedPath)
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            watchdogCleanup: cleanup
+        )
+
+        do {
+            try await server.start()
+            XCTFail("expected watchdog cleanup arming failure")
+        } catch let error as ControlSocketServerError {
+            XCTAssertEqual(error, .watchdogCleanupFailed(path: socketPath.path))
+        }
+
+        var socketInfo = stat()
+        XCTAssertEqual(Darwin.lstat(socketPath.path, &socketInfo), 0)
+        XCTAssertEqual(socketInfo.st_mode & S_IFMT, S_IFSOCK)
+        try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
+    }
+
+    func testWatchdogCleanupRefusesUnsafeSocketMode() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+        chmod(socketPath.path, 0o666)
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
+
+        XCTAssertFalse(cleanup.arm())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath.path))
+
+        chmod(socketPath.path, 0o600)
+        await server.stop()
+    }
+
+    func testWatchdogCleanupRefusesUnsafeParentMode() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+        chmod(socketPath.deletingLastPathComponent().path, 0o755)
+        let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
+
+        XCTAssertFalse(cleanup.arm())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath.path))
+
+        chmod(socketPath.deletingLastPathComponent().path, 0o700)
+        await server.stop()
+    }
+
     func testServerSocketParentDirIs0700AndSocketIs0600() async throws {
         let socketPath = try makeSocketPath()
         let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))

@@ -452,6 +452,7 @@ final class CoordinatorClientTests: XCTestCase {
             modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
+        let preparationRan = LockedBox(false)
         let client = try await makeClient(
             status: status,
             recorder: recorder,
@@ -463,11 +464,16 @@ final class CoordinatorClientTests: XCTestCase {
                     message: "invalid auth_request"
                 )
             },
+            watchdogExitPreparation: {
+                preparationRan.set(true)
+            },
             watchdogExitHook: { reason in
+                XCTAssertTrue(preparationRan.get(), "auth watchdog hook ran before synchronous cleanup")
                 Task { await captured.set(reason) }
             }
         )
 
+        await client.suppressSignedRecoveryDiscoveryForTest()
         await client.start()
         try await Self.waitUntil(timeoutNanoseconds: 1_000_000_000) {
             await captured.value() != nil
@@ -514,6 +520,7 @@ final class CoordinatorClientTests: XCTestCase {
             }
         )
 
+        await client.suppressSignedRecoveryDiscoveryForTest()
         await client.start()
         try await Self.waitUntil(timeoutNanoseconds: 1_000_000_000) {
             await attempts.currentCount() >= 6
@@ -2010,18 +2017,23 @@ final class CoordinatorClientTests: XCTestCase {
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
         let captured = CapturedWatchdogReason()
+        let preparationRan = LockedBox(false)
         let client = try await makeClient(
             status: status,
             recorder: recorder,
+            watchdogExitPreparation: {
+                preparationRan.set(true)
+            },
             watchdogExitHook: { reason in
+                XCTAssertTrue(preparationRan.get(), "watchdog exit hook ran before synchronous cleanup")
                 Task { await captured.set(reason) }
             }
         )
 
-        // Tolerance = 3 × intervalSeconds. interval=1 → tolerance=3s.
-        // Seeding age=5s puts us safely past tolerance on the first
+        // The minimum tolerance is 15s so a bounded 5s send can finish.
+        // Seeding age=16s puts us safely past tolerance on the first
         // 0.5s check tick.
-        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 5 * 1_000_000_000)
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16 * 1_000_000_000)
         await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
 
         try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
@@ -2031,6 +2043,18 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNotNil(reason)
         XCTAssertTrue(reason?.contains("heartbeat liveness") ?? false, reason ?? "<nil>")
         await client.cancelHeartbeatWatchdogForTest()
+    }
+
+    func testHeartbeatWatchdogToleranceExceedsBoundedSendTimeout() {
+        let expected = UInt64(15 * 1_000_000_000)
+        XCTAssertEqual(
+            CoordinatorClient.heartbeatWatchdogToleranceNanosecondsForTest(intervalSeconds: 1),
+            expected
+        )
+        XCTAssertEqual(
+            CoordinatorClient.heartbeatWatchdogToleranceNanosecondsForTest(intervalSeconds: Int.max),
+            expected
+        )
     }
 
     // Issue #189 R1 security MEDIUM: inbound traffic must also count
@@ -2084,7 +2108,7 @@ final class CoordinatorClientTests: XCTestCase {
             }
         )
 
-        // interval=1 → tolerance=3s. Seed last-success age WELL below
+        // interval=1 → tolerance=15s. Seed last-success age WELL below
         // tolerance and run a couple of watchdog ticks; the hook must
         // not fire.
         await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 0)
@@ -4004,10 +4028,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.55")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.55")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.55")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.55")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.56")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.56")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.56")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.56")
     }
 
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
@@ -4998,6 +5022,7 @@ final class CoordinatorClientTests: XCTestCase {
         providerAdmissionRecovery: Bool = false,
         commitAdmissionIdentityPublicKey: (@Sendable (Data, Date?) throws -> Void)? = nil,
         sendOverride: CoordinatorClient.SendOverride? = nil,
+        watchdogExitPreparation: (@Sendable () -> Void)? = nil,
         watchdogExitHook: (@Sendable (String) -> Void)? = nil,
         publishesSpecDecodeTelemetry: Bool = false,
         modelCatalogModelID: String? = nil,
@@ -5095,6 +5120,7 @@ final class CoordinatorClientTests: XCTestCase {
             providerCredentialStore: providerCredentialStore,
             credentialStatusRuntime: credentialStatusRuntime,
             admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+            watchdogExitPreparation: watchdogExitPreparation ?? {},
             watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook
         ))
     }
