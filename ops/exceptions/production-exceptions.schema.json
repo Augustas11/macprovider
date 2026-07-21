@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/ops/exceptions/production-exceptions.schema.json",
+  "title": "macprovider production exception register",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "updated_at",
+    "updated_by",
+    "environment",
+    "exceptions",
+    "open_questions"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "macprovider-production-exceptions-v1"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/rfc3339"
+    },
+    "updated_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "environment": {
+      "const": "pearl-production"
+    },
+    "exceptions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "$comment": "JSON Schema uniqueItems catches byte-identical duplicate entries. Operators must also enforce unique exception.id values; see ops/runbooks/production-exception-register.md.",
+      "items": {
+        "$ref": "#/$defs/exception"
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/open_question"
+      }
+    }
+  },
+  "$defs": {
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "optional_rfc3339": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/rfc3339"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "issue_ref": {
+      "type": "string",
+      "pattern": "^(#[0-9]+|https://github\\.com/Augustas11/macprovider/issues/[0-9]+)$"
+    },
+    "evidence_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "environment",
+        "component",
+        "policy_delta",
+        "authority_surface",
+        "reason",
+        "owner",
+        "issue",
+        "created_at",
+        "expires_at",
+        "scope",
+        "removal_condition",
+        "rollback_command",
+        "post_removal_validation",
+        "blocks_stable_promotion",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^exc-[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "expired",
+            "removed",
+            "planned"
+          ]
+        },
+        "environment": {
+          "const": "pearl-production"
+        },
+        "component": {
+          "enum": [
+            "coordinator",
+            "gateway",
+            "cli",
+            "malibu",
+            "pearl-canary",
+            "catalog",
+            "tier2",
+            "edge",
+            "other"
+          ]
+        },
+        "policy_delta": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority_surface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issue": {
+          "$ref": "#/$defs/issue_ref"
+        },
+        "created_at": {
+          "$ref": "#/$defs/optional_rfc3339"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/optional_rfc3339"
+        },
+        "expiry_unknown_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "removal_condition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rollback_command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "post_removal_validation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blocks_stable_promotion": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence_ref"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "expires_at": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "expires_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "expiry_unknown_reason"
+            ]
+          }
+        }
+      ]
+    },
+    "open_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "question",
+        "owner",
+        "status",
+        "evidence_target"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^oq-[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "answered"
+          ]
+        },
+        "evidence_target": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

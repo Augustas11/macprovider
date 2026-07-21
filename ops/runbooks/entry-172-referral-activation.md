@@ -8,6 +8,8 @@ This runbook does not flip production flags, deploy services, create seed codes,
 
 Air exception is not #613 complete. It does not close #613, mark the two-Mac journey conformant, or claim fresh-provider redemption evidence.
 
+Register row: [`exc-entry172-air-referral-activation`](../exceptions/production-exceptions.json) in the #615 production exception register.
+
 Expiry: this exception expires at `2026-07-26T23:59:59Z`, on terminal success or failure of the first fresh referred-provider journey, or on any earlier controlled-sequence failure, whichever occurs first.
 
 Fail closed if any checklist item below is unmet.
