@@ -88,11 +88,9 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let pendingStatus = AgentSnapshotPresenter.publicStatus(pending)
         XCTAssertEqual(pendingStatus.title, "Pending hardware verification")
-        XCTAssertTrue(
-            pendingStatus.safeNextAction?.contains("Retry provider setup") == true,
-            pendingStatus.safeNextAction ?? ""
-        )
+        XCTAssertEqual(pendingStatus.safeNextAction, "Retry provider setup while online.")
         XCTAssertFalse(pendingStatus.safeNextAction?.contains("macprovider-cli") == true)
+        XCTAssertFalse(pendingStatus.detail?.contains("wait for operator approval") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(pending), "llama")
 

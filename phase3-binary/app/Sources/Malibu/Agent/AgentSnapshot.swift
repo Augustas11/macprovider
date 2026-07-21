@@ -392,8 +392,8 @@ enum AgentSnapshotPresenter {
         if isPendingHardwareVerification(s) {
             return PublicStatus(
                 title: "Pending hardware verification",
-                detail: "Network hardware verification is incomplete. If setup already submitted evidence, wait for operator approval; otherwise retry provider setup while online.",
-                safeNextAction: "Retry provider setup while online, or wait for operator approval."
+                detail: "Network hardware verification is incomplete. Retry provider setup while online so fresh evidence can be submitted; recently submitted evidence may still be awaiting operator approval.",
+                safeNextAction: "Retry provider setup while online."
             )
         }
         if isHardwareEvidenceRejected(s) {
