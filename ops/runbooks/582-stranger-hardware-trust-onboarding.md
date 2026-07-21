@@ -47,6 +47,8 @@ API path.
   printf '%s\n' 'url = "https://coordinator.streamvc.live/admin/hardware-trust/waiting?limit=50"'
   printf '%s\n' "header = \"Authorization: Bearer ${OPERATOR_TOKEN}\""
 } | curl --silent --show-error --fail-with-body --config -
+# If the response includes next_after_id, repeat with
+# .../waiting?limit=50&after_id=<next_after_id> until the cursor is absent.
 ```
 
 Dual-control approve (requester ≠ approver). The approve-confirm endpoint

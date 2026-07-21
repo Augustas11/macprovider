@@ -107,6 +107,17 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertTrue(rejectedStatus.safeNextAction?.contains("Retry provider setup") == true)
         XCTAssertFalse(rejectedStatus.safeNextAction?.contains("macprovider-cli") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(rejected), "Ineligible")
+        XCTAssertEqual(AgentSnapshotPresenter.stateLine(rejected), "Not eligible: admission evidence failed")
+
+        var uncatalogued = AgentSnapshot.empty
+        uncatalogued.state = .reconnecting
+        uncatalogued.currentModelID = "llama"
+        uncatalogued.lifecycleState = "catalog_incompatible"
+        uncatalogued.lifecycleReason = "autotune_model_uncatalogued"
+        let uncataloguedStatus = AgentSnapshotPresenter.publicStatus(uncatalogued)
+        XCTAssertEqual(uncataloguedStatus.title, "This Mac is not currently eligible")
+        XCTAssertTrue(uncataloguedStatus.safeNextAction?.contains("supported model") == true)
+        XCTAssertEqual(AgentSnapshotPresenter.stateLine(uncatalogued), "This Mac is not currently eligible")
     }
 
     func testBlockedPublicStatesExposeExactlyOneSafeAction() {

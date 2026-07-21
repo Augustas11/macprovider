@@ -408,6 +408,13 @@ enum AgentSnapshotPresenter {
                     : "Retry provider setup while online."
             )
         }
+        if isUncataloguedModel(s) {
+            return PublicStatus(
+                title: "This Mac is not currently eligible",
+                detail: "The selected model is not in the current signed catalog.",
+                safeNextAction: "Choose a supported model, or update provider software."
+            )
+        }
         if isSoftwareUpdateRequired(s) {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
@@ -516,9 +523,15 @@ enum AgentSnapshotPresenter {
     }
 
     private static func isSoftwareUpdateRequired(_ s: AgentSnapshot) -> Bool {
-        s.networkState == "catalog_update_required"
-            || s.lifecycleState == "catalog_incompatible"
-            || compatibilityRepairAvailable(s)
+        // Reason-specific #582 outcomes reuse catalog_incompatible on the v1
+        // wire; do not collapse them into generic software-update guidance.
+        if isHardwareEvidenceRejected(s) || isUncataloguedModel(s) {
+            return false
+        }
+        if s.networkState == "catalog_update_required" || compatibilityRepairAvailable(s) {
+            return true
+        }
+        return s.lifecycleState == "catalog_incompatible" && s.isLocalStatusObservationCurrent()
     }
 
     private static func isPendingHardwareVerification(_ s: AgentSnapshot) -> Bool {
@@ -534,6 +547,11 @@ enum AgentSnapshotPresenter {
         default:
             return false
         }
+    }
+
+    private static func isUncataloguedModel(_ s: AgentSnapshot) -> Bool {
+        guard s.isLocalStatusObservationCurrent() else { return false }
+        return s.lifecycleReason == "autotune_model_uncatalogued"
     }
 
     private static func isIneligibleForCustomerWork(_ s: AgentSnapshot) -> Bool {
@@ -608,6 +626,13 @@ enum AgentSnapshotPresenter {
     }
 
     static func stateLine(_ s: AgentSnapshot) -> String {
+        // Prefer reason-first public titles for #582 onboarding outcomes so the
+        // reused v1 lifecycle state labels do not override them in the menu.
+        if isPendingHardwareVerification(s)
+            || isHardwareEvidenceRejected(s)
+            || isUncataloguedModel(s) {
+            return publicStatus(s).title
+        }
         switch s.state {
         case .idle:         return authoritativeLifecycleLabel(s) ?? "Provider stopped"
         case .starting:     return authoritativeLifecycleLabel(s) ?? "Starting provider…"
