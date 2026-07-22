@@ -1,0 +1,5 @@
+# Issue #540 isolated acceptance overlay only. Never apply to Pearl.
+tier2:
+  require_encrypted_leg: true
+  encrypted_leg_rekey_after_requests: 10000
+  encrypted_leg_rekey_after_seconds: 30
