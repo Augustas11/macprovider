@@ -3122,7 +3122,8 @@ if ! python3 - \
   "$STATIC_AUTOTUNE_JSON" \
   "$STATIC_AUTOTUNE_SIG" \
   "$STATIC_DEMAND_JSON" \
-  "$STATIC_DEMAND_SIG" <<'PY'
+  "$STATIC_DEMAND_SIG" \
+  "$AUTOTUNE_TIER2_JSON" <<'PY'
 import hashlib, json, pathlib, re, sys
 
 proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))

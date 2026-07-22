@@ -230,7 +230,7 @@ The following are release-blocking:
 - package inclusion of the verified manifest and feeds;
 - provider version, Malibu build ledger, archive payload, and every coordinator
   advertisement agree at `1.8.31` / build `31`;
-- the signed Pearl manifest includes the coordinator, gateway, and all six
+- the signed Pearl manifest includes the coordinator, gateway, and all seven
   catalog payload files under one catalog release identity;
 - no backend or provider payload member is present outside its manifest, and no
   manifest member is absent from the staged release;
@@ -506,7 +506,7 @@ boundaries. Do not treat them as interchangeable deployment commands.
 The signed updater is the only unattended authority allowed to replace the
 coordinator/gateway pair. It verifies the signed network-release manifest as
 one complete payload before snapshot or service drain. Coordinator, gateway,
-and all six catalog files must be present and hash-exact. It additionally runs
+and all seven catalog files must be present and hash-exact. It additionally runs
 the canonical `catalog-release.py verify-directory` verifier over the candidate
 directory so both feed Ed25519 signatures, strict schemas, canonical bytes, and
 manifest bindings are verified inside the signed outer release. It rejects a
@@ -519,7 +519,7 @@ catalog status, and an explicit exact provider canary. Configure
 file, a host-key-pinned SSH target/key, and the canary install directory. Before
 success persistence, the selected provider must report `buyer_serving:true`,
 `catalog_admission_mode:current`, and the exact release/policy/digest/signer/row
-envelope. Independently, the updater reads all six installed catalog files on
+envelope. Independently, the updater reads all seven installed catalog files on
 that Mac through no-follow handles, binds provider ID and local status to the
 same row, and proves the live launchd PID's actual text vnode and listener use
 that installation. Only then may it persist success and disarm rollback.
