@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -983,5 +984,163 @@ func TestSchema_StickyCache_Validate(t *testing.T) {
 				t.Fatalf("Validate err=%v, wantErr=%v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// B10 (sustained streaming-TPS retention) tests ------------------------
+
+// makeTPSResult builds one streaming-OK result starting at `start` whose
+// derived decode TPS is exactly `tps` (tokens / post-TTFT duration), so a
+// fixture can dial retention deterministically.
+func makeTPSResult(start time.Time, tps float64) buyer.Result {
+	const tokens = 64
+	const ttftMs = 200
+	streamDur := float64(tokens) / tps // seconds
+	firstByte := start.Add(ttftMs * time.Millisecond)
+	last := firstByte.Add(time.Duration(streamDur * float64(time.Second)))
+	return buyer.Result{
+		StartUTC:                 start,
+		EndUTC:                   last,
+		TTFTMillis:               ttftMs,
+		TotalMillis:              last.Sub(start).Milliseconds(),
+		CompletionTokensReceived: tokens,
+		HTTPStatus:               200,
+		Stream:                   true,
+		RouteProviderID:          "p1",
+		Model:                    "m",
+		Outcome:                  "ok",
+		LastByteUTC:              last,
+	}
+}
+
+// soakResults spreads nEach first-window samples over the opening ~3 min
+// and nEach final-window samples over the closing ~3 min of a ~60 min
+// span, so the two 5-min windows are fully disjoint.
+func soakResults(firstTPS, finalTPS float64, nEach int) []buyer.Result {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var rs []buyer.Result
+	for i := 0; i < nEach; i++ {
+		rs = append(rs, makeTPSResult(base.Add(time.Duration(i*20)*time.Second), firstTPS))
+	}
+	for i := 0; i < nEach; i++ {
+		rs = append(rs, makeTPSResult(base.Add(time.Duration(3400+i*20)*time.Second), finalTPS))
+	}
+	return rs
+}
+
+func scArmed(armed bool, invs ...string) *scenario.Scenario {
+	s := sc(invs...)
+	s.Benchmark.SustainedGateArmed = armed
+	return s
+}
+
+func TestB10_Retention_Pass(t *testing.T) {
+	// 30 → 28 tok/s → retention 0.933 ≥ 0.85 → PASS
+	res := Evaluate(scArmed(false, "B10"), soakResults(30, 28, 10), nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusPass {
+		t.Fatalf("B10 expected PASS at retention 0.93, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Warn(t *testing.T) {
+	// 30 → 24 tok/s → retention 0.80 → WARN (≥0.70, <0.85)
+	res := Evaluate(scArmed(false, "B10"), soakResults(30, 24, 10), nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusWarn {
+		t.Fatalf("B10 expected WARN at retention 0.80, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Fail_WhenArmed(t *testing.T) {
+	// 30 → 18 tok/s → retention 0.60 < 0.70; armed → FAIL
+	res := Evaluate(scArmed(true, "B10"), soakResults(30, 18, 10), nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusFail {
+		t.Fatalf("B10 expected FAIL at retention 0.60 (armed), got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Unarmed_DowngradesFailToWarn(t *testing.T) {
+	// Same 0.60 retention, but gate UNARMED → downgraded to WARN, never FAIL.
+	res := Evaluate(scArmed(false, "B10"), soakResults(30, 18, 10), nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusWarn {
+		t.Fatalf("B10 expected WARN at retention 0.60 (unarmed), got %s: %s", got, res.Verdicts[0].Detail)
+	}
+	if res.AnyFailed() {
+		t.Fatalf("unarmed B10 must never contribute a FAIL: %s", res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Skip_TooFewSamples(t *testing.T) {
+	// Only 4 samples per window (< floor of 8) → SKIP.
+	res := Evaluate(scArmed(false, "B10"), soakResults(30, 28, 4), nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B10 expected SKIP with 4 samples/window, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Skip_NoStreamingSamples(t *testing.T) {
+	// Non-streaming results carry no windowed TPS → SKIP.
+	var results []buyer.Result
+	for i := 0; i < 20; i++ {
+		results = append(results, makeResult(300, 1000, 64, false, "p1", "m", 200))
+	}
+	res := Evaluate(scArmed(false, "B10"), results, nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B10 expected SKIP with no streaming samples, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Skip_ProviderStopsBeforeEnd(t *testing.T) {
+	// The #584 signature: 10 healthy streaming samples in the first 5 min,
+	// then the provider disconnects — the buyer keeps firing but every later
+	// request FAILS (503), extending the run to ~60 min with NO usable
+	// streaming sample in the final window. B10 must SKIP (empty final
+	// window), NOT slide the window back and falsely PASS at ~1.0 retention.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var results []buyer.Result
+	for i := 0; i < 10; i++ {
+		results = append(results, makeTPSResult(base.Add(time.Duration(i*20)*time.Second), 30))
+	}
+	// Failed requests spanning the rest of the hour (these carry StartUTC/
+	// EndUTC, so they extend the true run bounds).
+	for i := 0; i < 30; i++ {
+		r := makeResult(0, 500, 0, true, "p1", "m", 503)
+		r.StartUTC = base.Add(time.Duration(300+i*100) * time.Second)
+		r.EndUTC = r.StartUTC.Add(500 * time.Millisecond)
+		results = append(results, r)
+	}
+	res := Evaluate(scArmed(true, "B10"), results, nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B10 must SKIP when the provider stops before run end, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Skip_ShortRunOverlappingWindows(t *testing.T) {
+	// A run whose full span is < 2×window (600s) cannot hold disjoint first
+	// and final windows → SKIP, never a false PASS from overlapping windows.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var results []buyer.Result
+	for i := 0; i < 20; i++ {
+		results = append(results, makeTPSResult(base.Add(time.Duration(i*20)*time.Second), 30)) // spans ~380s
+	}
+	res := Evaluate(scArmed(true, "B10"), results, nil, nil, nil, "test", 400)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B10 must SKIP on a run too short for disjoint windows, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestComputeSustainedTPS_Windows(t *testing.T) {
+	bm := computeBuyerMetrics(soakResults(30, 24, 10))
+	st := bm.SustainedTPS
+	if st.FirstWindowSamples != 10 || st.FinalWindowSamples != 10 {
+		t.Fatalf("want 10/10 window samples, got %d/%d", st.FirstWindowSamples, st.FinalWindowSamples)
+	}
+	if math.Abs(st.FirstWindowTPSP50-30) > 0.5 {
+		t.Fatalf("want first p50 ≈30, got %.2f", st.FirstWindowTPSP50)
+	}
+	if math.Abs(st.FinalWindowTPSP50-24) > 0.5 {
+		t.Fatalf("want final p50 ≈24, got %.2f", st.FinalWindowTPSP50)
+	}
+	if math.Abs(st.Retention-0.80) > 0.02 {
+		t.Fatalf("want retention ≈0.80, got %.3f", st.Retention)
 	}
 }

@@ -2008,10 +2008,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 updater_module.sha256_file(source),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r6")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r7")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "95ea4ab96f8a09cc646b287c1ab6a30bbf2a5ecf",
+            "43138cee6dd26f18a11934390fc6b3b0623f1e00",
         )
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_FILE_MODES,
@@ -2105,7 +2105,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "issue-585-integration-r6",
+                "authority": "issue-585-integration-r7",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [

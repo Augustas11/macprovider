@@ -1,0 +1,105 @@
+# 15_thermal_soak.yaml — benchmark scenario, phase B, LONG-DURATION SOAK.
+#
+# Goal: drive a single provider under constant streaming-decode load for
+# 45–60 min and measure how much streaming TPS it RETAINS from the first
+# 5 min to the last 5 min (invariant B10). A provider that thermally
+# throttles under sustained load sheds decode throughput; B10 quantifies
+# the decay. This characterizes the 2026-07-13 production incident (#584)
+# where the canary collapsed a healthy provider under sustained synthetic
+# load (~30 → 8.9 → 5.3 tok/s), and restores the G3 soak coverage waived
+# pre-beta in #463 with a characterized shorter burn.
+#
+# ############################################################################
+# ## LAB PROVIDER ONLY — NEVER RUN THIS AGAINST streamvc.live / prod.       ##
+# ## #584 is the receipt: a 45–60 min soak DEGRADES AND DISCONNECTS the     ##
+# ## single prod mac. This scenario targets ${LAB_GATEWAY_URL} /            ##
+# ## ${LAB_COORDINATOR_URL}, which are intentionally UNSET by default so a  ##
+# ## bare run fails validation rather than firing at a default. Export them ##
+# ## to your lab stack (a machine you fully control) before running:        ##
+# ##   export LAB_GATEWAY_URL=http://127.0.0.1:<gw-port>                     ##
+# ##   export LAB_COORDINATOR_URL=http://127.0.0.1:<coord-port>             ##
+# ## The lab provider must be the ONLY pool member and prod buyers routed   ##
+# ## away. Stand the lab stack up ONCE and leave it — rapid coordinator     ##
+# ## restarts wedge the provider CLI's v2 proof-auth (pool → 0); recover    ##
+# ## with `pkill -9 -f macprovider-cli` and let launchd respawn one.        ##
+# ############################################################################
+#
+# Pacing math (reuses 07_sustained_throughput's model):
+#   The load is bounded by buyer COUNT: with 2 buyers, at most 2 requests
+#   are ever in flight, so the provider never sees > 2 concurrent — safely
+#   within Pearl N_eff=2.5 (AccountConcurrency N=3, margin 0.5). Unlike 07
+#   (a light 10s-floor baseline that keeps mean_active < 1), a soak wants
+#   the provider CONTINUOUSLY busy, so the inter-request floor is short
+#   (1s): each buyer re-fires ~1s after its previous completion, keeping
+#   decode active nearly the whole window while staying at ≤ 2 concurrent.
+#     30B cycle ≈ TTFT(~0.5–2s) + decode(64 tok / ~30 tok/s ≈ 2.1s) + 1s
+#              ≈ 4–5s → ~720–900 requests/buyer over 3600s, ~1500–1800 total.
+#   duration is the real cap; requests_per_buyer is a generous ceiling.
+#
+# One model per soak run — start with the 30B (the prod model class that
+# collapsed). Run smaller classes as SEPARATE runs (copy this file, swap the
+# model). max_tokens=64 keeps decode the dominant cost so B10 measures
+# sustained decode throughput, not TTFT.
+#
+# B10 is PROVISIONAL and UNARMED (sustained_gate_armed: false): its bands
+# (PASS ≥ 0.85 / WARN ≥ 0.70 / FAIL < 0.70) were chosen before any real
+# soak. Until a lab campaign calibrates them, a would-be FAIL is reported
+# as WARN so the uncalibrated gate can never block. Arm it (set true) only
+# after recalibrating the thresholds in benchmark.go + SPEC §3.5 §4.15 from
+# the first run. See docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md §4.15.
+#
+# Cost estimate (~1500–1800 requests × 64 max_tokens): order of $1–2.
+#
+# See docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md for thresholds + invariants.
+name: thermal_soak
+description: |
+  2 concurrent buyers, streaming, max_tokens=64, 45–60 min sustained-decode
+  soak against a LAB provider. Measures streaming-TPS retention (first 5-min
+  vs last 5-min window) via B10, plus B1-B5 over the long window. Serves the
+  #584 canary redesign — one stress point (N=2, 1s floor); the full "safe
+  sustained load" envelope needs a D3 sweep across concurrency/duty-cycle cells.
+
+expected_shape: |
+  Phase B long soak (descriptive, B-invariants asserted):
+   - ~1500–1800 requests over ~60 min, ideally all 200.
+   - Single lab provider serving continuously (2 concurrent max).
+   - B10 retention ≥ 0.85 (PASS) means the provider held throughput; a
+     decaying curve (WARN/would-FAIL) is the #584 thermal-throttle signature
+     and is the SIGNAL this test exists to capture, not a harness defect.
+   - Correlate the B10 decay with the provider-side thermal log captured by
+     test/e2e/thermal-soak/thermal-collector.sh (join by timestamp).
+
+target:
+  gateway_url: ${LAB_GATEWAY_URL}
+  coordinator_url: ${LAB_COORDINATOR_URL}
+  buyer_token: ${BUYER_TOKEN}
+  # DB reconcile (I1) is optional for a soak — B10/B1-B5 are buyer-side and
+  # provider-header-side. Set these to your lab DB paths to also run I1:
+  # coordinator_db_path: /path/to/lab/coordinator.db
+  # gateway_db_path: /path/to/lab/gateway.db
+
+buyers:
+  count: 2
+  stream: true
+  pattern: interval
+  interval_ms: 1000
+  # High ceiling on purpose: DURATION must be the terminating condition, not
+  # the request count (the load generator stops at whichever comes first). At
+  # the fastest plausible cycle (~1.2s) a buyer fires ~3000 reqs in 3600s, so
+  # 5000 guarantees the full 45-60 min window runs even on a fast provider.
+  requests_per_buyer: 5000
+
+duration: 3600s
+request_timeout: 30s
+silent_hang_threshold: 15s
+
+benchmark:
+  enabled: true
+  invariants: [B1, B2, B3, B4, B5, B10]
+  # sustained_gate_armed: false is the DEFAULT and is left unset on purpose.
+  # Do NOT set it true until the B10 thresholds are lab-calibrated (#584).
+
+prompts:
+  - model: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 64

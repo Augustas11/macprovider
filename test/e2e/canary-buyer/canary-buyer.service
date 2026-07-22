@@ -19,7 +19,9 @@
 #   #   rm -f /etc/macprovider/canary-buyer.env  # rotate both copied secrets first
 #   #   test ! -e /etc/macprovider/canary-buyer.env
 #   cp canary-buyer.service canary-buyer.timer /etc/systemd/system/
-#   systemctl daemon-reload && systemctl enable --now canary-buyer.timer
+#   systemctl daemon-reload
+#   # STOP: #584 does not authorize enabling the timer or creating an enable
+#   # gate. The separate signed production re-enable change owns those actions.
 [Unit]
 Description=macprovider low-impact scheduled buyer liveness probe
 After=network-online.target

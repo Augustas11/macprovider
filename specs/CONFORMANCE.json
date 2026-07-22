@@ -855,7 +855,7 @@
     {
       "spec_id": "SPEC-031",
       "title": "Canary Probe, Degrade & Sanction Lifecycle",
-      "version": "v0.1",
+      "version": "v0.2",
       "path": "specs/SPEC-031-canary-degrade-sanctions.md",
       "status": "draft",
       "owner": "@Augustas11",

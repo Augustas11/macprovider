@@ -94,6 +94,23 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 				Transport: transport,
 				Timeout:   sc.RequestTimeout,
 			}
+			// LAB-ONLY redirect guard for B10 soaks: even though the
+			// configured URLs are validated as lab addresses, a lab gateway
+			// that 3xx-redirects could otherwise send the sustained load to a
+			// public host (e.g. prod). Refuse any redirect whose destination
+			// is not itself a lab address, so the soak can never reach prod
+			// via a redirect (#584).
+			if sc.BenchmarkHasB10() {
+				client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+					if !scenario.LabHostAllowed(req.URL.Hostname()) {
+						return fmt.Errorf("B10 soak refused redirect to non-lab host %q (#584)", req.URL.Hostname())
+					}
+					if len(via) >= 10 {
+						return fmt.Errorf("stopped after 10 redirects")
+					}
+					return nil
+				}
+			}
 
 			for reqIdx := 0; reqIdx < sc.Buyers.RequestsPerBuyer; reqIdx++ {
 				if ctx.Err() != nil {

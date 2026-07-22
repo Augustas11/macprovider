@@ -412,6 +412,12 @@ duration: 1s
 
 func TestCommittedScenariosValidate(t *testing.T) {
 	t.Setenv("BUYER_TOKEN", "test-buyer-token")
+	// 15_thermal_soak.yaml targets ${LAB_GATEWAY_URL}/${LAB_COORDINATOR_URL},
+	// intentionally unset at runtime so a bare soak run fails validation
+	// rather than firing at a default (LAB PROVIDER ONLY — #584). Supply
+	// placeholders here so the structural-validity check still covers it.
+	t.Setenv("LAB_GATEWAY_URL", "http://127.0.0.1:18080")
+	t.Setenv("LAB_COORDINATOR_URL", "http://127.0.0.1:19090")
 
 	paths, err := filepath.Glob(filepath.Join("..", "..", "scenarios", "*.yaml"))
 	if err != nil {
@@ -442,6 +448,64 @@ func TestCommittedScenariosValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestB10_LabOnly_RejectsProdHost(t *testing.T) {
+	mk := func(gw, coord string) *Scenario {
+		s := validTestScenario()
+		s.Target.GatewayURL = gw
+		s.Target.CoordinatorURL = coord
+		s.Benchmark = Benchmark{Enabled: true, Invariants: []string{"B1", "B10"}, ProviderSlots: 3}
+		return &s
+	}
+	cases := []struct {
+		name    string
+		gw      string
+		coord   string
+		wantErr bool
+	}{
+		{"loopback ok", "http://127.0.0.1:18080", "http://127.0.0.1:19090", false},
+		{"localhost ok", "http://localhost:18080", "http://localhost:19090", false},
+		{"private LAN ok", "http://192.168.1.20:18080", "http://10.0.0.5:19090", false},
+		{"ipv6 loopback ok", "http://[::1]:18080", "http://[::1]:19090", false},
+		{"prod gateway rejected", "https://api.streamvc.live", "http://127.0.0.1:19090", true},
+		{"prod coordinator rejected", "http://127.0.0.1:18080", "https://coordinator.streamvc.live", true},
+		{"prod subdomain rejected", "https://foo.streamvc.live", "http://127.0.0.1:19090", true},
+		{"apex prod rejected", "https://streamvc.live", "http://127.0.0.1:19090", true},
+		// Bypass variants the R1 denylist missed (R2 HIGH):
+		{"trailing-dot prod rejected", "https://api.streamvc.live./", "http://127.0.0.1:19090", true},
+		{"uppercase prod rejected", "https://API.STREAMVC.LIVE", "http://127.0.0.1:19090", true},
+		{"fullwidth-dot prod rejected", "https://api．streamvc．live", "http://127.0.0.1:19090", true},
+		{"ideographic-dot prod rejected", "https://api。streamvc。live", "http://127.0.0.1:19090", true},
+		// Any public host (not just prod) is rejected — positive allowlist.
+		{"arbitrary public host rejected", "https://example.com", "http://127.0.0.1:19090", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mk(tc.gw, tc.coord).Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate err=%v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+	// The guard applies even when benchmark.enabled=false — the sustained
+	// buyer load runs regardless of scoring (R2 HIGH).
+	t.Run("disabled benchmark still guards B10", func(t *testing.T) {
+		s := mk("https://api.streamvc.live", "http://127.0.0.1:19090")
+		s.Benchmark.Enabled = false
+		if err := s.Validate(); err == nil {
+			t.Fatal("B10 + benchmark.enabled=false + prod host must still be rejected")
+		}
+	})
+	// A non-B10 scenario may still target prod (the other scenarios do).
+	t.Run("non-B10 may target prod", func(t *testing.T) {
+		s := validTestScenario()
+		s.Target.GatewayURL = "https://api.streamvc.live"
+		s.Benchmark = Benchmark{Enabled: true, Invariants: []string{"B1", "B2"}, ProviderSlots: 3}
+		if err := s.Validate(); err != nil {
+			t.Fatalf("non-B10 scenario must still allow prod host, got %v", err)
+		}
+	})
 }
 
 func validTestScenario() Scenario {

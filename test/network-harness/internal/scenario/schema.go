@@ -7,6 +7,7 @@ package scenario
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -158,6 +159,15 @@ type Benchmark struct {
 	// scenario that forgets the flag fails safe (SKIP), never silently arms an
 	// uncalibrated gate.
 	CacheGateArmed bool `yaml:"cache_gate_armed"`
+
+	// SustainedGateArmed arms B10 (sustained streaming-TPS retention) as a
+	// blocking gate. When false (the default), B10 still measures and
+	// reports retention, but a would-be FAIL is downgraded to WARN so an
+	// UNCALIBRATED gate can never block a run. The B10 thresholds are
+	// provisional (PASS >= 0.85 / WARN >= 0.70 / FAIL < 0.70) and must be
+	// calibrated against a real lab soak before this flag is set true —
+	// see docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md §3.5 and issue #584.
+	SustainedGateArmed bool `yaml:"sustained_gate_armed"`
 }
 
 // ChaosEvent is one scheduled shell action. `At` is measured from
@@ -601,15 +611,88 @@ func (s *Scenario) validateBuyerFleet() error {
 		if len(s.Benchmark.Invariants) == 0 {
 			return fmt.Errorf("benchmark.invariants must list at least one B-ID when benchmark.enabled=true")
 		}
-		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true, "B8": true, "B9": true}
+		// B8/B9 = RESEARCH_236 (sticky cache-reuse); B10 = RESEARCH_235
+		// (sustained-TPS retention). Both invariant sets coexist.
+		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true, "B8": true, "B9": true, "B10": true}
 		for _, id := range s.Benchmark.Invariants {
 			if !known[id] {
-				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B9)", id)
+				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B10)", id)
 			}
 		}
 		if s.Benchmark.ProviderSlots < 1 {
 			return fmt.Errorf("benchmark.provider_slots must be >= 1")
 		}
+	}
+	// LAB-ONLY enforcement for B10 (sustained-load soak) — applied regardless
+	// of Benchmark.Enabled, because the sustained buyer load still runs even
+	// when benchmark scoring is off. A 45–60 min soak degrades and disconnects
+	// the single prod mac — that IS #584. Both targets must be lab addresses
+	// (loopback/private/localhost); a public host such as prod is rejected, and
+	// hostname-normalization tricks cannot slip past a positive allowlist.
+	if s.BenchmarkHasB10() {
+		for _, pair := range []struct{ field, raw string }{
+			{"target.gateway_url", s.Target.GatewayURL},
+			{"target.coordinator_url", s.Target.CoordinatorURL},
+		} {
+			if err := validateLabOnlyHost(pair.field, pair.raw); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// benchmarkHasB10 reports whether the scenario declares the B10 sustained-load
+// soak invariant. Checked regardless of Benchmark.Enabled — the sustained buyer
+// load hits gateway_url even when benchmark scoring is turned off.
+func (s *Scenario) BenchmarkHasB10() bool {
+	for _, id := range s.Benchmark.Invariants {
+		if id == "B10" {
+			return true
+		}
+	}
+	return false
+}
+
+// LabHostAllowed reports whether host is an acceptable LAB target for a B10
+// soak. This is a POSITIVE allowlist (loopback / private / link-local /
+// "localhost") rather than a production denylist — a denylist of prod hostnames
+// is inherently bypassable by trailing-root-dot FQDNs, IDNA/full-width Unicode
+// separators, or case tricks, all of which Go's network stack still resolves to
+// the same public host. Only addresses the operator physically controls on a
+// private network can pass, so a soak can never reach prod (#584). host is a
+// bare hostname (url.Hostname()); it is canonicalized (lowercased, trailing dot
+// trimmed) before the check.
+func LabHostAllowed(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Any non-IP hostname (prod, a cloud host, a public FQDN) is rejected:
+		// a lab stack is reached by loopback/LAN IP or "localhost".
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// validateLabOnlyHost fails validation unless raw is empty or targets a lab
+// address (see LabHostAllowed). Empty raw is allowed here — the caller's
+// separate empty-gateway check governs that.
+func validateLabOnlyHost(field, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
+	}
+	if !LabHostAllowed(u.Hostname()) {
+		return fmt.Errorf("%s host %q is not a lab address — B10 (thermal soak) is LAB-ONLY; only loopback/private/link-local IPs or \"localhost\" are allowed, because a sustained soak degrades and disconnects a real provider (#584). Use a lab stack (a public host such as prod is rejected)", field, u.Hostname())
 	}
 	return nil
 }
