@@ -93,83 +93,269 @@ enum AutotuneRecommendationRunner {
         return try AutotuneRecommendationResult.fromAutotuneJSON(data)
     }
 
+    /// Pending-trust path: resubmit stored evidence without rebenchmarking.
+    static func pendingEvidenceResubmitArguments(configPath: URL) -> [String] {
+        [
+            "autotune",
+            "--recommend",
+            "--freshness-check",
+            "--require-hardware-evidence",
+            "--json",
+            "--config", configPath.path,
+        ]
+    }
+
+    /// Corrective #582 recovery transaction owned by the CLI.
+    static func hardwareAdmissionRecoveryArguments(configPath: URL) -> [String] {
+        [
+            "autotune",
+            "--recommend",
+            "--recover-hardware-admission",
+            "--json",
+            "--config", configPath.path,
+        ]
+    }
+
+    static func runPendingEvidenceResubmit(
+        cliURL: URL,
+        configPath: URL = ProviderPaths.current.configFile
+    ) async throws {
+        _ = try await runProcess(
+            executableURL: cliURL,
+            arguments: pendingEvidenceResubmitArguments(configPath: configPath),
+            timeout: 120
+        )
+    }
+
+    /// Cooperative cancel grace for corrective recovery. Must outlive
+    /// `drainGrace` plus CLI SIGTERM cascade so restore can run before the
+    /// App gives up; do not escalate to SIGKILL on this path.
+    static let recoveryCancelGraceSeconds: TimeInterval = 120
+
+    /// Runs the CLI corrective recovery transaction. Drain/restore and evidence
+    /// requirements are owned by macprovider-cli; Malibu only launches and
+    /// cooperatively cancels (no SIGKILL) so restore can complete.
+    static func runHardwareAdmissionRecovery(
+        cliURL: URL,
+        configPath: URL = ProviderPaths.current.configFile
+    ) async throws {
+        _ = try await runProcess(
+            executableURL: cliURL,
+            arguments: hardwareAdmissionRecoveryArguments(configPath: configPath),
+            cancelGraceSeconds: recoveryCancelGraceSeconds,
+            escalateToSIGKILL: false
+        )
+    }
+
+    /// Whether Malibu should attempt a best-effort launchd bootstrap after a
+    /// hardware-recovery attempt. Only corrective recovery drains/bootouts;
+    /// pending freshness never owns that obligation.
+    static func shouldBestEffortBootstrapLaunchd(
+        attemptedCorrectiveRecovery: Bool
+    ) -> Bool {
+        attemptedCorrectiveRecovery
+    }
+
+    /// Best-effort launchd bootstrap after cancelled/failed corrective recovery.
+    /// Safe if the job is already loaded; ignores nonzero exit.
+    static func bestEffortBootstrapLaunchdProvider(
+        uid: uid_t = getuid(),
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
+        plistURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+    ) {
+        let process = Process()
+        process.executableURL = launchctlURL
+        process.arguments = ["bootstrap", "gui/\(uid)", plistURL.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return
+        }
+    }
+
+    private final class ProcessHold: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var cancelled = false
+        private let cancelGraceSeconds: TimeInterval
+        private let escalateToSIGKILL: Bool
+
+        init(cancelGraceSeconds: TimeInterval, escalateToSIGKILL: Bool) {
+            self.cancelGraceSeconds = cancelGraceSeconds
+            self.escalateToSIGKILL = escalateToSIGKILL
+        }
+
+        var isCancelled: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return cancelled
+        }
+
+        func register(_ process: Process) {
+            lock.lock()
+            self.process = process
+            let shouldTerminate = cancelled
+            lock.unlock()
+            if shouldTerminate {
+                terminate(process)
+            }
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let process = self.process
+            lock.unlock()
+            if let process {
+                terminate(process)
+            }
+        }
+
+        private func terminate(_ process: Process) {
+            guard process.isRunning else { return }
+            AutotuneRecommendationRunner.terminateAutotuneSubtree(
+                process: process,
+                graceSeconds: cancelGraceSeconds,
+                escalateToSIGKILL: escalateToSIGKILL
+            )
+        }
+    }
+
     private static func runProcess(
         executableURL: URL,
         arguments: [String],
         timeout: TimeInterval = processTimeout,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        cancelGraceSeconds: TimeInterval = subtreeGraceSeconds,
+        escalateToSIGKILL: Bool = true
     ) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                let stdout = Pipe()
-                let stderr = Pipe()
-                let output = ProcessOutputBuffer()
+        try Task.checkCancellation()
+        let hold = ProcessHold(
+            cancelGraceSeconds: cancelGraceSeconds,
+            escalateToSIGKILL: escalateToSIGKILL
+        )
+        let result: Result<(Data, String), Error> = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    let process = Process()
+                    let stdout = Pipe()
+                    let stderr = Pipe()
+                    let output = ProcessOutputBuffer()
+                    let errOutput = ProcessOutputBuffer()
 
-                process.executableURL = executableURL
-                process.arguments = arguments
-                do {
-                    process.environment = try sanitizedProcessEnvironment(from: environment)
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                process.standardOutput = stdout
-                process.standardError = stderr
-
-                stdout.fileHandleForReading.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    guard !chunk.isEmpty else { return }
-                    output.append(chunk)
-                }
-                stderr.fileHandleForReading.readabilityHandler = { handle in
-                    _ = handle.availableData
-                }
-
-                do {
-                    try process.run()
-                    let deadline = Date().addingTimeInterval(max(1, timeout))
-                    while process.isRunning && Date() < deadline {
-                        Thread.sleep(forTimeInterval: 0.05)
+                    process.executableURL = executableURL
+                    process.arguments = arguments
+                    do {
+                        process.environment = try sanitizedProcessEnvironment(from: environment)
+                    } catch {
+                        continuation.resume(returning: .failure(error))
+                        return
                     }
-                    if process.isRunning {
-                        // ARCH-M-1 orphan-child fix: SIGTERM to the CLI first —
-                        // the CLI's `--recommend` path installs a signal
-                        // handler that cascades SIGTERM to its process group
-                        // via `killpg(0, SIGTERM)`, tearing down every
-                        // `CandidateProviderRunner` `serve --no-join` grandchild
-                        // before the CLI exits. If the CLI is wedged and does
-                        // not exit within the grace window, escalate to
-                        // `killpg(cliPid, SIGKILL)` so orphaned probe
-                        // subprocesses cannot outlive the runner.
-                        Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
+                    process.standardOutput = stdout
+                    process.standardError = stderr
+
+                    stdout.fileHandleForReading.readabilityHandler = { handle in
+                        let chunk = handle.availableData
+                        guard !chunk.isEmpty else { return }
+                        output.append(chunk)
+                    }
+                    stderr.fileHandleForReading.readabilityHandler = { handle in
+                        let chunk = handle.availableData
+                        guard !chunk.isEmpty else { return }
+                        errOutput.append(chunk)
+                    }
+
+                    do {
+                        try process.run()
+                        hold.register(process)
+                        let deadline = Date().addingTimeInterval(max(1, timeout))
+                        while process.isRunning && Date() < deadline && !hold.isCancelled {
+                            Thread.sleep(forTimeInterval: 0.05)
+                        }
+                        if hold.isCancelled {
+                            if process.isRunning {
+                                Self.terminateAutotuneSubtree(
+                                    process: process,
+                                    graceSeconds: cancelGraceSeconds,
+                                    escalateToSIGKILL: escalateToSIGKILL
+                                )
+                                if escalateToSIGKILL {
+                                    process.waitUntilExit()
+                                } else {
+                                    let waitDeadline = Date().addingTimeInterval(1)
+                                    while process.isRunning && Date() < waitDeadline {
+                                        Thread.sleep(forTimeInterval: 0.05)
+                                    }
+                                }
+                            }
+                            stdout.fileHandleForReading.readabilityHandler = nil
+                            stderr.fileHandleForReading.readabilityHandler = nil
+                            continuation.resume(returning: .failure(CancellationError()))
+                            return
+                        }
+                        if process.isRunning {
+                            // Recovery must keep cooperative-only teardown here
+                            // too: escalating to SIGKILL before the CLI can
+                            // restore would strand a post-bootout provider.
+                            let timeoutGrace = escalateToSIGKILL
+                                ? subtreeGraceSeconds
+                                : cancelGraceSeconds
+                            Self.terminateAutotuneSubtree(
+                                process: process,
+                                graceSeconds: timeoutGrace,
+                                escalateToSIGKILL: escalateToSIGKILL
+                            )
+                            if escalateToSIGKILL {
+                                process.waitUntilExit()
+                            }
+                            throw AutotuneRecommendationError.timedOut
+                        }
                         process.waitUntilExit()
-                        throw AutotuneRecommendationError.timedOut
+                        stdout.fileHandleForReading.readabilityHandler = nil
+                        stderr.fileHandleForReading.readabilityHandler = nil
+                        let remainingOutput = stdout.fileHandleForReading.readDataToEndOfFile()
+                        let remainingErr = stderr.fileHandleForReading.readDataToEndOfFile()
+                        let data = output.value(appending: remainingOutput)
+                        let errText = String(decoding: errOutput.value(appending: remainingErr), as: UTF8.self)
+                        guard process.terminationStatus == 0 else {
+                            throw AutotuneRecommendationError.nonZeroExit(
+                                process.terminationStatus,
+                                stderrTail: String(errText.suffix(512))
+                            )
+                        }
+                        continuation.resume(returning: .success((data, errText)))
+                    } catch {
+                        if process.isRunning {
+                            let failureGrace = escalateToSIGKILL
+                                ? subtreeGraceSeconds
+                                : cancelGraceSeconds
+                            Self.terminateAutotuneSubtree(
+                                process: process,
+                                graceSeconds: failureGrace,
+                                escalateToSIGKILL: escalateToSIGKILL
+                            )
+                            if escalateToSIGKILL {
+                                process.waitUntilExit()
+                            }
+                        }
+                        stdout.fileHandleForReading.readabilityHandler = nil
+                        stderr.fileHandleForReading.readabilityHandler = nil
+                        continuation.resume(returning: .failure(error))
                     }
-                    process.waitUntilExit()
-                    stdout.fileHandleForReading.readabilityHandler = nil
-                    stderr.fileHandleForReading.readabilityHandler = nil
-                    let remainingOutput = stdout.fileHandleForReading.readDataToEndOfFile()
-                    _ = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let data = output.value(appending: remainingOutput)
-                    guard process.terminationStatus == 0 else {
-                        throw AutotuneRecommendationError.nonZeroExit(process.terminationStatus)
-                    }
-                    continuation.resume(returning: data)
-                } catch {
-                    // If the process is still running when something else
-                    // failed (e.g. output-buffer error, sanitization mid-flight),
-                    // ensure we also tear down the whole subtree instead of
-                    // leaving a live CLI + grandchildren behind.
-                    if process.isRunning {
-                        Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
-                        process.waitUntilExit()
-                    }
-                    stdout.fileHandleForReading.readabilityHandler = nil
-                    stderr.fileHandleForReading.readabilityHandler = nil
-                    continuation.resume(throwing: error)
                 }
             }
+        } onCancel: {
+            hold.cancel()
+        }
+        try Task.checkCancellation()
+        switch result {
+        case .success(let pair):
+            return pair.0
+        case .failure(let error):
+            throw error
         }
     }
 
@@ -192,13 +378,18 @@ enum AutotuneRecommendationRunner {
     /// with a direct `SIGKILL` to the CLI pid in case `killpg` returned
     /// ESRCH before `setpgid` ran (race window between fork/exec and the
     /// CLI installing its group).
-    static func terminateAutotuneSubtree(process: Process, graceSeconds: TimeInterval) {
+    static func terminateAutotuneSubtree(
+        process: Process,
+        graceSeconds: TimeInterval,
+        escalateToSIGKILL: Bool = true
+    ) {
         process.terminate()
         let deadline = Date().addingTimeInterval(max(0, graceSeconds))
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
         guard process.isRunning else { return }
+        guard escalateToSIGKILL else { return }
         let cliPid = process.processIdentifier
         _ = Darwin.killpg(cliPid, SIGKILL)
         _ = Darwin.kill(cliPid, SIGKILL)
@@ -212,10 +403,28 @@ enum AutotuneRecommendationRunner {
     }
 }
 
-enum AutotuneRecommendationError: Error {
+enum AutotuneRecommendationError: Error, LocalizedError {
     case invalidJSON
-    case nonZeroExit(Int32)
+    case nonZeroExit(Int32, stderrTail: String = "")
     case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidJSON:
+            return "Provider setup returned invalid data."
+        case .nonZeroExit(let code, let stderrTail):
+            let detail = stderrTail
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .last(where: { !$0.isEmpty })
+            if let detail, detail.count <= 180 {
+                return "Provider setup failed (exit \(code)): \(detail)"
+            }
+            return "Provider setup failed (exit \(code))."
+        case .timedOut:
+            return "Provider setup timed out."
+        }
+    }
 }
 
 struct ModelDownloadPlan: Equatable {

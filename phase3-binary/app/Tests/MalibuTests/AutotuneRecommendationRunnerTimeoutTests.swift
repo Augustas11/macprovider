@@ -85,11 +85,14 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         // ARCH-M-1 regression: if the CLI ignores SIGTERM (wedged handler,
         // pathological state), the runner must escalate to SIGKILL so
         // orphan grandchildren cannot outlive the timeout. Simulate this
-        // with a shell that traps SIGTERM to a no-op and blocks on wait.
+        // with a shell that ignores SIGTERM and stays alive until SIGKILL.
+        //
+        // Do NOT use `sleep … & wait`: on some /bin/sh builds, an ignored
+        // SIGTERM still interrupts `wait`, so the script exits before grace
+        // and the wall-clock assertion flakes (CI saw ~0.06s elapsed).
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        // trap ignores SIGTERM (15); the subshell then wait's forever.
-        process.arguments = ["-c", "trap '' 15; sleep 60 & wait"]
+        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
         try process.run()
         Thread.sleep(forTimeInterval: 0.1)
         let before = Date()
@@ -107,6 +110,59 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
 
     func testSubtreeGraceSecondsIsPositive() {
         XCTAssertGreaterThan(AutotuneRecommendationRunner.subtreeGraceSeconds, 0)
+    }
+
+    func testHardwareAdmissionRecoveryUsesCLIOwnedTransactionFlag() {
+        let config = URL(fileURLWithPath: "/tmp/macprovider-config.yaml")
+        let pending = AutotuneRecommendationRunner.pendingEvidenceResubmitArguments(configPath: config)
+        XCTAssertTrue(pending.contains("--freshness-check"))
+        XCTAssertTrue(pending.contains("--require-hardware-evidence"))
+        XCTAssertFalse(pending.contains("--recover-hardware-admission"))
+
+        let corrective = AutotuneRecommendationRunner.hardwareAdmissionRecoveryArguments(configPath: config)
+        XCTAssertTrue(corrective.contains("--recover-hardware-admission"))
+        XCTAssertTrue(corrective.contains("--recommend"))
+        XCTAssertFalse(corrective.contains("--apply"))
+        XCTAssertFalse(corrective.contains("--freshness-check"))
+    }
+
+    func testTerminateWithoutSIGKILLEscalationLeavesUncooperativeChildAlive() throws {
+        // Recovery path must not SIGKILL before the CLI can restore launchd.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
+        try process.run()
+        Thread.sleep(forTimeInterval: 0.1)
+        AutotuneRecommendationRunner.terminateAutotuneSubtree(
+            process: process,
+            graceSeconds: 0.3,
+            escalateToSIGKILL: false
+        )
+        XCTAssertTrue(
+            process.isRunning,
+            "cooperative-only teardown must not SIGKILL a SIGTERM-ignoring recovery CLI"
+        )
+        // Cleanup for the test process.
+        AutotuneRecommendationRunner.terminateAutotuneSubtree(
+            process: process,
+            graceSeconds: 0.2,
+            escalateToSIGKILL: true
+        )
+        XCTAssertFalse(process.isRunning)
+    }
+
+    func testBestEffortBootstrapOnlyAfterCorrectiveRecovery() {
+        XCTAssertTrue(
+            AutotuneRecommendationRunner.shouldBestEffortBootstrapLaunchd(
+                attemptedCorrectiveRecovery: true
+            )
+        )
+        XCTAssertFalse(
+            AutotuneRecommendationRunner.shouldBestEffortBootstrapLaunchd(
+                attemptedCorrectiveRecovery: false
+            ),
+            "pending-only freshness must not own launchd bootstrap"
+        )
     }
 
     func testProcessTimeoutIsNotUntenable() {

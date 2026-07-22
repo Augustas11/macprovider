@@ -22,7 +22,12 @@ struct AutotuneHardwareEvidenceSubmitter {
     }()
 
     func submit(result: AutotuneRecommendResult, benchmarks: [String: CandidateBenchmark]) async -> AutotuneHardwareEvidenceSubmission {
-        await submit(snapshot: AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks))
+        // Refuse network submit when recommend used baked-catalog fallback or
+        // other submission-blocking trust warnings (#582).
+        if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
+            return .failed(AutotuneRecommendEngine.networkSubmissionBlockMessage(Set(result.warnings)))
+        }
+        return await submit(snapshot: AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks))
     }
 
     func submit(snapshot: AutotuneHardwareEvidenceSnapshot) async -> AutotuneHardwareEvidenceSubmission {

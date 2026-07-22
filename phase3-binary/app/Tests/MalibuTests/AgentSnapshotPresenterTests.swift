@@ -78,6 +78,73 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(ready).title, "Provider is ready")
     }
 
+    func testPublicStatusDistinguishesHardwareVerificationFromGenericReconnect() {
+        var pending = AgentSnapshot.empty
+        pending.state = .reconnecting
+        pending.currentModelID = "llama"
+        pending.networkState = "live_verified"
+        pending.lifecycleState = "coordinator_unavailable"
+        pending.lifecycleReason = "autotune_evidence_required"
+
+        let pendingStatus = AgentSnapshotPresenter.publicStatus(pending)
+        XCTAssertEqual(pendingStatus.title, "Pending hardware verification")
+        XCTAssertEqual(pendingStatus.safeNextAction, "Retry provider setup while online.")
+        XCTAssertEqual(pendingStatus.executableAction, .retryHardwareVerification)
+        XCTAssertFalse(pendingStatus.safeNextAction?.contains("macprovider-cli") == true)
+        XCTAssertFalse(pendingStatus.detail?.contains("wait for operator approval") == true)
+        XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
+        XCTAssertEqual(AgentSnapshotPresenter.modelLine(pending), "llama")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(pending),
+            "Pending hardware verification · Retry provider setup while online"
+        )
+
+        var rejected = AgentSnapshot.empty
+        rejected.state = .reconnecting
+        rejected.currentModelID = "llama"
+        rejected.lifecycleState = "catalog_incompatible"
+        rejected.lifecycleReason = "autotune_evidence_invalid"
+
+        let rejectedStatus = AgentSnapshotPresenter.publicStatus(rejected)
+        XCTAssertEqual(rejectedStatus.title, "Not eligible: admission evidence failed")
+        XCTAssertEqual(rejectedStatus.safeNextAction, "Retry provider setup while online.")
+        XCTAssertEqual(rejectedStatus.executableAction, .retryHardwareVerification)
+        XCTAssertFalse(rejectedStatus.safeNextAction?.contains("macprovider-cli") == true)
+        XCTAssertEqual(AgentSnapshotPresenter.short(rejected), "Ineligible")
+        XCTAssertEqual(AgentSnapshotPresenter.stateLine(rejected), "Not eligible: admission evidence failed")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(rejected),
+            "Not eligible: admission evidence failed · Retry provider setup while online"
+        )
+
+        var uncatalogued = AgentSnapshot.empty
+        uncatalogued.state = .reconnecting
+        uncatalogued.currentModelID = "llama"
+        uncatalogued.lifecycleState = "catalog_incompatible"
+        uncatalogued.lifecycleReason = "autotune_model_uncatalogued"
+        let uncataloguedStatus = AgentSnapshotPresenter.publicStatus(uncatalogued)
+        XCTAssertEqual(uncataloguedStatus.title, "This Mac is not currently eligible")
+        XCTAssertEqual(uncataloguedStatus.safeNextAction, "Retry provider setup while online.")
+        XCTAssertEqual(uncataloguedStatus.executableAction, .retryHardwareVerification)
+        XCTAssertTrue(uncataloguedStatus.detail?.contains("supported model") == true)
+        XCTAssertEqual(AgentSnapshotPresenter.stateLine(uncatalogued), "This Mac is not currently eligible")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(uncatalogued),
+            "This Mac is not currently eligible · Retry setup to apply a supported model"
+        )
+
+        var capExceeded = AgentSnapshot.empty
+        capExceeded.state = .reconnecting
+        capExceeded.lifecycleState = "catalog_incompatible"
+        capExceeded.lifecycleReason = "autotune_model_cap_exceeded"
+        let capStatus = AgentSnapshotPresenter.publicStatus(capExceeded)
+        XCTAssertEqual(capStatus.executableAction, .retryHardwareVerification)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(capExceeded),
+            "Not eligible: admission evidence failed · Retry setup to apply a smaller admitted model"
+        )
+    }
+
     func testBlockedPublicStatesExposeExactlyOneSafeAction() {
         let snapshots: [AgentSnapshot] = [
             {

@@ -162,6 +162,56 @@ final class StatusCommandTests: XCTestCase {
         XCTAssertTrue(output.contains("Open Malibu to review the recommended next step."), output)
     }
 
+    func testDefaultStatusSurfacesHardwareVerificationLifecycle() {
+        var pending = status(providerID: "provider-a")
+        pending["network_state"] = "live_verified"
+        pending["status"] = "ready"
+        pending["model_loaded"] = true
+        pending["coordinator"] = ["connected": false]
+        pending["lifecycle"] = [
+            "state": "coordinator_unavailable",
+            "reason_code": "autotune_evidence_required",
+        ]
+
+        let pendingOutput = LocalStatusFormatter.format(pending)
+        XCTAssertTrue(pendingOutput.contains("Pending hardware verification"), pendingOutput)
+        XCTAssertTrue(
+            pendingOutput.contains("autotune --recommend --freshness-check --require-hardware-evidence"),
+            pendingOutput
+        )
+
+        var rejected = status(providerID: "provider-a")
+        rejected["network_state"] = "live_verified"
+        rejected["status"] = "ready"
+        rejected["model_loaded"] = true
+        rejected["coordinator"] = ["connected": false]
+        rejected["lifecycle"] = [
+            "state": "catalog_incompatible",
+            "reason_code": "autotune_evidence_invalid",
+        ]
+
+        let rejectedOutput = LocalStatusFormatter.format(rejected)
+        XCTAssertTrue(rejectedOutput.contains("Not eligible: admission evidence failed"), rejectedOutput)
+        XCTAssertTrue(rejectedOutput.contains("autotune --recommend --recover-hardware-admission"), rejectedOutput)
+
+        var uncatalogued = status(providerID: "provider-a")
+        uncatalogued["network_state"] = "live_verified"
+        uncatalogued["status"] = "ready"
+        uncatalogued["model_loaded"] = true
+        uncatalogued["coordinator"] = ["connected": false]
+        uncatalogued["lifecycle"] = [
+            "state": "catalog_incompatible",
+            "reason_code": "autotune_model_uncatalogued",
+        ]
+
+        let uncataloguedOutput = LocalStatusFormatter.format(uncatalogued)
+        XCTAssertTrue(uncataloguedOutput.contains("This Mac is not currently eligible"), uncataloguedOutput)
+        XCTAssertTrue(
+            uncataloguedOutput.contains("autotune --recommend --recover-hardware-admission"),
+            uncataloguedOutput
+        )
+    }
+
     func testRoutineCLIHelpUsesCanonicalPublicLanguage() {
         let policy = try! publicLanguagePolicy()
         let helpMessages = [

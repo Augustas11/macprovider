@@ -164,6 +164,28 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertTrue(command.donorMode)
     }
 
+    func testRecoverHardwareAdmissionFlagParsesAndRejectsConflictingModes() throws {
+        let command = try AutotuneCommand.parse([
+            "--recommend",
+            "--recover-hardware-admission",
+        ])
+        XCTAssertTrue(command.recoverHardwareAdmission)
+
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recover-hardware-admission",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend",
+            "--recover-hardware-admission",
+            "--freshness-check",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend",
+            "--recover-hardware-admission",
+            "--no-submit-hardware-evidence",
+        ]))
+    }
+
     func testRecommendPrefetchRequiresExplicitCandidateAndRejectsMutationModes() throws {
         let command = try AutotuneCommand.parse([
             "--recommend",

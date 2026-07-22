@@ -78,6 +78,12 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend, check whether the stored recommendation is fresh without benchmarking.")
     var freshnessCheck = false
 
+    @Flag(
+        name: .customLong("recover-hardware-admission"),
+        help: "With --recommend, run corrective stranger recovery: drain the running provider, recommend/apply with required evidence submission, and restore the provider. Pending-trust resubmit uses --freshness-check --require-hardware-evidence instead."
+    )
+    var recoverHardwareAdmission = false
+
     @Flag(help: "With --recommend and --candidate-models, download and verify the exact signed model artifacts without loading or benchmarking them.")
     var prefetch = false
 
@@ -134,6 +140,10 @@ struct AutotuneCommand: AsyncParsableCommand {
 
     func run(dependencies: AutotuneRunDependencies) async throws {
         if recommend {
+            if recoverHardwareAdmission {
+                try await runHardwareAdmissionRecovery()
+                return
+            }
             if freshnessCheck {
                 try await runRecommendationFreshnessCheck()
                 return
@@ -694,6 +704,18 @@ struct AutotuneCommand: AsyncParsableCommand {
         if freshnessCheck && !recommend {
             throw ValidationError("--freshness-check requires --recommend")
         }
+        if recoverHardwareAdmission && !recommend {
+            throw ValidationError("--recover-hardware-admission requires --recommend")
+        }
+        if recoverHardwareAdmission && freshnessCheck {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --freshness-check")
+        }
+        if recoverHardwareAdmission && prefetch {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --prefetch")
+        }
+        if recoverHardwareAdmission && !submitHardwareEvidence {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --no-submit-hardware-evidence")
+        }
         if prefetch && !recommend {
             throw ValidationError("--prefetch requires --recommend")
         }
@@ -791,14 +813,24 @@ struct AutotuneCommand: AsyncParsableCommand {
         warnings.formUnion(rateCard.warnings)
 
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
-            let failures = warnings
-                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
-                .map(\.rawValue)
-                .sorted()
-                .joined(separator: ", ")
-            throw ValidationError(
-                "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
-            )
+            throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
+        }
+        // #582: baked-catalog / network-submission blocks are known before
+        // Stage-1 probes. Fail closed immediately when apply/submit is enabled
+        // so strangers do not wait hours for an already-rejected evidence class.
+        // Offline diagnostics remain available with --no-submit-hardware-evidence
+        // (and without --apply / --require-hardware-evidence).
+        if AutotuneRecommendEngine.shouldFailClosedBeforeBenchmarks(
+            warnings,
+            apply: apply,
+            submitHardwareEvidence: submitHardwareEvidence,
+            requireHardwareEvidence: requireHardwareEvidence
+        ) {
+            throw ValidationError(AutotuneRecommendEngine.networkSubmissionBlockMessage(warnings))
+        }
+        if AutotuneRecommendEngine.networkSubmissionBlocks(warnings) {
+            let message = AutotuneRecommendEngine.networkSubmissionBlockMessage(warnings)
+            FileHandle.standardError.write(Data("[warn] \(message)\n".utf8))
         }
 
         var request = AutotuneRecommendRequest(
@@ -834,6 +866,13 @@ struct AutotuneCommand: AsyncParsableCommand {
         var result = AutotuneRecommendEngine().recommend(request)
         result.probeDiagnostics = outcomes.diagnostics
         try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
+        if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
+            let message = AutotuneRecommendEngine.networkSubmissionBlockMessage(Set(result.warnings))
+            if apply || submitHardwareEvidence || requireHardwareEvidence {
+                throw ValidationError(message)
+            }
+            FileHandle.standardError.write(Data("[warn] \(message)\n".utf8))
+        }
         if submitHardwareEvidence {
             let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(
                 result: result,
@@ -934,14 +973,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         warnings.formUnion(catalog.warnings)
 
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
-            let failures = warnings
-                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
-                .map(\.rawValue)
-                .sorted()
-                .joined(separator: ", ")
-            throw ValidationError(
-                "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
-            )
+            throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
         }
 
         guard let requestedModelIDs = try recommendCandidateModelFilter(), !requestedModelIDs.isEmpty else {
@@ -1015,6 +1047,74 @@ struct AutotuneCommand: AsyncParsableCommand {
         )
     }
 
+    /// Corrective #582 recovery owned by the CLI:
+    /// drain (bootout) → recommend/apply with required evidence → restore.
+    /// Pending-trust resubmit is a separate freshness-check path so rejected /
+    /// cap / uncatalogued models cannot false-complete via stored evidence.
+    private func runHardwareAdmissionRecovery() async throws {
+        // Own the process group and cooperative cancellation before mutating
+        // launchd so SIGTERM can restore instead of stranding a bootout.
+        _ = autotuneBecomeProcessGroupLeader()
+        let interruptFlag = AutotuneInterruptFlag()
+        let signalSources = AutotuneSignalSources(flag: interruptFlag, cascadeToProcessGroup: true)
+        defer { _ = signalSources }
+
+        let conflict = try ProviderConflictDetector().detect()
+        let shouldRestore: Bool
+        switch conflict {
+        case .none:
+            shouldRestore = false
+        case .launchdManaged, .foreground:
+            shouldRestore = true
+        }
+
+        let drainResult = try ProviderDrainer().drain(
+            conflict,
+            port: port,
+            graceSeconds: TimeInterval(drainGrace)
+        )
+
+        var recoveryError: Error?
+        if case .portStillOpen(let openPort) = drainResult {
+            recoveryError = ValidationError(
+                "provider port \(openPort) still open after drain; cannot recover hardware admission safely"
+            )
+        } else if interruptFlag.isSet() {
+            recoveryError = ExitCode(130)
+        } else {
+            do {
+                var recovery = self
+                recovery.apply = true
+                recovery.requireHardwareEvidence = true
+                recovery.submitHardwareEvidence = true
+                try await recovery.runAutotuneRecommend()
+            } catch {
+                recoveryError = error
+            }
+        }
+
+        var restoreError: Error?
+        if shouldRestore {
+            do {
+                _ = try ProviderDrainer().restore(conflict, restartForeground: true)
+            } catch {
+                restoreError = error
+            }
+        }
+
+        if let restoreError {
+            if let recoveryError {
+                FileHandle.standardError.write(
+                    Data("hardware_admission_recovery_failed: \(recoveryError)\n".utf8)
+                )
+            }
+            throw restoreError
+        }
+        if let recoveryError {
+            throw recoveryError
+        }
+    }
+
     private func runRecommendationFreshnessCheck() async throws {
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
         let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
@@ -1073,7 +1173,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             )
         case .trustBlocked(_, let warnings):
             let failures = warnings
-                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+                .intersection(AutotuneRecommendEngine.networkSubmissionBlockingWarnings)
                 .map(\.rawValue)
                 .sorted()
                 .joined(separator: ", ")

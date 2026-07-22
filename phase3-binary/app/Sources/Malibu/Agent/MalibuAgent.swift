@@ -43,6 +43,10 @@ final class MalibuAgent: ObservableObject {
     private var lastRequestsRateSample: (total: Int, date: Date)?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
+    private var hardwareVerificationRetryTask: Task<Void, Never>?
+    /// Set while corrective `--recover-hardware-admission` may have drained
+    /// launchd and therefore owes a restore/bootstrap. Cleared on success.
+    private var hardwareRecoveryOwnsLaunchdRestore = false
     private var credentialRepairTask: Task<Void, Never>?
     private var admissionIdentityRecoveryTask: Task<Void, Never>?
     private var referralStatusExpiryTask: Task<Void, Never>?
@@ -221,6 +225,81 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
+    /// Online #582 recovery without reinstalling provider identity.
+    /// Pending trust resubmits stored evidence; corrective paths use the CLI
+    /// `--recover-hardware-admission` drain/recommend/restore transaction.
+    func retryHardwareVerification() async {
+        guard !isShuttingDown else { return }
+        guard AgentSnapshotPresenter.publicStatus(snapshot).executableAction == .retryHardwareVerification else {
+            return
+        }
+        guard !snapshot.hardwareVerificationRetryInProgress else { return }
+        if let previous = hardwareVerificationRetryTask {
+            previous.cancel()
+            await previous.value
+        }
+        guard !isShuttingDown, !Task.isCancelled else { return }
+        let pendingTrust = snapshot.lifecycleReason == "autotune_evidence_required"
+        snapshot.hardwareVerificationRetryInProgress = true
+        snapshot.hardwareVerificationRetryLastError = nil
+        hardwareVerificationRetryTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if !self.isShuttingDown {
+                    self.snapshot.hardwareVerificationRetryInProgress = false
+                }
+            }
+            var attemptedCorrectiveRecovery = !pendingTrust
+            do {
+                let cliURL = URL(fileURLWithPath: CLIUpdateRunner.installedCLIPath())
+                if pendingTrust {
+                    do {
+                        try await AutotuneRecommendationRunner.runPendingEvidenceResubmit(cliURL: cliURL)
+                    } catch let AutotuneRecommendationError.nonZeroExit(code, _) where code == 10 {
+                        // Stored recommendation/evidence missing or stale —
+                        // fall through to corrective drain/restore recovery.
+                        attemptedCorrectiveRecovery = true
+                        self.hardwareRecoveryOwnsLaunchdRestore = true
+                        try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
+                    }
+                } else {
+                    self.hardwareRecoveryOwnsLaunchdRestore = true
+                    try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
+                }
+                guard !Task.isCancelled, !self.isShuttingDown else {
+                    self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
+                    return
+                }
+                self.hardwareRecoveryOwnsLaunchdRestore = false
+                self.snapshot.hardwareVerificationRetryLastError = nil
+                if let port = ProviderConfig.readHTTPPort() {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await self.applyProviderSnapshot(port: port)
+                }
+            } catch is CancellationError {
+                self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
+                return
+            } catch {
+                self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.snapshot.hardwareVerificationRetryLastError =
+                    AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
+                    ?? "Provider setup could not be completed. Export diagnostics for support."
+            }
+        }
+        await hardwareVerificationRetryTask?.value
+    }
+
+    private func restoreLaunchdIfCorrectiveRecoveryOwned(_ attemptedCorrectiveRecovery: Bool) {
+        guard AutotuneRecommendationRunner.shouldBestEffortBootstrapLaunchd(
+            attemptedCorrectiveRecovery: attemptedCorrectiveRecovery
+        ) || hardwareRecoveryOwnsLaunchdRestore else {
+            return
+        }
+        AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+        hardwareRecoveryOwnsLaunchdRestore = false
+    }
+
     func updateCLINow() async {
         guard !snapshot.cliUpdateInProgress else { return }
         guard AgentSnapshotPresenter.updateAvailable(snapshot) else { return }
@@ -368,6 +447,16 @@ final class MalibuAgent: ObservableObject {
         healthPollTask?.cancel(); healthPollTask = nil
         cliUpdateTask?.cancel(); cliUpdateTask = nil
         referralStatusExpiryTask?.cancel(); referralStatusExpiryTask = nil
+        let hardwareRetryTask = hardwareVerificationRetryTask
+        hardwareVerificationRetryTask = nil
+        hardwareRetryTask?.cancel()
+        await hardwareRetryTask?.value
+        // Only restore when corrective recovery may have drained launchd.
+        // Ordinary quit must not re-bootstrap an intentionally unloaded job.
+        if hardwareRecoveryOwnsLaunchdRestore {
+            AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+            hardwareRecoveryOwnsLaunchdRestore = false
+        }
         let admissionRecoveryTask = admissionIdentityRecoveryTask
         admissionIdentityRecoveryTask = nil
         admissionRecoveryTask?.cancel()

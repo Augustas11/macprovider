@@ -2561,6 +2561,9 @@ struct LocalStatusFormatter {
         staleRecommendationSince: Date?
     ) -> String {
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
+        let lifecycle = status["lifecycle"] as? [String: Any] ?? [:]
+        let lifecycleState = string(lifecycle["state"])
+        let lifecycleReason = string(lifecycle["reason_code"])
         let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
         let providerID = string(status["provider_id"])
         let model = string(status["model"])
@@ -2577,12 +2580,24 @@ struct LocalStatusFormatter {
         } else if networkState == "buyer_serving" && connected && modelLoaded && !["draining", "unavailable"].contains(localState) {
             title = "Provider is ready"
             nextStep = nil
+        } else if lifecycleReason == "autotune_evidence_required" {
+            title = "Pending hardware verification"
+            nextStep = "Run `macprovider-cli autotune --recommend --freshness-check --require-hardware-evidence` while online. Recently submitted evidence may still be awaiting operator approval."
+        } else if lifecycleReason == "autotune_evidence_invalid"
+            || lifecycleReason == "autotune_model_cap_exceeded"
+        {
+            title = "Not eligible: admission evidence failed"
+            nextStep = "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online."
+        } else if lifecycleState == "catalog_incompatible"
+            || lifecycleReason == "autotune_model_uncatalogued"
+            || ["catalog_update_required", "compatibility_update_required"].contains(networkState) {
+            title = "This Mac is not currently eligible"
+            nextStep = lifecycleReason == "autotune_model_uncatalogued"
+                ? "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online."
+                : "Run `macprovider-cli update`, or choose a catalog-supported model."
         } else if networkState == "not_buyer_serving" {
             title = "This Mac is not currently eligible"
             nextStep = "Open Malibu to review the recommended next step."
-        } else if ["catalog_update_required", "compatibility_update_required"].contains(networkState) {
-            title = "This Mac is not currently eligible"
-            nextStep = "Run `macprovider-cli update`."
         } else if !modelLoaded || ["draining", "unavailable"].contains(localState) {
             title = "Model is preparing"
             nextStep = "Keep this Mac awake while preparation completes."

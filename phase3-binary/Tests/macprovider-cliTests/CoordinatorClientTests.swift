@@ -57,6 +57,42 @@ final class CoordinatorClientTests: XCTestCase {
         )
         XCTAssertEqual(unavailable.state, .coordinatorUnavailable)
         XCTAssertEqual(unavailable.reasonCode, "coordinator_unavailable")
+
+        let pendingHardware = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "autotune_evidence_required",
+                message: "autotune_evidence_required"
+            )
+        )
+        XCTAssertEqual(pendingHardware.state, .coordinatorUnavailable)
+        XCTAssertEqual(pendingHardware.reasonCode, "autotune_evidence_required")
+
+        let evidenceRejected = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "autotune_evidence_invalid",
+                message: "autotune_evidence_invalid"
+            )
+        )
+        XCTAssertEqual(evidenceRejected.state, .catalogIncompatible)
+        XCTAssertEqual(evidenceRejected.reasonCode, "autotune_evidence_invalid")
+
+        let uncatalogued = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "autotune_model_uncatalogued",
+                message: "autotune_model_uncatalogued"
+            )
+        )
+        XCTAssertEqual(uncatalogued.state, .catalogIncompatible)
+        XCTAssertEqual(uncatalogued.reasonCode, "autotune_model_uncatalogued")
+
+        let capExceeded = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "autotune_model_cap_exceeded",
+                message: "autotune_model_cap_exceeded"
+            )
+        )
+        XCTAssertEqual(capExceeded.state, .catalogIncompatible)
+        XCTAssertEqual(capExceeded.reasonCode, "autotune_model_cap_exceeded")
     }
 
     func testOperatorPauseAndResumeFenceRequestsAndPublishCoordinatorState() async throws {

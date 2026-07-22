@@ -1464,6 +1464,9 @@ struct AutotuneRecommendResult: Equatable {
 struct AutotuneRecommendEngine {
     static let safetyMarginGB = 4
     static let maxBenchmarkAge: TimeInterval = 7 * 24 * 3600
+    /// Integrity / update-required warnings that fail closed before paid
+    /// recommend / prefetch. Baked-catalog transport fallback stays out of this
+    /// set so SPEC-023 local diagnostics remain available offline (#582).
     static let paidTrustBlockingWarnings: Set<AutotuneRecommendWarning> = [
         .candidateCatalogIntegrityFailure,
         .candidateCatalogUpdateRequired,
@@ -1471,8 +1474,49 @@ struct AutotuneRecommendEngine {
         .demandRankUpdateRequired,
     ]
 
+    /// Warnings that must fail closed before network apply / evidence submit /
+    /// freshness resubmit. Includes baked candidate-catalog fallback: Pearl's
+    /// hello gate rejects that SHA class as `autotune_evidence_invalid` (#582).
+    static let networkSubmissionBlockingWarnings: Set<AutotuneRecommendWarning> = paidTrustBlockingWarnings.union([
+        .candidateCatalogFallbackUsed,
+    ])
+
     static func paidTrustBlocks(_ warnings: Set<AutotuneRecommendWarning>) -> Bool {
         !warnings.isDisjoint(with: paidTrustBlockingWarnings)
+    }
+
+    static func networkSubmissionBlocks(_ warnings: Set<AutotuneRecommendWarning>) -> Bool {
+        !warnings.isDisjoint(with: networkSubmissionBlockingWarnings)
+    }
+
+    /// True when recommend must abort before Stage-1 benchmarks because the
+    /// caller enabled apply/submit and catalog evidence would be rejected.
+    static func shouldFailClosedBeforeBenchmarks(
+        _ warnings: Set<AutotuneRecommendWarning>,
+        apply: Bool,
+        submitHardwareEvidence: Bool,
+        requireHardwareEvidence: Bool
+    ) -> Bool {
+        networkSubmissionBlocks(warnings)
+            && (apply || submitHardwareEvidence || requireHardwareEvidence)
+    }
+
+    /// Operator-facing copy when network onboarding is blocked. Fallback uses
+    /// stronger guidance because Pearl rejects that evidence class (#582).
+    static func networkSubmissionBlockMessage(_ warnings: Set<AutotuneRecommendWarning>) -> String {
+        let failures = warnings
+            .intersection(networkSubmissionBlockingWarnings)
+            .map(\.rawValue)
+            .sorted()
+            .joined(separator: ", ")
+        if warnings.contains(.candidateCatalogFallbackUsed) {
+            return "signed live catalog unavailable (\(failures)); reconnect and retry when the coordinator candidate catalog is reachable — baked-catalog evidence cannot be submitted"
+        }
+        return "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
+    }
+
+    static func paidTrustBlockMessage(_ warnings: Set<AutotuneRecommendWarning>) -> String {
+        networkSubmissionBlockMessage(warnings)
     }
 
     func recommend(_ request: AutotuneRecommendRequest) -> AutotuneRecommendResult {
@@ -2065,7 +2109,9 @@ struct RecommendationFreshnessChecker {
         let demand = release.demand
         let catalog = release.candidate
         let trustWarnings = demand.warnings.union(catalog.warnings)
-        let blockingWarnings = trustWarnings.intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+        // Freshness gates network evidence resubmit, so include catalog fallback
+        // even though offline recommend diagnostics remain allowed (#582).
+        let blockingWarnings = trustWarnings.intersection(AutotuneRecommendEngine.networkSubmissionBlockingWarnings)
         if !blockingWarnings.isEmpty {
             return .trustBlocked(stored?.generatedAt, blockingWarnings)
         }
