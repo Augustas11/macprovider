@@ -448,6 +448,33 @@ class ProductionExceptionsTests(unittest.TestCase):
         self.assertIn("expiry_self_extension", codes)
         self.assertIn("expired_reactivation", codes)
 
+    def test_active_expired_active_equal_expiry_reactivation_fails(self):
+        """active → expired → active with the same expires_at must still fail."""
+        active = _minimal_register(
+            [
+                _minimal_entry(
+                    id="exc-cycle",
+                    status="active",
+                    expires_at="2026-08-01T00:00:00Z",
+                    blocks_stable_promotion=False,
+                )
+            ]
+        )
+        expired = copy.deepcopy(active)
+        expired["exceptions"][0]["status"] = "expired"
+        reactivated = copy.deepcopy(active)
+        previous = pe.earliest_expiry_previous_register(
+            reactivated, [active, expired, reactivated]
+        )
+        self.assertEqual(previous["exceptions"][0]["status"], "expired")
+        result = pe.validate_register(
+            reactivated,
+            now=NOW,
+            tombstones=_tombstones(),
+            previous_doc=previous,
+        )
+        self.assertTrue(any(f.code == "expired_reactivation" for f in result.errors))
+
     def test_sync_check_fails_on_malformed_stale(self):
         current = _minimal_register()
         stale = {"schema_version": "wrong", "environment": "nope", "exceptions": {}}

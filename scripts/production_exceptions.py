@@ -769,13 +769,13 @@ def earliest_expiry_previous_register(
 ) -> dict[str, Any]:
     """Rebuild previous register with the earliest parseable expires_at per ID.
 
-    Includes active/planned/expired historical rows. Filtering to only
-    active/planned lets an expired->active reactivation with a later expiry
-    erase the earlier authoritative date and pass promotion. The historical
-    status from the earliest-expiry observation is restored so transition
-    checks can see expired->active reactivations.
+    Includes active/planned/expired historical rows. Any historical `expired`
+    observation for an ID is restored onto the previous row when the tip is
+    active/planned, so active→expired→active reactivation cannot erase the
+    expired intermediate state by selecting an earlier equal-dated active row.
     """
-    earliest: dict[str, tuple[datetime, str, str]] = {}
+    earliest: dict[str, tuple[datetime, str]] = {}
+    saw_expired: set[str] = set()
     for doc in history:
         if not isinstance(doc, dict):
             continue
@@ -790,6 +790,8 @@ def earliest_expiry_previous_register(
             status = entry.get("status")
             if not isinstance(exc_id, str) or status not in {"active", "planned", "expired"}:
                 continue
+            if status == "expired":
+                saw_expired.add(exc_id)
             if not isinstance(expires, str):
                 continue
             try:
@@ -798,17 +800,19 @@ def earliest_expiry_previous_register(
                 continue
             prev = earliest.get(exc_id)
             if prev is None or exp_dt < prev[0]:
-                earliest[exc_id] = (exp_dt, expires, status)
+                earliest[exc_id] = (exp_dt, expires)
 
     previous = deepcopy(current)
     for entry in previous.get("exceptions", []):
         if not isinstance(entry, dict):
             continue
         exc_id = entry.get("id")
+        if not isinstance(exc_id, str):
+            continue
         if exc_id in earliest:
-            _dt, expires, status = earliest[exc_id]
-            entry["expires_at"] = expires
-            entry["status"] = status
+            entry["expires_at"] = earliest[exc_id][1]
+        if exc_id in saw_expired and entry.get("status") in {"active", "planned"}:
+            entry["status"] = "expired"
     return previous
 
 
