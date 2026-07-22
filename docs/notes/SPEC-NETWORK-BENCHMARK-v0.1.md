@@ -124,14 +124,46 @@ single bad run doesn't trip the alert).
 | B5 | Slot util reasonable | ≥ 15% over 5-min window |
 | B6 | Earnings/hr viable | ≥ $0.30/hr at current pricing |
 | B7 | Cold/warm TTFT ratio bounded | cold p50 / warm p50 ≤ 2.0 (scenario 08) |
+| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens on warm turns (scenario 16, provider prefix-cache probe; calibrated from a 0.725 baseline): PASS ≥ 0.60 (target), WARN [0.50, 0.60) (degrading, non-green), FAIL < 0.50 (floor breached — reuse collapsed) |
+| B9 | Cached-turn latency advantage (record-only) | records reuse-bearing cached vs uncached full-response p50 latency ratio (scenario 16; always SKIP, not a gate) |
 | B10 | Sustained streaming-TPS retention | final-5min TPS p50 / first-5min TPS p50 over a 45–60 min soak (scenario 15): PASS ≥ 0.85, WARN ≥ 0.70, FAIL < 0.70. **PROVISIONAL / UNARMED** — thresholds are pre-run guesses; scenario 15 sets `sustained_gate_armed: false` so a would-be FAIL downgrades to WARN until a lab soak calibrates them (#584). SKIP if either window has < 8 streaming samples. |
 
-(B8/B9 — sticky cache-reuse retention + cached-turn latency — are added by
-RESEARCH_236; B10 skips that range so the two tests never collide on an ID
-regardless of merge order.)
-
 Like I1-I4, each invariant produces a structured verdict (PASS / WARN /
-FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
+FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run —
+and neither does a benchmark FAIL: benchmark verdicts are **advisory**,
+they do not change the harness exit code. A continuous/phase-C gate must
+parse `benchmark_verdict.json` and act on B8/B9 itself.
+
+B8/B9 **SKIP** rather than FAIL in every inconclusive case — the gateway
+omitted the usage frame (spec-strict path), the scenario did not run the
+`sticky_cache` pattern, the uncached primer failed (cache never warmed),
+every warm request failed, a provider reported an impossible
+`cached_prompt_tokens > prompt_tokens`, fewer than 3 valid warm samples
+were measured, or fewer than a strict majority of the scenario's INTENDED
+warm turns produced a valid measurement (a duration-truncated or
+survivorship-biased run) — so a missing or untrustworthy measurement is
+never mistaken for a regression. B9 is **record-only** (always SKIP): it
+records the reuse-bearing cached-vs-uncached latency ratio for
+observability but is never a gate, because the single-buyer pattern yields
+just one cold control and that lone cold turn also pays one-time
+connection setup — arming it soundly needs a multi-cold-control redesign,
+so B8 (reuse retention) is armed independently.
+
+B8 is **armed** with a target of **0.60** and a hard FAIL floor of **0.50**,
+calibrated from the 2026-07-22 scenario-16 prod baseline: the harness measured a
+median reuse of **0.725** over 7 warm turns on the live pool (corroborating
+#376's 2026-07-09 ~0.64, range 0.638-0.70). PASS ≥ 0.60; WARN in [0.50, 0.60)
+(reuse degrading — a scheduled consumer must treat WARN, and SKIP, as non-green,
+not just FAIL); FAIL < 0.50 (the calibrated floor — reuse has collapsed). The
+0.50 floor sits below both the median and the #376 low end, so normal jitter —
+reuse is deterministic prefix caching and very stable — will not flap the gate,
+while a genuine collapse (a provider prefix-cache regression) drops below
+it and FAILs. `benchmark.cache_gate_armed` is a positive, fail-safe flag:
+false (its default, if omitted) makes B8 record-but-SKIP; the scenario sets
+it true. CAUTION when re-baselining: an **identical-prompt** run reports 0
+reuse regardless of cache health (the provider rejects it as `nothing_new`,
+LCP == full prompt), so a 0 from such a run is a measurement artifact, not
+a regression — the scenario's divergent per-turn prompts avoid it.
 
 ## 4. New scenarios (07-10)
 
@@ -164,6 +196,43 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
   tier-2 pricing, session_duration.
 - **Invariants**: B5, B6 (B7 session-mean deferred — needs >>10-min
   windows).
+
+### 4.5 `16_sticky_cache_reuse`
+- **What**: 1 buyer × 8 sequential non-streaming turns under the
+  `sticky_cache` pattern (single buyer because the live pool serves each
+  model from one single-slot provider — concurrent buyers contend and
+  503). The harness prepends a per-run deterministic ~2.7k-token prefix
+  (`cache_prefix_lines`, sized under the live 4000-token context cap) to
+  every request under a sticky conversation tag. `request_index` 0 is the
+  cold uncached first-touch that warms the provider prefix cache;
+  `request_index` 1..7 are the warm cached turns that reuse it. Mirrors
+  `test/e2e/canary-buyer/probe.mjs`.
+- **Measures**: turn-2+ provider prefix-cache reuse (`cached_prompt_tokens
+  / prompt_tokens`) and the cached-vs-uncached full-response latency
+  advantage.
+- **Invariants**: B8 (cache-reuse retention), B9 (cached-turn latency
+  advantage, RECORD-ONLY — always SKIP). B1 is intentionally omitted —
+  these turns are non-streaming so the harness records full-response wall
+  time as "TTFT" and B1 would score a misleading number.
+- **Prompt shape**: each turn shares the large prefix but appends a
+  per-turn-unique tail so consecutive prompts DIVERGE after it — an
+  identical full prompt is rejected by the provider cache as `nothing_new`
+  (LCP == full prompt) and reports 0 reuse even when the cache works.
+- **Consumer policy**: a scheduled/armed run must treat B8 SKIP as
+  non-green/inconclusive (alert on persistent SKIP) and capability-
+  preflight the pinned model, so operational SKIP is distinguishable from a
+  real regression.
+- **Phase C — regression gate**: the guard for the #376 reuse win.
+  Intended to be wired as a scheduled/CI run that parses
+  `benchmark_verdict.json` (benchmark verdicts are advisory — they do not
+  set the exit code). Ships **armed** (`cache_gate_armed: true`, B8 floor
+  0.50) because the 2026-07-22 baseline measured a positive median reuse of
+  0.725 on the live pool; B9 stays record-only. As a single-provider probe
+  it measures the provider prefix cache, not sticky routing — the routing
+  dimension needs ≥2 eligible providers plus an affinity assertion.
+  Requires sticky routing ON (`routing.sticky_enabled: true` on both
+  sides + gateway `auth.key_hash_secret`). Light and prod-safe (~8
+  requests, order of cents).
 
 ### 4.15 `15_thermal_soak` (RESEARCH_235, #584)
 - **What**: 45–60 min (`duration: 3600s`) sustained-decode soak at N=2
@@ -200,6 +269,21 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
     "error_rate_per_1k": 3.0,
     "total_requests": 150,
     "non_2xx_breakdown": {"429": 2, "503": 1, "502": 0},
+    "cache_reuse": {
+      "attempted_cached_turns": 7,
+      "attempted_uncached_turns": 1,
+      "cached_turns": 7,
+      "usage_absent_turns": 0,
+      "invalid_turns": 0,
+      "reuse_count": 7,
+      "reuse_p50": 0.64,
+      "reuse_mean": 0.63,
+      "reuse_min": 0.61,
+      "uncached_latency_ms": {"p50": 1800, "p95": 1800, "p99": 1800},
+      "cached_latency_ms": {"p50": 900, "p95": 1050, "p99": 1100},
+      "cached_reuse_latency_ms": {"p50": 900, "p95": 1050, "p99": 1100},
+      "latency_ratio_p50": 0.50
+    },
     "sustained_tps": {"first_window_tps_p50": 30.4, "final_window_tps_p50": 27.9, "retention": 0.92, "first_window_samples": 61, "final_window_samples": 58}
   },
   "provider_metrics": {

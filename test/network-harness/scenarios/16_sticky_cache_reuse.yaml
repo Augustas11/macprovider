@@ -1,0 +1,147 @@
+# 16_sticky_cache_reuse.yaml — benchmark, phase C (regression-gate
+# INSTRUMENT; verdicts advisory, B8 armed from a real baseline).
+#
+# Purpose: measure the KV-cache-reuse win that was already banked (#376:
+# ~64% turn-2 prompt-cache reuse on a ~3.9k-token shared prefix, live
+# 2026-07-09) and turn it into a benchmark invariant (B8) so a future
+# provider-side prefix-cache regression fails loud, the way B7 locks in
+# the cold/warm ratio (RESEARCH_236, P4).
+#
+# WHAT IT MEASURES (be precise): B8 is a PROVIDER PREFIX-CACHE reuse probe,
+# not a sticky-routing test. With a single eligible provider (the live pool
+# as of 2026-07-22) every request lands on that one provider whether or not
+# stickiness is on, so this scenario cannot by itself detect a
+# sticky-routing regression — to exercise the routing dimension, run it
+# with >= 2 eligible providers for the model and assert per-buyer affinity.
+#
+# Mechanism (mirrors test/e2e/canary-buyer/probe.mjs): a single buyer fires
+# a sequence of non-streaming requests under a sticky conversation tag. The
+# harness prepends a per-run deterministic ~2.7k-token "reference facts"
+# prefix (cache_prefix_lines) to each request AND appends a per-turn-UNIQUE
+# follow-up so consecutive prompts DIVERGE after that shared prefix. The
+# divergence is load-bearing: the provider's ConversationCache rejects an
+# identical prompt (longest-common-prefix == the whole incoming prompt) as
+# "nothing_new" and reports 0 reuse even when the cache is working — so the
+# warm turn must keep the prefix a cache HIT (lcp == prefix, < full prompt)
+# while computing only the small new tail. request_index 0 is the cold
+# first-touch that WARMS the prefix cache (tagged "uncached"); request_index
+# >= 1 are the warm turns that REUSE it (tagged "cached"). On the warm turns
+# the harness reads usage.cached_prompt_tokens / usage.prompt_tokens.
+#
+# ADVISORY (verdicts don't set exit code) + GATE ARMED: benchmark verdicts
+# do NOT change the harness exit code (only the hard invariants I1-I4 do) —
+# a CI/phase-C consumer must parse benchmark_verdict.json and act on B8
+# itself (B9 is record-only). cache_gate_armed is true below: the
+# 2026-07-22 scenario-16 prod baseline established a real positive reuse
+# median of 0.725 over 7 warm turns, so B8's floor (0.50) is transcribed
+# from a real measurement with headroom and B8 now PASS/WARN/FAILs. (An
+# EARLIER identical-prompt run wrongly read 0 reuse — that was the
+# "nothing_new" artifact this scenario's divergent prompts now avoid, NOT
+# a pool regression.)
+#
+# CONTINUOUS-GATE CONSUMER POLICY (for whoever wires the scheduled run):
+# treat B8 SKIP as NON-GREEN / inconclusive, not success — a healthy armed
+# gate should PASS, so a persistent SKIP (model dropped from the pool,
+# usage frame lost, context cap shrunk, capability drift) must alert. Also
+# capability-preflight the pinned model (advertised + context headroom)
+# before firing, so an operational SKIP is distinguishable from a real
+# regression.
+#
+# Hard rules honoured (RESEARCH_236):
+#  1. Large prefix (~2.7k tokens) — a small prefix makes turn-2
+#     cached_prompt_tokens always 0 and the metric meaningless. Enforced by
+#     the MinCachePrefixLines floor in the schema.
+#  2. stream: false — the terminal usage frame is reliably present
+#     (streaming usage can drop for large prompts, #511).
+#  3. B8 SKIPs (never FAILs) when the gateway omits usage.
+#
+# Requires sticky routing ON on both sides (verified live 2026-07-22:
+# gateway routing.sticky_enabled=true + key_hash_secret set; coordinator
+# routing.sticky_enabled=true; /v1/models tier1_disclosure.sticky_affinity
+# .enabled=true, ttl 1800s).
+#
+# Cost estimate (8 requests x 12 max_tokens, ~2.7k prompt tokens each):
+# order of cents. Light and prod-safe — no sustained load.
+name: sticky_cache_reuse
+description: |
+  1 buyer x 8 sequential non-streaming sticky turns sharing a large
+  ~2.7k-token prefix. Measures turn-2+ provider prefix-cache reuse
+  (cached_prompt_tokens / prompt_tokens) and the cached-vs-uncached
+  full-response latency advantage. Phase-C regression-gate instrument for
+  the #376 reuse win (verdicts advisory; B8 armed, B9 record-only).
+
+expected_shape: |
+  Phase C benchmark (instrument; verdicts advisory, B8 armed):
+   - 8 total requests (1 buyer x 8 turns).
+   - request_index 0 is the cold uncached first-touch; request_index 1..7
+     are warm cached turns on the same provider.
+   - B8 scores the median (cached_prompt_tokens / prompt_tokens) across the
+     warm turns against a floor of 0.50 (calibrated from the measured 0.725
+     baseline with headroom). It PASS/WARN/FAILs when armed; it SKIPs when
+     cache_gate_armed is false, when usage is absent, or when the run is too
+     partial (no strict majority of the intended warm turns measured).
+     Baseline run 2026-07-22: median reuse 0.725 → PASS.
+   - B9 is RECORD-ONLY (always SKIP, never a gate): it records the
+     reuse-bearing cached vs uncached full-response latency p50 ratio for
+     trend/observability. These turns are non-streaming so this is NOT
+     TTFT; and the single cold control also pays one-time connection setup
+     the keep-alive warm turns do not — arming B9 as a real gate would need
+     a multi-cold-control redesign, so it is intentionally not armed.
+   - This is a single-provider PROVIDER-CACHE probe, not a sticky-routing
+     test: to detect a sticky-routing regression, run with >= 2 eligible
+     providers AND add a provider-affinity assertion (with repeated
+     identical prefixes each provider can warm after its first miss, so
+     reuse alone would not reliably fall).
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+# count: 1 — the live pool serves each model from a SINGLE provider
+# with a SINGLE slot (2026-07-22), so concurrent buyers contend and 503.
+# A single sequential buyer keeps every turn on the one warm provider,
+# which is exactly what the reuse measurement needs.
+buyers:
+  count: 1
+  stream: false
+  pattern: sticky_cache
+  interval_ms: 1500
+  requests_per_buyer: 8
+  # SPEC-004 Pillar A: per-buyer conversation tag → all of a buyer's turns
+  # route to one provider so the warm turns reuse its prefix cache.
+  sticky_conversation_key: "harness-scenario-16-buyer-%d"
+  # ~30 tokens/line * 90 = ~2.7k tokens — over the provider's prefix-cache
+  # granularity yet safely under the live providers' max_context_tokens
+  # (4000 as of 2026-07-22), so the request is not rejected with
+  # context_exceeds_capacity. probe.mjs used ~3.9k against a
+  # larger-context provider; size this to the target pool's cap.
+  cache_prefix_lines: 90
+
+duration: 300s
+request_timeout: 60s
+silent_hang_threshold: 30s
+
+benchmark:
+  enabled: true
+  # B8 (cache-reuse retention) + B9 (cached-turn latency advantage) only.
+  # B1 (TTFT) is intentionally omitted: these turns are non-streaming, so
+  # the harness records full-response wall time as "TTFT" and B1 would
+  # score a misleading number here.
+  invariants: [B8, B9]
+  # cache_gate_armed is a positive, fail-safe flag: omitted/false means the
+  # gate is NOT armed (B8 records but SKIPs). ARMED here because the
+  # 2026-07-22 scenario-16 prod baseline established a real positive reuse
+  # median of 0.725 over 7 warm turns (corroborating #376's ~0.64-0.70),
+  # and the B8 floor (0.50) was transcribed from it with headroom. B8 now
+  # PASS/WARN/FAILs so a future provider prefix-cache regression fails
+  # loud. Set back to false if a pool change makes the baseline invalid.
+  cache_gate_armed: true
+
+prompts:
+  - model: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+    user: "Using the reference facts above, reply with exactly one word: pong."
+    max_tokens: 12

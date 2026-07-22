@@ -39,6 +39,24 @@ const (
 	MaxBuyerCount                            = 1000
 	MaxRequestsPerBuyer                      = 10000
 	MaxTotalBuyerRequests                    = 100000
+
+	// MinCachePrefixLines is the floor for Buyers.CachePrefixLines under
+	// the sticky_cache pattern. At ~30 tokens/line this is ~1.8k tokens —
+	// large enough to exceed the provider's prefix-cache granularity so a
+	// warm turn's cached_prompt_tokens is a real reuse signal rather than
+	// a constant 0 (RESEARCH_236 hard rule #1), while staying well under
+	// the live providers' max_context_tokens (4000 as of 2026-07-22) so
+	// the request is not rejected with context_exceeds_capacity. The
+	// scenario picks a value with headroom under that cap.
+	MinCachePrefixLines = 60
+
+	// MaxCachePrefixLines bounds Buyers.CachePrefixLines from above so a
+	// scenario (semi-trusted input) cannot drive the prefix generator into
+	// an enormous per-request body / memory blowup, and so the generated
+	// prompt stays within realistic provider context windows. At ~30
+	// tokens/line, 200 lines is ~6k tokens — already above the live 4000
+	// cap; anything larger is only ever a mistake or an attack.
+	MaxCachePrefixLines = 200
 )
 
 func expandEnv(input []byte) []byte {
@@ -130,6 +148,17 @@ type Benchmark struct {
 	// B5 (slot utilization). Defaults to 3 — the Pearl coordinator's
 	// AccountConcurrency at the time this spec landed (PR #205).
 	ProviderSlots int `yaml:"provider_slots"`
+
+	// CacheGateArmed gates whether B8 (sticky cache-reuse, scenario 16) emits a
+	// PASS/WARN/FAIL verdict. It is a POSITIVE, fail-safe flag: the zero value
+	// (false, i.e. omitted) means the gate is NOT armed, so B8 records its
+	// measured value but SKIPs. (B9 is record-only and always SKIPs regardless
+	// of this flag.) Scenario 16 arms the gate from the 2026-07-22 prod
+	// baseline (median reuse 0.725, corroborating #376); the B8 floor 0.50 is
+	// transcribed from that positive baseline. Defaulting to false means a
+	// scenario that forgets the flag fails safe (SKIP), never silently arms an
+	// uncalibrated gate.
+	CacheGateArmed bool `yaml:"cache_gate_armed"`
 
 	// SustainedGateArmed arms B10 (sustained streaming-TPS retention) as a
 	// blocking gate. When false (the default), B10 still measures and
@@ -257,6 +286,17 @@ type Buyers struct {
 	// Example: "harness-buyer-%d" → buyer 0 sends
 	// "X-MacProvider-Conversation: harness-buyer-0" on every request.
 	StickyConversationKey string `yaml:"sticky_conversation_key"`
+
+	// CachePrefixLines is required (and only used) when Pattern is
+	// "sticky_cache". The harness prepends a per-buyer, per-run
+	// deterministic "reference facts" block of this many lines
+	// (~25 tokens/line) to every request's user content, so consecutive
+	// sticky-routed turns reuse the provider's warm prefix cache. Must be
+	// large enough (>= MinCachePrefixLines) that a warm turn's
+	// cached_prompt_tokens exceeds the provider's prefix-cache
+	// granularity — a small prefix reports 0 reuse always and the B8
+	// invariant becomes meaningless (RESEARCH_236 hard rule #1).
+	CachePrefixLines int `yaml:"cache_prefix_lines"`
 }
 
 // Prompt is one item in the rotating prompt pool. Buyers pick by index
@@ -509,12 +549,49 @@ func (s *Scenario) validateBuyerFleet() error {
 		}
 	}
 	switch s.Buyers.Pattern {
-	case "constant", "interval", "ramp", "burst", "cold_warm_pairs":
+	case "constant", "interval", "ramp", "burst", "cold_warm_pairs", "sticky_cache":
 	default:
-		return fmt.Errorf("buyers.pattern must be one of constant|interval|ramp|burst|cold_warm_pairs (got %q)", s.Buyers.Pattern)
+		return fmt.Errorf("buyers.pattern must be one of constant|interval|ramp|burst|cold_warm_pairs|sticky_cache (got %q)", s.Buyers.Pattern)
 	}
 	if s.Buyers.Pattern == "interval" && s.Buyers.IntervalMs <= 0 {
 		return fmt.Errorf("buyers.interval_ms must be > 0 when pattern=interval")
+	}
+	if s.Buyers.Pattern == "sticky_cache" {
+		// The KV-cache-reuse probe (RESEARCH_236 / #376) needs: non-
+		// streaming so the terminal usage frame is reliably present
+		// (streaming usage can drop for large prompts, #511); a sticky
+		// conversation tag so the warm turns route back to the same
+		// provider; >= 2 turns so there is at least one warm (cached)
+		// turn after the request_index-0 cold first-touch; a paced
+		// interval so the provider has settled the prior turn; and a
+		// large prefix so cached_prompt_tokens is meaningful.
+		if s.Buyers.Count != 1 {
+			// One sequential buyer only: the uncached primer / warm-turn
+			// semantics assume a single conversation warming one provider,
+			// and the live pool serves each model from a single-slot
+			// provider (concurrent buyers contend and 503). A multi-buyer
+			// variant would need per-buyer primer tracking plus a
+			// provider-affinity assertion — out of scope here.
+			return fmt.Errorf("buyers.count must be 1 when pattern=sticky_cache (got %d)", s.Buyers.Count)
+		}
+		if s.Buyers.Stream {
+			return fmt.Errorf("buyers.stream must be false when pattern=sticky_cache (streaming usage can drop for large prompts, #511)")
+		}
+		if s.Buyers.StickyConversationKey == "" {
+			return fmt.Errorf("buyers.sticky_conversation_key is required when pattern=sticky_cache")
+		}
+		if s.Buyers.RequestsPerBuyer < 2 {
+			return fmt.Errorf("buyers.requests_per_buyer must be >= 2 when pattern=sticky_cache (got %d) — need a cold turn plus at least one warm turn", s.Buyers.RequestsPerBuyer)
+		}
+		if s.Buyers.IntervalMs <= 0 {
+			return fmt.Errorf("buyers.interval_ms must be > 0 when pattern=sticky_cache")
+		}
+		if s.Buyers.CachePrefixLines < MinCachePrefixLines {
+			return fmt.Errorf("buyers.cache_prefix_lines must be >= %d when pattern=sticky_cache (got %d) — a small prefix makes cached_prompt_tokens meaningless", MinCachePrefixLines, s.Buyers.CachePrefixLines)
+		}
+		if s.Buyers.CachePrefixLines > MaxCachePrefixLines {
+			return fmt.Errorf("buyers.cache_prefix_lines must be <= %d when pattern=sticky_cache (got %d) — an oversized prefix blows up the request body and exceeds provider context windows", MaxCachePrefixLines, s.Buyers.CachePrefixLines)
+		}
 	}
 	if s.Buyers.Pattern == "ramp" && s.Buyers.RampDuration <= 0 {
 		return fmt.Errorf("buyers.ramp_duration must be > 0 when pattern=ramp")
@@ -534,13 +611,12 @@ func (s *Scenario) validateBuyerFleet() error {
 		if len(s.Benchmark.Invariants) == 0 {
 			return fmt.Errorf("benchmark.invariants must list at least one B-ID when benchmark.enabled=true")
 		}
-		// B8/B9 are reserved by RESEARCH_236 (sticky cache-reuse); B10 is
-		// RESEARCH_235's sustained-TPS retention. B10 skips that range to
-		// avoid colliding regardless of PR merge order.
-		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true, "B10": true}
+		// B8/B9 = RESEARCH_236 (sticky cache-reuse); B10 = RESEARCH_235
+		// (sustained-TPS retention). Both invariant sets coexist.
+		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true, "B8": true, "B9": true, "B10": true}
 		for _, id := range s.Benchmark.Invariants {
 			if !known[id] {
-				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B7, B10)", id)
+				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B10)", id)
 			}
 		}
 		if s.Benchmark.ProviderSlots < 1 {

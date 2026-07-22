@@ -35,21 +35,21 @@ type Pricing struct {
 
 // ModelPrice is the per-1000-token cost of one tier-2 model. USD.
 type ModelPrice struct {
-	ModelID                string  `json:"model"`
-	PromptPricePer1k       float64 `json:"price_per_1k_prompt_tokens"`
-	CompletionPricePer1k   float64 `json:"price_per_1k_completion_tokens"`
+	ModelID              string  `json:"model"`
+	PromptPricePer1k     float64 `json:"price_per_1k_prompt_tokens"`
+	CompletionPricePer1k float64 `json:"price_per_1k_completion_tokens"`
 }
 
 // rawCatalogEntry is the JSON-side mirror. Kept separate so we can grow
 // the manifest schema (e.g. tier identifiers, hash fields) without
 // forcing pricing math to know about them.
 type rawCatalogEntry struct {
-	Model                string  `json:"model"`
-	ModelID              string  `json:"model_id"`
-	PromptPer1k          float64 `json:"price_per_1k_prompt_tokens"`
-	CompletionPer1k      float64 `json:"price_per_1k_completion_tokens"`
-	PromptPer1kAlt       float64 `json:"prompt_per_1k"`
-	CompletionPer1kAlt   float64 `json:"completion_per_1k"`
+	Model              string  `json:"model"`
+	ModelID            string  `json:"model_id"`
+	PromptPer1k        float64 `json:"price_per_1k_prompt_tokens"`
+	CompletionPer1k    float64 `json:"price_per_1k_completion_tokens"`
+	PromptPer1kAlt     float64 `json:"prompt_per_1k"`
+	CompletionPer1kAlt float64 `json:"completion_per_1k"`
 }
 
 // LoadPricing reads a tier-2 pricing manifest from a local path or
@@ -60,14 +60,14 @@ type rawCatalogEntry struct {
 // Two source formats are supported, distinguished by file extension:
 //
 //   - *.json  → manifest file with per-1k USD rates (array, {models:[...]},
-//               or {model_id:{...}} shape).
+//     or {model_id:{...}} shape).
 //   - *.yaml  → coordinator config file. The loader parses rewards.rate_card,
 //   - *.yml      rewards.global_multiplier, rewards.provider_share, and
-//               stats.rollup.usd_per_million_credits, then derives provider-
-//               net USD/1k rates per the credits → USD formula. This is the
-//               recommended form for production runs — pricing tracks
-//               whatever the coordinator is actually settling against,
-//               eliminating drift from a parallel JSON manifest (issue #223).
+//     stats.rollup.usd_per_million_credits, then derives provider-
+//     net USD/1k rates per the credits → USD formula. This is the
+//     recommended form for production runs — pricing tracks
+//     whatever the coordinator is actually settling against,
+//     eliminating drift from a parallel JSON manifest (issue #223).
 func LoadPricing(source string) (*Pricing, error) {
 	if source == "" {
 		return nil, fmt.Errorf("empty pricing source")

@@ -528,10 +528,10 @@ func TestComputeBuyerMetrics_ColdWarmPopulated(t *testing.T) {
 func TestSchema_ColdWarmPairs_Validate(t *testing.T) {
 	// requests_per_buyer must be even, ≥2; inter_pair_idle_seconds > 0
 	cases := []struct {
-		name              string
-		reqs              int
-		idleSec           int
-		wantErr           bool
+		name    string
+		reqs    int
+		idleSec int
+		wantErr bool
 	}{
 		{"valid 10 pairs", 20, 60, false},
 		{"odd reqs", 21, 60, true},
@@ -551,6 +551,431 @@ func TestSchema_ColdWarmPairs_Validate(t *testing.T) {
 					Pattern:              "cold_warm_pairs",
 					RequestsPerBuyer:     tc.reqs,
 					InterPairIdleSeconds: tc.idleSec,
+				},
+				Prompts: []scenario.Prompt{{Model: "m", User: "hi"}},
+			}
+			err := s.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate err=%v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// B8 / B9 — sticky cache-reuse (RESEARCH_236) -------------------------
+
+// makeCacheResult builds a non-streaming ("cached" or "uncached") result
+// with a given full-response latency (TotalMillis, since these turns are
+// non-streaming) and, when usageAndCache is true, a usage frame carrying
+// cached_prompt_tokens = cached and prompt_tokens = prompt.
+func makeCacheResult(latencyMs int64, phase string, usageAndCache bool, cached, prompt int64) buyer.Result {
+	r := makeResult(latencyMs, latencyMs, 4, false, "p1", "m", 200)
+	r.CachePhase = phase
+	if usageAndCache {
+		r.UsagePresent = true
+		r.CachedPromptTokensPresent = true
+		r.CachedPromptTokens = cached
+		r.PromptTokensReported = prompt
+	}
+	return r
+}
+
+// makeFailedCacheResult builds a cache-phase result that did NOT succeed
+// (e.g. a 503) — attempted but no usage.
+func makeFailedCacheResult(phase string) buyer.Result {
+	r := makeResult(300, 300, 0, false, "p1", "m", 503)
+	r.CachePhase = phase
+	return r
+}
+
+// scCache builds a benchmark scenario with the cache gate armed/disarmed
+// as requested, so tests can exercise both the scoring and the SKIP-only
+// (calibration-pending) modes.
+func scCache(armed bool, invs ...string) *scenario.Scenario {
+	s := sc(invs...)
+	s.Benchmark.CacheGateArmed = armed
+	return s
+}
+
+// okPrimer is a successful uncached first-touch that warms the cache, a
+// precondition for B8/B9 scoring.
+func okPrimer() buyer.Result {
+	return makeCacheResult(500, "uncached", true, 0, 3000)
+}
+
+func TestB8_CacheReuse_Pass(t *testing.T) {
+	// median reuse = 0.64 (2000/3125) ≥ target 0.60 → PASS (gate armed)
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3125))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusPass {
+		t.Fatalf("B8 expected PASS at reuse 0.64, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Warn(t *testing.T) {
+	// median reuse = 0.55 (1650/3000, in [0.50, 0.60)) → WARN (degrading:
+	// over the 0.50 floor but under the 0.60 target)
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 1650, 3000))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusWarn {
+		t.Fatalf("B8 expected WARN at reuse 0.55, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_BandBoundaries(t *testing.T) {
+	// Pin the exact reband boundaries: PASS >= 0.60, WARN [0.50, 0.60),
+	// FAIL < 0.50. Guards against a silent threshold drift.
+	cases := []struct {
+		name       string
+		cached     int64
+		prompt     int64
+		wantStatus Status
+	}{
+		{"at target 0.60 -> PASS", 1800, 3000, StatusPass},
+		{"at floor 0.50 -> WARN", 1500, 3000, StatusWarn},
+		{"just below floor 0.499 -> FAIL", 1497, 3000, StatusFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results := []buyer.Result{okPrimer()}
+			for i := 0; i < 6; i++ {
+				results = append(results, makeCacheResult(300, "cached", true, tc.cached, tc.prompt))
+			}
+			res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+			if got := res.Verdicts[0].Status; got != tc.wantStatus {
+				t.Fatalf("reuse %.4f: want %s, got %s: %s", float64(tc.cached)/float64(tc.prompt), tc.wantStatus, got, res.Verdicts[0].Detail)
+			}
+		})
+	}
+}
+
+func TestB8_CacheReuse_Fail_Collapsed(t *testing.T) {
+	// Cache collapsed: every cached turn reports cached_prompt_tokens=0
+	// but the field IS present → reuse 0.0 < 0.50 → FAIL (armed, not SKIP).
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 0, 3000))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusFail {
+		t.Fatalf("B8 expected FAIL at reuse 0.0 (collapsed), got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_GateNotArmed(t *testing.T) {
+	// Even a healthy 0.64 reuse SKIPs while the gate is not armed — the
+	// floor isn't calibrated against a positive baseline yet.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3125))
+	}
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP while gate not armed, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_NoPrimer(t *testing.T) {
+	// The uncached first-touch failed (cache never warmed) → SKIP even
+	// though warm turns "succeeded".
+	results := []buyer.Result{makeFailedCacheResult("uncached")}
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP when primer failed, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_PartialSurvivorship(t *testing.T) {
+	// 7 attempted warm turns, only 3 valid measurements (4 usage-absent) —
+	// meets MinSamples but fails the majority-coverage gate → SKIP, not a
+	// survivorship-biased PASS.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 3; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP on partial/survivorship run, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_UsageAbsent(t *testing.T) {
+	// Spec-strict gateway: cached turns exist but none carried usage/cache
+	// fields → SKIP, never FAIL (hard rule #2).
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP with usage absent, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_InvalidRatio(t *testing.T) {
+	// Untrusted provider reports cached_prompt_tokens > prompt_tokens
+	// (impossible, ratio > 1). Must NOT PASS — excluded as invalid → no
+	// valid samples → SKIP.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 5000, 3000))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP on impossible cached>prompt, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+	if bm := computeBuyerMetrics(results); bm.CacheReuse.InvalidTurns != 6 {
+		t.Fatalf("want 6 invalid turns, got %d", bm.CacheReuse.InvalidTurns)
+	}
+}
+
+func TestB8_CacheReuse_Skip_InsufficientSamples(t *testing.T) {
+	// Only 2 valid measured warm turns (< CacheReuseMinSamples) → SKIP.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 2; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP on thin sample, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_AllWarmFailed(t *testing.T) {
+	// Primer succeeded but every warm turn failed (503) → SKIP as a run
+	// failure, distinctly from "pattern not used".
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 5; i++ {
+		results = append(results, makeFailedCacheResult("cached"))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP when all warm turns failed, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_NoCachePhase(t *testing.T) {
+	// Scenario didn't use the sticky_cache pattern → SKIP.
+	results := []buyer.Result{makeResult(300, 1000, 64, false, "p1", "m", 200)}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP without cache phase, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+// B9 is RECORD-ONLY: it always SKIPs (never PASS/WARN/FAIL), regardless of
+// the cache_gate_armed flag, but records the measured latency ratio when
+// reuse is conclusively positive.
+
+func TestB9_CachedLatency_RecordOnly_WithReuse(t *testing.T) {
+	// Positive reuse (0.667) + latency advantage → SKIP (record-only) but
+	// the ratio 0.6 IS recorded in Value.
+	var results []buyer.Result
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
+	}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
+	v := res.Verdicts[0]
+	if v.Status != StatusSkip {
+		t.Fatalf("B9 is record-only, expected SKIP, got %s: %s", v.Status, v.Detail)
+	}
+	if v.Value < 0.59 || v.Value > 0.61 {
+		t.Fatalf("B9 expected recorded ratio ~0.6, got %v", v.Value)
+	}
+}
+
+func TestB9_CachedLatency_RecordOnly_NoReuse(t *testing.T) {
+	// No reuse evidence (usage absent) → SKIP, ratio not attributable.
+	var results []buyer.Result
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(500, "uncached", false, 0, 0))
+	}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
+	}
+	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B9 expected SKIP without reuse evidence, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB9_CachedLatency_RecordOnly_CollapsedReuse(t *testing.T) {
+	// Warm turns faster but reuse collapsed to 0 (valid cached=0): no
+	// reuse-bearing latency cohort → SKIP, ratio not recorded as an
+	// advantage.
+	var results []buyer.Result
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
+	}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 0, 3000))
+	}
+	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B9 expected SKIP on collapsed reuse, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+// scCacheSticky builds an armed sticky_cache scenario so Evaluate derives
+// the INTENDED warm-turn count (requestsPerBuyer-1) for the coverage gate.
+func scCacheSticky(requestsPerBuyer int, invs ...string) *scenario.Scenario {
+	s := scCache(true, invs...)
+	s.Buyers.Pattern = "sticky_cache"
+	s.Buyers.Count = 1
+	s.Buyers.RequestsPerBuyer = requestsPerBuyer
+	return s
+}
+
+func TestB8_CacheReuse_Skip_EvenHalfNotMajority(t *testing.T) {
+	// 8 attempted warm turns, exactly 4 valid (4 usage-absent). Half is not
+	// a strict majority (needs 8/2+1=5) → SKIP, not PASS.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP at exactly-half coverage, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_TruncatedVsIntended(t *testing.T) {
+	// Scenario INTENDED 7 warm turns (requests_per_buyer=8) but the run was
+	// truncated: only the primer + 3 healthy warm turns came back. Judged
+	// against the intended count (majority=4), 3 is incomplete → SKIP —
+	// even though against the 3 attempted it would look 3/3 complete.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 3; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(scCacheSticky(8, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP on truncated-vs-intended run, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+	// Sanity: the same 3/3 attempted set PASSes when there is no intended
+	// count to measure against (non-sticky_cache fallback), proving the
+	// intended-count gate is what caught the truncation.
+	res2 := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res2.Verdicts[0].Status; got != StatusPass {
+		t.Fatalf("B8 fallback expected PASS on 3/3 attempted, got %s: %s", got, res2.Verdicts[0].Detail)
+	}
+}
+
+func TestComputeBuyerMetrics_B9CohortExcludesFastNonReuseTurns(t *testing.T) {
+	// Adversarial: fast usage-absent warm turns (latency 100) alongside
+	// SLOW reuse-bearing turns (latency 600, > the 500 cold primer). The
+	// all-warm CachedLatencyMs p50 is dragged down and would falsely look
+	// like an advantage; CachedReuseLatencyMs (the B9 population) must
+	// exclude the fast non-reuse turns, so its p50 = 600 and the ratio
+	// shows NO advantage.
+	results := []buyer.Result{makeCacheResult(500, "uncached", true, 0, 3000)}
+	for i := 0; i < 5; i++ {
+		results = append(results, makeCacheResult(600, "cached", true, 2000, 3000)) // reuse-bearing, slow
+	}
+	for i := 0; i < 5; i++ {
+		results = append(results, makeCacheResult(100, "cached", false, 0, 0)) // usage-absent, fast
+	}
+	bm := computeBuyerMetrics(results)
+	if bm.CacheReuse.CachedLatencyMs.Count != 10 {
+		t.Fatalf("CachedLatencyMs should cover all 10 warm turns, got %d", bm.CacheReuse.CachedLatencyMs.Count)
+	}
+	if bm.CacheReuse.CachedReuseLatencyMs.Count != 5 {
+		t.Fatalf("CachedReuseLatencyMs should be the 5 reuse-bearing turns, got %d", bm.CacheReuse.CachedReuseLatencyMs.Count)
+	}
+	if bm.CacheReuse.CachedReuseLatencyMs.P50 != 600 {
+		t.Fatalf("reuse-bearing p50 should be 600 (not dragged down by fast usage-absent turns), got %v", bm.CacheReuse.CachedReuseLatencyMs.P50)
+	}
+	if bm.CacheReuse.LatencyRatioP50 != 1.2 { // 600/500 — no advantage
+		t.Fatalf("latency ratio should be 1.2 from the reuse cohort, got %v", bm.CacheReuse.LatencyRatioP50)
+	}
+}
+
+func TestComputeBuyerMetrics_CacheReusePopulated(t *testing.T) {
+	var results []buyer.Result
+	results = append(results, makeCacheResult(600, "uncached", true, 0, 4000))
+	for i := 0; i < 5; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2400, 4000))
+	}
+	// One cached turn with usage absent — counted but not measured.
+	results = append(results, makeCacheResult(320, "cached", false, 0, 0))
+	bm := computeBuyerMetrics(results)
+	if bm.CacheReuse.AttemptedCachedTurns != 6 || bm.CacheReuse.AttemptedUncachedTurns != 1 {
+		t.Fatalf("want 6 attempted cached / 1 uncached, got %d / %d", bm.CacheReuse.AttemptedCachedTurns, bm.CacheReuse.AttemptedUncachedTurns)
+	}
+	if bm.CacheReuse.CachedTurns != 6 {
+		t.Fatalf("want 6 cached turns, got %d", bm.CacheReuse.CachedTurns)
+	}
+	if bm.CacheReuse.ReuseCount != 5 {
+		t.Fatalf("want 5 measured reuse samples, got %d", bm.CacheReuse.ReuseCount)
+	}
+	if bm.CacheReuse.UsageAbsentTurns != 1 {
+		t.Fatalf("want 1 usage-absent turn, got %d", bm.CacheReuse.UsageAbsentTurns)
+	}
+	if bm.CacheReuse.ReuseP50 != 0.6 {
+		t.Fatalf("want reuse p50 0.6, got %v", bm.CacheReuse.ReuseP50)
+	}
+	if bm.CacheReuse.UncachedLatencyMs.Count != 1 || bm.CacheReuse.CachedLatencyMs.Count != 6 {
+		t.Fatalf("want 1 uncached / 6 cached latency samples, got %d / %d", bm.CacheReuse.UncachedLatencyMs.Count, bm.CacheReuse.CachedLatencyMs.Count)
+	}
+	if bm.CacheReuse.LatencyRatioP50 != 0.5 {
+		t.Fatalf("want latency ratio 0.5 (300/600), got %v", bm.CacheReuse.LatencyRatioP50)
+	}
+}
+
+// Scenario schema validation for sticky_cache ------------------------
+
+func TestSchema_StickyCache_Validate(t *testing.T) {
+	cases := []struct {
+		name        string
+		count       int
+		stream      bool
+		stickyKey   string
+		reqs        int
+		intervalMs  int
+		prefixLines int
+		wantErr     bool
+	}{
+		{"valid", 1, false, "harness-%d", 4, 1500, 140, false},
+		{"multi buyer rejected", 2, false, "harness-%d", 4, 1500, 140, true},
+		{"streaming rejected", 1, true, "harness-%d", 4, 1500, 140, true},
+		{"no sticky key", 1, false, "", 4, 1500, 140, true},
+		{"one request", 1, false, "harness-%d", 1, 1500, 140, true},
+		{"zero interval", 1, false, "harness-%d", 4, 0, 140, true},
+		{"prefix too small", 1, false, "harness-%d", 4, 1500, 50, true},
+		{"prefix too large", 1, false, "harness-%d", 4, 1500, 500, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &scenario.Scenario{
+				Name:     "x",
+				Target:   scenario.Target{GatewayURL: "https://x", BuyerToken: "tk"},
+				Duration: 60_000_000_000,
+				Buyers: scenario.Buyers{
+					Count:                 tc.count,
+					Stream:                tc.stream,
+					Pattern:               "sticky_cache",
+					RequestsPerBuyer:      tc.reqs,
+					IntervalMs:            tc.intervalMs,
+					StickyConversationKey: tc.stickyKey,
+					CachePrefixLines:      tc.prefixLines,
 				},
 				Prompts: []scenario.Prompt{{Model: "m", User: "hi"}},
 			}

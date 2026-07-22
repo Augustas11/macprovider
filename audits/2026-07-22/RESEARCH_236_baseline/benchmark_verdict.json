@@ -1,0 +1,22 @@
+[
+  {
+    "id": "B8",
+    "title": "sticky cache-reuse retention",
+    "status": "PASS",
+    "value": 0.7253571428571428,
+    "target": 0.5,
+    "bare_min": 0.3,
+    "unit": "ratio",
+    "detail": "median cache reuse 0.725 ≥ floor 0.50 (n=7 cached turns, 7 measured, min=0.725 mean=0.725, 0 usage-absent, 0 invalid)"
+  },
+  {
+    "id": "B9",
+    "title": "cached-turn latency advantage (record-only)",
+    "status": "SKIP",
+    "value": 0.21028411364545818,
+    "target": 0.9,
+    "bare_min": 1,
+    "unit": "ratio",
+    "detail": "record-only: reuse-bearing cached/uncached latency p50 ratio 0.21 (cached p50=2102ms uncached p50=9996ms, n_cached=7 n_uncached=1) — not a gate; single cold control has connection-setup bias, arming needs a multi-cold-control redesign"
+  }
+]
