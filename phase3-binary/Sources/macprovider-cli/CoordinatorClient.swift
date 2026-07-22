@@ -413,10 +413,18 @@ actor CoordinatorClient {
         self.catalogCandidateSHA256 = catalogCandidateSHA256
         self.catalogSignerKeyID = catalogSignerKeyID
         self.catalogRowIdentity = catalogRowIdentity
+        let markerStoreForManifest = autoupdateMarkerStore
         let compatibilityManifestLoader = installedCompatibilityManifest ?? { executableURL, expectedVersion in
-            CompatibilitySetManifest.loadInstalled(
-                executableURL: executableURL,
-                expectedVersion: expectedVersion
+            // Prefer install authority when PATH is a stale regular-file copy
+            // without a sibling compatibility-set.json (#616 / #610).
+            let canonical = markerStoreForManifest.resolveCanonicalInstallBinary(
+                launchedExecutableURL: executableURL
+            )
+            return CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: executableURL,
+                canonicalBinaryURL: canonical,
+                expectedVersion: expectedVersion,
+                publicKeyPEM: markerStoreForManifest.compatibilityManifestPublicKeyPEM
             )
         }
         self.installedCompatibilityManifest = compatibilityManifestLoader
@@ -475,16 +483,6 @@ actor CoordinatorClient {
 
     func start() async {
         await runStartupAutoupdateRecovery()
-        // Best-effort PATH converge after every serve start. When an older CLI
-        // (public 1.8.48) activated a newer payload without convergePathEntrypoint,
-        // the next launchd-managed process repairs ~/.local/bin so ordinary
-        // `macprovider-cli update` stops seeing a divergent regular-file copy (#616).
-        do {
-            _ = try autoupdateMarkerStore.ensurePathEntrypointMatchesInstallAuthority()
-        } catch {
-            // Do not block buyer serving on PATH repair failure; update paths
-            // still fail closed when they require a safe entrypoint converge.
-        }
         startReconnectTask()
         if warmSwapEnabled, swapHeartbeatTask == nil {
             swapHeartbeatTask = Task { [weak self] in

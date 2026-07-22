@@ -91,70 +91,6 @@ read_config_port() {
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { printf "[%s] %s\n" "$(ts)" "$*" >> "$LOG_PATH"; }
 
-# #616/#610: when an older updater activated a newer payload without repairing
-# ~/.local/bin/macprovider-cli, ordinary PATH `macprovider-cli update` keeps
-# executing a stale regular-file copy with no sibling compatibility-set.json.
-# Best-effort converge that entrypoint to a symlink at MACPROVIDER_BINARY_PATH
-# (install authority). Fail soft — never block health/rollback ticks.
-converge_path_entrypoint() {
-  local canonical="${1:-$BINARY_PATH}"
-  local entrypoint="${MACPROVIDER_PATH_ENTRYPOINT:-$HOME/.local/bin/macprovider-cli}"
-  local bindir
-  bindir="$(dirname "$entrypoint")"
-  local tmp target resolved
-
-  [ -n "$canonical" ] || return 0
-  [ -x "$canonical" ] || return 0
-  [ -d "$bindir" ] || return 0
-  if [ ! -e "$entrypoint" ] && [ ! -L "$entrypoint" ]; then
-    return 0
-  fi
-
-  # Owner-only repair; match AutoUpdateMarkerStore.convergePathEntrypoint.
-  if [ "$(stat -f '%u' "$bindir" 2>/dev/null || true)" != "$(id -u)" ]; then
-    return 0
-  fi
-  if [ "$(stat -f '%u' "$entrypoint" 2>/dev/null || true)" != "$(id -u)" ]; then
-    return 0
-  fi
-  # Refuse group/world-writable bin dirs (Swift validateTrustedBinaryDirectory).
-  # stat %Lp is already an octal permission string (e.g. 700); parse as base-8.
-  mode="$(stat -f '%Lp' "$bindir" 2>/dev/null || printf '0')"
-  if [ "$((8#$mode & 022))" -ne 0 ]; then
-    return 0
-  fi
-
-  if [ -L "$entrypoint" ]; then
-    target="$(readlink "$entrypoint" 2>/dev/null || true)"
-    if [ -z "$target" ]; then
-      return 0
-    fi
-    if [[ "$target" == /* ]]; then
-      resolved="$target"
-    else
-      resolved="$bindir/$target"
-    fi
-    if [ "$resolved" = "$canonical" ]; then
-      return 0
-    fi
-  elif [ -f "$entrypoint" ]; then
-    :
-  else
-    return 0
-  fi
-
-  tmp="$bindir/.macprovider-cli.entrypoint-watchdog-$$"
-  rm -f "$tmp"
-  if ! ln -s "$canonical" "$tmp" 2>/dev/null; then
-    return 0
-  fi
-  if ! mv -f "$tmp" "$entrypoint" 2>/dev/null; then
-    rm -f "$tmp"
-    return 0
-  fi
-  log "converged PATH entrypoint $entrypoint -> $canonical"
-}
-
 resolve_coordinator_ip() {
   # First try dscacheutil (no network call if already cached);
   # fall back to host(1) which most macs have via bind-utils.
@@ -1475,7 +1411,6 @@ PY
 }
 
 main() {
-  converge_path_entrypoint "$BINARY_PATH" || true
   autoupdate_recovery_tick
   pid="$(read_provider_id || true)"
   if [ -z "$pid" ]; then

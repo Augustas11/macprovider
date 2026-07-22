@@ -55,7 +55,7 @@ Operator journey on a reachable coordinator:
 # standalone ~/.local/bin copy raises invalid_current_or_target_set even with
 # a valid Pearl first-hop admission. One symlink repair makes ordinary update
 # use the coherent ~/macprovider payload (J2 control). Newer CLIs also
-# auto-repair this at update/serve/watchdog time (#616).
+# auto-repair this at update/serve time (#616).
 if [ -e "$HOME/.local/bin/macprovider-cli" ] && [ ! -L "$HOME/.local/bin/macprovider-cli" ] \
   && [ -x "$HOME/macprovider/macprovider-cli" ]; then
   ln -sfn "$HOME/macprovider/macprovider-cli" "$HOME/.local/bin/macprovider-cli"

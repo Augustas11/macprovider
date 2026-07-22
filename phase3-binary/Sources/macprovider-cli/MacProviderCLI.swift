@@ -698,6 +698,12 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        // #616/#610: repair a stale PATH regular-file entrypoint to install
+        // authority before any compatibility-set discovery freezes identity for
+        // this serve process. Must run before manifest load / CoordinatorClient init.
+        let serveMarkerStore = AutoUpdateMarkerStore()
+        _ = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority()
+
         // v1.8.53 can leave its one-shot reload helper alive long enough to
         // restart the newly installed target repeatedly. The target fences that
         // helper before configuration/model work, but only while two durable
@@ -1201,9 +1207,18 @@ struct ServeCommand: AsyncParsableCommand {
         }()
         let admissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(admissionIdentityStatus)
         let installedCompatibilityManifest: CompatibilitySetManifest? = try { () throws -> CompatibilitySetManifest? in
-            guard let directory = CompatibilitySetManifest.payloadDirectory(
-                for: Bundle.main.executableURL
-            ) else { return nil }
+            let launched = Bundle.main.executableURL
+            let canonical = serveMarkerStore.resolveCanonicalInstallBinary(launchedExecutableURL: launched)
+            if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: launched,
+                canonicalBinaryURL: canonical,
+                expectedVersion: CoordinatorClient.binaryVersion
+            ) {
+                return installed
+            }
+            // Fail closed when a sibling/canonical manifest exists but is invalid.
+            let authority = canonical ?? CompatibilitySetManifest.resolvedExecutableURL(launched)
+            guard let directory = CompatibilitySetManifest.payloadDirectory(for: authority) else { return nil }
             let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
             guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
             return try CompatibilitySetManifest.loadValidated(

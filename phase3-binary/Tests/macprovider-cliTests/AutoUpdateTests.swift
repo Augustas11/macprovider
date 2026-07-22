@@ -1010,6 +1010,46 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(installed.version, "1.8.48")
     }
 
+    func testLoadInstalledPreferringInstallAuthorityAcceptsNewerCanonicalThanPathExpectedVersion() throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let install = fixture.url.appendingPathComponent("macprovider", isDirectory: true)
+        try FileManager.default.createDirectory(at: install, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let canonical = install.appendingPathComponent("macprovider-cli")
+        try Data("canonical-binary".utf8).write(to: canonical)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: canonical.path)
+        let manifestFixture = try CompatibilityManifestFixture(
+            root: install,
+            privateKey: manifestSigningKey,
+            version: "1.8.57",
+            providerCLIVersion: "1.8.57",
+            malibuAppVersion: "1.8.43",
+            commit: "ea9093e406c7c85764d65e21d31c12ddcca45208",
+            populateResources: true
+        )
+
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy-1.8.48".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+
+        // Physical mixed state: PATH still claims 1.8.48 while canonical payload
+        // already carries the newer signed set.
+        let installed = try XCTUnwrap(
+            CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: entrypoint,
+                canonicalBinaryURL: canonical,
+                expectedVersion: "1.8.48",
+                publicKeyPEM: manifestPublicKey
+            )
+        )
+        XCTAssertEqual(installed.compatibilitySetID, manifestFixture.compatibilitySetID)
+        XCTAssertEqual(installed.version, "1.8.57")
+        XCTAssertEqual(installed.providerCLIVersion, "1.8.57")
+    }
+
     func testRequireCoordinatorAdmissionResolvesCurrentSetFromCanonicalWhenPathLacksSiblingSet() throws {
         let fixture = try TempHome()
         let manifestSigningKey = P256.Signing.PrivateKey()
