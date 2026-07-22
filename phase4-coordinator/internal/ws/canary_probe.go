@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	errCanaryChallengeBankEmpty   = errors.New("canary challenge bank is empty")
-	errCanaryRandomSeedTooShort   = errors.New("canary random seed too short")
-	errCanaryChallengePromptEmpty = errors.New("canary challenge prompt and expected must not be empty")
+	errCanaryChallengeBankEmpty    = errors.New("canary challenge bank is empty")
+	errCanaryRandomSeedTooShort    = errors.New("canary random seed too short")
+	errCanaryChallengePromptEmpty  = errors.New("canary challenge prompt and expected must not be empty")
 	errCanaryChallengeMissingNonce = errors.New("canary challenge prompt and expected must contain {nonce}")
 )
 

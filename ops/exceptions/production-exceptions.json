@@ -173,10 +173,13 @@
       ],
       "partial_progress": [
         "2026-07-22 Pearl: pool.canary_enabled=false; canary-buyer.timer disabled/inactive.",
-        "2026-07-22 Pearl: removed empty /etc/macprovider-canary-buyer/enabled and /etc/macprovider/canary-buyer.enabled; installed /var/lib/macprovider-canary-buyer/DISABLED."
+        "2026-07-22 Pearl: removed empty /etc/macprovider-canary-buyer/enabled and /etc/macprovider/canary-buyer.enabled; installed /var/lib/macprovider-canary-buyer/DISABLED.",
+        "Partial #584 hermetically proves the scheduled liveness/explicit qualification split, hard request/token/time budgets, adaptive abort and recovery-soak invariants, fail-closed qualification baselines, no automatic retry/load amplification, and the FR-CAN22 sole-provider sanction floor."
       ],
       "still_blocked_for_clearance": [
-        "#584 physical baselines, safe qualification, emergency-disable drill, and approved re-enable evidence."
+        "Approved per-model/per-tier physical baselines and isolated cold/warm, thermal, memory-pressure, AC/battery, sustained-load, and fault-injection qualification evidence on M1 8 GB and higher-memory M-series providers.",
+        "A normal-operating-day liveness cadence with stable heartbeats, no disconnect/restart/drain, and the expected Ready pool after every post-probe soak.",
+        "A Pearl emergency-disable drill plus independent signed go/no-go approval for a later timer flip; until then keep the timer disabled, both enable gates absent, DISABLED present, and pool.canary_enabled=false."
       ]
     },
     {

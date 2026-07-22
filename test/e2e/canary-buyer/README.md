@@ -11,13 +11,17 @@ The canary has two deliberately separate modes:
   enumerated rollout-safety fleet remains Ready. The production gateway is
   observed only for safety, not used for the qualification workload.
 
-The shipped systemd and launchd schedules are fail-closed. They issue no network
-requests until an operator creates the configured enable-gate file after the
-Issue #584 production re-enable criteria are approved. The wrapper returns
+The shipped systemd and launchd schedules are fail-closed. The wrapper returns
 status `20` for the emergency-disable sentinel and `21` for a missing enable
 gate. The systemd unit records those deliberate no-load states as successful
 unit outcomes for alert hygiene, but rollout/recovery tooling requires the
 original `ExecMainStatus=0`; neither skip status is serving evidence.
+
+For the current Issue #584 containment, Pearl's timer stays disabled/inactive,
+both historical empty enable gates stay absent, `/var/lib/macprovider-canary-buyer/DISABLED`
+stays present, and `pool.canary_enabled` stays false. This Partial does not
+authorize removing the sentinel, recreating an enable gate, enabling the timer,
+or using either mode as production rollout proof.
 
 ## Emergency disable — one command
 
@@ -65,17 +69,9 @@ For systemd, install `probe.mjs`, `safety.mjs`, `run-canary.sh`, and
 `emergency-disable.sh` together,
 plus the buyer token, operator token, heartbeat URL, and expected-fleet JSON
 credentials documented in `canary-buyer.service`. Leave
-`/etc/macprovider-canary-buyer/enabled` absent until sign-off. The dedicated
-control directory is intentionally root-owned and world-traversable because the
-systemd service uses `DynamicUser=true`; it contains no credentials and remains
-non-writable to the service identity. After sign-off:
-
-```bash
-sudo install -d -o root -g root -m 0755 /etc/macprovider-canary-buyer
-sudo install -o root -g root -m 0644 /dev/null \
-  /etc/macprovider-canary-buyer/enabled
-sudo systemctl enable --now canary-buyer.timer
-```
+`/etc/macprovider-canary-buyer/enabled` absent and keep the DISABLED sentinel in
+place. A later signed re-enable change must provide the reviewed production
+procedure; this Partial intentionally provides no command that can arm Pearl.
 
 The dead-man heartbeat is pinged only after successful preconditions, workload,
 postconditions, and recovery soak. A failure never pings and never retries.
@@ -256,6 +252,26 @@ qualification endpoint. A separate test-only
 operator tokens are redacted from logs, stdout, and artifacts; the heartbeat
 URL is supplied to curl over stdin rather than exposed in the process argv.
 
+## Production re-enable remains out of scope
+
+Do not re-enable Pearl from this runbook. Issue #584 remains open until all of
+the following physical and operational evidence is reviewed and signed:
+
+- per-model/per-hardware-tier cold and warm baselines with sample size,
+  percentile, variance, thermal/power conditions, and safety margin;
+- the isolated qualification matrix on M1 8 GB and higher-memory M-series Macs,
+  including thermal pressure, memory pressure, battery/AC, sustained load, and
+  injected stream/heartbeat/provider failures;
+- a normal-operating-day liveness cadence with stable heartbeats, no provider
+  disconnect/restart/drain, and the expected Ready pool after every soak;
+- a Pearl emergency-disable drill proving the sentinel is installed before the
+  service/timer are stopped and remain inactive afterward; and
+- an approved go/no-go record followed by a separately reviewed timer flip.
+
+The coordinator's internal sanction loop is independently governed by
+SPEC-031 §16 and remains disabled until every requirement in that normative
+re-enable bar passes.
+
 ## Validation
 
 ```bash
@@ -266,7 +282,7 @@ bash test/e2e/canary-buyer/run-canary.test.sh
 
 These tests prove the software controls, installed-file layout, abort and auth
 classification, exact fleet/isolation invariants, recovery requirements, kill
-switches, and no retry/load amplification. The sole remaining production gate
-outside this software ledger is collected physical-Mac evidence: thermal and
-memory-pressure behavior, real heartbeat/disconnect recovery, and the required
-operating-day cadence from the approved target hardware.
+switches, and no retry/load amplification. They do not prove physical-Mac
+safety. Thermal and memory-pressure behavior, real heartbeat/disconnect
+recovery, the emergency-disable drill, and an operating-day cadence remain
+production re-enable gates.
