@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -138,10 +139,21 @@ func TestStickyCachePrefix_DistinctPerBuyerAndRun(t *testing.T) {
 // cold uncached first-touch and >=1 as warm cached turns, and prepends the
 // large prefix so consecutive turns share it.
 func TestRun_StickyCachePattern_PhaseTaggingAndPrefix(t *testing.T) {
-	var seenPromptLens []int
+	var seenUserContent []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		seenPromptLens = append(seenPromptLens, len(b))
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(b, &body)
+		for _, m := range body.Messages {
+			if m.Role == "user" {
+				seenUserContent = append(seenUserContent, m.Content)
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3200,"completion_tokens":2,"cached_prompt_tokens":2000}}`)
@@ -176,11 +188,39 @@ func TestRun_StickyCachePattern_PhaseTaggingAndPrefix(t *testing.T) {
 	if byIdx[1].CachePhase != "cached" || byIdx[2].CachePhase != "cached" {
 		t.Fatalf("request_index 1/2 CachePhase=%q/%q, want cached", byIdx[1].CachePhase, byIdx[2].CachePhase)
 	}
-	// The large prefix must actually be sent — each request body should be
+	if len(seenUserContent) != 3 {
+		t.Fatalf("want 3 user prompts, got %d", len(seenUserContent))
+	}
+	// The large prefix must actually be sent — each user prompt should be
 	// well over a plain "hi" (~3k+ token prefix ⇒ many KB).
-	for i, n := range seenPromptLens {
-		if n < 3000 {
-			t.Fatalf("request %d body only %d bytes — large prefix not prepended", i, n)
+	for i, s := range seenUserContent {
+		if len(s) < 3000 {
+			t.Fatalf("prompt %d only %d bytes — large prefix not prepended", i, len(s))
 		}
 	}
+	// CRITICAL (nothing_new fix): consecutive turns must SHARE a long
+	// common prefix but NOT be identical — an identical full prompt is
+	// rejected by the provider cache as nothing_new (LCP == full prompt)
+	// and reports 0 reuse even when the cache works.
+	lcp := longestCommonPrefixLen(seenUserContent[0], seenUserContent[1])
+	if lcp < 2000 {
+		t.Fatalf("consecutive turns share only %d-byte prefix — too little for a prefix-cache hit", lcp)
+	}
+	for i := 1; i < len(seenUserContent); i++ {
+		if seenUserContent[i] == seenUserContent[i-1] {
+			t.Fatalf("turn %d prompt is IDENTICAL to turn %d — would trigger nothing_new (0 reuse)", i, i-1)
+		}
+	}
+}
+
+func longestCommonPrefixLen(a, b string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
 }

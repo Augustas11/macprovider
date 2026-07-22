@@ -1,0 +1,112 @@
+{
+  "scenario": "sticky_cache_reuse",
+  "scenario_version": "v0.1",
+  "run_id": "20260722T135901Z",
+  "duration_seconds": 36.773196,
+  "buyer_metrics": {
+    "ttft_ms": {
+      "count": 8,
+      "p50": 2102,
+      "p95": 9996,
+      "p99": 9996,
+      "mean": 3092,
+      "max": 9996
+    },
+    "streaming_tps": {
+      "count": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "mean": 0,
+      "max": 0
+    },
+    "wall_time_ms": {
+      "count": 8,
+      "p50": 2102,
+      "p95": 9996,
+      "p99": 9996,
+      "mean": 3092.125,
+      "max": 9996
+    },
+    "tail_ratio_p99_p50": 4.755470980019029,
+    "error_rate_per_1k": 0,
+    "total_requests": 8,
+    "success_count": 8,
+    "non_2xx_breakdown": {},
+    "cold_warm": {
+      "cold_ttft_ms": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "mean": 0,
+        "max": 0
+      },
+      "warm_ttft_ms": {
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "mean": 0,
+        "max": 0
+      },
+      "ratio_p50": 0
+    },
+    "cache_reuse": {
+      "attempted_cached_turns": 7,
+      "attempted_uncached_turns": 1,
+      "cached_turns": 7,
+      "usage_absent_turns": 0,
+      "invalid_turns": 0,
+      "reuse_count": 7,
+      "reuse_p50": 0.7253571428571428,
+      "reuse_mean": 0.7253571428571428,
+      "reuse_min": 0.7253571428571428,
+      "uncached_latency_ms": {
+        "count": 1,
+        "p50": 9996,
+        "p95": 9996,
+        "p99": 9996,
+        "mean": 9996,
+        "max": 9996
+      },
+      "cached_latency_ms": {
+        "count": 7,
+        "p50": 2102,
+        "p95": 2205,
+        "p99": 2205,
+        "mean": 2105.8571428571427,
+        "max": 2205
+      },
+      "cached_reuse_latency_ms": {
+        "count": 7,
+        "p50": 2102,
+        "p95": 2205,
+        "p99": 2205,
+        "mean": 2105.8571428571427,
+        "max": 2205
+      },
+      "latency_ratio_p50": 0.21028411364545818
+    }
+  },
+  "provider_metrics": {
+    "per_provider": [
+      {
+        "provider_id": "mp-26592d710fc97aa7c07b260665c67cf6",
+        "requests_admitted": 8,
+        "tokens_delivered": 24,
+        "busy_seconds": 24.741074,
+        "slot_util_pct": 22.42672806210988,
+        "earnings_usd_per_hr": 0,
+        "session_duration_s": 35.25331
+      }
+    ],
+    "aggregate": {
+      "slot_util_pct": 22.42672806210988,
+      "earnings_usd_per_hr": 0,
+      "tokens_delivered": 24,
+      "providers_seen": 1
+    },
+    "attribution_missing": false
+  }
+}

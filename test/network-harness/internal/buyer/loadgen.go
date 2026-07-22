@@ -117,14 +117,21 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 
 				prompt := sc.PromptFor(buyerIdx, reqIdx)
 				if sc.Buyers.Pattern == "sticky_cache" {
-					// Prepend a per-buyer, per-run large deterministic prefix so
-					// consecutive sticky-routed requests share a ~3-4k-token
-					// prefix the provider can serve from its warm KV cache.
-					// Mirrors probe.mjs stickyPrefix(): a small prefix would make
-					// turn-2 cached_prompt_tokens always 0 and the metric
-					// meaningless (hard rule #1).
+					// Each turn shares a per-buyer, per-run large deterministic
+					// prefix (the ~3-4k-token cached subject, mirroring probe.mjs
+					// stickyPrefix) BUT appends a per-turn-unique follow-up so
+					// consecutive prompts DIVERGE after that prefix. This is
+					// load-bearing: the provider's ConversationCache rejects an
+					// identical prompt (longest-common-prefix == the whole
+					// incoming prompt) as "nothing_new" and reports 0 reuse even
+					// when the cache is working. With a unique tail each warm turn
+					// keeps the prefix as a cache HIT (lcp == prefix, < full
+					// prompt) while computing only the small new tail — exactly
+					// the reuse the metric is meant to see. A too-small prefix
+					// would still make cached_prompt_tokens ~0 (hard rule #1).
 					prefix := stickyCachePrefix(buyerIdx, runSalt, sc.Buyers.CachePrefixLines)
-					prompt.User = prefix + "\n\n" + prompt.User
+					prompt.User = prefix + "\n\n" + prompt.User +
+						fmt.Sprintf("\n\nFollow-up %d: in one word, recall item %d's namespace.", reqIdx, reqIdx)
 				}
 				res := fireOnce(ctx, client, sc, prompt, buyerIdx, reqIdx)
 				if sc.Buyers.Pattern == "cold_warm_pairs" {

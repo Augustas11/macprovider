@@ -746,9 +746,13 @@ func TestB8_CacheReuse_Skip_NoCachePhase(t *testing.T) {
 	}
 }
 
-func TestB9_CachedLatency_Pass(t *testing.T) {
-	// uncached p50 = 500, cached p50 = 300 → ratio 0.6 ≤ 0.90 → PASS (armed),
-	// with conclusive positive reuse (0.667).
+// B9 is RECORD-ONLY: it always SKIPs (never PASS/WARN/FAIL), regardless of
+// the cache_gate_armed flag, but records the measured latency ratio when
+// reuse is conclusively positive.
+
+func TestB9_CachedLatency_RecordOnly_WithReuse(t *testing.T) {
+	// Positive reuse (0.667) + latency advantage → SKIP (record-only) but
+	// the ratio 0.6 IS recorded in Value.
 	var results []buyer.Result
 	for i := 0; i < 4; i++ {
 		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
@@ -757,41 +761,17 @@ func TestB9_CachedLatency_Pass(t *testing.T) {
 		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
 	}
 	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
-	if got := res.Verdicts[0].Status; got != StatusPass {
-		t.Fatalf("B9 expected PASS at ratio 0.6, got %s: %s", got, res.Verdicts[0].Detail)
+	v := res.Verdicts[0]
+	if v.Status != StatusSkip {
+		t.Fatalf("B9 is record-only, expected SKIP, got %s: %s", v.Status, v.Detail)
+	}
+	if v.Value < 0.59 || v.Value > 0.61 {
+		t.Fatalf("B9 expected recorded ratio ~0.6, got %v", v.Value)
 	}
 }
 
-func TestB9_CachedLatency_Fail_NoAdvantage(t *testing.T) {
-	// cached slower than uncached → ratio > 1.0 → FAIL (reuse is positive).
-	var results []buyer.Result
-	for i := 0; i < 4; i++ {
-		results = append(results, makeCacheResult(300, "uncached", true, 0, 3000))
-	}
-	for i := 0; i < 8; i++ {
-		results = append(results, makeCacheResult(500, "cached", true, 2000, 3000))
-	}
-	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
-	if got := res.Verdicts[0].Status; got != StatusFail {
-		t.Fatalf("B9 expected FAIL with no advantage, got %s: %s", got, res.Verdicts[0].Detail)
-	}
-}
-
-func TestB9_CachedLatency_Skip_OneSide(t *testing.T) {
-	// Only cached turns, no uncached control → SKIP.
-	var results []buyer.Result
-	for i := 0; i < 6; i++ {
-		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
-	}
-	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
-	if got := res.Verdicts[0].Status; got != StatusSkip {
-		t.Fatalf("B9 expected SKIP with only cached turns, got %s: %s", got, res.Verdicts[0].Detail)
-	}
-}
-
-func TestB9_CachedLatency_Skip_NoReuseEvidence(t *testing.T) {
-	// Both phases present with latency but usage absent everywhere → no
-	// reuse evidence → SKIP (don't attribute a latency gap to cache).
+func TestB9_CachedLatency_RecordOnly_NoReuse(t *testing.T) {
+	// No reuse evidence (usage absent) → SKIP, ratio not attributable.
 	var results []buyer.Result
 	for i := 0; i < 4; i++ {
 		results = append(results, makeCacheResult(500, "uncached", false, 0, 0))
@@ -805,9 +785,10 @@ func TestB9_CachedLatency_Skip_NoReuseEvidence(t *testing.T) {
 	}
 }
 
-func TestB9_CachedLatency_Skip_CollapsedReuse(t *testing.T) {
-	// Warm turns are faster (latency advantage) but reuse collapsed to 0
-	// (valid cached=0). Must NOT PASS on keep-alive/setup effects → SKIP.
+func TestB9_CachedLatency_RecordOnly_CollapsedReuse(t *testing.T) {
+	// Warm turns faster but reuse collapsed to 0 (valid cached=0): no
+	// reuse-bearing latency cohort → SKIP, ratio not recorded as an
+	// advantage.
 	var results []buyer.Result
 	for i := 0; i < 4; i++ {
 		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
@@ -818,20 +799,6 @@ func TestB9_CachedLatency_Skip_CollapsedReuse(t *testing.T) {
 	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusSkip {
 		t.Fatalf("B9 expected SKIP on collapsed reuse, got %s: %s", got, res.Verdicts[0].Detail)
-	}
-}
-
-func TestB9_CachedLatency_Skip_GateNotArmed(t *testing.T) {
-	var results []buyer.Result
-	for i := 0; i < 4; i++ {
-		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
-	}
-	for i := 0; i < 8; i++ {
-		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
-	}
-	res := Evaluate(scCache(false, "B9"), results, nil, nil, nil, "test", 60)
-	if got := res.Verdicts[0].Status; got != StatusSkip {
-		t.Fatalf("B9 expected SKIP while gate not armed, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
@@ -880,6 +847,35 @@ func TestB8_CacheReuse_Skip_TruncatedVsIntended(t *testing.T) {
 	res2 := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
 	if got := res2.Verdicts[0].Status; got != StatusPass {
 		t.Fatalf("B8 fallback expected PASS on 3/3 attempted, got %s: %s", got, res2.Verdicts[0].Detail)
+	}
+}
+
+func TestComputeBuyerMetrics_B9CohortExcludesFastNonReuseTurns(t *testing.T) {
+	// Adversarial: fast usage-absent warm turns (latency 100) alongside
+	// SLOW reuse-bearing turns (latency 600, > the 500 cold primer). The
+	// all-warm CachedLatencyMs p50 is dragged down and would falsely look
+	// like an advantage; CachedReuseLatencyMs (the B9 population) must
+	// exclude the fast non-reuse turns, so its p50 = 600 and the ratio
+	// shows NO advantage.
+	results := []buyer.Result{makeCacheResult(500, "uncached", true, 0, 3000)}
+	for i := 0; i < 5; i++ {
+		results = append(results, makeCacheResult(600, "cached", true, 2000, 3000)) // reuse-bearing, slow
+	}
+	for i := 0; i < 5; i++ {
+		results = append(results, makeCacheResult(100, "cached", false, 0, 0)) // usage-absent, fast
+	}
+	bm := computeBuyerMetrics(results)
+	if bm.CacheReuse.CachedLatencyMs.Count != 10 {
+		t.Fatalf("CachedLatencyMs should cover all 10 warm turns, got %d", bm.CacheReuse.CachedLatencyMs.Count)
+	}
+	if bm.CacheReuse.CachedReuseLatencyMs.Count != 5 {
+		t.Fatalf("CachedReuseLatencyMs should be the 5 reuse-bearing turns, got %d", bm.CacheReuse.CachedReuseLatencyMs.Count)
+	}
+	if bm.CacheReuse.CachedReuseLatencyMs.P50 != 600 {
+		t.Fatalf("reuse-bearing p50 should be 600 (not dragged down by fast usage-absent turns), got %v", bm.CacheReuse.CachedReuseLatencyMs.P50)
+	}
+	if bm.CacheReuse.LatencyRatioP50 != 1.2 { // 600/500 — no advantage
+		t.Fatalf("latency ratio should be 1.2 from the reuse cohort, got %v", bm.CacheReuse.LatencyRatioP50)
 	}
 }
 

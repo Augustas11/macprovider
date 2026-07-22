@@ -124,8 +124,8 @@ single bad run doesn't trip the alert).
 | B5 | Slot util reasonable | ≥ 15% over 5-min window |
 | B6 | Earnings/hr viable | ≥ $0.30/hr at current pricing |
 | B7 | Cold/warm TTFT ratio bounded | cold p50 / warm p50 ≤ 2.0 (scenario 08) |
-| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens ≥ 0.40 on warm turns (scenario 16, provider prefix-cache probe) |
-| B9 | Cached-turn latency advantage | cached vs uncached full-response p50 latency ratio ≤ 0.90 (scenario 16) |
+| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens ≥ 0.50 on warm turns (scenario 16, provider prefix-cache probe; calibrated from a 0.725 baseline) |
+| B9 | Cached-turn latency advantage (record-only) | records reuse-bearing cached vs uncached full-response p50 latency ratio (scenario 16; always SKIP, not a gate) |
 
 Like I1-I4, each invariant produces a structured verdict (PASS / WARN /
 FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run —
@@ -141,23 +141,25 @@ every warm request failed, a provider reported an impossible
 were measured, or fewer than a strict majority of the scenario's INTENDED
 warm turns produced a valid measurement (a duration-truncated or
 survivorship-biased run) — so a missing or untrustworthy measurement is
-never mistaken for a regression. B9 additionally requires conclusive
-positive reuse and scores only the reuse-bearing latency cohort, so a fast
-usage-absent or zero-reuse turn cannot manufacture a latency advantage.
+never mistaken for a regression. B9 is **record-only** (always SKIP): it
+records the reuse-bearing cached-vs-uncached latency ratio for
+observability but is never a gate, because the single-buyer pattern yields
+just one cold control and that lone cold turn also pays one-time
+connection setup — arming it soundly needs a multi-cold-control redesign,
+so B8 (reuse retention) is armed independently.
 
-B8/B9 ship with the gate **not armed**: the 0.40 floor and 0.90 ratio are
-provisional and were NOT calibrated against a positive baseline — the
-2026-07-22 scenario-16 prod run measured ~0 reuse on the live pool (both
-served models report `cached_prompt_tokens = 0`; the ~0.64 figure from
-2026-07-09, #376, was a different provider/prefix context).
-`benchmark.cache_gate_armed` is a positive, fail-safe flag: while it is
-false (its default), the invariants record the measured value but SKIP the
-PASS/WARN/FAIL, so an unsupported-capability pool is not mistaken for a
-regression. Arm the gate — set `cache_gate_armed: true` and transcribe the
-floor from the real median, with headroom — only once a reuse-capable
-provider is in the pool. B9 is a full-response latency ratio (these turns
-are non-streaming, so not TTFT) and carries a known cold-turn
-connection-setup bias to remove with multiple cold controls before arming.
+B8 is **armed** with a floor of **0.50**, calibrated from the 2026-07-22
+scenario-16 prod baseline: the harness measured a median reuse of **0.725**
+over 7 warm turns on the live pool (corroborating #376's 2026-07-09 ~0.64,
+range 0.638-0.70). The floor sits well below both, so normal jitter — reuse
+is deterministic prefix caching and very stable — will not flap the gate,
+while a genuine collapse (a provider prefix-cache regression) drops below
+it and FAILs. `benchmark.cache_gate_armed` is a positive, fail-safe flag:
+false (its default, if omitted) makes B8 record-but-SKIP; the scenario sets
+it true. CAUTION when re-baselining: an **identical-prompt** run reports 0
+reuse regardless of cache health (the provider rejects it as `nothing_new`,
+LCP == full prompt), so a 0 from such a run is a measurement artifact, not
+a regression — the scenario's divergent per-turn prompts avoid it.
 
 ## 4. New scenarios (07-10)
 
@@ -205,19 +207,24 @@ connection-setup bias to remove with multiple cold controls before arming.
   / prompt_tokens`) and the cached-vs-uncached full-response latency
   advantage.
 - **Invariants**: B8 (cache-reuse retention), B9 (cached-turn latency
-  advantage). B1 is intentionally omitted — these turns are non-streaming
-  so the harness records full-response wall time as "TTFT" and B1 would
-  score a misleading number.
-- **Phase C — regression-gate instrument**: the eventual guard for the
-  #376 reuse win. Intended to be wired as a scheduled/CI run that parses
+  advantage, RECORD-ONLY — always SKIP). B1 is intentionally omitted —
+  these turns are non-streaming so the harness records full-response wall
+  time as "TTFT" and B1 would score a misleading number.
+- **Prompt shape**: each turn shares the large prefix but appends a
+  per-turn-unique tail so consecutive prompts DIVERGE after it — an
+  identical full prompt is rejected by the provider cache as `nothing_new`
+  (LCP == full prompt) and reports 0 reuse even when the cache works.
+- **Consumer policy**: a scheduled/armed run must treat B8 SKIP as
+  non-green/inconclusive (alert on persistent SKIP) and capability-
+  preflight the pinned model, so operational SKIP is distinguishable from a
+  real regression.
+- **Phase C — regression gate**: the guard for the #376 reuse win.
+  Intended to be wired as a scheduled/CI run that parses
   `benchmark_verdict.json` (benchmark verdicts are advisory — they do not
-  set the exit code). Ships with the gate **not armed**
-  (`cache_gate_armed: false`, so B8/B9 record but SKIP) because the
-  2026-07-22 baseline measured ~0 reuse on the current pool; arm it
-  (`cache_gate_armed: true`) once a reuse-capable provider is present and
-  the floor is transcribed from a positive baseline. As a single-provider
-  probe it
-  measures the provider prefix cache, not sticky routing — the routing
+  set the exit code). Ships **armed** (`cache_gate_armed: true`, B8 floor
+  0.50) because the 2026-07-22 baseline measured a positive median reuse of
+  0.725 on the live pool; B9 stays record-only. As a single-provider probe
+  it measures the provider prefix cache, not sticky routing — the routing
   dimension needs ≥2 eligible providers plus an affinity assertion.
   Requires sticky routing ON (`routing.sticky_enabled: true` on both
   sides + gateway `auth.key_hash_secret`). Light and prod-safe (~8
