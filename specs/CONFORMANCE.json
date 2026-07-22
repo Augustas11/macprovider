@@ -1012,6 +1012,7 @@
       "depends_on": [
         "SPEC-001",
         "SPEC-005",
+        "SPEC-010",
         "SPEC-015",
         "SPEC-024",
         "SPEC-032"
@@ -1685,6 +1686,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "FR-KVP12 (telemetry and probe boundary): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R013",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP13 (KVS gates, production fence, stop condition): normative in SPEC-037 v0.1.0; gate evidence requires a non-production host or maintenance window."
       }
     }
   ]
