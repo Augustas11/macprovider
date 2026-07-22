@@ -45,6 +45,15 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 		deadline = time.Now().Add(sc.Duration)
 	}
 
+	// Per-run salt for the sticky_cache pattern's generated prefix. Mixing
+	// it into the prefix keeps each RUN's request_index-0 a genuine cold
+	// first-touch (the prefix another run left warm on the provider won't
+	// match), while still being identical across a single run's requests
+	// so the warm turns actually reuse it. UnixNano is monotonic-enough
+	// here; determinism is only required WITHIN a run, and the unit tests
+	// call stickyCachePrefix with a fixed salt directly.
+	runSalt := time.Now().UnixNano()
+
 	var (
 		mu      sync.Mutex
 		results = make([]Result, 0, sc.Buyers.Count*sc.Buyers.RequestsPerBuyer)
@@ -107,12 +116,31 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 				}
 
 				prompt := sc.PromptFor(buyerIdx, reqIdx)
+				if sc.Buyers.Pattern == "sticky_cache" {
+					// Prepend a per-buyer, per-run large deterministic prefix so
+					// consecutive sticky-routed requests share a ~3-4k-token
+					// prefix the provider can serve from its warm KV cache.
+					// Mirrors probe.mjs stickyPrefix(): a small prefix would make
+					// turn-2 cached_prompt_tokens always 0 and the metric
+					// meaningless (hard rule #1).
+					prefix := stickyCachePrefix(buyerIdx, runSalt, sc.Buyers.CachePrefixLines)
+					prompt.User = prefix + "\n\n" + prompt.User
+				}
 				res := fireOnce(ctx, client, sc, prompt, buyerIdx, reqIdx)
 				if sc.Buyers.Pattern == "cold_warm_pairs" {
 					if reqIdx%2 == 0 {
 						res.Phase = "cold"
 					} else {
 						res.Phase = "warm"
+					}
+				}
+				if sc.Buyers.Pattern == "sticky_cache" {
+					// request_index 0 warms the prefix cache (cold first-touch);
+					// >= 1 are the warm turns that should reuse it.
+					if reqIdx == 0 {
+						res.CachePhase = "uncached"
+					} else {
+						res.CachePhase = "cached"
 					}
 				}
 
@@ -123,7 +151,7 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 				if sc.Buyers.Pattern == "burst" {
 					return
 				}
-				if sc.Buyers.Pattern == "interval" && sc.Buyers.IntervalMs > 0 {
+				if (sc.Buyers.Pattern == "interval" || sc.Buyers.Pattern == "sticky_cache") && sc.Buyers.IntervalMs > 0 {
 					ok, interrupted := waitForDispatchDelay(ctx, time.Duration(sc.Buyers.IntervalMs)*time.Millisecond, deadline)
 					if interrupted || !ok {
 						return
@@ -281,6 +309,35 @@ func fireOnce(ctx context.Context, client *http.Client, sc *scenario.Scenario, p
 	}
 
 	return res
+}
+
+// stickyCachePrefix builds a deterministic, large "reference facts"
+// block for the sticky_cache pattern, mirroring the proven recipe in
+// test/e2e/canary-buyer/probe.mjs (stickyPrefix). Each line is ~30
+// tokens, so `lines` maps roughly to `lines * 30` prompt tokens; the
+// scenario picks a line count that exceeds the provider's prefix-cache
+// granularity so a warm turn's cached_prompt_tokens is a real reuse
+// signal rather than a constant 0 (hard rule #1), while staying under
+// the provider's max_context_tokens so the request is not rejected with
+// context_exceeds_capacity.
+//
+// The block is seeded by both buyerIdx and a per-run salt: buyerIdx so
+// two concurrent buyers never share a prefix (which would let buyer B's
+// first-touch hit a cache buyer A warmed, polluting the uncached
+// baseline), and salt so a fresh run's request_index-0 is a genuine
+// cold first-touch rather than a hit on a prefix a previous run left
+// warm on the provider. Within a single run the value is identical
+// across a buyer's turns, so the warm turns actually reuse it.
+func stickyCachePrefix(buyerIdx int, salt int64, lines int) string {
+	if lines < 1 {
+		lines = 1
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Reference facts to retain for conversation b%d-s%d:", buyerIdx, salt)
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&b, "\n- item %d: key K%d maps to value V%d under namespace N%d; invariant s%d > %d.", i, i, i*7, i%9, i, i)
+	}
+	return b.String()
 }
 
 func buildBody(p scenario.Prompt, stream bool) ([]byte, error) {
@@ -547,8 +604,12 @@ func consumeSSE(body io.Reader, res *Result) {
 // attribution. Other fields are preserved as-is by the SSE byte counter.
 type chunkPayload struct {
 	Usage struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
+		PromptTokens     int64  `json:"prompt_tokens"`
+		CompletionTokens int64  `json:"completion_tokens"`
+		// CachedPromptTokens is a pointer so an absent field (a
+		// spec-strict gateway) is distinguishable from a genuine 0
+		// (cache collapsed) — the B8 SKIP-vs-FAIL distinction.
+		CachedPromptTokens *int64 `json:"cached_prompt_tokens"`
 	} `json:"usage"`
 	Choices []struct {
 		Delta struct {
@@ -607,9 +668,20 @@ func parseChunkTokens(payload []byte, res *Result) (code string, isStandaloneErr
 	}
 	if c.Usage.CompletionTokens > 0 {
 		res.CompletionTokensReceived = c.Usage.CompletionTokens
+		res.UsagePresent = true
 	}
 	if c.Usage.PromptTokens > 0 {
 		res.PromptTokensReported = c.Usage.PromptTokens
+		res.UsagePresent = true
+	}
+	// cached_prompt_tokens presence (KV-cache reuse, #376). Only a
+	// content/usage frame that already passed the standalone-error gate
+	// above reaches here, so recording the field cannot import tokens
+	// from a forged error envelope.
+	if c.Usage.CachedPromptTokens != nil {
+		res.CachedPromptTokensPresent = true
+		res.CachedPromptTokens = *c.Usage.CachedPromptTokens
+		res.UsagePresent = true
 	}
 	return "", false
 }
@@ -759,11 +831,16 @@ func consumeJSON(body io.Reader, res *Result) {
 		return
 	}
 	if c.Usage != nil {
+		res.UsagePresent = true
 		if c.Usage.CompletionTokens > 0 {
 			res.CompletionTokensReceived = c.Usage.CompletionTokens
 		}
 		if c.Usage.PromptTokens > 0 {
 			res.PromptTokensReported = c.Usage.PromptTokens
+		}
+		if c.Usage.CachedPromptTokens != nil {
+			res.CachedPromptTokensPresent = true
+			res.CachedPromptTokens = *c.Usage.CachedPromptTokens
 		}
 	}
 	res.SawTerminator = true
@@ -782,8 +859,11 @@ type nonStreamingChatCompletion struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
+		PromptTokens     int64  `json:"prompt_tokens"`
+		CompletionTokens int64  `json:"completion_tokens"`
+		// Pointer so an omitted cached_prompt_tokens (spec-strict
+		// gateway) is distinguishable from a genuine 0 (cache cold).
+		CachedPromptTokens *int64 `json:"cached_prompt_tokens"`
 	} `json:"usage"`
 }
 

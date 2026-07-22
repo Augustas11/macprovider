@@ -560,3 +560,195 @@ func TestSchema_ColdWarmPairs_Validate(t *testing.T) {
 		})
 	}
 }
+
+// B8 / B9 — sticky cache-reuse (RESEARCH_236) -------------------------
+
+// makeCacheResult builds a non-streaming ("cached" or "uncached") result
+// with a given TTFT and, when usageAndCache is true, a usage frame
+// carrying cached_prompt_tokens = cached and prompt_tokens = prompt.
+func makeCacheResult(ttftMs int64, phase string, usageAndCache bool, cached, prompt int64) buyer.Result {
+	r := makeResult(ttftMs, ttftMs+50, 4, false, "p1", "m", 200)
+	r.CachePhase = phase
+	if usageAndCache {
+		r.UsagePresent = true
+		r.CachedPromptTokensPresent = true
+		r.CachedPromptTokens = cached
+		r.PromptTokensReported = prompt
+	}
+	return r
+}
+
+func TestB8_CacheReuse_Pass(t *testing.T) {
+	// median reuse = 0.64 (2000/3125) ≥ floor 0.40 → PASS
+	var results []buyer.Result
+	results = append(results, makeCacheResult(500, "uncached", true, 0, 3125))
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3125))
+	}
+	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusPass {
+		t.Fatalf("B8 expected PASS at reuse 0.64, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Warn(t *testing.T) {
+	// median reuse = 0.30 (in [0.20, 0.40)) → WARN
+	var results []buyer.Result
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 900, 3000))
+	}
+	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusWarn {
+		t.Fatalf("B8 expected WARN at reuse 0.30, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Fail_Collapsed(t *testing.T) {
+	// Cache collapsed: every cached turn reports cached_prompt_tokens=0
+	// but the field IS present → reuse 0.0 < 0.20 → FAIL (not SKIP).
+	var results []buyer.Result
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 0, 3000))
+	}
+	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusFail {
+		t.Fatalf("B8 expected FAIL at reuse 0.0 (collapsed), got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_UsageAbsent(t *testing.T) {
+	// Spec-strict gateway: cached turns exist but none carried usage/cache
+	// fields → SKIP, never FAIL (hard rule #2).
+	var results []buyer.Result
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
+	}
+	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP with usage absent, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_NoCachePhase(t *testing.T) {
+	// Scenario didn't use the sticky_cache pattern → SKIP.
+	results := []buyer.Result{makeResult(300, 1000, 64, false, "p1", "m", 200)}
+	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP without cache phase, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB9_CachedTTFT_Pass(t *testing.T) {
+	// uncached p50 = 500, cached p50 = 300 → ratio 0.6 ≤ 0.90 → PASS
+	var results []buyer.Result
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
+	}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(sc("B9"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusPass {
+		t.Fatalf("B9 expected PASS at ratio 0.6, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB9_CachedTTFT_Fail_NoAdvantage(t *testing.T) {
+	// cached slower than uncached → ratio > 1.0 → FAIL
+	var results []buyer.Result
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(300, "uncached", true, 0, 3000))
+	}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(500, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(sc("B9"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusFail {
+		t.Fatalf("B9 expected FAIL with no advantage, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB9_CachedTTFT_Skip_OneSide(t *testing.T) {
+	// Only cached turns, no uncached control → SKIP.
+	var results []buyer.Result
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(sc("B9"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B9 expected SKIP with only cached turns, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestComputeBuyerMetrics_CacheReusePopulated(t *testing.T) {
+	var results []buyer.Result
+	results = append(results, makeCacheResult(600, "uncached", true, 0, 4000))
+	for i := 0; i < 5; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2400, 4000))
+	}
+	// One cached turn with usage absent — counted but not measured.
+	results = append(results, makeCacheResult(320, "cached", false, 0, 0))
+	bm := computeBuyerMetrics(results)
+	if bm.CacheReuse.CachedTurns != 6 {
+		t.Fatalf("want 6 cached turns, got %d", bm.CacheReuse.CachedTurns)
+	}
+	if bm.CacheReuse.ReuseCount != 5 {
+		t.Fatalf("want 5 measured reuse samples, got %d", bm.CacheReuse.ReuseCount)
+	}
+	if bm.CacheReuse.UsageAbsentTurns != 1 {
+		t.Fatalf("want 1 usage-absent turn, got %d", bm.CacheReuse.UsageAbsentTurns)
+	}
+	if bm.CacheReuse.ReuseP50 != 0.6 {
+		t.Fatalf("want reuse p50 0.6, got %v", bm.CacheReuse.ReuseP50)
+	}
+	if bm.CacheReuse.UncachedTTFTMs.Count != 1 || bm.CacheReuse.CachedTTFTMs.Count != 6 {
+		t.Fatalf("want 1 uncached / 6 cached TTFT samples, got %d / %d", bm.CacheReuse.UncachedTTFTMs.Count, bm.CacheReuse.CachedTTFTMs.Count)
+	}
+	if bm.CacheReuse.TTFTRatioP50 != 0.5 {
+		t.Fatalf("want TTFT ratio 0.5 (300/600), got %v", bm.CacheReuse.TTFTRatioP50)
+	}
+}
+
+// Scenario schema validation for sticky_cache ------------------------
+
+func TestSchema_StickyCache_Validate(t *testing.T) {
+	cases := []struct {
+		name        string
+		stream      bool
+		stickyKey   string
+		reqs        int
+		intervalMs  int
+		prefixLines int
+		wantErr     bool
+	}{
+		{"valid", false, "harness-%d", 4, 1500, 140, false},
+		{"streaming rejected", true, "harness-%d", 4, 1500, 140, true},
+		{"no sticky key", false, "", 4, 1500, 140, true},
+		{"one request", false, "harness-%d", 1, 1500, 140, true},
+		{"zero interval", false, "harness-%d", 4, 0, 140, true},
+		{"prefix too small", false, "harness-%d", 4, 1500, 50, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &scenario.Scenario{
+				Name:     "x",
+				Target:   scenario.Target{GatewayURL: "https://x", BuyerToken: "tk"},
+				Duration: 60_000_000_000,
+				Buyers: scenario.Buyers{
+					Count:                 1,
+					Stream:                tc.stream,
+					Pattern:               "sticky_cache",
+					RequestsPerBuyer:      tc.reqs,
+					IntervalMs:            tc.intervalMs,
+					StickyConversationKey: tc.stickyKey,
+					CachePrefixLines:      tc.prefixLines,
+				},
+				Prompts: []scenario.Prompt{{Model: "m", User: "hi"}},
+			}
+			err := s.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate err=%v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -30,6 +30,21 @@ type Result struct {
 	CompletionTokensReceived int64 `json:"completion_tokens_received"`
 	PromptTokensReported     int64 `json:"prompt_tokens_reported"`
 
+	// KV-cache reuse signal (SPEC-004 Pillar A / #376). CachedPromptTokens
+	// is the response's usage.cached_prompt_tokens — the count of prompt
+	// tokens the provider served from a warm prefix cache. A genuine 0
+	// (cache collapsed / cold) is a MEANINGFUL failure value that must be
+	// distinguished from an omitted field (a spec-strict gateway that
+	// drops the usage frame), so presence is tracked separately:
+	//   - UsagePresent is true when the response carried a usage object.
+	//   - CachedPromptTokensPresent is true when that usage object carried
+	//     the cached_prompt_tokens key.
+	// The B8 (cache-reuse retention) invariant SKIPs — never FAILs — when
+	// these are absent, mirroring probe.mjs's null handling.
+	CachedPromptTokens        int64 `json:"cached_prompt_tokens"`
+	CachedPromptTokensPresent bool  `json:"cached_prompt_tokens_present"`
+	UsagePresent              bool  `json:"usage_present"`
+
 	// HTTP outcome.
 	HTTPStatus int    `json:"http_status"`
 	Outcome    string `json:"outcome"` // ok | http_error | transport_error | timeout | silent_hang | client_abort | invalid_response
@@ -113,4 +128,13 @@ type Result struct {
 	// immediately-following request in the same pair. Empty for all
 	// other patterns. Drives the B7 (TTFT cold/warm ratio) verdict.
 	Phase string `json:"phase,omitempty"`
+
+	// CachePhase tags requests fired under the sticky_cache pattern:
+	// "uncached" for each buyer's first-touch request (request_index 0,
+	// which warms the provider's prefix cache with this buyer's unique
+	// large prefix) and "cached" for the warm follow-ups (request_index
+	// >= 1) that should hit that prefix cache on the sticky-routed
+	// provider. Empty for all other patterns. Drives the B8 (cache-reuse
+	// retention) and B9 (cached-turn TTFT advantage) verdicts.
+	CachePhase string `json:"cache_phase,omitempty"`
 }

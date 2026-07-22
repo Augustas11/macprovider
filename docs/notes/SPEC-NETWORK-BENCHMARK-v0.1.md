@@ -124,9 +124,19 @@ single bad run doesn't trip the alert).
 | B5 | Slot util reasonable | ≥ 15% over 5-min window |
 | B6 | Earnings/hr viable | ≥ $0.30/hr at current pricing |
 | B7 | Cold/warm TTFT ratio bounded | cold p50 / warm p50 ≤ 2.0 (scenario 08) |
+| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens ≥ 0.40 on warm sticky turns (scenario 16) |
+| B9 | Cached-turn TTFT advantage | cached_turn_ttft_p50 / uncached_turn_ttft_p50 ≤ 0.90 (scenario 16) |
 
 Like I1-I4, each invariant produces a structured verdict (PASS / WARN /
 FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
+
+B8/B9 **SKIP** rather than FAIL when the gateway omits the usage frame
+(spec-strict path) or when the scenario did not run the `sticky_cache`
+pattern — a missing measurement is not a regression. B8's floor and B9's
+ratio are **provisional**, calibrated from the scenario-16 prod baseline
+(RESEARCH_236 Deliverable 4) with headroom below the measured median so
+normal jitter does not flap the gate. The floor (0.40) is deliberately
+conservative versus the 2026-07-09 measurement of ~0.64 (#376).
 
 ## 4. New scenarios (07-10)
 
@@ -159,6 +169,25 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
   tier-2 pricing, session_duration.
 - **Invariants**: B5, B6 (B7 session-mean deferred — needs >>10-min
   windows).
+
+### 4.5 `16_sticky_cache_reuse`
+- **What**: 2 buyers × 8 sequential non-streaming turns under the
+  `sticky_cache` pattern. Each buyer routes to one provider via a
+  per-buyer sticky conversation tag; the harness prepends a per-buyer,
+  per-run deterministic ~3.7k-token prefix (`cache_prefix_lines`) to
+  every request. `request_index` 0 is the cold uncached first-touch that
+  warms the provider prefix cache; `request_index` 1..7 are the warm
+  cached turns that reuse it. Mirrors `test/e2e/canary-buyer/probe.mjs`.
+- **Measures**: turn-2+ KV-cache reuse (`cached_prompt_tokens /
+  prompt_tokens`) and the cached-vs-uncached TTFT advantage.
+- **Invariants**: B1 (aggregate TTFT), B8 (cache-reuse retention),
+  B9 (cached-turn TTFT advantage).
+- **Phase C — regression gate**: this is the guard for the already-banked
+  #376 reuse win. Wire it as a scheduled/CI run so a future stickiness or
+  provider prefix-cache regression fails loud. Requires sticky routing ON
+  on both gateway and coordinator (`routing.sticky_enabled: true` +
+  gateway `auth.key_hash_secret`); B8 reads collapsed reuse if sticky is
+  off. Light and prod-safe (~16 requests, order of cents).
 
 ## 5. Artifact schema (`benchmark_summary.json`)
 
