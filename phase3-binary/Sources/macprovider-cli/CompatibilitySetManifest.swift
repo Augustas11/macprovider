@@ -409,6 +409,57 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         )
     }
 
+    /// Loads the installed signed set from the launched executable when it has
+    /// a coherent sibling manifest; otherwise falls back to `canonicalBinaryURL`
+    /// (install authority). This is the #616/#610 PATH regular-file case:
+    /// `~/.local/bin/macprovider-cli` as a stale copy has no sibling set, while
+    /// `~/macprovider/macprovider-cli` does.
+    static func loadInstalledPreferringInstallAuthority(
+        launchedExecutableURL: URL?,
+        canonicalBinaryURL: URL?,
+        expectedVersion: String? = nil,
+        publicKeyPEM: String = SelfUpdate.checksumPublicKeyPEM
+    ) -> CompatibilitySetManifest? {
+        var candidates: [URL] = []
+        if let canonicalBinaryURL {
+            candidates.append(canonicalBinaryURL.standardizedFileURL)
+        }
+        if let resolved = resolvedExecutableURL(launchedExecutableURL) {
+            if !candidates.contains(where: { $0.path == resolved.path }) {
+                candidates.append(resolved)
+            }
+        }
+        for executable in candidates {
+            guard let payloadDirectory = payloadDirectory(for: executable) else { continue }
+            let manifestURL = payloadDirectory.appendingPathComponent(fileName)
+            guard FileManager.default.fileExists(atPath: manifestURL.path) else { continue }
+            if let expectedVersion {
+                if let installed = try? loadValidated(
+                    from: payloadDirectory,
+                    expectedProviderVersion: expectedVersion,
+                    publicKeyPEM: publicKeyPEM
+                ) {
+                    return installed
+                }
+                // Mixed PATH/payload versions: still surface the install-authority
+                // set identity so update can converge rather than throw
+                // invalid_current_or_target_set on a nil current set.
+                if let installed = try? loadValidated(
+                    from: payloadDirectory,
+                    publicKeyPEM: publicKeyPEM
+                ) {
+                    return installed
+                }
+            } else if let installed = try? loadValidated(
+                from: payloadDirectory,
+                publicKeyPEM: publicKeyPEM
+            ) {
+                return installed
+            }
+        }
+        return nil
+    }
+
     static func resolvedExecutableURL(_ executableURL: URL?) -> URL? {
         executableURL?
             .standardizedFileURL

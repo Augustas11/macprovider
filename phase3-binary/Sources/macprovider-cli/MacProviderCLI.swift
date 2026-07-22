@@ -2079,6 +2079,11 @@ struct UpdateCommand: AsyncParsableCommand {
     var acceptanceRunAttempt: Int?
 
     func run() async throws {
+        // #616/#610: before any acceptance/admission/discovery work, converge a
+        // stale PATH regular-file entrypoint to the canonical install so the
+        // launched PATH location resolves into a directory that has
+        // compatibility-set.json (public 1.8.48 first-hop / mixed install).
+        _ = try AutoUpdateMarkerStore().ensurePathEntrypointMatchesInstallAuthority()
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides())
         let updater = SelfUpdate(
             currentVersion: CoordinatorClient.binaryVersion,

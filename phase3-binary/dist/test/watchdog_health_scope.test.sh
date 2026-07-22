@@ -209,4 +209,26 @@ if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
   exit 1
 fi
 
+# #616/#610: stale PATH regular-file entrypoint must converge to the install
+# authority binary on each watchdog tick (best-effort).
+rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home"
+make_fake_common
+mkdir -p "$TMP/home/macprovider" "$TMP/home/.local/bin"
+cat > "$TMP/home/macprovider/macprovider-cli" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 755 "$TMP/home/macprovider/macprovider-cli"
+printf 'stale-path-copy\n' > "$TMP/home/.local/bin/macprovider-cli"
+chmod 755 "$TMP/home/.local/bin/macprovider-cli"
+chmod 700 "$TMP/home/.local/bin"
+: > "$TMP/launchctl.log"
+run_watchdog
+if [ ! -L "$TMP/home/.local/bin/macprovider-cli" ]; then
+  echo "watchdog must repair PATH regular-file entrypoint into a symlink" >&2
+  exit 1
+fi
+[ "$(readlink "$TMP/home/.local/bin/macprovider-cli")" = "$TMP/home/macprovider/macprovider-cli" ]
+grep -F 'converged PATH entrypoint' "$TMP/logs/watchdog.log" >/dev/null
+
 echo "watchdog health scope ok"

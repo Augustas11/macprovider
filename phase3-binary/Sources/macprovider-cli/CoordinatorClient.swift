@@ -475,6 +475,16 @@ actor CoordinatorClient {
 
     func start() async {
         await runStartupAutoupdateRecovery()
+        // Best-effort PATH converge after every serve start. When an older CLI
+        // (public 1.8.48) activated a newer payload without convergePathEntrypoint,
+        // the next launchd-managed process repairs ~/.local/bin so ordinary
+        // `macprovider-cli update` stops seeing a divergent regular-file copy (#616).
+        do {
+            _ = try autoupdateMarkerStore.ensurePathEntrypointMatchesInstallAuthority()
+        } catch {
+            // Do not block buyer serving on PATH repair failure; update paths
+            // still fail closed when they require a safe entrypoint converge.
+        }
         startReconnectTask()
         if warmSwapEnabled, swapHeartbeatTask == nil {
             swapHeartbeatTask = Task { [weak self] in
