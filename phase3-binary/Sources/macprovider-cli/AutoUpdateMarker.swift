@@ -477,10 +477,28 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     func requireCoordinatorCompatibilityTarget(
         _ targetCompatibilitySetID: String,
         currentCompatibilitySetID: String?,
-        now: Date = Date()
+        now: Date = Date(),
+        launchedExecutableURL: URL? = Bundle.main.executableURL
     ) throws {
+        // PATH regular-file launches often pass nil current because there is no
+        // sibling compatibility-set.json next to ~/.local/bin (#616 physical
+        // J1). Resolve current from install authority before failing closed.
+        var resolvedCurrent = currentCompatibilitySetID
+        if resolvedCurrent == nil
+            || !CompatibilitySetManifest.isCanonicalCompatibilitySetID(resolvedCurrent!)
+        {
+            let canonical = resolveCanonicalInstallBinary(launchedExecutableURL: launchedExecutableURL)
+            if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: launchedExecutableURL,
+                canonicalBinaryURL: canonical,
+                allowProviderVersionMismatch: true,
+                publicKeyPEM: compatibilityManifestPublicKeyPEM
+            ) {
+                resolvedCurrent = installed.compatibilitySetID
+            }
+        }
         guard CompatibilitySetManifest.isCanonicalCompatibilitySetID(targetCompatibilitySetID),
-              let currentCompatibilitySetID,
+              let currentCompatibilitySetID = resolvedCurrent,
               CompatibilitySetManifest.isCanonicalCompatibilitySetID(currentCompatibilitySetID) else {
             throw AutoUpdateMarkerError.compatibilityAdmissionRequired("invalid_current_or_target_set")
         }
@@ -1166,6 +1184,28 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             return nil
         }
         return standardized
+    }
+
+    /// Resolves install authority and converges `~/.local/bin/macprovider-cli`
+    /// to that canonical binary when a PATH entrypoint exists (#616 / #610).
+    ///
+    /// Used at update start and provider startup so a stale PATH **regular
+    /// file** (no sibling `compatibility-set.json`) is repaired to a symlink
+    /// before set discovery / admission look up the launched path. After the
+    /// symlink swap, `resolvingSymlinksInPath` on the PATH location finds the
+    /// coherent payload set even if this process was originally exec'd from
+    /// the stale copy.
+    @discardableResult
+    func ensurePathEntrypointMatchesInstallAuthority(
+        launchedExecutableURL: URL? = Bundle.main.executableURL
+    ) throws -> URL? {
+        guard let canonical = resolveCanonicalInstallBinary(
+            launchedExecutableURL: launchedExecutableURL
+        ) else {
+            return nil
+        }
+        _ = try convergePathEntrypoint(to: canonical)
+        return canonical
     }
 
     /// Converges the user PATH entrypoint to a symlink at `canonicalBinary`

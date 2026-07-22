@@ -413,10 +413,19 @@ actor CoordinatorClient {
         self.catalogCandidateSHA256 = catalogCandidateSHA256
         self.catalogSignerKeyID = catalogSignerKeyID
         self.catalogRowIdentity = catalogRowIdentity
+        let markerStoreForManifest = autoupdateMarkerStore
         let compatibilityManifestLoader = installedCompatibilityManifest ?? { executableURL, expectedVersion in
-            CompatibilitySetManifest.loadInstalled(
-                executableURL: executableURL,
-                expectedVersion: expectedVersion
+            // Prefer install authority when PATH is a stale regular-file copy
+            // without a sibling compatibility-set.json (#616 / #610).
+            let canonical = markerStoreForManifest.resolveCanonicalInstallBinary(
+                launchedExecutableURL: executableURL
+            )
+            return CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: executableURL,
+                canonicalBinaryURL: canonical,
+                expectedVersion: expectedVersion,
+                allowProviderVersionMismatch: false,
+                publicKeyPEM: markerStoreForManifest.compatibilityManifestPublicKeyPEM
             )
         }
         self.installedCompatibilityManifest = compatibilityManifestLoader

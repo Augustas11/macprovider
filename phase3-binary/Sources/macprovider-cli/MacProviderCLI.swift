@@ -698,6 +698,18 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
+        // #616/#610: repair a stale PATH regular-file entrypoint to install
+        // authority, then re-exec into that canonical binary when this process
+        // was launched from a non-canonical path. PATH repair alone does not
+        // replace the already-running stale inode; identity must freeze on the
+        // binary that matches the signed set's provider_cli member.
+        let serveMarkerStore = AutoUpdateMarkerStore()
+        if let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
+           let launched = Bundle.main.executableURL?.standardizedFileURL,
+           launched.path != canonical.standardizedFileURL.path {
+            try execCanonicalInstall(canonical)
+        }
+
         // v1.8.53 can leave its one-shot reload helper alive long enough to
         // restart the newly installed target repeatedly. The target fences that
         // helper before configuration/model work, but only while two durable
@@ -1201,9 +1213,19 @@ struct ServeCommand: AsyncParsableCommand {
         }()
         let admissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(admissionIdentityStatus)
         let installedCompatibilityManifest: CompatibilitySetManifest? = try { () throws -> CompatibilitySetManifest? in
-            guard let directory = CompatibilitySetManifest.payloadDirectory(
-                for: Bundle.main.executableURL
-            ) else { return nil }
+            let launched = Bundle.main.executableURL
+            let canonical = serveMarkerStore.resolveCanonicalInstallBinary(launchedExecutableURL: launched)
+            if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: launched,
+                canonicalBinaryURL: canonical,
+                expectedVersion: CoordinatorClient.binaryVersion,
+                allowProviderVersionMismatch: false
+            ) {
+                return installed
+            }
+            // Fail closed when a sibling/canonical manifest exists but is invalid.
+            let authority = canonical ?? CompatibilitySetManifest.resolvedExecutableURL(launched)
+            guard let directory = CompatibilitySetManifest.payloadDirectory(for: authority) else { return nil }
             let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
             guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
             return try CompatibilitySetManifest.loadValidated(
@@ -2079,6 +2101,15 @@ struct UpdateCommand: AsyncParsableCommand {
     var acceptanceRunAttempt: Int?
 
     func run() async throws {
+        // #616/#610: converge PATH, then hand off to the canonical install binary
+        // when this process was launched from a divergent PATH copy so update
+        // runs with sibling compatibility-set.json and matching provider_cli.
+        let updateMarkerStore = AutoUpdateMarkerStore()
+        if let canonical = try updateMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
+           let launched = Bundle.main.executableURL?.standardizedFileURL,
+           launched.path != canonical.standardizedFileURL.path {
+            try execCanonicalInstall(canonical)
+        }
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides())
         let updater = SelfUpdate(
             currentVersion: CoordinatorClient.binaryVersion,
@@ -2120,6 +2151,23 @@ struct UpdateCommand: AsyncParsableCommand {
             """.utf8))
         }
     }
+}
+
+/// Replaces this process with the canonical install binary and the same argv
+/// after PATH entrypoint repair (#616). Used by serve/update when launched from
+/// a stale `~/.local/bin` regular-file copy.
+private func execCanonicalInstall(_ canonical: URL) throws -> Never {
+    let argv = [canonical.path] + Array(CommandLine.arguments.dropFirst())
+    let cArgs = argv.map { strdup($0) } + [nil]
+    defer {
+        for pointer in cArgs where pointer != nil {
+            free(pointer)
+        }
+    }
+    _ = execv(canonical.path, cArgs)
+    throw ValidationError(
+        "failed to hand off to canonical install at \(canonical.path) (errno=\(errno))"
+    )
 }
 
 private func installTerminationHandlers(

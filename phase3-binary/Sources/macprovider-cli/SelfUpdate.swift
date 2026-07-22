@@ -117,6 +117,10 @@ struct SelfUpdate {
     }
 
     func run(checkOnly: Bool) async throws {
+        // Repair stale PATH regular-file entrypoints before set discovery so
+        // sibling compatibility-set.json is reachable via symlink resolution
+        // (#616 / #610 physical matrix J1/J4).
+        _ = try markerStore.ensurePathEntrypointMatchesInstallAuthority()
         let head = try await discoverSignedReleaseHead()
         try await markerStore.updateSignedPolicy(
             minimum: head.signedPolicyMinimum,
@@ -127,6 +131,7 @@ struct SelfUpdate {
         let comparison = Self.compareSemver(installedReleaseVersion, latest)
 
         if comparison != .orderedAscending {
+            _ = try markerStore.ensurePathEntrypointMatchesInstallAuthority()
             print("Already up to date (v\(installedReleaseVersion))")
             return
         }
@@ -181,9 +186,11 @@ struct SelfUpdate {
         expectedRunID: String,
         expectedRunAttempt: Int
     ) async throws {
+        _ = try markerStore.ensurePathEntrypointMatchesInstallAuthority()
         let target = try Self.validateReleaseTag(tag)
         let installedReleaseVersion = try installedCompatibilitySetReleaseVersion()
         guard Self.compareSemver(installedReleaseVersion, target) == .orderedAscending else {
+            _ = try markerStore.ensurePathEntrypointMatchesInstallAuthority()
             throw UpdateError.acceptanceCandidateNotNewer(
                 current: installedReleaseVersion,
                 target: target
@@ -220,19 +227,17 @@ struct SelfUpdate {
     }
 
     private func installedCompatibilitySetReleaseVersion() throws -> String {
-        guard let payloadDirectory = CompatibilitySetManifest.payloadDirectory(
-            for: Bundle.main.executableURL
-        ) else {
-            return currentVersion
+        let launched = Bundle.main.executableURL
+        let canonical = markerStore.resolveCanonicalInstallBinary(launchedExecutableURL: launched)
+        if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+            launchedExecutableURL: launched,
+            canonicalBinaryURL: canonical,
+            expectedVersion: currentVersion,
+            allowProviderVersionMismatch: true
+        ) {
+            return installed.version
         }
-        let manifestURL = payloadDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
-            return currentVersion
-        }
-        return try CompatibilitySetManifest.loadValidated(
-            from: payloadDirectory,
-            expectedProviderVersion: currentVersion
-        ).version
+        return currentVersion
     }
 
     func resolveReleaseByTags(normalizedTarget: String) async throws -> GitHubRelease {

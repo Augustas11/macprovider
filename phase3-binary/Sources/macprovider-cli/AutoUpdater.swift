@@ -345,13 +345,19 @@ struct AutoUpdater: Sendable {
             }
             let target = head.targetVersion
             await record(updateID: updateID, target: target, source: .githubPoll, phase: .detection, outcome: .inProgress, reason: "signed_release_discovery_detected", attempt: 1)
-            let installedReleaseVersion = currentBinaryURL().flatMap {
-                CompatibilitySetManifest.loadInstalled(
-                    executableURL: $0,
-                    expectedVersion: currentVersion
-                )?.version
-            } ?? currentVersion
+            let canonicalBinary = currentBinaryURL()
+            let installedReleaseVersion = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: Bundle.main.executableURL,
+                canonicalBinaryURL: canonicalBinary,
+                expectedVersion: currentVersion,
+                allowProviderVersionMismatch: true
+            )?.version ?? currentVersion
             guard SelfUpdate.compareSemver(installedReleaseVersion, target) == .orderedAscending else {
+                // Keep PATH converged even on noop polls so mixed regular-file
+                // PATH installs heal without waiting for the next activation.
+                _ = try? markerStore.ensurePathEntrypointMatchesInstallAuthority(
+                    launchedExecutableURL: Bundle.main.executableURL
+                )
                 await record(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, outcome: .noop, reason: "target_not_newer", attempt: 1)
                 return
             }

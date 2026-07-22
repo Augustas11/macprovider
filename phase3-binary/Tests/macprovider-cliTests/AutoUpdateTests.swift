@@ -930,6 +930,187 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: entrypoint), "new-binary")
     }
 
+    func testEnsurePathEntrypointMatchesInstallAuthorityRepairsRegularFileAndNoopsSymlink() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let install = fixture.url.appendingPathComponent("macprovider", isDirectory: true)
+        try FileManager.default.createDirectory(at: install, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let canonical = install.appendingPathComponent("macprovider-cli")
+        try Data("canonical-binary".utf8).write(to: canonical)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: canonical.path)
+
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+
+        let repaired = try store.ensurePathEntrypointMatchesInstallAuthority(launchedExecutableURL: entrypoint)
+        XCTAssertEqual(repaired?.standardizedFileURL, canonical.standardizedFileURL)
+        var entrypointInfo = stat()
+        XCTAssertEqual(lstat(entrypoint.path, &entrypointInfo), 0)
+        XCTAssertEqual(entrypointInfo.st_mode & S_IFMT, S_IFLNK)
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: entrypoint.path),
+            canonical.path
+        )
+        XCTAssertEqual(try String(contentsOf: entrypoint), "canonical-binary")
+
+        // Symlink already converged: idempotent no-op.
+        let again = try store.ensurePathEntrypointMatchesInstallAuthority(launchedExecutableURL: entrypoint)
+        XCTAssertEqual(again?.standardizedFileURL, canonical.standardizedFileURL)
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: entrypoint.path),
+            canonical.path
+        )
+    }
+
+    func testLoadInstalledPreferringInstallAuthorityFallsBackFromPathRegularFile() throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let install = fixture.url.appendingPathComponent("macprovider", isDirectory: true)
+        try FileManager.default.createDirectory(at: install, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let canonical = install.appendingPathComponent("macprovider-cli")
+        try Data("canonical-binary".utf8).write(to: canonical)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: canonical.path)
+        let manifestFixture = try CompatibilityManifestFixture(
+            root: install,
+            privateKey: manifestSigningKey,
+            version: "1.8.48",
+            providerCLIVersion: "1.8.48",
+            malibuAppVersion: "1.8.43",
+            commit: "b84b430aad74574e8a37bc052fe4f9863d0c0ce8",
+            populateResources: true
+        )
+
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+
+        XCTAssertNil(
+            CompatibilitySetManifest.loadInstalled(
+                executableURL: entrypoint,
+                expectedVersion: "1.8.48",
+                publicKeyPEM: manifestPublicKey
+            )
+        )
+        let installed = try XCTUnwrap(
+            CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: entrypoint,
+                canonicalBinaryURL: canonical,
+                expectedVersion: "1.8.48",
+                publicKeyPEM: manifestPublicKey
+            )
+        )
+        XCTAssertEqual(installed.compatibilitySetID, manifestFixture.compatibilitySetID)
+        XCTAssertEqual(installed.version, "1.8.48")
+    }
+
+    func testLoadInstalledPreferringInstallAuthorityAcceptsNewerCanonicalThanPathExpectedVersion() throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let install = fixture.url.appendingPathComponent("macprovider", isDirectory: true)
+        try FileManager.default.createDirectory(at: install, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let canonical = install.appendingPathComponent("macprovider-cli")
+        try Data("canonical-binary".utf8).write(to: canonical)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: canonical.path)
+        let manifestFixture = try CompatibilityManifestFixture(
+            root: install,
+            privateKey: manifestSigningKey,
+            version: "1.8.57",
+            providerCLIVersion: "1.8.57",
+            malibuAppVersion: "1.8.43",
+            commit: "ea9093e406c7c85764d65e21d31c12ddcca45208",
+            populateResources: true
+        )
+
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy-1.8.48".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+
+        // Updater discovery may surface the newer install-authority set even
+        // when the running PATH copy still expects 1.8.48.
+        let installed = try XCTUnwrap(
+            CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: entrypoint,
+                canonicalBinaryURL: canonical,
+                expectedVersion: "1.8.48",
+                allowProviderVersionMismatch: true,
+                publicKeyPEM: manifestPublicKey
+            )
+        )
+        XCTAssertEqual(installed.compatibilitySetID, manifestFixture.compatibilitySetID)
+        XCTAssertEqual(installed.version, "1.8.57")
+        XCTAssertEqual(installed.providerCLIVersion, "1.8.57")
+
+        // Serve/runtime admission must not advertise that newer set while still
+        // executing the stale PATH binary.
+        XCTAssertNil(
+            CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: entrypoint,
+                canonicalBinaryURL: canonical,
+                expectedVersion: "1.8.48",
+                allowProviderVersionMismatch: false,
+                publicKeyPEM: manifestPublicKey
+            )
+        )
+    }
+
+    func testRequireCoordinatorAdmissionResolvesCurrentSetFromCanonicalWhenPathLacksSiblingSet() throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            compatibilityManifestPublicKeyPEM: manifestPublicKey
+        )
+        try store.ensureTrustedRoot()
+        let install = fixture.url.appendingPathComponent("macprovider", isDirectory: true)
+        try FileManager.default.createDirectory(at: install, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let canonical = install.appendingPathComponent("macprovider-cli")
+        try Data("canonical-binary".utf8).write(to: canonical)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: canonical.path)
+        let currentFixture = try CompatibilityManifestFixture(
+            root: install,
+            privateKey: manifestSigningKey,
+            version: "1.8.48",
+            providerCLIVersion: "1.8.48",
+            malibuAppVersion: "1.8.43",
+            commit: "b84b430aad74574e8a37bc052fe4f9863d0c0ce8",
+            populateResources: true
+        )
+        let target = "Augustas11/macprovider:v1.8.57@ea9093e406c7c85764d65e21d31c12ddcca45208"
+        let observed = Date(timeIntervalSince1970: 1_800_000_000)
+        try store.persistCompatibilityAdmission(
+            acceptedCompatibilitySetID: currentFixture.compatibilitySetID,
+            recommendedCompatibilitySetID: target,
+            now: observed,
+            validitySeconds: 90
+        )
+
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+
+        // Physical J1 shape: PATH regular file cannot resolve a sibling set, so
+        // callers pass nil current — install authority must supply it.
+        XCTAssertNoThrow(try store.requireCoordinatorCompatibilityTarget(
+            target,
+            currentCompatibilitySetID: nil,
+            now: observed.addingTimeInterval(30),
+            launchedExecutableURL: entrypoint
+        ))
+    }
+
     func testAutoUpdaterPathConvergeFailureRollsBackCanonicalBinary() async throws {
         let fixture = try TempHome()
         let manifestSigningKey = P256.Signing.PrivateKey()
