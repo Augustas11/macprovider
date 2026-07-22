@@ -1,0 +1,49 @@
+# macprovider cold/warm TTFT probe — WARM-baseline accumulation (systemd oneshot).
+#
+# Accumulates warm-state samples (both regimes) into the NDJSON store on a LAB
+# host running against a LAB provider. Cold samples are captured separately by
+# the operator (see cold-cycle.sh); this unit only does the warm baseline.
+#
+# Install (lab host):
+#   apt-get install -y nodejs            # >= 18
+#   install -d -o macprovider -g macprovider -m 0755 /opt/macprovider/coldwarm-ttft
+#   cp coldwarm-probe.mjs run-coldwarm.sh /opt/macprovider/coldwarm-ttft/
+#   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider/coldwarm-ttft
+#   # buyer token via 0640 env file (NEVER inline in this unit):
+#   #   printf 'MACPROVIDER_BUYER_TOKEN=%s\n' "$TOKEN" > /etc/macprovider/coldwarm-ttft.env
+#   #   chown root:macprovider /etc/macprovider/coldwarm-ttft.env && chmod 0640 ...
+#   cp coldwarm-warm.{service,timer} coldwarm-matrix.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now coldwarm-warm.timer coldwarm-matrix.timer
+[Unit]
+Description=macprovider cold/warm TTFT probe — warm baseline accumulation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=macprovider
+Group=macprovider
+EnvironmentFile=-/etc/macprovider/coldwarm-ttft.env
+# Point at the LAB gateway, NOT prod — cold cycles churn the provider (see
+# cold-cycle.sh). Warm accumulation against prod read-only is fine, but keep the
+# store consistent by using one base per store.
+Environment=COLDWARM_BASE=https://api.streamvc.live
+Environment=COLDWARM_NODE_BIN=/usr/bin/node
+Environment=COLDWARM_STORE=/var/lib/macprovider/coldwarm-ttft/coldwarm-samples.ndjson
+Environment=COLDWARM_METRICS_OUT=/var/lib/macprovider/coldwarm-ttft/coldwarm.prom
+Environment=COLDWARM_JSON_OUT=/var/lib/macprovider/coldwarm-ttft/artifacts
+Environment=COLDWARM_SAMPLES=20
+ExecStart=/bin/bash /opt/macprovider/coldwarm-ttft/run-coldwarm.sh --scenario warm
+TimeoutStartSec=600
+# Hardening — outbound https + own state dir only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/macprovider/coldwarm-ttft
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=coldwarm-ttft

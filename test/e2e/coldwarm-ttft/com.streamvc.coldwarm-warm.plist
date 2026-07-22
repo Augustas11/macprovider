@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent template — warm-baseline accumulation for the cold/warm TTFT
+  matrix, every 30 minutes on a lab Mac. Cold cycles are operator-driven
+  (see cold-cycle.sh); this agent only accumulates the warm baseline.
+
+  Install (per-user LaunchAgent):
+    1. Edit REPLACE_REPO_PATH below to the absolute checkout path.
+    2. Put the buyer token at ~/.config/macprovider/buyer-api-key (run-coldwarm.sh
+       resolves it) OR export MACPROVIDER_BUYER_TOKEN in EnvironmentVariables.
+    3. cp com.streamvc.coldwarm-warm.plist ~/Library/LaunchAgents/
+    4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.streamvc.coldwarm-warm.plist
+    5. launchctl kickstart -p gui/$(id -u)/com.streamvc.coldwarm-warm   # run once now
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.streamvc.coldwarm-warm
+    rm ~/Library/LaunchAgents/com.streamvc.coldwarm-warm.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.streamvc.coldwarm-warm</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPLACE_REPO_PATH/test/e2e/coldwarm-ttft/run-coldwarm.sh</string>
+    <string>--scenario</string>
+    <string>warm</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>COLDWARM_BASE</key>
+    <string>https://api.streamvc.live</string>
+    <!-- Pin the model explicitly to keep the store's matrix keys consistent.
+         Use the FULL catalog model id the provider advertises (what /v1/status
+         returns), NOT the short rate-card key: post-#510 the provider advertises
+         `mlx-community/…` and a buyer request for the short id
+         `qwen3-coder-30b-a3b-instruct` 404s `model_not_found`. Leave COLDWARM_MODEL
+         unset to auto-derive from /v1/status (also the full id) — either is fine,
+         but never hardcode the short id. (2026-07-10 incident learning.) -->
+    <key>COLDWARM_MODEL</key>
+    <string>mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_HOME/Library/Logs/coldwarm-warm.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE_HOME/Library/Logs/coldwarm-warm.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
