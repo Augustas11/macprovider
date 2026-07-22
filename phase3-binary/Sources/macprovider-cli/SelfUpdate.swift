@@ -232,7 +232,8 @@ struct SelfUpdate {
         if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
             launchedExecutableURL: launched,
             canonicalBinaryURL: canonical,
-            expectedVersion: currentVersion
+            expectedVersion: currentVersion,
+            allowProviderVersionMismatch: true
         ) {
             return installed.version
         }

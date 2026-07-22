@@ -1035,19 +1035,32 @@ final class AutoUpdateTests: XCTestCase {
         try Data("stale-path-copy-1.8.48".utf8).write(to: entrypoint)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
 
-        // Physical mixed state: PATH still claims 1.8.48 while canonical payload
-        // already carries the newer signed set.
+        // Updater discovery may surface the newer install-authority set even
+        // when the running PATH copy still expects 1.8.48.
         let installed = try XCTUnwrap(
             CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
                 launchedExecutableURL: entrypoint,
                 canonicalBinaryURL: canonical,
                 expectedVersion: "1.8.48",
+                allowProviderVersionMismatch: true,
                 publicKeyPEM: manifestPublicKey
             )
         )
         XCTAssertEqual(installed.compatibilitySetID, manifestFixture.compatibilitySetID)
         XCTAssertEqual(installed.version, "1.8.57")
         XCTAssertEqual(installed.providerCLIVersion, "1.8.57")
+
+        // Serve/runtime admission must not advertise that newer set while still
+        // executing the stale PATH binary.
+        XCTAssertNil(
+            CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                launchedExecutableURL: entrypoint,
+                canonicalBinaryURL: canonical,
+                expectedVersion: "1.8.48",
+                allowProviderVersionMismatch: false,
+                publicKeyPEM: manifestPublicKey
+            )
+        )
     }
 
     func testRequireCoordinatorAdmissionResolvesCurrentSetFromCanonicalWhenPathLacksSiblingSet() throws {

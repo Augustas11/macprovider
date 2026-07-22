@@ -424,6 +424,7 @@ actor CoordinatorClient {
                 launchedExecutableURL: executableURL,
                 canonicalBinaryURL: canonical,
                 expectedVersion: expectedVersion,
+                allowProviderVersionMismatch: false,
                 publicKeyPEM: markerStoreForManifest.compatibilityManifestPublicKeyPEM
             )
         }

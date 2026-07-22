@@ -414,10 +414,17 @@ struct CompatibilitySetManifest: Equatable, Sendable {
     /// (install authority). This is the #616/#610 PATH regular-file case:
     /// `~/.local/bin/macprovider-cli` as a stale copy has no sibling set, while
     /// `~/macprovider/macprovider-cli` does.
+    ///
+    /// - Parameter allowProviderVersionMismatch: When `true` (updater/current-set
+    ///   discovery only), a signed canonical manifest may be returned even if its
+    ///   `provider_cli` version differs from `expectedVersion`. Serve/runtime
+    ///   admission must keep this `false` so a stale process cannot advertise a
+    ///   newer set identity than the binary it is actually executing.
     static func loadInstalledPreferringInstallAuthority(
         launchedExecutableURL: URL?,
         canonicalBinaryURL: URL?,
         expectedVersion: String? = nil,
+        allowProviderVersionMismatch: Bool = false,
         publicKeyPEM: String = SelfUpdate.checksumPublicKeyPEM
     ) -> CompatibilitySetManifest? {
         var candidates: [URL] = []
@@ -441,13 +448,11 @@ struct CompatibilitySetManifest: Equatable, Sendable {
                 ) {
                     return installed
                 }
-                // Mixed PATH/payload versions: still surface the install-authority
-                // set identity so update can converge rather than throw
-                // invalid_current_or_target_set on a nil current set.
-                if let installed = try? loadValidated(
+                if allowProviderVersionMismatch,
+                   let installed = try? loadValidated(
                     from: payloadDirectory,
                     publicKeyPEM: publicKeyPEM
-                ) {
+                   ) {
                     return installed
                 }
             } else if let installed = try? loadValidated(

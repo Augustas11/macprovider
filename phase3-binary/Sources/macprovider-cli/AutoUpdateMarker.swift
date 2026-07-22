@@ -491,6 +491,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
                 launchedExecutableURL: launchedExecutableURL,
                 canonicalBinaryURL: canonical,
+                allowProviderVersionMismatch: true,
                 publicKeyPEM: compatibilityManifestPublicKeyPEM
             ) {
                 resolvedCurrent = installed.compatibilitySetID

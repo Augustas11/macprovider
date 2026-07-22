@@ -349,7 +349,8 @@ struct AutoUpdater: Sendable {
             let installedReleaseVersion = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
                 launchedExecutableURL: Bundle.main.executableURL,
                 canonicalBinaryURL: canonicalBinary,
-                expectedVersion: currentVersion
+                expectedVersion: currentVersion,
+                allowProviderVersionMismatch: true
             )?.version ?? currentVersion
             guard SelfUpdate.compareSemver(installedReleaseVersion, target) == .orderedAscending else {
                 // Keep PATH converged even on noop polls so mixed regular-file
