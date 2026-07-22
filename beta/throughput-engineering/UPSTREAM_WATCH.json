@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "last_checked_at": "2026-07-22T11:49:28Z",
-  "last_changed_at": "2026-07-22T11:49:28Z",
+  "last_checked_at": "2026-07-22T19:29:44Z",
+  "last_changed_at": "2026-07-22T19:29:44Z",
   "macprovider_pins": {
     "mlx_swift_lm": "3.31.4",
     "mlx_swift": "0.31.6"
@@ -22,10 +22,12 @@
       "kind": "pull_request",
       "number": 364,
       "url": "https://github.com/ml-explore/mlx-swift-lm/pull/364",
-      "state": "OPEN",
+      "state": "MERGED",
       "title": "MLXLLM Gemma4Text: add MoE block (router + experts) for the text path",
       "runbook_tasks": ["T1-02", "TG1"],
-      "updated_at": "2026-06-26T10:17:20Z"
+      "updated_at": "2026-07-22T19:29:44Z",
+      "merged_at": "2026-07-21T19:43:49Z",
+      "status": "awaiting_release_tag"
     }
   },
   "releases": {
