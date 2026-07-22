@@ -4,6 +4,19 @@ Branch: `research/236-p4-cache-regression`
 Worktree: `/Users/augstar/macprovider-p4-cache` (off origin/main @ 55d298ba)
 Task prompt: `audits/_prompts/RESEARCH_236_P4_CACHE_REGRESSION_PROMPT.md` (on origin/main)
 
+## Status: impl+calibration DONE; R5 architect HIGH FIXED (commit ac72e3b2, pushed); NEEDS R6 re-audit (code+architect) then PR. Security PASSED R2 — do not re-run.
+
+### R5 result + fix (done by main session after the build agent hit its session limit)
+- R5 architect returned 1 HIGH: B8's advertised 0.50 floor was NOT the FAIL boundary — old bands PASS>=0.50 / WARN[0.30,0.50) / FAIL<0.30 let reuse fall to ~0.35 with only a non-blocking WARN, breaking fail-loud.
+- FIX (commit `ac72e3b2`, pushed): rebanded to PASS>=0.60 (target) / WARN[0.50,0.60) / FAIL<0.50 (hard floor) — exactly the auditor's recommendation. Updated WARN unit test (0.30->0.55), SPEC-NETWORK-BENCHMARK B8 bands (line 127 + 151), stale threshold comments, and dropped B9 gate-shaped Target/BareMin (R5 LOW#3, record-only). `go build ./... && go test ./...` GREEN.
+- R5 code lane: 0 H / 0 M, 3 LOW — all addressed by the same commit.
+
+### REMAINING (single clean step for a fresh session)
+1. R6 re-audit — ONLY code + architect lanes (security already 0/0/0 at R2, do NOT re-run). Prompts: `audits/2026-07-22/RESEARCH_236_P4_CACHE_GATE_{CODE,ARCHITECT}_AUDIT.md` (update their stale threshold refs to 0.60/0.50 first). Via `omc ask codex` / /ask skill. Bar = 0 C/H/M. The reband directly implements the R5 architect recommendation, so expect clean; fix + re-audit if not.
+2. Rebase on origin/main; `go test ./...` under test/network-harness.
+3. Open PR as **Augustas11** (`GH_TOKEN=$(gh auth token -u Augustas11) gh pr create --base main --head research/236-p4-cache-regression`), body from `scratchpad/pr-body.md` (update B8 thresholds to 0.60/0.50 in the body). Do NOT merge — hand to user.
+
+--- ORIGINAL NOTE BELOW (pre-R5) ---
 ## Status: implementation + calibration + arming DONE; audit R5 in flight; PR NOT yet opened.
 
 ### Deliverables
