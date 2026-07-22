@@ -76,5 +76,5 @@ phase4-coordinator/stats.test
 test/network-harness/artifacts/
 test/network-harness/harness
 
-# Local audit scratchpads
-scratchpad/
+# Local #615 audit artifacts (reports/diffs; keep out of PRs)
+scratchpad/615-audit/
