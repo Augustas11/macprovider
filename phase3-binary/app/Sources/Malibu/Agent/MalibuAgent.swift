@@ -742,8 +742,8 @@ final class MalibuAgent: ObservableObject {
             snapshot.state = localReady ? .reconnecting : .starting
             snapshot.pauseAcknowledged = false
         }
-        let buyerServing = snapshot.isLocalStatusObservationCurrent()
-            && snapshot.networkState == "buyer_serving"
+        let observationCurrent = snapshot.isLocalStatusObservationCurrent()
+        let buyerServing = observationCurrent && snapshot.networkState == "buyer_serving"
         if localReady && buyerServing {
             snapshot.state = .serving
             snapshot.lastError = nil
@@ -824,7 +824,7 @@ final class MalibuAgent: ObservableObject {
         healthPollTask?.cancel()
         healthPollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                try? await Task.sleep(nanoseconds: LocalStatusObservationPolicy.pollIntervalNanoseconds)
                 guard let self else { return }
                 if await InstalledProviderMonitor.isHealthy(port: port) {
                     await self.applyProviderSnapshot(port: port)
@@ -896,7 +896,7 @@ final class MalibuAgent: ObservableObject {
 
         metricsPoller = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                try? await Task.sleep(nanoseconds: LocalStatusObservationPolicy.pollIntervalNanoseconds)
                 try? await client.send(.metricsRequest)
                 try? await client.send(.statusRequest)
                 if let port = ProviderConfig.readHTTPPort() {

@@ -232,6 +232,11 @@ struct ReferralStatusProjection: Equatable, Sendable {
 }
 
 enum ReferralPanelPresenter {
+    /// Persistent chrome clarifying SPEC-034's two-step earn path: base from
+    /// first verified buyer-serving settlement, optional exactly-once X bonus.
+    static let pathChrome =
+        "Base unlocks after first paid serve · Optional X post adds bonus invites"
+
     static func headline(availability: ReferralAvailability, status: ReferralStatusProjection?) -> String {
         switch availability {
         case .unsupported: return "Invites unavailable with this provider software"
@@ -241,11 +246,15 @@ enum ReferralPanelPresenter {
             guard let status else { return "Referral status unavailable" }
             if !status.joinLinksEnabled { return "Invite links temporarily unavailable" }
             switch status.socialState {
-            case ReferralStatusProjection.locked: return "Serve once to unlock invites"
-            case ReferralStatusProjection.eligible: return status.remaining == 0 ? "Invite capacity used" : "Invites ready"
-            case ReferralStatusProjection.pending: return "X post awaiting network review"
-            case ReferralStatusProjection.matured: return "X bonus awarded"
-            case ReferralStatusProjection.failed: return "X post was not verified"
+            case ReferralStatusProjection.locked: return "Serve once to unlock your base invite"
+            case ReferralStatusProjection.eligible:
+                return status.remaining == 0 ? "Invite capacity used" : "Base invite ready"
+            case ReferralStatusProjection.pending: return "X bonus pending verification"
+            case ReferralStatusProjection.matured: return "Base invite unlocked · X bonus awarded"
+            case ReferralStatusProjection.failed:
+                if status.remaining == 0 { return "Invite capacity used · X bonus not awarded" }
+                if status.availableInviteURL != nil { return "Base invite ready · X bonus not awarded" }
+                return "Base invite unlocked · X bonus not awarded"
             case ReferralStatusProjection.revoked: return "Invites revoked"
             default: return "Referral status unavailable"
             }
@@ -267,15 +276,29 @@ enum ReferralPanelPresenter {
             }
             switch status.socialState {
             case ReferralStatusProjection.locked:
-                return "The network has not yet confirmed this provider can receive customer work."
+                return "Complete one verified customer job to unlock the base invite. X is an optional bonus after that."
             case ReferralStatusProjection.pending:
-                return "No bonus is earned until the public post is verified."
+                return "Your base invite is already unlocked. No X bonus is earned until the public post is verified."
             case ReferralStatusProjection.matured:
-                return "\(invitePhrase(status.bonusCapacity)) earned from the X reward."
+                return maturedDetail(status)
             case ReferralStatusProjection.failed:
-                return "No bonus was awarded. You can create a new verification post when available."
+                if status.availableInviteURL != nil {
+                    return "Your base invite remains available. You can start a new X verification when available."
+                }
+                return "No X bonus was awarded. You can create a new verification post when available."
             case ReferralStatusProjection.revoked:
                 return "Referral actions are disabled. Your provider can continue serving."
+            case ReferralStatusProjection.eligible:
+                if status.remaining == 0 {
+                    return "\(invitePhrase(status.remaining)) remaining · \(status.redemptions) redeemed."
+                }
+                if status.availableInviteURL != nil {
+                    if status.canStartSocialChallenge {
+                        return "Copy your private invite anytime. Optional: share on X for \(invitePhrase(status.configuredBonusCapacity))."
+                    }
+                    return "Copy your private invite anytime."
+                }
+                return "\(invitePhrase(status.remaining)) remaining · \(status.redemptions) redeemed."
             default:
                 return "\(invitePhrase(status.remaining)) remaining · \(status.redemptions) redeemed."
             }
@@ -283,10 +306,29 @@ enum ReferralPanelPresenter {
     }
 
     static func capacity(_ status: ReferralStatusProjection) -> String {
-        "\(status.remaining) remaining · \(status.redemptions) redeemed · \(status.baseCapacity + status.bonusCapacity) total"
+        let total = status.baseCapacity + status.bonusCapacity
+        if status.bonusCapacity > 0 {
+            return "\(status.remaining) remaining · \(status.redemptions) redeemed · \(status.baseCapacity) base + \(status.bonusCapacity) X bonus (\(total) total)"
+        }
+        if status.canStartSocialChallenge {
+            return "\(status.remaining) remaining · \(status.redemptions) redeemed · \(status.baseCapacity) base · X bonus available"
+        }
+        return "\(status.remaining) remaining · \(status.redemptions) redeemed · \(total) total"
     }
 
     static func invitePhrase(_ count: Int) -> String {
         "\(count) invite use\(count == 1 ? "" : "s")"
+    }
+
+    private static func maturedDetail(_ status: ReferralStatusProjection) -> String {
+        let base = "\(status.baseCapacity) base from serving"
+        let bonus = "\(status.bonusCapacity) from X bonus"
+        if status.remaining > 0, status.availableInviteURL != nil {
+            return "\(base) · \(bonus). Remaining invites stay copyable — X is not required to invite."
+        }
+        if status.remaining > 0 {
+            return "\(base) · \(bonus). Remaining capacity is preserved; invite link unavailable right now."
+        }
+        return "\(base) · \(bonus). Invite capacity is fully used."
     }
 }
