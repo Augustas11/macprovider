@@ -46,6 +46,15 @@ Until then the interim rule is **derived-only mutate**:
    author/sign Tier-2 with `scripts/sign-catalog.go` after review, using
    `tier2-identity-binding.json` + `check-tier2-binding` as the drift gate.
    Signing alone does **not** authorize a live catalog.
+   `scripts/catalog-release.py stage-tier2-republish` helps close a detected
+   conflict: it projects autotune-derived hashes from
+   `tier2-identity-binding.json` onto an operator-supplied template (e.g. the
+   current live Tier-2 file) for overlapping `model_id`s only, leaving every
+   other reviewed field (`hash_scope`, `artifact_kind`, `min_ram_gb`, `notes`,
+   `source`) untouched, and refuses to write output unless the staged body
+   already passes `check-tier2-binding`. It is a staging aid for
+   `sign-catalog.go`, not a second identity authority. See
+   `ops/runbooks/608-llama-tier2-republish.md` for a worked example.
 3. `scripts/catalog-release.py check-tier2-binding` and Pearl
    `deploy-pearl-vps.sh` fail closed when an overlapping `model_id` has a
    Tier-2 `sha256` that disagrees with the autotune `model_sha256`. Deploy

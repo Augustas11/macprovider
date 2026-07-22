@@ -395,4 +395,89 @@ conflict = {
 PY
 expect_rejected "conflicting tier2 catalog in release directory"
 
+# #608 Partial: Llama-3.2 live-CONFLICT fixture proves check-tier2-binding
+# fails closed on the exact stale-vs-current hash pair observed on Pearl, and
+# that scripts/catalog-release.py stage-tier2-republish resolves it into an
+# agreeing unsigned body without touching derive-tier2's disabled path.
+python3 - "$VERIFY" "$CANONICAL" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("catalog_release", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+canonical = pathlib.Path(sys.argv[2])
+candidate = (canonical / "autotune-candidates.json").read_bytes()
+candidate_obj = module.validate_candidate(candidate)
+binding_data = (canonical / "tier2-identity-binding.json").read_bytes()
+module.validate_tier2_identity_binding(binding_data, candidate, candidate_obj)
+binding_obj = module.strict_json(binding_data, "tier2-identity-binding")
+
+conflict_template = json.loads(
+    (canonical / "testdata" / "tier2-llama-conflict-template.json").read_bytes()
+)
+llama_row = next(
+    m for m in conflict_template["models"]
+    if m["model_id"] == "mlx-community/Llama-3.2-3B-Instruct-4bit"
+)
+STALE_LLAMA_SHA256 = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+CURRENT_LLAMA_SHA256 = "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90"
+assert llama_row["sha256"] == STALE_LLAMA_SHA256, "fixture must encode the live Pearl stale hash"
+assert candidate_obj["rows"]["meta-llama/llama-3.2-3b-instruct"]["model_sha256"] == CURRENT_LLAMA_SHA256
+
+template_bytes = module.canonical_bytes(conflict_template)
+
+try:
+    module.check_tier2_binding(candidate, template_bytes)
+except module.CatalogError as exc:
+    message = str(exc)
+    if "Llama-3.2-3B-Instruct-4bit" not in message or STALE_LLAMA_SHA256 not in message or CURRENT_LLAMA_SHA256 not in message:
+        raise SystemExit(f"Llama conflict error missing expected hashes: {exc}")
+else:
+    raise SystemExit("stale Llama-3.2 tier2 fixture was accepted (must fail closed)")
+
+with tempfile.TemporaryDirectory() as directory:
+    staged_path = pathlib.Path(directory) / "tier2-staged.json"
+    staged_bytes, changed = module.stage_tier2_republish(
+        module.load_tier2_republish_template(json.dumps(conflict_template).encode()),
+        binding_obj,
+    )
+    if len(changed) != 1 or "Llama-3.2-3B-Instruct-4bit" not in changed[0]:
+        raise SystemExit(f"stage_tier2_republish changed unexpected rows: {changed!r}")
+    # Every overlapping model_id (all 9 in this fixture) must now agree with
+    # the current autotune release, not just Llama.
+    module.check_tier2_binding(candidate, staged_bytes)
+    staged_path.write_bytes(staged_bytes)
+
+    module.cmd_stage_tier2_republish(
+        canonical / "autotune-candidates.json",
+        canonical / "tier2-identity-binding.json",
+        canonical / "testdata" / "tier2-llama-conflict-template.json",
+        staged_path,
+    )
+    module.check_tier2_binding(candidate, staged_path.read_bytes())
+    staged_obj = json.loads(staged_path.read_bytes())
+    staged_models = {m["model_id"]: m["sha256"] for m in staged_obj["models"]}
+    if staged_models["mlx-community/Llama-3.2-3B-Instruct-4bit"] != CURRENT_LLAMA_SHA256:
+        raise SystemExit("staged republish body did not adopt the current autotune Llama hash")
+    for entry in staged_obj["models"]:
+        if entry["model_id"] == "mlx-community/Llama-3.2-3B-Instruct-4bit":
+            continue
+        original = next(m for m in conflict_template["models"] if m["model_id"] == entry["model_id"])
+        if entry != original:
+            raise SystemExit(f"stage-tier2-republish changed an already-agreeing row: {entry['model_id']}")
+
+    # Re-staging an already-agreeing body is a no-op (idempotent).
+    _, second_pass_changed = module.stage_tier2_republish(
+        module.load_tier2_republish_template(staged_path.read_bytes()),
+        binding_obj,
+    )
+    if second_pass_changed:
+        raise SystemExit(f"re-staging an agreeing body should be a no-op, got: {second_pass_changed!r}")
+print("llama tier2 conflict fixture + stage-tier2-republish checks locked")
+PY
+
 echo "PASS: catalog release generation and trust failures are locked"

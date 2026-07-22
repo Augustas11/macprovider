@@ -32,6 +32,7 @@ TIER2_BINDING_PATH = CATALOG_DIR / "tier2-identity-binding.json"
 TIER2_BINDING_SCHEMA = "macprovider.tier2-identity-binding.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
+TIER2_HASH_SCOPES = {"primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental"}
 MODEL_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
@@ -874,6 +875,97 @@ def check_tier2_binding(candidate_data: bytes, tier2_data: bytes) -> None:
         fail(f"autotune/tier2 identity conflict on {len(conflicts)} model(s): " + "; ".join(conflicts))
 
 
+def load_tier2_republish_template(data: bytes) -> dict:
+    """Parse an operator-reviewed Tier-2 catalog body used as a republish
+    template for `stage-tier2-republish` (#608). Accepts either the unsigned
+    body shape or the full signed shape (an optional `signature` object is
+    ignored; the staged output is always unsigned)."""
+    value = strict_json(data, "tier2 republish template")
+    allowed = {"catalog_id", "expires_at", "issued_at", "models", "version", "signature"}
+    required = {"catalog_id", "expires_at", "issued_at", "models", "version"}
+    exact_keys(value, allowed, required, "tier2 republish template")
+    if value["version"] != 1:
+        fail("tier2 republish template: version must be 1")
+    if not isinstance(value["catalog_id"], str) or not value["catalog_id"].strip():
+        fail("tier2 republish template: catalog_id must be a non-empty string")
+    if not isinstance(value["issued_at"], str) or not value["issued_at"].strip():
+        fail("tier2 republish template: issued_at must be a non-empty string")
+    if not isinstance(value["expires_at"], str) or not value["expires_at"].strip():
+        fail("tier2 republish template: expires_at must be a non-empty string")
+    models = value["models"]
+    if not isinstance(models, list) or not models:
+        fail("tier2 republish template: models must be a non-empty array")
+    allowed_entry = {"artifact_kind", "hash_scope", "model_id", "min_ram_gb", "notes", "sha256", "source"}
+    required_entry = {"artifact_kind", "hash_scope", "model_id", "sha256", "source"}
+    seen: set[str] = set()
+    for idx, entry in enumerate(models):
+        label = f"tier2 republish template models[{idx}]"
+        if not isinstance(entry, dict):
+            fail(f"{label}: must be an object")
+        exact_keys(entry, allowed_entry, required_entry, label)
+        if entry["artifact_kind"] != "mlx_weight_file":
+            fail(f"{label}: artifact_kind must be mlx_weight_file")
+        if entry["hash_scope"] not in TIER2_HASH_SCOPES:
+            fail(f"{label}: unsupported hash_scope")
+        if not isinstance(entry["model_id"], str) or not entry["model_id"].strip():
+            fail(f"{label}: model_id must be a non-empty string")
+        if not isinstance(entry["sha256"], str) or not HEX64.fullmatch(entry["sha256"]):
+            fail(f"{label}: sha256 must be lowercase 64-hex")
+        if not isinstance(entry["source"], str) or not entry["source"].strip():
+            fail(f"{label}: source must be a non-empty string")
+        if "min_ram_gb" in entry and entry["min_ram_gb"] is not None and (
+            not isinstance(entry["min_ram_gb"], int)
+            or isinstance(entry["min_ram_gb"], bool)
+            or entry["min_ram_gb"] < 1
+        ):
+            fail(f"{label}: min_ram_gb must be a positive integer")
+        if "notes" in entry and entry["notes"] is not None and not isinstance(entry["notes"], str):
+            fail(f"{label}: notes must be a string")
+        normalized = entry["model_id"].strip().lower()
+        if normalized in seen:
+            fail(f"{label}: duplicate model_id {entry['model_id']!r}")
+        seen.add(normalized)
+    return value
+
+
+def stage_tier2_republish(template_obj: dict, binding_obj: dict) -> tuple[bytes, list[str]]:
+    """Project autotune-derived hashes from a validated
+    `tier2-identity-binding.json` object onto an operator-reviewed Tier-2
+    republish template, changing only `sha256` for model_ids that overlap.
+
+    This is deliberately NOT `derive_tier2_unsigned_body`: it never invents
+    `hash_scope`, `artifact_kind`, `min_ram_gb`, `notes`, or `source` — those
+    stay exactly as the operator wrote them in the template. It only closes
+    autotune/Tier-2 identity drift (#608) so the result can be reviewed and
+    handed to `scripts/sign-catalog.go sign`. It is not a second identity
+    authority: the caller must still run `check-tier2-binding` (this
+    function calls it internally) before treating the output as republish-
+    ready, and Pearl upload still goes through the reviewed sign + deploy
+    path, never this script alone.
+    """
+    binding_by_model: dict[str, str] = {}
+    for entry in binding_obj["models"]:
+        binding_by_model[entry["model_id"].strip().lower()] = entry["sha256"]
+    changed: list[str] = []
+    updated_models = []
+    for entry in template_obj["models"]:
+        normalized = entry["model_id"].strip().lower()
+        autotune_hash = binding_by_model.get(normalized)
+        new_entry = dict(entry)
+        if autotune_hash is not None and autotune_hash != entry["sha256"]:
+            changed.append(f"{entry['model_id']}: {entry['sha256']} -> {autotune_hash}")
+            new_entry["sha256"] = autotune_hash
+        updated_models.append(new_entry)
+    body = {
+        "catalog_id": template_obj["catalog_id"],
+        "expires_at": template_obj["expires_at"],
+        "issued_at": template_obj["issued_at"],
+        "models": updated_models,
+        "version": template_obj["version"],
+    }
+    return json.dumps(body, indent=2, sort_keys=True).encode("utf-8") + b"\n", changed
+
+
 def derive_tier2_unsigned_body(
     candidate_obj: dict,
     *,
@@ -1102,6 +1194,40 @@ def cmd_derive_tier2(
     del output_path
 
 
+def cmd_stage_tier2_republish(
+    candidate_path: pathlib.Path,
+    binding_path: pathlib.Path,
+    template_path: pathlib.Path,
+    output_path: pathlib.Path,
+) -> None:
+    """Stage an UNSIGNED Tier-2 republish body that resolves autotune/Tier-2
+    identity drift (#608) for a reviewed `template_path` catalog, using the
+    already-generated `tier2-identity-binding.json` as the autotune hash
+    source. Fails closed (does not write `output_path`) unless the staged
+    result agrees with `candidate_path` on every overlapping model_id, so a
+    caller cannot accidentally ship a body that still conflicts."""
+    candidate = candidate_path.read_bytes()
+    candidate_obj = validate_candidate(candidate)
+    binding_data = binding_path.read_bytes()
+    validate_tier2_identity_binding(binding_data, candidate, candidate_obj)
+    binding_obj = strict_json(binding_data, "tier2 identity binding")
+    template_obj = load_tier2_republish_template(template_path.read_bytes())
+    staged, changed = stage_tier2_republish(template_obj, binding_obj)
+    check_tier2_binding(candidate, staged)
+    output_path.write_bytes(staged)
+    if changed:
+        print("stage-tier2-republish: updated sha256 for " + "; ".join(changed))
+    else:
+        print("stage-tier2-republish: template already agrees with autotune; no sha256 changes")
+    print(
+        f"stage-tier2-republish: wrote unsigned body to {output_path} "
+        f"(autotune release={candidate_obj['version']!r}, models={len(template_obj['models'])}). "
+        "Review the diff, then sign with scripts/sign-catalog.go and republish "
+        "through the reviewed deploy path. This output is not a second identity "
+        "authority; check-tier2-binding already passed against the pinned candidate."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1133,6 +1259,26 @@ def main() -> int:
     derive_parser.add_argument("--catalog-id", required=True)
     derive_parser.add_argument("--issued-at", required=True)
     derive_parser.add_argument("--expires-at", required=True)
+    stage_parser = sub.add_parser("stage-tier2-republish")
+    stage_parser.add_argument(
+        "--candidate",
+        type=pathlib.Path,
+        default=CATALOG_DIR / "autotune-candidates.json",
+        help="autotune-candidates.json path",
+    )
+    stage_parser.add_argument(
+        "--binding",
+        type=pathlib.Path,
+        default=TIER2_BINDING_PATH,
+        help="tier2-identity-binding.json path (must match --candidate)",
+    )
+    stage_parser.add_argument(
+        "--template",
+        required=True,
+        type=pathlib.Path,
+        help="operator-reviewed Tier-2 catalog (signed or unsigned) to project autotune hashes into",
+    )
+    stage_parser.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
     try:
         if args.command == "bootstrap":
@@ -1153,6 +1299,8 @@ def main() -> int:
                 issued_at=args.issued_at,
                 expires_at=args.expires_at,
             )
+        elif args.command == "stage-tier2-republish":
+            cmd_stage_tier2_republish(args.candidate, args.binding, args.template, args.output)
         else:
             fail(f"unknown command {args.command!r}")
     except (CatalogError, OSError, subprocess.SubprocessError) as exc:
