@@ -199,7 +199,8 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
     "tail_ratio_p99_p50": 2.7,
     "error_rate_per_1k": 3.0,
     "total_requests": 150,
-    "non_2xx_breakdown": {"429": 2, "503": 1, "502": 0}
+    "non_2xx_breakdown": {"429": 2, "503": 1, "502": 0},
+    "sustained_tps": {"first_window_tps_p50": 30.4, "final_window_tps_p50": 27.9, "retention": 0.92, "first_window_samples": 61, "final_window_samples": 58}
   },
   "provider_metrics": {
     "per_provider": [

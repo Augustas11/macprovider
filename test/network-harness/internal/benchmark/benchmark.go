@@ -96,13 +96,14 @@ type BuyerMetrics struct {
 // SustainedTPSMetrics is the sustained-load retention cross-section for
 // B10. It windows the per-request *streaming* decode-TPS distribution
 // (post-TTFT tokens / decode duration — the same basis as B2, NOT the
-// structurally-unreliable non-streaming sustained_tps field) by
-// wall-clock StartUTC into a first window (the first SustainedTPSWindowSeconds
-// of observed samples) and a final window (the last SustainedTPSWindowSeconds),
-// then reports retention = final_p50 / first_p50. On a short run the two
-// windows can overlap; the ≥ SustainedTPSMinWindowSamples floor is the
-// guard against a meaningless verdict, not window disjointness (a real
-// 45–60 min soak has fully disjoint windows).
+// structurally-unreliable non-streaming sustained_tps field) by wall-clock
+// start into a first window [runStart, runStart+W) and a final window
+// (runEnd-W, runEnd], where runStart/runEnd are the TRUE run bounds (over
+// ALL results, including failures) and W = SustainedTPSWindowSeconds, then
+// reports retention = final_p50 / first_p50. Anchoring to the real run end
+// (not the last successful sample) is what makes a near-end provider
+// disconnect SKIP rather than falsely PASS. Runs whose span is < 2W (windows
+// would overlap) yield zero-count windows → B10 SKIPs.
 type SustainedTPSMetrics struct {
 	FirstWindowTPSP50  float64 `json:"first_window_tps_p50"`
 	FinalWindowTPSP50  float64 `json:"final_window_tps_p50"`
@@ -312,7 +313,26 @@ func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 	non2xx := map[string]int{}
 	success := 0
 	non2xxCount := 0
+	// Run temporal bounds are tracked over ALL results (including failed /
+	// disconnected ones — their StartUTC/EndUTC are still recorded at
+	// dispatch). B10 anchors its first/final windows to this true run span,
+	// NOT to the last successful streaming sample. That way a provider that
+	// disconnects near the end of a soak (the #584 signature) leaves an empty
+	// final window → B10 SKIPs, instead of the window sliding back onto early
+	// healthy samples and falsely reporting ~1.0 retention.
+	var runStart, runEnd time.Time
 	for _, r := range results {
+		if !r.StartUTC.IsZero() {
+			if runStart.IsZero() || r.StartUTC.Before(runStart) {
+				runStart = r.StartUTC
+			}
+			if r.StartUTC.After(runEnd) {
+				runEnd = r.StartUTC
+			}
+		}
+		if !r.EndUTC.IsZero() && r.EndUTC.After(runEnd) {
+			runEnd = r.EndUTC
+		}
 		if r.HTTPStatus >= 400 || r.Outcome != "ok" {
 			non2xxCount++
 			key := fmt.Sprintf("%d", r.HTTPStatus)
@@ -374,39 +394,44 @@ func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 			bm.ColdWarm.RatioP50 = bm.ColdWarm.ColdTTFTMs.P50 / bm.ColdWarm.WarmTTFTMs.P50
 		}
 	}
-	bm.SustainedTPS = computeSustainedTPS(tpsSamples)
+	bm.SustainedTPS = computeSustainedTPS(tpsSamples, runStart, runEnd)
 	return bm
 }
 
-// computeSustainedTPS windows the timestamped streaming-TPS samples into
-// a first window ([t0, t0+W)) and a final window ((tEnd-W, tEnd]) by
-// wall-clock start, where t0/tEnd are the earliest/latest observed sample
-// starts and W = SustainedTPSWindowSeconds. It reports the p50 of each
-// window and retention = final_p50 / first_p50. Sample counts are 0 when
-// no streaming samples exist; B10 SKIPs below the per-window floor.
-func computeSustainedTPS(samples []tpsSample) SustainedTPSMetrics {
+// computeSustainedTPS windows the timestamped streaming-TPS samples into a
+// first window [runStart, runStart+W) and a final window (runEnd-W, runEnd]
+// by wall-clock start, where W = SustainedTPSWindowSeconds and runStart /
+// runEnd are the TRUE run bounds (earliest/latest timestamp over ALL results,
+// including failures) — NOT the last successful sample. This is the fix for
+// the #584 failure mode: if the provider disconnects near run end, the final
+// window has no usable streaming samples and B10 SKIPs, rather than sliding
+// back onto early healthy samples and falsely PASSing.
+//
+// The run span must be at least 2W (disjoint windows). A shorter run yields
+// zero-count windows, so B10 SKIPs — a run that can't hold a distinct first
+// and final 5-min window cannot produce a meaningful retention verdict.
+// retention = final_p50 / first_p50. B10 SKIPs below the per-window floor.
+func computeSustainedTPS(samples []tpsSample, runStart, runEnd time.Time) SustainedTPSMetrics {
 	var st SustainedTPSMetrics
-	if len(samples) == 0 {
+	if len(samples) == 0 || runStart.IsZero() || !runEnd.After(runStart) {
 		return st
 	}
-	t0 := samples[0].start
-	tEnd := samples[0].start
-	for _, s := range samples {
-		if s.start.Before(t0) {
-			t0 = s.start
-		}
-		if s.start.After(tEnd) {
-			tEnd = s.start
-		}
+	w := time.Duration(SustainedTPSWindowSeconds) * time.Second
+	// Require disjoint first/final windows: span >= 2W. Otherwise leave both
+	// counts 0 so evalB10 SKIPs (can't distinguish first vs final).
+	if runEnd.Sub(runStart) < 2*w {
+		return st
 	}
-	firstCutoff := t0.Add(time.Duration(SustainedTPSWindowSeconds) * time.Second)
-	finalCutoff := tEnd.Add(-time.Duration(SustainedTPSWindowSeconds) * time.Second)
+	firstCutoff := runStart.Add(w)  // first window: [runStart, firstCutoff)
+	finalCutoff := runEnd.Add(-w)   // final window: (finalCutoff, runEnd]
 	var first, final []float64
 	for _, s := range samples {
-		if s.start.Before(firstCutoff) {
+		if !s.start.Before(runStart) && s.start.Before(firstCutoff) {
 			first = append(first, s.tps)
 		}
-		if !s.start.Before(finalCutoff) {
+		// Final window lower bound is EXCLUSIVE (finalCutoff, runEnd]; a
+		// sample exactly at the cutoff belongs to neither window.
+		if s.start.After(finalCutoff) && !s.start.After(runEnd) {
 			final = append(final, s.tps)
 		}
 	}

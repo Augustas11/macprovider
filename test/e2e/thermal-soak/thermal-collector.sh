@@ -29,12 +29,19 @@
 # tool text is preserved under "raw" so nothing is lost if parsing drifts
 # across macOS versions.
 #
+# Run this UNPRIVILEGED — do NOT `sudo` the whole script. It escalates only the
+# single `powermetrics` call internally (via `sudo powermetrics`), so `pmset`,
+# `mkdir`, and the log writes stay as your user. For an unattended run, grant
+# passwordless powermetrics once (e.g. a sudoers line:
+# `<you> ALL=(root) NOPASSWD: /usr/bin/powermetrics`) so the loop doesn't stall
+# on a password prompt.
+#
 # Usage:
-#   sudo ./thermal-collector.sh --out ./thermal-<runid>.ndjson --interval 5
-#   sudo ./thermal-collector.sh --out ./thermal.ndjson --duration 3600
+#   ./thermal-collector.sh --out ./thermal-<runid>.ndjson --interval 5
+#   ./thermal-collector.sh --out ./thermal.ndjson --duration 3600
 #   # Start this JUST BEFORE launching the harness soak; stop with the soak
-#   # (Ctrl-C, SIGTERM, or --duration). Then join:
-#   #   ./join-thermal.py per_request.jsonl thermal.ndjson > overlay.ndjson
+#   # (Ctrl-C, SIGTERM, or --duration). Then join (from this directory):
+#   #   ./join-thermal.py /path/to/per_request.jsonl ./thermal.ndjson > overlay.ndjson
 #
 # Env overrides: THERMAL_INTERVAL_S (default 5), THERMAL_DURATION_S (0 = until
 # signalled), THERMAL_OUT.
@@ -65,6 +72,23 @@ if [[ -z "$THERMAL_OUT" ]]; then
   echo "thermal-collector: --out <path.ndjson> is required" >&2
   exit 2
 fi
+
+# Strictly validate the numeric inputs BEFORE they are ever used in Bash
+# arithmetic ($((...))). Unvalidated arithmetic operands can smuggle command
+# substitution via array subscripts, so accept only plain base-10 digits with
+# sane bounds. (interval: 1..3600s, duration: 0..604800s / 7 days.)
+if ! [[ "$THERMAL_INTERVAL_S" =~ ^[1-9][0-9]{0,3}$ ]] || (( THERMAL_INTERVAL_S > 3600 )); then
+  echo "thermal-collector: --interval must be an integer 1..3600 (got '$THERMAL_INTERVAL_S')" >&2
+  exit 2
+fi
+if ! [[ "$THERMAL_DURATION_S" =~ ^(0|[1-9][0-9]{0,6})$ ]] || (( THERMAL_DURATION_S > 604800 )); then
+  echo "thermal-collector: --duration must be an integer 0..604800 (got '$THERMAL_DURATION_S')" >&2
+  exit 2
+fi
+
+# Restrict permissions on any file we create — the thermal log preserves raw
+# device output and should not be world-readable by default.
+umask 077
 
 case "$(uname -s)" in
   Darwin) : ;;

@@ -45,8 +45,29 @@ use B10.
 `go build ./...` OK. `go test ./...` GREEN (whole harness). `go vet ./...` clean.
 Scenario 15 `--dry-run` validates; fails safely without LAB_* env.
 
+## Audit status
+- R1 (3 lanes) DONE: code 0C/0H/1M/1L, security 0C/1H/1M/2L, architect 0C/2H/2M.
+  All findings FIXED in R1-fix commit:
+  - B10 final-window anchoring (code M / arch H): now anchors to TRUE run
+    start/end over ALL results (incl failures); near-end disconnect → empty
+    final window → SKIP (not false PASS). Span <2W → SKIP. + LOW boundary fix
+    (exclusive finalCutoff). 2 new tests (provider-stops-before-end, short-run).
+  - Prod-host reachable (security H): rejectProdHost() in schema.go hard-fails
+    any B10 scenario whose gateway/coordinator resolves to streamvc.live(+subs).
+    New regression test. README prod-stack exception removed.
+  - Thermal-join channel loss (arch H): join-thermal.py matches pmset +
+    powermetrics INDEPENDENTLY, emits per-channel skew, bounds max skew.
+  - Bash arithmetic injection (security M): strict digit+bound validation of
+    --interval/--duration before $((...)); run unprivileged, umask 077.
+  - Scenario duration cap (arch M): requests_per_buyer 1000→5000 so duration
+    terminates. README reframes envelope as a D3 sweep, scenario 15 = 1 point.
+  - README recipe (arch M): path-stable abs paths, points to
+    benchmark_summary.json (buyer_metrics.sustained_tps), no top-level sudo.
+  - LOW: .gitignore thermal artifacts; SPEC §5 example gains sustained_tps.
+- R2: RE-AUDIT the touched lanes (all 3 touched) → need 0 C/H/M to PR.
+
 ## Next steps (this session)
-1. [ ] Three-lane codex audit (code/security/architect) via `omc ask codex
+1. [ ] R2 three-lane codex re-audit (code/security/architect) via `omc ask codex
    --prompt "$(cat <promptfile>)"`. Prompts under `audits/_prompts/` or
    `audits/<date>/`. Bar 0 C/H/M. Loop→fix→re-audit.
 2. [ ] Rebase on origin/main.

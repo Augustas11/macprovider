@@ -664,6 +664,45 @@ func TestB10_Retention_Skip_NoStreamingSamples(t *testing.T) {
 	}
 }
 
+func TestB10_Retention_Skip_ProviderStopsBeforeEnd(t *testing.T) {
+	// The #584 signature: 10 healthy streaming samples in the first 5 min,
+	// then the provider disconnects — the buyer keeps firing but every later
+	// request FAILS (503), extending the run to ~60 min with NO usable
+	// streaming sample in the final window. B10 must SKIP (empty final
+	// window), NOT slide the window back and falsely PASS at ~1.0 retention.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var results []buyer.Result
+	for i := 0; i < 10; i++ {
+		results = append(results, makeTPSResult(base.Add(time.Duration(i*20)*time.Second), 30))
+	}
+	// Failed requests spanning the rest of the hour (these carry StartUTC/
+	// EndUTC, so they extend the true run bounds).
+	for i := 0; i < 30; i++ {
+		r := makeResult(0, 500, 0, true, "p1", "m", 503)
+		r.StartUTC = base.Add(time.Duration(300+i*100) * time.Second)
+		r.EndUTC = r.StartUTC.Add(500 * time.Millisecond)
+		results = append(results, r)
+	}
+	res := Evaluate(scArmed(true, "B10"), results, nil, nil, nil, "test", 3600)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B10 must SKIP when the provider stops before run end, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB10_Retention_Skip_ShortRunOverlappingWindows(t *testing.T) {
+	// A run whose full span is < 2×window (600s) cannot hold disjoint first
+	// and final windows → SKIP, never a false PASS from overlapping windows.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var results []buyer.Result
+	for i := 0; i < 20; i++ {
+		results = append(results, makeTPSResult(base.Add(time.Duration(i*20)*time.Second), 30)) // spans ~380s
+	}
+	res := Evaluate(scArmed(true, "B10"), results, nil, nil, nil, "test", 400)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B10 must SKIP on a run too short for disjoint windows, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
 func TestComputeSustainedTPS_Windows(t *testing.T) {
 	bm := computeBuyerMetrics(soakResults(30, 24, 10))
 	st := bm.SustainedTPS

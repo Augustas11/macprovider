@@ -75,7 +75,11 @@ phase4-coordinator/stats.test
 .deepsec-local/
 test/network-harness/artifacts/
 test/network-harness/harness
+test/network-harness/out-soak-30b/
 test/e2e/aead-rekey-oneshot/artifacts/
+# RESEARCH_235 thermal soak: raw device telemetry + correlation output.
+test/e2e/thermal-soak/out/
+test/e2e/thermal-soak/*.ndjson
 
 # Local #615 audit artifacts (reports/diffs; keep out of PRs)
 scratchpad/615-audit/

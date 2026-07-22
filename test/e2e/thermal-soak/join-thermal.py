@@ -68,8 +68,12 @@ def streaming_tps(rec):
 
 
 def load_thermal(path):
-    """Load thermal samples as a time-sorted list of (epoch, dict)."""
-    out = []
+    """Load thermal samples, split BY SOURCE into two time-sorted lists of
+    (epoch, dict). pmset and powermetrics are emitted as separate records with
+    disjoint fields (pmset has cpu_speed_limit_pct; powermetrics has power +
+    temp), so they must be matched independently — merging them and picking one
+    nearest record would null out whichever channel wasn't selected."""
+    by_source = {"pmset": [], "powermetrics": []}
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -82,17 +86,27 @@ def load_thermal(path):
             ts = parse_ts(rec.get("ts"))
             if ts is None:
                 continue
-            out.append((ts.timestamp(), rec))
-    out.sort(key=lambda x: x[0])
-    return out
+            src = rec.get("source")
+            if src not in by_source:
+                continue
+            by_source[src].append((ts.timestamp(), rec))
+    for lst in by_source.values():
+        lst.sort(key=lambda x: x[0])
+    return by_source
 
 
-def nearest_thermal(thermal, epoch):
-    """Nearest thermal sample to `epoch` by absolute time distance."""
+def nearest_thermal(thermal, epoch, max_skew_s):
+    """Nearest thermal sample to `epoch`, but only if within `max_skew_s`.
+    Returns (record, skew_seconds) or (None, None) when the list is empty or the
+    nearest sample is too stale — a bounded skew keeps a far-away thermal
+    reading from being silently attached to a TPS bin."""
     if not thermal:
-        return {}
-    best = min(thermal, key=lambda x: abs(x[0] - epoch))
-    return best[1]
+        return None, None
+    epoch_ts, rec = min(thermal, key=lambda x: abs(x[0] - epoch))
+    skew = epoch_ts - epoch
+    if abs(skew) > max_skew_s:
+        return None, round(skew, 1)
+    return rec, round(skew, 1)
 
 
 def main():
@@ -100,6 +114,9 @@ def main():
     ap.add_argument("per_request")
     ap.add_argument("thermal")
     ap.add_argument("--bin-seconds", type=int, default=60)
+    ap.add_argument("--max-skew-seconds", type=int, default=30,
+                    help="drop a thermal reading if the nearest sample is more "
+                         "than this many seconds from the bin (default 30)")
     args = ap.parse_args()
 
     thermal = load_thermal(args.thermal)
@@ -135,7 +152,10 @@ def main():
         pts = bins[b]
         tpss = [t for _, t in pts]
         mid_epoch = statistics.median([e for e, _ in pts])
-        th = nearest_thermal(thermal, mid_epoch)
+        # Match each thermal SOURCE independently so pmset (speed limit) and
+        # powermetrics (power/temp) both attach, each with its own skew.
+        pm, pm_skew = nearest_thermal(thermal["pmset"], mid_epoch, args.max_skew_seconds)
+        pw, pw_skew = nearest_thermal(thermal["powermetrics"], mid_epoch, args.max_skew_seconds)
         out = {
             "bin": b,
             "bin_start_offset_s": b * args.bin_seconds,
@@ -143,10 +163,16 @@ def main():
             "tps_p50": round(statistics.median(tpss), 2),
             "tps_min": round(min(tpss), 2),
             "tps_max": round(max(tpss), 2),
-            "cpu_speed_limit_pct": th.get("cpu_speed_limit_pct"),
-            "cpu_power_mw": th.get("cpu_power_mw"),
-            "gpu_power_mw": th.get("gpu_power_mw"),
-            "cpu_die_temp_c": th.get("cpu_die_temp_c"),
+            # pmset channel
+            "cpu_speed_limit_pct": pm.get("cpu_speed_limit_pct") if pm else None,
+            "pmset_ts": pm.get("ts") if pm else None,
+            "pmset_skew_s": pm_skew,
+            # powermetrics channel
+            "cpu_power_mw": pw.get("cpu_power_mw") if pw else None,
+            "gpu_power_mw": pw.get("gpu_power_mw") if pw else None,
+            "cpu_die_temp_c": pw.get("cpu_die_temp_c") if pw else None,
+            "powermetrics_ts": pw.get("ts") if pw else None,
+            "powermetrics_skew_s": pw_skew,
         }
         print(json.dumps(out))
     return 0

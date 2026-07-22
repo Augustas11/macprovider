@@ -34,11 +34,18 @@ disconnects the single prod mac** (~30 → 8.9 → 5.3 tok/s, then stale
 heartbeats → WS EOF → removed from pool). Running this soak against
 `streamvc.live` with the prod provider in the pool reproduces the outage.
 
+This is enforced in code: scenario 15 declares `B10`, and the harness rejects
+any `B10` scenario whose `gateway_url` or `coordinator_url` resolves to
+`streamvc.live` (or a subdomain) — see `rejectProdHost` in
+`test/network-harness/internal/scenario/schema.go`. A soak **cannot** be pointed
+at prod even by setting `LAB_GATEWAY_URL` to the prod host.
+
 Requirements for a valid run:
 - A Mac you **fully control** (you will run `powermetrics`/`pmset` on it and
   deliberately push it toward thermal throttle).
-- It is the **only** pool member of a **lab** coordinator+gateway stack (or the
-  prod stack with prod buyers routed away and this the sole provider).
+- It is the **only** pool member of a **lab** coordinator+gateway stack. (Do
+  NOT use the prod stack — the code-level guard above forbids a prod host for a
+  B10 scenario.)
 - Record the machine's **model, chip, RAM, and cooling** (fan vs fanless — an
   M1 Air is fanless and throttles hard; that is *signal*, not a defect).
 - Stand the lab stack up **once** and leave it. Rapid coordinator restarts
@@ -55,29 +62,44 @@ Requirements for a valid run:
 
 ## Run recipe (once a lab Mac exists)
 
+Use absolute paths so the commands work from any directory. Let
+`THERMAL_DIR=/abs/path/to/test/e2e/thermal-soak` and
+`HARNESS_DIR=/abs/path/to/test/network-harness`.
+
 ```bash
 # ── on the LAB PROVIDER mac ─────────────────────────────────────────────
-# 1. Start the thermal collector JUST BEFORE the soak (own terminal / tmux):
-sudo ./thermal-collector.sh --out ./thermal-$(date -u +%Y%m%dT%H%M%SZ).ndjson --interval 5
+# 1. Start the thermal collector JUST BEFORE the soak (own terminal / tmux).
+#    Run it UNPRIVILEGED — it escalates only the internal `powermetrics` call.
+"$THERMAL_DIR/thermal-collector.sh" \
+  --out "$THERMAL_DIR/out/thermal-$(date -u +%Y%m%dT%H%M%SZ).ndjson" --interval 5
 
 # ── on the machine running the harness (can be the same mac) ────────────
-# 2. Point at the LAB stack and fire the soak:
+# 2. Point at the LAB stack and fire the soak (a prod host is rejected):
 export LAB_GATEWAY_URL=http://127.0.0.1:<lab-gw-port>
 export LAB_COORDINATOR_URL=http://127.0.0.1:<lab-coord-port>
 export BUYER_TOKEN="$(cat ~/.config/macprovider/buyer-api-key)"   # never echo it
-cd ../../network-harness
-go build -o harness ./cmd/harness
-./harness run scenarios/15_thermal_soak.yaml --out ./out-soak-30b
+( cd "$HARNESS_DIR" && go build -o harness ./cmd/harness \
+  && ./harness run scenarios/15_thermal_soak.yaml --out "$HARNESS_DIR/out-soak-30b" )
 
 # 3. Stop the collector (Ctrl-C) when the soak finishes.
 
 # 4. Correlate TPS decay vs thermal state:
-./join-thermal.py ./out-soak-30b/per_request.jsonl ./thermal-*.ndjson --bin-seconds 60 > overlay.ndjson
+"$THERMAL_DIR/join-thermal.py" \
+  "$HARNESS_DIR/out-soak-30b/per_request.jsonl" \
+  "$THERMAL_DIR"/out/thermal-*.ndjson --bin-seconds 60 --max-skew-seconds 30 \
+  > "$THERMAL_DIR/out/overlay.ndjson"
 ```
 
-`benchmark_verdict.json` in the `--out` dir carries the `B10` verdict
-(`first_window_tps_p50`, `final_window_tps_p50`, `retention`, per-window
-sample counts). `overlay.ndjson` is the thermal correlation.
+The `B10` window fields (`first_window_tps_p50`, `final_window_tps_p50`,
+`retention`, per-window sample counts) live in **`benchmark_summary.json`**
+(under `buyer_metrics.sustained_tps`) in the `--out` dir; `benchmark_verdict.json`
+carries the human-readable `B10` verdict line. `overlay.ndjson` is the thermal
+correlation — each bin has both the pmset channel (`cpu_speed_limit_pct`) and
+the powermetrics channel (`cpu_power_mw`/`gpu_power_mw`/`cpu_die_temp_c`), each
+with its own `*_skew_s` (null when no thermal sample was within `--max-skew-seconds`).
+
+The thermal log preserves raw device output under a `"raw"` field — **review /
+redact before sharing**, and keep `out/` local (it is gitignored).
 
 ## What a run must answer (Deliverable 3, parked)
 
@@ -88,7 +110,12 @@ sample counts). `overlay.ndjson` is the thermal correlation.
 2. The **safe sustained-load envelope**: the concurrency / duty-cycle at which a
    given provider class holds ≥ 0.85 retention. This tells the redesigned #584
    canary how much load it may apply, and for how long, before it becomes the
-   cause of the degradation it is trying to detect.
+   cause of the degradation it is trying to detect. **Scenario 15 is a single
+   stress point** (N=2, 1s floor) — deliberately heavier than #584's sequential
+   canary, not an incident-faithful reproduction. Building the envelope needs a
+   **D3 sweep** across several concurrency / duty-cycle cells (e.g. N∈{1,2,3},
+   floors {1s,5s,15s}), with a cool-down between cells so each starts thermally
+   neutral. Copy scenario 15 per cell (swap `count` / `interval_ms`).
 3. A recommendation on [#463](https://github.com/Augustas11/macprovider/issues/463):
    can the waived G3 48 h soak be replaced by this characterized shorter soak as
    a release gate, or is a longer burn still needed before the beta cohort?

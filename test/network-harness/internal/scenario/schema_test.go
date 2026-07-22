@@ -450,6 +450,43 @@ func TestCommittedScenariosValidate(t *testing.T) {
 	}
 }
 
+func TestB10_LabOnly_RejectsProdHost(t *testing.T) {
+	mk := func(gw, coord string) *Scenario {
+		s := validTestScenario()
+		s.Target.GatewayURL = gw
+		s.Target.CoordinatorURL = coord
+		s.Benchmark = Benchmark{Enabled: true, Invariants: []string{"B1", "B10"}, ProviderSlots: 3}
+		return &s
+	}
+	cases := []struct {
+		name    string
+		gw      string
+		coord   string
+		wantErr bool
+	}{
+		{"lab localhost ok", "http://127.0.0.1:18080", "http://127.0.0.1:19090", false},
+		{"prod gateway rejected", "https://api.streamvc.live", "http://127.0.0.1:19090", true},
+		{"prod coordinator rejected", "http://127.0.0.1:18080", "https://coordinator.streamvc.live", true},
+		{"prod subdomain rejected", "https://foo.streamvc.live", "http://127.0.0.1:19090", true},
+		{"apex prod rejected", "https://streamvc.live", "http://127.0.0.1:19090", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mk(tc.gw, tc.coord).Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate err=%v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+	// A non-B10 scenario may still target prod (the other scenarios do).
+	s := validTestScenario()
+	s.Target.GatewayURL = "https://api.streamvc.live"
+	s.Benchmark = Benchmark{Enabled: true, Invariants: []string{"B1", "B2"}, ProviderSlots: 3}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("non-B10 scenario must still allow prod host, got %v", err)
+	}
+}
+
 func validTestScenario() Scenario {
 	return Scenario{
 		Name:                "test",

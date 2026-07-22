@@ -537,13 +537,61 @@ func (s *Scenario) validateBuyerFleet() error {
 		// RESEARCH_235's sustained-TPS retention. B10 skips that range to
 		// avoid colliding regardless of PR merge order.
 		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true, "B10": true}
+		hasB10 := false
 		for _, id := range s.Benchmark.Invariants {
 			if !known[id] {
 				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B7, B10)", id)
 			}
+			if id == "B10" {
+				hasB10 = true
+			}
 		}
 		if s.Benchmark.ProviderSlots < 1 {
 			return fmt.Errorf("benchmark.provider_slots must be >= 1")
+		}
+		// LAB-ONLY enforcement for B10 (sustained-load soak). A 45–60 min
+		// soak degrades and disconnects the single prod mac — that IS #584.
+		// Leaving the lab URLs unset already fails the empty-gateway check,
+		// but an operator could still point ${LAB_GATEWAY_URL} at prod. Hard
+		// fail if either target resolves to the production host, so a B10
+		// scenario physically cannot fire at streamvc.live.
+		if hasB10 {
+			for _, pair := range []struct{ field, raw string }{
+				{"target.gateway_url", s.Target.GatewayURL},
+				{"target.coordinator_url", s.Target.CoordinatorURL},
+			} {
+				if err := rejectProdHost(pair.field, pair.raw); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// prodHostSuffixes are the production hosts a lab-only (B10) scenario must
+// never target. Matches the exact host and any subdomain of it.
+var prodHostSuffixes = []string{"streamvc.live"}
+
+// rejectProdHost fails validation if raw is a URL whose host is (or is a
+// subdomain of) a production host. Empty raw is allowed here — the caller's
+// separate empty-gateway check governs that. This is the LAB-ONLY guard for
+// the thermal soak (#584): a B10 scenario physically cannot fire at prod.
+func rejectProdHost(field, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", field, err)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return nil
+	}
+	for _, suffix := range prodHostSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return fmt.Errorf("%s points at production host %q — B10 (thermal soak) is LAB-ONLY; a sustained soak degrades and disconnects the prod provider (#584). Use a lab stack", field, host)
 		}
 	}
 	return nil

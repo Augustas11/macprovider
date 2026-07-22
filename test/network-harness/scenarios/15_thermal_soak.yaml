@@ -82,7 +82,11 @@ buyers:
   stream: true
   pattern: interval
   interval_ms: 1000
-  requests_per_buyer: 1000
+  # High ceiling on purpose: DURATION must be the terminating condition, not
+  # the request count (the load generator stops at whichever comes first). At
+  # the fastest plausible cycle (~1.2s) a buyer fires ~3000 reqs in 3600s, so
+  # 5000 guarantees the full 45-60 min window runs even on a fast provider.
+  requests_per_buyer: 5000
 
 duration: 3600s
 request_timeout: 30s
