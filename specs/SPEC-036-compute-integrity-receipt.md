@@ -68,8 +68,9 @@ Out of scope:
 - Any change to SPEC-015 v0.4 `usage` fields.
 - Rewriting SPEC-022's top-level settlement outcome enum.
 - Redefining the shared measurement algorithms; SPEC-036 composes on SPEC-030
-  (Losslessness Probe) §FR-3 (transport/auth/load-bound policy values),
-  §FR-7 (`support_selection_v1` construction), and §FR-9 (TV-interval computation)
+  (Losslessness Probe) §FR-3 (transport/auth/load-bound policy values), and generalizes
+  §FR-7 (`support_selection_v1` construction — to a bounded `(N+1)`-arm form,
+  `N ≤ max_active_references`, FR-6) and §FR-9 (TV-interval computation)
   rather than re-specifying them. SPEC-036 does NOT inherit SPEC-030 §FR-4's
   digest/replay wire framing — it owns its settlement-bearing digest preimage,
   replay binding, Tier-2 carrier, and result variants (FR-6), reusing only the
@@ -99,7 +100,8 @@ retained compact evidence needed to recompute the TV interval for every
 provider/reference union support used by a verdict.
 The payload key set is closed over: `model_id`, `target_model_hash`,
 `tokenizer_identity`, `sampler_stage`, `sampling_profile`, `corpus_version`,
-`threshold_version`, `reference_source_id`, `reference_failure_domain_id`,
+`threshold_version`, `hardware_runtime_class`, `reference_source_id`,
+`reference_failure_domain_id`,
 `computed_reference_distribution_summary`, `runtime_build_provenance_digest` AND
 `golden_fixture_validation_digest` (both required for every enforce-counted
 reference — golden fixture is additional, never a substitute; FR-5),
@@ -217,8 +219,19 @@ retry and validation.
 
 **Warn-only mode:** Policy mode that computes and emits compute-integrity state
 but MUST NOT alter buyer debit, provider credit, earnings, payout readiness, or
-buyer-facing claims. Warn-only onboarding results MAY be surfaced as readiness
-telemetry, but MUST NOT block covered paid routing.
+buyer-facing claims for **new verdicts and clean keys**. Warn-only onboarding
+results MAY be surfaced as readiness telemetry, but MUST NOT block covered paid
+routing on the basis of a warn-only verdict. **Preserved-adverse-state exception:**
+warn-only's "no money effect / no block" governs *new* compute-integrity verdicts,
+not the *release* of adverse state already adjudicated under enforce. Any active
+`quarantined_compute_drift` or `blocked:<reason>` overlay and any active
+circuit-breaker admission hold that existed under enforce MUST survive a transition
+to warn_only (whether an FR-16 manual rollback or an FR-1 auto-downgrade) and MUST
+continue to reject billable covered buyer routing/settlement for the affected keys
+(operator-funded diagnostics only) until the applicable FR-10 clear rule or FR-16
+`cleared` transition completes. Only clean keys (no active adverse overlay/hold)
+receive warn-only's no-effect fallback. Releasing an adjudicated quarantine/block or
+a breaker hold requires the normal clear rule, never a mode downgrade.
 
 **Enforce mode:** Policy mode in which request-start
 `quarantined_compute_drift` makes the settlement outcome `quarantined` with
@@ -276,6 +289,12 @@ The policy MUST include:
   covered key or declare the reference set representative of the covered classes.
 - `corpus_version`.
 - `threshold_version`.
+- `max_active_references`, default 2, hard cap 4 (the maximum `N` counted toward a
+  covered key's verdict at once). It bounds the FR-6/FR-7 `(N+1)`-arm support so
+  request/result size and probe load stay bounded: shared-support length is at most
+  `(max_active_references + 1) * K`. Enforce requires at least 2 independent active
+  references (FR-5); more than `max_active_references` MUST NOT be counted toward one
+  verdict.
 - `window_size_days`, default 7 (the rolling verdict-counting window).
 - `positive_state_freshness_ttl_hours`, default 24 (the maximum age of the newest
   eligible canary before `verified`/`warn` expires as `window_ttl_expired`). Enforce
@@ -285,8 +304,9 @@ The policy MUST include:
 - `quarantine_candidate_count`, default 3.
 - `clear_pass_count`, default 5.
 - Reference freshness TTL, default 24 hours.
-- Abusive inconclusive limit, default more than 3 inconclusive probe results
-  in 24 hours for the same key.
+- Abusive inconclusive limit, default more than 3 **FR-9-classified
+  abusive-inconclusive events** (not raw inconclusive results) in 24 hours for the
+  same overlay key.
 - `disclosure_copy_version` and `disclosure_copy_digest` (FR-15).
 - `reference_unavailable_auto_downgrade`: optional automatic **policy-mode**
   downgrade (enforce → warn_only) — NOT a per-row settlement override — so a total
@@ -343,7 +363,12 @@ Activation MUST refuse any covered route, trusted-reference event, window, or
 request-start capture that lacks an exact policy match for the covered model,
 hash/catalog selector, paid entrypoint, tokenizer, sampler stage, normalization
 basis, actual covered sampling profile or profile set, sampling-profile coverage
-rule, required reference source mode, corpus version, and threshold version.
+rule, required reference source mode, corpus version, threshold version, and
+`hardware_runtime_class`. The `hardware_runtime_class` (or its canonical digest)
+MUST match across the reference event, the `reference_set_admissibility_v1` record,
+the probe request/result, the threshold key, the calibration key (Migration §6), and
+the request-start route snapshot; any mismatch fails closed (a reference/threshold/
+canary from one class MUST NOT authorize or quarantine another class).
 
 `observe` and `warn_only` MAY compute verdicts and emit audit events, but MUST
 NOT change buyer debit, provider credit, earnings, payout readiness, or
@@ -657,7 +682,8 @@ The captured state MUST include:
   `schema_version = "reference_set_admissibility_v1"`,
   `reference_set_id`, full covered `(model_id, target_model_hash,
   tokenizer_identity, sampler_stage, sampling_profile, corpus_version,
-  threshold_version)` key, `reference_set_admissibility_status`,
+  threshold_version, hardware_runtime_class)` key,
+  `reference_set_admissibility_status`,
   `reference_quorum_count`, `reference_fault_check_version`, and a
   `references[]` array sorted by `reference_event_digest`. Each `references[]`
   item MUST bind `reference_event_digest`, `reference_source_id`,
@@ -935,6 +961,7 @@ The request `payload` MUST include:
 - `sampling_profile`.
 - `corpus_version`.
 - `threshold_version`.
+- `hardware_runtime_class`.
 - `support_selection = "compute_integrity_support_selection_v1"`.
 - `normalization_basis = "full_distribution"` for v0.1
   `post_sampler_probabilities`; future sampler stages MUST define their own
@@ -1124,9 +1151,12 @@ capture and the FR-12 `hardware_class_changed` expiry, which together prove a
 captured verdict, its reference set, and the paid request all belong to the covered
 class and force expiry when a provider's class changes.
 
-The threshold record MUST include:
+The threshold record is a **closed** object (its digest, FR-13, is SHA-256 over the
+RFC 8785/JCS canonical `{type, schema_version, payload}` where `payload` is exactly
+the fields below). It MUST include the full 8-tuple threshold key (`model_id`,
+`target_model_hash`, `tokenizer_identity`, `sampler_stage`, `sampling_profile`,
+`corpus_version`, `threshold_version`, `hardware_runtime_class`) plus:
 
-- `threshold_version`.
 - `baseline_median_tv_upper_p99`.
 - `baseline_position_tv_upper_p99`.
 - `tau_warn_median`.
@@ -1286,9 +1316,12 @@ per FR-3) and MUST NOT be collapsed into `pending`.
 
 Abusive inconclusive rule:
 
-- More than 3 `inconclusive` results in 24 hours for the same key, excluding
-  coordinator-attributable reference outages, MUST move the key to
-  `blocked:abusive_inconclusive`.
+- More than 3 **abusive-inconclusive events, as classified by FR-9** (i.e.
+  excluding every FR-9 coordinator-fault-exempt and non-abusive result such as
+  `model_swap`, coordinator-attributable reference/scheduling/transport faults, and
+  the not-yet-repeated `tail_mass_high`), in 24 hours for the same overlay key MUST
+  move it to `blocked:abusive_inconclusive`. Raw `inconclusive` count is NOT the
+  trigger.
 - `blocked:abusive_inconclusive` MUST deny covered paid routing and payable
   settlement until manual review or a fresh pass sequence clears the key.
 
@@ -1303,6 +1336,16 @@ Payable-window prerequisites:
   provider compute even when no new probe has been scheduled.
 - The latest window MUST have fresh trusted-reference quorum, fresh thresholds,
   covered sampling-profile scope, and no active `blocked:<reason>` state.
+- **All-profile windows are a closed profile grid, not a blended aggregate.** For an
+  `__all_profiles__` window, EVERY covered sampling profile MUST independently
+  satisfy `min_window_canaries`, the verified pass rule, the freshness TTL, its
+  profile-keyed calibration, and the reference requirements before the aggregate
+  window is `verified`/payable; a fresh pass sequence on one profile MUST NOT
+  authorize buyer traffic on an unprobed or stale sibling profile. The
+  covered-profile-set digest (SHA-256 over the JCS canonical, sorted covered-profile
+  list) MUST be bound into the window and the request-start capture, and settlement
+  MUST verify the buyer request's profile is a member with its own fresh satisfied
+  sub-window.
 - The latest window MUST NOT satisfy the quarantine rule.
 - Under-sampled windows MUST remain `pending` (never `expired`) and MUST NOT
   authorize covered paid routing or payable settlement in enforce mode. A
@@ -1621,13 +1664,18 @@ The coordinator MUST expose an operator control to revert
 `compute_integrity_settlement.mode` from `enforce` to `warn_only` during an
 incident. The downgrade action does not depend on enforce activation checks.
 Because settlement is a pure function of immutable request-start state (FR-3, FR-4),
-a rollback to `warn_only` simply stops NEW rows from being captured under enforce
-(new `warn_only`-captured rows have no money effect, per the warn-only definition);
-it does not, and need not, retroactively change any already-captured row's money
-outcome. Rows already captured non-payable under enforce (including
-`compute_integrity_circuit_breaker_hold` captures) keep that captured outcome; rows
-already captured payable under enforce keep that captured outcome. Reactivating
-enforce after rollback MUST satisfy all FR-1 preconditions again.
+a rollback to `warn_only` stops NEW clean-key rows from being captured under enforce
+(new clean-key `warn_only`-captured rows have no money effect); it does not
+retroactively change any already-captured row's money outcome. Rows already captured
+non-payable under enforce (including `compute_integrity_circuit_breaker_hold`
+captures) keep that captured outcome; rows already captured payable under enforce
+keep that captured outcome. Per the warn-only Preserved-adverse-state exception (§3),
+a manual rollback MUST NOT release an active `quarantined_compute_drift`/
+`blocked:<reason>` overlay or an active circuit-breaker admission hold: those scopes
+MUST continue to reject billable covered buyer routing/settlement (operator-funded
+diagnostics only) until the FR-10 clear rule or FR-16 `cleared` transition completes,
+even while the mode reads `warn_only`. Reactivating enforce after rollback MUST
+satisfy all FR-1 preconditions again.
 
 The coordinator MUST implement a circuit breaker that fails closed for affected
 covered keys, covered models, or the whole policy when new
@@ -1790,8 +1838,8 @@ The initial deployment budget MUST assume either:
 
 Before enforce activation, every covered
 `(model_id, target_model_hash, tokenizer_identity, sampler_stage,
-sampling_profile, corpus_version, threshold_version)` key MUST complete an
-approved warn-only calibration gate. Corpus or threshold-version changes
+sampling_profile, corpus_version, threshold_version, hardware_runtime_class)` key
+MUST complete an approved warn-only calibration gate. Corpus or threshold-version changes
 invalidate prior warn-only calibration for enforce until the new full key
 completes its gate. The default per-key gate is at
 least 30 days of warn-only data, at least 100 eligible canaries, a hard minimum of
