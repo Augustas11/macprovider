@@ -70,11 +70,15 @@ Out of scope (recorded, not silently dropped):
   channel is future work and MUST NOT be presented as shipped buyer purge.
   Because it does not exist, **persistence of buyer conversation keys is
   disabled and unenableable in v0.1** (FR-KVP11).
-- Long-context restore beyond the promotion ceiling. v0.1's validated and
-  serviceable envelope is the ~8k-token prefix class (total decoded size ≤
-  the 256 MiB promotion ceiling, calibrated to the memo's hypothetical q4
-  KV); the memo's highest-value 32k–64k class is deferred to
-  KVS-04-class evidence under a future format milestone (§6).
+- Long-context restore beyond the promotion ceiling. Under the v1
+  allowlist (unquantized `KVCacheSimple`, ~96 KiB/token for the live Qwen
+  shape) the serviceable envelope is the **~2.5k-token prefix class**
+  (total decoded size ≤ the 256 MiB promotion ceiling). The memo's 8k
+  primary-gate class fits the ceiling only under quantized KV
+  (~30 KiB/token), whose cache class is not in the v1 allowlist — so the
+  8k performance gate is explicitly deferred behind the Q6/Q7-driven
+  format decision (§6), and the 32k–64k class behind KVS-04-class
+  evidence under a future format milestone.
 - Defense against a hostile process running under the **same macOS user
   (euid)** as the provider, and against host-privileged actions (root, full
   system restore including the user Keychain, kernel/clock control beyond
@@ -358,9 +362,17 @@ block, fail, or corrupt the request being served.
     transactional: creation is verified before first use (a failed create
     aborts the write, `disk_write_skipped`); re-creating an index after
     eviction or purge deletes any residual item then adds fresh
-    (`errSecDuplicateItem` ⇒ delete-then-add); **quota and retention
-    eviction destroy the entry's DEK** along with its files
-    (crypto-shredding evicted entries); orphaned items are reconciled
+    (`errSecDuplicateItem` ⇒ delete-then-add); a write that aborts after
+    creating a provisional DEK deletes it in its abort path (activation
+    reconcile is the backstop, not the primary cleanup); **whole-entry
+    quota/retention eviction destroys the entry's DEK** along with its
+    files (crypto-shredding evicted entries) — whereas compaction of a
+    **superseded generation retains the shared DEK** while any live
+    generation remains (the DEK is destroyed only when the last one
+    goes; telemetry distinguishes the two). Whole-entry eviction runs in
+    the per-index mutation lane, cancels in-flight writers for the index,
+    and verifies DEK deletion before reclaiming quota bytes. Orphaned
+    items are reconciled
     (enumerated by service prefix and deleted when no live entry matches)
     at tier activation; and the Keychain item count is bounded by live
     entries plus in-flight churn and is reported on the FR-KVP12
@@ -498,14 +510,22 @@ block, fail, or corrupt the request being served.
   snapshot for the index whose sampled purge generation predates the new
   high-watermark; (4) delete the entry's generations and manifest; (5)
   report success with counts (entries removed, bytes freed), never raw
-  keys. Steps run inside the per-key hot-cache serialization lane
-  (FR-CI4a): every hot lease carries the purge generation sampled at its
-  `begin()`, and a hot `commit()` whose stamped generation is below the
-  live high-watermark MUST NOT reinsert the entry (the lease is released
+  keys. Tombstones are **phase-aware**: on completion of steps 2–4 the
+  tombstone is durably marked complete (fsync) — new writes for the index
+  are admitted only after that mark, and recovery re-runs the destructive
+  steps only for an incomplete tombstone, so a crash after a post-purge
+  re-cache can never delete the fresh entry or its DEK (fixture: AC-4).
+  Steps run inside the per-key hot-cache serialization lane (FR-CI4a):
+  every hot lease carries the purge generation sampled at its `begin()`,
+  and a hot `commit()` whose stamped generation is below the live
+  high-watermark MUST NOT reinsert the entry (the lease is released
   without commit) — so a pre-purge lease can repopulate neither RAM nor
-  disk after `purge_ok`. In-flight writers/promotions are cancelled or
-  joined before step 5, and any in-memory DEK copy is discarded with
-  them. Re-caching after a purge creates a **fresh DEK** (FR-KVP6). The index MUST be ineligible at every intermediate crash point;
+  disk after `purge_ok`. In-flight **writers are cancelled** (never
+  joined — they would fail the publication fence, and a purge waiting on
+  a writer that is waiting for the mutation lane would deadlock);
+  in-flight **promotions** are cancelled or joined; any in-memory DEK
+  copy is discarded with them. Re-caching after a purge creates a
+  **fresh DEK** (FR-KVP6). The index MUST be ineligible at every intermediate crash point;
   recovery at tier activation completes interrupted purges (tombstone
   present ⇒ finish steps 2–4) before any read is served. A purge failing
   partway (Keychain deletion error, I/O error, lock timeout) reports
@@ -556,14 +576,15 @@ block, fail, or corrupt the request being served.
   selected hot-cache state (v1 normative; configuration may lower it,
   never raise it). Reads are chunked per §5a, verified-then-materialized
   per layer, and MUST NOT hold a second full copy of the restored tensors
-  once promoted. The `disk_miss_budget` trigger is the entry's **total
-  declared decoded size** exceeding the ceiling (not transient headroom).
-  The ceiling and the §6 8k gate are calibrated to the memo's
-  hypothetical q4 KV representation; the active `kvBits` question (memo
-  Q6/Q7) is a precondition for KVS-01 being meaningful — under FP16 KV
-  even 8k prefixes exceed the ceiling. Lifting the ceiling for the
-  32k–64k class is a future format-milestone change, not a configuration
-  tweak.
+  once promoted. The `disk_miss_budget` trigger is the entry's
+  `decoded_length` (§5a — the same geometry formula as the FR-KVP3
+  write-side estimate, so nothing writable is unpromotable) exceeding the
+  ceiling. Either answer to the active-`kvBits` question (memo Q6/Q7)
+  requires a format change before an 8k restored arm can exist on the
+  production model: quantized KV needs a `QuantizedKVCache` allowlist
+  extension (new codec ID + ABI epoch, §5a), FP16 needs a ceiling-raise
+  milestone. Both are spec-revision decisions, not configuration
+  tweaks.
 - Promoted entries count against the existing hot-tier budgets (200k
   tokens, entry cap); promotion MUST NOT raise any RAM ceiling. At most one
   promotion runs at a time namespace-wide (back-pressure; concurrent
@@ -737,7 +758,7 @@ independently hits), with exactly one reason code:
 | 14 | `creation_time` in the future | `disk_miss_envelope` |
 | 15 | Eligibility deadline passed | `disk_miss_expired` |
 | 16 | AEAD tag, blob SHA-256, or length mismatch; truncated/oversized/reordered/duplicated chunk | `disk_miss_corrupt` |
-| 17 | No committed manifest but orphan artifacts present **before activation recovery has swept them** (crash between blob write and manifest publish); after recovery sweeps the orphans, the index reads as row 1 (`disk_miss_absent`) | `disk_miss_corrupt` |
+| 17 | *(moved to control plane)* Orphan artifacts without a committed manifest are swept at tier activation before any read is served; the request path then observes row 1 (`disk_miss_absent`). Orphan sweep is a recovery event (AC-3), not a request-path outcome | — |
 | 18 | Malicious/oversized shape or length metadata (§5a bounds, pre-allocation) | `disk_miss_corrupt` |
 | 19 | Stamped purge generation below live high-watermark (incl. backup/snapshot reintroduction, racing writer) | `disk_miss_tombstoned` |
 | 20 | Entry DEK absent/destroyed | `disk_miss_tombstoned` |
@@ -766,9 +787,12 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
   generation, token count, chunk count (non-negative integers within
   JSON-safe range); creation time and eligibility deadline (integer Unix
   seconds UTC); model/tokenizer/catalog identities (strings ≤ 1 KiB);
-  hashes (lowercase base16); layer records (class ID string, layer index,
-  ndim ≤ 8, dims, dtype enum); chunk table (per chunk: ordinal, ciphertext
-  length, 96-bit nonce as base16); blob total length; blob SHA-256. The
+  hashes (lowercase base16); layer records — `layers[]` objects with the
+  closed key set `{layer_index, class_id, layout_version, ndim, dims[],
+  dtype}` (layout_version is per-layer, authenticated, exact-matched per
+  FR-KVP4(a)8, with an AC-2 mutation fixture); chunk table — `chunks[]`
+  objects with the closed key set `{ordinal, ct_length, nonce}` (96-bit
+  nonce as base16); blob total length; blob SHA-256. The
   closed required-field list is: `schema_id`, `codec_id`, `namespace_id`,
   `key_epoch`, `index_hmac`, `generation`, `commit_sequence`,
   `purge_generation`, `request_model`, `served_model_id`, `model_sha256`,
@@ -776,9 +800,22 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
   `chat_template_sha256`, `abi_epoch`, `mlx_swift_lm_revision`,
   `mlx_version`, `cache_class`, `layer_count`, `layers[]`, `kv_bits`,
   `kv_group_size`, `kv_quant_mode`, `kv_quant_policy`, `decode_path`,
-  `token_count`, `created_at`, `eligible_until`, `chunks[]`,
-  `blob_length`, `blob_sha256`. Missing or unknown fields reject the
-  manifest.
+  `token_count`, `created_at`, `eligible_until`, `decoded_length`,
+  `chunks[]`, `blob_length`, `blob_sha256`. Missing or unknown fields
+  (at any nesting level) reject the manifest. Unquantized caches encode
+  `kv_bits`, `kv_group_size`, `kv_quant_mode`, and `kv_quant_policy` as
+  canonical JSON `null` (matching the shipped `kvBits == nil` predicate
+  value); `null` vs any number is an exact-match mismatch. `created_at`
+  and `eligible_until` are integer Unix **milliseconds** UTC, preserving
+  the hot tier's sub-second deadline (boundary fixtures at
+  just-before/at/just-after the deadline). `decoded_length` is the total
+  decoded payload size computed by one normative geometry formula (token
+  array bytes + per-layer framing + Σ tensor bytes from `layers[]` ×
+  `token_count`); the same formula is the FR-KVP3 write-side estimate and
+  the FR-KVP9 `disk_miss_budget` trigger, and a declared value that does
+  not equal the recomputation is `disk_miss_corrupt` (FR-KVP4c). Golden
+  JCS/AAD byte fixtures for a reference manifest are a required test
+  artifact.
 - **Bounds:** ≤ 512 layers; ndim ≤ 8; each dim ≤ 2^32; chunk count ≤ 4096;
   per-chunk ciphertext ≤ 64 MiB; strings ≤ 1 KiB; `token_count` ≤ the
   hot-tier token cap (200k); `blob_length` ≤ the per-entry byte cap.
@@ -814,8 +851,8 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
   `mlx-swift-lm` standard **unquantized** cache class). If the live model
   runs a quantized KV cache (`QuantizedKVCache`), every write is skipped
   and the harness cannot exercise the production cache class — resolving
-  memo Q6/Q7 is therefore a KVS-01 meaningfulness precondition (FR-KVP9,
-  §6). **Codec evolution rule (aligned with §8):** any payload-semantic
+  memo Q6/Q7 is therefore the precondition for the KVS-01b 8k gate, and
+  under v1 the runnable gate is KVS-01a at ~2.5k tokens (FR-KVP9, §6). **Codec evolution rule (aligned with §8):** any payload-semantic
   change, allowlist extension, or incompatible class/layout change
   requires a **new codec ID and an ABI-epoch bump**, with fixtures;
   existing codec IDs are immutable and never reinterpreted.
@@ -842,10 +879,24 @@ tokens, cached prompt tokens, TTFT, total latency, disk bytes
 read/written, peak staging RSS, commit-latency delta (write-path
 overhead), and correctness outcome.
 
-### KVS-01 — restart survival on an 8k prefix (primary gate)
+### KVS-01 — restart survival (primary gate, two stages)
 
-Persist (await `disk_write_committed`) → kill provider → relaunch exact
-build/model → matching suffix request within the eligibility window. Arms:
+**KVS-01a (correctness, runnable under v1 defaults):** the gate scenario
+below at a **~2.5k-token prefix** — the largest class the v1 allowlist
+(unquantized `KVCacheSimple`) fits under the 256 MiB promotion ceiling.
+All correctness gates apply; performance numbers are recorded but the
+warm-relative thresholds are advisory at this size.
+
+**KVS-01b (performance, the memo's 8k target):** the same scenario at an
+8k prefix. Requires the Q6/Q7-driven format decision first (FR-KVP9):
+`QuantizedKVCache` allowlisting (codec v2) if production KV is quantized,
+or a ceiling-raise milestone if FP16. FR-KVP13 graduation past
+synthetic-key experiments requires KVS-01b; v0.1 lands the machinery and
+KVS-01a evidence.
+
+Scenario: persist (await `disk_write_committed`) → kill provider →
+relaunch exact build/model → matching suffix request within the
+eligibility window. Arms:
 restored (disk hit), in-RAM warm repeat, clean cold restart
 (disk-disabled), and disk-enabled-but-miss. **Protocol:** minimum 30 cycles
 per arm, interleaved (paired warm control per restored cycle); percentiles
@@ -857,9 +908,11 @@ miss with correct output. **Performance gates (acceptance hypotheses):**
 restored p50 ≤ `max(1.25 × warm p50, warm p50 + 1 s)`; restored p95 ≤
 `max(1.5 × warm p95, warm p95 + 2 s)`; once a usable cold control exists,
 ≥ 30% p95 TTFT reduction vs that control; and write-path overhead
-(commit-latency delta with the tier enabled) p95 ≤ 250 ms at the 8k class.
-**Scope honesty:** v0.1 gates validate the 8k class under the default
-budgets; the memo's highest-value 32k–64k workloads exceed the promotion
+(commit-latency delta with the tier enabled) p95 ≤ 250 ms at the stage's
+gate prefix class (KVS-01a: ~2.5k; KVS-01b: 8k).
+**Scope honesty:** v0.1 gates validate the ~2.5k class under the v1
+allowlist (KVS-01a); the 8k class awaits the Q6/Q7 format decision
+(KVS-01b); the memo's highest-value 32k–64k workloads exceed the promotion
 ceiling and are explicitly deferred to KVS-04-class evidence under a
 future format milestone (raising the FR-KVP9 ceiling is a spec-revision
 decision, not a configuration change) — recorded in the gate's
