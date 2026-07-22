@@ -533,10 +533,13 @@ func (s *Scenario) validateBuyerFleet() error {
 		if len(s.Benchmark.Invariants) == 0 {
 			return fmt.Errorf("benchmark.invariants must list at least one B-ID when benchmark.enabled=true")
 		}
-		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true}
+		// B8/B9 are reserved by RESEARCH_236 (sticky cache-reuse); B10 is
+		// RESEARCH_235's sustained-TPS retention. B10 skips that range to
+		// avoid colliding regardless of PR merge order.
+		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true, "B10": true}
 		for _, id := range s.Benchmark.Invariants {
 			if !known[id] {
-				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B7)", id)
+				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B7, B10)", id)
 			}
 		}
 		if s.Benchmark.ProviderSlots < 1 {

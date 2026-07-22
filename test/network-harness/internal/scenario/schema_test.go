@@ -412,6 +412,12 @@ duration: 1s
 
 func TestCommittedScenariosValidate(t *testing.T) {
 	t.Setenv("BUYER_TOKEN", "test-buyer-token")
+	// 15_thermal_soak.yaml targets ${LAB_GATEWAY_URL}/${LAB_COORDINATOR_URL},
+	// intentionally unset at runtime so a bare soak run fails validation
+	// rather than firing at a default (LAB PROVIDER ONLY — #584). Supply
+	// placeholders here so the structural-validity check still covers it.
+	t.Setenv("LAB_GATEWAY_URL", "http://127.0.0.1:18080")
+	t.Setenv("LAB_COORDINATOR_URL", "http://127.0.0.1:19090")
 
 	paths, err := filepath.Glob(filepath.Join("..", "..", "scenarios", "*.yaml"))
 	if err != nil {

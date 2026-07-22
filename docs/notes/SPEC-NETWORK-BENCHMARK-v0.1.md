@@ -124,6 +124,11 @@ single bad run doesn't trip the alert).
 | B5 | Slot util reasonable | ≥ 15% over 5-min window |
 | B6 | Earnings/hr viable | ≥ $0.30/hr at current pricing |
 | B7 | Cold/warm TTFT ratio bounded | cold p50 / warm p50 ≤ 2.0 (scenario 08) |
+| B10 | Sustained streaming-TPS retention | final-5min TPS p50 / first-5min TPS p50 over a 45–60 min soak (scenario 15): PASS ≥ 0.85, WARN ≥ 0.70, FAIL < 0.70. **PROVISIONAL / UNARMED** — thresholds are pre-run guesses; scenario 15 sets `sustained_gate_armed: false` so a would-be FAIL downgrades to WARN until a lab soak calibrates them (#584). SKIP if either window has < 8 streaming samples. |
+
+(B8/B9 — sticky cache-reuse retention + cached-turn latency — are added by
+RESEARCH_236; B10 skips that range so the two tests never collide on an ID
+regardless of merge order.)
 
 Like I1-I4, each invariant produces a structured verdict (PASS / WARN /
 FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
@@ -159,6 +164,25 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
   tier-2 pricing, session_duration.
 - **Invariants**: B5, B6 (B7 session-mean deferred — needs >>10-min
   windows).
+
+### 4.15 `15_thermal_soak` (RESEARCH_235, #584)
+- **What**: 45–60 min (`duration: 3600s`) sustained-decode soak at N=2
+  concurrent buyers, streaming, `max_tokens=64`, one model per run (start
+  with the 30B — the prod model class that collapsed on 2026-07-13). Short
+  (1s) inter-request floor keeps the provider continuously busy while the
+  2-buyer cap holds concurrency ≤ 2 (within Pearl N_eff=2.5).
+- **Measures**: how much streaming decode-TPS the provider RETAINS from the
+  first 5 min to the last 5 min under constant load, correlated with a
+  provider-side thermal log (`test/e2e/thermal-soak/`).
+- **Invariants**: B1, B2, B3, B4, B5, **B10** (sustained-TPS retention).
+- **LAB PROVIDER ONLY.** Targets `${LAB_GATEWAY_URL}`/`${LAB_COORDINATOR_URL}`
+  (unset by default → validation fails rather than firing at a default).
+  Never run against `streamvc.live` — a soak degrades and disconnects the
+  single prod mac (that IS #584). Parked at the campaign step until a
+  dedicated lab Mac exists; the instrument (scenario + B10 + thermal
+  capture) ships now, calibration follows the first lab run.
+- **B10 is provisional/unarmed** until that first run recalibrates the
+  thresholds; see §3.5.
 
 ## 5. Artifact schema (`benchmark_summary.json`)
 
