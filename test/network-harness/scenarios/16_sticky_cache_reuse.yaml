@@ -23,16 +23,17 @@
 # "cached"). On the warm turns the harness reads usage.cached_prompt_tokens
 # / usage.prompt_tokens.
 #
-# ADVISORY + CALIBRATION-PENDING: benchmark verdicts do NOT change the
-# harness exit code (only the hard invariants I1-I4 do) — a CI/phase-C gate
-# must parse benchmark_verdict.json and act on B8/B9. AND cache_calibration
-# _pending is true below: the 2026-07-22 prod baseline found ~0 reuse on
-# the current pool (both live models report cached_prompt_tokens=0), so the
-# provisional 0.40 floor is NOT yet calibrated against a positive
-# reuse-capable baseline; B8/B9 therefore RECORD their measured value but
-# SKIP (never PASS/FAIL) until a reuse-capable provider is in the pool and
-# the floor is transcribed from a real positive measurement — then flip the
-# flag to false to arm the gate.
+# ADVISORY + GATE NOT ARMED: benchmark verdicts do NOT change the harness
+# exit code (only the hard invariants I1-I4 do) — a CI/phase-C gate must
+# parse benchmark_verdict.json and act on B8/B9. AND cache_gate_armed is
+# false below (its fail-safe default): the 2026-07-22 prod baseline found
+# ~0 reuse on the current pool (both live models report
+# cached_prompt_tokens=0), so the provisional 0.40 floor is NOT yet
+# calibrated against a positive reuse-capable baseline; B8/B9 therefore
+# RECORD their measured value but SKIP (never PASS/FAIL). Set
+# cache_gate_armed: true (see the benchmark block) only once a
+# reuse-capable provider is in the pool and the floor is transcribed from
+# a real positive measurement.
 #
 # Hard rules honoured (RESEARCH_236):
 #  1. Large prefix (~2.7k tokens) — a small prefix makes turn-2
@@ -58,22 +59,26 @@ description: |
   the #376 reuse win (verdicts advisory + calibration-pending).
 
 expected_shape: |
-  Phase C benchmark (instrument; verdicts advisory + calibration-pending):
+  Phase C benchmark (instrument; verdicts advisory + gate not armed):
    - 8 total requests (1 buyer x 8 turns).
    - request_index 0 is the cold uncached first-touch; request_index 1..7
      are warm cached turns on the same provider.
    - B8 records median (cached_prompt_tokens / prompt_tokens) across the
-     warm turns. Provisional floor 0.40; SKIPs while cache_calibration_
-     pending is true (no positive baseline yet) or when usage is absent.
-   - B9 records cached vs uncached full-response latency p50 ratio (these
-     turns are non-streaming, so this is NOT TTFT; with tiny max_tokens the
-     wall time is prefill-dominated). NOTE: the single cold turn also pays
-     one-time connection setup the keep-alive warm turns do not — a known
-     downward bias to calibrate out before arming.
-   - When run with >= 2 eligible providers and stickiness OFF: warm turns
-     scatter across providers, prefix cache misses, reuse collapses toward
-     0 — that is the sticky-routing regression B8 is meant to catch once
-     armed.
+     warm turns. Provisional floor 0.40; SKIPs while cache_gate_armed is
+     false (no positive baseline yet), when usage is absent, or when the
+     run is too partial (no strict majority of the intended warm turns
+     measured).
+   - B9 records the reuse-bearing cached vs uncached full-response latency
+     p50 ratio (these turns are non-streaming, so this is NOT TTFT; with
+     tiny max_tokens the wall time is prefill-dominated). NOTE: the single
+     cold turn also pays one-time connection setup the keep-alive warm
+     turns do not — a known downward bias; before arming B9, take multiple
+     independent cold controls to remove it.
+   - This is a single-provider PROVIDER-CACHE probe, not a sticky-routing
+     test: to detect a sticky-routing regression, run with >= 2 eligible
+     providers AND add a provider-affinity assertion (with repeated
+     identical prefixes each provider can warm after its first miss, so
+     reuse alone would not reliably fall).
 
 target:
   gateway_url: https://api.streamvc.live

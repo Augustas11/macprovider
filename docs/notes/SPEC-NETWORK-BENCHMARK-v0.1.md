@@ -135,23 +135,29 @@ parse `benchmark_verdict.json` and act on B8/B9 itself.
 
 B8/B9 **SKIP** rather than FAIL in every inconclusive case — the gateway
 omitted the usage frame (spec-strict path), the scenario did not run the
-`sticky_cache` pattern, every request failed, a provider reported an
-impossible `cached_prompt_tokens > prompt_tokens`, or fewer than 3 valid
-warm samples were measured — so a missing or untrustworthy measurement is
-never mistaken for a regression.
+`sticky_cache` pattern, the uncached primer failed (cache never warmed),
+every warm request failed, a provider reported an impossible
+`cached_prompt_tokens > prompt_tokens`, fewer than 3 valid warm samples
+were measured, or fewer than a strict majority of the scenario's INTENDED
+warm turns produced a valid measurement (a duration-truncated or
+survivorship-biased run) — so a missing or untrustworthy measurement is
+never mistaken for a regression. B9 additionally requires conclusive
+positive reuse and scores only the reuse-bearing latency cohort, so a fast
+usage-absent or zero-reuse turn cannot manufacture a latency advantage.
 
-B8/B9 are **calibration-pending**: the 0.40 floor and 0.90 ratio are
+B8/B9 ship with the gate **not armed**: the 0.40 floor and 0.90 ratio are
 provisional and were NOT calibrated against a positive baseline — the
 2026-07-22 scenario-16 prod run measured ~0 reuse on the live pool (both
 served models report `cached_prompt_tokens = 0`; the ~0.64 figure from
-2026-07-09, #376, was a different provider/prefix context). While
-`benchmark.cache_calibration_pending` is true the invariants record the
-measured value but SKIP the PASS/WARN/FAIL, so an unsupported-capability
-pool is not mistaken for a regression. Arm the gate (flip the flag to
-false and transcribe the floor from the real median, with headroom) once
-a reuse-capable provider is in the pool. B9 is a full-response latency
-ratio (these turns are non-streaming, so not TTFT) and carries a known
-cold-turn connection-setup bias to calibrate out before arming.
+2026-07-09, #376, was a different provider/prefix context).
+`benchmark.cache_gate_armed` is a positive, fail-safe flag: while it is
+false (its default), the invariants record the measured value but SKIP the
+PASS/WARN/FAIL, so an unsupported-capability pool is not mistaken for a
+regression. Arm the gate — set `cache_gate_armed: true` and transcribe the
+floor from the real median, with headroom — only once a reuse-capable
+provider is in the pool. B9 is a full-response latency ratio (these turns
+are non-streaming, so not TTFT) and carries a known cold-turn
+connection-setup bias to remove with multiple cold controls before arming.
 
 ## 4. New scenarios (07-10)
 
@@ -205,10 +211,12 @@ cold-turn connection-setup bias to calibrate out before arming.
 - **Phase C — regression-gate instrument**: the eventual guard for the
   #376 reuse win. Intended to be wired as a scheduled/CI run that parses
   `benchmark_verdict.json` (benchmark verdicts are advisory — they do not
-  set the exit code). Ships **calibration-pending** (B8/B9 record but SKIP)
-  because the 2026-07-22 baseline measured ~0 reuse on the current pool;
-  arm it once a reuse-capable provider is present and the floor is
-  transcribed from a positive baseline. As a single-provider probe it
+  set the exit code). Ships with the gate **not armed**
+  (`cache_gate_armed: false`, so B8/B9 record but SKIP) because the
+  2026-07-22 baseline measured ~0 reuse on the current pool; arm it
+  (`cache_gate_armed: true`) once a reuse-capable provider is present and
+  the floor is transcribed from a positive baseline. As a single-provider
+  probe it
   measures the provider prefix cache, not sticky routing — the routing
   dimension needs ≥2 eligible providers plus an affinity assertion.
   Requires sticky routing ON (`routing.sticky_enabled: true` on both
@@ -243,6 +251,7 @@ cold-turn connection-setup bias to calibrate out before arming.
       "reuse_min": 0.61,
       "uncached_latency_ms": {"p50": 1800, "p95": 1800, "p99": 1800},
       "cached_latency_ms": {"p50": 900, "p95": 1050, "p99": 1100},
+      "cached_reuse_latency_ms": {"p50": 900, "p95": 1050, "p99": 1100},
       "latency_ratio_p50": 0.50
     }
   },

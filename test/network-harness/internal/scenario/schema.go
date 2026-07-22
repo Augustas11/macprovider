@@ -557,6 +557,15 @@ func (s *Scenario) validateBuyerFleet() error {
 		// turn after the request_index-0 cold first-touch; a paced
 		// interval so the provider has settled the prior turn; and a
 		// large prefix so cached_prompt_tokens is meaningful.
+		if s.Buyers.Count != 1 {
+			// One sequential buyer only: the uncached primer / warm-turn
+			// semantics assume a single conversation warming one provider,
+			// and the live pool serves each model from a single-slot
+			// provider (concurrent buyers contend and 503). A multi-buyer
+			// variant would need per-buyer primer tracking plus a
+			// provider-affinity assertion — out of scope here.
+			return fmt.Errorf("buyers.count must be 1 when pattern=sticky_cache (got %d)", s.Buyers.Count)
+		}
 		if s.Buyers.Stream {
 			return fmt.Errorf("buyers.stream must be false when pattern=sticky_cache (streaming usage can drop for large prompts, #511)")
 		}

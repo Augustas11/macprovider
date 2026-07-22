@@ -835,6 +835,54 @@ func TestB9_CachedLatency_Skip_GateNotArmed(t *testing.T) {
 	}
 }
 
+// scCacheSticky builds an armed sticky_cache scenario so Evaluate derives
+// the INTENDED warm-turn count (requestsPerBuyer-1) for the coverage gate.
+func scCacheSticky(requestsPerBuyer int, invs ...string) *scenario.Scenario {
+	s := scCache(true, invs...)
+	s.Buyers.Pattern = "sticky_cache"
+	s.Buyers.Count = 1
+	s.Buyers.RequestsPerBuyer = requestsPerBuyer
+	return s
+}
+
+func TestB8_CacheReuse_Skip_EvenHalfNotMajority(t *testing.T) {
+	// 8 attempted warm turns, exactly 4 valid (4 usage-absent). Half is not
+	// a strict majority (needs 8/2+1=5) → SKIP, not PASS.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP at exactly-half coverage, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_TruncatedVsIntended(t *testing.T) {
+	// Scenario INTENDED 7 warm turns (requests_per_buyer=8) but the run was
+	// truncated: only the primer + 3 healthy warm turns came back. Judged
+	// against the intended count (majority=4), 3 is incomplete → SKIP —
+	// even though against the 3 attempted it would look 3/3 complete.
+	results := []buyer.Result{okPrimer()}
+	for i := 0; i < 3; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(scCacheSticky(8, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP on truncated-vs-intended run, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+	// Sanity: the same 3/3 attempted set PASSes when there is no intended
+	// count to measure against (non-sticky_cache fallback), proving the
+	// intended-count gate is what caught the truncation.
+	res2 := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res2.Verdicts[0].Status; got != StatusPass {
+		t.Fatalf("B8 fallback expected PASS on 3/3 attempted, got %s: %s", got, res2.Verdicts[0].Detail)
+	}
+}
+
 func TestComputeBuyerMetrics_CacheReusePopulated(t *testing.T) {
 	var results []buyer.Result
 	results = append(results, makeCacheResult(600, "uncached", true, 0, 4000))
@@ -872,6 +920,7 @@ func TestComputeBuyerMetrics_CacheReusePopulated(t *testing.T) {
 func TestSchema_StickyCache_Validate(t *testing.T) {
 	cases := []struct {
 		name        string
+		count       int
 		stream      bool
 		stickyKey   string
 		reqs        int
@@ -879,13 +928,14 @@ func TestSchema_StickyCache_Validate(t *testing.T) {
 		prefixLines int
 		wantErr     bool
 	}{
-		{"valid", false, "harness-%d", 4, 1500, 140, false},
-		{"streaming rejected", true, "harness-%d", 4, 1500, 140, true},
-		{"no sticky key", false, "", 4, 1500, 140, true},
-		{"one request", false, "harness-%d", 1, 1500, 140, true},
-		{"zero interval", false, "harness-%d", 4, 0, 140, true},
-		{"prefix too small", false, "harness-%d", 4, 1500, 50, true},
-		{"prefix too large", false, "harness-%d", 4, 1500, 500, true},
+		{"valid", 1, false, "harness-%d", 4, 1500, 140, false},
+		{"multi buyer rejected", 2, false, "harness-%d", 4, 1500, 140, true},
+		{"streaming rejected", 1, true, "harness-%d", 4, 1500, 140, true},
+		{"no sticky key", 1, false, "", 4, 1500, 140, true},
+		{"one request", 1, false, "harness-%d", 1, 1500, 140, true},
+		{"zero interval", 1, false, "harness-%d", 4, 0, 140, true},
+		{"prefix too small", 1, false, "harness-%d", 4, 1500, 50, true},
+		{"prefix too large", 1, false, "harness-%d", 4, 1500, 500, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -894,7 +944,7 @@ func TestSchema_StickyCache_Validate(t *testing.T) {
 				Target:   scenario.Target{GatewayURL: "https://x", BuyerToken: "tk"},
 				Duration: 60_000_000_000,
 				Buyers: scenario.Buyers{
-					Count:                 1,
+					Count:                 tc.count,
 					Stream:                tc.stream,
 					Pattern:               "sticky_cache",
 					RequestsPerBuyer:      tc.reqs,
