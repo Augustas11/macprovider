@@ -49,6 +49,12 @@ SIGN_CATALOG_GO_PATH = ROOT / "scripts" / "sign-catalog.go"
 COORDINATOR_YAML_PATH = ROOT / "phase4-coordinator" / "dist" / "coordinator.yaml"
 GO_PROBE_TIMEOUT_SECONDS = 5
 TIER2_SIGN_VERIFY_TIMEOUT_SECONDS = 60
+FIXED_GO_EXECUTABLES = (
+    "/opt/homebrew/bin/go",
+    "/usr/local/go/bin/go",
+    "/usr/local/bin/go",
+)
+HOSTED_GO_TOOLCACHE_ROOT = pathlib.Path("/opt/hostedtoolcache/go")
 
 
 class CatalogError(RuntimeError):
@@ -1121,18 +1127,27 @@ def go_executable() -> str:
     version probe before trusting the binary. Tier-2 authenticity must not
     depend on ambient process environment.
     """
-    candidates = [
-        "/opt/homebrew/bin/go",
-        "/usr/local/go/bin/go",
-        "/usr/local/bin/go",
-    ]
+    candidates = list(FIXED_GO_EXECUTABLES)
+    for architecture in ("x64", "arm64"):
+        candidates.extend(
+            str(path)
+            for path in sorted(
+                HOSTED_GO_TOOLCACHE_ROOT.glob(f"*/{architecture}/bin/go"),
+                reverse=True,
+            )
+        )
 
     checked: list[str] = []
     for candidate in candidates:
         if not candidate or candidate in checked:
             continue
         checked.append(candidate)
-        if os.geteuid() == 0 and not root_trusted_executable(candidate):
+        candidate_path = pathlib.Path(candidate)
+        hosted_toolcache_candidate = (
+            candidate_path.parts[: len(HOSTED_GO_TOOLCACHE_ROOT.parts)]
+            == HOSTED_GO_TOOLCACHE_ROOT.parts
+        )
+        if (os.geteuid() == 0 or hosted_toolcache_candidate) and not root_trusted_executable(candidate):
             continue
         try:
             result = subprocess.run(

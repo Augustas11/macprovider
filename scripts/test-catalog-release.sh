@@ -682,6 +682,31 @@ try:
 finally:
     os.environ.pop("GO_BIN", None)
 
+# GitHub's pinned setup-go action installs below a root-owned hosted-toolcache
+# tree rather than one of the workstation paths above. That bounded tree is an
+# allowed source only after the same root ownership/mode validation; PATH and
+# GO_BIN remain ignored.
+hosted_root = keys_dir / "hosted-toolcache" / "go"
+hosted_go = hosted_root / "1.26.5" / "x64" / "bin" / "go"
+hosted_go.parent.mkdir(parents=True)
+hosted_go.write_text("#!/usr/bin/env bash\nif [ \"$1\" = version ]; then echo 'go version go1.26.5 linux/amd64'; exit 0; fi\nexit 1\n")
+hosted_go.chmod(0o755)
+saved_fixed_go = module.FIXED_GO_EXECUTABLES
+saved_hosted_root = module.HOSTED_GO_TOOLCACHE_ROOT
+saved_root_trusted = module.root_trusted_executable
+try:
+    module.FIXED_GO_EXECUTABLES = ()
+    module.HOSTED_GO_TOOLCACHE_ROOT = hosted_root
+    module.root_trusted_executable = lambda candidate: pathlib.Path(candidate) == hosted_go
+    if module.go_executable() != str(hosted_go):
+        raise SystemExit("root-trusted hosted setup-go toolchain was not selected")
+finally:
+    module.FIXED_GO_EXECUTABLES = saved_fixed_go
+    module.HOSTED_GO_TOOLCACHE_ROOT = saved_hosted_root
+    module.root_trusted_executable = saved_root_trusted
+
+print("root-trusted hosted setup-go toolchain is accepted without PATH trust")
+
 # The trust root is the committed coordinator.yaml only. An ambient
 # environment variable set by anything other than a reviewed PR touching
 # that file must NOT be able to authenticate a catalog signed by a

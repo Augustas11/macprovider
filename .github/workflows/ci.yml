@@ -297,7 +297,9 @@ jobs:
     # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
     # build — so it stays a fast, isolated job. Closes the 2026-06-17
     # regression where an env:NAME-indirected operator_key false-failed the
-    # gate and pushed operators into SKIP_C2_CHECK=1.
+    # gate and pushed operators into SKIP_C2_CHECK=1. Catalog release tests now
+    # authenticate Tier-2 with the reviewed Go verifier, so install the pinned
+    # toolchain even though this job does not build a service binary.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -306,6 +308,12 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Set up Go for the Tier-2 signature verifier
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
 
       - name: make test-dist
         run: make test-dist
