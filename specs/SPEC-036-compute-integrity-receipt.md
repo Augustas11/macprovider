@@ -68,9 +68,11 @@ Out of scope:
 - Any change to SPEC-015 v0.4 `usage` fields.
 - Rewriting SPEC-022's top-level settlement outcome enum.
 - Redefining the shared measurement algorithms; SPEC-036 composes on SPEC-030
-  (Losslessness Probe) §FR-3 (transport/auth/load-bound policy values), and generalizes
-  §FR-7 (`support_selection_v1` construction — to a bounded `(N+1)`-arm form,
-  `N ≤ max_active_references`, FR-6) and §FR-9 (TV-interval computation)
+  (Losslessness Probe) §FR-3 (transport/auth/load-bound policy values), §FR-7
+  (`support_selection_v1` — each provider-vs-reference TV uses the pinned two-arm
+  `[K,2K]` construction unchanged; only the *wire* carries the bounded union of
+  pairwise supports so one probe answers all references, `N ≤ max_active_references`,
+  FR-6/FR-7) and §FR-9 (TV-interval computation)
   rather than re-specifying them. SPEC-036 does NOT inherit SPEC-030 §FR-4's
   digest/replay wire framing — it owns its settlement-bearing digest preimage,
   replay binding, Tier-2 carrier, and result variants (FR-6), reusing only the
@@ -496,33 +498,32 @@ overlay/breaker adverse state carries an immutable `adjudication_origin`:
   enforcing).
 
 `adjudication_origin` is set at state creation, is immutable, and is captured and
-digested in FR-4. A state's **money/routing EFFECT** (deny billable covered routing +
-non-payable settlement) is active for a new admission IFF ALL of: (i)
-`adjudication_origin == enforce_preserved`; (ii) the state is provider-attributable
-(`quarantined_compute_drift`, `blocked:swap_laundering_suspected`,
-`blocked:manual_review_required`, `blocked:abusive_inconclusive`) or an active
-breaker hold; and (iii) the **SPEC-022 conjunction is currently true** for the key.
-Otherwise the state's effect is **dormant** (the state persists / survives — only the
-FR-10/FR-16 clear releases it — but it does not block money/routing):
+digested in FR-4. The single normative `effective_adverse_state` predicate — used by
+FR-3 settlement, FR-4 capture, FR-10 state resolution, FR-11 onboarding, FR-16
+routing, and Migration — is this exhaustive truth table (an adverse state's
+money/routing EFFECT = deny billable covered routing + non-payable settlement):
 
-- A **SPEC-036-only downgrade** (`enforce → warn_only` via FR-16 rollback or FR-1
-  auto-downgrade) does NOT change the SPEC-022 conjunction, so
-  `enforce_preserved` provider-attributable states and breaker holds REMAIN
-  effect-active and keep blocking (this is the §3 Preserved-adverse-state exception).
-- A **SPEC-022 downgrade** (SPEC-022 leaves enforce or narrows coverage below
-  SPEC-036's) makes the conjunction false → SPEC-036 exercises NO routing/onboarding/
-  money authority for new admissions in the now-uncovered scope, including for
-  `enforce_preserved` state, which goes dormant; SPEC-022 alone governs those rows.
-  The dormant state resumes its effect automatically when SPEC-022 returns to enforce
-  for the key (no re-adjudication needed; it was never cleared).
-- **Coordinator-attributable** blocks (`blocked:reference_missing`,
-  `blocked:calibration_missing`, `blocked:reference_fault`) are dormant for routing
-  during an FR-1 availability downgrade (the point of that downgrade) but persist and
-  resume on return to enforce.
-- `telemetry_only` state never has a money/routing effect in any mode.
+| Runtime mode | Provider-attributable / breaker (`enforce_preserved`) | Coordinator-attributable block (`enforce_preserved`) | `telemetry_only` (any state) |
+|---|---|---|---|
+| SPEC-036 enforce AND SPEC-022 enforce (both effectively enforce) | **active** (fail closed) | **active** (fail closed) | dormant |
+| SPEC-036 warn_only, SPEC-022 still enforce (SPEC-036-only downgrade) | **active** (§3 Preserved-adverse-state exception) | dormant (FR-1 availability downgrade — the point of it) | dormant |
+| SPEC-022 not enforce (SPEC-022 downgrade / coverage narrowed) | dormant (SPEC-036 has no independent money authority; SPEC-022 alone governs) | dormant | dormant |
 
-Rows already captured under a composite snapshot keep their captured outcome
-regardless of later mode changes (immutability).
+"Dormant" means the state persists and survives (only the FR-10/FR-16 clear releases
+it); its effect resumes automatically, with no re-adjudication, when the mode returns
+to a row where the truth table makes it active. `telemetry_only` state (computed under
+observe/warn_only or where SPEC-022 was not enforcing) NEVER has a money/routing
+effect. Under normal enforce (top row) EVERY non-payable state fails closed — this is
+consistent with the FR-3 enforce fail-closed rule below; the origin/mode gating only
+governs what survives a *downgrade*, never a relaxation of normal-enforce
+fail-closed. Rows already captured under a composite snapshot keep their captured
+outcome regardless of later mode changes (immutability).
+
+Origin inheritance: any successor overlay, `blocked:swap_laundering_suspected` block,
+or adverse-state lineage tombstone (FR-10, FR-12) DERIVED from an `enforce_preserved`
+adverse state MUST itself be `enforce_preserved`, regardless of the mode at derivation
+time, so artifact churn during a warn_only window cannot convert preserved risk into
+`telemetry_only`.
 
 In enforce mode, a covered paid request MUST NOT create buyer final debit,
 provider credit, earnings visibility, settlement-sweep inclusion, or payout
@@ -908,20 +909,20 @@ re-derive these):**
 - The `target_generation` ownership/increment semantics of SPEC-030 §FR-2 (the
   coordinator owns generation; providers echo the actual generation at each measured
   position; results MUST NOT authorize across a generation boundary).
-- The `support_selection_v1` shared-support **construction rule** (SPEC-030 §FR-7)
-  as the base of a SPEC-036-owned multi-arm **generalization**: SPEC-030's two-arm
-  (provider + one reference, ≤ `2K`) union is generalized here to an
-  `(N+1)`-arm union over the provider top-K and the top-K of all `N` active
-  references (≤ `(N+1)K`), with full-distribution probabilities reported over the
-  union and tail mass outside it, including SPEC-030's small-vocabulary exception.
-  This is a documented generalization, not an identical two-arm reuse.
+- The `support_selection_v1` two-arm **construction rule** (SPEC-030 §FR-7) applied
+  **pairwise, unchanged**: every provider-vs-reference TV interval (FR-7) is computed
+  over a two-arm `[K,2K]` support `provider_top_k ∪ reference_r_top_k`. The only
+  SPEC-036-owned change is on the wire: the probe carries the bounded union of the
+  pairwise supports (`≤ (N+1)K`, `N ≤ max_active_references`) so one provider result
+  answers every reference; the coordinator restricts to each pairwise `[K,2K]` support
+  for the actual TV math. SPEC-030's small-vocabulary exception applies to each arm.
 - The TV lower/upper interval **formula** and canonical median rule (SPEC-030 §FR-9).
 
 SPEC-036 carries the support-selection rule under the settlement-scoped constant
-`compute_integrity_support_selection_v1` (its reference arms are the coordinator-held
-trusted references, not SPEC-030's provider plain path); the construction is the same
-rule generalized from two arms to `(N+1)` arms for `N` active references
-(§FR-6/§FR-7), not the literal two-arm SPEC-030 wire construction.
+`compute_integrity_support_selection_v1` (its reference arm is a coordinator-held
+trusted reference, not SPEC-030's provider plain path). Each TV interval uses
+SPEC-030 §FR-7's two-arm `[K,2K]` construction unchanged; the wire carries the bounded
+union of the pairwise supports so one probe answers all active references (FR-6/FR-7).
 
 **Owned by SPEC-036 (settlement-bearing wire framing — NOT inherited from
 SPEC-030, which frames these for its own `losslessness_probe_v1` profile):**
@@ -1157,29 +1158,30 @@ attributes the malformed result to its own reference or transport fault.
 ### FR-7 TV computation
 
 For each measurement position and **each active admissible reference** `r`, the
-coordinator MUST compute a provider-vs-reference `r` TV interval over the combined
-`compute_integrity_support_selection_v1` shared support (`support_token_ids` = the
-union of provider top-K and every reference's top-K). The coordinator sends every
-reference's top-K in `reference_top_k_sets`, the provider returns its own top-K plus
-probabilities over the combined support, and the coordinator recomputes reference
-`r`'s probabilities and tail mass over that same support (from `r`'s
-`reference_full_distribution_ref`, §3) before computing, per reference `r`:
+coordinator MUST compute a provider-vs-reference `r` TV interval over the **pairwise**
+`support_selection_v1` support `S_r = provider_top_k ∪ reference_r_top_k` — exactly
+SPEC-030 §FR-7's two-arm construction, bounded `[K, 2K]`. Each TV interval therefore
+uses the pinned SPEC-030 two-arm primitive unchanged. The single owned generalization
+is only on the **wire**: to answer every `S_r` from one probe, the request carries all
+references' top-K in `reference_top_k_sets` and the provider reports probabilities over
+the bounded union `support_token_ids` (`= provider_top_k ∪ ⋃_r reference_r_top_k`,
+length `[K, (N+1)K]`, `N ≤ max_active_references`). For each reference `r` the
+coordinator restricts the provider probabilities to `S_r`, recomputes the provider
+tail mass outside `S_r`, and recomputes reference `r`'s probabilities and tail mass
+over `S_r` (from `r`'s `reference_full_distribution_ref`, §3), then computes:
 
 ```text
-support_diff_r = sum(abs(p_provider(token) - p_reference_r(token)))
-tv_lower_r = 0.5 * (support_diff_r + abs(provider_tail_mass - reference_tail_mass_r))
-tv_upper_r = 0.5 * (support_diff_r + provider_tail_mass + reference_tail_mass_r)
+support_diff_r = sum_{t in S_r} abs(p_provider(t) - p_reference_r(t))
+tv_lower_r = 0.5 * (support_diff_r + abs(provider_tail_mass_r - reference_tail_mass_r))
+tv_upper_r = 0.5 * (support_diff_r + provider_tail_mass_r + reference_tail_mass_r)
 ```
 
-A single provider result therefore yields one TV interval per active reference over
-one shared support. The FR-5 agreed-envelope rule aggregates across references:
-`pass` requires the pass predicate to hold against every active admissible
-reference; `quarantine_candidate` requires the quarantine predicate to hold against
-every active admissible reference. Each reference's tail mass is computed against
-the larger combined `(N+1)`-arm support, so a reference's tail can only be **lower**
-than it would be against a two-arm support (more tokens in the union means less mass
-outside it); the K-retry/tail predicates below apply to each `tv_*_r` in turn against
-the combined support.
+where `provider_tail_mass_r` and `reference_tail_mass_r` are the masses outside `S_r`.
+A single provider result therefore yields one two-arm `[K,2K]` TV interval per active
+reference. The FR-5 agreed-envelope rule aggregates: `pass` requires the pass
+predicate against every active admissible reference; `quarantine_candidate` requires
+the quarantine predicate against every active admissible reference. The K-retry/tail
+predicates below apply to each `tv_*_r` in turn.
 
 The provider MUST NOT supply the authoritative verdict. The coordinator verdict
 MUST be derived from raw compact distributions, tail masses, identity fields,
@@ -1304,9 +1306,22 @@ coordinator final-inconclusive enum (distinct from the provider-supplied
 the drift counter, and each is attributable-to-coordinator-fault-exempt from the
 abusive rule when the coordinator caused it:
 
-- `inconclusive:identity_reject` (echoed identity/nonce/`probe_request_digest`/
-  `probe_result_digest`/`type`/`schema_version`/expiry mismatch, or duplicate-digest
-  replay) — abusive event.
+- `inconclusive:identity_reject` (nonce/`probe_request_digest`/`probe_result_digest`/
+  `type`/`schema_version`/expiry mismatch, or duplicate-digest replay) — abusive event.
+- `inconclusive:model_swap` (a `measurement` result whose per-position actual
+  `target_model_hash`/`target_generation` differ from expected or are mixed across
+  positions — a warm swap mid-probe) — NOT an abusive event (treated as an identity
+  change that expires the key), mirroring the `provider_inconclusive` `model_swap`
+  mapping.
+
+Measurement-validation precedence (ordered; first match wins) resolves the overlap
+between the strict identity rule and the specific-reason rules: (1)
+authentication/replay failure → `identity_reject`; (2) per-position hash/generation
+change or mix → `model_swap`; (3) prompt/position/prefix/context binding failure →
+`position_mismatch`; (4) distribution/support/tail-validation failure →
+`malformed_distribution`; (5) FR-7 tail/K-retry outcomes → `tail_mass_high` /
+`k_retry_failed`. This ensures an ordinary swap or a coordinator corpus fault does not
+mis-accumulate as `identity_reject`.
 - `inconclusive:position_mismatch` (prefix/position/context mismatch) — abusive event
   unless coordinator corpus-issuance fault.
 - `inconclusive:malformed_distribution` (any FR-6 distribution-validation failure) —
