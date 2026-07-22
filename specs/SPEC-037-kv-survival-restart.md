@@ -363,8 +363,13 @@ block, fail, or corrupt the request being served.
     aborts the write, `disk_write_skipped`); re-creating an index after
     eviction or purge deletes any residual item then adds fresh
     (`errSecDuplicateItem` ⇒ delete-then-add); a write that aborts after
-    creating a provisional DEK deletes it in its abort path (activation
-    reconcile is the backstop, not the primary cleanup); **whole-entry
+    creating a provisional DEK deletes it in its abort path, and cleanup
+    is **ownership-checked**: every DEK item records its creating write's
+    incarnation identifier, and an abort path deletes only an item it
+    created (in the per-index mutation lane) — so a delayed abort can
+    never delete a fresh DEK re-created after a purge or eviction
+    (fixture: AC-4); activation reconcile is the backstop, not the
+    primary cleanup; **whole-entry
     quota/retention eviction destroys the entry's DEK** along with its
     files (crypto-shredding evicted entries) — whereas compaction of a
     **superseded generation retains the shared DEK** while any live
@@ -390,9 +395,9 @@ block, fail, or corrupt the request being served.
 - **AEAD framing.** Chunked AES-256-GCM per §5a: every chunk uses a fresh
   CSPRNG 96-bit nonce (never derived from counters that can roll back);
   AAD binds the whole manifest (hence the full envelope, chunk table
-  included) plus the chunk ordinal. Total chunk count is an authenticated
-  envelope field, and the reader MUST verify decrypted chunks cover
-  ordinals `0..count-1` exactly.
+  included) plus the chunk ordinal. The chunk count is the authenticated
+  `chunks[]` table's length (not a separate field), and the reader MUST
+  verify decrypted chunks cover ordinals `0..count-1` exactly.
 - **Epoch rotation (purge-all), crash-safe ordering:** (0) durably record a
   rotation-intent journal entry `{from: N, to: N+1, phase}` in namespace
   metadata (fsync) **before any key operation**; (1) create + verify the
@@ -501,20 +506,26 @@ block, fail, or corrupt the request being served.
   key, canonicalized and HMAC-indexed inside the provider process;
   whole-namespace purge is key-epoch rotation (FR-KVP6).
 - **Revocation authority is DEK destruction.** Single-key purge ordering:
-  (1) advance the index's purge-generation high-watermark in namespace
-  metadata and write + `fsync` a tombstone for the (epoch, index) carrying
-  it; (2) delete the entry's DEK Keychain item and verify absence — from
+  (1) create + `fsync` an **incomplete** tombstone for the (epoch, index)
+  carrying the incremented purge generation, `fsync` its directory, and
+  only then advance + `fsync` the high-watermark in namespace metadata —
+  in that order, so a crash between the two always leaves an incomplete
+  tombstone for recovery to resume from; (2) delete the entry's DEK
+  Keychain item and verify absence — from
   this instant the entry is unrecoverable even if every file is restored
   from a snapshot or backup of the cache directory; (3) remove the matching
   hot-tier entry and cancel any in-flight promotion or pending/queued
   snapshot for the index whose sampled purge generation predates the new
   high-watermark; (4) delete the entry's generations and manifest; (5)
   report success with counts (entries removed, bytes freed), never raw
-  keys. Tombstones are **phase-aware**: on completion of steps 2–4 the
-  tombstone is durably marked complete (fsync) — new writes for the index
+  keys. Step 4's unlinks are followed by an entry-directory `fsync`
+  before the completion mark is written. Tombstones are **phase-aware**:
+  on completion of steps 2–4 the tombstone is durably marked complete
+  (fsync + directory fsync) — new writes for the index
   are admitted only after that mark, and recovery re-runs the destructive
   steps only for an incomplete tombstone, so a crash after a post-purge
-  re-cache can never delete the fresh entry or its DEK (fixture: AC-4).
+  re-cache can never delete the fresh entry or its DEK; AC-4 injects a
+  kill at every sub-boundary of this ordering (fixture: AC-4).
   Steps run inside the per-key hot-cache serialization lane (FR-CI4a):
   every hot lease carries the purge generation sampled at its `begin()`,
   and a hot `commit()` whose stamped generation is below the live
@@ -754,11 +765,11 @@ independently hits), with exactly one reason code:
 | 10 | Namespace or key-epoch mismatch (incl. file copied across namespaces/epochs) | `disk_miss_envelope` |
 | 11 | HMAC index does not recompute from the presented canonical key bytes | `disk_miss_envelope` |
 | 12 | Decode path class is not ordinary decode | `disk_miss_envelope` |
-| 13 | Token count, generation, commit sequence, chunk table, or lengths internally inconsistent | `disk_miss_envelope` |
+| 13 | Artifact internally inconsistent: token count / generation / commit sequence / chunk table / `decoded_length` / any declared length fails recomputation or coherence, or a required field is missing / an unknown field present | `disk_miss_corrupt` |
 | 14 | `creation_time` in the future | `disk_miss_envelope` |
 | 15 | Eligibility deadline passed | `disk_miss_expired` |
 | 16 | AEAD tag, blob SHA-256, or length mismatch; truncated/oversized/reordered/duplicated chunk | `disk_miss_corrupt` |
-| 17 | *(moved to control plane)* Orphan artifacts without a committed manifest are swept at tier activation before any read is served; the request path then observes row 1 (`disk_miss_absent`). Orphan sweep is a recovery event (AC-3), not a request-path outcome | — |
+| 17 | *(reserved — orphan sweep)* Orphan artifacts without a committed manifest are an activation-recovery event covered by AC-3, not a request-path outcome; after recovery the request path observes row 1. This row is intentionally not reason-coded and is exempt from AC-2 | *(AC-3)* |
 | 18 | Malicious/oversized shape or length metadata (§5a bounds, pre-allocation) | `disk_miss_corrupt` |
 | 19 | Stamped purge generation below live high-watermark (incl. backup/snapshot reintroduction, racing writer) | `disk_miss_tombstoned` |
 | 20 | Entry DEK absent/destroyed | `disk_miss_tombstoned` |
@@ -767,6 +778,12 @@ independently hits), with exactly one reason code:
 | 23 | Declared decoded size exceeds the promotion staging ceiling | `disk_miss_budget` |
 | 24 | Live identity input unavailable in current process | `disk_miss_identity_unavailable` |
 | 25 | Promoted layers fail hot-tier predicate (LCP < 32, nothing-new, non-exact trim) | `disk_promote_rejected` + shipped reason |
+
+Partition rule: rows 2–12 and 14 are **envelope** mismatches against the
+live runtime or lifecycle (`disk_miss_envelope`/`disk_miss_expired`); rows
+13 and 15–18 are **artifact integrity** failures (`disk_miss_corrupt`) —
+the two sets are mutually exclusive by construction (a manifest is first
+checked for internal coherence, then compared against the runtime).
 
 Write phase: successful durable publication → `disk_write_committed`; any
 write-side failure or refusal (identity unavailable, allowlist, geometry
@@ -809,13 +826,19 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
   and `eligible_until` are integer Unix **milliseconds** UTC, preserving
   the hot tier's sub-second deadline (boundary fixtures at
   just-before/at/just-after the deadline). `decoded_length` is the total
-  decoded payload size computed by one normative geometry formula (token
-  array bytes + per-layer framing + Σ tensor bytes from `layers[]` ×
-  `token_count`); the same formula is the FR-KVP3 write-side estimate and
-  the FR-KVP9 `disk_miss_budget` trigger, and a declared value that does
-  not equal the recomputation is `disk_miss_corrupt` (FR-KVP4c). Golden
-  JCS/AAD byte fixtures for a reference manifest are a required test
-  artifact.
+  decoded payload size computed by one exact, overflow-checked equation:
+  `4 + 4·token_count` (token-count word + i32 token array) `+
+  Σ over layers[] of (4 + 2 + |class_id bytes| + 1 + 8·ndim + 1 + 8` (the
+  per-layer framing: layer_index, class-ID length prefix and bytes, ndim,
+  dims, dtype, cache_offset) `+ 2·(8 + Π(dims) · dtype_size))` — where
+  `dims[]` is the exact serialized tensor shape **including the sequence
+  axis sized to `token_count`**, `dtype_size` follows the dtype enum, and
+  the factor 2 counts the K and V tensors, each with its own u64 length
+  prefix. The identical equation is the FR-KVP3 write-side estimate and
+  the FR-KVP9 `disk_miss_budget` trigger; a declared value that does not
+  equal the recomputation is `disk_miss_corrupt` (FR-KVP4c). Golden
+  JCS/AAD byte fixtures for a reference manifest, plus numeric
+  `decoded_length` golden vectors, are required test artifacts.
 - **Bounds:** ≤ 512 layers; ndim ≤ 8; each dim ≤ 2^32; chunk count ≤ 4096;
   per-chunk ciphertext ≤ 64 MiB; strings ≤ 1 KiB; `token_count` ≤ the
   hot-tier token cap (200k); `blob_length` ≤ the per-entry byte cap.
@@ -958,7 +981,9 @@ All are required tests in `phase3-binary/Tests/macprovider-cliTests/`:
   composed and decomposed Unicode forms of the same key canonicalize to
   one index (positive equivalence); HKDF derivation matches the
   conformance vector.
-- **AC-2 outcome matrix:** every §5 read-phase row exercised, including a
+- **AC-2 outcome matrix:** every reason-coded §5 read-phase row exercised
+  (row 17 is validated via AC-3 recovery plus a row-1 observation),
+  including a
   mutation fixture for **each individual authenticated envelope field**,
   chunk reorder/truncation/duplication/splice variants, and wrong-epoch /
   cross-namespace copies; each yields exactly its mapped reason code and a
