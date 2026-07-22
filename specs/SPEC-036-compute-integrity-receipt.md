@@ -223,15 +223,23 @@ buyer-facing claims for **new verdicts and clean keys**. Warn-only onboarding
 results MAY be surfaced as readiness telemetry, but MUST NOT block covered paid
 routing on the basis of a warn-only verdict. **Preserved-adverse-state exception:**
 warn-only's "no money effect / no block" governs *new* compute-integrity verdicts,
-not the *release* of adverse state already adjudicated under enforce. Any active
-`quarantined_compute_drift` or `blocked:<reason>` overlay and any active
-circuit-breaker admission hold that existed under enforce MUST survive a transition
-to warn_only (whether an FR-16 manual rollback or an FR-1 auto-downgrade) and MUST
-continue to reject billable covered buyer routing/settlement for the affected keys
-(operator-funded diagnostics only) until the applicable FR-10 clear rule or FR-16
-`cleared` transition completes. Only clean keys (no active adverse overlay/hold)
-receive warn-only's no-effect fallback. Releasing an adjudicated quarantine/block or
-a breaker hold requires the normal clear rule, never a mode downgrade.
+not the *release* of adverse state already adjudicated under enforce. The preserved
+set is exactly the **provider-attributable** adverse state plus active breaker holds:
+`quarantined_compute_drift`, `blocked:swap_laundering_suspected`,
+`blocked:manual_review_required`, `blocked:abusive_inconclusive`, and any active
+circuit-breaker admission hold that existed under enforce. Each MUST survive a
+transition to warn_only (whether an FR-16 manual rollback or an FR-1 auto-downgrade)
+and MUST continue to reject billable covered buyer routing/settlement for the
+affected keys (operator-funded diagnostics only) until the applicable FR-10 clear
+rule or FR-16 `cleared` transition completes. **Coordinator-attributable** blocks
+(`blocked:reference_missing`, `blocked:calibration_missing`,
+`blocked:reference_fault`) become **dormant** for routing during an availability
+downgrade — that is the whole point of the FR-1 reference-outage downgrade (keep the
+pool available when the coordinator, not the provider, is the reason no fresh verdict
+exists); they resume on return to enforce. Clean keys (no active preserved adverse
+state) receive warn-only's no-effect fallback. Releasing a provider-attributable
+quarantine/block or a breaker hold requires the normal clear rule, never a mode
+downgrade.
 
 **Enforce mode:** Policy mode in which request-start
 `quarantined_compute_drift` makes the settlement outcome `quarantined` with
@@ -370,9 +378,13 @@ the probe request/result, the threshold key, the calibration key (Migration §6)
 the request-start route snapshot; any mismatch fails closed (a reference/threshold/
 canary from one class MUST NOT authorize or quarantine another class).
 
-`observe` and `warn_only` MAY compute verdicts and emit audit events, but MUST
-NOT change buyer debit, provider credit, earnings, payout readiness, or
-buyer-facing verification claims.
+`observe` and `warn_only` MAY compute verdicts and emit audit events, but for new
+verdicts and clean keys MUST NOT change buyer debit, provider credit, earnings,
+payout readiness, or buyer-facing verification claims (see the §3 warn-only
+Preserved-adverse-state exception: enforce-origin provider-attributable
+`quarantined_compute_drift`/`blocked:<reason>` overlays and active circuit-breaker
+holds still deny billable routing/settlement for their keys under `warn_only` until
+the FR-10/FR-16 clear).
 
 `enforce` MUST refuse activation unless:
 
@@ -665,6 +677,10 @@ The captured state MUST include:
   covered class the captured state was measured/calibrated under; a mismatch between
   this and the route snapshot's provider class fails closed as
   `compute_integrity_uncovered_profile`).
+- `covered_sampling_profile_set_digest` for an all-profile window (SHA-256 over the
+  JCS canonical, sorted covered-profile list; null for a per-profile window), so
+  settlement can verify the buyer request's profile is a member with its own fresh
+  satisfied sub-window (FR-10).
 - `compute_integrity_state`.
 - `expiry_cause` when state is `expired`.
 - `compute_integrity_window_id`.
@@ -1010,9 +1026,12 @@ The result `payload` MUST include:
   kind"). The payload is a discriminated union on `result_kind`; each variant's key
   set is closed exactly as specified below.
 - Identity echoes: `model_id`, `target_model_hash`, `tokenizer_identity`,
-  `target_generation`, `sampling_profile`, `corpus_version`, `threshold_version`.
-  In the `provider_inconclusive` variant each identity echo MAY be null, in which
-  case the payload MUST carry a non-empty `identity_unavailable_reason` string.
+  `target_generation`, `sampling_profile`, `corpus_version`, `threshold_version`,
+  `hardware_runtime_class`. The coordinator MUST reject a result whose
+  `hardware_runtime_class` echo does not equal the request's and the route snapshot's
+  covered class. In the `provider_inconclusive` variant each identity echo MAY be
+  null, in which case the payload MUST carry a non-empty `identity_unavailable_reason`
+  string.
 - `support_selection`, `normalization_basis`, and `sampler_stage` echoes.
 - For `result_kind = "provider_inconclusive"`, the payload MUST additionally carry
   exactly `provider_reason_code` (from the FR-6 closed inconclusive set) and, when
@@ -1165,15 +1184,25 @@ the fields below). It MUST include the full 8-tuple threshold key (`model_id`,
 - `tau_quarantine_position`.
 - `tau_reference_fault_median`.
 - `tau_reference_fault_position`.
-- Calibration source and sample count.
-- Minimum eligible canary count.
-- Measurement-position count.
-- Provider/model/hash/tokenizer/sampler-stage/profile coverage.
-- Calibration time window.
-- Baseline tail-mass feasibility rate.
-- Baseline median and max `tv_upper`.
-- Approved false-positive target.
-- Approval timestamp and approver group.
+- `calibration_source` (string) and `calibration_sample_count` (integer).
+- `min_eligible_canary_count` (integer).
+- `measurement_position_count` (integer).
+- `coverage` (object binding the covered provider/model/hash/tokenizer/sampler-stage/
+  profile/hardware_runtime_class set).
+- `calibration_window_start` and `calibration_window_end` (RFC3339 UTC).
+- `baseline_tail_mass_feasibility_rate` (number in `[0,1]`).
+- `baseline_median_tv_upper` and `baseline_max_tv_upper` (numbers).
+- `false_positive_budget` (number in `[0,1]`) AND the measured evidence:
+  `measured_false_quarantine_numerator` (integer),
+  `measured_false_quarantine_denominator` (integer, the eligible-canary population),
+  `measured_false_quarantine_rate` (number in `[0,1]`, ≤ `false_positive_budget`),
+  and `measured_fp_window` (RFC3339 UTC range over the covered
+  `hardware_runtime_class`). Enforce activation (FR-8) reads these fields, so the
+  closed digest commits the evidence that authorizes enforce.
+- `approval_timestamp` (RFC3339 UTC) and `approver_group` (string).
+
+All fields above are the exact, closed JSON keys; producers/auditors serialize the
+same JCS payload for the FR-13 `threshold_record_digest`.
 
 Initial threshold formulas:
 
@@ -1444,9 +1473,12 @@ threshold_version)` onboarding key MUST pass compute-integrity onboarding when
 policy mode is `enforce`, unless the active policy explicitly requires an
 all-profile window whose coverage subsumes the buyer request.
 
-In `warn_only`, onboarding computes readiness telemetry only. It MUST NOT block
-covered paid routing, provider earnings opportunity, payout readiness, or
-buyer-facing claims.
+In `warn_only`, onboarding computes readiness telemetry only for clean keys and MUST
+NOT block covered paid routing, provider earnings opportunity, payout readiness, or
+buyer-facing claims on the basis of a warn-only onboarding verdict. (This does not
+override the §3 Preserved-adverse-state exception: a key whose overlay carries an
+enforce-origin provider-attributable quarantine/block is still excluded regardless of
+mode.)
 
 The onboarding gate applies only when neither the swap-laundering overlay
 `(stable_provider_identity, model_id)` nor the per-key stable-identity risk overlay
@@ -1641,8 +1673,11 @@ The disclosure copy MUST state:
   hold may be routed and billed in enforce mode. In observe or warn-only mode,
   `warn` is telemetry/readiness state only.
 - In enforce mode, `quarantined_compute_drift` means paid routing and payable
-  settlement are blocked for the covered key; in observe or warn-only mode it is
-  telemetry/readiness state only.
+  settlement are blocked for the covered key. In a policy that has NEVER been enforce
+  for the key (pure observe/warn-only), it is telemetry/readiness state only; but a
+  `quarantined_compute_drift` first adjudicated under enforce remains money-blocking
+  even after a downgrade to warn_only, until cleared (§3 Preserved-adverse-state
+  exception).
 - `verified` and `warn` reflect the latest detection window, not a real-time
   proof about the in-flight request; background drift detection can lag by the
   FR-17 time-to-quarantine SLO and can be about 5 days at the default cadence.
@@ -1692,14 +1727,16 @@ retroactively reclassify a row already admitted while it was inactive; such rows
 settle from their captured payable state. Circuit-breaker activation MUST preserve
 existing `quarantined_compute_drift` and `blocked:<reason>` states.
 
-The breaker's routing/settlement effect on **new buyer admissions** applies only
-where SPEC-036 is in effective enforce (FR-3 runtime conjunction). The breaker state
-itself survives an `enforce → warn_only` rollback and continues to protect
-already-captured rows and to deny in-scope enforce admissions, but under warn_only
-(or where SPEC-022 is not enforce) new admissions have no money effect regardless,
-so warn-only's "MUST NOT alter money" and the breaker's "deny/hold" do not conflict:
-the breaker constrains only enforce-effective new admissions and immutable captured
-rows.
+An active circuit-breaker hold established under enforce is a preserved adverse hold
+(§3): it survives an `enforce → warn_only` transition (manual rollback or
+auto-downgrade) and MUST continue to **deny billable new covered buyer admissions in
+its scope** (operator-funded diagnostics only) and protect already-captured rows,
+until the FR-16 `cleared` transition completes — it is NOT limited to
+effective-enforce admissions. For clean keys with no active breaker hold and no
+provider-attributable overlay, warn_only (or SPEC-022 not being enforce) means new
+admissions have no SPEC-036 money effect. Thus warn-only's "no money effect for new
+verdicts/clean keys" and the breaker's mode-independent "deny in scope" do not
+conflict — they govern disjoint sets of keys.
 
 Circuit-breaker state MUST be one of:
 
@@ -1878,10 +1915,11 @@ these reasons:
 
 - **Accrual vs cadence.** At the default ~1 canary/key/day cadence (FR-17), the
   per-key gate's ≥100 *eligible* canaries takes on the order of 100+ days (not 30),
-  and the "≥10 distinct stable provider identities when available" clause is
-  unreachable with the one-to-few controllable providers of the current beta.
-  Enforce for a real covered set therefore requires either dedicated burst-probing
-  budget with a stated wall-clock, or more supply, or both. The 30-day floor is a
+  and the **hard** ≥10-distinct-stable-provider-identities calibration floor
+  (Migration §6; the "when available" relaxation is removed) is unreachable with the
+  one-to-few controllable providers of the current beta — and burst probing raises
+  canary count, not identity diversity. Enforce for a real covered set therefore
+  requires more supply for diversity plus burst budget for count. The 30-day floor is a
   floor, not the binding constraint.
 - **Proportionality.** SPEC-036 is an *overt* detector (§4): it is defeated by a
   provider that recognizes the `compute_integrity_probe_v1` frame, and fresh `warn`
@@ -2019,11 +2057,15 @@ Before SPEC-036 can move toward LOCK:
     missing or stale; and approved copy forbids honest-computation,
     cryptographic-proof, hardware-integrity, and binary-integrity claims.
 13. An operator-control test proves manual-review dual approval, enforce to
-    warn-only deactivation without retroactive payability changes, rollback not
-    disabling active circuit-breaker holds, full FR-1 preconditions before
-    reactivating enforce, fail-closed circuit-breaker activation on
-    quarantine/reference-fault spikes, `override_routing_only` not making held
-    settlement payable, and `cleared` transition only after quiet-window, fresh
+    warn-only deactivation without retroactive payability changes, and — for BOTH a
+    manual FR-16 rollback and an FR-1 auto-downgrade — that an enforce-origin
+    provider-attributable `quarantined_compute_drift`/`blocked:<reason>` overlay and
+    an active circuit-breaker hold keep denying billable routing/settlement under
+    warn_only (a valid SPEC-015 receipt to such a key yields no debit/credit), while
+    coordinator-attributable blocks go dormant for clean-key availability; full FR-1
+    preconditions before reactivating enforce; fail-closed circuit-breaker activation
+    on quarantine/reference-fault spikes; `override_routing_only` not making held
+    settlement payable; and `cleared` transition only after quiet-window, fresh
     reference admission, dual approval, and audit-field requirements are met.
 14. A capacity test proves configured background and targeted burst canary rates
     meet the operator-approved time-to-onboard, time-to-quarantine, and
@@ -2091,8 +2133,10 @@ default holds unless maintainers record a stricter value in the LOCK PR or
 
 4. **The proposed per-covered-key warn-only calibration gate is adopted as the
    minimum enforce timeline** (Migration §6): at least 30 warn-only days, at least
-   100 eligible canaries, at least 10 distinct stable provider identities when
-   available, and at least one relevant trusted-reference refresh after the latest
+   100 eligible canaries, a hard minimum of at least 10 distinct stable provider
+   identities (the "when available" relaxation is removed; below-floor keys stay
+   warn-only unless maintainers approve a statistically justified lower floor), and
+   at least one relevant trusted-reference refresh after the latest
    reference runtime/build, runtime-build provenance digest, signed golden-fixture
    validation digest, tokenizer, sampler-stage, corpus, threshold, or catalog
    change. Fleet-wide evidence MAY be additionally required but MUST NOT substitute
