@@ -131,6 +131,33 @@ _validate_dns_name() {
 _validate_dns_name "$DOMAIN"        DOMAIN
 _validate_dns_name "${STATS_DOMAIN:-stats.streamvc.live}" STATS_DOMAIN
 
+_validate_catalog_canary_auth_token() {
+  local value="$1" length
+  length=${#value}
+  [ "$length" -ge 32 ] && [ "$length" -le 512 ] || return 1
+  case "$value" in
+    *[!A-Za-z0-9._~-]*) return 1 ;;
+  esac
+}
+
+_parse_model_hash_legacy_until() {
+  python3 -c '
+import shlex
+import sys
+
+raw = sys.argv[1].strip()
+if not raw:
+    sys.exit(0)
+try:
+    values = shlex.split(raw, comments=False, posix=True)
+except ValueError as exc:
+    raise SystemExit(f"invalid MODEL_HASH_LEGACY_UNTIL quoting: {exc}")
+if len(values) != 1:
+    raise SystemExit("MODEL_HASH_LEGACY_UNTIL must be a single scalar value")
+print(values[0], end="")
+' "$1"
+}
+
 # Email validator — RFC-conformant pre-validation is overkill; we just
 # need to reject metacharacters that would split a shell arg.
 if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
@@ -143,7 +170,7 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
     echo "  Select a provider expected to reconnect after restart; deployment commits only after pool admission." >&2
     exit 1
   fi
-  if ! printf '%s' "$CATALOG_CANARY_AUTH_TOKEN" | grep -Eq '^[A-Za-z0-9._~-]{32,512}$'; then
+  if ! _validate_catalog_canary_auth_token "$CATALOG_CANARY_AUTH_TOKEN"; then
     echo "aborting deploy: CATALOG_CANARY_AUTH_TOKEN is required and must be a safe 32-512 character bearer token" >&2
     exit 1
   fi
@@ -654,9 +681,13 @@ else
   # The deadline is not a secret, but it is operator-owned runtime state. Read
   # it as data from the same EnvironmentFile systemd uses; do not source the
   # file. The deploy gate validates syntax and freshness before any upload.
-  MODEL_HASH_LEGACY_UNTIL_FOR_GATE="$($SSH \
-    'if [ -r /etc/macprovider/coordinator.env ]; then sed -n "s/^[[:space:]]*MODEL_HASH_LEGACY_UNTIL=//p" /etc/macprovider/coordinator.env | tail -n 1 | sed "s/^[[:space:]]*[\"'\"']//; s/[\"'\"'][[:space:]]*$//"; fi')" || {
+  MODEL_HASH_LEGACY_UNTIL_RAW="$($SSH \
+    'if [ -r /etc/macprovider/coordinator.env ]; then sed -n "s/^[[:space:]]*MODEL_HASH_LEGACY_UNTIL=//p" /etc/macprovider/coordinator.env | tail -n 1; fi')" || {
     echo "aborting deploy: could not read MODEL_HASH_LEGACY_UNTIL from Pearl coordinator.env" >&2
+    exit 5
+  }
+  MODEL_HASH_LEGACY_UNTIL_FOR_GATE="$(_parse_model_hash_legacy_until "$MODEL_HASH_LEGACY_UNTIL_RAW")" || {
+    echo "aborting deploy: could not parse MODEL_HASH_LEGACY_UNTIL from Pearl coordinator.env" >&2
     exit 5
   }
   env MODEL_HASH_LEGACY_UNTIL="$MODEL_HASH_LEGACY_UNTIL_FOR_GATE" \
@@ -1798,7 +1829,7 @@ BEGIN
            FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
            JOIN pg_attribute a
              ON a.attrelid = c.conrelid AND a.attnum = k.attnum
-       ) = ARRAY['provider_id', 'hardware_identity_hash', 'source']
+       ) = ARRAY['provider_id', 'hardware_identity_hash', 'source']::name[]
   ) THEN
     RAISE EXCEPTION 'hardware_verification_trust PRIMARY KEY is not (provider_id, hardware_identity_hash, source) (migration 019 not applied)';
   END IF;

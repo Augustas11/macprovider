@@ -526,8 +526,16 @@ gate_run_dir="$(mktemp -d)"
 gate_stub_bin="$gate_run_dir/bin"
 trap 'rm -rf "$remote_preflight_tmp" "$parser_tmp" "$env_parse_tmp" "$gate_heredoc_tmp" "$gate_parser_tmp" "$gate_env_tmp" "$gate_run_dir"' EXIT
 mkdir -p "$gate_stub_bin"
-# Stub psql: for the fixtures that reach it (declared + DSN present), 019 is "present".
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$gate_stub_bin/psql"
+# Stub psql: for fixtures that reach it, verify the exact type-safe primary-key
+# assertion before treating migration 019 as present. PostgreSQL returns name[]
+# from array_agg(pg_attribute.attname); comparing it with an uncast text[]
+# literal aborts a healthy production deploy before the release snapshot.
+cat > "$gate_stub_bin/psql" <<'STUB_PSQL'
+#!/usr/bin/env bash
+set -euo pipefail
+sql="$(cat)"
+grep -qF ") = ARRAY['provider_id', 'hardware_identity_hash', 'source']::name[]" <<<"$sql"
+STUB_PSQL
 chmod +x "$gate_stub_bin/psql"
 
 run_gate_fixture() {
