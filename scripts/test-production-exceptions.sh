@@ -290,9 +290,12 @@ weaken = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=Tr
 subprocess.check_call(["git", "add", "unrelated.txt"], cwd=repo)
 subprocess.check_call(["git", "commit", "-m", "unrelated-0"], cwd=repo, stdout=subprocess.DEVNULL)
 for i in range(1, 40):
-    (repo / "unrelated.txt").write_text(f"{i}\n")
-    subprocess.check_call(["git", "add", "unrelated.txt"], cwd=repo)
-    subprocess.check_call(["git", "commit", "-m", f"unrelated-{i}"], cwd=repo, stdout=subprocess.DEVNULL)
+    # Empty commits keep first-parent depth without stressing the object store.
+    subprocess.check_call(
+        ["git", "commit", "--allow-empty", "-m", f"unrelated-{i}"],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+    )
 
 subprocess.check_call(
     ["git", "checkout", "-b", "side", baseline],
@@ -301,9 +304,11 @@ subprocess.check_call(
     stderr=subprocess.DEVNULL,
 )
 for i in range(40):
-    (repo / f"side-{i}.txt").write_text(f"side{i}\n")
-    subprocess.check_call(["git", "add", f"side-{i}.txt"], cwd=repo)
-    subprocess.check_call(["git", "commit", "-m", f"side-{i}"], cwd=repo, stdout=subprocess.DEVNULL)
+    subprocess.check_call(
+        ["git", "commit", "--allow-empty", "-m", f"side-{i}"],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+    )
 subprocess.check_call(
     ["git", "checkout", "main"],
     cwd=repo,
