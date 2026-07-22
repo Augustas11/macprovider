@@ -3993,6 +3993,31 @@ func (s *Server) DrainAll(reason string) {
 	}
 }
 
+// CloseAllProviderSessions tears down hijacked provider sockets so final
+// disconnect events can still enqueue before FlushConnectionEvents.
+func (s *Server) CloseAllProviderSessions(reason string) {
+	if s == nil {
+		return
+	}
+	s.sessions.Range(func(key, value any) bool {
+		session, ok := value.(*providerSession)
+		if !ok || session == nil {
+			return true
+		}
+		s.log.Info().
+			Str("provider_id", session.providerID).
+			Str("reason", reason).
+			Msg("closing provider session for shutdown")
+		_ = s.takeCloseEvent(session.conn)
+		session.close()
+		s.sessions.Delete(key)
+		if session.conn != nil {
+			_ = session.conn.Close()
+		}
+		return true
+	})
+}
+
 func (s *Server) handlePreflightAck(providerID, assignedID string, payload []byte) {
 	ack, field, err := ParsePreflightAck(payload)
 	if err != nil {

@@ -187,7 +187,40 @@ func TestFixedWidthOrderingNearFractionalBoundary(t *testing.T) {
 	}
 }
 
-func TestLastKnownOfflineRepresentation(t *testing.T) {
+func TestListLastKnownOpaqueCursorStableAcrossSeenUpdate(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	t1 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Second)
+	for i, id := range []string{"a", "b", "c"} {
+		seen := t1
+		if i == 0 {
+			seen = t2
+		}
+		if err := store.UpsertLastKnown(ctx, LastKnown{ProviderID: id, LastSeenAt: seen}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page1, err := store.ListLastKnown(ctx, 2, "", "")
+	if err != nil || len(page1) != 2 {
+		t.Fatalf("page1=%v err=%v", page1, err)
+	}
+	cursorID := page1[1].ProviderID
+	cursorSeen := FormatFixedUTC(page1[1].LastSeenAt)
+	// Mutate the cursor row's last_seen after page1; opaque cursor must not reshuffle.
+	if err := store.UpsertLastKnown(ctx, LastKnown{ProviderID: cursorID, LastSeenAt: t2.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	page2, err := store.ListLastKnown(ctx, 2, cursorSeen, cursorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, snap := range page2 {
+		if snap.ProviderID == page1[0].ProviderID {
+			t.Fatalf("duplicated %q across pages", snap.ProviderID)
+		}
+	}
+}
 	store := openTestStore(t)
 	ctx := context.Background()
 	seen := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)

@@ -23,7 +23,7 @@ type ConnectionEventStore interface {
 	Record(ctx context.Context, event providerevents.Event) error
 	UpsertLastKnown(ctx context.Context, snap providerevents.LastKnown) error
 	GetLastKnown(ctx context.Context, providerID string) (providerevents.LastKnown, bool, error)
-	ListLastKnown(ctx context.Context, limit int, afterProviderID string) ([]providerevents.LastKnown, error)
+	ListLastKnown(ctx context.Context, limit int, afterSeenAt, afterProviderID string) ([]providerevents.LastKnown, error)
 	ListEvents(ctx context.Context, providerID string, limit int) ([]providerevents.Event, error)
 	LatestEventProvider(ctx context.Context, providerID string) (providerevents.Event, bool, error)
 	ReconcileBounds(ctx context.Context) error
@@ -319,7 +319,19 @@ func (s *Server) recordCloseEventFromMeta(meta closeEventMeta, code gobwas.Statu
 }
 
 func (s *Server) rememberProviderSnapshot(provider pool.Provider) {
-	s.enqueueLastKnown(lastKnownFromProvider(provider, s.now().UTC()), true)
+	snap := lastKnownFromProvider(provider, s.now().UTC())
+	if s == nil || s.connectionEvents == nil || strings.TrimSpace(snap.ProviderID) == "" {
+		return
+	}
+	// Admission/disconnect snapshots persist synchronously so connected
+	// providers are immediately visible on operator list pages.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.connectionEvents.UpsertLastKnown(ctx, snap); err != nil {
+		s.log.Warn().Err(err).
+			Str("provider_id", snap.ProviderID).
+			Msg("provider last-known snapshot persistence failed")
+	}
 }
 
 func (s *Server) rememberProviderSnapshotCoalesced(provider pool.Provider) {

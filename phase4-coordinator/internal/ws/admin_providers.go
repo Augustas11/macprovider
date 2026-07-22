@@ -109,7 +109,8 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 	if limit > providerevents.DefaultListPageCap {
 		limit = providerevents.DefaultListPageCap
 	}
-	after := strings.TrimSpace(r.URL.Query().Get("after"))
+	afterID := strings.TrimSpace(r.URL.Query().Get("after"))
+	afterSeen := strings.TrimSpace(r.URL.Query().Get("after_seen"))
 
 	live := map[string]pool.Provider{}
 	var liveIDs []string
@@ -125,15 +126,31 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 	sort.Strings(liveIDs)
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	known, err := s.connectionEvents.ListLastKnown(ctx, limit, after)
+	known, err := s.connectionEvents.ListLastKnown(ctx, limit, afterSeen, afterID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "list last-known failed", "code": "events_store_error"}})
 		return
 	}
 
 	out := make([]adminProviderView, 0, limit)
-	var lastEmittedKnown string
-	for _, snap := range known {
+	seen := map[string]struct{}{}
+	// Page 1 prioritizes currently connected providers so live inventory is
+	// never crowded out by a full durable page.
+	if afterID == "" && afterSeen == "" {
+		for _, id := range liveIDs {
+			if len(out) >= limit {
+				break
+			}
+			out = append(out, adminViewFromLive(live[id]))
+			seen[id] = struct{}{}
+		}
+	}
+	var lastSnap *providerevents.LastKnown
+	for i := range known {
+		snap := known[i]
+		if _, ok := seen[snap.ProviderID]; ok {
+			continue
+		}
 		if len(out) >= limit {
 			break
 		}
@@ -143,27 +160,8 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 			snap.Presence = "offline"
 			out = append(out, adminViewFromLastKnown(snap))
 		}
-		lastEmittedKnown = snap.ProviderID
-	}
-	// First page only: append stable-sorted live providers missing from this
-	// durable page without advancing the durable cursor past unseen rows.
-	if after == "" {
-		for _, id := range liveIDs {
-			if len(out) >= limit {
-				break
-			}
-			already := false
-			for _, view := range out {
-				if view.ProviderID == id {
-					already = true
-					break
-				}
-			}
-			if already {
-				continue
-			}
-			out = append(out, adminViewFromLive(live[id]))
-		}
+		seen[snap.ProviderID] = struct{}{}
+		lastSnap = &known[i]
 	}
 	resp := map[string]any{
 		"providers": out,
@@ -173,10 +171,9 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 			"limit":     limit,
 		},
 	}
-	// Cursor tracks the last emitted durable row only, so live-only fillers
-	// cannot advance past unseen offline inventory.
-	if lastEmittedKnown != "" && len(known) == limit {
-		resp["next_after"] = lastEmittedKnown
+	if lastSnap != nil && len(known) == limit {
+		resp["next_after"] = lastSnap.ProviderID
+		resp["next_after_seen"] = providerevents.FormatFixedUTC(lastSnap.LastSeenAt)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

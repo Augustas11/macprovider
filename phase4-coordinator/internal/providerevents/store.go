@@ -52,7 +52,7 @@ type Store interface {
 	Record(ctx context.Context, event Event) error
 	UpsertLastKnown(ctx context.Context, snap LastKnown) error
 	GetLastKnown(ctx context.Context, providerID string) (LastKnown, bool, error)
-	ListLastKnown(ctx context.Context, limit int, afterProviderID string) ([]LastKnown, error)
+	ListLastKnown(ctx context.Context, limit int, afterSeenAt, afterProviderID string) ([]LastKnown, error)
 	ListEvents(ctx context.Context, providerID string, limit int) ([]Event, error)
 	LatestEventProvider(ctx context.Context, providerID string) (Event, bool, error)
 	Prune(ctx context.Context, olderThan time.Time) (int64, error)
@@ -345,16 +345,17 @@ FROM provider_last_known WHERE provider_id = ?`, providerID)
 	return snap, true, nil
 }
 
-func (s *SQLiteStore) ListLastKnown(ctx context.Context, limit int, afterProviderID string) ([]LastKnown, error) {
+func (s *SQLiteStore) ListLastKnown(ctx context.Context, limit int, afterSeenAt, afterProviderID string) ([]LastKnown, error) {
 	if limit <= 0 || limit > DefaultListPageCap {
 		limit = DefaultListPageCap
 	}
+	afterSeenAt = strings.TrimSpace(afterSeenAt)
 	afterProviderID = strings.TrimSpace(afterProviderID)
 	var (
 		rows *sql.Rows
 		err  error
 	)
-	if afterProviderID == "" {
+	if afterProviderID == "" || afterSeenAt == "" {
 		rows, err = s.db.QueryContext(ctx, `
 SELECT provider_id, assigned_id, binary_version, model_id, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
@@ -363,20 +364,15 @@ FROM provider_last_known
 ORDER BY last_seen_at_utc DESC, provider_id ASC
 LIMIT ?`, limit)
 	} else {
-		// Cursor is provider_id; resume after that row in last_seen DESC, provider_id ASC order.
 		rows, err = s.db.QueryContext(ctx, `
 SELECT provider_id, assigned_id, binary_version, model_id, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
 	last_seen_at_utc, routing_eligible
 FROM provider_last_known
-WHERE (last_seen_at_utc < (
-	SELECT last_seen_at_utc FROM provider_last_known WHERE provider_id = ?
-)) OR (
-	last_seen_at_utc = (SELECT last_seen_at_utc FROM provider_last_known WHERE provider_id = ?)
-	AND provider_id > ?
-)
+WHERE last_seen_at_utc < ?
+   OR (last_seen_at_utc = ? AND provider_id > ?)
 ORDER BY last_seen_at_utc DESC, provider_id ASC
-LIMIT ?`, afterProviderID, afterProviderID, afterProviderID, limit)
+LIMIT ?`, afterSeenAt, afterSeenAt, afterProviderID, limit)
 	}
 	if err != nil {
 		return nil, err
