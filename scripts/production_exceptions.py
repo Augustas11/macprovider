@@ -695,10 +695,89 @@ def simulate_config_sync_restore(
     return result.dedupe()
 
 
-def _safe_scalar(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_secrets(value)
-    return value
+REPORT_ROW_KEYS = frozenset(
+    {
+        "id",
+        "status",
+        "component",
+        "owner",
+        "issue",
+        "expires_at",
+        "clock_state",
+        "blocks_stable_promotion",
+    }
+)
+# Free-prose inventory fields intentionally omitted from reports so
+# secrets_redacted is a claim over a closed allowlist, not over reason/scope/
+# policy_delta/authority_surface strings that may contain credentials.
+REPORT_OMITTED_FIELDS = frozenset(
+    {"policy_delta", "authority_surface", "reason", "scope"}
+)
+
+
+def union_tombstone_docs(history: Iterable[dict[str, Any] | None]) -> dict[str, Any]:
+    """Union tombstone rows across history; first-seen metadata wins."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for doc in history:
+        if not isinstance(doc, dict):
+            continue
+        rows = doc.get("tombstones")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict) and isinstance(row.get("id"), str):
+                by_id.setdefault(row["id"], row)
+    return {
+        "schema_version": TOMBSTONE_SCHEMA_VERSION,
+        "updated_at": "1970-01-01T00:00:00Z",
+        "updated_by": "promote-history-union",
+        "environment": ENVIRONMENT,
+        "tombstones": list(by_id.values()),
+    }
+
+
+def earliest_expiry_previous_register(
+    current: dict[str, Any],
+    history: Iterable[dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Rebuild previous register with the earliest active/planned expires_at.
+
+    Walking only origin/main^ is defeated when an unrelated successor lands after
+    an expiry self-extension. History should be oldest-first.
+    """
+    earliest: dict[str, tuple[datetime, str]] = {}
+    for doc in history:
+        if not isinstance(doc, dict):
+            continue
+        rows = doc.get("exceptions")
+        if not isinstance(rows, list):
+            continue
+        for entry in rows:
+            if not isinstance(entry, dict):
+                continue
+            exc_id = entry.get("id")
+            expires = entry.get("expires_at")
+            status = entry.get("status")
+            if not isinstance(exc_id, str) or status not in {"active", "planned"}:
+                continue
+            if not isinstance(expires, str):
+                continue
+            try:
+                exp_dt = parse_rfc3339(expires)
+            except ValueError:
+                continue
+            prev = earliest.get(exc_id)
+            if prev is None or exp_dt < prev[0]:
+                earliest[exc_id] = (exp_dt, expires)
+
+    previous = deepcopy(current)
+    for entry in previous.get("exceptions", []):
+        if not isinstance(entry, dict):
+            continue
+        exc_id = entry.get("id")
+        if exc_id in earliest:
+            entry["expires_at"] = earliest[exc_id][1]
+    return previous
 
 
 def build_health_report(
@@ -708,6 +787,7 @@ def build_health_report(
     alert_hours: int = DEFAULT_ALERT_HOURS,
     validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build an allowlisted operator report with no free-prose inventory fields."""
     now = now or datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
     for entry in doc.get("exceptions", []):
@@ -715,12 +795,14 @@ def build_health_report(
             continue
         expires_at = entry.get("expires_at")
         clock_state = "unknown"
+        safe_expires: str | None = None
         if isinstance(expires_at, str) and RFC3339_RE.fullmatch(expires_at):
             try:
                 expiry = parse_rfc3339(expires_at)
             except ValueError:
                 clock_state = "invalid"
             else:
+                safe_expires = expires_at
                 if expiry <= now:
                     clock_state = "past_due"
                 elif expiry <= now + timedelta(hours=alert_hours):
@@ -729,32 +811,42 @@ def build_health_report(
                     clock_state = "outside_alert_window"
         elif expires_at is None:
             clock_state = "unbounded"
-        rows.append(
-            {
-                "id": _safe_scalar(str(entry.get("id", ""))),
-                "status": _safe_scalar(str(entry.get("status", ""))),
-                "component": _safe_scalar(str(entry.get("component", ""))),
-                "owner": _safe_scalar(str(entry.get("owner", ""))),
-                "issue": _safe_scalar(str(entry.get("issue", ""))),
-                "expires_at": _safe_scalar(expires_at) if expires_at is not None else None,
-                "clock_state": clock_state,
-                "blocks_stable_promotion": entry.get("blocks_stable_promotion"),
-                "scope": _safe_scalar(str(entry.get("scope", ""))),
-                "authority_surface": _safe_scalar(str(entry.get("authority_surface", ""))),
-                "policy_delta": _safe_scalar(str(entry.get("policy_delta", ""))),
-                "reason": _safe_scalar(str(entry.get("reason", ""))),
-            }
-        )
+        else:
+            clock_state = "invalid"
+
+        status = entry.get("status")
+        component = entry.get("component")
+        exc_id = entry.get("id")
+        issue = entry.get("issue")
+        owner = entry.get("owner")
+        row = {
+            "id": exc_id if isinstance(exc_id, str) and ID_RE.fullmatch(exc_id) else "[INVALID]",
+            "status": status if status in STATUSES else "[INVALID]",
+            "component": component if component in COMPONENTS else "[INVALID]",
+            "owner": redact_secrets(owner) if isinstance(owner, str) else "[INVALID]",
+            "issue": issue if isinstance(issue, str) and ISSUE_RE.fullmatch(issue) else "[INVALID]",
+            "expires_at": safe_expires,
+            "clock_state": clock_state,
+            "blocks_stable_promotion": entry.get("blocks_stable_promotion")
+            if isinstance(entry.get("blocks_stable_promotion"), bool)
+            else None,
+        }
+        assert set(row) == REPORT_ROW_KEYS
+        rows.append(row)
     by_status: dict[str, list[str]] = {status: [] for status in sorted(STATUSES)}
     for row in rows:
         status = row.get("status")
-        if status in by_status and isinstance(row.get("id"), str):
+        if status in by_status and isinstance(row.get("id"), str) and row["id"] != "[INVALID]":
             by_status[status].append(row["id"])
+    env = doc.get("environment")
+    updated = doc.get("updated_at")
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "environment": _safe_scalar(doc.get("environment")),
-        "register_updated_at": _safe_scalar(doc.get("updated_at")),
+        "environment": env if env == ENVIRONMENT else "[INVALID]",
+        "register_updated_at": updated
+        if isinstance(updated, str) and RFC3339_RE.fullmatch(updated)
+        else "[INVALID]",
         "alert_hours": alert_hours,
         "counts": {status: len(ids) for status, ids in by_status.items()},
         "active_or_blocking": [
@@ -764,10 +856,12 @@ def build_health_report(
             or row.get("blocks_stable_promotion") is True
         ],
         "exceptions": rows,
+        "field_set": "allowlisted-v1",
         "note": (
-            "Operator-visible exception inventory for registered rows only. "
-            "Does not prove Pearl has no unregistered exceptions. "
-            "Secret-like substrings are redacted when recognized."
+            "Allowlisted operator inventory for registered rows only "
+            "(id/status/component/owner/issue/expires_at/clock_state/"
+            "blocks_stable_promotion). Free-prose policy fields are omitted. "
+            "Does not prove Pearl has no unregistered exceptions."
         ),
     }
     if validation is not None:
@@ -778,7 +872,7 @@ def build_health_report(
             ],
             "ok": bool(validation.get("ok")),
         }
-    # Scan complete payload except the assertion field itself.
+    # Residual scan over the closed allowlist payload.
     probe = {key: value for key, value in report.items() if key != "secrets_redacted"}
     secrets_clean = not contains_secret(json.dumps(probe, sort_keys=True))
     report["secrets_redacted"] = secrets_clean

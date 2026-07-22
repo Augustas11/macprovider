@@ -417,6 +417,12 @@ jobs:
         run: |
           set -euo pipefail
           accepted="$RUNNER_TEMP/accepted"
+          # #615: bind exception authority at the start of publication; the
+          # irreversible undraft below re-gates and refuses if origin/main moved.
+          EXCEPTION_GATE_SHA_FILE="$RUNNER_TEMP/exception-authority.sha" \
+            bash scripts/gate-production-exceptions-promote.sh
+          BOUND_EXCEPTION_SHA="$(cat "$RUNNER_TEMP/exception-authority.sha")"
+          printf 'EXCEPTION_AUTHORITY_SHA=%s\n' "$BOUND_EXCEPTION_SHA"
           release_assets=()
           while IFS= read -r name; do
             [[ -n "$name" ]] && release_assets+=("$accepted/$name")
@@ -441,9 +447,19 @@ jobs:
             "$RUNNER_TEMP/final-draft-publication.json" \
             "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
           bash scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing
-          # #615: re-fetch and re-gate exception authority in this same step,
-          # immediately before the irreversible undraft PATCH.
-          bash scripts/gate-production-exceptions-promote.sh
+          # #615: re-gate immediately before undraft; fail if bound SHA moved.
+          EXCEPTION_GATE_SHA_FILE="$RUNNER_TEMP/exception-authority-final.sha" \
+            bash scripts/gate-production-exceptions-promote.sh
+          FINAL_EXCEPTION_SHA="$(cat "$RUNNER_TEMP/exception-authority-final.sha")"
+          if [ "$FINAL_EXCEPTION_SHA" != "$BOUND_EXCEPTION_SHA" ]; then
+            echo "FAIL: exception authority moved before undraft ($BOUND_EXCEPTION_SHA -> $FINAL_EXCEPTION_SHA)" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if [ "$(git rev-parse origin/main)" != "$BOUND_EXCEPTION_SHA" ]; then
+            echo "FAIL: origin/main moved under bound exception authority before undraft" >&2
+            exit 1
+          fi
           # Repository rules and the production-release environment serialize
           # the sole owner publication path. Re-fetch the exact numeric draft
           # and tag immediately before this irreversible transition.

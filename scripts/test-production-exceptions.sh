@@ -29,15 +29,87 @@ python3 - "$report" <<'PY'
 import json, sys
 report = json.load(open(sys.argv[1], encoding="utf-8"))
 assert report.get("secrets_redacted") is True
+assert report.get("field_set") == "allowlisted-v1"
 assert isinstance(report.get("exceptions"), list) and report["exceptions"]
 assert report["validation"]["ok"] is True
-forbidden = ("Bearer ", "BEGIN ", "ghp_", "sk-", "password=")
+# Free-prose inventory fields must never appear in the allowlisted report.
+for forbidden_field in ("policy_delta", "authority_surface", "reason", "scope"):
+    for row in report["exceptions"]:
+        assert forbidden_field not in row
+forbidden = ("Bearer ", "BEGIN ", "ghp_", "sk-", "password=", "AKIA", "eyJ")
 blob = json.dumps(report)
 for token in forbidden:
     if token in blob:
         raise SystemExit(f"report leaked secret-like token {token!r}")
+# Adversarial free-prose must be omitted even when schema-valid.
 PY
 rm -f "$report"
+
+# Schema-valid register with Basic/JWT/AKIA in free-prose must not leak into report.
+adv="$(mktemp -d "${TMPDIR:-/tmp}/exception-adv.XXXXXX")"
+python3 - "$adv" <<'PY'
+import json, pathlib, sys
+work = pathlib.Path(sys.argv[1])
+jwt = (
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+  "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+  "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+)
+doc = {
+  "$schema": "./production-exceptions.schema.json",
+  "schema_version": "macprovider-production-exceptions-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "exceptions": [{
+    "id": "exc-adv-secrets",
+    "status": "active",
+    "environment": "pearl-production",
+    "component": "other",
+    "policy_delta": f"Authorization: Basic dXNlcjpwYXNz {jwt}",
+    "authority_surface": "test",
+    "reason": "AKIAIOSFODNN7EXAMPLE",
+    "owner": "ops/test",
+    "issue": "https://github.com/Augustas11/macprovider/issues/615",
+    "created_at": "2026-07-01T00:00:00Z",
+    "expires_at": "2026-08-01T00:00:00Z",
+    "scope": "api_key=supersecretvalue; must not widen",
+    "removal_condition": "done",
+    "rollback_command": "echo",
+    "post_removal_validation": "echo",
+    "blocks_stable_promotion": False,
+    "evidence": ["https://github.com/Augustas11/macprovider/issues/615"],
+  }],
+  "open_questions": [],
+}
+tombs = {
+  "schema_version": "macprovider-removed-exception-tombstones-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "tombstones": [],
+}
+(work / "reg.json").write_text(json.dumps(doc))
+(work / "tombs.json").write_text(json.dumps(tombs))
+PY
+adv_report="$adv/report.json"
+python3 scripts/check-production-exceptions.py \
+  --register "$adv/reg.json" \
+  --tombstones "$adv/tombs.json" \
+  --now 2026-07-22T12:00:00Z \
+  report -o "$adv_report" \
+  || fail "adversarial allowlisted report failed"
+python3 - "$adv_report" <<'PY'
+import json, sys
+blob = open(sys.argv[1], encoding="utf-8").read()
+report = json.loads(blob)
+assert report["secrets_redacted"] is True
+assert report["field_set"] == "allowlisted-v1"
+for token in ("dXNlcjpwYXNz", "AKIAIOSFODNN7EXAMPLE", "supersecretvalue", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"):
+    if token in blob:
+        raise SystemExit(f"allowlisted report leaked {token!r}")
+PY
+rm -rf "$adv"
 
 # Default-safe deploy gate must pass on the committed inventory (warnings OK).
 python3 scripts/check-production-exceptions.py \
@@ -82,25 +154,37 @@ grep -qF 'origin/main' \
 grep -qF 'Re-check production exceptions before draft creation' \
   .github/workflows/promote-acceptance-candidate.yml \
   || fail "promote workflow missing pre-draft exception recheck"
-# Undraft binding: the promote helper must run inside the publish step
-# immediately before the irreversible draft=false PATCH.
+# Undraft binding: bind SHA at publish start, re-gate immediately before
+# draft=false PATCH, and refuse if the bound authority SHA moved.
 python3 - <<'PY'
 from pathlib import Path
 text = Path(".github/workflows/promote-acceptance-candidate.yml").read_text(encoding="utf-8")
 marker = "Reverify and publish only the captured numeric draft"
 start = text.index(marker)
-chunk = text[start:start + 3500]
-if "bash scripts/gate-production-exceptions-promote.sh" not in chunk:
-    raise SystemExit("publish step missing inline exception recheck")
-gate_at = chunk.index("bash scripts/gate-production-exceptions-promote.sh")
+chunk = text[start:start + 6500]
+if chunk.count("EXCEPTION_GATE_SHA_FILE=") < 2:
+    raise SystemExit("publish step must bind then re-bind EXCEPTION_GATE_SHA_FILE")
+if "EXCEPTION_AUTHORITY_SHA=" not in chunk:
+    raise SystemExit("publish step missing EXCEPTION_AUTHORITY_SHA print")
+if "exception authority moved before undraft" not in chunk:
+    raise SystemExit("publish step missing pre-PATCH authority SHA compare")
+first_gate = chunk.index("bash scripts/gate-production-exceptions-promote.sh")
+second_gate = chunk.index("bash scripts/gate-production-exceptions-promote.sh", first_gate + 1)
+bind_at = chunk.index("exception authority moved before undraft")
 patch_at = chunk.index("-F draft=false -F prerelease=false")
-if gate_at > patch_at:
-    raise SystemExit("exception recheck must precede undraft PATCH")
-print("ok: undraft-bound exception recheck")
+if not (first_gate < second_gate < bind_at < patch_at):
+    raise SystemExit("bind-gate -> re-gate -> SHA compare -> undraft PATCH ordering violated")
+print("ok: undraft-bound exception recheck with SHA bind")
 PY
-grep -qF 'history_window=32' \
+grep -qF 'EXCEPTION_AUTHORITY_SHA=' \
   scripts/gate-production-exceptions-promote.sh \
-  || fail "promote helper missing durable tombstone history window"
+  || fail "promote helper missing EXCEPTION_AUTHORITY_SHA bind"
+grep -qF 'earliest_expiry_previous_register' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper missing earliest-expiry history reconstruction"
+grep -qF 'history_window=' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper missing durable history window"
 
 # sync-check CLI (documented form with --tombstones after subcommand).
 work="$(mktemp -d "${TMPDIR:-/tmp}/exception-sync.XXXXXX")"

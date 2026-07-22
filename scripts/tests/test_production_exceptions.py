@@ -204,11 +204,272 @@ class ProductionExceptionsTests(unittest.TestCase):
         result = pe.simulate_config_sync_restore(current, stale, tombstones)
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
+    def test_health_report_allowlists_and_omits_free_prose(self):
+        jwt = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        doc = _minimal_register(
+            [
+                _minimal_entry(
+                    owner="ops/test",
+                    policy_delta=f"Authorization: Basic dXNlcjpwYXNz and Bearer SUPERSECRETTOKEN123 {jwt}",
+                    reason=f"AKIAIOSFODNN7EXAMPLE api_key=abcd1234 token={jwt}",
+                    scope=f"password=hunter2 scope with {jwt}",
+                    authority_surface="ghp_abcdefghijklmnopqrstuvwx",
+                )
+            ]
+        )
+        report = pe.build_health_report(doc, now=NOW)
+        blob = json.dumps(report)
+        for leaked in (
+            "SUPERSECRETTOKEN123",
+            "dXNlcjpwYXNz",
+            "AKIAIOSFODNN7EXAMPLE",
+            "hunter2",
+            "ghp_abcdefghijklmnopqrstuvwx",
+            jwt,
+            "policy_delta",
+            "authority_surface",
+            '"reason"',
+            '"scope"',
+        ):
+            self.assertNotIn(leaked, blob)
+        self.assertEqual(report["field_set"], "allowlisted-v1")
+        self.assertTrue(report["secrets_redacted"])
+        self.assertEqual(set(report["exceptions"][0]), pe.REPORT_ROW_KEYS)
+        self.assertEqual(report["counts"]["active"], 1)
+
+    def test_health_report_refuses_secret_in_allowlisted_owner(self):
+        doc = _minimal_register(
+            [_minimal_entry(owner="ops password=hunter2token")]
+        )
+        # Owner is allowlisted but still scanned; residual secret clears the flag.
+        report = pe.build_health_report(doc, now=NOW)
+        # password= pattern is redacted from owner; assertion should stay true
+        # after redaction unless residual remains.
+        self.assertNotIn("hunter2token", json.dumps(report))
+        self.assertTrue(report["secrets_redacted"])
+
+    def test_cli_report_omits_basic_jwt_aws_even_when_schema_valid(self):
+        jwt = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            register = tmp_path / "production-exceptions.json"
+            tombs = tmp_path / "removed-exception-tombstones.json"
+            out = tmp_path / "report.json"
+            doc = _minimal_register(
+                [
+                    _minimal_entry(
+                        policy_delta=f"Authorization: Basic dXNlcjpwYXNz {jwt}",
+                        reason="AKIAIOSFODNN7EXAMPLE",
+                        scope="api_key=supersecretvalue",
+                    )
+                ]
+            )
+            register.write_text(json.dumps(doc), encoding="utf-8")
+            tombs.write_text(json.dumps(_tombstones()), encoding="utf-8")
+            rc = pe.main(
+                [
+                    "--register",
+                    str(register),
+                    "--tombstones",
+                    str(tombs),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
+                    "report",
+                    "-o",
+                    str(out),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            blob = out.read_text(encoding="utf-8")
+            for leaked in (
+                "dXNlcjpwYXNz",
+                "AKIAIOSFODNN7EXAMPLE",
+                "supersecretvalue",
+                jwt,
+                "policy_delta",
+            ):
+                self.assertNotIn(leaked, blob)
+            parsed = json.loads(blob)
+            self.assertTrue(parsed["secrets_redacted"])
+            self.assertEqual(parsed["field_set"], "allowlisted-v1")
+
+    def test_stale_register_full_structural_validation(self):
+        current = _minimal_register()
+        cases = [
+            ({"schema_version": "wrong", "environment": "nope", "exceptions": {}}, "stale_"),
+            (
+                {
+                    **_minimal_register(),
+                    "$schema": "",
+                },
+                "stale_$schema",
+            ),
+            (
+                {
+                    **{k: v for k, v in _minimal_register().items() if k != "updated_by"},
+                },
+                "stale_updated_by",
+            ),
+            (
+                {
+                    **_minimal_register(),
+                    "open_questions": "not-a-list",
+                },
+                "stale_open_questions",
+            ),
+            (
+                {
+                    **_minimal_register(),
+                    "exceptions": [
+                        {
+                            "id": "exc-partial",
+                            "status": "active",
+                            "extra_field": True,
+                        }
+                    ],
+                },
+                "stale_",
+            ),
+            (
+                {
+                    **_minimal_register(),
+                    "exceptions": [_minimal_entry()],
+                    "unexpected_root": 1,
+                },
+                "stale_additional_properties",
+            ),
+        ]
+        for stale, expect_prefix in cases:
+            result = pe.simulate_config_sync_restore(current, stale, _tombstones())
+            self.assertTrue(
+                any(f.code.startswith(expect_prefix) for f in result.errors),
+                msg=f"expected {expect_prefix} in {[f.code for f in result.errors]} for {stale!r}",
+            )
+
+    def test_promote_history_detects_expiry_extend_after_unrelated_successor(self):
+        """Mutation at main~2 + unrelated tip must still see earliest expiry."""
+        baseline = _minimal_register(
+            [_minimal_entry(id="exc-hist", expires_at="2026-08-01T00:00:00Z")]
+        )
+        extended = copy.deepcopy(baseline)
+        extended["exceptions"][0]["expires_at"] = "2026-10-01T00:00:00Z"
+        unrelated_tip = copy.deepcopy(extended)
+        unrelated_tip["updated_by"] = "unrelated-successor"
+        # History oldest-first: baseline -> extended -> tip(same as extended)
+        previous = pe.earliest_expiry_previous_register(
+            unrelated_tip, [baseline, extended, unrelated_tip]
+        )
+        self.assertEqual(previous["exceptions"][0]["expires_at"], "2026-08-01T00:00:00Z")
+        result = pe.validate_register(
+            unrelated_tip,
+            now=NOW,
+            tombstones=_tombstones(),
+            previous_doc=previous,
+        )
+        self.assertTrue(any(f.code == "expiry_self_extension" for f in result.errors))
+
+    def test_promote_history_detects_tombstone_delete_after_unrelated_successor(self):
+        tomb_row = {
+            "id": "exc-old",
+            "removed_at": "2026-07-20T00:00:00Z",
+            "removal_evidence": "prior",
+            "authority_surface": "test",
+        }
+        with_tomb = _tombstones([tomb_row])
+        deleted = _tombstones()
+        tip = _minimal_register()
+        base = pe.union_tombstone_docs([with_tomb, deleted, deleted])
+        result = pe.validate_register(
+            tip, now=NOW, tombstones=deleted, base_tombstones=base
+        )
+        self.assertTrue(any(f.code == "tombstone_deleted" for f in result.errors))
+        # Reason-specific: must be tombstone_deleted, not a generic failure.
+        self.assertEqual(
+            {f.code for f in result.errors if f.code == "tombstone_deleted"},
+            {"tombstone_deleted"},
+        )
+
     def test_sync_check_fails_on_malformed_stale(self):
         current = _minimal_register()
         stale = {"schema_version": "wrong", "environment": "nope", "exceptions": {}}
         result = pe.simulate_config_sync_restore(current, stale, _tombstones())
         self.assertTrue(any(f.code.startswith("stale_") for f in result.errors))
+
+    def test_cli_gate_report_and_sync_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            register = tmp_path / "production-exceptions.json"
+            tombs = tmp_path / "removed-exception-tombstones.json"
+            stale = tmp_path / "stale.json"
+            register.write_text(json.dumps(_minimal_register()), encoding="utf-8")
+            tombs.write_text(json.dumps(_tombstones()), encoding="utf-8")
+            stale.write_text(json.dumps(_minimal_register()), encoding="utf-8")
+            out = tmp_path / "report.json"
+            rc = pe.main(
+                [
+                    "--register",
+                    str(register),
+                    "--tombstones",
+                    str(tombs),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
+                    "report",
+                    "-o",
+                    str(out),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue(out.is_file())
+            parsed = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(parsed["field_set"], "allowlisted-v1")
+            rc_gate = pe.main(
+                [
+                    "--register",
+                    str(register),
+                    "--tombstones",
+                    str(tombs),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
+                    "gate",
+                    "--mode",
+                    "deploy",
+                    "--no-enforce",
+                ]
+            )
+            self.assertEqual(rc_gate, 0)
+            rc_sync = pe.main(
+                [
+                    "--tombstones",
+                    str(tombs),
+                    "sync-check",
+                    "--current",
+                    str(register),
+                    "--stale",
+                    str(stale),
+                ]
+            )
+            self.assertEqual(rc_sync, 0)
+            # Documented form with --tombstones after subcommand also works.
+            rc_sync2 = pe.main(
+                [
+                    "sync-check",
+                    "--current",
+                    str(register),
+                    "--stale",
+                    str(stale),
+                    "--tombstones",
+                    str(tombs),
+                ]
+            )
+            self.assertEqual(rc_sync2, 0)
 
     def test_parent_tombstones_arg_preserved_for_sync_check(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,90 +574,6 @@ class ProductionExceptionsTests(unittest.TestCase):
             nxt, now=NOW, tombstones=_tombstones(), previous_doc=previous
         )
         self.assertTrue(any(f.code == "expiry_self_extension" for f in result.errors))
-
-    def test_health_report_redacts_secrets_and_lists_active(self):
-        doc = _minimal_register(
-            [
-                _minimal_entry(
-                    owner="ops password=hunter2",
-                    policy_delta="uses Bearer SUPERSECRETTOKEN123 and still temporary",
-                    reason="token: abcdefghijklmnop",
-                )
-            ]
-        )
-        report = pe.build_health_report(doc, now=NOW)
-        blob = json.dumps(report)
-        self.assertNotIn("SUPERSECRETTOKEN123", blob)
-        self.assertNotIn("hunter2", blob)
-        self.assertIn("[REDACTED]", blob)
-        self.assertTrue(report["secrets_redacted"])
-        self.assertEqual(report["counts"]["active"], 1)
-
-    def test_cli_gate_report_and_sync_roundtrip(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            register = tmp_path / "production-exceptions.json"
-            tombs = tmp_path / "removed-exception-tombstones.json"
-            stale = tmp_path / "stale.json"
-            register.write_text(json.dumps(_minimal_register()), encoding="utf-8")
-            tombs.write_text(json.dumps(_tombstones()), encoding="utf-8")
-            stale.write_text(json.dumps(_minimal_register()), encoding="utf-8")
-            out = tmp_path / "report.json"
-            rc = pe.main(
-                [
-                    "--register",
-                    str(register),
-                    "--tombstones",
-                    str(tombs),
-                    "--now",
-                    "2026-07-22T12:00:00Z",
-                    "report",
-                    "-o",
-                    str(out),
-                ]
-            )
-            self.assertEqual(rc, 0)
-            self.assertTrue(out.is_file())
-            rc_gate = pe.main(
-                [
-                    "--register",
-                    str(register),
-                    "--tombstones",
-                    str(tombs),
-                    "--now",
-                    "2026-07-22T12:00:00Z",
-                    "gate",
-                    "--mode",
-                    "deploy",
-                    "--no-enforce",
-                ]
-            )
-            self.assertEqual(rc_gate, 0)
-            rc_sync = pe.main(
-                [
-                    "--tombstones",
-                    str(tombs),
-                    "sync-check",
-                    "--current",
-                    str(register),
-                    "--stale",
-                    str(stale),
-                ]
-            )
-            self.assertEqual(rc_sync, 0)
-            # Documented form with --tombstones after subcommand also works.
-            rc_sync2 = pe.main(
-                [
-                    "sync-check",
-                    "--current",
-                    str(register),
-                    "--stale",
-                    str(stale),
-                    "--tombstones",
-                    str(tombs),
-                ]
-            )
-            self.assertEqual(rc_sync2, 0)
 
     def test_previous_removed_restored_detected(self):
         previous = _minimal_register(

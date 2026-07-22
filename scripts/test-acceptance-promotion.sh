@@ -30,6 +30,8 @@ for required in (
     "scripts/gate-production-exceptions-promote.sh",
     "Re-check production exceptions before draft creation",
     "bash scripts/gate-production-exceptions-promote.sh",
+    "EXCEPTION_GATE_SHA_FILE=",
+    "exception authority moved before undraft",
     "scripts/verify-acceptance-promotion.py verify-run",
     "scripts/verify-acceptance-promotion.py verify-directory",
     "scripts/verify-release-checksums.sh",

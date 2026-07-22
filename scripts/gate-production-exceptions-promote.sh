@@ -1,85 +1,120 @@
 #!/usr/bin/env bash
 # Fail-closed #615 stable-promotion gate against current origin/main.
-# Builds durable base tombstone authority from up to 32 first-parent
-# ancestors so a deletion is still visible after unrelated successor commits.
+#
+# Durability: walks up to HISTORY_WINDOW first-parent ancestors to:
+#   - union all tombstone IDs ever present (anti-deletion)
+#   - reconstruct previous expires_at as the earliest active expiry per ID
+#     (anti self-extension even after unrelated successor commits)
+#
+# Authority binding: prints EXCEPTION_AUTHORITY_SHA=<origin/main> so callers
+# can refuse undraft if main moved after the gate. Optional
+# EXCEPTION_GATE_SHA_FILE captures that SHA for later comparison.
 set -euo pipefail
+
+HISTORY_WINDOW="${EXCEPTION_HISTORY_WINDOW:-32}"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$root"
 
 git fetch --no-tags origin main
 main_sha="$(git rev-parse origin/main)"
-parent_sha="$(git rev-parse "${main_sha}^" 2>/dev/null || true)"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/exception-promote.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-git show "${main_sha}:ops/exceptions/production-exceptions.json" \
-  > "$work/production-exceptions.json"
-
-if git cat-file -e "${main_sha}:ops/exceptions/removed-exception-tombstones.json" 2>/dev/null; then
-  git show "${main_sha}:ops/exceptions/removed-exception-tombstones.json" \
-    > "$work/removed-exception-tombstones.json"
-else
-  printf '%s\n' '{"schema_version":"macprovider-removed-exception-tombstones-v1","updated_at":"1970-01-01T00:00:00Z","updated_by":"missing","environment":"pearl-production","tombstones":[]}' \
-    > "$work/removed-exception-tombstones.json"
-fi
-
-if [ -n "$parent_sha" ] && git cat-file -e "${parent_sha}:ops/exceptions/production-exceptions.json" 2>/dev/null; then
-  git show "${parent_sha}:ops/exceptions/production-exceptions.json" \
-    > "$work/previous-production-exceptions.json"
-else
-  cp "$work/production-exceptions.json" "$work/previous-production-exceptions.json"
-fi
-
-# Union tombstone IDs across recent first-parent history for durable anti-deletion.
-python3 - "$main_sha" "$work/base-tombstones.json" <<'PY'
+python3 - "$main_sha" "$HISTORY_WINDOW" "$work" "$root" <<'PY'
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 main_sha = sys.argv[1]
-out_path = sys.argv[2]
-revs = subprocess.check_output(
-    ["git", "rev-list", "-n", "32", main_sha],
-    text=True,
-).split()
-by_id = {}
-for rev in revs:
+window = int(sys.argv[2])
+work = Path(sys.argv[3])
+root = Path(sys.argv[4])
+sys.path.insert(0, str(root / "scripts"))
+import production_exceptions as pe  # noqa: E402
+
+
+def show_json(rev: str, path: str):
     try:
         raw = subprocess.check_output(
-            ["git", "show", f"{rev}:ops/exceptions/removed-exception-tombstones.json"],
+            ["git", "show", f"{rev}:{path}"],
             text=True,
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
-        continue
+        return None
     try:
-        doc = json.loads(raw)
+        return json.loads(raw)
     except json.JSONDecodeError:
-        continue
-    rows = doc.get("tombstones")
-    if not isinstance(rows, list):
-        continue
-    for row in rows:
-        if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"] not in by_id:
-            by_id[row["id"]] = row
-doc = {
-    "schema_version": "macprovider-removed-exception-tombstones-v1",
-    "updated_at": "1970-01-01T00:00:00Z",
-    "updated_by": "promote-history-union",
-    "environment": "pearl-production",
-    "tombstones": list(by_id.values()),
-}
-with open(out_path, "w", encoding="utf-8") as handle:
-    json.dump(doc, handle, indent=2)
-    handle.write("\n")
+        return None
+
+
+revs = subprocess.check_output(
+    ["git", "rev-list", "-n", str(window), main_sha],
+    text=True,
+).split()
+if not revs:
+    raise SystemExit("no revisions for exception history window")
+
+# rev-list is newest-first; helpers expect oldest-first history.
+history_regs = [
+    show_json(rev, "ops/exceptions/production-exceptions.json") for rev in reversed(revs)
+]
+history_tombs = [
+    show_json(rev, "ops/exceptions/removed-exception-tombstones.json")
+    for rev in reversed(revs)
+]
+
+current_register = history_regs[-1]
+if not isinstance(current_register, dict):
+    raise SystemExit("origin/main production-exceptions.json missing/invalid")
+
+current_tombs = history_tombs[-1]
+if not isinstance(current_tombs, dict):
+    current_tombs = {
+        "schema_version": pe.TOMBSTONE_SCHEMA_VERSION,
+        "updated_at": "1970-01-01T00:00:00Z",
+        "updated_by": "missing",
+        "environment": pe.ENVIRONMENT,
+        "tombstones": [],
+    }
+
+base_tombs = pe.union_tombstone_docs(history_tombs)
+previous = pe.earliest_expiry_previous_register(current_register, history_regs)
+
+(work / "production-exceptions.json").write_text(
+    json.dumps(current_register, indent=2) + "\n", encoding="utf-8"
+)
+(work / "removed-exception-tombstones.json").write_text(
+    json.dumps(current_tombs, indent=2) + "\n", encoding="utf-8"
+)
+(work / "base-tombstones.json").write_text(
+    json.dumps(base_tombs, indent=2) + "\n", encoding="utf-8"
+)
+(work / "previous-production-exceptions.json").write_text(
+    json.dumps(previous, indent=2) + "\n", encoding="utf-8"
+)
+(work / "authority.sha").write_text(main_sha + "\n", encoding="ascii")
+print(f"exception-promote-gate: main={main_sha} history_window={window}")
+print(f"EXCEPTION_AUTHORITY_SHA={main_sha}")
 PY
 
-printf 'exception-promote-gate: main=%s parent=%s history_window=32\n' "$main_sha" "${parent_sha:-none}"
 python3 scripts/check-production-exceptions.py \
   --register "$work/production-exceptions.json" \
   --tombstones "$work/removed-exception-tombstones.json" \
   --base-tombstones "$work/base-tombstones.json" \
   --previous-register "$work/previous-production-exceptions.json" \
   gate --mode=promote
+
+# Re-confirm the fetched tip did not move under us before returning success.
+fresh="$(git rev-parse origin/main)"
+bound="$(cat "$work/authority.sha")"
+if [ "$fresh" != "$bound" ]; then
+  echo "FAIL: origin/main moved during exception gate ($bound -> $fresh); re-run required" >&2
+  exit 1
+fi
+if [ -n "${EXCEPTION_GATE_SHA_FILE:-}" ]; then
+  printf '%s\n' "$bound" > "$EXCEPTION_GATE_SHA_FILE"
+fi
