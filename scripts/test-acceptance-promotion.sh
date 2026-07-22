@@ -29,7 +29,7 @@ for required in (
     "contents: write",
     "scripts/gate-production-exceptions-promote.sh",
     "Re-check production exceptions before draft creation",
-    "Re-check production exceptions before undraft publish",
+    "bash scripts/gate-production-exceptions-promote.sh",
     "scripts/verify-acceptance-promotion.py verify-run",
     "scripts/verify-acceptance-promotion.py verify-directory",
     "scripts/verify-release-checksums.sh",

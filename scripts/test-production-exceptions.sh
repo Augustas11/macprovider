@@ -82,9 +82,25 @@ grep -qF 'origin/main' \
 grep -qF 'Re-check production exceptions before draft creation' \
   .github/workflows/promote-acceptance-candidate.yml \
   || fail "promote workflow missing pre-draft exception recheck"
-grep -qF 'Re-check production exceptions before undraft publish' \
-  .github/workflows/promote-acceptance-candidate.yml \
-  || fail "promote workflow missing pre-undraft exception recheck"
+# Undraft binding: the promote helper must run inside the publish step
+# immediately before the irreversible draft=false PATCH.
+python3 - <<'PY'
+from pathlib import Path
+text = Path(".github/workflows/promote-acceptance-candidate.yml").read_text(encoding="utf-8")
+marker = "Reverify and publish only the captured numeric draft"
+start = text.index(marker)
+chunk = text[start:start + 3500]
+if "bash scripts/gate-production-exceptions-promote.sh" not in chunk:
+    raise SystemExit("publish step missing inline exception recheck")
+gate_at = chunk.index("bash scripts/gate-production-exceptions-promote.sh")
+patch_at = chunk.index("-F draft=false -F prerelease=false")
+if gate_at > patch_at:
+    raise SystemExit("exception recheck must precede undraft PATCH")
+print("ok: undraft-bound exception recheck")
+PY
+grep -qF 'history_window=32' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper missing durable tombstone history window"
 
 # sync-check CLI (documented form with --tombstones after subcommand).
 work="$(mktemp -d "${TMPDIR:-/tmp}/exception-sync.XXXXXX")"

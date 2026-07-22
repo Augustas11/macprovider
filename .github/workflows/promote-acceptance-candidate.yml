@@ -406,12 +406,6 @@ jobs:
             "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
           printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
 
-      - name: Re-check production exceptions before undraft publish
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/gate-production-exceptions-promote.sh
-
       - name: Reverify and publish only the captured numeric draft
         shell: bash
         env:
@@ -447,6 +441,9 @@ jobs:
             "$RUNNER_TEMP/final-draft-publication.json" \
             "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
           bash scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing
+          # #615: re-fetch and re-gate exception authority in this same step,
+          # immediately before the irreversible undraft PATCH.
+          bash scripts/gate-production-exceptions-promote.sh
           # Repository rules and the production-release environment serialize
           # the sole owner publication path. Re-fetch the exact numeric draft
           # and tag immediately before this irreversible transition.

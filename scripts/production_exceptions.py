@@ -64,11 +64,16 @@ OWNER_PLACEHOLDER_RE = re.compile(
 )
 SECRET_RE = re.compile(
     r"(?is)("
-    r"bearer\s+[a-z0-9._\-]+|"
+    r"bearer\s+[a-z0-9._\-+=/]+|"
+    r"basic\s+[a-z0-9+/]{8,}={0,2}|"
+    r"authorization\s*[:=]\s*\S+|"
     r"sk-[a-z0-9]{10,}|"
     r"ghp_[a-z0-9]{20,}|"
+    r"akia[0-9a-z]{16}|"
+    r"eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+|"
     r"xox[baprs]-[a-z0-9-]{10,}|"
     r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----|"
+    r"api[_-]?key\s*[:=]\s*\S+|"
     r"password\s*[:=]\s*\S+|"
     r"token\s*[:=]\s*\S+|"
     r"\b[a-f0-9]{64}\b"
@@ -633,35 +638,18 @@ def validate_stale_register(doc: dict[str, Any], result: ValidationResult) -> No
     if not isinstance(doc, dict):
         result.error("stale_type", "stale register must be an object")
         return
-    unknown_root = sorted(set(doc) - REGISTER_ROOT_KEYS)
-    if unknown_root:
-        result.error("stale_additional", f"unknown stale root fields: {unknown_root}")
-    if doc.get("schema_version") != SCHEMA_VERSION:
-        result.error(
-            "stale_schema",
-            f"stale schema_version must be {SCHEMA_VERSION!r}",
-        )
-    if doc.get("environment") != ENVIRONMENT:
-        result.error("stale_environment", f"stale environment must be {ENVIRONMENT!r}")
-    try:
-        parse_rfc3339(doc.get("updated_at"))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        result.error("stale_updated_at", "stale updated_at must be RFC3339Z")
-    exceptions = doc.get("exceptions")
-    if not isinstance(exceptions, list):
-        result.error("stale_exceptions", "stale exceptions must be an array")
-        return
-    for index, entry in enumerate(exceptions):
-        if not isinstance(entry, dict):
-            result.error("stale_entry", f"stale exceptions[{index}] must be an object")
+    # Full structural validation, then drop historical-only missing_tombstone
+    # findings that cannot apply to pre-tombstone backups.
+    historical = validate_register(doc, tombstones={"schema_version": TOMBSTONE_SCHEMA_VERSION, "updated_at": "1970-01-01T00:00:00Z", "updated_by": "historical", "environment": ENVIRONMENT, "tombstones": []})
+    for finding in historical.findings:
+        if finding.code == "missing_tombstone":
             continue
-        if not isinstance(entry.get("id"), str) or not ID_RE.fullmatch(entry["id"]):
-            result.error("stale_id", f"stale exceptions[{index}].id is invalid")
-        if entry.get("status") not in STATUSES:
-            result.error(
-                "stale_status",
-                f"stale exceptions[{index}] has invalid status {entry.get('status')!r}",
-            )
+        # Remap codes so operators see these as stale-authority failures.
+        code = finding.code if finding.code.startswith("stale_") else f"stale_{finding.code}"
+        if finding.severity == "error":
+            result.error(code, finding.message, finding.exception_id)
+        else:
+            result.warn(code, finding.message, finding.exception_id)
 
 
 def simulate_config_sync_restore(
