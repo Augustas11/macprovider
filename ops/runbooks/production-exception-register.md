@@ -39,6 +39,10 @@ Required fields are enforced by
 `ops/exceptions/production-exceptions.schema.json` and by
 `scripts/check-production-exceptions.py validate` (stdlib schema-parity checks
 including additionalProperties, calendar timestamps, and evidence string items).
+Optional clearance-tracking arrays `partial_progress` and
+`still_blocked_for_clearance` are allowed when present (non-empty string items)
+so Partial #608 progress notes stay durable in the register; they are omitted
+from the allowlisted operator report.
 
 Set `blocks_stable_promotion: true` when an active/planned/expired exception
 would make #615, #613, #584, #585, or related rollout evidence incomplete.

@@ -642,6 +642,58 @@ class ProductionExceptionsTests(unittest.TestCase):
         self.assertIn("updated_at", codes)
         self.assertIn("evidence", codes)
 
+    def test_optional_progress_fields_accepted_and_typed(self):
+        doc = _minimal_register(
+            [
+                _minimal_entry(
+                    id="exc-progress",
+                    partial_progress=["shipped fail-closed binding"],
+                    still_blocked_for_clearance=["physical Pearl proof remains"],
+                )
+            ]
+        )
+        result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
+        self.assertEqual(result.errors, [], [f.format() for f in result.errors])
+        report = pe.build_health_report(doc, now=NOW)
+        blob = json.dumps(report)
+        self.assertNotIn("partial_progress", blob)
+        self.assertNotIn("still_blocked_for_clearance", blob)
+        self.assertNotIn("shipped fail-closed binding", blob)
+
+    def test_optional_progress_fields_reject_bad_shapes(self):
+        cases = (
+            {"partial_progress": "not-a-list"},
+            {"partial_progress": [""]},
+            {"partial_progress": [123]},
+            {"still_blocked_for_clearance": {"x": 1}},
+            {"still_blocked_for_clearance": ["ok", ""]},
+        )
+        for overrides in cases:
+            doc = _minimal_register([_minimal_entry(id="exc-progress-bad", **overrides)])
+            result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
+            self.assertTrue(
+                any(
+                    f.code in {"partial_progress", "still_blocked_for_clearance"}
+                    for f in result.errors
+                ),
+                msg=overrides,
+            )
+
+    def test_committed_register_includes_608_progress_notes(self):
+        doc = pe.load_json(pe.default_register_path(ROOT))
+        row = next(
+            entry
+            for entry in doc["exceptions"]
+            if entry["id"] == "exc-catalog-compatibility-bridges"
+        )
+        self.assertIsInstance(row.get("partial_progress"), list)
+        self.assertTrue(row["partial_progress"])
+        self.assertIsInstance(row.get("still_blocked_for_clearance"), list)
+        self.assertTrue(row["still_blocked_for_clearance"])
+        tombstones = pe.load_json(pe.default_tombstone_path(ROOT))
+        result = pe.validate_register(doc, now=NOW, tombstones=tombstones)
+        self.assertEqual(result.errors, [], [f.format() for f in result.errors])
+
     def test_expiry_self_extension_detected(self):
         previous = _minimal_register(
             [_minimal_entry(id="exc-ext", expires_at="2026-08-01T00:00:00Z")]

@@ -130,7 +130,16 @@ EXCEPTION_KEYS = frozenset(REQUIRED_EXCEPTION_FIELDS := (
     "post_removal_validation",
     "blocks_stable_promotion",
     "evidence",
-)) | {"expiry_unknown_reason"}
+)) | {
+    "expiry_unknown_reason",
+    # Optional #608 progress notes — durable clearance tracking, not free-form
+    # arbitrary keys. Present as arrays of non-empty strings when used.
+    "partial_progress",
+    "still_blocked_for_clearance",
+}
+OPTIONAL_STRING_LIST_FIELDS = frozenset(
+    {"partial_progress", "still_blocked_for_clearance"}
+)
 OPEN_QUESTION_KEYS = frozenset(
     {"id", "question", "owner", "status", "evidence_target"}
 )
@@ -381,6 +390,21 @@ def validate_register(
                     result.error(
                         "evidence",
                         f"evidence[{evid_index}] must be a non-empty string",
+                        exc_id,
+                    )
+
+        for list_field in sorted(OPTIONAL_STRING_LIST_FIELDS):
+            if list_field not in entry:
+                continue
+            value = entry.get(list_field)
+            if not isinstance(value, list):
+                result.error(list_field, f"{list_field} must be an array when present", exc_id)
+                continue
+            for item_index, item in enumerate(value):
+                if not isinstance(item, str) or not item.strip():
+                    result.error(
+                        list_field,
+                        f"{list_field}[{item_index}] must be a non-empty string",
                         exc_id,
                     )
 
@@ -738,7 +762,15 @@ REPORT_ROW_KEYS = frozenset(
 # secrets_redacted is a claim over a closed field set (enums / IDs /
 # timestamps / bools), not over owner/reason/scope/policy strings.
 REPORT_OMITTED_FIELDS = frozenset(
-    {"owner", "policy_delta", "authority_surface", "reason", "scope"}
+    {
+        "owner",
+        "policy_delta",
+        "authority_surface",
+        "reason",
+        "scope",
+        "partial_progress",
+        "still_blocked_for_clearance",
+    }
 )
 
 
