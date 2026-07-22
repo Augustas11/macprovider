@@ -174,7 +174,9 @@ admission-key rotation, so provider-originated churn on a mutable key dimension
 cannot launder an active quarantine or reset an in-progress accumulator (FR-10,
 FR-12). Request-start capture (FR-4) MUST consult the overlay for the request's
 overlay key: an active overlay quarantine/block is inherited as the request-start
-state.
+state. Every overlay quarantine/block carries an immutable `adjudication_origin`
+(`enforce_preserved` or `telemetry_only`) that governs whether its money/routing
+effect is active, per the FR-3 effective adverse-state gating matrix.
 
 **Swap-laundering overlay:** A higher-level coordinator-owned state layer keyed by
 `(stable_provider_identity, model_id)` — spanning all hashes, tokenizers,
@@ -237,9 +239,12 @@ rule or FR-16 `cleared` transition completes. **Coordinator-attributable** block
 downgrade — that is the whole point of the FR-1 reference-outage downgrade (keep the
 pool available when the coordinator, not the provider, is the reason no fresh verdict
 exists); they resume on return to enforce. Clean keys (no active preserved adverse
-state) receive warn-only's no-effect fallback. Releasing a provider-attributable
-quarantine/block or a breaker hold requires the normal clear rule, never a mode
-downgrade.
+state) receive warn-only's no-effect fallback. This exception governs a
+**SPEC-036-only** downgrade (SPEC-022 remains enforce); if SPEC-022 itself leaves
+enforce, even `enforce_preserved` state goes dormant per the FR-3 gating matrix
+(SPEC-036 holds no independent money authority). Releasing a provider-attributable
+quarantine/block or a breaker hold (as opposed to its effect going dormant) requires
+the normal clear rule, never a mode downgrade.
 
 **Enforce mode:** Policy mode in which request-start
 `quarantined_compute_drift` makes the settlement outcome `quarantined` with
@@ -479,16 +484,45 @@ change to either policy MUST NOT retroactively change an already-admitted attemp
 If the captured snapshot shows SPEC-022 was not in enforce for the request's
 coverage, SPEC-036 MUST NOT alter the request's money outcome.
 
-**Effective enforce is a runtime conjunction, not just an activation check.**
-SPEC-036's effective enforce for any new admission is the conjunction of SPEC-036's
-configured mode and SPEC-022's *current* enforce coverage for that request. If
-SPEC-022 is rolled back out of enforce (or its coverage narrows below SPEC-036's)
-while SPEC-036 remains configured `enforce`, SPEC-036 MUST behave as warn-only /
-no-effect for new admissions in the now-uncovered scope: it MUST NOT deny covered
-paid routing or block onboarding on compute-integrity grounds where SPEC-022 is no
-longer enforcing, so SPEC-036 never exercises routing/onboarding authority beyond
-SPEC-022's effective money authority. Rows already captured under a composite
-snapshot where both policies were enforce keep their captured outcome (immutability).
+**Effective adverse-state gating (the authoritative mode × origin matrix).**
+SPEC-036 is a strictly subordinate AND-gate on SPEC-022 and holds NO independent
+money authority; it can only ever *narrow* creditability where SPEC-022 is itself
+enforcing. To make routing and settlement deterministic when modes change, every
+overlay/breaker adverse state carries an immutable `adjudication_origin`:
+
+- `enforce_preserved` — adjudicated while SPEC-036 mode was `enforce` AND the
+  SPEC-022 conjunction was true;
+- `telemetry_only` — computed under `observe`/`warn_only` (or where SPEC-022 was not
+  enforcing).
+
+`adjudication_origin` is set at state creation, is immutable, and is captured and
+digested in FR-4. A state's **money/routing EFFECT** (deny billable covered routing +
+non-payable settlement) is active for a new admission IFF ALL of: (i)
+`adjudication_origin == enforce_preserved`; (ii) the state is provider-attributable
+(`quarantined_compute_drift`, `blocked:swap_laundering_suspected`,
+`blocked:manual_review_required`, `blocked:abusive_inconclusive`) or an active
+breaker hold; and (iii) the **SPEC-022 conjunction is currently true** for the key.
+Otherwise the state's effect is **dormant** (the state persists / survives — only the
+FR-10/FR-16 clear releases it — but it does not block money/routing):
+
+- A **SPEC-036-only downgrade** (`enforce → warn_only` via FR-16 rollback or FR-1
+  auto-downgrade) does NOT change the SPEC-022 conjunction, so
+  `enforce_preserved` provider-attributable states and breaker holds REMAIN
+  effect-active and keep blocking (this is the §3 Preserved-adverse-state exception).
+- A **SPEC-022 downgrade** (SPEC-022 leaves enforce or narrows coverage below
+  SPEC-036's) makes the conjunction false → SPEC-036 exercises NO routing/onboarding/
+  money authority for new admissions in the now-uncovered scope, including for
+  `enforce_preserved` state, which goes dormant; SPEC-022 alone governs those rows.
+  The dormant state resumes its effect automatically when SPEC-022 returns to enforce
+  for the key (no re-adjudication needed; it was never cleared).
+- **Coordinator-attributable** blocks (`blocked:reference_missing`,
+  `blocked:calibration_missing`, `blocked:reference_fault`) are dormant for routing
+  during an FR-1 availability downgrade (the point of that downgrade) but persist and
+  resume on return to enforce.
+- `telemetry_only` state never has a money/routing effect in any mode.
+
+Rows already captured under a composite snapshot keep their captured outcome
+regardless of later mode changes (immutability).
 
 In enforce mode, a covered paid request MUST NOT create buyer final debit,
 provider credit, earnings visibility, settlement-sweep inclusion, or payout
@@ -681,6 +715,9 @@ The captured state MUST include:
   JCS canonical, sorted covered-profile list; null for a per-profile window), so
   settlement can verify the buyer request's profile is a member with its own fresh
   satisfied sub-window (FR-10).
+- `adjudication_origin` (`enforce_preserved` | `telemetry_only`) for any captured
+  overlay/breaker adverse state, per the FR-3 gating matrix; missing/unreadable →
+  `compute_integrity_unreadable`.
 - `compute_integrity_state`.
 - `expiry_cause` when state is `expired`.
 - `compute_integrity_window_id`.
@@ -868,6 +905,9 @@ re-derive these):**
   least 128 bits, expiry no more than 120 seconds after issuance, `K` limited to
   64 or 256, at most 4 prompts and 8 stochastic measurement positions per result,
   and non-billable provider probe work (see also FR-17).
+- The `target_generation` ownership/increment semantics of SPEC-030 §FR-2 (the
+  coordinator owns generation; providers echo the actual generation at each measured
+  position; results MUST NOT authorize across a generation boundary).
 - The `support_selection_v1` shared-support **construction rule** (SPEC-030 §FR-7)
   as the base of a SPEC-036-owned multi-arm **generalization**: SPEC-030's two-arm
   (provider + one reference, ≤ `2K`) union is generalized here to an
@@ -1048,8 +1088,14 @@ The result `payload` MUST include:
   of ALL references in `reference_top_k_sets`; length is between `k` and
   `(N+1)*k` for N active references, unless the vocabulary is smaller),
   `provider_support_probabilities` (one finite probability in `[0,1]` per
-  `support_token_ids` entry), and `provider_tail_mass` (finite, in `[0,1]`, the
-  mass outside `support_token_ids`).
+  `support_token_ids` entry), `provider_tail_mass` (finite, in `[0,1]`, the mass
+  outside `support_token_ids`), and the **actual** `target_model_hash` and
+  `target_generation` observed at that position (inheriting SPEC-030 §FR-2 generation
+  ownership/increment semantics). The coordinator MUST reject as
+  `inconclusive:model_swap` any measurement whose per-position actual hash/generation
+  differ from the expected identity or are not identical across all measured
+  positions (a warm swap mid-probe), so a mixed-generation result cannot present one
+  globally-matching generation.
 - `validation_metadata` (measurement variant only): an object with exactly
   `provider_measured_at` (RFC3339 UTC), `provider_execution_ms` (non-negative
   integer), `provider_final_k` (64 or 256), and `provider_scalar_verdict` (a
@@ -1061,12 +1107,22 @@ reference probabilities and reference tail mass over `support_token_ids` itself
 (FR-7) from the reference event's `reference_full_distribution_ref` and MUST NOT
 accept reference-side probabilities from the provider.
 
-The coordinator MUST reject results whose echoed identity fields, nonce,
-`type`, `schema_version`, `probe_request_digest`, `probe_result_digest`, expiry,
-position identifiers, teacher-forced prefix digests, context hashes, or
-union-support fields do not match the issued request and corpus position. The
-coordinator MUST reject replay of a duplicate `probe_request_digest` outside the
-issued probe attempt and MUST log digest mismatches as validation failures.
+The strict identity-equality rule applies to `result_kind = "measurement"` results:
+the coordinator MUST reject a `measurement` result whose echoed identity fields
+(including `hardware_runtime_class`), nonce, `type`, `schema_version`,
+`probe_request_digest`, `probe_result_digest`, expiry, position identifiers,
+teacher-forced prefix digests, context hashes, or union-support fields do not match
+the issued request and corpus position, finalizing `inconclusive:identity_reject`. A
+`result_kind = "provider_inconclusive"` result is the sanctioned channel for a
+changed or unavailable identity: its identity echoes MAY differ from the request or
+be null (with `identity_unavailable_reason`), and it MUST NOT be rejected as
+`identity_reject` on that basis — instead it finalizes per its
+`provider_reason_code` (FR-9 mapping; e.g. a changed hash/generation →
+`inconclusive:model_swap`, non-abusive). The coordinator MUST still reject any result
+(either kind) with a nonce, `probe_request_digest`, `probe_result_digest`, `type`, or
+`schema_version` mismatch, MUST reject replay of a duplicate `probe_request_digest`
+outside the issued probe attempt, and MUST log digest mismatches as validation
+failures.
 
 The coordinator MUST validate compact distributions before computing TV:
 
@@ -1555,7 +1611,10 @@ The escalation trigger is deterministic and distinguishes provider-mutable
 continuity-proven reconnect and NOT a same-hash reload, which are exempt) MUST move
 the swap-laundering overlay to `blocked:swap_laundering_suspected` when, at the time
 of the change, the provider's per-key overlay for the prior artifact carries any of:
-active `quarantined_compute_drift` or `blocked:<reason>` state, a non-zero
+active **provider-attributable** state (`quarantined_compute_drift`,
+`blocked:swap_laundering_suspected`, `blocked:manual_review_required`, or
+`blocked:abusive_inconclusive` — NOT a coordinator-attributable
+`blocked:reference_missing`/`calibration_missing`/`reference_fault`), a non-zero
 quarantine-candidate window count, a non-zero 24-hour abusive-inconclusive count, or
 a non-zero 24-hour onboarding-failure count. This carries provider-attributable risk
 (drift, abusive-inconclusive blocks, onboarding-failure blocks, and all three
@@ -1727,16 +1786,18 @@ retroactively reclassify a row already admitted while it was inactive; such rows
 settle from their captured payable state. Circuit-breaker activation MUST preserve
 existing `quarantined_compute_drift` and `blocked:<reason>` states.
 
-An active circuit-breaker hold established under enforce is a preserved adverse hold
-(§3): it survives an `enforce → warn_only` transition (manual rollback or
-auto-downgrade) and MUST continue to **deny billable new covered buyer admissions in
-its scope** (operator-funded diagnostics only) and protect already-captured rows,
-until the FR-16 `cleared` transition completes — it is NOT limited to
-effective-enforce admissions. For clean keys with no active breaker hold and no
-provider-attributable overlay, warn_only (or SPEC-022 not being enforce) means new
-admissions have no SPEC-036 money effect. Thus warn-only's "no money effect for new
-verdicts/clean keys" and the breaker's mode-independent "deny in scope" do not
-conflict — they govern disjoint sets of keys.
+An active circuit-breaker hold established under enforce is an `enforce_preserved`
+adverse hold (§3): it survives an `enforce → warn_only` transition (manual rollback
+or auto-downgrade) and, per the FR-3 gating matrix, its effect is active — it MUST
+continue to **deny billable new covered buyer admissions in its scope**
+(operator-funded diagnostics only) and protect already-captured rows — SO LONG AS the
+SPEC-022 conjunction remains true (a SPEC-036-only downgrade). If SPEC-022 itself
+leaves enforce, the hold persists but its effect is dormant (SPEC-036 holds no money
+authority then), resuming when SPEC-022 returns to enforce; only the FR-16 `cleared`
+transition releases the hold itself. For clean keys with no active hold and no
+provider-attributable overlay, warn_only means new admissions have no SPEC-036 money
+effect. Thus warn-only's "no effect for new verdicts/clean keys" and the breaker's
+"deny in scope while the SPEC-022 conjunction holds" govern disjoint sets of keys.
 
 Circuit-breaker state MUST be one of:
 
