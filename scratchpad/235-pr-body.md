@@ -53,15 +53,35 @@ recalibrates B10's thresholds (then arms the gate), and answers the #463 (waived
 G3 48 h soak) recommendation. Run recipe + open questions in
 `test/e2e/thermal-soak/README.md`.
 
+### Prod-safety (LAB-ONLY, enforced in code)
+
+Any scenario declaring `B10` must have `gateway_url` and `coordinator_url`
+resolve to a **loopback / private / link-local IP or `localhost`** (positive
+allowlist `LabHostAllowed`) — every public host is rejected, including
+trailing-dot and Unicode-separator variants; the check runs even when
+`benchmark.enabled=false`; and a `CheckRedirect` guard blocks a lab gateway from
+redirecting the soak to a non-lab host. A soak physically cannot reach
+`streamvc.live`.
+
 ### Verification
 
 - `go build ./...`, `go test ./...`, `go vet ./...` — GREEN in
-  `test/network-harness` (7 new B10 unit tests: PASS/WARN/FAIL-armed/
-  FAIL-downgrade-unarmed/SKIP×2/window-math).
-- `harness run scenarios/15_thermal_soak.yaml --dry-run` validates; fails safely
-  (validation error) without `LAB_*` env — cannot hit prod.
-- Three-lane codex audit (code / security / architect) to 0 CRITICAL / 0 HIGH /
-  0 MEDIUM; prompts + results under `audits/2026-07-22/`.
+  `test/network-harness`. New tests: B10 PASS/WARN/FAIL-armed/FAIL-downgrade-
+  unarmed/SKIP-too-few/SKIP-provider-stops-before-end/SKIP-short-run/window-math;
+  lab-only host allow/reject matrix (loopback/localhost/private/ipv6 ok; prod
+  apex/subdomain/uppercase/trailing-dot/full-width/ideographic-dot/arbitrary-
+  public rejected; disabled-benchmark still guarded; non-B10 still allows prod).
+- `harness run scenarios/15_thermal_soak.yaml --dry-run` validates on a lab URL;
+  fails safely without `LAB_*` env and on any prod host.
+- **Three-lane codex audit (code / security / architect), 3 rounds** — R3 is
+  **0 CRITICAL / 0 HIGH / 0 MEDIUM on all three lanes** (code APPROVE, security
+  APPROVE, architect WATCH). Prompts + results under `audits/2026-07-22/`.
+  Carried LOWs (documented, non-blocking): (1) scoped IPv6 link-local
+  `[fe80::1%25en0]` is rejected by `net.ParseIP` — a legitimate-lab
+  false-negative that **fails safe** (never allows prod); (2) `join-thermal.py`
+  loads its inputs fully into memory (a local operator post-processing tool);
+  (3) the redirect barrier has no dedicated regression test yet (its logic was
+  read and verified correct by all three lanes).
 - Does not touch scenario 07/08 or the money path.
 
 Closes nothing (instrument only); advances #584.
