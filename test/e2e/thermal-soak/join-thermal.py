@@ -49,7 +49,16 @@ def parse_ts(s):
 def streaming_tps(rec):
     """Derive per-request streaming decode TPS, mirroring benchmark.go's B2/B10
     basis: tokens / (last_byte - (start + ttft)). Returns (start_dt, tps) or
-    None if the record is not a usable streaming success."""
+    None if the record is not a usable streaming success.
+
+    Mirrors B10's success filter exactly (benchmark.go: HTTPStatus >= 400 or
+    Outcome != "ok" are excluded) so the thermal overlay reflects the same
+    population B10 scores — a failed stream that received some usage before a
+    transport error must NOT contribute a TPS point."""
+    if rec.get("outcome") != "ok":
+        return None
+    if (rec.get("http_status") or 0) >= 400:
+        return None
     if not rec.get("stream"):
         return None
     tokens = rec.get("completion_tokens_received") or 0
@@ -105,7 +114,9 @@ def nearest_thermal(thermal, epoch, max_skew_s):
     epoch_ts, rec = min(thermal, key=lambda x: abs(x[0] - epoch))
     skew = epoch_ts - epoch
     if abs(skew) > max_skew_s:
-        return None, round(skew, 1)
+        # Too stale — drop both the record and its skew so the output field is
+        # null (matches the documented contract and the README).
+        return None, None
     return rec, round(skew, 1)
 
 

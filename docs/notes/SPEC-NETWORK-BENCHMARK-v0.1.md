@@ -188,10 +188,10 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
 
 ```json
 {
-  "scenario": "07_sustained_throughput",
+  "scenario": "15_thermal_soak",
   "scenario_version": "v0.1",
   "run_id": "20260628T180000Z",
-  "duration_seconds": 300,
+  "duration_seconds": 3600,
   "buyer_metrics": {
     "ttft_ms": {"p50": 612, "p95": 1840, "p99": 3210},
     "streaming_tps": {"p50": 42, "p95": 18},

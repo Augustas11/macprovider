@@ -17,8 +17,11 @@ lines up with the machine throttling.
 The scenario, the `B10` invariant, and these scripts are **built and tested**,
 but **no soak has been run yet**. The run needs a **dedicated lab Mac** (see
 below); it must NOT run against production. The first lab run is the actual
-deliverable — it produces the "safe sustained load" envelope the #584 canary
-redesign consumes, and recalibrates B10's provisional thresholds. Until then:
+deliverable — it provides the **initial calibration** and the first stress
+point, and recalibrates B10's provisional thresholds. The full "safe sustained
+load" envelope the #584 canary redesign consumes comes from a **D3 sweep**
+across concurrency / duty-cycle cells (see the parked-work section below), not
+from a single scenario-15 run. Until then:
 
 - `B10` thresholds (PASS ≥ 0.85 / WARN ≥ 0.70 / FAIL < 0.70) are **provisional
   guesses**, and scenario 15 leaves the gate **unarmed** (`sustained_gate_armed:

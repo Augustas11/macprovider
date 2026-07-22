@@ -56,7 +56,8 @@ description: |
   2 concurrent buyers, streaming, max_tokens=64, 45–60 min sustained-decode
   soak against a LAB provider. Measures streaming-TPS retention (first 5-min
   vs last 5-min window) via B10, plus B1-B5 over the long window. Serves the
-  #584 canary redesign — produces the "safe sustained load" envelope.
+  #584 canary redesign — one stress point (N=2, 1s floor); the full "safe
+  sustained load" envelope needs a D3 sweep across concurrency/duty-cycle cells.
 
 expected_shape: |
   Phase B long soak (descriptive, B-invariants asserted):
