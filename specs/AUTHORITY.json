@@ -40,6 +40,7 @@
     {"id": "canary-sanction-lifecycle", "owner_spec": "SPEC-031", "consumers": ["SPEC-002", "SPEC-032", "SPEC-033"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
     {"id": "hardware-evidence-admission", "owner_spec": "SPEC-032", "consumers": ["SPEC-002", "SPEC-008", "SPEC-023", "SPEC-031", "SPEC-033"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
     {"id": "hardware-evidence-verifier", "owner_spec": "SPEC-033", "consumers": ["SPEC-023", "SPEC-031", "SPEC-032"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "referral-advocacy-policy", "owner_spec": "SPEC-034", "consumers": ["SPEC-001", "SPEC-003", "SPEC-025", "SPEC-026"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"}
+    {"id": "referral-advocacy-policy", "owner_spec": "SPEC-034", "consumers": ["SPEC-001", "SPEC-003", "SPEC-025", "SPEC-026"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
+    {"id": "provider-connection-diagnostics", "owner_spec": "SPEC-035", "consumers": ["SPEC-002"], "status": "declared", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/535"}
   ]
 }

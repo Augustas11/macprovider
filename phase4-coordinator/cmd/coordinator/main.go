@@ -30,6 +30,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
+	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/referralapi"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -225,6 +226,16 @@ func main() {
 	admissionStore, err := providerws.NewSQLiteAdmissionStore(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
+		os.Exit(1)
+	}
+	connectionEventStore, err := providerevents.Open(providerevents.DefaultDBPath(cfg.Storage.DBPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "provider connection events storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer connectionEventStore.Close()
+	if err := connectionEventStore.ReconcileBounds(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "provider connection events reconcile: %v\n", err)
 		os.Exit(1)
 	}
 	billingStore, err := billing.NewStore(reqLogStore.DB())
@@ -488,6 +499,8 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
+	wsOpts = append(wsOpts, providerws.WithConnectionEventStore(connectionEventStore))
+	wsOpts = append(wsOpts, providerws.WithConnectionEventMetrics(metricsHandle))
 	if canaryStore != nil {
 		wsOpts = append(wsOpts, providerws.WithCanarySanctionStore(canaryStore))
 	}
@@ -1016,6 +1029,7 @@ func main() {
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
+	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
 
@@ -1054,6 +1068,9 @@ func main() {
 				logger.Error().Err(err).Msg("provider http shutdown failed")
 				os.Exit(1)
 			}
+			wsServer.CloseAllProviderSessions("coordinator shutdown")
+			wsServer.WaitProviderConnections(2 * time.Second)
+			wsServer.FlushConnectionEvents(2 * time.Second)
 			// M2-2: wait for the swap-audit drain goroutine to finish so
 			// the last few model swaps are persisted. The drain goroutine
 			// exits on shutdownCtx.Done() (already cancelled by
@@ -1196,6 +1213,32 @@ func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner,
 	prune()
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
+func startProviderConnectionEventPruner(ctx context.Context, store *providerevents.SQLiteStore, logger zerolog.Logger) {
+	if store == nil {
+		return
+	}
+	prune := func() {
+		if err := store.ReconcileBounds(ctx); err != nil {
+			logger.Warn().Err(err).Msg("provider connection events reconcile failed")
+			return
+		}
+		logger.Info().Msg("provider connection events bounds reconciled")
+	}
+	prune()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
 			select {

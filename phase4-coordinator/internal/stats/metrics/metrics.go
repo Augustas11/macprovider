@@ -57,19 +57,20 @@ import (
 // case; production code passes prometheus.DefaultRegisterer (or
 // a coordinator-owned named registry).
 type Metrics struct {
-	RequestTotal             *prometheus.CounterVec
-	PartnerKeyRequestTotal   *prometheus.CounterVec
-	RollupLagSeconds         *prometheus.GaugeVec
-	RollupErrorsTotal        *prometheus.CounterVec
-	RollupPanicTotal         *prometheus.CounterVec
-	RateLimitExceededTotal   *prometheus.CounterVec
-	RegisterRateLimitHits    *prometheus.CounterVec
-	RegisterSource           *prometheus.CounterVec
-	RegisterHardwareErrors   prometheus.Counter
-	IdlePrewarmEventTotal    *prometheus.CounterVec
-	ModelHashMismatchTotal   prometheus.Counter
-	CredentialBootstrapTotal *prometheus.CounterVec
-	ReferralEventTotal       *prometheus.CounterVec
+	RequestTotal                 *prometheus.CounterVec
+	PartnerKeyRequestTotal       *prometheus.CounterVec
+	RollupLagSeconds             *prometheus.GaugeVec
+	RollupErrorsTotal            *prometheus.CounterVec
+	RollupPanicTotal             *prometheus.CounterVec
+	RateLimitExceededTotal       *prometheus.CounterVec
+	RegisterRateLimitHits        *prometheus.CounterVec
+	RegisterSource               *prometheus.CounterVec
+	RegisterHardwareErrors       prometheus.Counter
+	IdlePrewarmEventTotal        *prometheus.CounterVec
+	ModelHashMismatchTotal       prometheus.Counter
+	CredentialBootstrapTotal     *prometheus.CounterVec
+	ReferralEventTotal           *prometheus.CounterVec
+	ProviderConnectionEventTotal *prometheus.CounterVec
 }
 
 // New registers all five metrics against reg and returns the
@@ -170,6 +171,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"event", "outcome"},
 		),
+		ProviderConnectionEventTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "provider_connection_event_total",
+				Help: "Count of durable provider connection lifecycle events by closed-set kind, outcome, and failure_reason.",
+			},
+			[]string{"kind", "outcome", "failure_reason"},
+		),
 	}
 }
 
@@ -260,4 +268,30 @@ func (m *Metrics) IncReferralEvent(event, outcome string) {
 		return
 	}
 	m.ReferralEventTotal.WithLabelValues(event, outcome).Inc()
+}
+
+func (m *Metrics) IncProviderConnectionEvent(kind, outcome, failureReason string) {
+	if m == nil || m.ProviderConnectionEventTotal == nil {
+		return
+	}
+	switch kind {
+	case "upgrade_failed", "auth_rejected", "auth_accepted", "disconnect", "warmup_failed", "heartbeat_stale":
+	default:
+		return
+	}
+	switch outcome {
+	case "success", "failure":
+	default:
+		return
+	}
+	switch failureReason {
+	case "", "none":
+		failureReason = "none"
+	case "invalid_token", "invalid_auth_request", "no_common_aead_suite", "tier2_attestation_failed",
+		"version_unsupported", "warmup_failed", "heartbeat_stale", "provider_websocket_disconnected",
+		"upgrade_failed", "unrecognized_auth_message", "pool_full", "other":
+	default:
+		failureReason = "other"
+	}
+	m.ProviderConnectionEventTotal.WithLabelValues(kind, outcome, failureReason).Inc()
 }

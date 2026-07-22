@@ -21,6 +21,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	gobwas "github.com/gobwas/ws"
@@ -133,6 +134,21 @@ type Server struct {
 	idlePrewarmMetrics             IdlePrewarmMetrics
 	modelHashMismatchMetrics       ModelHashMismatchMetrics
 	credentialBootstrapMetrics     CredentialBootstrapMetrics
+	connectionEvents               ConnectionEventStore
+	connectionEventMetrics         ConnectionEventMetrics
+	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
+	connectionEventQueue           chan connectionEventJob
+	connectionEventQueueMu         sync.Mutex
+	connectionEventWorkerOnce      sync.Once
+	connectionEventStopOnce        sync.Once
+	connectionEventDone            chan struct{}
+	connectionEventsStopped        atomic.Bool
+	providerConnWG                 sync.WaitGroup
+	anonymousEventMu               sync.Mutex
+	anonymousEventWindow           time.Time
+	anonymousEventCount            int
+	lastKnownFlushMu               sync.Mutex
+	lastKnownFlush                 map[string]time.Time
 	bootstrapLimiter               *bootstrapMintLimiter
 	idlePrewarmLimits              sync.Map
 	idlePrewarmQueue               chan idlePrewarmRecord
@@ -823,6 +839,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/poolz", s.handlePoolz)
 	mux.HandleFunc("/admin/blacklist", s.handleBlacklist)
+	mux.HandleFunc("/admin/providers", s.handleAdminProviders)
+	mux.HandleFunc("/admin/providers/", s.handleAdminProviders)
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
 	mux.HandleFunc("/admin/promote/", s.handleAdminPromote)
 	mux.HandleFunc("/admin/reject/", s.handleAdminReject)
@@ -851,6 +869,14 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	conn, _, _, err := gobwas.UpgradeHTTP(r, w)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("provider websocket upgrade failed")
+		s.recordConnectionEvent(providerevents.Event{
+			Kind:          providerevents.KindUpgradeFailed,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonUpgradeFailed,
+			AuthStage:     providerevents.AuthStageUpgrade,
+			MessageFamily: providerevents.MessageFamilyNone,
+			Diagnostic:    "websocket_upgrade_failed",
+		})
 		return
 	}
 	s.enableProviderTCPKeepAlive(conn)
@@ -862,11 +888,13 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	remoteIP := remoteIPForUnauthSemaphore(r.RemoteAddr, r.Header)
 	perIPOK, releasePerIP := s.reserveUnauthenticatedConnForIP(remoteIP)
 	if !perIPOK {
+		s.rememberCloseEvent(conn, closeEventMeta{authStage: providerevents.AuthStageUpgrade, messageFamily: providerevents.MessageFamilyNone})
 		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections_per_ip")
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
 	if !s.reserveUnauthenticatedConn() {
+		s.rememberCloseEvent(conn, closeEventMeta{authStage: providerevents.AuthStageUpgrade, messageFamily: providerevents.MessageFamilyNone})
 		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections")
 		releasePerIP()
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
@@ -875,6 +903,13 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	s.setReadDeadline(conn, s.cfg.ProviderWSHandshakeTimeout())
 	auth, ok := s.validateProviderToken(r)
 	if !ok {
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:       auth.providerID,
+			authStage:        providerevents.AuthStageUpgrade,
+			messageFamily:    providerevents.MessageFamilyNone,
+			diagnostic:       "bearer_validation_failed",
+			identityVerified: false,
+		})
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		s.releaseUnauthenticatedConn()
 		releasePerIP()
@@ -882,10 +917,14 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth.sourceIP = remoteIP
-	go s.handleConn(conn, auth, func() {
-		s.releaseUnauthenticatedConn()
-		releasePerIP()
-	})
+	s.providerConnWG.Add(1)
+	go func() {
+		defer s.providerConnWG.Done()
+		s.handleConn(conn, auth, func() {
+			s.releaseUnauthenticatedConn()
+			releasePerIP()
+		})
+	}()
 }
 
 func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
@@ -941,6 +980,7 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 
 func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthenticated func()) {
 	defer conn.Close()
+	defer func() { _ = s.takeCloseEvent(conn) }()
 	var releaseOnce sync.Once
 	releaseUnauth := func() {
 		if releaseUnauthenticated != nil {
@@ -958,11 +998,23 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 
 	payload, op, err := s.readClientData(conn, s.directControlReply(conn))
 	if err != nil {
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyMissing,
+			diagnostic:    "first_message_read_failed",
+		})
 		s.close(conn, CloseInvalidHello, "invalid_hello: read")
 		return
 	}
 	if op != gobwas.OpText {
 		s.log.Warn().Str("bad_field", "opcode").Msg("provider first auth message rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyOther,
+			diagnostic:    "bad_field=opcode",
+		})
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
@@ -976,6 +1028,12 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 			Str("bad_field", badField).
 			Str("message_type", firstAuthMessageTypeForLog(typ)).
 			Msg("provider first auth message rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: firstAuthMessageTypeForLog(typ),
+			diagnostic:    "bad_field=" + badField,
+		})
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
@@ -996,6 +1054,12 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 			Str("bad_field", badField).
 			Str("message_type", firstAuthMessageTypeForLog(typ)).
 			Msg("provider first auth message rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: firstAuthMessageTypeForLog(typ),
+			diagnostic:    "bad_field=" + badField,
+		})
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 	}
 }
@@ -1164,9 +1228,22 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    connectionAuth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyHello,
+			diagnostic:    "invalid_hello",
+		})
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
 		return "", ""
 	}
+	s.rememberCloseEvent(conn, closeEventMeta{
+		providerID:       hello.ProviderID,
+		authStage:        providerevents.AuthStageFirstMessage,
+		messageFamily:    providerevents.MessageFamilyHello,
+		binaryVersion:    hello.BinaryVersion,
+		identityVerified: connectionAuth.validated && connectionAuth.providerID != "" && connectionAuth.providerID == hello.ProviderID,
+	})
 	if hello.Version != 1 {
 		s.close(conn, CloseVersionUnsupported, "version_unsupported: protocol version "+itoa(hello.Version))
 		return "", ""
@@ -1289,6 +1366,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			badField = "stage"
 		}
 		s.log.Warn().Str("bad_field", badField).Msg("provider auth_request initial rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    connectionAuth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyAuthRequest,
+			diagnostic:    "bad_field=" + badField,
+		})
 		// SPEC-002 v1.3.5 §11 AC-K.15 / SPEC-010 v1.5 R-3.1.9 — when
 		// initial-stage parse fails on a SPEC-010 catalog validation
 		// rule, surface the LOCKED reason substring on the wire so
@@ -1303,6 +1386,13 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
 	}
+	s.rememberCloseEvent(conn, closeEventMeta{
+		providerID:       initial.ProviderID,
+		authStage:        providerevents.AuthStageFirstMessage,
+		messageFamily:    providerevents.MessageFamilyAuthRequest,
+		binaryVersion:    initial.BinaryVersion,
+		identityVerified: connectionAuth.validated && connectionAuth.providerID != "" && connectionAuth.providerID == initial.ProviderID,
+	})
 	if !s.requireCompatibleSet(conn, initial.CompatibilitySetID, true) {
 		return "", ""
 	}
@@ -1347,6 +1437,15 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	authAttemptID := "auth-" + s.newUUID()
+	s.rememberCloseEvent(conn, closeEventMeta{
+		providerID:       initial.ProviderID,
+		sessionID:        entry.AssignedID,
+		attemptID:        authAttemptID,
+		authStage:        providerevents.AuthStageProof,
+		messageFamily:    providerevents.MessageFamilyAuthRequest,
+		binaryVersion:    initial.BinaryVersion,
+		identityVerified: connectionAuth.validated && connectionAuth.providerID != "" && connectionAuth.providerID == initial.ProviderID,
+	})
 	challengeExpiresAt := s.now().Add(10 * time.Minute).UTC()
 	// SPEC-002 v1.3.5 §7.9 + R-7.9.8 — L-1 baseline gate:
 	// create retention state only if the initial-stage frame
@@ -2487,6 +2586,17 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 	session.probeWrites = true
 	session.onWriteFailure = s.handleProviderWriteFailure
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
+	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
+	s.rememberProviderSnapshot(*entry)
+	s.recordConnectionEvent(providerevents.Event{
+		ProviderID:    entry.ProviderID,
+		SessionID:     entry.AssignedID,
+		Kind:          providerevents.KindAuthAccepted,
+		Outcome:       providerevents.OutcomeSuccess,
+		AuthStage:     providerevents.AuthStagePostAuth,
+		MessageFamily: providerevents.MessageFamilyNone,
+		BinaryVersion: entry.BinaryVersion,
+	})
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
 	return session, pool.RegisterRefusalNone
@@ -2566,6 +2676,7 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 	// Log every WS close at warn level so silent failures (like the v1.1.2
 	// deploy's invalid_token rejection of M4/M1) are visible in the journal.
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
+	s.recordCloseEvent(conn, code, reason)
 	_ = s.writeServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
 }
 
@@ -2578,6 +2689,24 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 // registerProviderSession has returned.
 func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, reason string) {
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
+	if session != nil {
+		session.closeEventOnce.Do(func() {
+			meta := closeEventMeta{
+				providerID:       session.providerID,
+				sessionID:        session.assignedID,
+				authStage:        providerevents.AuthStagePostAuth,
+				messageFamily:    providerevents.MessageFamilyNone,
+				identityVerified: true,
+			}
+			if p, ok := s.pool.Resolve(session.providerID, session.assignedID); ok {
+				meta.binaryVersion = p.BinaryVersion
+			}
+			// Drop any stale conn-keyed meta so a later takeCloseEvent cannot
+			// emit a second unattributed close event for the same socket.
+			_ = s.takeCloseEvent(session.conn)
+			s.recordCloseEventFromMeta(meta, code, reason)
+		})
+	}
 	body := gobwas.NewCloseFrameBody(code, reason)
 	var buf bytes.Buffer
 	if err := gobwas.WriteFrame(&buf, gobwas.NewCloseFrame(body)); err != nil {
@@ -3058,9 +3187,31 @@ func (s *Server) runWarmupGate(provider pool.Provider) {
 			return
 		}
 		s.log.Warn().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Str("reason", "warmup_failed").Msg("warmup gate attempt failed")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    provider.ProviderID,
+			SessionID:     provider.AssignedID,
+			Kind:          providerevents.KindWarmupFailed,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonWarmupFailed,
+			AuthStage:     providerevents.AuthStageWarmup,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: provider.BinaryVersion,
+			Diagnostic:    "warmup_attempt_failed",
+		})
 	}
 	if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
 		s.log.Warn().Str("provider_id", provider.ProviderID).Str("reason", "warmup_failed").Msg("provider marked unavailable after warmup gate failures")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    provider.ProviderID,
+			SessionID:     provider.AssignedID,
+			Kind:          providerevents.KindWarmupFailed,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonWarmupFailed,
+			AuthStage:     providerevents.AuthStageWarmup,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: provider.BinaryVersion,
+			Diagnostic:    "warmup_gate_exhausted",
+		})
 	}
 }
 
@@ -3847,6 +3998,52 @@ func (s *Server) DrainAll(reason string) {
 	}
 }
 
+// CloseAllProviderSessions tears down hijacked provider sockets so final
+// disconnect events can still enqueue before FlushConnectionEvents.
+func (s *Server) CloseAllProviderSessions(reason string) {
+	if s == nil {
+		return
+	}
+	s.sessions.Range(func(key, value any) bool {
+		session, ok := value.(*providerSession)
+		if !ok || session == nil {
+			return true
+		}
+		s.log.Info().
+			Str("provider_id", session.providerID).
+			Str("reason", reason).
+			Msg("closing provider session for shutdown")
+		_ = s.takeCloseEvent(session.conn)
+		session.close()
+		s.sessions.Delete(key)
+		if session.conn != nil {
+			_ = session.conn.Close()
+		}
+		return true
+	})
+}
+
+// WaitProviderConnections blocks until in-flight provider WS handlers exit or
+// the timeout elapses. Used before journal flush on shutdown.
+func (s *Server) WaitProviderConnections(timeout time.Duration) {
+	if s == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		s.providerConnWG.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.log.Warn().Msg("provider websocket handlers did not quiesce before journal flush")
+	}
+}
+
 func (s *Server) handlePreflightAck(providerID, assignedID string, payload []byte) {
 	ack, field, err := ParsePreflightAck(payload)
 	if err != nil {
@@ -3936,9 +4133,21 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
 		return
 	}
+	s.rememberProviderSnapshotCoalesced(*entry)
 	threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
 	if gap > threshold {
 		s.log.Warn().Str("provider_id", providerID).Dur("gap", gap).Dur("threshold", threshold).Msg("provider heartbeat stale")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    providerID,
+			SessionID:     assignedID,
+			Kind:          providerevents.KindHeartbeatStale,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonHeartbeatStale,
+			AuthStage:     providerevents.AuthStageLiveness,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: entry.BinaryVersion,
+			Diagnostic:    "heartbeat_gap",
+		})
 	}
 	if gap > s.wakeGapThreshold() && !s.warmupGatePending(providerID) {
 		s.log.Info().Str("provider_id", providerID).Dur("gap", gap).Msg("provider wake detected")
@@ -4088,6 +4297,29 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
 	s.pruneIdlePrewarmLimits(s.now())
+	binaryVersion := ""
+	var conn net.Conn
+	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+		conn = session.conn
+	}
+	if provider, ok := s.pool.Resolve(providerID, assignedID); ok {
+		provider.State = pool.StateUnavailable
+		binaryVersion = provider.BinaryVersion
+		s.rememberProviderSnapshot(provider)
+	}
+	if conn != nil {
+		_ = s.takeCloseEvent(conn)
+	}
+	s.recordConnectionEvent(providerevents.Event{
+		ProviderID:    providerID,
+		SessionID:     assignedID,
+		Kind:          providerevents.KindDisconnect,
+		Outcome:       providerevents.OutcomeFailure,
+		FailureReason: providerevents.ReasonProviderWebsocketDisconnected,
+		AuthStage:     providerevents.AuthStagePostAuth,
+		MessageFamily: providerevents.MessageFamilyNone,
+		BinaryVersion: binaryVersion,
+	})
 	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
 		session.close()
 		s.sessions.Delete(sessionKey(providerID, assignedID))
@@ -4164,6 +4396,17 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 			Dur("gap", s.now().Sub(last)).
 			Dur("threshold", threshold).
 			Msg("provider inactive past threshold; closing websocket")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    providerID,
+			SessionID:     assignedID,
+			Kind:          providerevents.KindHeartbeatStale,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonHeartbeatStale,
+			AuthStage:     providerevents.AuthStageLiveness,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: provider.BinaryVersion,
+			Diagnostic:    "liveness_threshold_exceeded",
+		})
 		_ = conn.Close()
 		return
 	}

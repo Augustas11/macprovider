@@ -568,7 +568,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/658",
-        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55→vNext update/rollback/buyer-serving journey remains open. #610 still owns broader first-hop recovery conformance."
+        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55\u2192vNext update/rollback/buyer-serving journey remains open. #610 still owns broader first-hop recovery conformance."
       }
     },
     {
@@ -969,6 +969,34 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
+    },
+    {
+      "spec_id": "SPEC-035",
+      "title": "Provider connection diagnostics and failure history",
+      "version": "v0.1.1",
+      "path": "specs/SPEC-035-provider-connection-diagnostics.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-connection-diagnostics"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-003"
+      ],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Partial #535 lands coordinator durable events + operator GETs; provider diagnostic_status over WSS, pearlctl inspect/alerts, and HTTPS beacon remain deferred."
+      }
     }
   ],
   "requirements": [
@@ -1340,6 +1368,112 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/613",
         "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested; conformance remains pending until the signed production deployment completes the real-X dwell reward and the missing fresh referred-provider journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R001",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) Record",
+        "phase4-coordinator/internal/ws/connection_events.go:func (s *Server) recordConnectionEvent",
+        "phase4-coordinator/internal/ws/admin_providers.go:func (s *Server) handleAdminProviders"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/providerevents/store_test.go:TestRecordRetentionAndPerProviderCap",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestRedactDiagnosticStripsSecretsAndBounds",
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersRequireOperatorAuth",
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersOfflineLastKnownAndEvents"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Durable redacted connection events: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R002",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/providerevents/taxonomy.go:func NormalizeFailureReason"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/providerevents/store_test.go:TestNormalizeFailureReasonTaxonomy"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Closed failure taxonomy: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R003",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/admin_providers.go:func (s *Server) handleAdminProviders",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) authorizedOperator"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersRequireOperatorAuth"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Operator-only admin GETs: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R004",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/admin_providers.go:func (s *Server) writeAdminProviderDetail",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) UpsertLastKnown"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersOfflineLastKnownAndEvents",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestLastKnownOfflineRepresentation"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Offline last-known representation: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R005",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) Prune",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) enforceProviderCap",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) ReconcileBounds"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/providerevents/store_test.go:TestRecordRetentionAndPerProviderCap",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestAnonymousBucketCapped"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Retention bound: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
       }
     }
   ]
