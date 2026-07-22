@@ -320,6 +320,9 @@ private struct ReferralPanel: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Invite providers")
                         .font(.headline)
+                    Text(ReferralPanelPresenter.pathChrome)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     Text(ReferralPanelPresenter.headline(availability: availability, status: status))
                         .font(.callout.weight(.semibold))
                     Text(ReferralPanelPresenter.detail(availability: availability, status: status))
@@ -354,6 +357,12 @@ private struct ReferralPanel: View {
                             Task { await agent.startReferralChallenge() }
                         }
                         .disabled(agent.snapshot.referralActionInProgress)
+                    } else if status.socialState == ReferralStatusProjection.matured,
+                              status.socialBonusEnabled,
+                              status.bonusCapacity > 0 {
+                        Text("X bonus already awarded")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 

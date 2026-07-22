@@ -31,19 +31,19 @@ final class MenuBarController {
         self.dismissalStore = dismissalStore
         self.dismissedUnclaimedThreshold = dismissalStore.dismissedThreshold
         self.onAction = onAction
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.statusItem = NSStatusBar.system.statusItem(withLength: MenuBarPresentation.statusItemLength)
         configureButton()
         subscribeToState()
     }
 
     private func configureButton() {
         guard let button = statusItem.button else { return }
-        let icon = MalibuMenuBarIcon.makeTemplate(pointSize: 18)
+        let icon = MalibuMenuBarIcon.makeTemplate()
         button.image = icon
         button.image?.size = icon.size
         button.image?.accessibilityDescription = "Malibu"
-        button.imagePosition = .imageLeading
-        button.imageScaling = .scaleNone
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
         button.title = ""
         button.target = self
         button.action = #selector(statusBarButtonClicked(_:))
@@ -138,13 +138,16 @@ final class MenuBarController {
     private func render(_ snapshot: AgentSnapshot) {
         // AUDIT R1 ARCHITECT A5: view strings live in the presenter, not the
         // snapshot data type. This lets locale/currency work touch one place.
+        // #664: menu bar stays icon-only; status/earnings/badges live in
+        // tooltip + right-click menu + dashboard.
         latestSnapshot = snapshot
-        let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
-        let updateBadge = AgentSnapshotPresenter.updateAvailable(snapshot) ? "↑" : nil
-        let queueDot = (snapshot.queueDepth ?? 0) > 0 ? "•" : nil
+        PublicStatusTransitionDiagnostics.notePresentedSnapshot(snapshot)
         if let button = statusItem.button {
-            button.title = [AgentSnapshotPresenter.short(snapshot), badge, updateBadge, queueDot].compactMap { $0 }.joined(separator: " ")
-            button.imagePosition = .imageLeading
+            button.title = MenuBarPresentation.buttonTitle(
+                for: snapshot,
+                dismissedThreshold: dismissedUnclaimedThreshold
+            )
+            button.imagePosition = .imageOnly
         }
         statusItem.button?.toolTip = menuTooltip(snapshot)
         statusItem.button?.contentTintColor = snapshot.thermalState?.isMenuBarAttention == true
