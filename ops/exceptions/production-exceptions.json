@@ -1,8 +1,8 @@
 {
   "$schema": "./production-exceptions.schema.json",
   "schema_version": "macprovider-production-exceptions-v1",
-  "updated_at": "2026-07-21T18:30:00Z",
-  "updated_by": "cursor-610-first-hop",
+  "updated_at": "2026-07-22T05:50:00Z",
+  "updated_by": "cursor-608-catalog-unify",
   "environment": "pearl-production",
   "exceptions": [
     {
@@ -143,16 +143,28 @@
       "component": "catalog",
       "policy_delta": "Model/catalog authority may temporarily tolerate current-plus-previous or bridge compatibility instead of one strict signed release-bound model identity authority consumed uniformly by autotune and Tier-2.",
       "authority_surface": "Autotune current/previous catalog activation, `tier2.catalog_path`, `tier2.model_hash_legacy_until`, and catalog admission compatibility surfaces.",
-      "reason": "#608 records production drift between autotune/network catalog identity and Tier-2 catalog identity; #615 requires the bridge inventory to be explicit until a single release-bound authority is fully enforced.",
+      "reason": "#608 records production drift between autotune/network catalog identity and Tier-2 catalog identity; #615 requires the bridge inventory to be explicit until a single release-bound authority is fully enforced. Partial #608 landed fail-closed conflict detection + release-derived Tier-2 identity binding tooling, but the dual on-disk authorities remain.",
       "owner": "catalog release/provider upgrade",
       "issue": "https://github.com/Augustas11/macprovider/issues/608",
       "created_at": "2026-07-16T00:00:00Z",
       "expires_at": null,
-      "expiry_unknown_reason": "#608 remains open for unified authority and atomic release/rollback; live current/previous catalog bridge state must be verified on Pearl.",
+      "expiry_unknown_reason": "#608 remains open for physical dual-file removal and ledger-bound Tier-2 bytes; live current/previous catalog bridge state must be verified on Pearl.",
       "scope": "Pearl catalog/admission consumers across coordinator, provider CLI, and Tier-2 during migration.",
-      "removal_condition": "Autotune and Tier-2 consume the same signed model identity rows, rollback restores one complete release, and production emits no model-hash uncatalogued events for active signed release rows.",
-      "rollback_command": "Use the catalog-release/provider-upgrade runbook to restore one complete signed catalog release set; do not edit Tier-2 identity separately from the network release.",
+      "removal_condition": "Autotune and Tier-2 consume the same signed model identity rows from one release-bound file/authority, rollback restores one complete release (including Tier-2 bytes in the ledger/compatibility-set), and production emits no model-hash uncatalogued events for active signed release rows.",
+      "rollback_command": "Use the catalog-release/provider-upgrade runbook to restore one complete signed catalog release set; do not edit Tier-2 identity separately from the network release. Before upload, `catalog-release.py check-tier2-binding` must pass against the autotune release being activated.",
       "post_removal_validation": "Coordinator active release identity and component digests match the signed release; Tier-2 expected identity is generated from the same row; no duplicate legacy catalog file participates in modern decisions.",
+      "partial_progress": [
+        "Coordinator startup/reload fail-closed on overlapping autotune vs Tier-2 hash conflicts (internal/catalogbind).",
+        "catalog-release.py emits tier2-identity-binding.json; derive-tier2 remains disabled until an explicit snapshot-manifest Tier-2 hash_scope exists; check-tier2-binding enforces digest overlap.",
+        "deploy-pearl-vps.sh refuses upload when Tier-2 conflicts with the staged autotune release.",
+        "Route-snapshot Tier-2 mismatch fails closed even outside settlement enforce mode."
+      ],
+      "still_blocked_for_clearance": [
+        "Signed Tier-2 bytes are not yet a ledger/compatibility-set feed member.",
+        "Independent /opt/macprovider/tier2-catalog.json file authority still exists.",
+        "Current-plus-previous autotune bridge and model_hash_legacy_until remain.",
+        "Physical Pearl journey proof that no uncatalogued events fire for active release rows."
+      ],
       "blocks_stable_promotion": true,
       "evidence": [
         "https://github.com/Augustas11/macprovider/issues/615",
@@ -160,7 +172,9 @@
         "https://github.com/Augustas11/macprovider/issues/609",
         "ops/runbooks/catalog-release-provider-upgrade.md",
         "beta/DECISION_CRITERIA.md Entry 170",
-        "specs/CONFORMANCE.json"
+        "specs/CONFORMANCE.json",
+        "phase4-coordinator/internal/catalogbind/",
+        "phase3-binary/catalog/autotune/tier2-identity-binding.json"
       ]
     },
     {

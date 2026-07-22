@@ -613,6 +613,73 @@ func TestStreamingSettlementOutputPersistsOpenAICompatibleSSE(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotFailsClosedOnTier2AdmissionConflictInObserveMode(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "conflict-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream must not be reached when Tier-2 conflicts with admission hash")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x76}, 32))
+	providers := registry.Snapshot()
+	if len(providers) != 1 {
+		t.Fatalf("providers=%d", len(providers))
+	}
+	provider := providers[0]
+	// Admission identity differs from the active Tier-2 row for model-a.
+	provider.ExpectedModelHash = strings.Repeat("c", 64)
+	provider.ModelHash = strings.Repeat("c", 64)
+	provider.HashStatus = pool.HashStatusVerified
+	registry.Register(&provider, nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code == http.StatusOK {
+		t.Fatalf("observe-mode conflict must fail closed, got status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "tier2 catalog does not match signed admission row") &&
+		!strings.Contains(rr.Body.String(), "route snapshot") {
+		// Buyer surfaces the recorder error; accept either the exact conflict
+		// text or a route-snapshot failure wrapper.
+		t.Fatalf("response missing conflict signal: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := routeSnapshotCount(t, dbPath); got != 0 {
+		t.Fatalf("route snapshots=%d want 0 on conflict", got)
+	}
+}
+
 func TestRouteSnapshotSkippedForNonSettlementCapableModelHash(t *testing.T) {
 	tier2.ResetForTest()
 	t.Cleanup(tier2.ResetForTest)

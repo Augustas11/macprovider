@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -473,7 +474,7 @@ func TestReloadTier2RejectsStartupCatalogFieldChange(t *testing.T) {
 	next.Tier2.CatalogPath = "/tmp/catalog.json"
 	next.Tier2.CatalogPublicKey = "catalog-key"
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	got := fetchReloadTier2Metadata(t, buyerServer)
 	if got.Phase != 0 || got.ModelHash.Active {
@@ -488,7 +489,7 @@ func TestReloadTier2RejectsStartupOnlyTier2FieldChange(t *testing.T) {
 	next.Tier2.ObserveEnabled = true
 	next.Tier2.EncryptedLegRekeyAfterRequests++
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	got := fetchReloadTier2Metadata(t, buyerServer)
 	if got.Phase != 0 || got.ModelHash.Active {
@@ -610,7 +611,7 @@ func TestReloadTier2AppliesHotObserveFlag(t *testing.T) {
 	next := startup
 	next.Tier2.ObserveEnabled = true
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	got := fetchReloadTier2Metadata(t, buyerServer)
 	if got.Phase != 0 || !got.ModelHash.Active {
@@ -638,7 +639,7 @@ func TestReloadTier2ReloadsSamePathCatalogContents(t *testing.T) {
 	}
 
 	var logs bytes.Buffer
-	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil)
 
 	if got := tier2.VerifyProviderHash("model-a", reloadOtherHash); got != pool.HashStatusVerified {
 		t.Fatalf("reloaded catalog hash status=%q want %q logs=%s", got, pool.HashStatusVerified, logs.String())
@@ -668,13 +669,65 @@ func TestReloadTier2PreservesPreviousCatalogOnInvalidSamePathReload(t *testing.T
 	}
 
 	var logs bytes.Buffer
-	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil)
 
 	if got := tier2.VerifyProviderHash("model-a", reloadTestHash); got != pool.HashStatusVerified {
 		t.Fatalf("preserved catalog hash status=%q want %q logs=%s", got, pool.HashStatusVerified, logs.String())
 	}
 	if tier2.LoadFailed() {
 		t.Fatalf("rejected reload mutated tier2 load state logs=%s", logs.String())
+	}
+}
+
+func TestReloadTier2RejectsAutotuneBindingConflict(t *testing.T) {
+	defer tier2.ResetForTest()
+	catalogPath := t.TempDir() + "/catalog.json"
+	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
+	if err := os.WriteFile(catalogPath, raw, 0600); err != nil {
+		t.Fatalf("write initial catalog: %v", err)
+	}
+	startup := config.Default()
+	startup.Tier2.CatalogPath = catalogPath
+	startup.Tier2.CatalogPublicKey = publicKey
+	if err := tier2.Configure(startup.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("startup Configure: %v", err)
+	}
+	startup, _, wsServer, buyerServer := reloadTestServers(startup)
+	replacement, _ := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadOtherHash)
+	if err := os.WriteFile(catalogPath, replacement, 0600); err != nil {
+		t.Fatalf("write conflicting catalog: %v", err)
+	}
+	autotuneCatalog, err := autotune.ParseCatalog([]byte(`{
+		"version":"release-under-test",
+		"policy_version":"autotune-policy-v1",
+		"source":"operator_curated_autotune_candidate_catalog",
+		"rows":{
+			"model-a":{
+				"model_id":"model-a",
+				"model_revision":"0123456789abcdef0123456789abcdef01234567",
+				"model_sha256":"` + reloadTestHash + `",
+				"min_ram_gb":12,
+				"min_bandwidth_tier":"C",
+				"bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":4500},
+				"runtime_status":"recommendable"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseCatalog: %v", err)
+	}
+
+	var logs bytes.Buffer
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog)
+
+	if got := tier2.VerifyProviderHash("model-a", reloadTestHash); got != pool.HashStatusVerified {
+		t.Fatalf("conflicting reload must preserve prior catalog: status=%q logs=%s", got, logs.String())
+	}
+	if got := tier2.VerifyProviderHash("model-a", reloadOtherHash); got != pool.HashStatusMismatch {
+		t.Fatalf("conflicting reload must not activate drifted hash: status=%q", got)
+	}
+	if !strings.Contains(logs.String(), "tier2 config reload rejected") {
+		t.Fatalf("expected reload rejection log, got %s", logs.String())
 	}
 }
 
@@ -709,7 +762,7 @@ func TestReloadTier2RejectsExistingUntypedProviderHashesWithoutBridge(t *testing
 	next := startup
 	next.Tier2.ObserveEnabled = true
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	provider, ok := registry.Resolve("provider-a", "session-a")
 	if !ok {
@@ -754,7 +807,7 @@ func TestReloadTier2LogsUntypedHashInvalidTransition(t *testing.T) {
 		t.Fatalf("write replacement catalog: %v", err)
 	}
 
-	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	provider, ok := registry.Resolve("provider-a", "session-a")
 	if !ok {
@@ -804,7 +857,7 @@ func TestReloadTier2LogsMissingAlgorithmInvalidation(t *testing.T) {
 	next := startup
 	next.Tier2.RequireHashVerified = true
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	provider, ok := registry.Resolve("provider-a", "session-a")
 	if !ok {
