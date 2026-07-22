@@ -211,8 +211,24 @@ _validate_catalog_canary_auth_token "$token_512" ||
 ! _validate_catalog_canary_auth_token "${token_32}"$'\r''header = "X-Injected: yes"' ||
   fail "canary token validator must reject carriage-return curl-config injection"
 
+deadline_alarm_tmp="$(mktemp)"
+trap 'rm -f "$token_validator_tmp" "$deadline_alarm_tmp"' EXIT
+awk '/^_run_with_deadline_alarm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_alarm_tmp"
+grep -qF '_run_with_deadline_alarm()' "$deadline_alarm_tmp" ||
+  fail "deploy must keep an extractable subprocess deadline helper"
+# shellcheck disable=SC1090
+. "$deadline_alarm_tmp"
+deadline_start="$SECONDS"
+if _run_with_deadline_alarm 1 sh -c 'sleep 30'; then
+  fail "subprocess deadline helper must terminate a hung command"
+fi
+[ "$((SECONDS - deadline_start))" -lt 5 ] ||
+  fail "subprocess deadline helper did not enforce its wall-clock bound"
+_run_with_deadline_alarm 2 sh -c 'exit 0' ||
+  fail "subprocess deadline helper must preserve successful commands"
+
 deadline_parser_tmp="$(mktemp)"
-trap 'rm -f "$token_validator_tmp" "$deadline_parser_tmp"' EXIT
+trap 'rm -f "$token_validator_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"' EXIT
 awk '/^_parse_model_hash_legacy_until\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_parser_tmp"
 grep -qF '_parse_model_hash_legacy_until()' "$deadline_parser_tmp" ||
   fail "deploy must keep an extractable MODEL_HASH_LEGACY_UNTIL parser"
@@ -243,17 +259,21 @@ grep -q 'StrictHostKeyChecking=yes' "$DEPLOY_SH" ||
 grep -q 'assigned_id=\$CANARY_ASSIGNED_QUERY&details=deployment' "$DEPLOY_SH" ||
   fail "deploy must gate completion on the exact proved provider session"
 
-proof_retry_line=$(grep -nF 'if run_catalog_canary_mac_proof > "$CANARY_INSTALLED_BODY"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+proof_retry_line=$(grep -nF 'if run_catalog_canary_mac_proof "$CANARY_PROOF_TIMEOUT_S" > "$CANARY_INSTALLED_BODY"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
 session_rebind_line=$(grep -nF 'read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY <<< "$CANARY_BINDING"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
 session_query_line=$(grep -nF 'CANARY_STATUS=$(curl --config "$CANARY_CURL_CONFIG"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
 [ -n "$proof_retry_line" ] && [ -n "$session_rebind_line" ] && [ -n "$session_query_line" ] &&
   [ "$proof_retry_line" -lt "$session_rebind_line" ] && [ "$session_rebind_line" -lt "$session_query_line" ] ||
   fail "each canary recovery attempt must re-prove the Mac and bind the query to that attempt's session"
 
-grep -q 'CANARY_MAX_ATTEMPTS=36' "$DEPLOY_SH" &&
+grep -q 'CANARY_RECOVERY_DEADLINE=' "$DEPLOY_SH" &&
+  grep -q '_run_with_deadline_alarm "$timeout_s" "${CANARY_SSH\[@\]}"' "$DEPLOY_SH" &&
   grep -q 'rm -f "$CANARY_INSTALLED_BODY" "$CANARY_POOL_BODY"' "$DEPLOY_SH" &&
   grep -q 'waiting for exact catalog canary recovery' "$DEPLOY_SH" ||
-  fail "deploy must retry full canary proof with a bounded window and discard stale attempt output"
+  fail "deploy must retry full canary proof within a wall-clock deadline and discard stale attempt output"
+
+grep -q 'os.O_RDONLY | nofollow | nonblock' "$DEPLOY_SH" ||
+  fail "Mac proof must open untrusted file entries without blocking on special files"
 
 grep -q 'value.get("assigned_id") != sys.argv\[3\]' "$DEPLOY_SH" ||
   fail "deploy must reject coordinator evidence for a different assigned session"
