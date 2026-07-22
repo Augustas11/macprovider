@@ -90,6 +90,17 @@ let package = Package(
                 "MacProviderCore",
             ],
             path: "Tests/MacProviderCoreTests"
+        ),
+        .testTarget(
+            name: "mlx-stage-spikeTests",
+            dependencies: [
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ],
+            path: "Tests/mlx-stage-spikeTests",
+            exclude: ["README.md"]
         )
     ]
 )
