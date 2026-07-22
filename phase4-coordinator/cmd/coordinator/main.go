@@ -30,6 +30,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
+	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/referralapi"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -225,6 +226,11 @@ func main() {
 	admissionStore, err := providerws.NewSQLiteAdmissionStore(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
+		os.Exit(1)
+	}
+	connectionEventStore, err := providerevents.NewSQLiteStore(reqLogStore.DB())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "provider connection events storage: %v\n", err)
 		os.Exit(1)
 	}
 	billingStore, err := billing.NewStore(reqLogStore.DB())
@@ -488,6 +494,8 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
+	wsOpts = append(wsOpts, providerws.WithConnectionEventStore(connectionEventStore))
+	wsOpts = append(wsOpts, providerws.WithConnectionEventMetrics(metricsHandle))
 	if canaryStore != nil {
 		wsOpts = append(wsOpts, providerws.WithCanarySanctionStore(canaryStore))
 	}

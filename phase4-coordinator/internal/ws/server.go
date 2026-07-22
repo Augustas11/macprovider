@@ -21,6 +21,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	gobwas "github.com/gobwas/ws"
@@ -133,6 +134,9 @@ type Server struct {
 	idlePrewarmMetrics             IdlePrewarmMetrics
 	modelHashMismatchMetrics       ModelHashMismatchMetrics
 	credentialBootstrapMetrics     CredentialBootstrapMetrics
+	connectionEvents               ConnectionEventStore
+	connectionEventMetrics         ConnectionEventMetrics
+	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
 	bootstrapLimiter               *bootstrapMintLimiter
 	idlePrewarmLimits              sync.Map
 	idlePrewarmQueue               chan idlePrewarmRecord
@@ -823,6 +827,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/poolz", s.handlePoolz)
 	mux.HandleFunc("/admin/blacklist", s.handleBlacklist)
+	mux.HandleFunc("/admin/providers", s.handleAdminProviders)
+	mux.HandleFunc("/admin/providers/", s.handleAdminProviders)
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
 	mux.HandleFunc("/admin/promote/", s.handleAdminPromote)
 	mux.HandleFunc("/admin/reject/", s.handleAdminReject)
@@ -851,6 +857,14 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	conn, _, _, err := gobwas.UpgradeHTTP(r, w)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("provider websocket upgrade failed")
+		s.recordConnectionEvent(providerevents.Event{
+			Kind:          providerevents.KindUpgradeFailed,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonUpgradeFailed,
+			AuthStage:     providerevents.AuthStageUpgrade,
+			MessageFamily: providerevents.MessageFamilyNone,
+			Diagnostic:    "websocket_upgrade_failed",
+		})
 		return
 	}
 	s.enableProviderTCPKeepAlive(conn)
@@ -862,11 +876,13 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	remoteIP := remoteIPForUnauthSemaphore(r.RemoteAddr, r.Header)
 	perIPOK, releasePerIP := s.reserveUnauthenticatedConnForIP(remoteIP)
 	if !perIPOK {
+		s.rememberCloseEvent(conn, closeEventMeta{authStage: providerevents.AuthStageUpgrade, messageFamily: providerevents.MessageFamilyNone})
 		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections_per_ip")
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
 	if !s.reserveUnauthenticatedConn() {
+		s.rememberCloseEvent(conn, closeEventMeta{authStage: providerevents.AuthStageUpgrade, messageFamily: providerevents.MessageFamilyNone})
 		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections")
 		releasePerIP()
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
@@ -875,6 +891,12 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	s.setReadDeadline(conn, s.cfg.ProviderWSHandshakeTimeout())
 	auth, ok := s.validateProviderToken(r)
 	if !ok {
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageUpgrade,
+			messageFamily: providerevents.MessageFamilyNone,
+			diagnostic:    "bearer_validation_failed",
+		})
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		s.releaseUnauthenticatedConn()
 		releasePerIP()
@@ -958,11 +980,23 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 
 	payload, op, err := s.readClientData(conn, s.directControlReply(conn))
 	if err != nil {
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyMissing,
+			diagnostic:    "first_message_read_failed",
+		})
 		s.close(conn, CloseInvalidHello, "invalid_hello: read")
 		return
 	}
 	if op != gobwas.OpText {
 		s.log.Warn().Str("bad_field", "opcode").Msg("provider first auth message rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyOther,
+			diagnostic:    "bad_field=opcode",
+		})
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
@@ -976,6 +1010,12 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 			Str("bad_field", badField).
 			Str("message_type", firstAuthMessageTypeForLog(typ)).
 			Msg("provider first auth message rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: firstAuthMessageTypeForLog(typ),
+			diagnostic:    "bad_field=" + badField,
+		})
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
@@ -996,6 +1036,12 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 			Str("bad_field", badField).
 			Str("message_type", firstAuthMessageTypeForLog(typ)).
 			Msg("provider first auth message rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    auth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: firstAuthMessageTypeForLog(typ),
+			diagnostic:    "bad_field=" + badField,
+		})
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 	}
 }
@@ -2487,6 +2533,16 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 	session.probeWrites = true
 	session.onWriteFailure = s.handleProviderWriteFailure
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
+	s.rememberProviderSnapshot(*entry)
+	s.recordConnectionEvent(providerevents.Event{
+		ProviderID:    entry.ProviderID,
+		SessionID:     entry.AssignedID,
+		Kind:          providerevents.KindAuthAccepted,
+		Outcome:       providerevents.OutcomeSuccess,
+		AuthStage:     providerevents.AuthStagePostAuth,
+		MessageFamily: providerevents.MessageFamilyNone,
+		BinaryVersion: entry.BinaryVersion,
+	})
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
 	return session, pool.RegisterRefusalNone
@@ -2566,6 +2622,7 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 	// Log every WS close at warn level so silent failures (like the v1.1.2
 	// deploy's invalid_token rejection of M4/M1) are visible in the journal.
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
+	s.recordCloseEvent(conn, code, reason)
 	_ = s.writeServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
 }
 
@@ -2578,6 +2635,15 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 // registerProviderSession has returned.
 func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, reason string) {
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
+	if session != nil {
+		s.rememberCloseEvent(session.conn, closeEventMeta{
+			providerID:    session.providerID,
+			sessionID:     session.assignedID,
+			authStage:     providerevents.AuthStagePostAuth,
+			messageFamily: providerevents.MessageFamilyNone,
+		})
+		s.recordCloseEvent(session.conn, code, reason)
+	}
 	body := gobwas.NewCloseFrameBody(code, reason)
 	var buf bytes.Buffer
 	if err := gobwas.WriteFrame(&buf, gobwas.NewCloseFrame(body)); err != nil {
@@ -3058,9 +3124,31 @@ func (s *Server) runWarmupGate(provider pool.Provider) {
 			return
 		}
 		s.log.Warn().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Str("reason", "warmup_failed").Msg("warmup gate attempt failed")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    provider.ProviderID,
+			SessionID:     provider.AssignedID,
+			Kind:          providerevents.KindWarmupFailed,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonWarmupFailed,
+			AuthStage:     providerevents.AuthStageWarmup,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: provider.BinaryVersion,
+			Diagnostic:    "warmup_attempt_failed",
+		})
 	}
 	if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
 		s.log.Warn().Str("provider_id", provider.ProviderID).Str("reason", "warmup_failed").Msg("provider marked unavailable after warmup gate failures")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    provider.ProviderID,
+			SessionID:     provider.AssignedID,
+			Kind:          providerevents.KindWarmupFailed,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonWarmupFailed,
+			AuthStage:     providerevents.AuthStageWarmup,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: provider.BinaryVersion,
+			Diagnostic:    "warmup_gate_exhausted",
+		})
 	}
 }
 
@@ -3939,6 +4027,17 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
 	if gap > threshold {
 		s.log.Warn().Str("provider_id", providerID).Dur("gap", gap).Dur("threshold", threshold).Msg("provider heartbeat stale")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    providerID,
+			SessionID:     assignedID,
+			Kind:          providerevents.KindHeartbeatStale,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonHeartbeatStale,
+			AuthStage:     providerevents.AuthStageLiveness,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: entry.BinaryVersion,
+			Diagnostic:    "heartbeat_gap",
+		})
 	}
 	if gap > s.wakeGapThreshold() && !s.warmupGatePending(providerID) {
 		s.log.Info().Str("provider_id", providerID).Dur("gap", gap).Msg("provider wake detected")
@@ -4088,6 +4187,19 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
 	s.pruneIdlePrewarmLimits(s.now())
+	if provider, ok := s.pool.Resolve(providerID, assignedID); ok {
+		provider.State = pool.StateUnavailable
+		s.rememberProviderSnapshot(provider)
+	}
+	s.recordConnectionEvent(providerevents.Event{
+		ProviderID:    providerID,
+		SessionID:     assignedID,
+		Kind:          providerevents.KindDisconnect,
+		Outcome:       providerevents.OutcomeFailure,
+		FailureReason: providerevents.ReasonProviderWebsocketDisconnected,
+		AuthStage:     providerevents.AuthStagePostAuth,
+		MessageFamily: providerevents.MessageFamilyNone,
+	})
 	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
 		session.close()
 		s.sessions.Delete(sessionKey(providerID, assignedID))
@@ -4164,6 +4276,17 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 			Dur("gap", s.now().Sub(last)).
 			Dur("threshold", threshold).
 			Msg("provider inactive past threshold; closing websocket")
+		s.recordConnectionEvent(providerevents.Event{
+			ProviderID:    providerID,
+			SessionID:     assignedID,
+			Kind:          providerevents.KindHeartbeatStale,
+			Outcome:       providerevents.OutcomeFailure,
+			FailureReason: providerevents.ReasonHeartbeatStale,
+			AuthStage:     providerevents.AuthStageLiveness,
+			MessageFamily: providerevents.MessageFamilyNone,
+			BinaryVersion: provider.BinaryVersion,
+			Diagnostic:    "liveness_threshold_exceeded",
+		})
 		_ = conn.Close()
 		return
 	}
