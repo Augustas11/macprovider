@@ -221,6 +221,8 @@ func TestListLastKnownOpaqueCursorStableAcrossSeenUpdate(t *testing.T) {
 		}
 	}
 }
+
+func TestLastKnownOfflineRepresentation(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 	seen := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
