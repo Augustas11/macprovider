@@ -2,10 +2,16 @@
 
 ## Status
 
-**Partial #610.** Code and automated tests land the production-supported
-first-hop bridge. Physical proof from a stranded public 1.8.48 install
-(disconnected + rejected journeys, buyer restore) remains required before
-closing the issue.
+**Partial #610 — issue OPEN.** Code and automated tests land the production-supported
+first-hop bridge; private physical J1 Shape A **PASS** on
+`v1.8.58@8c4c57d8` (2026-07-22) closed the PATH postcondition gap (#678).
+
+Authoritative close checklist:
+[`audits/2026-07-22/CLOSE_CRITERIA_610.md`](../../audits/2026-07-22/CLOSE_CRITERIA_610.md).
+
+Remaining before close: public release + Pearl advertise, production bridge
+enablement if needed, and deferred physical ACs (disconnected-only, opt-out,
+rollback) unless explicitly waived in decision log.
 
 ## Why this exists
 
@@ -95,16 +101,14 @@ After the first recovery-capable CLI is active:
 5. Failed activation rolls back the previous complete set
 6. PATH / launchd / payload converge to one signed set (#616)
 
-## Physical acceptance still open
+## Physical acceptance — see close criteria
 
-Record and attach before closing #610:
+Detailed done/remaining gates, evidence pointers, and AC matrix:
+[`audits/2026-07-22/CLOSE_CRITERIA_610.md`](../../audits/2026-07-22/CLOSE_CRITERIA_610.md).
 
-1. Baseline public 1.8.48 set hash `a486a539…` / CLI hash `ae618537…`
-2. Pearl first-hop bridge enabled with exact set IDs above
-3. Ordinary `macprovider-cli update` activates the recovery target without
-   extracting candidate binaries or `launchctl` repair
-4. Repeat disconnected / rejected / opt-out / rollback / buyer HTTP 200
-5. Remove `first_hop_bridge_ids` entry after the cohort empties
+Summary: J1 Shape A **PASS** on private `v1.8.58@8c4c57d8` (2026-07-22). Issue
+stays OPEN until public release, Pearl advertise, production bridge (if needed),
+and deferred physical ACs are satisfied.
 
 ## Related
 
