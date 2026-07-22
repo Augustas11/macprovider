@@ -4,7 +4,7 @@ Version: v0.1.0
 Status: draft (normative design; IMPL lands behind a disabled-by-default flag)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
-Audit history: R1+R2 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1.
+Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds.
 
 ## 1. Purpose and scope
 
@@ -13,7 +13,10 @@ tier on local disk so a reusable conversation prefix survives provider process
 loss — deploy, crash, supervisor relaunch, and (within eligibility bounds,
 see FR-KVP10) host reboot — and cuts the restart-driven re-prefill
 contribution to the buyer-TTFT tail measured in RESEARCH_234 (p95 16.8 s,
-p99 51.4 s, 4.2% of requests over 20 s).
+p99 51.4 s, 4.2% of requests over 20 s). In v0.1 this benefit is
+measured on synthetic operator traffic only (FR-KVP11 synthetic-key gate);
+production buyer-key persistence is gated on future coordinator purge
+propagation.
 
 The tier changes only cache **residency** — which turns can still hit after
 the hot tier has lost the entry (process loss, or intra-process LRU/token-cap
@@ -67,6 +70,11 @@ Out of scope (recorded, not silently dropped):
   channel is future work and MUST NOT be presented as shipped buyer purge.
   Because it does not exist, **persistence of buyer conversation keys is
   disabled and unenableable in v0.1** (FR-KVP11).
+- Long-context restore beyond the promotion ceiling. v0.1's validated and
+  serviceable envelope is the ~8k-token prefix class (total decoded size ≤
+  the 256 MiB promotion ceiling, calibrated to the memo's hypothetical q4
+  KV); the memo's highest-value 32k–64k class is deferred to
+  KVS-04-class evidence under a future format milestone (§6).
 - Defense against a hostile process running under the **same macOS user
   (euid)** as the provider, and against host-privileged actions (root, full
   system restore including the user Keychain, kernel/clock control beyond
@@ -188,19 +196,29 @@ persistence-format test fixtures (§7).
   the snapshot records (fixture: AC-9).
 - **Write-side budget (RAM-DoS bound).** Before copying, the writer MUST
   estimate snapshot bytes from validated cache geometry; if the estimate
-  exceeds `write_staging_max_bytes` (default 256 MiB; hard max 1 GiB) or
-  the per-entry byte cap, the write is skipped (`disk_write_skipped`)
-  without copying. At most **one** pending snapshot may exist per index
-  (a newer commit replaces an unstarted older one) and pending snapshot
-  bytes namespace-wide MUST NOT exceed `write_staging_max_bytes`; excess
-  commits skip persistence. The hot commit itself is never blocked or
-  failed by any of this; the synchronous copy cost is bounded by the same
-  cap and is measured by the KVS harness (§6 write-path overhead).
+  exceeds `write_staging_max_bytes` (default 256 MiB; hard max 1 GiB), the
+  per-entry byte cap, **or the FR-KVP9 promotion staging ceiling** (an
+  entry that could never be promoted MUST NOT be written — detail
+  `exceeds_promotion_ceiling`), the write is skipped
+  (`disk_write_skipped`) without copying. At most **one** pending snapshot
+  may exist per index (a newer commit replaces an unstarted older one).
+  A single atomic **write-live budget** (`write_staging_max_bytes`) covers
+  all write-side memory from snapshot capture through release — pending
+  snapshots, the active serializer, and codec/encryption buffers — and is
+  reserved before copying; commits that cannot reserve skip persistence.
+  The hot commit itself is never blocked or failed by any of this; the
+  synchronous copy cost is bounded by the same budget and is measured by
+  the KVS harness (§6 write-path overhead).
 - **Write ordering (per index, single writer — FR-KVP7):** writes for one
   index are serialized in commit-sequence order; the writer MUST drop any
   snapshot whose commit sequence is ≤ the last published one. Blob and
   manifest temp files use per-write unique names created with `O_EXCL` in
-  the **same directory** as their destination. Commit protocol: write
+  the **same directory** as their destination. Generation numbers and
+  commit sequences are recovered at tier activation as (max committed
+  manifest value + 1); `O_EXCL` creation makes any residual collision an
+  explicit error (fixture: AC-3). Commit protocol: when the entry
+  directory is newly created, `mkdir` → `fsync(namespace parent
+  directory)` first; then write
   `gen-<N>.blob` → `fsync(blob fd)` → `fsync(entry directory)` → write
   manifest to unique temp → `fsync(temp fd)` → enter the per-index
   **mutation lane** (the same critical section purge uses, FR-KVP8) and
@@ -234,8 +252,11 @@ runtime value byte-for-byte:
    `kvsurv-codec-v1`);
 2. provider namespace ID and key epoch;
 3. HMAC index of the canonical key bytes (recomputed and compared);
-4. model ID, exact `model_sha256` (SPEC-010 canonical artifact hash), and
-   catalog revision;
+4. the **incoming cache-predicate model string** (the request `model`
+   value the hot tier stores and compares — aliases stay distinct exactly
+   as in the shipped predicate), and separately the **served canonical
+   identity**: served model ID, exact `model_sha256` (SPEC-010 canonical
+   artifact hash), and catalog revision;
 5. tokenizer identity, tokenizer configuration hash, and chat-template
    hash;
 6. serialization compatibility identity: the source-controlled
@@ -262,14 +283,17 @@ guard of FR-KVP10.
 
 **(c) Structural consistency:** token count, generation number, commit
 sequence, chunk table (count, per-chunk lengths, contiguous ordinals
-`0..count-1`, no gaps or duplicates), total payload length, and declared
-tensor shapes MUST be internally consistent and within the §5a parsing
-bounds **before any allocation is sized from them**.
+`0..count-1`, no gaps or duplicates), total payload length, declared
+tensor shapes, the declared blob SHA-256 (recomputed over the blob file —
+a structural fast-fail, not AAD-bound; see §5a), and frame-vs-manifest
+nonce equality MUST all be internally consistent and within the §5a
+parsing bounds **before any allocation is sized from them and before any
+AEAD open**.
 
-**(d) Cryptographic verification:** the manifest's declared blob SHA-256
-matches, and every payload chunk's AEAD tag verifies with the entry DEK
-under the §5a AAD (which binds the entire manifest, so rewriting any
-envelope field invalidates every chunk).
+**(d) Cryptographic verification:** every payload chunk's AEAD tag
+verifies with the entry DEK under the §5a AAD projection (which binds the
+whole manifest except post-encryption fields, so rewriting any envelope
+field invalidates every chunk).
 
 **Live identity completeness.** If any live-identity input (e.g. the
 canonical model hash) is unavailable in the current process, the tier MUST
@@ -327,9 +351,20 @@ block, fail, or corrupt the request being served.
     required fixture.
   - Per entry, a random 32-byte **entry DEK** is stored as its own Keychain
     item (service embeds namespace + epoch, account = entry index) and is
-    the AES-256-GCM key for that entry's chunks. **DEK destruction is the
-    purge revocation authority** (FR-KVP8): ciphertext restored from any
-    directory backup/snapshot is undecryptable once the DEK is gone.
+    the AES-256-GCM key for that entry's chunks (all generations of the
+    entry). **DEK destruction is the purge revocation authority**
+    (FR-KVP8): ciphertext restored from any directory backup/snapshot is
+    undecryptable once the DEK is gone. DEK lifecycle is complete and
+    transactional: creation is verified before first use (a failed create
+    aborts the write, `disk_write_skipped`); re-creating an index after
+    eviction or purge deletes any residual item then adds fresh
+    (`errSecDuplicateItem` ⇒ delete-then-add); **quota and retention
+    eviction destroy the entry's DEK** along with its files
+    (crypto-shredding evicted entries); orphaned items are reconciled
+    (enumerated by service prefix and deleted when no live entry matches)
+    at tier activation; and the Keychain item count is bounded by live
+    entries plus in-flight churn and is reported on the FR-KVP12
+    inspection surface.
 - **Keychain mode (normative).** All items use the **Data Protection
   Keychain**: `kSecUseDataProtectionKeychain = true`, an access group per
   the shipped `SecureEnclaveIdentity` pattern (`keychain-access-groups`
@@ -377,7 +412,11 @@ block, fail, or corrupt the request being served.
   the rotation journal. A provider process MUST only open its own
   namespace.
 - **Single writer with retry.** A process MUST hold an exclusive advisory
-  lock (`flock`) on a namespace lockfile while the tier is active. If the
+  lock (`flock`) on a namespace lockfile while the tier is active. The
+  lockfile lives in a stable, owner-verified directory **outside** every
+  deletable namespace/product path (so `purge --all --forget` never
+  unlinks a held lock inode) and is never deleted by cleanup; `--forget`
+  retains the lock through directory and Keychain verification. If the
   lock is unavailable (supervisor-relaunch overlap, duplicate instance),
   the tier is **transiently** dormant and MUST retry acquisition with
   bounded backoff, warning if contention persists; it activates on
@@ -386,8 +425,11 @@ block, fail, or corrupt the request being served.
   **tier activation** — not merely process start — and no disk read is
   served before it completes. Every mutating purge/cleanup operation
   requires the lock **regardless of the `enabled` flag** (a disabled tier
-  still purges); a purge that cannot acquire it within a bounded wait fails
-  (`purge_failed`), never silently.
+  still purges). Execution model: while a provider process holds the lock,
+  purge/status (CLI or socket) are executed **by that lock-holding
+  process** via the control socket, without re-acquisition; the
+  bounded-wait path (`purge_failed` on timeout) applies to a
+  standalone/offline purge acquiring a free lock. Never silent.
 - Cross-namespace reads, writes, eviction, or key derivation are forbidden.
   A raw entry copied between namespace directories MUST fail closed (the
   namespace ID is bound into the HMAC index, the DEK item identity, and
@@ -398,10 +440,17 @@ block, fail, or corrupt the request being served.
   A small **non-evictable metadata reserve** (default 4 MiB) is held back
   from the data budget so tombstones, journals, and namespace metadata can
   always be written — purge MUST NOT become impossible at full quota, and
-  purge MAY evict unrelated blobs to fund itself. Tombstone records are
-  bounded (compacted once their fence is subsumed by the namespace
-  high-watermark map, which is itself bounded and retained until epoch
-  destruction).
+  purge MAY evict unrelated blobs to fund itself. Control-plane state is
+  hard-bounded: namespace metadata ≤ 256 KiB, usage/rotation journals
+  compacted at ≤ 1 MiB, tombstones compacted once subsumed by the
+  high-watermark map, and the purge high-watermark map capped at **4096
+  indices** — reaching the cap forces an epoch rotation (which resets it
+  while preserving revocation via crypto-shred) before further purges;
+  a purge of an index with no artifacts and no in-flight work no-ops the
+  map (checked in the mutation lane) so absent-key purges cannot grow it.
+  All control artifacts are parsed with checked bounds (`fstat` first);
+  activation work is bounded by these caps. Quota-evicted and
+  retention-evicted entries have their DEK destroyed (FR-KVP6).
 - Caps (operational defaults, not protocol values): total bytes 16 GiB,
   entry count 64, per-entry bytes 2 GiB. The per-entry cap is calibrated to
   the memo's q4-KV estimate; if the active KV representation is FP16,
@@ -430,11 +479,15 @@ block, fail, or corrupt the request being served.
 ### FR-KVP8 — purge primitive: DEK destruction + fencing — ship-blocker (SPEC-037-R008)
 
 - The provider binary MUST expose a local purge primitive **before** the
-  disk tier can be enabled: a control-socket command (and matching
-  `macprovider-cli` subcommand) that (a) purges one conversation key —
-  addressed by raw key, canonicalized and HMAC-indexed inside the provider
-  process — or (b) purges the whole namespace via key-epoch rotation
-  (FR-KVP6).
+  disk tier can be enabled, with these canonical spellings: single-key
+  `macprovider-cli kv-cache purge --key <conversation_key>` (also
+  `--key-stdin`, preferred, to keep raw keys out of argv/shell history),
+  whole-namespace `macprovider-cli kv-cache purge --all`, uninstall
+  `macprovider-cli kv-cache purge --all --forget`, and inspection
+  `macprovider-cli kv-cache status` (FR-KVP12) — each backed by a
+  matching control-socket command. Single-key purge is addressed by raw
+  key, canonicalized and HMAC-indexed inside the provider process;
+  whole-namespace purge is key-epoch rotation (FR-KVP6).
 - **Revocation authority is DEK destruction.** Single-key purge ordering:
   (1) advance the index's purge-generation high-watermark in namespace
   metadata and write + `fsync` a tombstone for the (epoch, index) carrying
@@ -445,7 +498,14 @@ block, fail, or corrupt the request being served.
   snapshot for the index whose sampled purge generation predates the new
   high-watermark; (4) delete the entry's generations and manifest; (5)
   report success with counts (entries removed, bytes freed), never raw
-  keys. The index MUST be ineligible at every intermediate crash point;
+  keys. Steps run inside the per-key hot-cache serialization lane
+  (FR-CI4a): every hot lease carries the purge generation sampled at its
+  `begin()`, and a hot `commit()` whose stamped generation is below the
+  live high-watermark MUST NOT reinsert the entry (the lease is released
+  without commit) — so a pre-purge lease can repopulate neither RAM nor
+  disk after `purge_ok`. In-flight writers/promotions are cancelled or
+  joined before step 5, and any in-memory DEK copy is discarded with
+  them. Re-caching after a purge creates a **fresh DEK** (FR-KVP6). The index MUST be ineligible at every intermediate crash point;
   recovery at tier activation completes interrupted purges (tombstone
   present ⇒ finish steps 2–4) before any read is served. A purge failing
   partway (Keychain deletion error, I/O error, lock timeout) reports
@@ -473,9 +533,13 @@ block, fail, or corrupt the request being served.
   `enabled=false` (a disabled tier still has purgeable residue) — under
   the namespace lock per FR-KVP7.
 - An uninstall/cleanup mode (`purge --all --forget`) MUST rotate the
-  epoch, delete the namespace directory, and delete all of the namespace's
-  Keychain items; the provider uninstall path invokes it so no orphaned
-  ciphertext or key material outlives the product.
+  epoch, delete the namespace directory, and delete all of the
+  namespace's Keychain items — enumerated by service prefix, so orphaned
+  DEK items from evicted entries and abandoned namespaces are found
+  without relying on metadata; the provider uninstall path invokes it so
+  no orphaned ciphertext or key material outlives the product. The
+  namespace lock (held from outside the deleted tree, FR-KVP7) is
+  retained until deletions are verified.
 - Motivation (SPEC-024 FR-CI10a): `DELETE /v1/sticky` purges only
   coordinator state; without this primitive a restart-durable provider
   entry would be buyer-unpurgeable. v0.1 ships the primitive; wiring
@@ -492,8 +556,14 @@ block, fail, or corrupt the request being served.
   selected hot-cache state (v1 normative; configuration may lower it,
   never raise it). Reads are chunked per §5a, verified-then-materialized
   per layer, and MUST NOT hold a second full copy of the restored tensors
-  once promoted. An entry whose declared decoded size exceeds the ceiling
-  is not promoted (`disk_miss_budget`).
+  once promoted. The `disk_miss_budget` trigger is the entry's **total
+  declared decoded size** exceeding the ceiling (not transient headroom).
+  The ceiling and the §6 8k gate are calibrated to the memo's
+  hypothetical q4 KV representation; the active `kvBits` question (memo
+  Q6/Q7) is a precondition for KVS-01 being meaningful — under FP16 KV
+  even 8k prefixes exceed the ceiling. Lifting the ceiling for the
+  32k–64k class is a future format-milestone change, not a configuration
+  tweak.
 - Promoted entries count against the existing hot-tier budgets (200k
   tokens, entry cap); promotion MUST NOT raise any RAM ceiling. At most one
   promotion runs at a time namespace-wide (back-pressure; concurrent
@@ -518,16 +588,23 @@ block, fail, or corrupt the request being served.
   commit — deploys, crashes, supervisor relaunches, fast reboots. Reboot
   recovery additionally depends on Keychain availability after first
   unlock (FR-KVP6), so "host reboot" is a bounded capability, not
-  unconditional.
+  unconditional — with the default 900 s eligibility window, practical
+  reboot yield is expected to be near zero (resume + login + first unlock
+  must all fit inside the window); deploys, crashes, and supervisor
+  relaunches are the realistic beneficiaries.
 - **Clock integrity.** Namespace metadata maintains a persisted,
-  monotonically non-decreasing **wall-clock high-water mark** (updated at
-  writes and periodically, fsynced). If current wall-clock < high-water,
-  the tier is dormant (reads miss `disk_miss_io`, detail
-  `clock_rollback`; writes skip) until the clock reaches the mark again.
-  This prevents a backward clock step from re-opening expired eligibility.
-  `creation_time > now` additionally hard-misses (FR-KVP4b). No stronger
-  clock guarantee is claimed (host-privileged clock control is out of
-  scope, §1).
+  monotonically non-decreasing **wall-clock high-water mark**, durably
+  advanced (fsync) to the evaluation timestamp **before any eligibility
+  decision is acted upon**, at writes, and periodically. If current
+  wall-clock < high-water, the tier is dormant (reads miss
+  `disk_miss_io`, detail `clock_rollback`; writes skip) until the clock
+  reaches the mark. Precise guarantee: a rollback below the mark causes
+  dormancy, and an expiry once evaluated can never re-open (the mark was
+  advanced first); an entry whose deadline lies in the `(high-water,
+  deadline]` band after a kill-and-rollback could in principle re-open —
+  accepted residual, because host-privileged clock control is out of
+  scope (§1) and reuse remains same-conversation and envelope-validated.
+  `creation_time > now` additionally hard-misses (FR-KVP4b).
 - **Physical retention** is separately bounded: expired or superseded
   generations are deleted by compaction (opportunistic and periodic) and
   at latest `retention_minutes` (operational default 60) after creation
@@ -560,8 +637,8 @@ YAML file → environment → CLI overrides. Exact surface (AC-9 fixtures):
 | `max_entries` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRIES` | `--kv-disk-cache-max-entries` | 64 | > 0; invalid ⇒ tier disabled |
 | `max_entry_bytes` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRY_BYTES` | `--kv-disk-cache-max-entry-bytes` | 2 GiB | > 0; invalid ⇒ tier disabled |
 | `retention_minutes` | `MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES` | `--kv-disk-cache-retention-minutes` | 60 | > 0; **cleanup deadline only — does NOT extend reuse eligibility, which is fixed at the hot-tier TTL (default 900 s) and is not tunable here**; invalid ⇒ tier disabled |
-| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 256 MiB | ≤ 256 MiB hard (FR-KVP9); invalid ⇒ tier disabled |
-| `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | 256 MiB | ≤ 1 GiB hard (FR-KVP3); invalid ⇒ tier disabled |
+| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 256 MiB | read/promotion side; ≤ 256 MiB hard (FR-KVP9); invalid ⇒ tier disabled |
+| `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | 256 MiB | write/snapshot side; ≤ 1 GiB hard (FR-KVP3); invalid ⇒ tier disabled |
 | `min_free_bytes` | `MACPROVIDER_KV_DISK_CACHE_MIN_FREE_BYTES` | `--kv-disk-cache-min-free-bytes` | 8 GiB | ≥ 1 GiB; invalid ⇒ tier disabled |
 | `promotion_max_seconds` | `MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S` | `--kv-disk-cache-promotion-max-s` | 5 | > 0; invalid ⇒ tier disabled |
 | `shutdown_drain_seconds` | `MACPROVIDER_KV_DISK_CACHE_SHUTDOWN_DRAIN_S` | `--kv-disk-cache-shutdown-drain-s` | 5 | ≥ 0; invalid ⇒ tier disabled |
@@ -580,7 +657,11 @@ Rollout gates:
   crafting the prefix on a non-gateway path). All other traffic uses the
   hot tier exactly as today. This satisfies the shipped
   `validConversationKey` rule (synthetic keys are valid `conv:` keys) and
-  makes the §6 gates runnable under the default configuration.
+  makes the §6 gates runnable under the default configuration. An
+  ingest-provenance flag MUST be threaded from each ingest boundary
+  (direct-HTTP header / relay field / Tier-2 envelope) to the persistence
+  decision, parallel to how the key itself is threaded — the gate never
+  infers provenance from key shape alone.
 - **Enable-time notice.** On enable, log one plain-language INFO line:
   directory, caps, **reuse-eligibility TTL (the hot-tier value)**,
   retention (labeled cleanup-only), synthetic-gate state, and the purge
@@ -614,8 +695,9 @@ Rollout gates:
 - **Inspection surface:** a read-only control-socket command and
   `macprovider-cli` subcommand report, per namespace: current bytes and
   entry count vs caps, free-space headroom, key epoch, tombstone count,
-  the reuse-eligibility TTL, and cumulative counters per reason code. No
-  raw keys.
+  Keychain item count, the reuse-eligibility TTL, and cumulative counters
+  per reason code (canonical spelling: `macprovider-cli kv-cache status`,
+  FR-KVP8). No raw keys.
 - Telemetry is provider-local observability only: it MUST NOT feed
   billing, routing, settlement, or sanctions, and MUST NOT create a new
   cross-account prefix oracle (SPEC-024 FR-CI9/FR-CI10 hold unchanged).
@@ -655,7 +737,7 @@ independently hits), with exactly one reason code:
 | 14 | `creation_time` in the future | `disk_miss_envelope` |
 | 15 | Eligibility deadline passed | `disk_miss_expired` |
 | 16 | AEAD tag, blob SHA-256, or length mismatch; truncated/oversized/reordered/duplicated chunk | `disk_miss_corrupt` |
-| 17 | No committed manifest (crash between blob write and manifest publish) | `disk_miss_corrupt` |
+| 17 | No committed manifest but orphan artifacts present **before activation recovery has swept them** (crash between blob write and manifest publish); after recovery sweeps the orphans, the index reads as row 1 (`disk_miss_absent`) | `disk_miss_corrupt` |
 | 18 | Malicious/oversized shape or length metadata (§5a bounds, pre-allocation) | `disk_miss_corrupt` |
 | 19 | Stamped purge generation below live high-watermark (incl. backup/snapshot reintroduction, racing writer) | `disk_miss_tombstoned` |
 | 20 | Entry DEK absent/destroyed | `disk_miss_tombstoned` |
@@ -686,27 +768,57 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
   seconds UTC); model/tokenizer/catalog identities (strings ≤ 1 KiB);
   hashes (lowercase base16); layer records (class ID string, layer index,
   ndim ≤ 8, dims, dtype enum); chunk table (per chunk: ordinal, ciphertext
-  length, 96-bit nonce as base16); blob total length; blob SHA-256.
+  length, 96-bit nonce as base16); blob total length; blob SHA-256. The
+  closed required-field list is: `schema_id`, `codec_id`, `namespace_id`,
+  `key_epoch`, `index_hmac`, `generation`, `commit_sequence`,
+  `purge_generation`, `request_model`, `served_model_id`, `model_sha256`,
+  `catalog_revision`, `tokenizer_id`, `tokenizer_config_sha256`,
+  `chat_template_sha256`, `abi_epoch`, `mlx_swift_lm_revision`,
+  `mlx_version`, `cache_class`, `layer_count`, `layers[]`, `kv_bits`,
+  `kv_group_size`, `kv_quant_mode`, `kv_quant_policy`, `decode_path`,
+  `token_count`, `created_at`, `eligible_until`, `chunks[]`,
+  `blob_length`, `blob_sha256`. Missing or unknown fields reject the
+  manifest.
 - **Bounds:** ≤ 512 layers; ndim ≤ 8; each dim ≤ 2^32; chunk count ≤ 4096;
-  per-chunk ciphertext ≤ 64 MiB; strings ≤ 1 KiB. Violations →
-  `disk_miss_corrupt` before allocation.
-- **AAD:** the JCS canonical bytes of the complete manifest object, plus
-  the 4-byte big-endian chunk ordinal appended, form each chunk's AEAD
-  associated data. The manifest contains no secret and no AEAD output of
-  itself; any manifest mutation invalidates every chunk tag.
+  per-chunk ciphertext ≤ 64 MiB; strings ≤ 1 KiB; `token_count` ≤ the
+  hot-tier token cap (200k); `blob_length` ≤ the per-entry byte cap.
+  Violations → `disk_miss_corrupt` before allocation.
+- **AAD (non-circular projection):** each chunk's AEAD associated data is
+  the JCS canonical bytes of the manifest object **with the
+  `blob_sha256` field omitted** (it is derived from the AEAD output —
+  including it would make the format uncomputable), plus the 4-byte
+  big-endian chunk ordinal appended. Everything else in the manifest —
+  identities, lifecycle, chunk table with nonces and lengths — is
+  AAD-bound, so any mutation of those fields invalidates every chunk tag.
+  `blob_sha256` itself is a structural fast-fail field validated in
+  FR-KVP4(c) before any AEAD open; a forged value is caught structurally
+  and cannot make a tampered chunk verify. The manifest chunk-table nonce
+  is authoritative; the blob frame's nonce MUST equal it, and a mismatch
+  is `disk_miss_corrupt` before AEAD open.
 - **Blob** (`gen-<N>.blob`): concatenated chunk frames, each
   `"KVS1"(4B) ‖ u32-LE ordinal ‖ u32-LE ciphertext-length ‖ nonce(12B) ‖
   ciphertext ‖ GCM tag(16B)`; ordinals contiguous from 0 and matching the
   manifest chunk table exactly; blob SHA-256 in the manifest covers the
   whole file.
 - **Payload codec** (`kvsurv-codec-v1`, the decrypted concatenated
-  plaintext): token array (i32 LE) followed by per-layer records
-  `{class ID, layer index u32, ndim u8, dims u64 LE, dtype enum (f16=1,
-  bf16=2, f32=3, i32=4, u32=5), row-major contiguous LE tensor bytes}` for
-  each key/value tensor of the layer, in layer order.
+  plaintext; fully self-delimiting with checked size arithmetic — the sum
+  of all section lengths MUST equal the declared decoded size): `u32 LE
+  token_count` (MUST equal the manifest field) ‖ token array (i32 LE) ‖
+  per-layer records in layer order, each
+  `{u32 LE layer_index, u16 LE class-ID length ‖ UTF-8 class ID, u8 ndim,
+  ndim × u64 LE dims, u8 dtype enum (f16=1, bf16=2, f32=3, i32=4, u32=5),
+  u64 LE cache_offset, K tensor then V tensor, each prefixed by u64 LE
+  byte length and containing row-major contiguous LE bytes}`. All length
+  arithmetic MUST use overflow-checked operations.
 - **Serialization allowlist (v1):** exactly `KVCacheSimple` (the pinned
-  `mlx-swift-lm` standard cache class). Extending the allowlist is a
-  codec-affecting change (new codec ID or ABI-epoch bump with fixtures).
+  `mlx-swift-lm` standard **unquantized** cache class). If the live model
+  runs a quantized KV cache (`QuantizedKVCache`), every write is skipped
+  and the harness cannot exercise the production cache class — resolving
+  memo Q6/Q7 is therefore a KVS-01 meaningfulness precondition (FR-KVP9,
+  §6). **Codec evolution rule (aligned with §8):** any payload-semantic
+  change, allowlist extension, or incompatible class/layout change
+  requires a **new codec ID and an ABI-epoch bump**, with fixtures;
+  existing codec IDs are immutable and never reinterpreted.
 - Temp files are created `O_EXCL` in the same directory as their
   destination (rename atomicity); tombstones, usage journal, rotation
   journal, and namespace metadata use the same fsync + atomic-rename
@@ -747,11 +859,15 @@ restored p50 ≤ `max(1.25 × warm p50, warm p50 + 1 s)`; restored p95 ≤
 ≥ 30% p95 TTFT reduction vs that control; and write-path overhead
 (commit-latency delta with the tier enabled) p95 ≤ 250 ms at the 8k class.
 **Scope honesty:** v0.1 gates validate the 8k class under the default
-budgets; the memo's highest-value 32k–64k workloads exceed the default
-write/promotion budgets and are explicitly deferred to KVS-04-class
-evidence with raised caps — recorded in the gate's decision-log entry
-along with the single-conversation-restore limitation (no thundering-herd
-measurement).
+budgets; the memo's highest-value 32k–64k workloads exceed the promotion
+ceiling and are explicitly deferred to KVS-04-class evidence under a
+future format milestone (raising the FR-KVP9 ceiling is a spec-revision
+decision, not a configuration change) — recorded in the gate's
+decision-log entry along with the single-conversation-restore limitation
+(no thundering-herd measurement) and the deferral of the memo's
+Approach-B token-replay control arm (correctness is instead anchored by
+the AC-1/AC-8 fixtures; the replay control may be added when a lab host
+exists).
 
 ### KVS-02 / KVS-03 — invalidation gates
 
@@ -795,8 +911,10 @@ All are required tests in `phase3-binary/Tests/macprovider-cliTests/`:
   cross-namespace copies; each yields exactly its mapped reason code and a
   fresh correct result; no partial reuse.
 - **AC-3 crash consistency:** kill injected at each FR-KVP3 ordering
-  boundary and each FR-KVP6 rotation-journal phase → recovery (at tier
-  activation) sees old generation, complete new generation, or clean miss;
+  boundary (including after new-entry `mkdir` before parent `fsync`) and
+  each FR-KVP6 rotation-journal phase → recovery (at tier activation)
+  sees old generation, complete new generation, or clean miss;
+  commit → restart → next-commit allocates a strictly newer generation;
   never a partial generation; open rotation journal drives forward; orphan
   bytes swept and accounted; a writer paused after its mutation-lane check
   cannot be interleaved by purge (lane exclusivity fixture).
@@ -808,9 +926,13 @@ All are required tests in `phase3-binary/Tests/macprovider-cliTests/`:
   tombstone compaction → eviction → second purge → backup restoration →
   still fenced (high-watermark survives); purge-all with live hot entries,
   in-flight leases, and queued snapshots → all invalidated before success;
-  purge at full quota succeeds (metadata reserve); `purge_failed` on
-  induced Keychain error leaves the fence closed; purge works with
-  `enabled=false`; success never reported before durability.
+  purge at full quota succeeds (metadata reserve); a pre-purge hot lease
+  finishing after `purge_ok` reinserts nothing (stamped-generation commit
+  rejection) and recreates no cold eligibility; quota/retention eviction
+  destroys the entry DEK; high-watermark map at cap forces epoch
+  rotation; `purge_failed` on induced Keychain error leaves the fence
+  closed; purge works with `enabled=false`; success never reported before
+  durability.
 - **AC-5 namespace isolation and locking:** entry copied into another
   namespace fails closed; quota eviction in namespace A never touches
   namespace B; a second process contending the lock stays dormant, retries
