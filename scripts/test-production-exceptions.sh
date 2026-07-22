@@ -198,6 +198,20 @@ grep -qF 'ops/exceptions/production-exceptions.json' \
 grep -qF 'first_parent_path_scoped=1' \
   scripts/gate-production-exceptions-promote.sh \
   || fail "promote helper missing path-scoped history marker"
+grep -qF 'EXCEPTION_HISTORY_WINDOW is no longer supported' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper must reject EXCEPTION_HISTORY_WINDOW cap"
+grep -qF 'refusing to synthesize an empty current tombstone ledger' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper must fail closed on missing/invalid current tombstones"
+
+# Positive history-window caps must fail closed (not silently truncate).
+if EXCEPTION_HISTORY_WINDOW=1 bash scripts/gate-production-exceptions-promote.sh >/tmp/exc-cap.out 2>&1; then
+  fail "EXCEPTION_HISTORY_WINDOW=1 must not succeed"
+fi
+grep -qF 'EXCEPTION_HISTORY_WINDOW is no longer supported' /tmp/exc-cap.out \
+  || fail "cap rejection message missing"
+rm -f /tmp/exc-cap.out
 
 # Path-scoped first-parent history must keep main~2 authority after many
 # unrelated successors and a merge fan-out larger than any numeric window.

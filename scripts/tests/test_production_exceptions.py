@@ -419,6 +419,35 @@ class ProductionExceptionsTests(unittest.TestCase):
             {"tombstone_deleted"},
         )
 
+    def test_expired_reactivation_with_later_expiry_fails(self):
+        expired = _minimal_register(
+            [
+                _minimal_entry(
+                    id="exc-react",
+                    status="expired",
+                    expires_at="2026-07-01T00:00:00Z",
+                    blocks_stable_promotion=False,
+                )
+            ]
+        )
+        reactivated = copy.deepcopy(expired)
+        reactivated["exceptions"][0]["status"] = "active"
+        reactivated["exceptions"][0]["expires_at"] = "2026-12-01T00:00:00Z"
+        previous = pe.earliest_expiry_previous_register(
+            reactivated, [expired, reactivated]
+        )
+        self.assertEqual(previous["exceptions"][0]["expires_at"], "2026-07-01T00:00:00Z")
+        self.assertEqual(previous["exceptions"][0]["status"], "expired")
+        result = pe.validate_register(
+            reactivated,
+            now=NOW,
+            tombstones=_tombstones(),
+            previous_doc=previous,
+        )
+        codes = {f.code for f in result.errors}
+        self.assertIn("expiry_self_extension", codes)
+        self.assertIn("expired_reactivation", codes)
+
     def test_sync_check_fails_on_malformed_stale(self):
         current = _minimal_register()
         stale = {"schema_version": "wrong", "environment": "nope", "exceptions": {}}

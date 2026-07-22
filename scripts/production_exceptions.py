@@ -532,6 +532,7 @@ def validate_register(
     if previous_doc is not None:
         check_anti_resurrection(previous_doc, doc, tombstone_ids, result)
         check_expiry_self_extension(previous_doc, doc, result)
+        check_expired_reactivation(previous_doc, doc, result)
 
     return result.dedupe()
 
@@ -766,12 +767,15 @@ def earliest_expiry_previous_register(
     current: dict[str, Any],
     history: Iterable[dict[str, Any] | None],
 ) -> dict[str, Any]:
-    """Rebuild previous register with the earliest active/planned expires_at.
+    """Rebuild previous register with the earliest parseable expires_at per ID.
 
-    Walking only origin/main^ is defeated when an unrelated successor lands after
-    an expiry self-extension. History should be oldest-first.
+    Includes active/planned/expired historical rows. Filtering to only
+    active/planned lets an expired->active reactivation with a later expiry
+    erase the earlier authoritative date and pass promotion. The historical
+    status from the earliest-expiry observation is restored so transition
+    checks can see expired->active reactivations.
     """
-    earliest: dict[str, tuple[datetime, str]] = {}
+    earliest: dict[str, tuple[datetime, str, str]] = {}
     for doc in history:
         if not isinstance(doc, dict):
             continue
@@ -784,7 +788,7 @@ def earliest_expiry_previous_register(
             exc_id = entry.get("id")
             expires = entry.get("expires_at")
             status = entry.get("status")
-            if not isinstance(exc_id, str) or status not in {"active", "planned"}:
+            if not isinstance(exc_id, str) or status not in {"active", "planned", "expired"}:
                 continue
             if not isinstance(expires, str):
                 continue
@@ -794,7 +798,7 @@ def earliest_expiry_previous_register(
                 continue
             prev = earliest.get(exc_id)
             if prev is None or exp_dt < prev[0]:
-                earliest[exc_id] = (exp_dt, expires)
+                earliest[exc_id] = (exp_dt, expires, status)
 
     previous = deepcopy(current)
     for entry in previous.get("exceptions", []):
@@ -802,8 +806,35 @@ def earliest_expiry_previous_register(
             continue
         exc_id = entry.get("id")
         if exc_id in earliest:
-            entry["expires_at"] = earliest[exc_id][1]
+            _dt, expires, status = earliest[exc_id]
+            entry["expires_at"] = expires
+            entry["status"] = status
     return previous
+
+
+def check_expired_reactivation(
+    previous_doc: dict[str, Any],
+    next_doc: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Reject same-ID expired -> active/planned transitions without a new ID."""
+    prev_by_id = {
+        entry["id"]: entry
+        for entry in previous_doc.get("exceptions", [])
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    for entry in next_doc.get("exceptions", []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        prev = prev_by_id.get(entry["id"])
+        if prev is None:
+            continue
+        if prev.get("status") == "expired" and entry.get("status") in {"active", "planned"}:
+            result.error(
+                "expired_reactivation",
+                "expired exception reactivated without a new exception id",
+                entry["id"],
+            )
 
 
 def build_health_report(

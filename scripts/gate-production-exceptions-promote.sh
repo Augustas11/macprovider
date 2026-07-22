@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Fail-closed #615 stable-promotion gate against current origin/main.
 #
-# Durability: walks first-parent commits that touched the exception register
-# or tombstone ledger (path-scoped), so unrelated successors cannot push the
-# last sound authority out of a fixed numeric window. For each such commit:
+# Durability: walks ALL first-parent commits that touched the exception
+# register or tombstone ledger (path-scoped, uncapped). For each such commit:
 #   - union all tombstone IDs ever present (anti-deletion)
-#   - reconstruct previous expires_at as the earliest active expiry per ID
-#     (anti self-extension)
+#   - reconstruct previous expires_at as the earliest active/planned/expired
+#     expiry per ID (anti self-extension / expired reactivation)
 #
 # Authority binding: prints EXCEPTION_AUTHORITY_SHA=<origin/main> so callers
 # can refuse undraft if main moved after the gate. Optional
 # EXCEPTION_GATE_SHA_FILE captures that SHA for later comparison.
 set -euo pipefail
 
-# Optional safety cap on path history depth (0 = unlimited).
-HISTORY_WINDOW="${EXCEPTION_HISTORY_WINDOW:-0}"
+if [ -n "${EXCEPTION_HISTORY_WINDOW:-}" ]; then
+  echo "FAIL: EXCEPTION_HISTORY_WINDOW is no longer supported; path-scoped history is uncapped" >&2
+  exit 1
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$root"
@@ -25,16 +26,15 @@ main_sha="$(git rev-parse origin/main)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/exception-promote.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-python3 - "$main_sha" "$HISTORY_WINDOW" "$work" "$root" <<'PY'
+python3 - "$main_sha" "$work" "$root" <<'PY'
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 main_sha = sys.argv[1]
-window = int(sys.argv[2])
-work = Path(sys.argv[3])
-root = Path(sys.argv[4])
+work = Path(sys.argv[2])
+root = Path(sys.argv[3])
 sys.path.insert(0, str(root / "scripts"))
 import production_exceptions as pe  # noqa: E402
 
@@ -58,16 +58,16 @@ def show_json(rev: str, path: str):
 
 
 # Path-scoped first-parent history: only commits that touched exception
-# authority files. Unrelated successors do not consume the sample budget.
-cmd = ["git", "rev-list", "--first-parent", main_sha, "--", REGISTER_PATH, TOMBSTONE_PATH]
-if window > 0:
-    cmd[3:3] = ["-n", str(window)]
-revs = subprocess.check_output(cmd, text=True).split()
+# authority files. Unrelated successors do not consume any sample budget.
+# History is intentionally uncapped — a numeric window is fail-open.
+revs = subprocess.check_output(
+    ["git", "rev-list", "--first-parent", main_sha, "--", REGISTER_PATH, TOMBSTONE_PATH],
+    text=True,
+).split()
 # Always include the current tip so we evaluate today's trees even when the
 # tip commit itself did not modify the exception paths.
 if not revs or revs[0] != main_sha:
     revs = [main_sha, *revs]
-# Deduplicate while preserving newest-first order from rev-list.
 seen = set()
 ordered = []
 for rev in revs:
@@ -81,6 +81,8 @@ if not revs:
 
 # Helpers expect oldest-first history.
 history_regs = [show_json(rev, REGISTER_PATH) for rev in reversed(revs)]
+# Historical missing/invalid tombstone docs are tolerated (pre-ledger eras);
+# only the tip ledger is required to be present and parseable.
 history_tombs = [show_json(rev, TOMBSTONE_PATH) for rev in reversed(revs)]
 
 current_register = show_json(main_sha, REGISTER_PATH)
@@ -89,13 +91,10 @@ if not isinstance(current_register, dict):
 
 current_tombs = show_json(main_sha, TOMBSTONE_PATH)
 if not isinstance(current_tombs, dict):
-    current_tombs = {
-        "schema_version": pe.TOMBSTONE_SCHEMA_VERSION,
-        "updated_at": "1970-01-01T00:00:00Z",
-        "updated_by": "missing",
-        "environment": pe.ENVIRONMENT,
-        "tombstones": [],
-    }
+    raise SystemExit(
+        "origin/main removed-exception-tombstones.json missing/invalid; "
+        "refusing to synthesize an empty current tombstone ledger"
+    )
 
 base_tombs = pe.union_tombstone_docs(history_tombs)
 previous = pe.earliest_expiry_previous_register(current_register, history_regs)
