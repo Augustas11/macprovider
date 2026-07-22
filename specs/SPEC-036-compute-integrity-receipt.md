@@ -100,8 +100,10 @@ provider/reference union support used by a verdict.
 The payload key set is closed over: `model_id`, `target_model_hash`,
 `tokenizer_identity`, `sampler_stage`, `sampling_profile`, `corpus_version`,
 `threshold_version`, `reference_source_id`, `reference_failure_domain_id`,
-`computed_reference_distribution_summary`, `runtime_build_provenance_digest` or
-`golden_fixture_validation_digest`, `refresh_timestamp`, `support_selection`,
+`computed_reference_distribution_summary`, `runtime_build_provenance_digest` AND
+`golden_fixture_validation_digest` (both required for every enforce-counted
+reference — golden fixture is additional, never a substitute; FR-5),
+`refresh_timestamp`, `support_selection`,
 `normalization_basis`, `k`, `position_set_digest`, and a closed `positions[]`
 array. `position_set_digest` is the SHA-256 over the RFC 8785/JCS canonical JSON array
 `[[prompt_id, position_index], ...]` of the pairs covered by the event, sorted by a
@@ -114,7 +116,12 @@ top-K ids), `reference_full_distribution_ref` (either inline offline per-token
 reference probabilities, or `retained_evidence_object_digest` plus a retained
 object, sufficient for the coordinator to recompute the reference probability for
 ANY provider-selected token and the reference tail mass outside ANY valid returned
-union), and `reference_greedy_tail_bound`. A reference event is created before any
+union), and `reference_greedy_tail_bound`. Every reference event MUST bind its `reference_top_k_token_ids` at the maximum
+`k = 256` as an ordered (non-increasing probability, ascending token id tie-break)
+list; the `K = 64` probe uses the deterministic length-64 prefix, and a mandatory
+`K = 64 → 256` retry (FR-7) — including reference-vs-reference fault retries (FR-5)
+— MUST reuse the SAME reference-event digest, so both K levels derive from one
+immutable snapshot. A reference event is created before any
 provider probe, so it MUST NOT store provider-dependent union probabilities or a
 single union tail scalar; the per-verdict union reference probabilities and union
 tail mass are computed at verdict time from `reference_full_distribution_ref` and
@@ -291,10 +298,23 @@ The policy MUST include:
   reclassifies an already-captured row and preserves SPEC-022 request-start
   immutability. Already-captured coordinator-attributable non-payable rows remain
   non-payable (fail closed); SPEC-036 never settles a captured covered enforce row
-  as payable except from a fresh `verified`/`warn` capture. Honest-provider
+  as payable except from a fresh `verified`/`warn` capture. **Carve-out:** the
+  auto-downgrade suspends only new-verdict capability; it MUST NOT release adjudicated
+  provider-attributable state. A key carrying an active `quarantined_compute_drift`,
+  `blocked:swap_laundering_suspected`, `blocked:manual_review_required`, or
+  `blocked:abusive_inconclusive` — verdicts already established from admissible
+  references, independent of live references — MUST continue to be excluded from
+  covered paid routing and settlement throughout the downgrade window, so a
+  reference outage (or an induced one) cannot launder an adjudicated quarantine. Honest-provider
   compensation for delivered work voided by a coordinator-attributable lapse, if any,
-  MUST use the operator-funded non-buyer instrument (FR-17), outside the SPEC-022
-  settlement money-path.
+  MUST use the operator-funded non-buyer instrument (FR-17) — subject to that
+  instrument's per-provider daily caps and anti-Sybil eligibility as a distinct
+  capped "voided-work compensation" category — outside the SPEC-022 settlement
+  money-path. The trigger scope SHOULD match the reference-staleness scope: for a
+  sharded fleet a partial outage MAY downgrade only the affected model/shard scope,
+  so honest keys outside the outage are neither voided nor needlessly downgraded (for
+  the minimal 2-node fleet any node loss drops every key below quorum, so the trigger
+  is effectively whole-set).
 - `circuit_breaker_policy`: a closed object defining deterministic activation.
   It MUST include `rolling_window_minutes` (positive integer), `event_time_basis`
   (enum `transition_recorded_at`), the in-scope transition set (fixed to new
@@ -628,8 +648,8 @@ The captured state MUST include:
   verdict.
 - `reference_source_ids`, `reference_failure_domain_ids`, and source-independence
   evidence for every reference counted toward quorum.
-- Runtime-build provenance digests or golden-fixture validation digests for every
-  reference counted toward quorum.
+- Runtime-build provenance digests AND golden-fixture validation digests (both,
+  non-substitutable per FR-5) for every reference counted toward quorum.
 - Reference refresh timestamps.
 - `reference_set_admissibility_digest`, computed over the
   `reference_set_admissibility_v1` RFC 8785/JCS object. That object MUST contain
@@ -642,8 +662,8 @@ The captured state MUST include:
   `references[]` array sorted by `reference_event_digest`. Each `references[]`
   item MUST bind `reference_event_digest`, `reference_source_id`,
   `reference_failure_domain_id`, source-independence evidence digest,
-  runtime-build provenance digest or golden-fixture validation digest, and
-  refresh timestamp.
+  runtime-build provenance digest AND golden-fixture validation digest (both,
+  non-substitutable), and refresh timestamp.
 - `reference_set_admissibility_status`. Allowed values are `admissible`,
   `missing_quorum`, `reference_fault`, `stale_reference`,
   `independence_failed`, `provenance_missing`, and `schema_invalid`. Unknown
@@ -713,7 +733,21 @@ Trusted reference admission MUST verify:
   reference fleet MUST provide at least two references that differ in operator
   identity, hardware failure domain, AND runtime-build/kernel provenance per covered
   key (see FR-17); this is one reason v0.1 enforce is not reachable with a single
-  cloned reference node (§6.1).
+  cloned reference node (§6.1). Reconciliation with the class model (FR-8): "independent
+  runtime-build/kernel provenance" means **independently produced builds within the
+  same `hardware_runtime_class` numeric-equivalence band** — the class is a band
+  chosen so that independently-produced conforming builds still agree within the
+  `tau_reference_fault` floors, so requiring build independence does not
+  reference-fault-lock enforce and does not false-fail an honest provider of that
+  class. This is the reachable operating point; two builds so divergent that they
+  exceed `tau_reference_fault` are, by definition, different classes and MUST NOT be
+  quorum peers. The honest limit of this design: two independent builds within one
+  band give **outage/operator independence and protection against
+  build-specific-but-out-of-band defects**, but a subtle in-band correlated bug
+  present in both builds is not caught — which is why the golden-fixture check
+  (validation against a signed reference distribution) is retained as an additional
+  mandatory admission check, and why §4's threat model disclaims full compute-integrity
+  proof.
 
 Hybrid mode SHOULD also collect N-provider consensus telemetry with N >= 3, but
 consensus telemetry MUST NOT create automatic quarantine in v0.1 without a fresh
@@ -802,9 +836,10 @@ re-derive these):**
 - The TV lower/upper interval **formula** and canonical median rule (SPEC-030 §FR-9).
 
 SPEC-036 carries the support-selection rule under the settlement-scoped constant
-`compute_integrity_support_selection_v1` (its second arm is the coordinator-held
-trusted reference, not SPEC-030's provider plain path); the construction algorithm
-is identical.
+`compute_integrity_support_selection_v1` (its reference arms are the coordinator-held
+trusted references, not SPEC-030's provider plain path); the construction is the same
+rule generalized from two arms to `(N+1)` arms for `N` active references
+(§FR-6/§FR-7), not the literal two-arm SPEC-030 wire construction.
 
 **Owned by SPEC-036 (settlement-bearing wire framing — NOT inherited from
 SPEC-030, which frames these for its own `losslessness_probe_v1` profile):**
@@ -1172,8 +1207,12 @@ abusive rule when the coordinator caused it:
   result) — counter effect per the mapped `provider_reason_code`, by this closed
   mapping: `inconclusive:model_swap` → no abusive increment (treated as `expired`
   identity change); `inconclusive:unsupported_sampler` → abusive event;
-  `inconclusive:reference_unavailable` → coordinator-fault-exempt (no abusive
-  increment); `inconclusive:position_mismatch`, `inconclusive:missing_distribution`,
+  `inconclusive:reference_unavailable` → abusive event UNLESS the coordinator
+  independently confirms an actual reference outage for that key at that time (a
+  provider-supplied `reference_unavailable` is not self-authenticating and MUST NOT
+  by itself suppress the abusive-inconclusive counter, else a provider could spam it
+  to keep a stale `verified` window payable within its TTL);
+  `inconclusive:position_mismatch`, `inconclusive:missing_distribution`,
   `inconclusive:timeout` → abusive event.
 
 `warn` MUST NOT block covered paid routing by itself.
@@ -1488,7 +1527,7 @@ settlement-impacting state, with `payload` containing:
 - Reference event digests and retained evidence object digests for every trusted
   reference used by the verdict.
 - Reference source ids, failure-domain ids, source-independence evidence,
-  runtime-build provenance digests or golden-fixture validation digests, refresh
+  runtime-build provenance digests AND golden-fixture validation digests (both), refresh
   timestamps, and the full `reference_set_admissibility_v1` object for every
   trusted reference counted toward quorum.
 - Inline compact per-position evidence or signed retained-object references with
@@ -1618,9 +1657,14 @@ Circuit-breaker state MUST be one of:
 
 - `inactive`: no hold applies; new admissions capture their normal request-start
   state.
-- `active`: new covered paid admissions in the affected scope are denied, or
-  captured with `circuit_breaker_active = true` (non-payable via the derived
-  `compute_integrity_circuit_breaker_hold` reason).
+- `active`: the breaker is evaluated atomically **before provider forwarding**, and
+  new covered paid admissions in the affected scope MUST be rejected (not forwarded
+  as billable buyer work that is then guaranteed non-payable). The coordinator MAY
+  record an audit-only rejection row noting the breaker, and the captured
+  `circuit_breaker_active = true` / derived `compute_integrity_circuit_breaker_hold`
+  path is retained only as defensive settlement handling for an
+  invariant-violation/race where a row was nonetheless forwarded — never as a
+  permitted admission branch.
 - `override_routing_only`: a dual-approved temporary routing override is active for
   the named scope. To avoid knowingly-uncompensated work, an override MUST NOT route
   billable buyer traffic that would capture a non-payable request-start state; it
@@ -1750,8 +1794,13 @@ sampling_profile, corpus_version, threshold_version)` key MUST complete an
 approved warn-only calibration gate. Corpus or threshold-version changes
 invalidate prior warn-only calibration for enforce until the new full key
 completes its gate. The default per-key gate is at
-least 30 days of warn-only data, at least 100 eligible canaries, at least 10
-distinct stable provider identities when available, and at least one relevant
+least 30 days of warn-only data, at least 100 eligible canaries, a hard minimum of
+at least 10 distinct stable provider identities in the calibration sample (the
+"when available" relaxation is removed: a key that cannot reach the diversity floor
+MUST remain observe/warn-only, since burst probing raises canary COUNT but cannot
+raise identity DIVERSITY, and false-positive validation strength depends on
+diversity — maintainers MAY approve a statistically justified lower floor with
+recorded rationale, below which the key stays warn-only), and at least one relevant
 trusted-reference refresh after the latest reference runtime/build,
 runtime-build provenance digest, signed golden-fixture validation digest,
 tokenizer, sampler-stage, corpus, threshold, or catalog change. A fleet-wide
@@ -1830,8 +1879,8 @@ Before SPEC-036 can move toward LOCK:
 2. A reference-event fixture covers trusted reference admission, signed catalog
    hash match, tokenizer identity match, sampler stage, reference-set and
    reference-event digests, source and failure-domain independence,
-   runtime-build provenance or signed golden-fixture validation digests,
-   freshness TTL, and refresh on reference runtime/build update,
+   both runtime-build provenance AND signed golden-fixture validation digests
+   (non-substitutable), freshness TTL, and refresh on reference runtime/build update,
    runtime-build provenance digest change, signed golden-fixture validation
    digest change, tokenizer, sampler-stage, corpus, threshold, and catalog
    change. It proves old reference events become inadmissible after
@@ -1935,11 +1984,15 @@ Before SPEC-036 can move toward LOCK:
 15. A reference-quorum test proves missing trusted-reference quorum produces
     `blocked:reference_missing`, trusted-reference disagreement produces
     `blocked:reference_fault`, duplicate or non-independent reference sources
-    cannot satisfy enforce quorum, golden-fixture validation may substitute for
-    runtime-build provenance only after source and failure-domain independence is
-    proven, pass/quarantine verdicts use the agreed envelope across all active
-    admissible trusted references, both suppress provider drift counters, and
-    both appear in auditor bundles.
+    cannot satisfy enforce quorum, that two references sharing a runtime-build/kernel
+    provenance FAIL quorum (map to `independence_failed`) even when both pass
+    golden-fixture validation — i.e. golden fixture is an additional mandatory check
+    and never substitutes for operator, hardware-failure-domain, or
+    runtime-build/kernel independence — that missing runtime-build provenance and
+    missing golden-fixture validation each independently fail admission,
+    pass/quarantine verdicts use the agreed envelope across all active admissible
+    trusted references, both suppress provider drift counters, and both appear in
+    auditor bundles.
 16. A closed-reason test proves every enforce-mode non-payable
     compute-integrity state maps to the v0.1 settlement reason enum.
 17. A sampler-stage test proves sampler stage is included in keys, thresholds,
