@@ -243,6 +243,18 @@ grep -q 'StrictHostKeyChecking=yes' "$DEPLOY_SH" ||
 grep -q 'assigned_id=\$CANARY_ASSIGNED_QUERY&details=deployment' "$DEPLOY_SH" ||
   fail "deploy must gate completion on the exact proved provider session"
 
+proof_retry_line=$(grep -nF 'if run_catalog_canary_mac_proof > "$CANARY_INSTALLED_BODY"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+session_rebind_line=$(grep -nF 'read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY <<< "$CANARY_BINDING"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+session_query_line=$(grep -nF 'CANARY_STATUS=$(curl --config "$CANARY_CURL_CONFIG"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+[ -n "$proof_retry_line" ] && [ -n "$session_rebind_line" ] && [ -n "$session_query_line" ] &&
+  [ "$proof_retry_line" -lt "$session_rebind_line" ] && [ "$session_rebind_line" -lt "$session_query_line" ] ||
+  fail "each canary recovery attempt must re-prove the Mac and bind the query to that attempt's session"
+
+grep -q 'CANARY_MAX_ATTEMPTS=36' "$DEPLOY_SH" &&
+  grep -q 'rm -f "$CANARY_INSTALLED_BODY" "$CANARY_POOL_BODY"' "$DEPLOY_SH" &&
+  grep -q 'waiting for exact catalog canary recovery' "$DEPLOY_SH" ||
+  fail "deploy must retry full canary proof with a bounded window and discard stale attempt output"
+
 grep -q 'value.get("assigned_id") != sys.argv\[3\]' "$DEPLOY_SH" ||
   fail "deploy must reject coordinator evidence for a different assigned session"
 
