@@ -271,7 +271,9 @@ The policy MUST include:
 - `threshold_version`.
 - `window_size_days`, default 7 (the rolling verdict-counting window).
 - `positive_state_freshness_ttl_hours`, default 24 (the maximum age of the newest
-  eligible canary before `verified`/`warn` expires as `window_ttl_expired`).
+  eligible canary before `verified`/`warn` expires as `window_ttl_expired`). Enforce
+  activation MUST refuse a policy whose TTL is less than twice the scheduled per-key
+  canary cadence, so a single missed probe does not routinely expire payable state.
 - `min_window_canaries`, default 5.
 - `quarantine_candidate_count`, default 3.
 - `clear_pass_count`, default 5.
@@ -279,20 +281,20 @@ The policy MUST include:
 - Abusive inconclusive limit, default more than 3 inconclusive probe results
   in 24 hours for the same key.
 - `disclosure_copy_version` and `disclosure_copy_digest` (FR-15).
-- `coordinator_attributable_lapse_mode`: `fail_closed` (default) or
-  `degrade_to_spec022`. It selects how covered enforce rows are settled when
-  non-payability is **coordinator-attributable** rather than provider-attributable
-  (see FR-3): `fail_closed` quarantines/holds as usual; `degrade_to_spec022` settles
-  the row under SPEC-022 alone (the provider's SPEC-015-verified delivered work is
-  paid; the compute-integrity assurance is simply absent for that row) and MUST
-  disclose the reduced assurance. Provider-attributable non-payability
-  (`quarantined_compute_drift`, provider-caused blocks, abusive-inconclusive) is
-  never degraded.
-- `reference_unavailable_auto_degrade`: optional bounded auto-degrade so a total
+- `reference_unavailable_auto_downgrade`: optional automatic **policy-mode**
+  downgrade (enforce → warn_only) — NOT a per-row settlement override — so a total
   reference-fleet outage does not empty the paid pool. When set, a whole-covered-set
-  reference-staleness condition MAY auto-apply `degrade_to_spec022` for a bounded
-  window with an audit record, instead of requiring a manual `enforce → warn_only`
-  downgrade.
+  reference-staleness condition MAY auto-flip the policy mode to `warn_only` for a
+  bounded window (`auto_downgrade_max_minutes`, capped, dual-approval-required to
+  extend) with an audit record. Because the flip changes the mode only for **new**
+  admissions (which then capture `warn_only`, i.e. no money effect), it never
+  reclassifies an already-captured row and preserves SPEC-022 request-start
+  immutability. Already-captured coordinator-attributable non-payable rows remain
+  non-payable (fail closed); SPEC-036 never settles a captured covered enforce row
+  as payable except from a fresh `verified`/`warn` capture. Honest-provider
+  compensation for delivered work voided by a coordinator-attributable lapse, if any,
+  MUST use the operator-funded non-buyer instrument (FR-17), outside the SPEC-022
+  settlement money-path.
 - `circuit_breaker_policy`: a closed object defining deterministic activation.
   It MUST include `rolling_window_minutes` (positive integer), `event_time_basis`
   (enum `transition_recorded_at`), the in-scope transition set (fixed to new
@@ -364,16 +366,17 @@ buyer-facing verification claims.
 - Operator deactivation, circuit-breaker, and manual-review controls from
   FR-16 are implemented.
 - Stable-identity Sybil resistance holds. Because quarantine/block inheritance
-  (FR-12) binds to `stable_provider_identity`, enforce MUST refuse activation unless
-  SPEC-026 guarantees that creating a new provider account row / new
-  `stable_provider_identity` is bound to a hardware-rooted attestation (SPEC-026 App
-  Attest team/bundle-pinned `identity_signature`) and is not trivially repeatable by
-  the same operator, so that a quarantined operator cannot cheaply mint a fresh
-  clean identity. The assumed invariant — new-identity creation carries a
-  hardware-attestation cost the coordinator can rate-limit and correlate — MUST be
-  stated in the enforce activation record and is `maintainer-approval-required at
-  LOCK`. Where SPEC-026 cannot supply this for a provider track, that track MUST
-  remain observe/warn-only.
+  (FR-12) binds to `stable_provider_identity`, enforce MUST refuse activation for any
+  provider track unless a **named stable-device/operator-identity authority**
+  guarantees that creating a new `stable_provider_identity` carries a cost the
+  coordinator can rate-limit and correlate (so a quarantined operator cannot cheaply
+  mint a fresh clean identity). SPEC-026's App Attest surface is optional and
+  client-dormant on the shipped CLI/`mp-*` track and permits many attestation keys
+  per device, so it does NOT by itself supply this invariant; enforce is therefore
+  categorically **unavailable** for a track lacking a pre-vetted provider-account
+  regime or an equivalent identity authority, regardless of supply or calibration
+  (§6.1). Naming that authority and its cost model is `maintainer-approval-required
+  at LOCK`; until it exists, the affected track remains observe/warn-only.
 
 ### FR-2 Receipt compatibility
 
@@ -438,9 +441,14 @@ readiness unless the captured request-start compute-integrity state is fresh
 `expired`, stale, unreadable, or uncovered-profile state MUST fail closed. The
 coordinator MAY hold such a row pending until a bounded settlement deadline — the
 SPEC-022 route-snapshot settlement deadline for the row (SPEC-036 MUST NOT extend
-it); at deadline it MUST settle as `quarantined` with a specific reason. A held
-`pending` row that becomes fresh `verified`/`warn` before the deadline settles from
-that captured state; otherwise it settles `compute_integrity_pending_deadline`.
+it); at deadline it MUST settle as `quarantined` with a specific reason. A captured
+`pending` row is immutable and MUST remain non-payable: it settles
+`compute_integrity_pending_deadline` at the deadline and MUST NOT be promoted to
+payable by a canary that finalizes after request start (that would violate
+request-start immutability). Covered paid routing already requires a fresh
+`verified`/`warn` state at request start (§3), so a `pending` key should not be
+forwarded as covered paid work in the first place; if it was (e.g. state changed
+between admission and capture), the immutable `pending` capture fails closed.
 
 Compute-integrity settlement reasons are closed over this v0.1 enum:
 
@@ -488,6 +496,7 @@ this deterministic table:
 - `corpus_changed` -> `compute_integrity_expired`.
 - `catalog_changed` -> `compute_integrity_expired`.
 - `sampling_profile_uncovered` -> `compute_integrity_uncovered_profile`.
+- `hardware_class_changed` -> `compute_integrity_expired`.
 - `state_unreadable` -> `compute_integrity_unreadable`.
 
 The `expiry_cause` enum above is closed. Under-sampled windows are NOT an `expired`
@@ -543,19 +552,21 @@ against the route snapshot and request sampler at settlement MUST fail closed as
 `compute_integrity_unreadable`. Settlement MUST NOT emit any reason string outside
 the FR-3 closed enum for covered paid settlement.
 
-**Attribution and honest-provider fairness.** Non-payable conditions partition into
-**provider-attributable** (`quarantined_compute_drift`,
-`blocked:swap_laundering_suspected`, `blocked:manual_review_required` from provider
-behavior, `blocked:abusive_inconclusive`) and **coordinator-attributable**
-(`compute_integrity_reference_missing`/`reference_stale`/`blocked_reference_fault`,
-`compute_integrity_calibration_missing`/`threshold_stale`,
-`compute_integrity_circuit_breaker_hold`, and `window_ttl_expired`/`unknown`/
-`pending_deadline` caused solely by the coordinator not scheduling a fresh probe).
-Under `coordinator_attributable_lapse_mode = degrade_to_spec022`, a covered enforce
-row whose ONLY non-payable condition is coordinator-attributable MUST settle under
-SPEC-022 alone (delivered SPEC-015-verified work is paid) rather than void the
-provider's credit; provider-attributable conditions are never degraded and always
-fail closed. Under the default `fail_closed`, all conditions fail closed.
+**Fail-closed is unconditional at the row level.** Every non-payable request-start
+condition — provider-attributable (`quarantined_compute_drift`, provider-caused
+blocks, abusive-inconclusive) and coordinator-attributable (reference
+missing/stale/fault, calibration/threshold stale, circuit-breaker hold, unscheduled
+`window_ttl_expired`/`unknown`/`pending`) alike — MUST fail closed at settlement. A
+captured covered enforce row is settled payable ONLY from a fresh `verified`/`warn`
+capture; SPEC-036 has no per-row degrade-to-payable path. Availability during a
+coordinator-attributable outage is handled by the pre-admission
+`reference_unavailable_auto_downgrade` mode flip (FR-1), which affects only new
+admissions, and honest-provider compensation for voided delivered work, if any, is
+an operator-funded non-buyer path (FR-17) — never a SPEC-022 buyer-debit/provider-
+credit settlement. The enforce activation record MUST acknowledge that under
+`fail_closed` semantics a coordinator-attributable lapse voids the affected
+delivered work unless the operator funds compensation (`maintainer-approval-required
+at LOCK`).
 
 **Reason precedence.** When more than one non-payable condition holds for a covered
 enforce row, settlement MUST apply exactly one reason by this total order (highest
@@ -598,6 +609,17 @@ The captured state MUST include:
 - `sampling_profile_coverage_mode`.
 - `compute_integrity_policy_version`.
 - `compute_integrity_policy_mode`.
+- `compute_integrity_policy_digest`: digest of the full active SPEC-036 policy
+  object (so the exact money rule in force at request start is provable).
+- Composite SPEC-022 binding: `spec022_policy_version`, `spec022_policy_mode`,
+  `spec022_coverage_digest`, `spec022_effective_enforce` (boolean), and the linked
+  `spec022_route_snapshot_digest`. Every money-affecting change to either policy MUST
+  bump the respective policy version; a missing or unreadable composite-binding field
+  MUST fail closed as `compute_integrity_unreadable`.
+- `hardware_runtime_class` and its immutable `hardware_runtime_class_digest` (the
+  covered class the captured state was measured/calibrated under; a mismatch between
+  this and the route snapshot's provider class fails closed as
+  `compute_integrity_uncovered_profile`).
 - `compute_integrity_state`.
 - `expiry_cause` when state is `expired`.
 - `compute_integrity_window_id`.
@@ -679,19 +701,19 @@ Trusted reference admission MUST verify:
 - The reference runtime version and corpus version are recorded.
 - Each enforce-mode reference source MUST satisfy the closed independence predicate
   below against every other source counted toward the same covered key's quorum. Two
-  sources are independent iff ALL of: (a) independent operator-controlled source
-  identity; (b) independent hardware failure domain (distinct physical host and
-  power/network fault domain); and (c) EITHER independent runtime-build/kernel
-  provenance OR — if they share a signed runtime build/kernel — each source is
-  additionally validated against a signed golden-distribution fixture at admission
-  and every refresh. Golden-fixture validation MAY substitute only for the
-  runtime-build/kernel provenance dimension (c); it MUST NOT substitute for shared
-  operator identity (a) or a shared hardware failure domain (b). Two sources sharing
-  a hardware failure domain or operator identity MUST NOT both count toward the
-  two-reference enforce quorum even when both pass the golden fixture. Consequently
-  the funded reference fleet MUST provide at least two independent hardware failure
-  domains per covered key (a single hardware class is permitted only when the two
-  nodes are distinct hosts in distinct fault domains; see FR-17).
+  sources are independent iff ALL THREE of: (a) independent operator-controlled
+  source identity; (b) independent hardware failure domain (distinct physical host
+  and power/network fault domain); and (c) independent runtime-build/kernel
+  provenance. All three are REQUIRED and none is substitutable — two references that
+  share a runtime build/kernel could share a compromised-or-buggy distribution and
+  both pass a limited golden fixture, so a shared software failure domain MUST NOT
+  count as two independent references. A signed golden-distribution fixture at
+  admission and every refresh is an ADDITIONAL mandatory admission check (FR-5
+  admissibility), never a substitute for any of (a)–(c). Consequently the funded
+  reference fleet MUST provide at least two references that differ in operator
+  identity, hardware failure domain, AND runtime-build/kernel provenance per covered
+  key (see FR-17); this is one reason v0.1 enforce is not reachable with a single
+  cloned reference node (§6.1).
 
 Hybrid mode SHOULD also collect N-provider consensus telemetry with N >= 3, but
 consensus telemetry MUST NOT create automatic quarantine in v0.1 without a fresh
@@ -770,11 +792,13 @@ re-derive these):**
   least 128 bits, expiry no more than 120 seconds after issuance, `K` limited to
   64 or 256, at most 4 prompts and 8 stochastic measurement positions per result,
   and non-billable provider probe work (see also FR-17).
-- The `support_selection_v1` shared-support **construction rule** (SPEC-030 §FR-7):
-  the numeric-ascending union of the two arms' top-K token ids, with
-  full-distribution probabilities reported over the union and tail mass outside
-  it, including SPEC-030's small-vocabulary exception (support length is at least
-  `K` and at most `2K` unless vocabulary size is smaller).
+- The `support_selection_v1` shared-support **construction rule** (SPEC-030 §FR-7)
+  as the base of a SPEC-036-owned multi-arm **generalization**: SPEC-030's two-arm
+  (provider + one reference, ≤ `2K`) union is generalized here to an
+  `(N+1)`-arm union over the provider top-K and the top-K of all `N` active
+  references (≤ `(N+1)K`), with full-distribution probabilities reported over the
+  union and tail mass outside it, including SPEC-030's small-vocabulary exception.
+  This is a documented generalization, not an identical two-arm reuse.
 - The TV lower/upper interval **formula** and canonical median rule (SPEC-030 §FR-9).
 
 SPEC-036 carries the support-selection rule under the settlement-scoped constant
@@ -1014,10 +1038,11 @@ A single provider result therefore yields one TV interval per active reference o
 one shared support. The FR-5 agreed-envelope rule aggregates across references:
 `pass` requires the pass predicate to hold against every active admissible
 reference; `quarantine_candidate` requires the quarantine predicate to hold against
-every active admissible reference. Reference tail mass is computed against the
-combined support, so a reference's tail may exceed the single-reference ceiling only
-because of another reference's tokens; the K-retry/tail predicates below apply to
-each `tv_*_r` in turn.
+every active admissible reference. Each reference's tail mass is computed against
+the larger combined `(N+1)`-arm support, so a reference's tail can only be **lower**
+than it would be against a two-arm support (more tokens in the union means less mass
+outside it); the K-retry/tail predicates below apply to each `tv_*_r` in turn against
+the combined support.
 
 The provider MUST NOT supply the authoritative verdict. The coordinator verdict
 MUST be derived from raw compact distributions, tail masses, identity fields,
@@ -1055,7 +1080,14 @@ providers whose `hardware_runtime_class` matches (or is bounded by) the trusted
 reference set's class; providers outside the covered class(es) remain
 observe/warn-only, and FR-15 disclosure MUST state which hardware/runtime classes an
 enforce policy covers. A later version MAY calibrate per class with a
-class-representative reference set.
+class-representative reference set. Because the policy pins exactly one
+`hardware_runtime_class` per covered key, the class is a **policy invariant that is
+constant within every measurement, reference, window, overlay, and request-start
+identity for that key** (it therefore need not be an additional discriminator in
+those tuples); it is bound instead via the FR-4 `hardware_runtime_class_digest`
+capture and the FR-12 `hardware_class_changed` expiry, which together prove a
+captured verdict, its reference set, and the paid request all belong to the covered
+class and force expiry when a provider's class changes.
 
 The threshold record MUST include:
 
@@ -1133,8 +1165,16 @@ abusive rule when the coordinator caused it:
   increment unless repeated > 3 in 24h.
 - `inconclusive:k_retry_failed` (FR-7 mandatory K=256 retry could not complete) —
   abusive event unless coordinator reference/scheduling/transport fault.
+- `inconclusive:coordinator_timeout` (initial K=64 probe timed out, produced no
+  result, or failed transport before any provider result) — abusive event unless
+  coordinator scheduling/transport fault; no `probe_result_digest`.
 - `inconclusive:provider_inconclusive` (a well-formed `provider_inconclusive`
-  result) — counter effect per the mapped `provider_reason_code`.
+  result) — counter effect per the mapped `provider_reason_code`, by this closed
+  mapping: `inconclusive:model_swap` → no abusive increment (treated as `expired`
+  identity change); `inconclusive:unsupported_sampler` → abusive event;
+  `inconclusive:reference_unavailable` → coordinator-fault-exempt (no abusive
+  increment); `inconclusive:position_mismatch`, `inconclusive:missing_distribution`,
+  `inconclusive:timeout` → abusive event.
 
 `warn` MUST NOT block covered paid routing by itself.
 
@@ -1181,20 +1221,29 @@ Allowed states:
 - `expired`: prior state exceeded freshness TTL or was invalidated by target
   generation, corpus, threshold, tokenizer, sampler stage, or catalog change.
 
-Positive-state recomputation (mandatory, not sticky): the window's positive state
-is a deterministic function of the current window, recomputed on **every finalized
-eligible canary** and at every request-start capture. The window key's positive
-state MUST be `verified` only while the verified pass rule and payable-window
-prerequisites hold, `warn` only while the payable-window prerequisites hold and the
-latest valid result is warning-class below the quarantine-candidate threshold, and
-otherwise MUST be `pending` (non-payable) — unless the overlay is
-`quarantined_compute_drift` or `blocked:<reason>`, which takes precedence. In
-particular, a latest verdict of `quarantine_candidate` that does not yet satisfy the
-window quarantine rule MUST drop the window out of payable `verified`/`warn` to
-`pending` until the verified pass rule is re-satisfied; an implementation MUST NOT
-retain a sticky `verified` across an intervening `quarantine_candidate`. Any window
-that is not exactly `verified`, `warn`, `quarantined_compute_drift`, or
-`blocked:<reason>` MUST be treated as `pending` and is non-payable.
+Positive-state recomputation (mandatory, not sticky): the effective state is a
+deterministic function of the current window and overlay, recomputed on **every
+finalized eligible canary** and at every request-start capture, by this ordered
+resolution (first match wins):
+
+1. If the swap-laundering overlay or per-key overlay carries
+   `blocked:<reason>` or `quarantined_compute_drift` → that block/quarantine state.
+2. Else if a freshness/invalidation check fails (TTL, target generation, tokenizer,
+   sampler stage, corpus, threshold, catalog) → `expired` with the FR-3
+   `expiry_cause`.
+3. Else if there is no valid result for the window key yet → `unknown`.
+4. Else if the verified pass rule and payable-window prerequisites hold →
+   `verified`.
+5. Else if the payable-window prerequisites hold and the latest valid result is
+   warning-class below the quarantine-candidate threshold → `warn`.
+6. Else → `pending` (under-sampled, or the latest verdict is a
+   `quarantine_candidate` that does not yet satisfy the window quarantine rule).
+
+Only steps 4–5 are payable. In particular, an intervening `quarantine_candidate`
+that does not satisfy the window quarantine rule resolves to `pending` at step 6 —
+an implementation MUST NOT retain a sticky `verified` across it. `unknown` and
+`expired` are preserved as distinct states (they carry distinct settlement reasons
+per FR-3) and MUST NOT be collapsed into `pending`.
 
 Abusive inconclusive rule:
 
@@ -1269,11 +1318,16 @@ Clear rule:
   `pass` results over at least 24 hours on the overlay key, or through an explicit
   dual-approved overlay transition that records old/new overlay-key bindings and
   evidence. A `target_generation` change never clears the overlay (the overlay key
-  omits `target_generation`); a `corpus_version` or `threshold_version` change
-  produces a new overlay key and does NOT migrate quarantine automatically —
-  operators MUST NOT rotate corpus/threshold as a de-facto amnesty, and a
-  genuinely-drifted provider must still re-pass on the new key (fail-closed via
-  re-onboarding).
+  omits `target_generation`). A `corpus_version` or `threshold_version` change
+  produces a new overlay key; to prevent operator-rotation amnesty, an active
+  `quarantined_compute_drift`/`blocked:<reason>` on the prior overlay MUST write an
+  adverse-state lineage tombstone keyed by `(stable_provider_identity, model_id,
+  target_model_hash, tokenizer_identity, sampler_stage)` that the coordinator MUST
+  consult at request-start capture for the successor corpus/threshold key. While a
+  tombstone is unresolved, the successor key MUST NOT regain eligibility through the
+  short FR-11 onboarding gate; it regains eligibility only through the full FR-10
+  clear rule (`clear_pass_count` consecutive passes over ≥24h) or dual-approved
+  manual review that explicitly retires the tombstone.
 - `blocked:abusive_inconclusive` clears only after dual-approved manual review
   or `clear_pass_count` consecutive `pass` results over at least 24 hours for
   the same key while the rolling abusive-inconclusive window is below threshold.
@@ -1350,9 +1404,14 @@ NOT carry across target-generation boundaries.
 
 On target model hash change (which also increments `target_generation`), completed
 warm-swap, same-hash runtime reload, provider reconnect without continuity proof,
-tokenizer identity change, sampler stage change, corpus version change, or
-threshold version change, the affected exact key's positive state MUST move to
-`expired` and covered paid routing MUST require fresh compute-integrity state.
+tokenizer identity change, sampler stage change, corpus version change, threshold
+version change, or a provider `hardware_runtime_class` change, the affected exact
+key's positive state MUST move to `expired` and covered paid routing MUST require
+fresh compute-integrity state. A `hardware_runtime_class` change specifically
+expires with `expiry_cause = hardware_class_changed` and, because the covered class
+is policy-pinned per key (FR-8), a provider whose class no longer matches the covered
+class becomes uncovered (observe/warn-only) rather than measured against a
+mismatched-class threshold/reference.
 
 Expiry of positive state MUST NOT expire the stable-identity risk overlay.
 Active `quarantined_compute_drift`, active `blocked:<reason>` state, and the three
@@ -1648,7 +1707,8 @@ enforce activation record MUST state the maximum covered
 cardinality the funded reference fleet sustains within the TTL, and catalog/coverage
 expansion beyond that cardinality MUST be gated on added reference capacity —
 otherwise newly-covered keys fail closed as `compute_integrity_reference_stale`,
-which for honest providers degrades per `coordinator_attributable_lapse_mode` (FR-3).
+which fails closed (non-payable) per FR-3, with availability preserved by the
+pre-admission `reference_unavailable_auto_downgrade` mode flip (FR-1).
 
 At the default background budget, a key receives about 1 canary per day. The
 spec therefore MUST disclose that default background detection, onboarding, and
@@ -1665,11 +1725,12 @@ The initial deployment budget MUST assume either:
   identical M4 Pro node cloned within one fault/operator domain does NOT satisfy the
   FR-5 quorum), plus additional idle standby and sharding capacity when
   resident-model count or warm-swap latency cannot refresh all covered
-  model/hash/tokenizer/sampler-stage keys within the freshness TTL. When the two
-  nodes share a signed runtime build/kernel, each MUST additionally pass independent
-  signed golden-fixture validation at admission and every refresh (FR-5 predicate
-  dimension (c)); golden-fixture validation does not substitute for the distinct
-  hardware failure domain or operator identity; or
+  model/hash/tokenizer/sampler-stage keys within the freshness TTL. The two nodes
+  MUST also differ in runtime-build/kernel provenance (FR-5 dimension (c)); a signed
+  golden-fixture validation at admission and every refresh is an additional required
+  check, not a substitute for operator, hardware, or runtime-build independence. A
+  pair of identically-provisioned cloned nodes therefore does NOT satisfy enforce
+  quorum; or
 - an equivalent self-hosted reference fleet with the same redundancy, sharding,
   freshness, and audit properties.
 
@@ -1730,12 +1791,19 @@ these reasons:
   remains payable, so enforce blocks only the gross-substitution quarantine tail —
   overlapping what the SPEC-022 hash gate already covers. Enforcing before the
   honest-provider protections above (hardware-class restriction, measured-FP gate,
-  coordinator-attributable-lapse degrade, tightened swap-laundering) are validated
+  reference-outage auto-downgrade, tightened swap-laundering) are validated
   would risk net-harming honest providers more than it deters cheating.
+- **Identity authority is a hard prerequisite, not a supply problem.** Enforce's
+  Sybil precondition (FR-1) requires a named stable-device/operator-identity
+  authority that the shipped SPEC-026 App-Attest track does not provide (it is
+  optional/client-dormant and allows many keys per device). Until a pre-vetted
+  provider-account regime or equivalent authority exists, enforce is architecturally
+  unavailable for the shipped track — adding reference capacity or calibration data
+  cannot unblock it.
 - **Honest disclosure.** FR-11 provider-facing "expected wall-clock target" MUST be
   set from the true accrual budget (which may be ~100 days for a new key at default
   cadence), stated separately from the FR-15 ~5-day *detection* lag. FR-15 MUST NOT
-  imply enforce is imminent where supply/calibration cannot support it.
+  imply enforce is imminent where supply/calibration/identity cannot support it.
 
 Enforce activation for any covered key is therefore permitted only after the
 maintainer group ratifies, per key: sufficient supply/burst budget to accrue the
@@ -1750,11 +1818,15 @@ exist.
 
 Before SPEC-036 can move toward LOCK:
 
-1. A threshold-calibration fixture covers records keyed by `(model_id,
-   target_model_hash, tokenizer_identity, sampler_stage, sampling_profile,
-   corpus_version, threshold_version)`, baseline p99 fields, minimum
-   sample/position counts, false-positive target, threshold-version changes, and
-   activation refusal when calibration is missing or underpowered.
+1. A threshold-calibration fixture covers records keyed by the full 8-tuple
+   `(model_id, target_model_hash, tokenizer_identity, sampler_stage,
+   sampling_profile, corpus_version, threshold_version, hardware_runtime_class)`,
+   baseline p99 fields, minimum sample/position counts, a numeric false-positive
+   budget with a measured realized false-quarantine rate at or below it, threshold-
+   version changes, and activation refusal when calibration is missing, underpowered,
+   or lacks the measured-FP validation. It also proves enforce is class-restricted:
+   a provider whose `hardware_runtime_class` differs from the covered class cannot
+   enter enforce and remains observe/warn-only.
 2. A reference-event fixture covers trusted reference admission, signed catalog
    hash match, tokenizer identity match, sampler stage, reference-set and
    reference-event digests, source and failure-domain independence,
@@ -1824,9 +1896,12 @@ Before SPEC-036 can move toward LOCK:
    for the same stable identity across `assigned_id`/`target_generation` churn, and
    that request-start capture consults the overlay so a generation-churned key
    settles non-payable while the overlay is quarantined. It also proves that
-   repeated `target_model_hash`/`tokenizer_identity` flips after a `warn` or
-   `quarantine_candidate` escalate to a `blocked:swap_laundering_suspected` block at
-   `(stable_provider_identity, model_id)` swap-laundering scope.
+   a provider-originated `target_model_hash`/`tokenizer_identity` change made while
+   the per-key overlay carries active risk (a non-zero quarantine-candidate/abusive-
+   inconclusive/onboarding-failure accumulator or an active block) escalates to a
+   `blocked:swap_laundering_suspected` block at `(stable_provider_identity, model_id)`
+   swap-laundering scope, while a benign `warn` with no accumulated risk and a
+   continuity-proven reconnect or same-hash reload do NOT escalate.
 9. An audit/export test proves reference events, probe digests, state
    transitions, and settlement quarantine rows are linkable by digest/id without
    exposing raw buyer prompts or outputs; signed auditor bundles exist before
