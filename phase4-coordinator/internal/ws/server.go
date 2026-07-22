@@ -143,6 +143,7 @@ type Server struct {
 	connectionEventStopOnce        sync.Once
 	connectionEventDone            chan struct{}
 	connectionEventsStopped        atomic.Bool
+	providerConnWG                 sync.WaitGroup
 	anonymousEventMu               sync.Mutex
 	anonymousEventWindow           time.Time
 	anonymousEventCount            int
@@ -916,10 +917,14 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth.sourceIP = remoteIP
-	go s.handleConn(conn, auth, func() {
-		s.releaseUnauthenticatedConn()
-		releasePerIP()
-	})
+	s.providerConnWG.Add(1)
+	go func() {
+		defer s.providerConnWG.Done()
+		s.handleConn(conn, auth, func() {
+			s.releaseUnauthenticatedConn()
+			releasePerIP()
+		})
+	}()
 }
 
 func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
@@ -4016,6 +4021,27 @@ func (s *Server) CloseAllProviderSessions(reason string) {
 		}
 		return true
 	})
+}
+
+// WaitProviderConnections blocks until in-flight provider WS handlers exit or
+// the timeout elapses. Used before journal flush on shutdown.
+func (s *Server) WaitProviderConnections(timeout time.Duration) {
+	if s == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		s.providerConnWG.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.log.Warn().Msg("provider websocket handlers did not quiesce before journal flush")
+	}
 }
 
 func (s *Server) handlePreflightAck(providerID, assignedID string, payload []byte) {

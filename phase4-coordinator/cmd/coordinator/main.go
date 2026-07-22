@@ -1069,6 +1069,7 @@ func main() {
 				os.Exit(1)
 			}
 			wsServer.CloseAllProviderSessions("coordinator shutdown")
+			wsServer.WaitProviderConnections(2 * time.Second)
 			wsServer.FlushConnectionEvents(2 * time.Second)
 			// M2-2: wait for the swap-audit drain goroutine to finish so
 			// the last few model swaps are persisted. The drain goroutine

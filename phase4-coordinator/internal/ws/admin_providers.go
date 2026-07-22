@@ -3,7 +3,6 @@ package ws
 import (
 	"context"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -113,17 +112,14 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 	afterSeen := strings.TrimSpace(r.URL.Query().Get("after_seen"))
 
 	live := map[string]pool.Provider{}
-	var liveIDs []string
 	connected := 0
 	for _, p := range s.pool.Snapshot() {
 		if !s.isProviderTransportConnected(p) {
 			continue
 		}
 		live[p.ProviderID] = p
-		liveIDs = append(liveIDs, p.ProviderID)
 		connected++
 	}
-	sort.Strings(liveIDs)
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	known, err := s.connectionEvents.ListLastKnown(ctx, limit, afterSeen, afterID)
@@ -133,24 +129,9 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 	}
 
 	out := make([]adminProviderView, 0, limit)
-	seen := map[string]struct{}{}
-	// Page 1 prioritizes currently connected providers so live inventory is
-	// never crowded out by a full durable page.
-	if afterID == "" && afterSeen == "" {
-		for _, id := range liveIDs {
-			if len(out) >= limit {
-				break
-			}
-			out = append(out, adminViewFromLive(live[id]))
-			seen[id] = struct{}{}
-		}
-	}
 	var lastSnap *providerevents.LastKnown
 	for i := range known {
 		snap := known[i]
-		if _, ok := seen[snap.ProviderID]; ok {
-			continue
-		}
 		if len(out) >= limit {
 			break
 		}
@@ -160,7 +141,6 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 			snap.Presence = "offline"
 			out = append(out, adminViewFromLastKnown(snap))
 		}
-		seen[snap.ProviderID] = struct{}{}
 		lastSnap = &known[i]
 	}
 	resp := map[string]any{
