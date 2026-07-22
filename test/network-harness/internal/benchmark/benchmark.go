@@ -11,6 +11,11 @@
 //   B4  Error rate per 1000 requests bounded
 //   B5  Provider slot utilization reasonable
 //   B6  Earnings/hr viable at current tier-2 pricing
+//   B7  Cold/warm TTFT ratio bounded (scenario 08)
+//   B10 Sustained streaming-TPS retention over a long soak (scenario 15)
+//
+// (B8/B9 — sticky cache-reuse — are added by RESEARCH_236; B10 skips
+// that range to avoid colliding regardless of merge order.)
 //
 // Each verdict carries a Status (PASS / WARN / FAIL / SKIP), the
 // measured value, the target and bare-min thresholds, and a one-line
@@ -81,6 +86,29 @@ type BuyerMetrics struct {
 	// distributions used by B7. Both Count fields are 0 when phase
 	// data is absent.
 	ColdWarm ColdWarmMetrics `json:"cold_warm,omitempty"`
+
+	// SustainedTPS — the windowed streaming-TPS retention cross-section
+	// used by B10. Always computed; the window sample counts are 0 on
+	// runs too short/sparse to fill either window, in which case B10 SKIPs.
+	SustainedTPS SustainedTPSMetrics `json:"sustained_tps"`
+}
+
+// SustainedTPSMetrics is the sustained-load retention cross-section for
+// B10. It windows the per-request *streaming* decode-TPS distribution
+// (post-TTFT tokens / decode duration — the same basis as B2, NOT the
+// structurally-unreliable non-streaming sustained_tps field) by
+// wall-clock StartUTC into a first window (the first SustainedTPSWindowSeconds
+// of observed samples) and a final window (the last SustainedTPSWindowSeconds),
+// then reports retention = final_p50 / first_p50. On a short run the two
+// windows can overlap; the ≥ SustainedTPSMinWindowSamples floor is the
+// guard against a meaningless verdict, not window disjointness (a real
+// 45–60 min soak has fully disjoint windows).
+type SustainedTPSMetrics struct {
+	FirstWindowTPSP50  float64 `json:"first_window_tps_p50"`
+	FinalWindowTPSP50  float64 `json:"final_window_tps_p50"`
+	Retention          float64 `json:"retention"`
+	FirstWindowSamples int     `json:"first_window_samples"`
+	FinalWindowSamples int     `json:"final_window_samples"`
 }
 
 // ColdWarmMetrics is the cold-vs-warm TTFT cross-section. Cold = first
@@ -178,6 +206,26 @@ const (
 	// hurts buyer-perceived p50 on bursty workloads.
 	ColdWarmRatioTarget  = 2.0
 	ColdWarmRatioBareMin = 5.0
+
+	// B10 (sustained streaming-TPS retention) thresholds for scenario 15
+	// (thermal soak). retention = final-window TPS p50 / first-window TPS
+	// p50 over a 45–60 min constant-decode soak. A provider that thermally
+	// throttles under sustained load sheds decode throughput; retention
+	// captures how much it keeps. These bands are PROVISIONAL — they were
+	// chosen before any real soak run and MUST be recalibrated from the
+	// first lab-Mac campaign (issue #584) before B10 is armed as a gate.
+	// Until then scenario 15 leaves sustained_gate_armed=false, which
+	// downgrades a would-be FAIL to WARN (see evalB10).
+	SustainedTPSRetentionTarget  = 0.85 // PASS ≥ 0.85
+	SustainedTPSRetentionBareMin = 0.70 // WARN ≥ 0.70, FAIL < 0.70
+
+	// SustainedTPSWindowSeconds is the width of the first/final comparison
+	// windows (5 min each).
+	SustainedTPSWindowSeconds = 300.0
+
+	// SustainedTPSMinWindowSamples is the per-window sample floor below
+	// which B10 SKIPs rather than emit a low-confidence retention verdict.
+	SustainedTPSMinWindowSamples = 8
 )
 
 // Evaluate computes the benchmark summary and per-invariant verdicts.
@@ -233,6 +281,8 @@ func Evaluate(
 			verdicts = append(verdicts, evalB6(providerMetrics, pricing, windowSeconds))
 		case "B7":
 			verdicts = append(verdicts, evalB7(buyerMetrics))
+		case "B10":
+			verdicts = append(verdicts, evalB10(buyerMetrics, sc.Benchmark.SustainedGateArmed))
 		default:
 			verdicts = append(verdicts, Verdict{
 				ID:     id,
@@ -248,9 +298,17 @@ func Evaluate(
 
 // --- buyer-side compute -----------------------------------------------------
 
+// tpsSample is one streaming-TPS observation tagged with the request's
+// wall-clock start, used to window the decode-TPS distribution for B10.
+type tpsSample struct {
+	start time.Time
+	tps   float64
+}
+
 func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 	var ttfts, walls, tps []float64
 	var coldTTFTs, warmTTFTs []float64
+	var tpsSamples []tpsSample
 	non2xx := map[string]int{}
 	success := 0
 	non2xxCount := 0
@@ -288,7 +346,9 @@ func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 			firstByte := r.StartUTC.Add(time.Duration(r.TTFTMillis) * time.Millisecond)
 			streamDur := r.LastByteUTC.Sub(firstByte).Seconds()
 			if streamDur > 0 {
-				tps = append(tps, float64(r.CompletionTokensReceived)/streamDur)
+				v := float64(r.CompletionTokensReceived) / streamDur
+				tps = append(tps, v)
+				tpsSamples = append(tpsSamples, tpsSample{start: r.StartUTC, tps: v})
 			}
 		}
 	}
@@ -314,7 +374,54 @@ func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 			bm.ColdWarm.RatioP50 = bm.ColdWarm.ColdTTFTMs.P50 / bm.ColdWarm.WarmTTFTMs.P50
 		}
 	}
+	bm.SustainedTPS = computeSustainedTPS(tpsSamples)
 	return bm
+}
+
+// computeSustainedTPS windows the timestamped streaming-TPS samples into
+// a first window ([t0, t0+W)) and a final window ((tEnd-W, tEnd]) by
+// wall-clock start, where t0/tEnd are the earliest/latest observed sample
+// starts and W = SustainedTPSWindowSeconds. It reports the p50 of each
+// window and retention = final_p50 / first_p50. Sample counts are 0 when
+// no streaming samples exist; B10 SKIPs below the per-window floor.
+func computeSustainedTPS(samples []tpsSample) SustainedTPSMetrics {
+	var st SustainedTPSMetrics
+	if len(samples) == 0 {
+		return st
+	}
+	t0 := samples[0].start
+	tEnd := samples[0].start
+	for _, s := range samples {
+		if s.start.Before(t0) {
+			t0 = s.start
+		}
+		if s.start.After(tEnd) {
+			tEnd = s.start
+		}
+	}
+	firstCutoff := t0.Add(time.Duration(SustainedTPSWindowSeconds) * time.Second)
+	finalCutoff := tEnd.Add(-time.Duration(SustainedTPSWindowSeconds) * time.Second)
+	var first, final []float64
+	for _, s := range samples {
+		if s.start.Before(firstCutoff) {
+			first = append(first, s.tps)
+		}
+		if !s.start.Before(finalCutoff) {
+			final = append(final, s.tps)
+		}
+	}
+	st.FirstWindowSamples = len(first)
+	st.FinalWindowSamples = len(final)
+	if len(first) > 0 {
+		st.FirstWindowTPSP50 = percentile(first, 0.50)
+	}
+	if len(final) > 0 {
+		st.FinalWindowTPSP50 = percentile(final, 0.50)
+	}
+	if st.FirstWindowTPSP50 > 0 {
+		st.Retention = st.FinalWindowTPSP50 / st.FirstWindowTPSP50
+	}
+	return st
 }
 
 // --- provider-side compute --------------------------------------------------
@@ -630,6 +737,60 @@ func evalB7(bm BuyerMetrics) Verdict {
 	default:
 		v.Status = StatusFail
 		v.Detail = fmt.Sprintf("cold/warm p50 ratio %.2f exceeds bare-min %.1f — cold-start penalty hurts buyer-perceived latency", v.Value, v.BareMin)
+	}
+	return v
+}
+
+// evalB10 scores sustained streaming-TPS retention over a long soak
+// (scenario 15). retention = final-window TPS p50 / first-window TPS p50.
+// A provider that thermally throttles under constant decode load sheds
+// throughput, driving retention below 1.0. SKIP when either window has
+// fewer than SustainedTPSMinWindowSamples samples (run too short/sparse).
+//
+// gateArmed gates blocking: the B10 thresholds are provisional until a
+// real lab soak calibrates them (issue #584), so when gateArmed is false
+// a would-be FAIL is reported as WARN with a "[provisional/unarmed]"
+// marker — the retention is still measured and surfaced, it just cannot
+// block a run. When gateArmed is true B10 fails hard below the bare-min.
+func evalB10(bm BuyerMetrics, gateArmed bool) Verdict {
+	v := Verdict{ID: "B10", Title: "sustained streaming-TPS retention", Unit: "ratio",
+		Target: SustainedTPSRetentionTarget, BareMin: SustainedTPSRetentionBareMin}
+	st := bm.SustainedTPS
+	if st.FirstWindowSamples < SustainedTPSMinWindowSamples || st.FinalWindowSamples < SustainedTPSMinWindowSamples {
+		v.Status = StatusSkip
+		v.Detail = fmt.Sprintf("insufficient windowed streaming samples (first=%d final=%d, need >=%d each) — soak too short or too sparse for a retention verdict",
+			st.FirstWindowSamples, st.FinalWindowSamples, SustainedTPSMinWindowSamples)
+		return v
+	}
+	if st.FirstWindowTPSP50 <= 0 {
+		v.Status = StatusSkip
+		v.Detail = "first-window streaming TPS p50 is zero — cannot compute retention"
+		return v
+	}
+	v.Value = st.Retention
+	armSuffix := ""
+	if !gateArmed {
+		armSuffix = " [provisional/unarmed — thresholds not yet lab-calibrated, #584]"
+	}
+	switch {
+	case v.Value >= SustainedTPSRetentionTarget:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("retention %.2f >= target %.2f (first p50=%.1f tok/s n=%d, final p50=%.1f tok/s n=%d)%s",
+			v.Value, v.Target, st.FirstWindowTPSP50, st.FirstWindowSamples, st.FinalWindowTPSP50, st.FinalWindowSamples, armSuffix)
+	case v.Value >= SustainedTPSRetentionBareMin:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("retention %.2f under target %.2f but >= bare-min %.2f — throughput sagging under sustained load (first p50=%.1f final p50=%.1f)%s",
+			v.Value, v.Target, v.BareMin, st.FirstWindowTPSP50, st.FinalWindowTPSP50, armSuffix)
+	default:
+		if gateArmed {
+			v.Status = StatusFail
+			v.Detail = fmt.Sprintf("retention %.2f under bare-min %.2f — sustained-load throughput collapse (first p50=%.1f tok/s, final p50=%.1f tok/s); this is the #584 degradation signature",
+				v.Value, v.BareMin, st.FirstWindowTPSP50, st.FinalWindowTPSP50)
+		} else {
+			v.Status = StatusWarn
+			v.Detail = fmt.Sprintf("retention %.2f below bare-min %.2f (would FAIL if gate armed) — sustained-load throughput collapse (first p50=%.1f tok/s, final p50=%.1f tok/s)%s",
+				v.Value, v.BareMin, st.FirstWindowTPSP50, st.FinalWindowTPSP50, armSuffix)
+		}
 	}
 	return v
 }

@@ -129,6 +129,15 @@ type Benchmark struct {
 	// B5 (slot utilization). Defaults to 3 — the Pearl coordinator's
 	// AccountConcurrency at the time this spec landed (PR #205).
 	ProviderSlots int `yaml:"provider_slots"`
+
+	// SustainedGateArmed arms B10 (sustained streaming-TPS retention) as a
+	// blocking gate. When false (the default), B10 still measures and
+	// reports retention, but a would-be FAIL is downgraded to WARN so an
+	// UNCALIBRATED gate can never block a run. The B10 thresholds are
+	// provisional (PASS >= 0.85 / WARN >= 0.70 / FAIL < 0.70) and must be
+	// calibrated against a real lab soak before this flag is set true —
+	// see docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md §3.5 and issue #584.
+	SustainedGateArmed bool `yaml:"sustained_gate_armed"`
 }
 
 // ChaosEvent is one scheduled shell action. `At` is measured from
