@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "last_checked_at": null,
-  "last_changed_at": "2026-07-07T17:00:00Z",
+  "last_checked_at": "2026-07-22T05:02:09Z",
+  "last_changed_at": "2026-07-22T05:02:09Z",
   "macprovider_pins": {
     "mlx_swift_lm": "3.31.4",
-    "mlx_swift": "0.31.6"
+    "mlx_swift": "0.31.4"
   },
   "blockers": {
     "mlx_swift_lm_406_compile_kv_offset": {
@@ -13,19 +13,21 @@
       "number": 406,
       "url": "https://github.com/ml-explore/mlx-swift-lm/issues/406",
       "state": "OPEN",
-      "title": "KVCacheSimple.offset (Swift Int) breaks MLX.compile() decode",
+      "title": "KVCacheSimple.offset (Swift Int) breaks MLX.compile() decode \u2014 cache write position frozen across steps",
       "runbook_tasks": ["T2-01", "TG2"],
-      "updated_at": "2026-07-07T16:53:26Z"
+      "updated_at": "2026-07-07T16:53:26Z",
+      "closed_at": null
     },
     "mlx_swift_lm_364_gemma_moe": {
       "repo": "ml-explore/mlx-swift-lm",
       "kind": "pull_request",
       "number": 364,
       "url": "https://github.com/ml-explore/mlx-swift-lm/pull/364",
-      "state": "OPEN",
+      "state": "MERGED",
       "title": "MLXLLM Gemma4Text: add MoE block (router + experts) for the text path",
       "runbook_tasks": ["T1-02", "TG1"],
-      "updated_at": "2026-06-26T10:17:20Z"
+      "updated_at": "2026-07-21T20:22:03Z",
+      "merged_at": "2026-07-21T19:43:49Z"
     }
   },
   "releases": {
@@ -42,7 +44,7 @@
   },
   "implementation_signals": {
     "kvcache_offset_graph_traceable": false,
-    "note": "Heuristic: KVCache.swift on upstream main still uses Swift Int offset in KVCacheSimple.update (checked 2026-07-07)."
+    "note": "KVCache.swift heuristic on upstream main"
   },
   "watchlist": {
     "omlx": {
