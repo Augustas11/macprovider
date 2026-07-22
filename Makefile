@@ -107,6 +107,7 @@ test-dist:
 	bash ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh
 	node --test test/e2e/canary-buyer/probe.test.mjs test/e2e/canary-buyer/safety.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
 
 vet: vet-coordinator vet-gateway vet-integration
 

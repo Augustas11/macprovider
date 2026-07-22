@@ -75,6 +75,7 @@ phase4-coordinator/stats.test
 .deepsec-local/
 test/network-harness/artifacts/
 test/network-harness/harness
+test/e2e/aead-rekey-oneshot/artifacts/
 
 # Local #615 audit artifacts (reports/diffs; keep out of PRs)
 scratchpad/615-audit/

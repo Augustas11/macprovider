@@ -11,3 +11,4 @@
 | **B — Entry 172 referrals** | [`entry-172-referral-activation.md`](./entry-172-referral-activation.md) | Reversible private-prebeta referral activation checklist |
 | **#615 production exceptions** | [`production-exception-register.md`](./production-exception-register.md) | Machine-readable production exception register maintenance |
 | **#582 stranger onboarding** | [`582-stranger-hardware-trust-onboarding.md`](./582-stranger-hardware-trust-onboarding.md) | No-exception install → evidence → durable trust approve → admit → ready |
+| **#540 AEAD rekey** | [`540-aead-rekey-oneshot.md`](./540-aead-rekey-oneshot.md) | Isolated, approved, no-retry request/age rekey evidence |
