@@ -199,11 +199,26 @@ read_gateway_db_path_from_file() {
   ' "$1"
 }
 
+# #615 production exception gate runs independently of C2. SKIP_C2_CHECK must
+# never suppress registered-row exception enforcement.
+REPO_ROOT="$(CDPATH= cd -- "$DIST_DIR/../.." && pwd -P)"
+EXCEPTION_CHECK="$REPO_ROOT/scripts/check-production-exceptions.py"
+if [ ! -f "$EXCEPTION_CHECK" ]; then
+  echo "aborting gateway deploy: production exception checker missing: $EXCEPTION_CHECK" >&2
+  exit 5
+fi
+log "step 0a/8: production exception register gate (deploy, default-safe unless ENFORCEMENT=1)"
+python3 "$EXCEPTION_CHECK" gate --mode=deploy || {
+  echo "aborting gateway deploy: production exception gate failed" >&2
+  exit 5
+}
+
 log "step 0/8: pre-deploy C2 cross-component config check"
 # M1-6 follow-up (codex audits 2026-06-11): require real configs for C2,
 # or an explicit SKIP_C2_CHECK=1 override. The previous "best-effort"
 # path treated missing inputs as a warning, which weakened a deploy gate
 # the audit called out as mandatory.
+# NOTE: SKIP_C2_CHECK skips only the C2 timer relation — not the #615 gate above.
 if [ "$DRY_RUN_LOCAL" = "1" ]; then
   echo "  --dry-run-local set — validating local GATEWAY_CONFIG and exiting before deploy" >&2
   if [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
@@ -219,7 +234,7 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
   echo "  gateway config:        $GATEWAY_CONFIG $( [ -f "$GATEWAY_CONFIG" ] || echo '(missing — provide GATEWAY_CONFIG=<path>)')" >&2
   exit 5
 elif [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
-  echo "  SKIP_C2_CHECK=1 set — C2 cross-check skipped by operator opt-out" >&2
+  echo "  SKIP_C2_CHECK=1 set — C2 cross-check skipped by operator opt-out (exception gate already ran)" >&2
 elif [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ]; then
   GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
     echo "aborting gateway deploy: mktemp failed for installed config copy" >&2; exit 5;

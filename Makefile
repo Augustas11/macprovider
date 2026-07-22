@@ -8,7 +8,7 @@
 .PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
-        build-linux check fmt verify-autotune-catalog
+        build-linux check check-exceptions fmt verify-autotune-catalog
 
 test: test-coordinator test-gateway test-integration test-dist
 
@@ -51,6 +51,7 @@ test-integration:
 # that an env:NAME-indirected secret is deferred to runtime rather than
 # false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
 test-dist:
+	bash scripts/test-production-exceptions.sh
 	bash scripts/test-coordinator-advertised-version-test.sh
 	bash scripts/test-malibu-independent-release.sh
 	bash scripts/test-release-tag-target.sh
@@ -122,7 +123,11 @@ build-linux:
 	phase4-coordinator/scripts/build-linux.sh
 	phase5-gateway/scripts/build-linux.sh
 
-check:
+check-exceptions:
+	python3 scripts/check-production-exceptions.py validate
+	python3 scripts/check-production-exceptions.py report
+
+check: check-exceptions
 	phase4-coordinator/dist/check-deploy-config.sh \
 		phase4-coordinator/dist/coordinator.yaml \
 		phase5-gateway/dist/gateway.yaml
