@@ -302,7 +302,7 @@ legacy coordinator.
 
    The installer must commit only after this bridge coordinator returns the
    exact `current` buyer-serving envelope. The still-armed Pearl updater then
-   requires the same provider ID, release/policy/digest/signer/row, exact six
+   requires the same provider ID, release/policy/digest/signer/row, exact seven
    catalog files, and live text vnode before it can persist backend success. If
    the canary installer fails, its own transaction restores the prior provider
    while the Pearl updater remains able to roll back the backend. Do not raise
@@ -591,7 +591,7 @@ The direct-deploy recovery procedure is:
    the provider's on-disk bytes.
 12. Set `CATALOG_CANARY_SSH_TARGET` to the operator-controlled canary Mac and
    `CATALOG_CANARY_SSH_KEY` to a dedicated read-only operator key. Ensure its SSH
-   host key is already present in `known_hosts`. The deploy reads the six shipped
+   host key is already present in `known_hosts`. The deploy reads the seven shipped
    files below `CATALOG_CANARY_INSTALL_DIR` (default
    `macprovider/catalog-release`) through no-follow directory handles and
    compares every SHA-256 with the locally verified release before commit. The
