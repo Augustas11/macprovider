@@ -503,21 +503,32 @@ FR-3 settlement, FR-4 capture, FR-10 state resolution, FR-11 onboarding, FR-16
 routing, and Migration — is this exhaustive truth table (an adverse state's
 money/routing EFFECT = deny billable covered routing + non-payable settlement):
 
+The table is total over SPEC-036 mode ∈ {`enforce`, `warn_only`, `observe`} ×
+SPEC-022 {enforce, not-enforce} (rows 1–2 group `warn_only` and `observe`
+identically, since neither is SPEC-036 enforce):
+
 | Runtime mode | Provider-attributable / breaker (`enforce_preserved`) | Coordinator-attributable block (`enforce_preserved`) | `telemetry_only` (any state) |
 |---|---|---|---|
-| SPEC-036 enforce AND SPEC-022 enforce (both effectively enforce) | **active** (fail closed) | **active** (fail closed) | dormant |
-| SPEC-036 warn_only, SPEC-022 still enforce (SPEC-036-only downgrade) | **active** (§3 Preserved-adverse-state exception) | dormant (FR-1 availability downgrade — the point of it) | dormant |
-| SPEC-022 not enforce (SPEC-022 downgrade / coverage narrowed) | dormant (SPEC-036 has no independent money authority; SPEC-022 alone governs) | dormant | dormant |
+| SPEC-036 enforce AND SPEC-022 enforce | **active** (fail closed) | **active** (fail closed) | dormant |
+| SPEC-036 `warn_only` OR `observe`, SPEC-022 still enforce (SPEC-036-only downgrade, incl. enforce→observe) | **active** (§3 Preserved-adverse-state exception) | dormant (FR-1 availability downgrade — the point of it) | dormant |
+| SPEC-022 not enforce (SPEC-022 downgrade / coverage narrowed), any SPEC-036 mode | dormant (SPEC-036 has no independent money authority; SPEC-022 alone governs) | dormant | dormant |
 
+Every downstream consumer — FR-10 state resolution, FR-11 onboarding, FR-16 routing,
+Migration prospective evaluation, and FR-3 settlement — MUST gate on this
+`effective_adverse_state` predicate rather than on stored quarantine/block state
+directly; where those sections say an overlay quarantine/block "takes precedence" or
+"is inherited," they mean an adverse state **whose effect is active** per this table.
 "Dormant" means the state persists and survives (only the FR-10/FR-16 clear releases
 it); its effect resumes automatically, with no re-adjudication, when the mode returns
-to a row where the truth table makes it active. `telemetry_only` state (computed under
-observe/warn_only or where SPEC-022 was not enforcing) NEVER has a money/routing
-effect. Under normal enforce (top row) EVERY non-payable state fails closed — this is
-consistent with the FR-3 enforce fail-closed rule below; the origin/mode gating only
-governs what survives a *downgrade*, never a relaxation of normal-enforce
-fail-closed. Rows already captured under a composite snapshot keep their captured
-outcome regardless of later mode changes (immutability).
+to a row where the table makes it active. A `telemetry_only` state NEVER has a
+money/routing effect; a fresh **enforce-mode** quarantine/block of a key that
+previously held only a `telemetry_only` adverse state is a NEW `enforce_preserved`
+adjudication (that is the re-adjudication path — evidence gathered under enforce, not
+a re-labeling of the old telemetry state). Under normal enforce (row 1) EVERY
+non-payable state fails closed, consistent with the FR-3 enforce fail-closed rule
+below; the origin/mode gating only governs what survives a *downgrade*, never a
+relaxation of normal-enforce fail-closed. Rows already captured under a composite
+snapshot keep their captured outcome regardless of later mode changes (immutability).
 
 Origin inheritance: any successor overlay, `blocked:swap_laundering_suspected` block,
 or adverse-state lineage tombstone (FR-10, FR-12) DERIVED from an `enforce_preserved`
@@ -604,9 +615,12 @@ covered key, model, or whole policy **at request-start capture**, the coordinato
 MUST record the captured `circuit_breaker_active = true` and `circuit_breaker_scope`
 (FR-4) alongside the underlying captured compute-integrity state (which is preserved
 unchanged, e.g. `verified` or `warn`). At settlement, a captured
-`circuit_breaker_active = true` MUST make the row non-payable and settlement MUST
-derive reason `compute_integrity_circuit_breaker_hold`, regardless of the underlying
-state. To preserve SPEC-022 request-start immutability, settlement reads only the
+`circuit_breaker_active = true` MUST make the row non-payable; settlement derives
+reason `compute_integrity_circuit_breaker_hold` only when no higher-precedence
+non-payable condition matches (per the FR-3 reason-precedence table, drift and blocks
+outrank the breaker, so a drift-quarantined row keeps `compute_drift_quarantined`
+while a breaker over an otherwise-payable `verified`/`warn` row yields the breaker
+reason). To preserve SPEC-022 request-start immutability, settlement reads only the
 captured request-start composite snapshot (FR-4): a circuit-breaker that activates
 *after* request-start MUST NOT retroactively reclassify an already-admitted row — it
 stops new admissions for the affected scope instead (FR-16). Emergency clawback of
@@ -1197,7 +1211,13 @@ or `quarantine_candidate` if any of these predicates is true:
 - `median(tv_lower) >= tau_quarantine_median - 0.005`.
 - Any position `tv_lower >= tau_quarantine_position - 0.005`.
 
-At K=256, if either tail mass exceeds `0.005`, the result MUST be
+A mandatory K=256 retry is a fresh probe (new `probe_id`, new single-use nonce, new
+`probe_request_digest`) that MUST bind the SAME covered key, corpus positions,
+reference-event digests, and `target_generation` as the K=64 attempt it retries (via
+a `retry_of_probe_id` field echoing the original `probe_id`); the coordinator MUST
+reject a K=256 result whose bound identity/positions/reference digests differ from the
+retried K=64 attempt, so a provider cannot substitute a different measurement on
+retry. At K=256, if either tail mass exceeds `0.005`, the result MUST be
 `inconclusive:tail_mass_high` and MUST NOT increment drift counters.
 
 If a mandatory K=256 retry fails, times out, or cannot complete before expiry,
@@ -1250,13 +1270,21 @@ the fields below). It MUST include the full 8-tuple threshold key (`model_id`,
 - `calibration_window_start` and `calibration_window_end` (RFC3339 UTC).
 - `baseline_tail_mass_feasibility_rate` (number in `[0,1]`).
 - `baseline_median_tv_upper` and `baseline_max_tv_upper` (numbers).
-- `false_positive_budget` (number in `[0,1]`) AND the measured evidence:
-  `measured_false_quarantine_numerator` (integer),
-  `measured_false_quarantine_denominator` (integer, the eligible-canary population),
-  `measured_false_quarantine_rate` (number in `[0,1]`, ≤ `false_positive_budget`),
-  and `measured_fp_window` (RFC3339 UTC range over the covered
-  `hardware_runtime_class`). Enforce activation (FR-8) reads these fields, so the
-  closed digest commits the evidence that authorizes enforce.
+- `false_positive_budget` (number in `[0,1]`) AND the measured evidence. Because an
+  overt drift detector cannot prove honest computation, the metric is defined against
+  a **maintainer-adjudicated known-good calibration cohort**: a set of
+  provider/reference runs that the SPEC Maintainers group has independently vetted as
+  correctly serving the covered artifact/class (recorded as
+  `known_good_cohort_digest` over the cohort's member identities + adjudication
+  evidence). A "false quarantine" is a canary on a known-good cohort member that would
+  cross the quarantine rule. The record binds `known_good_cohort_digest`,
+  `measured_false_quarantine_numerator` (integer, would-quarantine canaries on cohort
+  members), `measured_false_quarantine_denominator` (integer, eligible cohort
+  canaries), `measured_false_quarantine_rate` (number in `[0,1]`, ≤
+  `false_positive_budget`), and `measured_fp_window` (RFC3339 UTC range over the
+  covered `hardware_runtime_class`). This is an observable would-quarantine rate on a
+  vetted cohort, not a proof of honest computation; enforce activation (FR-8) reads
+  these fields, so the closed digest commits the authorizing evidence.
 - `approval_timestamp` (RFC3339 UTC) and `approver_group` (string).
 
 All fields above are the exact, closed JSON keys; producers/auditors serialize the
@@ -1314,14 +1342,21 @@ abusive rule when the coordinator caused it:
   change that expires the key), mirroring the `provider_inconclusive` `model_swap`
   mapping.
 
-Measurement-validation precedence (ordered; first match wins) resolves the overlap
-between the strict identity rule and the specific-reason rules: (1)
-authentication/replay failure → `identity_reject`; (2) per-position hash/generation
-change or mix → `model_swap`; (3) prompt/position/prefix/context binding failure →
-`position_mismatch`; (4) distribution/support/tail-validation failure →
-`malformed_distribution`; (5) FR-7 tail/K-retry outcomes → `tail_mass_high` /
-`k_retry_failed`. This ensures an ordinary swap or a coordinator corpus fault does not
-mis-accumulate as `identity_reject`.
+Measurement-validation precedence (ordered; first match wins) is exhaustive and
+resolves the overlap between the strict identity rule and the specific-reason rules:
+(1) authentication/replay/envelope failure (nonce, `probe_request_digest`,
+`probe_result_digest`, `type`, `schema_version`, expiry, or duplicate-digest replay)
+→ `identity_reject`; (2) per-position `target_model_hash`/`target_generation` change or
+mix → `model_swap`; (3) any other global identity-echo mismatch (`model_id`,
+`tokenizer_identity`, `sampling_profile`, `corpus_version`, `threshold_version`,
+`hardware_runtime_class`) → `identity_reject`; (4) prompt/position/prefix/context
+binding failure → `position_mismatch`; (5) distribution/support/tail-validation
+failure → `malformed_distribution`; (6) FR-7 tail/K-retry outcomes → `tail_mass_high`
+/ `k_retry_failed`. A coordinator-side reference fault (reference unavailable/faulty
+at measurement time, not a provider problem) finalizes the probe as
+`inconclusive:coordinator_reference_fault` — coordinator-fault-exempt (no abusive
+increment) and NOT a canary verdict. This ensures an ordinary swap or a coordinator
+corpus/reference fault does not mis-accumulate as `identity_reject`.
 - `inconclusive:position_mismatch` (prefix/position/context mismatch) — abusive event
   unless coordinator corpus-issuance fault.
 - `inconclusive:malformed_distribution` (any FR-6 distribution-validation failure) —
@@ -1333,6 +1368,9 @@ mis-accumulate as `identity_reject`.
 - `inconclusive:coordinator_timeout` (initial K=64 probe timed out, produced no
   result, or failed transport before any provider result) — abusive event unless
   coordinator scheduling/transport fault; no `probe_result_digest`.
+- `inconclusive:coordinator_reference_fault` (the reference set was unavailable or
+  faulty at measurement time — a coordinator-side, not provider, condition) —
+  coordinator-fault-exempt (no abusive increment); not a canary verdict.
 - `inconclusive:provider_inconclusive` (a well-formed `provider_inconclusive`
   result) — counter effect per the mapped `provider_reason_code`, by this closed
   mapping: `inconclusive:model_swap` → no abusive increment (treated as `expired`
@@ -1658,9 +1696,13 @@ the coordinator's existing signed journey/settlement evidence: an outer envelope
 `{type:"compute_integrity_auditor_bundle_v1", schema_version:"compute_integrity_auditor_bundle_v1", payload}`,
 a `bundle_digest` computed as SHA-256 over the RFC 8785/JCS canonical form of that
 object (excluding `bundle_digest` and `signature`), and a detached `signature` over
-`bundle_digest` by a coordinator auditor-signing key whose public key is resolvable
-and rotatable through the coordinator's existing signing-key discovery mechanism
-(the same key lifecycle as SPEC-015 receipt-key resolution). A verifier verifies the
+`bundle_digest` under a self-contained coordinator audit-signing profile: Ed25519
+signature; a `signing_key_id` bound in the payload; the public key resolvable from a
+coordinator audit-signing-key directory (a signed, versioned key list served by the
+coordinator, distinct from SPEC-015's provider-scoped receipt keys); each key carries
+a validity interval with rotation overlap, and superseded keys MUST be retained for
+the audit-retention period so historical bundles remain verifiable; revocation is
+published in the same directory. A verifier verifies the
 signature over `bundle_digest`, recomputes `bundle_digest` from the payload, then
 recomputes the TV intervals from the retained evidence. Before enforce activation,
 the coordinator MUST expose this signed read-only auditor bundle for every
@@ -1779,12 +1821,17 @@ retroactively change any already-captured row's money outcome. Rows already capt
 non-payable under enforce (including `compute_integrity_circuit_breaker_hold`
 captures) keep that captured outcome; rows already captured payable under enforce
 keep that captured outcome. Per the warn-only Preserved-adverse-state exception (§3),
-a manual rollback MUST NOT release an active `quarantined_compute_drift`/
-`blocked:<reason>` overlay or an active circuit-breaker admission hold: those scopes
-MUST continue to reject billable covered buyer routing/settlement (operator-funded
-diagnostics only) until the FR-10 clear rule or FR-16 `cleared` transition completes,
-even while the mode reads `warn_only`. Reactivating enforce after rollback MUST
-satisfy all FR-1 preconditions again.
+a manual rollback MUST NOT release an adverse state whose effect is active per the
+FR-3 `effective_adverse_state` table — i.e. `enforce_preserved` provider-attributable
+overlays (`quarantined_compute_drift`, `blocked:swap_laundering_suspected`,
+`blocked:manual_review_required`, `blocked:abusive_inconclusive`) and active
+circuit-breaker holds while SPEC-022 remains enforce: those scopes MUST continue to
+reject billable covered buyer routing/settlement (operator-funded diagnostics only)
+until the FR-10 clear rule or FR-16 `cleared` transition completes, even while the
+mode reads `warn_only`. Coordinator-attributable blocks
+(`blocked:reference_missing`/`calibration_missing`/`reference_fault`) go dormant for
+routing during the downgrade per the same table. Reactivating enforce after rollback
+MUST satisfy all FR-1 preconditions again.
 
 The coordinator MUST implement a circuit breaker that fails closed for affected
 covered keys, covered models, or the whole policy when new
