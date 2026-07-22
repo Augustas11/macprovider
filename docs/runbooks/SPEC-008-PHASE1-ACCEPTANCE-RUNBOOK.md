@@ -46,17 +46,22 @@ scripts/enforce-tier2-hash.sh --plan
 ```
 
 The safety harness, artifact check, and plan command are non-mutating. The
-safety harness replaces `ssh`, `scp`, and `curl` with local fakes and proves the
-apply path refuses connected-pool restarts before remote commands, fails closed
-when health JSON cannot be parsed, rolls back after config-merge and gateway
-disclosure failures, and can reach health, journal, and gateway checks on a fake
-success path. The artifact check proves the local provider tarball
-checksum/version, coordinator binary checksum/log string, public key, and signed
-catalog signature/body using coordinator-compatible catalog validation rules. It
+safety harness is hermetic: it generates ephemeral signed Tier-2 catalogs that
+match or conflict with the repo autotune release, replaces `ssh`, `scp`, and
+`curl` with local fakes, and proves the apply path (1) refuses conflicting /
+stale-backup-shaped Tier-2 catalogs before any remote command (#608),
+(2) refuses connected-pool restarts before remote commands, (3) fails closed
+when health JSON cannot be parsed, (4) rolls back after config-merge and
+gateway disclosure failures, and (5) can reach health, journal, and gateway
+checks on a fake success path when binding agrees. The artifact check proves
+the local provider tarball checksum/version, coordinator binary
+checksum/log string, public key, signed catalog signature/body, and
+autotune/Tier-2 identity binding when `AUTOTUNE_CANDIDATES` is present. It
 extracts the provider artifact under `TMPDIR` or `/tmp` and only cleans up
 directories matching its own `tier2-artifacts.*` pattern. The plan command
 validates the activation inputs again with the same signed-catalog verifier
-before printing the exact remote actions.
+and `check-tier2-binding` before printing a plan-only validation summary that
+refers live mutation to `deploy-pearl-vps.sh` (no remote action sequence).
 
 The C2 enforcement harness uses fake `ssh` and verifier commands to prove the
 guarded apply path reaches reload plus enforced verification on success, refuses
@@ -65,33 +70,42 @@ backup when enforced verification fails.
 
 ## Gate 1: Catalog Activation
 
-Apply observe-mode activation after accepting the restart window:
+Live Tier-2 identity mutation must go through the full Pearl release deploy
+(`phase4-coordinator/dist/deploy-pearl-vps.sh`), which pins Tier-2 bytes and
+runs `catalog-release.py check-tier2-binding` inside one release transaction
+(#608). Do **not** use `scripts/activate-tier2-observe.sh --apply` on Pearl;
+that path is retired for live hosts and remains available only as `--plan`
+(binding + signature validation) plus hermetic safety tests.
 
 ```bash
-DEMO_TOKEN=<redacted> FORCE_RESTART=1 scripts/activate-tier2-observe.sh --apply
+# Plan-only local validation (non-mutating):
+scripts/activate-tier2-observe.sh --plan
+
+# Production activation (preferred):
+# phase4-coordinator/dist/deploy-pearl-vps.sh  # with Tier-2 pin + binding check
 ```
 
-The apply path:
+Historical observe-helper apply behavior (retired for live use) previously:
 
-- uploads the signed catalog;
-- uploads the rebuilt coordinator binary unless `DEPLOY_COORDINATOR_BINARY=0`;
-- backs up the remote catalog, coordinator binary, and config where present;
-- merges only the top-level `tier2:` block into the live config;
-- restarts the coordinator because `catalog_path` and `catalog_public_key` are
+- uploaded the signed catalog;
+- uploaded the rebuilt coordinator binary unless `DEPLOY_COORDINATOR_BINARY=0`;
+- backed up the remote catalog, coordinator binary, and config where present;
+- merged only the top-level `tier2:` block into the live config;
+- restarted the coordinator because `catalog_path` and `catalog_public_key` are
   startup-only;
-- verifies public coordinator health, recent catalog-loaded journal evidence,
+- verified public coordinator health, recent catalog-loaded journal evidence,
   and gateway `/v1/models` Tier-2 disclosure;
-- restores available backups, stopping the coordinator before restoring a prior
-  binary, or removes a newly created catalog if catalog upload, binary upload,
-  config merge, restart, or verification fails.
+- restored available backups, stopping the coordinator before restoring a prior
+  binary, or removed a newly created catalog if catalog upload, binary upload,
+  config merge, restart, or verification failed.
 
 The gateway must preserve the coordinator's top-level `tier2` block in
 `/v1/models` while still replacing any upstream `tier1_disclosure` with the
 gateway-owned disclosure. If a deployed gateway strips `tier2`, activation will
-roll back at the post-restart disclosure check.
+fail closed at the post-restart disclosure check.
 
-Catalog activation is accepted when the apply command exits 0 and a read-only
-catalog verifier also exits 0:
+Catalog activation is accepted when the Pearl deploy completes successfully and
+a read-only catalog verifier also exits 0:
 
 ```bash
 DEMO_TOKEN=<redacted> scripts/verify-tier2-live.sh --catalog-only
@@ -256,13 +270,11 @@ Current C2 live evidence:
 
 ## Rollback Notes
 
-If `scripts/activate-tier2-observe.sh --apply` fails during its guarded path, it
-attempts rollback automatically. If manual rollback is needed, use the backup
-paths printed by the script for:
-
-- `/opt/macprovider/coordinator.yaml`;
-- `/opt/macprovider/coordinator`;
-- `/opt/macprovider/tier2-catalog.json`.
+Do **not** restore `/opt/macprovider/tier2-catalog.json` alone from a backup.
+Use the catalog-release / Pearl deploy recovery transaction so autotune and
+Tier-2 restore as one release set (`ops/runbooks/catalog-release-provider-upgrade.md`).
+The retired `activate-tier2-observe.sh --apply` helper must not be used for
+manual incident rollback.
 
 After manual rollback, restart `macprovider-coordinator` and re-run the
 read-only health checks before retrying activation.

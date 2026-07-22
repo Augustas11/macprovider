@@ -186,7 +186,7 @@
       "component": "catalog",
       "policy_delta": "Model/catalog authority may temporarily tolerate current-plus-previous or bridge compatibility instead of one strict signed release-bound model identity authority consumed uniformly by autotune and Tier-2.",
       "authority_surface": "Autotune current/previous catalog activation, `tier2.catalog_path`, `tier2.model_hash_legacy_until`, and catalog admission compatibility surfaces.",
-      "reason": "#608 records production drift between autotune/network catalog identity and Tier-2 catalog identity; #615 requires the bridge inventory to be explicit until a single release-bound authority is fully enforced. Partial #608 landed fail-closed conflict detection + release-derived Tier-2 identity binding tooling, but the dual on-disk authorities remain.",
+      "reason": "#608 records production drift between autotune/network catalog identity and Tier-2 catalog identity; #615 requires the bridge inventory to be explicit until a single release-bound authority is fully enforced. Partial #608 landed fail-closed conflict detection + release-derived Tier-2 identity binding tooling; the finish slice gates independent Tier-2 mutate paths so they cannot ship a conflicting live catalog, but the dual on-disk file still exists pending ledger membership and Pearl physical clearance.",
       "owner": "catalog release/provider upgrade",
       "issue": "https://github.com/Augustas11/macprovider/issues/608",
       "created_at": "2026-07-16T00:00:00Z",
@@ -194,18 +194,20 @@
       "expiry_unknown_reason": "Pearl still serves dual on-disk authorities: /opt/macprovider/autotune/current/* (published-2026-07-10-catalog-recovery-v1) and /opt/macprovider/tier2-catalog.json (macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b). Qwen identity currently agrees; dual-file removal remains open on #608. No MODEL_HASH_LEGACY_UNTIL on Pearl.",
       "scope": "Pearl catalog/admission consumers across coordinator, provider CLI, and Tier-2 during migration.",
       "removal_condition": "Autotune and Tier-2 consume the same signed model identity rows from one release-bound file/authority, rollback restores one complete release (including Tier-2 bytes in the ledger/compatibility-set), and production emits no model-hash uncatalogued events for active signed release rows.",
-      "rollback_command": "Use the catalog-release/provider-upgrade runbook to restore one complete signed catalog release set; do not edit Tier-2 identity separately from the network release. Before upload, `catalog-release.py check-tier2-binding` must pass against the autotune release being activated.",
+      "rollback_command": "Use the catalog-release/provider-upgrade runbook to restore one complete signed catalog release set; do not edit Tier-2 identity separately from the network release. Before upload, `catalog-release.py check-tier2-binding` must pass against the autotune release being activated. `activate-tier2-observe.sh --apply` is retired for all live hosts; production Tier-2 mutation requires `deploy-pearl-vps.sh`.",
       "post_removal_validation": "Coordinator active release identity and component digests match the signed release; Tier-2 expected identity is generated from the same row; no duplicate legacy catalog file participates in modern decisions.",
       "partial_progress": [
         "Coordinator startup/reload fail-closed on overlapping autotune vs Tier-2 hash conflicts (internal/catalogbind).",
         "catalog-release.py emits tier2-identity-binding.json; derive-tier2 remains disabled until an explicit snapshot-manifest Tier-2 hash_scope exists; check-tier2-binding enforces digest overlap.",
         "deploy-pearl-vps.sh refuses upload when Tier-2 conflicts with the staged autotune release.",
         "Route-snapshot Tier-2 mismatch fails closed even outside settlement enforce mode.",
-        "2026-07-22 Pearl: Qwen artifact hash agrees across autotune + Tier-2 at 10adb5da\u2026; dual files still present."
+        "2026-07-22 Pearl: Qwen artifact hash agrees across autotune + Tier-2 at 10adb5da…; dual files still present.",
+        "activate-tier2-observe.sh --plan refuses conflicting Tier-2 identity; live --apply is retired (hermetic harness only) in favor of deploy-pearl-vps.sh.",
+        "Hermetic activation safety covers conflict, stale-backup-shaped refuse, pin-race, apply-retired gate, and root-owned remote staging."
       ],
       "still_blocked_for_clearance": [
         "Signed Tier-2 bytes are not yet a ledger/compatibility-set feed member.",
-        "Independent /opt/macprovider/tier2-catalog.json file authority still exists.",
+        "Physical /opt/macprovider/tier2-catalog.json dual file still exists (live mutate gated via deploy-only; not deleted).",
         "Physical Pearl journey proof that no uncatalogued events fire for active release rows after single-authority cutover."
       ],
       "blocks_stable_promotion": true,
