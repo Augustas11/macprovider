@@ -70,10 +70,12 @@ python3 scripts/check-production-exceptions.py report
 python3 scripts/check-production-exceptions.py report -o /tmp/exceptions-report.json
 ```
 
-The JSON report lists registered active/expired/planned rows with owner, issue,
-expiry clock state, scope, and authority surface. Secret-like substrings
-(including PEM blocks and password/token assignments) are redacted; the report
-fails if residual secret-like material remains. This is the file/CLI health
+The JSON report is an allowlisted-v1 operator inventory for registered rows
+only: `id`, `status`, `component`, `issue`, `expires_at`, `clock_state`, and
+`blocks_stable_promotion`. Owner and free-prose policy fields (`reason`,
+`scope`, `policy_delta`, `authority_surface`) are omitted by construction so
+`secrets_redacted: true` is a claim over a closed field set. The report fails
+closed if residual secret-like material remains. This is the file/CLI health
 surface for #615 until an authenticated coordinator health endpoint is wired.
 It does **not** prove Pearl has no unregistered exceptions.
 
@@ -124,9 +126,13 @@ Promotes the warn-class findings above to hard-fail.
 ### Stable promotion (always fail-closed)
 
 Before draft creation and again before undraft publication, the promote
-workflow re-runs `scripts/gate-production-exceptions-promote.sh`, which gates
-the current `origin/main` register against `origin/main^` previous/base
-authority (tombstone deletions and expiry self-extensions fail closed).
+workflow re-runs `scripts/gate-production-exceptions-promote.sh`. The helper
+fetches `origin/main`, walks first-parent commits that touched the exception
+register or tombstone ledger (path-scoped), reconstructs earliest-expiry
+previous authority and a union tombstone base, then fail-closes on tombstone
+deletions and expiry self-extensions even after unrelated successors. The
+publish step binds `EXCEPTION_AUTHORITY_SHA`, re-gates immediately before the
+irreversible `draft=false` PATCH, and aborts if that SHA moved.
 
 ```bash
 bash scripts/gate-production-exceptions-promote.sh

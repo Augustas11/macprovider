@@ -213,7 +213,7 @@ class ProductionExceptionsTests(unittest.TestCase):
         doc = _minimal_register(
             [
                 _minimal_entry(
-                    owner="ops/test",
+                    owner="ops Basic dTpw",
                     policy_delta=f"Authorization: Basic dXNlcjpwYXNz and Bearer SUPERSECRETTOKEN123 {jwt}",
                     reason=f"AKIAIOSFODNN7EXAMPLE api_key=abcd1234 token={jwt}",
                     scope=f"password=hunter2 scope with {jwt}",
@@ -226,12 +226,14 @@ class ProductionExceptionsTests(unittest.TestCase):
         for leaked in (
             "SUPERSECRETTOKEN123",
             "dXNlcjpwYXNz",
+            "dTpw",
             "AKIAIOSFODNN7EXAMPLE",
             "hunter2",
             "ghp_abcdefghijklmnopqrstuvwx",
             jwt,
             "policy_delta",
             "authority_surface",
+            '"owner"',
             '"reason"',
             '"scope"',
         ):
@@ -241,16 +243,33 @@ class ProductionExceptionsTests(unittest.TestCase):
         self.assertEqual(set(report["exceptions"][0]), pe.REPORT_ROW_KEYS)
         self.assertEqual(report["counts"]["active"], 1)
 
-    def test_health_report_refuses_secret_in_allowlisted_owner(self):
-        doc = _minimal_register(
-            [_minimal_entry(owner="ops password=hunter2token")]
+    def test_health_report_omits_owner_including_opaque_and_auth_forms(self):
+        cases = (
+            "ops Basic dTpw",
+            "Authorization: Basic dXNlcjpwYXNz",
+            "Authorization: Bearer SUPERSECRETTOKEN123",
+            "ops/opaque-credential-Q7V9m2L4x8",
+            "ops password=hunter2token",
         )
-        # Owner is allowlisted but still scanned; residual secret clears the flag.
-        report = pe.build_health_report(doc, now=NOW)
-        # password= pattern is redacted from owner; assertion should stay true
-        # after redaction unless residual remains.
-        self.assertNotIn("hunter2token", json.dumps(report))
-        self.assertTrue(report["secrets_redacted"])
+        for owner in cases:
+            doc = _minimal_register([_minimal_entry(owner=owner)])
+            report = pe.build_health_report(doc, now=NOW)
+            blob = json.dumps(report)
+            self.assertNotIn('"owner"', blob, msg=owner)
+            for marker in ("dTpw", "dXNlcjpwYXNz", "SUPERSECRETTOKEN123", "Q7V9m2L4x8", "hunter2token"):
+                self.assertNotIn(marker, blob, msg=owner)
+            self.assertTrue(report["secrets_redacted"], msg=owner)
+
+    def test_redaction_covers_authorization_basic_and_bearer(self):
+        basic = "Authorization: Basic dXNlcjpwYXNz"
+        bearer = "Authorization: Bearer SUPERSECRETTOKEN123"
+        short = "Basic dTpw"
+        self.assertNotIn("dXNlcjpwYXNz", pe.redact_secrets(basic))
+        self.assertNotIn("SUPERSECRETTOKEN123", pe.redact_secrets(bearer))
+        self.assertNotIn("dTpw", pe.redact_secrets(short))
+        self.assertTrue(pe.contains_residual_secret(basic))
+        self.assertTrue(pe.contains_residual_secret(bearer))
+        self.assertTrue(pe.contains_residual_secret(short))
 
     def test_cli_report_omits_basic_jwt_aws_even_when_schema_valid(self):
         jwt = (
@@ -266,6 +285,7 @@ class ProductionExceptionsTests(unittest.TestCase):
             doc = _minimal_register(
                 [
                     _minimal_entry(
+                        owner="Authorization: Basic dTpw",
                         policy_delta=f"Authorization: Basic dXNlcjpwYXNz {jwt}",
                         reason="AKIAIOSFODNN7EXAMPLE",
                         scope="api_key=supersecretvalue",
@@ -290,11 +310,13 @@ class ProductionExceptionsTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             blob = out.read_text(encoding="utf-8")
             for leaked in (
+                "dTpw",
                 "dXNlcjpwYXNz",
                 "AKIAIOSFODNN7EXAMPLE",
                 "supersecretvalue",
                 jwt,
                 "policy_delta",
+                '"owner"',
             ):
                 self.assertNotIn(leaked, blob)
             parsed = json.loads(blob)

@@ -33,10 +33,10 @@ assert report.get("field_set") == "allowlisted-v1"
 assert isinstance(report.get("exceptions"), list) and report["exceptions"]
 assert report["validation"]["ok"] is True
 # Free-prose inventory fields must never appear in the allowlisted report.
-for forbidden_field in ("policy_delta", "authority_surface", "reason", "scope"):
+for forbidden_field in ("owner", "policy_delta", "authority_surface", "reason", "scope"):
     for row in report["exceptions"]:
         assert forbidden_field not in row
-forbidden = ("Bearer ", "BEGIN ", "ghp_", "sk-", "password=", "AKIA", "eyJ")
+forbidden = ("Bearer ", "BEGIN ", "ghp_", "sk-", "password=", "AKIA", "eyJ", "Basic ")
 blob = json.dumps(report)
 for token in forbidden:
     if token in blob:
@@ -45,7 +45,7 @@ for token in forbidden:
 PY
 rm -f "$report"
 
-# Schema-valid register with Basic/JWT/AKIA in free-prose must not leak into report.
+# Schema-valid register with Basic/JWT/AKIA/owner secrets must not leak into report.
 adv="$(mktemp -d "${TMPDIR:-/tmp}/exception-adv.XXXXXX")"
 python3 - "$adv" <<'PY'
 import json, pathlib, sys
@@ -69,7 +69,7 @@ doc = {
     "policy_delta": f"Authorization: Basic dXNlcjpwYXNz {jwt}",
     "authority_surface": "test",
     "reason": "AKIAIOSFODNN7EXAMPLE",
-    "owner": "ops/test",
+    "owner": "Authorization: Basic dTpw",
     "issue": "https://github.com/Augustas11/macprovider/issues/615",
     "created_at": "2026-07-01T00:00:00Z",
     "expires_at": "2026-08-01T00:00:00Z",
@@ -105,7 +105,14 @@ blob = open(sys.argv[1], encoding="utf-8").read()
 report = json.loads(blob)
 assert report["secrets_redacted"] is True
 assert report["field_set"] == "allowlisted-v1"
-for token in ("dXNlcjpwYXNz", "AKIAIOSFODNN7EXAMPLE", "supersecretvalue", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"):
+for token in (
+  "dTpw",
+  "dXNlcjpwYXNz",
+  "AKIAIOSFODNN7EXAMPLE",
+  "supersecretvalue",
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+  '"owner"',
+):
     if token in blob:
         raise SystemExit(f"allowlisted report leaked {token!r}")
 PY
@@ -182,9 +189,166 @@ grep -qF 'EXCEPTION_AUTHORITY_SHA=' \
 grep -qF 'earliest_expiry_previous_register' \
   scripts/gate-production-exceptions-promote.sh \
   || fail "promote helper missing earliest-expiry history reconstruction"
-grep -qF 'history_window=' \
+grep -qF -- '--first-parent' \
   scripts/gate-production-exceptions-promote.sh \
-  || fail "promote helper missing durable history window"
+  || fail "promote helper must walk first-parent history"
+grep -qF 'ops/exceptions/production-exceptions.json' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper must path-scope exception register history"
+grep -qF 'first_parent_path_scoped=1' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper missing path-scoped history marker"
+
+# Path-scoped first-parent history must keep main~2 authority after many
+# unrelated successors and a merge fan-out larger than any numeric window.
+hist="$(mktemp -d "${TMPDIR:-/tmp}/exception-hist.XXXXXX")"
+python3 - "$hist" "$root" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+
+hist = Path(sys.argv[1])
+scripts = Path(sys.argv[2]) / "scripts"
+sys.path.insert(0, str(scripts))
+import production_exceptions as pe
+
+repo = hist / "repo"
+repo.mkdir()
+subprocess.check_call(["git", "init", "-b", "main"], cwd=repo, stdout=subprocess.DEVNULL)
+subprocess.check_call(["git", "config", "user.email", "test@example.com"], cwd=repo)
+subprocess.check_call(["git", "config", "user.name", "test"], cwd=repo)
+
+reg = {
+  "$schema": "./production-exceptions.schema.json",
+  "schema_version": "macprovider-production-exceptions-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "exceptions": [{
+    "id": "exc-hist",
+    "status": "active",
+    "environment": "pearl-production",
+    "component": "other",
+    "policy_delta": "x",
+    "authority_surface": "x",
+    "reason": "x",
+    "owner": "ops/test",
+    "issue": "https://github.com/Augustas11/macprovider/issues/615",
+    "created_at": "2026-07-01T00:00:00Z",
+    "expires_at": "2026-08-01T00:00:00Z",
+    "scope": "test; must not widen",
+    "removal_condition": "done",
+    "rollback_command": "echo",
+    "post_removal_validation": "echo",
+    "blocks_stable_promotion": False,
+    "evidence": ["https://github.com/Augustas11/macprovider/issues/615"],
+  }],
+  "open_questions": [],
+}
+tombs = {
+  "schema_version": "macprovider-removed-exception-tombstones-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "tombstones": [{
+    "id": "exc-old",
+    "removed_at": "2026-07-20T00:00:00Z",
+    "removal_evidence": "prior",
+    "authority_surface": "test",
+  }],
+}
+reg_dir = repo / "ops/exceptions"
+reg_dir.mkdir(parents=True)
+(reg_dir / "production-exceptions.json").write_text(json.dumps(reg, indent=2) + "\n")
+(reg_dir / "removed-exception-tombstones.json").write_text(json.dumps(tombs, indent=2) + "\n")
+subprocess.check_call(["git", "add", "."], cwd=repo)
+subprocess.check_call(["git", "commit", "-m", "baseline"], cwd=repo, stdout=subprocess.DEVNULL)
+baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+reg["exceptions"][0]["expires_at"] = "2026-10-01T00:00:00Z"
+tombs["tombstones"] = []
+(reg_dir / "production-exceptions.json").write_text(json.dumps(reg, indent=2) + "\n")
+(reg_dir / "removed-exception-tombstones.json").write_text(json.dumps(tombs, indent=2) + "\n")
+subprocess.check_call(["git", "add", "."], cwd=repo)
+subprocess.check_call(["git", "commit", "-m", "weaken"], cwd=repo, stdout=subprocess.DEVNULL)
+weaken = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+(repo / "unrelated.txt").write_text("0\n")
+subprocess.check_call(["git", "add", "unrelated.txt"], cwd=repo)
+subprocess.check_call(["git", "commit", "-m", "unrelated-0"], cwd=repo, stdout=subprocess.DEVNULL)
+for i in range(1, 40):
+    (repo / "unrelated.txt").write_text(f"{i}\n")
+    subprocess.check_call(["git", "add", "unrelated.txt"], cwd=repo)
+    subprocess.check_call(["git", "commit", "-m", f"unrelated-{i}"], cwd=repo, stdout=subprocess.DEVNULL)
+
+subprocess.check_call(
+    ["git", "checkout", "-b", "side", baseline],
+    cwd=repo,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+for i in range(40):
+    (repo / f"side-{i}.txt").write_text(f"side{i}\n")
+    subprocess.check_call(["git", "add", f"side-{i}.txt"], cwd=repo)
+    subprocess.check_call(["git", "commit", "-m", f"side-{i}"], cwd=repo, stdout=subprocess.DEVNULL)
+subprocess.check_call(
+    ["git", "checkout", "main"],
+    cwd=repo,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+subprocess.check_call(
+    ["git", "merge", "--no-ff", "-m", "merge-side", "side"],
+    cwd=repo,
+    stdout=subprocess.DEVNULL,
+)
+tip = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+raw = subprocess.check_output(["git", "rev-list", "-n", "32", tip], cwd=repo, text=True).split()
+path = subprocess.check_output(
+    [
+      "git", "rev-list", "--first-parent", tip, "--",
+      "ops/exceptions/production-exceptions.json",
+      "ops/exceptions/removed-exception-tombstones.json",
+    ],
+    cwd=repo,
+    text=True,
+).split()
+if baseline not in path or weaken not in path:
+    raise SystemExit(f"path-scoped history missing authority commits: {path}")
+# Numeric -n 32 without path scope is expected to forget under merge fan-out.
+if baseline in raw and weaken in raw:
+    print("note: numeric window still saw authority in this topology; path-scope still required")
+
+revs = list(path)
+if not revs or revs[0] != tip:
+    revs = [tip, *revs]
+
+
+def show(rev, path_name):
+    raw_doc = subprocess.check_output(["git", "show", f"{rev}:{path_name}"], cwd=repo, text=True)
+    return json.loads(raw_doc)
+
+regs = [show(rev, "ops/exceptions/production-exceptions.json") for rev in reversed(revs)]
+tomb_docs = [show(rev, "ops/exceptions/removed-exception-tombstones.json") for rev in reversed(revs)]
+current = show(tip, "ops/exceptions/production-exceptions.json")
+current_tombs = show(tip, "ops/exceptions/removed-exception-tombstones.json")
+previous = pe.earliest_expiry_previous_register(current, regs)
+base = pe.union_tombstone_docs(tomb_docs)
+result = pe.validate_register(
+    current,
+    now=pe.parse_rfc3339("2026-07-22T12:00:00Z"),
+    tombstones=current_tombs,
+    previous_doc=previous,
+    base_tombstones=base,
+)
+codes = {f.code for f in result.errors}
+if "expiry_self_extension" not in codes:
+    raise SystemExit(f"missing expiry_self_extension in {codes}")
+if "tombstone_deleted" not in codes:
+    raise SystemExit(f"missing tombstone_deleted in {codes}")
+print("ok: path-scoped history keeps main~2 authority after unrelated+merge fan-out")
+PY
+rm -rf "$hist"
 
 # sync-check CLI (documented form with --tombstones after subcommand).
 work="$(mktemp -d "${TMPDIR:-/tmp}/exception-sync.XXXXXX")"

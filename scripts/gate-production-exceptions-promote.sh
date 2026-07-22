@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Fail-closed #615 stable-promotion gate against current origin/main.
 #
-# Durability: walks up to HISTORY_WINDOW first-parent ancestors to:
+# Durability: walks first-parent commits that touched the exception register
+# or tombstone ledger (path-scoped), so unrelated successors cannot push the
+# last sound authority out of a fixed numeric window. For each such commit:
 #   - union all tombstone IDs ever present (anti-deletion)
 #   - reconstruct previous expires_at as the earliest active expiry per ID
-#     (anti self-extension even after unrelated successor commits)
+#     (anti self-extension)
 #
 # Authority binding: prints EXCEPTION_AUTHORITY_SHA=<origin/main> so callers
 # can refuse undraft if main moved after the gate. Optional
 # EXCEPTION_GATE_SHA_FILE captures that SHA for later comparison.
 set -euo pipefail
 
-HISTORY_WINDOW="${EXCEPTION_HISTORY_WINDOW:-32}"
+# Optional safety cap on path history depth (0 = unlimited).
+HISTORY_WINDOW="${EXCEPTION_HISTORY_WINDOW:-0}"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$root"
@@ -35,6 +38,9 @@ root = Path(sys.argv[4])
 sys.path.insert(0, str(root / "scripts"))
 import production_exceptions as pe  # noqa: E402
 
+REGISTER_PATH = "ops/exceptions/production-exceptions.json"
+TOMBSTONE_PATH = "ops/exceptions/removed-exception-tombstones.json"
+
 
 def show_json(rev: str, path: str):
     try:
@@ -51,27 +57,37 @@ def show_json(rev: str, path: str):
         return None
 
 
-revs = subprocess.check_output(
-    ["git", "rev-list", "-n", str(window), main_sha],
-    text=True,
-).split()
+# Path-scoped first-parent history: only commits that touched exception
+# authority files. Unrelated successors do not consume the sample budget.
+cmd = ["git", "rev-list", "--first-parent", main_sha, "--", REGISTER_PATH, TOMBSTONE_PATH]
+if window > 0:
+    cmd[3:3] = ["-n", str(window)]
+revs = subprocess.check_output(cmd, text=True).split()
+# Always include the current tip so we evaluate today's trees even when the
+# tip commit itself did not modify the exception paths.
+if not revs or revs[0] != main_sha:
+    revs = [main_sha, *revs]
+# Deduplicate while preserving newest-first order from rev-list.
+seen = set()
+ordered = []
+for rev in revs:
+    if rev in seen:
+        continue
+    seen.add(rev)
+    ordered.append(rev)
+revs = ordered
 if not revs:
-    raise SystemExit("no revisions for exception history window")
+    raise SystemExit("no revisions for exception authority history")
 
-# rev-list is newest-first; helpers expect oldest-first history.
-history_regs = [
-    show_json(rev, "ops/exceptions/production-exceptions.json") for rev in reversed(revs)
-]
-history_tombs = [
-    show_json(rev, "ops/exceptions/removed-exception-tombstones.json")
-    for rev in reversed(revs)
-]
+# Helpers expect oldest-first history.
+history_regs = [show_json(rev, REGISTER_PATH) for rev in reversed(revs)]
+history_tombs = [show_json(rev, TOMBSTONE_PATH) for rev in reversed(revs)]
 
-current_register = history_regs[-1]
+current_register = show_json(main_sha, REGISTER_PATH)
 if not isinstance(current_register, dict):
     raise SystemExit("origin/main production-exceptions.json missing/invalid")
 
-current_tombs = history_tombs[-1]
+current_tombs = show_json(main_sha, TOMBSTONE_PATH)
 if not isinstance(current_tombs, dict):
     current_tombs = {
         "schema_version": pe.TOMBSTONE_SCHEMA_VERSION,
@@ -97,7 +113,10 @@ previous = pe.earliest_expiry_previous_register(current_register, history_regs)
     json.dumps(previous, indent=2) + "\n", encoding="utf-8"
 )
 (work / "authority.sha").write_text(main_sha + "\n", encoding="ascii")
-print(f"exception-promote-gate: main={main_sha} history_window={window}")
+print(
+    f"exception-promote-gate: main={main_sha} "
+    f"history_commits={len(revs)} first_parent_path_scoped=1"
+)
 print(f"EXCEPTION_AUTHORITY_SHA={main_sha}")
 PY
 

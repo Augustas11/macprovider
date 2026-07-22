@@ -64,15 +64,37 @@ OWNER_PLACEHOLDER_RE = re.compile(
 )
 SECRET_RE = re.compile(
     r"(?is)("
-    r"bearer\s+[a-z0-9._\-+=/]+|"
-    r"basic\s+[a-z0-9+/]{8,}={0,2}|"
+    # Full Authorization credential forms must win before any shorter overlap.
+    r"authorization\s*[:=]\s*basic\s+\S+|"
+    r"authorization\s*[:=]\s*bearer\s+\S+|"
     r"authorization\s*[:=]\s*\S+|"
+    r"basic\s+[a-z0-9+/]+=*|"
+    r"bearer\s+[a-z0-9._\-+=/]+|"
     r"sk-[a-z0-9]{10,}|"
     r"ghp_[a-z0-9]{20,}|"
     r"akia[0-9a-z]{16}|"
     r"eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+|"
     r"xox[baprs]-[a-z0-9-]{10,}|"
     r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----|"
+    r"api[_-]?key\s*[:=]\s*\S+|"
+    r"password\s*[:=]\s*\S+|"
+    r"token\s*[:=]\s*\S+|"
+    r"\b[a-f0-9]{64}\b"
+    r")"
+)
+# Residual scan is intentionally broader than the redaction transform so a
+# transform miss cannot certify secrets_redacted=true.
+RESIDUAL_SECRET_RE = re.compile(
+    r"(?is)("
+    r"authorization\s*[:=]\s*\S+|"
+    r"\bbasic\s+\S+|"
+    r"\bbearer\s+\S+|"
+    r"sk-[a-z0-9]{8,}|"
+    r"ghp_[a-z0-9]{16,}|"
+    r"akia[0-9a-z]{12,}|"
+    r"eyj[a-z0-9_-]+\.[a-z0-9_-]+|"
+    r"xox[baprs]-[a-z0-9-]{8,}|"
+    r"-----BEGIN[^-]*PRIVATE KEY-----|"
     r"api[_-]?key\s*[:=]\s*\S+|"
     r"password\s*[:=]\s*\S+|"
     r"token\s*[:=]\s*\S+|"
@@ -204,6 +226,11 @@ def redact_secrets(text: str) -> str:
 
 def contains_secret(text: str) -> bool:
     return bool(SECRET_RE.search(text))
+
+
+def contains_residual_secret(text: str) -> bool:
+    """Broader residual detector used only for secrets_redacted assurance."""
+    return bool(RESIDUAL_SECRET_RE.search(text))
 
 
 def load_json(path: Path) -> Any:
@@ -700,7 +727,6 @@ REPORT_ROW_KEYS = frozenset(
         "id",
         "status",
         "component",
-        "owner",
         "issue",
         "expires_at",
         "clock_state",
@@ -708,10 +734,10 @@ REPORT_ROW_KEYS = frozenset(
     }
 )
 # Free-prose inventory fields intentionally omitted from reports so
-# secrets_redacted is a claim over a closed allowlist, not over reason/scope/
-# policy_delta/authority_surface strings that may contain credentials.
+# secrets_redacted is a claim over a closed field set (enums / IDs /
+# timestamps / bools), not over owner/reason/scope/policy strings.
 REPORT_OMITTED_FIELDS = frozenset(
-    {"policy_delta", "authority_surface", "reason", "scope"}
+    {"owner", "policy_delta", "authority_surface", "reason", "scope"}
 )
 
 
@@ -818,12 +844,10 @@ def build_health_report(
         component = entry.get("component")
         exc_id = entry.get("id")
         issue = entry.get("issue")
-        owner = entry.get("owner")
         row = {
             "id": exc_id if isinstance(exc_id, str) and ID_RE.fullmatch(exc_id) else "[INVALID]",
             "status": status if status in STATUSES else "[INVALID]",
             "component": component if component in COMPONENTS else "[INVALID]",
-            "owner": redact_secrets(owner) if isinstance(owner, str) else "[INVALID]",
             "issue": issue if isinstance(issue, str) and ISSUE_RE.fullmatch(issue) else "[INVALID]",
             "expires_at": safe_expires,
             "clock_state": clock_state,
@@ -859,9 +883,10 @@ def build_health_report(
         "field_set": "allowlisted-v1",
         "note": (
             "Allowlisted operator inventory for registered rows only "
-            "(id/status/component/owner/issue/expires_at/clock_state/"
-            "blocks_stable_promotion). Free-prose policy fields are omitted. "
-            "Does not prove Pearl has no unregistered exceptions."
+            "(id/status/component/issue/expires_at/clock_state/"
+            "blocks_stable_promotion). Owner and free-prose policy fields are "
+            "omitted by construction. Does not prove Pearl has no unregistered "
+            "exceptions."
         ),
     }
     if validation is not None:
@@ -872,9 +897,9 @@ def build_health_report(
             ],
             "ok": bool(validation.get("ok")),
         }
-    # Residual scan over the closed allowlist payload.
+    # Residual scan uses a broader independent detector over the closed payload.
     probe = {key: value for key, value in report.items() if key != "secrets_redacted"}
-    secrets_clean = not contains_secret(json.dumps(probe, sort_keys=True))
+    secrets_clean = not contains_residual_secret(json.dumps(probe, sort_keys=True))
     report["secrets_redacted"] = secrets_clean
     return report
 
@@ -977,7 +1002,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(finding.format(), file=sys.stderr)
         return 1
     text = json.dumps(report, indent=2, sort_keys=False) + "\n"
-    if contains_secret(text):
+    if contains_residual_secret(text):
         print(
             "ERROR secrets_present <report>: residual secret-like material in serialized report",
             file=sys.stderr,
