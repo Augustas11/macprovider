@@ -418,6 +418,86 @@ final class ControlSocketTests: XCTestCase {
         try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
     }
 
+    func testServerReclaimsOrphanedControlSocketOnStart() async throws {
+        let socketPath = try makeSocketPath()
+        try FileManager.default.createDirectory(at: socketPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        chmod(socketPath.deletingLastPathComponent().path, 0o700)
+        try createOrphanedSocket(at: socketPath)
+
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "reclaimed-model"))
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.statusRequest)
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await server.stop()
+
+        XCTAssertEqual(response, .statusResponse(currentModelID: "reclaimed-model", runtimeState: .ready))
+        try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
+    }
+
+    func testServerFailsClosedWhenControlSocketIsLive() async throws {
+        let socketPath = try makeSocketPath()
+        let liveServer = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "live-model"))
+        try await liveServer.start()
+
+        let contender = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "contender"))
+        do {
+            try await contender.start()
+            XCTFail("expected stale socket rejection while peer is live")
+        } catch let error as ControlSocketServerError {
+            XCTAssertEqual(error, .staleSocket(path: socketPath.path))
+        }
+
+        // The live peer must be completely unaffected by the failed reclaim attempt.
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.statusRequest)
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await liveServer.stop()
+
+        XCTAssertEqual(response, .statusResponse(currentModelID: "live-model", runtimeState: .ready))
+    }
+
+    func testStaleSocketReclaimPreservesLiveReplacementOnIdentityRace() async throws {
+        let socketPath = try makeSocketPath()
+        try FileManager.default.createDirectory(at: socketPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        chmod(socketPath.deletingLastPathComponent().path, 0o700)
+
+        // Capture the identity a reclaimer would have observed for a
+        // now-orphaned socket before it acted on it.
+        let staleIdentityPath = socketPath.deletingLastPathComponent().appendingPathComponent("stale-identity.sock")
+        try createOrphanedSocket(at: staleIdentityPath)
+        let staleIdentity = try socketIdentity(at: staleIdentityPath)
+        try FileManager.default.removeItem(at: staleIdentityPath)
+
+        // A live server now wins the race and legitimately owns socketPath.
+        let liveServer = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "winner"))
+        try await liveServer.start()
+
+        let parentFD = Darwin.open(socketPath.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY)
+        XCTAssertGreaterThanOrEqual(parentFD, 0)
+        defer { Darwin.close(parentFD) }
+
+        // Attempting to quarantine using the stale (pre-race) identity must
+        // fail and must not disturb the live replacement's socket file.
+        XCTAssertFalse(ControlSocketStaleSocketReclaimer.quarantineAndUnlinkForTest(
+            parentFD: parentFD,
+            socketName: socketPath.lastPathComponent,
+            expectedIdentity: staleIdentity
+        ))
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.statusRequest)
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await liveServer.stop()
+
+        XCTAssertEqual(response, .statusResponse(currentModelID: "winner", runtimeState: .ready))
+        try? FileManager.default.removeItem(at: socketPath.deletingLastPathComponent())
+    }
+
     func testWatchdogCleanupRemovesOwnedUnixSocket() async throws {
         let socketPath = try makeSocketPath()
         let cleanup = ControlSocketWatchdogCleanup(socketPath: socketPath)
@@ -653,6 +733,31 @@ final class ControlSocketTests: XCTestCase {
 
     private func makeServer(socketPath: URL, modelRuntime: ModelRuntime) -> ControlSocketServer {
         ControlSocketServer(socketPath: socketPath, modelRuntime: modelRuntime, idleTimeoutSeconds: 0.2)
+    }
+
+    /// Binds and listens on `path` like a real serve process would, then
+    /// closes the listener without unlinking the file — reproducing the
+    /// exact orphaned-inode state left behind when a process dies (SIGKILL,
+    /// OOM, power loss) before its watchdog exit cleanup can run.
+    private func createOrphanedSocket(at path: URL) throws {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        var address = try unixAddress(path: path.path)
+        let result = withUnsafePointer(to: &address.sockaddr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, address.length)
+            }
+        }
+        XCTAssertEqual(result, 0)
+        chmod(path.path, 0o600)
+        XCTAssertEqual(Darwin.listen(fd, 128), 0)
+        Darwin.close(fd)
+    }
+
+    private func socketIdentity(at path: URL) throws -> ControlSocketFileIdentity {
+        var info = stat()
+        XCTAssertEqual(Darwin.lstat(path.path, &info), 0)
+        return ControlSocketFileIdentity(info)
     }
 
     private func rawConnect(socketPath: URL) throws -> Int32 {
