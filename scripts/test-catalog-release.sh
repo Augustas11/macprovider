@@ -480,4 +480,231 @@ with tempfile.TemporaryDirectory() as directory:
 print("llama tier2 conflict fixture + stage-tier2-republish checks locked")
 PY
 
+# #608 Partial: signed tier2-catalog.json as a release-ledger feed member.
+# Historical 2-feed release-ledger rows remain valid (validate_release_ledger
+# still accepts them); only a *new* release generate requires Tier-2.
+python3 - "$VERIFY" "$CANONICAL" "$STATIC" <<'PY'
+import base64
+import importlib.util
+import json
+import pathlib
+import shutil
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("catalog_release_tier2", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+canonical = pathlib.Path(sys.argv[2])
+static = pathlib.Path(sys.argv[3])
+
+candidate_bytes = (canonical / "autotune-candidates.json").read_bytes()
+candidate_obj = module.validate_candidate(candidate_bytes)
+demand_bytes = (canonical / "demand-rank.json").read_bytes()
+demand_obj = module.validate_demand(demand_bytes)
+qwen_row = candidate_obj["rows"]["qwen3-8b"]
+
+
+def rejected(label, fn):
+    try:
+        fn()
+    except module.CatalogError:
+        return
+    raise SystemExit(f"{label} was accepted")
+
+
+def signed_tier2(catalog_id, model_sha256, *, key_id="catalog-key-2026q2", sig="A" * 86, **overrides):
+    body = {
+        "catalog_id": catalog_id,
+        "issued_at": "2026-07-01T00:00:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "models": [{
+            "artifact_kind": "mlx_weight_file",
+            "hash_scope": "artifact_manifest",
+            "model_id": qwen_row["model_id"],
+            "sha256": model_sha256,
+            "source": "operator-curated",
+        }],
+        "version": 1,
+        "signature": {"alg": "Ed25519", "key_id": key_id, "sig": sig},
+    }
+    body.update(overrides)
+    return json.dumps(body).encode()
+
+
+agreeing_tier2 = signed_tier2("test-catalog-agree", qwen_row["model_sha256"])
+tier2_obj = module.validate_tier2_catalog(agreeing_tier2)
+if tier2_obj["catalog_id"] != "test-catalog-agree":
+    raise SystemExit("validate_tier2_catalog did not round-trip catalog_id")
+
+# --- structural rejections mirroring scripts/sign-catalog.go validateCatalogBody ---
+base_body = json.loads(agreeing_tier2)
+
+
+def mutated(mutation):
+    body = json.loads(json.dumps(base_body))
+    mutation(body)
+    return json.dumps(body).encode()
+
+
+rejected("missing signature field", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b.pop("signature"))
+))
+rejected("unknown top-level field", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b.__setitem__("extra", True))
+))
+rejected("non-Ed25519 alg", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["signature"].__setitem__("alg", "ed25519"))
+))
+rejected("short signature", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["signature"].__setitem__("sig", "AA"))
+))
+rejected("non-base64url signature", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["signature"].__setitem__("sig", "not base64!"))
+))
+rejected("version must be 1", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b.__setitem__("version", 2))
+))
+rejected("issued_at after expires_at", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: (b.__setitem__("issued_at", "2099-06-01T00:00:00Z")))
+))
+rejected("empty models", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b.__setitem__("models", []))
+))
+rejected("unsupported hash_scope", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["models"][0].__setitem__("hash_scope", "bogus_scope"))
+))
+rejected("unsupported artifact_kind", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["models"][0].__setitem__("artifact_kind", "gguf"))
+))
+rejected("bad sha256 format", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["models"][0].__setitem__("sha256", "not-hex"))
+))
+rejected("duplicate model_id case-insensitive", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["models"].append({**b["models"][0], "model_id": b["models"][0]["model_id"].upper()}))
+))
+module.validate_tier2_catalog(agreeing_tier2)  # baseline still accepted after mutation probes
+
+# --- check-tier2-binding fail-closed on conflicting hash ---
+conflicting_tier2 = signed_tier2("test-catalog-conflict", "f" * 64)
+module.check_tier2_binding(candidate_bytes, agreeing_tier2)
+try:
+    module.check_tier2_binding(candidate_bytes, conflicting_tier2)
+except module.CatalogError as exc:
+    if "conflicts" not in str(exc):
+        raise SystemExit(f"tier2 feed conflict error missing detail: {exc}")
+else:
+    raise SystemExit("conflicting tier2 feed candidate was accepted")
+
+# --- manifest() binds tier2-catalog.json as a third feed ---
+manifest_with_tier2 = module.manifest(
+    candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+    tier2=agreeing_tier2, tier2_obj=tier2_obj,
+)
+manifest_value = json.loads(manifest_with_tier2)
+if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.json", "tier2-catalog.json"}:
+    raise SystemExit(f"tier2 feed missing from manifest: {sorted(manifest_value['feeds'])}")
+tier2_feed = manifest_value["feeds"]["tier2-catalog.json"]
+if tier2_feed["sha256"] != module.sha256(agreeing_tier2) or tier2_feed["bytes"] != len(agreeing_tier2):
+    raise SystemExit("tier2 feed digest/bytes do not bind the signed catalog")
+if tier2_feed["version"] != "test-catalog-agree" or tier2_feed["signer_key_id"] != "catalog-key-2026q2":
+    raise SystemExit("tier2 feed version/signer_key_id must come from the signed catalog, not the release train")
+
+manifest_without_tier2 = module.manifest(candidate_bytes, demand_bytes, candidate_obj, demand_obj)
+if "tier2-catalog.json" in json.loads(manifest_without_tier2)["feeds"]:
+    raise SystemExit("manifest() must omit tier2-catalog.json when tier2 bytes are not supplied")
+
+# --- release-ledger: historical 2-feed rows stay valid; new 3-feed rows are accepted ---
+hist_release_id, hist_record = module.release_record(manifest_without_tier2)
+
+# A synthetic later release_id proves the 3-feed shape is accepted for *new*
+# rows without disturbing the real historical row's 2-feed shape.
+new_candidate_obj = json.loads(json.dumps(candidate_obj))
+new_candidate_obj["version"] = "published-2026-07-20-tier2-bound"
+new_demand_obj = json.loads(json.dumps(demand_obj))
+new_demand_obj["version"] = new_candidate_obj["version"]
+new_manifest_with_tier2 = module.manifest(
+    candidate_bytes, demand_bytes, new_candidate_obj, new_demand_obj,
+    tier2=agreeing_tier2, tier2_obj=tier2_obj,
+)
+bound_release_id, bound_record = module.release_record(new_manifest_with_tier2)
+if bound_release_id == hist_release_id:
+    raise SystemExit("synthetic tier2-bound release_id must differ from the real historical release_id")
+
+legacy_ledger = {
+    "schema_version": "macprovider.autotune-release-ledger.v2",
+    "releases": {hist_release_id: hist_record},
+    "tombstones": {},
+}
+module.validate_release_ledger(json.dumps(legacy_ledger).encode())
+
+tier2_bound_ledger = {
+    "schema_version": "macprovider.autotune-release-ledger.v2",
+    "releases": {
+        hist_release_id: hist_record,
+        bound_release_id: bound_record,
+    },
+    "tombstones": {},
+}
+module.validate_release_ledger(json.dumps(tier2_bound_ledger).encode())
+
+# Historical rows must not silently gain/require Tier-2, and rows must not mix
+# an unexpected feed name into either accepted shape.
+hybrid_ledger = json.loads(json.dumps(tier2_bound_ledger))
+hybrid_ledger["releases"][bound_release_id]["feeds"]["mystery.json"] = (
+    hybrid_ledger["releases"][bound_release_id]["feeds"].pop("demand-rank.json")
+)
+rejected("unexpected feed name set", lambda: module.validate_release_ledger(json.dumps(hybrid_ledger).encode()))
+
+# tier2-catalog.json's `version` field is the signed catalog_id, not the
+# autotune release_id — legacy feeds still must match release_id exactly.
+mismatched_autotune_version = json.loads(json.dumps(tier2_bound_ledger))
+mismatched_autotune_version["releases"][bound_release_id]["feeds"]["autotune-candidates.json"]["version"] = "wrong"
+rejected(
+    "autotune feed version must equal release_id even with tier2 bound",
+    lambda: module.validate_release_ledger(json.dumps(mismatched_autotune_version).encode()),
+)
+
+print("release-ledger accepts historical 2-feed rows and Tier-2-bound 3-feed rows")
+
+# --- generate() requires Tier-2 going forward; historical `verify` does not ---
+original_tier2_path = module.TIER2_CATALOG_PATH
+try:
+    module.TIER2_CATALOG_PATH = pathlib.Path(tempfile.mkdtemp()) / "tier2-catalog.json"
+    rejected("generate without tier2-catalog.json", module.require_tier2_catalog_for_generate)
+    module.TIER2_CATALOG_PATH.write_bytes(agreeing_tier2)
+    returned_tier2, returned_obj = module.require_tier2_catalog_for_generate()
+    if returned_tier2 != agreeing_tier2 or returned_obj["catalog_id"] != "test-catalog-agree":
+        raise SystemExit("require_tier2_catalog_for_generate did not round-trip the signed catalog")
+finally:
+    module.TIER2_CATALOG_PATH = original_tier2_path
+
+# --- verify_directory: tier2-catalog.json must be a declared feed member ---
+with tempfile.TemporaryDirectory() as directory:
+    release = pathlib.Path(directory)
+    shutil.copy(canonical / "trusted-keys.json", release / "trusted-keys.json")
+    for name in ("autotune-candidates.json", "demand-rank.json"):
+        shutil.copy(static / name, release / name)
+        shutil.copy(static / f"{name}.sig", release / f"{name}.sig")
+
+    # Happy path: tier2-catalog.json present AND declared in release.json.
+    (release / "tier2-catalog.json").write_bytes(agreeing_tier2)
+    (release / "release.json").write_bytes(manifest_with_tier2)
+    module.verify_directory(release)
+
+    # Undeclared: an agreeing tier2-catalog.json sitting beside a release.json
+    # that only binds the legacy 2 feeds must fail closed (feed membership,
+    # not just digest overlap, is what #608 requires).
+    (release / "release.json").write_bytes(manifest_without_tier2)
+    try:
+        module.verify_directory(release)
+    except module.CatalogError as exc:
+        if "manifest does not bind the feed bytes" not in str(exc):
+            raise SystemExit(f"undeclared tier2 catalog rejected for the wrong reason: {exc}")
+    else:
+        raise SystemExit("undeclared tier2-catalog.json feed membership was accepted")
+
+print("verify-directory requires tier2-catalog.json to be a declared feed member")
+PY
+
 echo "PASS: catalog release generation and trust failures are locked"

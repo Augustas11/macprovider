@@ -27,10 +27,25 @@ catalog member contains:
 ### Tier-2 identity binding (#608 Partial → finish slice: derived-only mutate)
 
 `tier2-identity-binding.json` is a **repository-local derived projection**
-written by `catalog-release.py generate`. It is **not** yet a member of the
+written by `catalog-release.py generate`. It is **not** a member of the
 signed autotune release envelope (`release.json` / ledger / Pearl immutable
 release directory / provider package). Operators must not treat it as a
 substitute for the signed Tier-2 file.
+
+A **signed** `tier2-catalog.json` (the `sign-catalog.go`-produced file, not
+the derived binding above) can now optionally be bound as a third
+`release.json` / `release-ledger.json` feed member alongside
+`autotune-candidates.json` and `demand-rank.json`
+(`scripts/catalog-release.py generate` / `verify` / `verify-directory`). This
+is historical-safe: every release-ledger row published before this change
+keeps its original 2-feed shape and `verify` still passes with no canonical
+`phase3-binary/catalog/autotune/tier2-catalog.json` present. Once a signed
+Tier-2 catalog exists at that path, `generate` requires it (fails closed if
+missing) and `verify` runs `check-tier2-binding` against it before trusting
+it as a feed member. This is still repo/ledger bookkeeping only: it does not
+flip `tier2.require_hash_verified`, does not remove the physical
+`/opt/macprovider/tier2-catalog.json` dual path, and does not authorize a
+Pearl publish by itself.
 
 Autotune admission identity and the Tier-2 attestation catalog remain separate
 signed files during migration (`exc-catalog-compatibility-bridges` stays
@@ -72,11 +87,11 @@ Until then the interim rule is **derived-only mutate**:
 6. Admission identity remains autotune-only (Entry 170 / #609). This binding
    check does **not** add a Tier-2 fallback.
 
-Follow-up on #608 (still blocked for exception clearance): fold signed Tier-2
-bytes into the release ledger / compatibility-set envelope, remove the
-physical `/opt/macprovider/tier2-catalog.json` dual path, and collect Pearl
-journey proof that no `model_hash_uncatalogued` events fire for active
-release rows.
+Follow-up on #608 (still blocked for exception clearance): the repo-side
+ledger / compatibility-set feed membership for signed Tier-2 bytes described
+above is landed; remaining work is to remove the physical
+`/opt/macprovider/tier2-catalog.json` dual path and collect Pearl journey
+proof that no `model_hash_uncatalogued` events fire for active release rows.
 
 The same signed network-release manifest also binds:
 

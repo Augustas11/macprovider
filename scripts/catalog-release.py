@@ -30,6 +30,10 @@ MANIFEST_PATH = CATALOG_DIR / "release.json"
 LEDGER_PATH = CATALOG_DIR / "release-ledger.json"
 TIER2_BINDING_PATH = CATALOG_DIR / "tier2-identity-binding.json"
 TIER2_BINDING_SCHEMA = "macprovider.tier2-identity-binding.v1"
+TIER2_CATALOG_PATH = CATALOG_DIR / "tier2-catalog.json"
+TIER2_CATALOG_FEED_NAME = "tier2-catalog.json"
+LEGACY_LEDGER_FEEDS = frozenset({"autotune-candidates.json", "demand-rank.json"})
+TIER2_BOUND_LEDGER_FEEDS = LEGACY_LEDGER_FEEDS | {TIER2_CATALOG_FEED_NAME}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 TIER2_HASH_SCOPES = {"primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental"}
@@ -516,6 +520,8 @@ def manifest(
     demand_obj: dict,
     sidecar_directory: pathlib.Path = STATIC_DIR,
     signer_key_id: str | None = None,
+    tier2: bytes | None = None,
+    tier2_obj: dict | None = None,
 ) -> bytes:
     signer_ids = {}
     if signer_key_id is not None:
@@ -528,21 +534,32 @@ def manifest(
             sidecar_path = sidecar_directory / f"{name}.sig"
             if sidecar_path.exists():
                 signer_ids[name] = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)[0]
+    feeds = {
+        "autotune-candidates.json": {
+            "sha256": sha256(candidate), "bytes": len(candidate), "version": candidate_obj["version"],
+            "signer_key_id": signer_ids.get("autotune-candidates.json"),
+        },
+        "demand-rank.json": {
+            "sha256": sha256(demand), "bytes": len(demand), "version": demand_obj["version"],
+            "signer_key_id": signer_ids.get("demand-rank.json"),
+        },
+    }
+    if tier2 is not None:
+        if tier2_obj is None:
+            fail("manifest: tier2 bytes provided without a parsed tier2_obj")
+        # Tier-2 is versioned by its own catalog_id, not the autotune release
+        # train, so it is bound as a feed member without claiming release_id
+        # identity (#608 Partial: ledger/compatibility-set membership).
+        feeds[TIER2_CATALOG_FEED_NAME] = {
+            "sha256": sha256(tier2), "bytes": len(tier2), "version": tier2_obj["catalog_id"],
+            "signer_key_id": tier2_obj["signature"]["key_id"],
+        }
     value = {
         "schema_version": "macprovider.autotune-release.v1",
         "release_id": candidate_obj["version"],
         "generated_at": candidate_obj["generated_at"],
         "policy_version": candidate_obj["policy_version"],
-        "feeds": {
-            "autotune-candidates.json": {
-                "sha256": sha256(candidate), "bytes": len(candidate), "version": candidate_obj["version"],
-                "signer_key_id": signer_ids.get("autotune-candidates.json"),
-            },
-            "demand-rank.json": {
-                "sha256": sha256(demand), "bytes": len(demand), "version": demand_obj["version"],
-                "signer_key_id": signer_ids.get("demand-rank.json"),
-            },
-        },
+        "feeds": feeds,
     }
     return json.dumps(value, indent=2, sort_keys=True).encode("utf-8") + b"\n"
 
@@ -610,11 +627,21 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
         if not isinstance(record["generated_at"], str) or (record["policy_version"] is not None and not isinstance(record["policy_version"], str)) or not isinstance(record["feeds"], dict):
             fail(f"{label}: invalid release entry {release_id!r}")
         parse_time(record["generated_at"], f"{label} release {release_id}")
-        expected_feeds = {"autotune-candidates.json", "demand-rank.json"}
-        exact_keys(record["feeds"], expected_feeds, expected_feeds, f"{label} release {release_id} feeds")
+        feed_names = set(record["feeds"])
+        # Historical-safe: releases published before #608 Tier-2 ledger
+        # membership keep their original 2-feed shape. Only the 3-feed shape
+        # (with tier2-catalog.json bound) is accepted for anything new.
+        if feed_names not in (LEGACY_LEDGER_FEEDS, TIER2_BOUND_LEDGER_FEEDS):
+            fail(
+                f"{label}: release {release_id!r} feeds must be exactly "
+                f"{sorted(LEGACY_LEDGER_FEEDS)} (historical) or "
+                f"{sorted(TIER2_BOUND_LEDGER_FEEDS)} (Tier-2 bound)"
+            )
         for feed_name, feed in record["feeds"].items():
             validate_ledger_feed(feed, f"{label} release {release_id} {feed_name}")
-            if feed["version"] != release_id:
+            # tier2-catalog.json is versioned by its own catalog_id, not the
+            # autotune release train (see manifest()).
+            if feed_name != TIER2_CATALOG_FEED_NAME and feed["version"] != release_id:
                 fail(f"{label}: feed version does not match release ID {release_id!r}")
     for release_id, tombstone in value["tombstones"].items():
         if not isinstance(release_id, str) or not release_id or not isinstance(tombstone, dict):
@@ -831,6 +858,82 @@ def validate_tier2_identity_binding(data: bytes, candidate: bytes, candidate_obj
     return value
 
 
+def validate_tier2_catalog(data: bytes) -> dict:
+    """Structural validation of a signed Tier-2 catalog (scripts/sign-catalog.go shape).
+
+    This locks the JSON shape (fields, hash format, signature envelope) so
+    `generate`/`verify` can safely record `signer_key_id` + digest as a
+    release-ledger feed member (#608 Partial: ledger/compatibility-set
+    membership). It does not re-verify the Ed25519 signature bytes — that
+    requires reproducing Go's exact struct-field encoding order and remains
+    `sign-catalog.go verify` / the coordinator's tier2 loader's job.
+    Cross-catalog identity agreement is enforced separately by
+    `check_tier2_binding`.
+    """
+    value = strict_json(data, "tier2-catalog")
+    top = {"catalog_id", "issued_at", "expires_at", "models", "signature", "version"}
+    exact_keys(value, top, top, "tier2-catalog")
+    if not isinstance(value["catalog_id"], str) or not value["catalog_id"].strip():
+        fail("tier2-catalog: catalog_id required")
+    parse_time(value["issued_at"], "tier2-catalog issued_at")
+    parse_time(value["expires_at"], "tier2-catalog expires_at")
+    issued = datetime.fromisoformat(value["issued_at"].replace("Z", "+00:00"))
+    expires = datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00"))
+    if issued >= expires:
+        fail("tier2-catalog: issued_at must be before expires_at")
+    if value["version"] != 1:
+        fail("tier2-catalog: version must be 1")
+    models = value["models"]
+    if not isinstance(models, list) or not models:
+        fail("tier2-catalog: models required")
+    seen_models: set[str] = set()
+    model_fields = {"artifact_kind", "hash_scope", "model_id", "min_ram_gb", "notes", "sha256", "source"}
+    model_required = {"artifact_kind", "hash_scope", "model_id", "sha256", "source"}
+    for idx, entry in enumerate(models):
+        if not isinstance(entry, dict):
+            fail(f"tier2-catalog: models[{idx}] must be an object")
+        exact_keys(entry, model_fields, model_required, f"tier2-catalog models[{idx}]")
+        if entry["artifact_kind"] != "mlx_weight_file":
+            fail(f"tier2-catalog models[{idx}]: unsupported artifact_kind")
+        if entry["hash_scope"] not in TIER2_HASH_SCOPES:
+            fail(f"tier2-catalog models[{idx}]: unsupported hash_scope")
+        model_id = entry["model_id"]
+        if not isinstance(model_id, str) or not model_id.strip():
+            fail(f"tier2-catalog models[{idx}]: model_id required")
+        normalized = model_id.lower().strip()
+        if normalized in seen_models:
+            fail(f"tier2-catalog models[{idx}]: duplicate model_id {model_id!r}")
+        seen_models.add(normalized)
+        if not isinstance(entry["sha256"], str) or not HEX64.fullmatch(entry["sha256"]):
+            fail(f"tier2-catalog models[{idx}]: sha256 must be lowercase 64-hex")
+        if not isinstance(entry["source"], str) or not entry["source"].strip():
+            fail(f"tier2-catalog models[{idx}]: source required")
+        min_ram = entry.get("min_ram_gb")
+        if min_ram is not None and (not isinstance(min_ram, int) or isinstance(min_ram, bool) or min_ram < 1):
+            fail(f"tier2-catalog models[{idx}]: min_ram_gb must be a positive integer")
+        notes = entry.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            fail(f"tier2-catalog models[{idx}]: notes must be a string")
+    signature = value["signature"]
+    if not isinstance(signature, dict):
+        fail("tier2-catalog: signature must be an object")
+    exact_keys(signature, {"alg", "key_id", "sig"}, {"alg", "key_id", "sig"}, "tier2-catalog signature")
+    if signature["alg"] != "Ed25519":
+        fail("tier2-catalog: signature.alg must be Ed25519")
+    if not isinstance(signature["key_id"], str) or not signature["key_id"].strip():
+        fail("tier2-catalog: signature.key_id required")
+    if not isinstance(signature["sig"], str) or not signature["sig"].strip():
+        fail("tier2-catalog: signature.sig required")
+    padded = signature["sig"] + "=" * (-len(signature["sig"]) % 4)
+    try:
+        raw_signature = base64.urlsafe_b64decode(padded)
+    except (ValueError, TypeError) as exc:
+        fail(f"tier2-catalog: signature.sig is not valid base64url: {exc}")
+    if len(raw_signature) != 64:
+        fail("tier2-catalog: signature.sig must be a 64-byte Ed25519 signature")
+    return value
+
+
 def load_tier2_models(tier2_data: bytes) -> dict[str, str]:
     value = strict_json(tier2_data, "tier2-catalog")
     models = value.get("models")
@@ -992,6 +1095,28 @@ def derive_tier2_unsigned_body(
     )
 
 
+def require_tier2_catalog_for_generate() -> tuple[bytes, dict]:
+    """New releases must bind signed Tier-2 bytes as a release feed member.
+
+    Historical release-ledger rows generated before this requirement keep
+    their original 2-feed shape (`validate_release_ledger` accepts both
+    shapes); only `generate` going forward requires Tier-2 (#608 Partial:
+    ledger/compatibility-set membership).
+    """
+    if not TIER2_CATALOG_PATH.exists():
+        fail(
+            "generate: missing tier2-catalog.json. Every new catalog release "
+            "must bind a signed Tier-2 catalog as a release-ledger feed member "
+            "(#608 Partial: ledger/compatibility-set membership). Historical "
+            "2-feed release-ledger rows remain valid; only new `generate` runs "
+            "require Tier-2. Sign a Tier-2 catalog with scripts/sign-catalog.go "
+            f"and place it at {TIER2_CATALOG_PATH}."
+        )
+    tier2 = TIER2_CATALOG_PATH.read_bytes()
+    tier2_obj = validate_tier2_catalog(tier2)
+    return tier2, tier2_obj
+
+
 def updated_release_ledger(manifest_bytes: bytes) -> bytes:
     current = validate_release_ledger(LEDGER_PATH.read_bytes()) if LEDGER_PATH.exists() else {"releases": {}, "tombstones": {}}
     require_ledger_evolution(base_release_ledger(), current)
@@ -1020,9 +1145,14 @@ def generate(signer_key_id: str | None = None) -> None:
     demand = canonical_bytes(demand_obj)
     if signer_key_id is not None and signer_key_id not in keyring():
         fail(f"cannot generate for unknown or retired signer key ID: {signer_key_id}")
+    tier2, tier2_obj = require_tier2_catalog_for_generate()
+    check_tier2_binding(candidate, tier2)
     # Compute every derived artifact before mutating on-disk release state so a
     # binding/derivation failure cannot leave a partially updated ledger.
-    manifest_bytes = manifest(candidate, demand, candidate_obj, demand_obj, signer_key_id=signer_key_id)
+    manifest_bytes = manifest(
+        candidate, demand, candidate_obj, demand_obj,
+        signer_key_id=signer_key_id, tier2=tier2, tier2_obj=tier2_obj,
+    )
     binding_bytes = derive_tier2_identity_binding(candidate, candidate_obj)
     swift_text = generated_swift(candidate, demand, signer_key_id)
     next_ledger = updated_release_ledger(manifest_bytes)
@@ -1041,7 +1171,7 @@ def generate(signer_key_id: str | None = None) -> None:
     print(
         f"generated catalog release {candidate_obj['version']} "
         f"candidate={sha256(candidate)} demand={sha256(demand)} "
-        f"tier2_binding={sha256(binding_bytes)}"
+        f"tier2_binding={sha256(binding_bytes)} tier2_catalog={sha256(tier2)}"
     )
 
 
@@ -1104,7 +1234,18 @@ def verify() -> None:
             fail(f"generated drift: {path}")
     if SWIFT_GENERATED.read_text() != generated_swift(candidate, demand):
         fail(f"generated drift: {SWIFT_GENERATED}")
-    expected_manifest = manifest(candidate, demand, candidate_obj, demand_obj)
+    # #608 Partial: historical-safe. The canonical release currently on disk
+    # may predate Tier-2 ledger membership (no TIER2_CATALOG_PATH); only
+    # `generate` requires Tier-2 going forward. When a canonical Tier-2
+    # catalog is present, fail closed on any autotune/tier2 identity conflict
+    # before trusting it as a feed member.
+    tier2 = None
+    tier2_obj = None
+    if TIER2_CATALOG_PATH.exists():
+        tier2 = TIER2_CATALOG_PATH.read_bytes()
+        tier2_obj = validate_tier2_catalog(tier2)
+        check_tier2_binding(candidate, tier2)
+    expected_manifest = manifest(candidate, demand, candidate_obj, demand_obj, tier2=tier2, tier2_obj=tier2_obj)
     if MANIFEST_PATH.read_bytes() != expected_manifest:
         fail(f"generated drift: {MANIFEST_PATH}")
     ledger = validate_release_ledger(LEDGER_PATH.read_bytes())
@@ -1129,10 +1270,11 @@ def verify() -> None:
         if public_key is None:
             fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
         verify_ed25519(public_key, signature, body, sidecar_path.name)
+    tier2_note = f"tier2_catalog={sha256(tier2)}" if tier2 is not None else "tier2_catalog=absent(historical)"
     print(
         f"verified catalog release {candidate_obj['version']} "
         f"candidate={sha256(candidate)} demand={sha256(demand)} "
-        f"tier2_binding={sha256(TIER2_BINDING_PATH.read_bytes())}"
+        f"tier2_binding={sha256(TIER2_BINDING_PATH.read_bytes())} {tier2_note}"
     )
 
 
@@ -1146,7 +1288,18 @@ def verify_directory(directory: pathlib.Path) -> None:
     validate_pair(candidate_obj, demand_obj)
     if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj):
         fail("release directory feeds are not deterministic canonical bytes")
-    expected_manifest = manifest(candidate, demand, candidate_obj, demand_obj, directory)
+    # A staged tier2-catalog.json must be a declared release.json feed member
+    # (#608 Partial: ledger/compatibility-set membership), not a bystander
+    # file — the manifest recomputation below fails closed on drift if it
+    # is not, and check_tier2_binding fails closed on identity conflicts.
+    tier2_path = directory / "tier2-catalog.json"
+    tier2 = None
+    tier2_obj = None
+    if tier2_path.exists():
+        tier2 = tier2_path.read_bytes()
+        tier2_obj = validate_tier2_catalog(tier2)
+        check_tier2_binding(candidate, tier2)
+    expected_manifest = manifest(candidate, demand, candidate_obj, demand_obj, directory, tier2=tier2, tier2_obj=tier2_obj)
     if (directory / "release.json").read_bytes() != expected_manifest:
         fail("release directory manifest does not bind the feed bytes")
     keys = keyring(directory / "trusted-keys.json")
@@ -1161,11 +1314,8 @@ def verify_directory(directory: pathlib.Path) -> None:
     if binding_path.exists():
         validate_tier2_identity_binding(binding_path.read_bytes(), candidate, candidate_obj)
         print(f"verified repo-local tier2 identity binding for {candidate_obj['version']}")
-    tier2_path = directory / "tier2-catalog.json"
-    if tier2_path.exists():
-        # Digest overlap check only — this does not replace sign-catalog.go verify.
-        check_tier2_binding(candidate, tier2_path.read_bytes())
-        print(f"verified tier2 digest binding against release {candidate_obj['version']}")
+    if tier2 is not None:
+        print(f"verified tier2 catalog {tier2_obj['catalog_id']} feed membership against release {candidate_obj['version']}")
     print(f"verified release directory {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)}")
 
 
