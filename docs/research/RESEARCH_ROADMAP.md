@@ -122,9 +122,15 @@ stack?" question is **no longer the blocker**. The real gates are all
   drafts** — now Tier A, the only substantive levers needing neither hardware nor
   an external gate — running as two parallel SPEC-draft sessions alongside the
   in-flight SPEC-036.
-- **Three SPEC tracks can run in parallel right now:** SPEC-036 (compute-integrity,
-  in flight), SPEC-037/233 (KV survival, buyer TTFT), SPEC-038/232 (batching,
-  provider earnings). All three are memo/handoff-ready; none blocks another.
+- **Three SPEC tracks, one sequencing constraint.** SPEC-036 (compute-integrity,
+  in flight) is Go coordinator code — fully parallel-safe with the other two.
+  SPEC-037/233 (KV survival) and SPEC-038/232 (batching) are memo-independent but
+  **both edit `phase3-binary/.../ModelRuntime.swift` + the KV-cache classes**, so:
+  write all three **SPECs** in parallel (distinct files; only the governance
+  manifests + decision log overlap, resolved at each sequential merge), but
+  **sequence the provider IMPL: land 037 first, then 038 rebases onto it.** This
+  also honors the 233 memo's "persistence before paged-KV" stop-condition — 038's
+  batch-aware KV layout must not break 037's opaque serialization.
 - The remaining backlog splits cleanly: **SPEC-draft work (232/233, unblocked
   now)**, **one hardware bottleneck gating a cluster of three (235 campaign / 234
   cold cell / 231 FB → one lab Mac)**, and **demand-gated second-wave (237

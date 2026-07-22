@@ -85,6 +85,23 @@ do not ship a number you haven't measured.
   reviewed revision behind the flag and does not block on merge — the fallback-B
   gate exists precisely for the calendar/correctness miss.
 
+## 1b. Parallelism / collision (SPEC-036 and SPEC-037 run alongside you)
+
+- **SPEC-036** (compute-integrity) is Go coordinator code — no file overlap.
+- **SPEC-037** (RESEARCH_233 KV survival) edits the **same provider files you do**
+  — `phase3-binary/.../ModelRuntime.swift` and the KV-cache classes. The two SPECs
+  are architecturally independent, but the provider IMPL is **not** conflict-free,
+  and 037 lands its provider IMPL **first**. **Before you start your provider IMPL,
+  rebase onto the merged 037 changes** (its opaque KV-persistence path). Your
+  dense/contiguous batch-aware KV cache **must not break 037's serialization
+  format** — coordinate the KV-cache class shape so persistence still round-trips,
+  or gate your layout change behind the flag so 037's serial path is unaffected.
+  Do not run your provider IMPL simultaneously with an unmerged 037.
+- **Shared files across all three** — `specs/CONFORMANCE.json`,
+  `specs/AUTHORITY.json`, `beta/DECISION_CRITERIA.md`: additive edits. Rebase on
+  latest `origin/main` before each PR and re-add your entries; keep the
+  decision-log entry for a final PR that merges last.
+
 ## 2. Phases
 
 - **A — SPEC.** Write `specs/SPEC-038-continuous-batching.md`: the batch-serving

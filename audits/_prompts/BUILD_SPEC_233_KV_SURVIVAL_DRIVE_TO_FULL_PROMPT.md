@@ -87,6 +87,22 @@ token replay as production cache, oMLX as inference engine.
   --stat HEAD` + grep load-bearing lines) before push. Backtick-heavy prompts →
   write to file and `cat`, never inline double-quoted.
 
+## 1b. Parallelism / collision (SPEC-036 and SPEC-038 run alongside you)
+
+- **SPEC-036** (compute-integrity) is Go coordinator code — no file overlap with
+  you. Ignore it except for the shared manifests below.
+- **SPEC-038** (RESEARCH_232 continuous batching) edits the **same provider files
+  you do** — `phase3-binary/.../ModelRuntime.swift` and the KV-cache classes. The
+  two SPECs are architecturally independent (no shared paged allocator), but the
+  provider IMPL is **not** conflict-free. **You (037) land the provider IMPL
+  first**; 038 rebases onto your merged changes. Serialize the *current* opaque
+  per-conversation KV layout — do not introduce a batch-aware/paged layout (that is
+  038's job, and your KVS-01 stop-condition fires if persistence needs it).
+- **Shared files across all three** — `specs/CONFORMANCE.json`,
+  `specs/AUTHORITY.json`, `beta/DECISION_CRITERIA.md`: additive edits. Rebase on
+  latest `origin/main` before each PR and re-add your entries; keep the
+  decision-log entry for a final PR that merges last.
+
 ## 2. Phases
 
 - **A — SPEC.** Write `specs/SPEC-037-kv-survival-restart.md` (house style
