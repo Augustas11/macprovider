@@ -564,10 +564,11 @@ func TestSchema_ColdWarmPairs_Validate(t *testing.T) {
 // B8 / B9 — sticky cache-reuse (RESEARCH_236) -------------------------
 
 // makeCacheResult builds a non-streaming ("cached" or "uncached") result
-// with a given TTFT and, when usageAndCache is true, a usage frame
-// carrying cached_prompt_tokens = cached and prompt_tokens = prompt.
-func makeCacheResult(ttftMs int64, phase string, usageAndCache bool, cached, prompt int64) buyer.Result {
-	r := makeResult(ttftMs, ttftMs+50, 4, false, "p1", "m", 200)
+// with a given full-response latency (TotalMillis, since these turns are
+// non-streaming) and, when usageAndCache is true, a usage frame carrying
+// cached_prompt_tokens = cached and prompt_tokens = prompt.
+func makeCacheResult(latencyMs int64, phase string, usageAndCache bool, cached, prompt int64) buyer.Result {
+	r := makeResult(latencyMs, latencyMs, 4, false, "p1", "m", 200)
 	r.CachePhase = phase
 	if usageAndCache {
 		r.UsagePresent = true
@@ -578,14 +579,31 @@ func makeCacheResult(ttftMs int64, phase string, usageAndCache bool, cached, pro
 	return r
 }
 
+// makeFailedCacheResult builds a cache-phase result that did NOT succeed
+// (e.g. a 503) — attempted but no usage.
+func makeFailedCacheResult(phase string) buyer.Result {
+	r := makeResult(300, 300, 0, false, "p1", "m", 503)
+	r.CachePhase = phase
+	return r
+}
+
+// scCache builds a benchmark scenario with the cache-calibration-pending
+// flag set as requested, so tests can exercise both the armed and the
+// SKIP-only (pending) modes.
+func scCache(pending bool, invs ...string) *scenario.Scenario {
+	s := sc(invs...)
+	s.Benchmark.CacheCalibrationPending = pending
+	return s
+}
+
 func TestB8_CacheReuse_Pass(t *testing.T) {
-	// median reuse = 0.64 (2000/3125) ≥ floor 0.40 → PASS
+	// median reuse = 0.64 (2000/3125) ≥ floor 0.40 → PASS (armed)
 	var results []buyer.Result
 	results = append(results, makeCacheResult(500, "uncached", true, 0, 3125))
 	for i := 0; i < 8; i++ {
 		results = append(results, makeCacheResult(300, "cached", true, 2000, 3125))
 	}
-	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusPass {
 		t.Fatalf("B8 expected PASS at reuse 0.64, got %s: %s", got, res.Verdicts[0].Detail)
 	}
@@ -597,7 +615,7 @@ func TestB8_CacheReuse_Warn(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		results = append(results, makeCacheResult(300, "cached", true, 900, 3000))
 	}
-	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusWarn {
 		t.Fatalf("B8 expected WARN at reuse 0.30, got %s: %s", got, res.Verdicts[0].Detail)
 	}
@@ -605,14 +623,27 @@ func TestB8_CacheReuse_Warn(t *testing.T) {
 
 func TestB8_CacheReuse_Fail_Collapsed(t *testing.T) {
 	// Cache collapsed: every cached turn reports cached_prompt_tokens=0
-	// but the field IS present → reuse 0.0 < 0.20 → FAIL (not SKIP).
+	// but the field IS present → reuse 0.0 < 0.20 → FAIL (armed, not SKIP).
 	var results []buyer.Result
 	for i := 0; i < 6; i++ {
 		results = append(results, makeCacheResult(300, "cached", true, 0, 3000))
 	}
-	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusFail {
 		t.Fatalf("B8 expected FAIL at reuse 0.0 (collapsed), got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_CalibrationPending(t *testing.T) {
+	// Even a healthy 0.64 reuse SKIPs while calibration is pending — the
+	// floor isn't calibrated against a positive baseline yet.
+	var results []buyer.Result
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3125))
+	}
+	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP while calibration pending, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
@@ -623,23 +654,66 @@ func TestB8_CacheReuse_Skip_UsageAbsent(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
 	}
-	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusSkip {
 		t.Fatalf("B8 expected SKIP with usage absent, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_InvalidRatio(t *testing.T) {
+	// Untrusted provider reports cached_prompt_tokens > prompt_tokens
+	// (impossible, ratio > 1). Must NOT PASS — excluded as invalid → no
+	// valid samples → SKIP.
+	var results []buyer.Result
+	for i := 0; i < 6; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 5000, 3000))
+	}
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP on impossible cached>prompt, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+	if bm := computeBuyerMetrics(results); bm.CacheReuse.InvalidTurns != 6 {
+		t.Fatalf("want 6 invalid turns, got %d", bm.CacheReuse.InvalidTurns)
+	}
+}
+
+func TestB8_CacheReuse_Skip_InsufficientSamples(t *testing.T) {
+	// Only 2 valid measured warm turns (< CacheReuseMinSamples) → SKIP.
+	var results []buyer.Result
+	for i := 0; i < 2; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP on thin sample, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB8_CacheReuse_Skip_AllFailed(t *testing.T) {
+	// Cache-phase turns were attempted but every request failed (503).
+	// Must SKIP as a run failure, not report "pattern not used".
+	var results []buyer.Result
+	results = append(results, makeFailedCacheResult("uncached"))
+	for i := 0; i < 5; i++ {
+		results = append(results, makeFailedCacheResult("cached"))
+	}
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B8 expected SKIP when all cached turns failed, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
 func TestB8_CacheReuse_Skip_NoCachePhase(t *testing.T) {
 	// Scenario didn't use the sticky_cache pattern → SKIP.
 	results := []buyer.Result{makeResult(300, 1000, 64, false, "p1", "m", 200)}
-	res := Evaluate(sc("B8"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B8"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusSkip {
 		t.Fatalf("B8 expected SKIP without cache phase, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
-func TestB9_CachedTTFT_Pass(t *testing.T) {
-	// uncached p50 = 500, cached p50 = 300 → ratio 0.6 ≤ 0.90 → PASS
+func TestB9_CachedLatency_Pass(t *testing.T) {
+	// uncached p50 = 500, cached p50 = 300 → ratio 0.6 ≤ 0.90 → PASS (armed)
 	var results []buyer.Result
 	for i := 0; i < 4; i++ {
 		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
@@ -647,13 +721,13 @@ func TestB9_CachedTTFT_Pass(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
 	}
-	res := Evaluate(sc("B9"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B9"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusPass {
 		t.Fatalf("B9 expected PASS at ratio 0.6, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
-func TestB9_CachedTTFT_Fail_NoAdvantage(t *testing.T) {
+func TestB9_CachedLatency_Fail_NoAdvantage(t *testing.T) {
 	// cached slower than uncached → ratio > 1.0 → FAIL
 	var results []buyer.Result
 	for i := 0; i < 4; i++ {
@@ -662,21 +736,51 @@ func TestB9_CachedTTFT_Fail_NoAdvantage(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		results = append(results, makeCacheResult(500, "cached", true, 2000, 3000))
 	}
-	res := Evaluate(sc("B9"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B9"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusFail {
 		t.Fatalf("B9 expected FAIL with no advantage, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
-func TestB9_CachedTTFT_Skip_OneSide(t *testing.T) {
+func TestB9_CachedLatency_Skip_OneSide(t *testing.T) {
 	// Only cached turns, no uncached control → SKIP.
 	var results []buyer.Result
 	for i := 0; i < 6; i++ {
 		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
 	}
-	res := Evaluate(sc("B9"), results, nil, nil, nil, "test", 60)
+	res := Evaluate(scCache(false, "B9"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusSkip {
 		t.Fatalf("B9 expected SKIP with only cached turns, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB9_CachedLatency_Skip_NoReuseEvidence(t *testing.T) {
+	// Both phases present with latency but usage absent everywhere → no
+	// reuse evidence → SKIP (don't attribute a latency gap to cache).
+	var results []buyer.Result
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(500, "uncached", false, 0, 0))
+	}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", false, 0, 0))
+	}
+	res := Evaluate(scCache(false, "B9"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B9 expected SKIP without reuse evidence, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB9_CachedLatency_Skip_CalibrationPending(t *testing.T) {
+	var results []buyer.Result
+	for i := 0; i < 4; i++ {
+		results = append(results, makeCacheResult(500, "uncached", true, 0, 3000))
+	}
+	for i := 0; i < 8; i++ {
+		results = append(results, makeCacheResult(300, "cached", true, 2000, 3000))
+	}
+	res := Evaluate(scCache(true, "B9"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B9 expected SKIP while calibration pending, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
@@ -689,6 +793,9 @@ func TestComputeBuyerMetrics_CacheReusePopulated(t *testing.T) {
 	// One cached turn with usage absent — counted but not measured.
 	results = append(results, makeCacheResult(320, "cached", false, 0, 0))
 	bm := computeBuyerMetrics(results)
+	if bm.CacheReuse.AttemptedCachedTurns != 6 || bm.CacheReuse.AttemptedUncachedTurns != 1 {
+		t.Fatalf("want 6 attempted cached / 1 uncached, got %d / %d", bm.CacheReuse.AttemptedCachedTurns, bm.CacheReuse.AttemptedUncachedTurns)
+	}
 	if bm.CacheReuse.CachedTurns != 6 {
 		t.Fatalf("want 6 cached turns, got %d", bm.CacheReuse.CachedTurns)
 	}
@@ -701,11 +808,11 @@ func TestComputeBuyerMetrics_CacheReusePopulated(t *testing.T) {
 	if bm.CacheReuse.ReuseP50 != 0.6 {
 		t.Fatalf("want reuse p50 0.6, got %v", bm.CacheReuse.ReuseP50)
 	}
-	if bm.CacheReuse.UncachedTTFTMs.Count != 1 || bm.CacheReuse.CachedTTFTMs.Count != 6 {
-		t.Fatalf("want 1 uncached / 6 cached TTFT samples, got %d / %d", bm.CacheReuse.UncachedTTFTMs.Count, bm.CacheReuse.CachedTTFTMs.Count)
+	if bm.CacheReuse.UncachedLatencyMs.Count != 1 || bm.CacheReuse.CachedLatencyMs.Count != 6 {
+		t.Fatalf("want 1 uncached / 6 cached latency samples, got %d / %d", bm.CacheReuse.UncachedLatencyMs.Count, bm.CacheReuse.CachedLatencyMs.Count)
 	}
-	if bm.CacheReuse.TTFTRatioP50 != 0.5 {
-		t.Fatalf("want TTFT ratio 0.5 (300/600), got %v", bm.CacheReuse.TTFTRatioP50)
+	if bm.CacheReuse.LatencyRatioP50 != 0.5 {
+		t.Fatalf("want latency ratio 0.5 (300/600), got %v", bm.CacheReuse.LatencyRatioP50)
 	}
 }
 
@@ -727,6 +834,7 @@ func TestSchema_StickyCache_Validate(t *testing.T) {
 		{"one request", false, "harness-%d", 1, 1500, 140, true},
 		{"zero interval", false, "harness-%d", 4, 0, 140, true},
 		{"prefix too small", false, "harness-%d", 4, 1500, 50, true},
+		{"prefix too large", false, "harness-%d", 4, 1500, 500, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

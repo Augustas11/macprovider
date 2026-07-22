@@ -124,19 +124,34 @@ single bad run doesn't trip the alert).
 | B5 | Slot util reasonable | ≥ 15% over 5-min window |
 | B6 | Earnings/hr viable | ≥ $0.30/hr at current pricing |
 | B7 | Cold/warm TTFT ratio bounded | cold p50 / warm p50 ≤ 2.0 (scenario 08) |
-| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens ≥ 0.40 on warm sticky turns (scenario 16) |
-| B9 | Cached-turn TTFT advantage | cached_turn_ttft_p50 / uncached_turn_ttft_p50 ≤ 0.90 (scenario 16) |
+| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens ≥ 0.40 on warm turns (scenario 16, provider prefix-cache probe) |
+| B9 | Cached-turn latency advantage | cached vs uncached full-response p50 latency ratio ≤ 0.90 (scenario 16) |
 
 Like I1-I4, each invariant produces a structured verdict (PASS / WARN /
-FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
+FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run —
+and neither does a benchmark FAIL: benchmark verdicts are **advisory**,
+they do not change the harness exit code. A continuous/phase-C gate must
+parse `benchmark_verdict.json` and act on B8/B9 itself.
 
-B8/B9 **SKIP** rather than FAIL when the gateway omits the usage frame
-(spec-strict path) or when the scenario did not run the `sticky_cache`
-pattern — a missing measurement is not a regression. B8's floor and B9's
-ratio are **provisional**, calibrated from the scenario-16 prod baseline
-(RESEARCH_236 Deliverable 4) with headroom below the measured median so
-normal jitter does not flap the gate. The floor (0.40) is deliberately
-conservative versus the 2026-07-09 measurement of ~0.64 (#376).
+B8/B9 **SKIP** rather than FAIL in every inconclusive case — the gateway
+omitted the usage frame (spec-strict path), the scenario did not run the
+`sticky_cache` pattern, every request failed, a provider reported an
+impossible `cached_prompt_tokens > prompt_tokens`, or fewer than 3 valid
+warm samples were measured — so a missing or untrustworthy measurement is
+never mistaken for a regression.
+
+B8/B9 are **calibration-pending**: the 0.40 floor and 0.90 ratio are
+provisional and were NOT calibrated against a positive baseline — the
+2026-07-22 scenario-16 prod run measured ~0 reuse on the live pool (both
+served models report `cached_prompt_tokens = 0`; the ~0.64 figure from
+2026-07-09, #376, was a different provider/prefix context). While
+`benchmark.cache_calibration_pending` is true the invariants record the
+measured value but SKIP the PASS/WARN/FAIL, so an unsupported-capability
+pool is not mistaken for a regression. Arm the gate (flip the flag to
+false and transcribe the floor from the real median, with headroom) once
+a reuse-capable provider is in the pool. B9 is a full-response latency
+ratio (these turns are non-streaming, so not TTFT) and carries a known
+cold-turn connection-setup bias to calibrate out before arming.
 
 ## 4. New scenarios (07-10)
 
@@ -171,23 +186,32 @@ conservative versus the 2026-07-09 measurement of ~0.64 (#376).
   windows).
 
 ### 4.5 `16_sticky_cache_reuse`
-- **What**: 2 buyers × 8 sequential non-streaming turns under the
-  `sticky_cache` pattern. Each buyer routes to one provider via a
-  per-buyer sticky conversation tag; the harness prepends a per-buyer,
-  per-run deterministic ~3.7k-token prefix (`cache_prefix_lines`) to
-  every request. `request_index` 0 is the cold uncached first-touch that
-  warms the provider prefix cache; `request_index` 1..7 are the warm
-  cached turns that reuse it. Mirrors `test/e2e/canary-buyer/probe.mjs`.
-- **Measures**: turn-2+ KV-cache reuse (`cached_prompt_tokens /
-  prompt_tokens`) and the cached-vs-uncached TTFT advantage.
+- **What**: 1 buyer × 8 sequential non-streaming turns under the
+  `sticky_cache` pattern (single buyer because the live pool serves each
+  model from one single-slot provider — concurrent buyers contend and
+  503). The harness prepends a per-run deterministic ~2.7k-token prefix
+  (`cache_prefix_lines`, sized under the live 4000-token context cap) to
+  every request under a sticky conversation tag. `request_index` 0 is the
+  cold uncached first-touch that warms the provider prefix cache;
+  `request_index` 1..7 are the warm cached turns that reuse it. Mirrors
+  `test/e2e/canary-buyer/probe.mjs`.
+- **Measures**: turn-2+ provider prefix-cache reuse (`cached_prompt_tokens
+  / prompt_tokens`) and the cached-vs-uncached full-response latency
+  advantage.
 - **Invariants**: B1 (aggregate TTFT), B8 (cache-reuse retention),
-  B9 (cached-turn TTFT advantage).
-- **Phase C — regression gate**: this is the guard for the already-banked
-  #376 reuse win. Wire it as a scheduled/CI run so a future stickiness or
-  provider prefix-cache regression fails loud. Requires sticky routing ON
-  on both gateway and coordinator (`routing.sticky_enabled: true` +
-  gateway `auth.key_hash_secret`); B8 reads collapsed reuse if sticky is
-  off. Light and prod-safe (~16 requests, order of cents).
+  B9 (cached-turn latency advantage).
+- **Phase C — regression-gate instrument**: the eventual guard for the
+  #376 reuse win. Intended to be wired as a scheduled/CI run that parses
+  `benchmark_verdict.json` (benchmark verdicts are advisory — they do not
+  set the exit code). Ships **calibration-pending** (B8/B9 record but SKIP)
+  because the 2026-07-22 baseline measured ~0 reuse on the current pool;
+  arm it once a reuse-capable provider is present and the floor is
+  transcribed from a positive baseline. As a single-provider probe it
+  measures the provider prefix cache, not sticky routing — the routing
+  dimension needs ≥2 eligible providers plus an affinity assertion.
+  Requires sticky routing ON (`routing.sticky_enabled: true` on both
+  sides + gateway `auth.key_hash_secret`). Light and prod-safe (~8
+  requests, order of cents).
 
 ## 5. Artifact schema (`benchmark_summary.json`)
 

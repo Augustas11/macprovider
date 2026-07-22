@@ -48,6 +48,14 @@ const (
 	// the request is not rejected with context_exceeds_capacity. The
 	// scenario picks a value with headroom under that cap.
 	MinCachePrefixLines = 60
+
+	// MaxCachePrefixLines bounds Buyers.CachePrefixLines from above so a
+	// scenario (semi-trusted input) cannot drive the prefix generator into
+	// an enormous per-request body / memory blowup, and so the generated
+	// prompt stays within realistic provider context windows. At ~30
+	// tokens/line, 200 lines is ~6k tokens — already above the live 4000
+	// cap; anything larger is only ever a mistake or an attack.
+	MaxCachePrefixLines = 200
 )
 
 func expandEnv(input []byte) []byte {
@@ -139,6 +147,17 @@ type Benchmark struct {
 	// B5 (slot utilization). Defaults to 3 — the Pearl coordinator's
 	// AccountConcurrency at the time this spec landed (PR #205).
 	ProviderSlots int `yaml:"provider_slots"`
+
+	// CacheCalibrationPending, when true, makes B8/B9 (sticky cache-reuse,
+	// scenario 16) record their measured value but return SKIP instead of
+	// PASS/WARN/FAIL. The provisional thresholds were NOT calibrated
+	// against a positive, capability-qualified baseline — as of 2026-07-22
+	// the live pool reports ~0 reuse, so a present-but-zero value cannot
+	// be told apart from a true regression. Keep this true until a
+	// reuse-capable provider is in the pool and a positive baseline is
+	// captured; then transcribe the floor and flip this to false to arm
+	// the gate. Default false so a calibrated scenario gates normally.
+	CacheCalibrationPending bool `yaml:"cache_calibration_pending"`
 }
 
 // ChaosEvent is one scheduled shell action. `At` is measured from
@@ -550,6 +569,9 @@ func (s *Scenario) validateBuyerFleet() error {
 		}
 		if s.Buyers.CachePrefixLines < MinCachePrefixLines {
 			return fmt.Errorf("buyers.cache_prefix_lines must be >= %d when pattern=sticky_cache (got %d) — a small prefix makes cached_prompt_tokens meaningless", MinCachePrefixLines, s.Buyers.CachePrefixLines)
+		}
+		if s.Buyers.CachePrefixLines > MaxCachePrefixLines {
+			return fmt.Errorf("buyers.cache_prefix_lines must be <= %d when pattern=sticky_cache (got %d) — an oversized prefix blows up the request body and exceeds provider context windows", MaxCachePrefixLines, s.Buyers.CachePrefixLines)
 		}
 	}
 	if s.Buyers.Pattern == "ramp" && s.Buyers.RampDuration <= 0 {

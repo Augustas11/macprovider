@@ -1,22 +1,38 @@
-# 16_sticky_cache_reuse.yaml — benchmark, phase C (regression gate).
+# 16_sticky_cache_reuse.yaml — benchmark, phase C (regression-gate
+# INSTRUMENT; verdicts advisory + calibration-pending, see below).
 #
-# Guards the sticky-routing + KV-cache-reuse win that is already measured
-# and banked (#376: ~64% turn-2 prompt-cache reuse on a ~3.9k-token shared
-# prefix, live 2026-07-09). Nothing else currently fails when a routing
-# change, coord config flip, or provider-side prefix-cache regression
-# silently takes that win back — this scenario + invariants B8/B9 are that
-# guard. It locks in the cache-reuse win the way B7 locks in the cold/warm
-# ratio (RESEARCH_236, P4).
+# Purpose: measure the KV-cache-reuse win that was already banked (#376:
+# ~64% turn-2 prompt-cache reuse on a ~3.9k-token shared prefix, live
+# 2026-07-09) and turn it into a benchmark invariant (B8) so a future
+# provider-side prefix-cache regression fails loud, the way B7 locks in
+# the cold/warm ratio (RESEARCH_236, P4).
 #
-# Mechanism (mirrors test/e2e/canary-buyer/probe.mjs): each buyer fires a
-# sequence of non-streaming requests under a per-buyer sticky conversation
-# tag, so every turn routes back to the SAME provider. The harness
-# prepends a per-buyer, per-run deterministic ~2.7k-token "reference facts"
+# WHAT IT MEASURES (be precise): B8 is a PROVIDER PREFIX-CACHE reuse probe,
+# not a sticky-routing test. With a single eligible provider (the live pool
+# as of 2026-07-22) every request lands on that one provider whether or not
+# stickiness is on, so this scenario cannot by itself detect a
+# sticky-routing regression — to exercise the routing dimension, run it
+# with >= 2 eligible providers for the model and assert per-buyer affinity.
+#
+# Mechanism (mirrors test/e2e/canary-buyer/probe.mjs): a single buyer fires
+# a sequence of non-streaming requests under a sticky conversation tag. The
+# harness prepends a per-run deterministic ~2.7k-token "reference facts"
 # prefix (cache_prefix_lines) to each request. request_index 0 is the cold
 # first-touch that WARMS the provider's prefix cache (tagged "uncached");
 # request_index >= 1 are the warm turns that should REUSE it (tagged
 # "cached"). On the warm turns the harness reads usage.cached_prompt_tokens
 # / usage.prompt_tokens.
+#
+# ADVISORY + CALIBRATION-PENDING: benchmark verdicts do NOT change the
+# harness exit code (only the hard invariants I1-I4 do) — a CI/phase-C gate
+# must parse benchmark_verdict.json and act on B8/B9. AND cache_calibration
+# _pending is true below: the 2026-07-22 prod baseline found ~0 reuse on
+# the current pool (both live models report cached_prompt_tokens=0), so the
+# provisional 0.40 floor is NOT yet calibrated against a positive
+# reuse-capable baseline; B8/B9 therefore RECORD their measured value but
+# SKIP (never PASS/FAIL) until a reuse-capable provider is in the pool and
+# the floor is transcribed from a real positive measurement — then flip the
+# flag to false to arm the gate.
 #
 # Hard rules honoured (RESEARCH_236):
 #  1. Large prefix (~2.7k tokens) — a small prefix makes turn-2
@@ -29,30 +45,35 @@
 # Requires sticky routing ON on both sides (verified live 2026-07-22:
 # gateway routing.sticky_enabled=true + key_hash_secret set; coordinator
 # routing.sticky_enabled=true; /v1/models tier1_disclosure.sticky_affinity
-# .enabled=true, ttl 1800s). If sticky is off, warm turns scatter to a
-# cold provider and B8 reports collapsed reuse.
+# .enabled=true, ttl 1800s).
 #
 # Cost estimate (8 requests x 12 max_tokens, ~2.7k prompt tokens each):
 # order of cents. Light and prod-safe — no sustained load.
 name: sticky_cache_reuse
 description: |
   1 buyer x 8 sequential non-streaming sticky turns sharing a large
-  ~2.7k-token prefix. Measures turn-2+ KV-cache reuse
-  (cached_prompt_tokens / prompt_tokens) and the cached-vs-uncached TTFT
-  advantage. Phase-C regression gate for the #376 reuse win.
+  ~2.7k-token prefix. Measures turn-2+ provider prefix-cache reuse
+  (cached_prompt_tokens / prompt_tokens) and the cached-vs-uncached
+  full-response latency advantage. Phase-C regression-gate instrument for
+  the #376 reuse win (verdicts advisory + calibration-pending).
 
 expected_shape: |
-  Phase C benchmark:
+  Phase C benchmark (instrument; verdicts advisory + calibration-pending):
    - 8 total requests (1 buyer x 8 turns).
-   - Per buyer: request_index 0 is the cold uncached first-touch;
-     request_index 1..7 are warm cached turns on the same sticky
-     provider.
-   - B8 scores median (cached_prompt_tokens / prompt_tokens) across the
-     warm turns; floor is provisional, calibrated from the prod baseline.
-   - B9 scores cached_turn_ttft_p50 / uncached_turn_ttft_p50; a warm turn
-     should start faster than the cold first-touch.
-   - With sticky OFF: warm turns route to a cold provider, reuse collapses
-     to ~0, B8 FAILs.
+   - request_index 0 is the cold uncached first-touch; request_index 1..7
+     are warm cached turns on the same provider.
+   - B8 records median (cached_prompt_tokens / prompt_tokens) across the
+     warm turns. Provisional floor 0.40; SKIPs while cache_calibration_
+     pending is true (no positive baseline yet) or when usage is absent.
+   - B9 records cached vs uncached full-response latency p50 ratio (these
+     turns are non-streaming, so this is NOT TTFT; with tiny max_tokens the
+     wall time is prefill-dominated). NOTE: the single cold turn also pays
+     one-time connection setup the keep-alive warm turns do not — a known
+     downward bias to calibrate out before arming.
+   - When run with >= 2 eligible providers and stickiness OFF: warm turns
+     scatter across providers, prefix cache misses, reuse collapses toward
+     0 — that is the sticky-routing regression B8 is meant to catch once
+     armed.
 
 target:
   gateway_url: https://api.streamvc.live
@@ -89,6 +110,12 @@ silent_hang_threshold: 30s
 benchmark:
   enabled: true
   invariants: [B1, B8, B9]
+  # Records B8/B9 measured values but SKIPs the PASS/WARN/FAIL verdict: the
+  # 0.40 floor is not yet calibrated against a positive reuse-capable
+  # baseline (2026-07-22 pool reports ~0 reuse). Flip to false once a
+  # reuse-capable provider is in the pool and the floor is transcribed from
+  # a real positive measurement, to arm the gate.
+  cache_calibration_pending: true
 
 prompts:
   - model: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
