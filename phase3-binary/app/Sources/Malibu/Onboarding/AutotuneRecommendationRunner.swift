@@ -147,7 +147,16 @@ enum AutotuneRecommendationRunner {
         )
     }
 
-    /// Best-effort launchd bootstrap after cancelled/killed corrective recovery.
+    /// Whether Malibu should attempt a best-effort launchd bootstrap after a
+    /// hardware-recovery attempt. Only corrective recovery drains/bootouts;
+    /// pending freshness never owns that obligation.
+    static func shouldBestEffortBootstrapLaunchd(
+        attemptedCorrectiveRecovery: Bool
+    ) -> Bool {
+        attemptedCorrectiveRecovery
+    }
+
+    /// Best-effort launchd bootstrap after cancelled/failed corrective recovery.
     /// Safe if the job is already loaded; ignores nonzero exit.
     static func bestEffortBootstrapLaunchdProvider(
         uid: uid_t = getuid(),
@@ -288,9 +297,15 @@ enum AutotuneRecommendationRunner {
                             return
                         }
                         if process.isRunning {
+                            // Recovery must keep cooperative-only teardown here
+                            // too: escalating to SIGKILL before the CLI can
+                            // restore would strand a post-bootout provider.
+                            let timeoutGrace = escalateToSIGKILL
+                                ? subtreeGraceSeconds
+                                : cancelGraceSeconds
                             Self.terminateAutotuneSubtree(
                                 process: process,
-                                graceSeconds: subtreeGraceSeconds,
+                                graceSeconds: timeoutGrace,
                                 escalateToSIGKILL: escalateToSIGKILL
                             )
                             if escalateToSIGKILL {
@@ -314,8 +329,17 @@ enum AutotuneRecommendationRunner {
                         continuation.resume(returning: .success((data, errText)))
                     } catch {
                         if process.isRunning {
-                            Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
-                            process.waitUntilExit()
+                            let failureGrace = escalateToSIGKILL
+                                ? subtreeGraceSeconds
+                                : cancelGraceSeconds
+                            Self.terminateAutotuneSubtree(
+                                process: process,
+                                graceSeconds: failureGrace,
+                                escalateToSIGKILL: escalateToSIGKILL
+                            )
+                            if escalateToSIGKILL {
+                                process.waitUntilExit()
+                            }
                         }
                         stdout.fileHandleForReading.readabilityHandler = nil
                         stderr.fileHandleForReading.readabilityHandler = nil

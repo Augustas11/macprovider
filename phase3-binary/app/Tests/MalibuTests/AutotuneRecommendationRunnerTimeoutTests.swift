@@ -126,6 +126,45 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         XCTAssertFalse(corrective.contains("--freshness-check"))
     }
 
+    func testTerminateWithoutSIGKILLEscalationLeavesUncooperativeChildAlive() throws {
+        // Recovery path must not SIGKILL before the CLI can restore launchd.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "trap '' 15; while :; do sleep 1; done"]
+        try process.run()
+        Thread.sleep(forTimeInterval: 0.1)
+        AutotuneRecommendationRunner.terminateAutotuneSubtree(
+            process: process,
+            graceSeconds: 0.3,
+            escalateToSIGKILL: false
+        )
+        XCTAssertTrue(
+            process.isRunning,
+            "cooperative-only teardown must not SIGKILL a SIGTERM-ignoring recovery CLI"
+        )
+        // Cleanup for the test process.
+        AutotuneRecommendationRunner.terminateAutotuneSubtree(
+            process: process,
+            graceSeconds: 0.2,
+            escalateToSIGKILL: true
+        )
+        XCTAssertFalse(process.isRunning)
+    }
+
+    func testBestEffortBootstrapOnlyAfterCorrectiveRecovery() {
+        XCTAssertTrue(
+            AutotuneRecommendationRunner.shouldBestEffortBootstrapLaunchd(
+                attemptedCorrectiveRecovery: true
+            )
+        )
+        XCTAssertFalse(
+            AutotuneRecommendationRunner.shouldBestEffortBootstrapLaunchd(
+                attemptedCorrectiveRecovery: false
+            ),
+            "pending-only freshness must not own launchd bootstrap"
+        )
+    }
+
     func testProcessTimeoutIsNotUntenable() {
         // Belt-and-suspenders: if the constant is ever set to some
         // multi-hour value, the user is trapped in an indefinite

@@ -44,6 +44,9 @@ final class MalibuAgent: ObservableObject {
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
     private var hardwareVerificationRetryTask: Task<Void, Never>?
+    /// Set while corrective `--recover-hardware-admission` may have drained
+    /// launchd and therefore owes a restore/bootstrap. Cleared on success.
+    private var hardwareRecoveryOwnsLaunchdRestore = false
     private var credentialRepairTask: Task<Void, Never>?
     private var admissionIdentityRecoveryTask: Task<Void, Never>?
     private var referralStatusExpiryTask: Task<Void, Never>?
@@ -246,34 +249,38 @@ final class MalibuAgent: ObservableObject {
                     self.snapshot.hardwareVerificationRetryInProgress = false
                 }
             }
+            var attemptedCorrectiveRecovery = !pendingTrust
             do {
                 let cliURL = URL(fileURLWithPath: CLIUpdateRunner.installedCLIPath())
                 if pendingTrust {
                     do {
                         try await AutotuneRecommendationRunner.runPendingEvidenceResubmit(cliURL: cliURL)
                     } catch let AutotuneRecommendationError.nonZeroExit(code, _) where code == 10 {
-                        // Stored recommendation/evidence missing or stale.
+                        // Stored recommendation/evidence missing or stale —
+                        // fall through to corrective drain/restore recovery.
+                        attemptedCorrectiveRecovery = true
+                        self.hardwareRecoveryOwnsLaunchdRestore = true
                         try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
                     }
                 } else {
+                    self.hardwareRecoveryOwnsLaunchdRestore = true
                     try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
                 }
-                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                guard !Task.isCancelled, !self.isShuttingDown else {
+                    self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
+                    return
+                }
+                self.hardwareRecoveryOwnsLaunchdRestore = false
                 self.snapshot.hardwareVerificationRetryLastError = nil
                 if let port = ProviderConfig.readHTTPPort() {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     await self.applyProviderSnapshot(port: port)
                 }
             } catch is CancellationError {
-                // Corrective recovery may have booted out launchd before the
-                // CLI could restore; never leave that obligation to a killed
-                // child. Pending freshness never drains, so this is harmless.
-                AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+                self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
                 return
             } catch {
-                if pendingTrust == false {
-                    AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
-                }
+                self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.hardwareVerificationRetryLastError =
                     AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
@@ -281,6 +288,16 @@ final class MalibuAgent: ObservableObject {
             }
         }
         await hardwareVerificationRetryTask?.value
+    }
+
+    private func restoreLaunchdIfCorrectiveRecoveryOwned(_ attemptedCorrectiveRecovery: Bool) {
+        guard AutotuneRecommendationRunner.shouldBestEffortBootstrapLaunchd(
+            attemptedCorrectiveRecovery: attemptedCorrectiveRecovery
+        ) || hardwareRecoveryOwnsLaunchdRestore else {
+            return
+        }
+        AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+        hardwareRecoveryOwnsLaunchdRestore = false
     }
 
     func updateCLINow() async {
@@ -434,8 +451,12 @@ final class MalibuAgent: ObservableObject {
         hardwareVerificationRetryTask = nil
         hardwareRetryTask?.cancel()
         await hardwareRetryTask?.value
-        // Belt-and-suspenders if cancellation raced the corrective CLI.
-        AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+        // Only restore when corrective recovery may have drained launchd.
+        // Ordinary quit must not re-bootstrap an intentionally unloaded job.
+        if hardwareRecoveryOwnsLaunchdRestore {
+            AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+            hardwareRecoveryOwnsLaunchdRestore = false
+        }
         let admissionRecoveryTask = admissionIdentityRecoveryTask
         admissionIdentityRecoveryTask = nil
         admissionRecoveryTask?.cancel()
