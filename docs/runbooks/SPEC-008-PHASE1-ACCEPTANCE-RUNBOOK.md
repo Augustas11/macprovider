@@ -60,7 +60,8 @@ autotune/Tier-2 identity binding when `AUTOTUNE_CANDIDATES` is present. It
 extracts the provider artifact under `TMPDIR` or `/tmp` and only cleans up
 directories matching its own `tier2-artifacts.*` pattern. The plan command
 validates the activation inputs again with the same signed-catalog verifier
-and `check-tier2-binding` before printing the exact remote actions.
+and `check-tier2-binding` before printing a plan-only validation summary that
+refers live mutation to `deploy-pearl-vps.sh` (no remote action sequence).
 
 The C2 enforcement harness uses fake `ssh` and verifier commands to prove the
 guarded apply path reaches reload plus enforced verification on success, refuses

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Hermetic safety checks for the guarded SPEC-008 Phase 1 activation helper.
 #
-# This script replaces ssh/scp/curl with local fakes and runs the production
-# activation script against them. It must never contact Pearl VPS or the public
-# coordinator/gateway endpoints.
+# This script replaces ssh/scp/curl with local fakes and runs the test-only
+# apply harness (scripts/test-support/tier2-observe-apply-harness.sh) against
+# them. It must never contact Pearl VPS or the public coordinator/gateway
+# endpoints. Production scripts/activate-tier2-observe.sh is plan-only.
 #
 # #608 finish: also proves activate-tier2-observe refuses a conflicting Tier-2
 # catalog before any remote mutation (no independent second authority).
@@ -350,7 +351,8 @@ binding_conflict_refuses_before_remote_mutation() {
 }
 
 apply_disabled_without_legacy_override() {
-  # Production entrypoint must refuse --apply unconditionally.
+  # Production entrypoint must refuse --apply unconditionally, even when former
+  # override / hermetic test variables are set.
   LAST_SCENARIO_DIR="$WORKDIR/apply_disabled_without_legacy_override"
   mkdir -p "$LAST_SCENARIO_DIR"
   LAST_STDOUT="$LAST_SCENARIO_DIR/stdout.txt"
@@ -361,6 +363,10 @@ apply_disabled_without_legacy_override() {
     env "CATALOG=$MATCHING_CATALOG" \
       "PUBLIC_KEY_FILE=$PUBLIC_KEY_FILE" \
       "AUTOTUNE_CANDIDATES=$AUTOTUNE_CANDIDATES" \
+      "ALLOW_LEGACY_TIER2_OBSERVE_APPLY=1" \
+      "TIER2_ACTIVATE_HERMETIC_TEST=1" \
+      "TIER2_ACTIVATE_FAKE_BIN=$FAKE_BIN" \
+      "VPS_HOST=fake-pearl.invalid" \
       "$REPO_ROOT/scripts/activate-tier2-observe.sh" --apply
   ) >"$LAST_STDOUT" 2>"$LAST_STDERR"
   LAST_RC=$?
@@ -371,6 +377,62 @@ apply_disabled_without_legacy_override() {
   assert_empty_or_missing "$LAST_SCENARIO_DIR/ssh.log"
   assert_empty_or_missing "$LAST_SCENARIO_DIR/scp.log"
   log "ok - production entrypoint retires --apply unconditionally"
+}
+
+harness_refuses_without_hermetic_fake_bin() {
+  run_apply "harness_refuses_without_hermetic_fake_bin" fail "$MATCHING_CATALOG" \
+    "FAKE_CURL_MODE=success" \
+    "FORCE_RESTART=1" \
+    "SKIP_GATEWAY_VERIFY=1" \
+    "TIER2_ACTIVATE_FAKE_BIN="
+
+  assert_contains "$LAST_STDERR" "TIER2_ACTIVATE_FAKE_BIN is required"
+  assert_empty_or_missing "$LAST_SCENARIO_DIR/ssh.log"
+  assert_empty_or_missing "$LAST_SCENARIO_DIR/scp.log"
+  log "ok - harness refuses apply without injected fake bin"
+}
+
+harness_refuses_fake_bin_outside_safety_workdir() {
+  local outsider="$WORKDIR/outsider-bin"
+  mkdir -p "$outsider"
+  cp "$FAKE_BIN/ssh" "$FAKE_BIN/scp" "$FAKE_BIN/curl" "$outsider/"
+  chmod +x "$outsider/ssh" "$outsider/scp" "$outsider/curl"
+
+  run_apply "harness_refuses_fake_bin_outside_safety_workdir" fail "$MATCHING_CATALOG" \
+    "FAKE_CURL_MODE=success" \
+    "FORCE_RESTART=1" \
+    "SKIP_GATEWAY_VERIFY=1" \
+    "TIER2_ACTIVATE_FAKE_BIN=$outsider"
+
+  assert_contains "$LAST_STDERR" "fake command directory is outside the hermetic workspace"
+  assert_empty_or_missing "$LAST_SCENARIO_DIR/ssh.log"
+  assert_empty_or_missing "$LAST_SCENARIO_DIR/scp.log"
+  log "ok - harness refuses fake bin outside tier2-activate-safety.*/bin"
+}
+
+harness_refuses_symlink_network_fakes() {
+  local linked="$WORKDIR/linked-bin"
+  mkdir -p "$linked"
+  ln -s "$FAKE_BIN/ssh" "$linked/ssh"
+  ln -s "$FAKE_BIN/scp" "$linked/scp"
+  ln -s "$FAKE_BIN/curl" "$linked/curl"
+  # Place linked-bin under a path that matches the safety workdir pattern so
+  # the symlink check is what fails (not the directory pattern).
+  local nested="$WORKDIR/tier2-activate-safety.symlink-check/bin"
+  mkdir -p "$(dirname "$nested")"
+  rm -rf "$nested"
+  mv "$linked" "$nested"
+
+  run_apply "harness_refuses_symlink_network_fakes" fail "$MATCHING_CATALOG" \
+    "FAKE_CURL_MODE=success" \
+    "FORCE_RESTART=1" \
+    "SKIP_GATEWAY_VERIFY=1" \
+    "TIER2_ACTIVATE_FAKE_BIN=$nested"
+
+  assert_contains "$LAST_STDERR" "hermetic fake must not be a symlink"
+  assert_empty_or_missing "$LAST_SCENARIO_DIR/ssh.log"
+  assert_empty_or_missing "$LAST_SCENARIO_DIR/scp.log"
+  log "ok - harness refuses symlink ssh/scp/curl fakes"
 }
 
 stale_backup_shaped_conflict_refuses() {
@@ -428,8 +490,10 @@ config_merge_failure_rolls_back() {
   log "ok - config merge failure restores config/binary and removes created catalog"
 }
 
-existing_catalog_backup_restored_on_failure() {
-  run_apply "existing_catalog_backup_restored_on_failure" fail "$MATCHING_CATALOG" \
+existing_catalog_complete_transaction_undo_on_failure() {
+  # Existing remote catalog is restored only as part of complete
+  # config+binary+catalog transactional undo (not Tier-2-alone recovery).
+  run_apply "existing_catalog_complete_transaction_undo_on_failure" fail "$MATCHING_CATALOG" \
     "FAKE_CURL_MODE=success" \
     "FAKE_SSH_MODE=config_fail" \
     "FAKE_REMOTE_HAS_CATALOG=1" \
@@ -437,9 +501,13 @@ existing_catalog_backup_restored_on_failure() {
     "SKIP_GATEWAY_VERIFY=1"
 
   assert_contains "$LAST_STDERR" "live config tier2 merge failed"
-  assert_contains "$LAST_STDERR" "restoring previous tier2 catalog from /opt/macprovider/tier2-catalog.json.bak-tier2-FAKE"
+  assert_contains "$LAST_STDERR" "restoring previous coordinator config from /opt/macprovider/coordinator.yaml.bak-tier2-FAKE"
+  assert_contains "$LAST_STDERR" "restoring previous coordinator binary from /opt/macprovider/coordinator.bak-tier2-FAKE"
+  assert_contains "$LAST_STDERR" "restoring previous tier2 catalog from /opt/macprovider/tier2-catalog.json.bak-tier2-FAKE (complete transaction undo)"
   assert_contains "$LAST_SCENARIO_DIR/ssh.log" "cp -a /opt/macprovider/tier2-catalog.json.bak-tier2-FAKE /opt/macprovider/tier2-catalog.json"
-  log "ok - existing Tier-2 catalog backup is restored on failure"
+  assert_contains "$LAST_SCENARIO_DIR/ssh.log" "cp -a /opt/macprovider/coordinator.yaml.bak-tier2-FAKE /opt/macprovider/coordinator.yaml"
+  assert_contains "$LAST_SCENARIO_DIR/ssh.log" "cp -a /opt/macprovider/coordinator.bak-tier2-FAKE /opt/macprovider/coordinator"
+  log "ok - existing Tier-2 catalog restore requires complete transaction undo"
 }
 
 gateway_failure_rolls_back() {
@@ -515,11 +583,14 @@ write_fake_commands
 build_hermetic_catalogs
 binding_conflict_refuses_before_remote_mutation
 apply_disabled_without_legacy_override
+harness_refuses_without_hermetic_fake_bin
+harness_refuses_fake_bin_outside_safety_workdir
+harness_refuses_symlink_network_fakes
 stale_backup_shaped_conflict_refuses
 restart_guard_refuses_connected_pool
 health_parse_failure_refuses_without_force
 config_merge_failure_rolls_back
-existing_catalog_backup_restored_on_failure
+existing_catalog_complete_transaction_undo_on_failure
 gateway_failure_rolls_back
 successful_apply_path_with_fakes
 pin_race_uploads_pinned_bytes_not_replaced_original

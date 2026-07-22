@@ -5,22 +5,27 @@
 #
 # This harness retains the gated apply implementation solely so
 # scripts/test-tier2-activation-safety.sh can exercise pin/staging/rollback
-# against local ssh/scp/curl fakes. It refuses to run unless invoked by basename
-# and VPS_HOST=fake-pearl.invalid.
+# against injected absolute-path ssh/scp/curl fakes under a
+# tier2-activate-safety.*/bin directory. Real OpenSSH/curl are never resolved
+# from PATH. It refuses to run unless invoked by basename
+# tier2-observe-apply-harness.sh with VPS_HOST=fake-pearl.invalid.
 
 set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: scripts/activate-tier2-observe.sh [--plan|--apply]
+usage: scripts/test-support/tier2-observe-apply-harness.sh [--plan|--apply]
 
-Environment:
+TEST-ONLY. Not a production entrypoint. Live Tier-2 mutation uses
+phase4-coordinator/dist/deploy-pearl-vps.sh.
+
+Environment (hermetic defaults):
   CATALOG             default: .omc/tier2/tier2-catalog.json
   PUBLIC_KEY_FILE     default: .omc/tier2/catalog-signing-key.pub
   AUTOTUNE_CANDIDATES default: phase3-binary/catalog/autotune/autotune-candidates.json
                       required for check-tier2-binding before plan/apply (#608)
-  SSH_KEY             default: ~/.ssh/pearl_operator_ed25519
-  VPS_HOST            default: 159.223.165.194
+  SSH_KEY             default: ~/.ssh/pearl_operator_ed25519 (tests inject a fake key)
+  VPS_HOST            required: fake-pearl.invalid
   VPS_USER            default: root
   SSH_PORT            default: 22
   REMOTE_CONFIG       default: /opt/macprovider/coordinator.yaml
@@ -28,14 +33,14 @@ Environment:
   SERVICE             default: macprovider-coordinator
   COORDINATOR_BINARY  default: phase4-coordinator/dist/coordinator-linux-amd64
   DEPLOY_COORDINATOR_BINARY=1 uploads COORDINATOR_BINARY before restart
-  COORDINATOR_ORIGIN  default: https://coordinator.streamvc.live
-  GATEWAY_ORIGIN      default: https://api.streamvc.live
+  COORDINATOR_ORIGIN  default: https://fake-coordinator.invalid
+  GATEWAY_ORIGIN      default: https://fake-gateway.invalid
   DEMO_TOKEN          required by --apply unless SKIP_GATEWAY_VERIFY=1
   SKIP_GATEWAY_VERIFY=1 skips /v1/models Tier-2 verification
   FORCE_RESTART=1     required by --apply when providers are connected
-  ALLOW_LEGACY_TIER2_OBSERVE_APPLY / TIER2_ACTIVATE_HERMETIC_TEST
-                      hermetic-test only; live --apply is retired (#608). Prefer
-                      phase4-coordinator/dist/deploy-pearl-vps.sh for production.
+  TIER2_ACTIVATE_HERMETIC_TEST=1  required for --apply
+  TIER2_ACTIVATE_FAKE_BIN         required absolute …/tier2-activate-safety.*/bin
+                                  containing non-symlink ssh/scp/curl fakes
   Requires local go toolchain for signed catalog verification before plan/apply
   Requires local python3 for autotune/Tier-2 identity binding before plan/apply,
   and for --apply health parsing / gateway verification
@@ -75,8 +80,8 @@ REMOTE_CATALOG="${REMOTE_CATALOG:-/opt/macprovider/tier2-catalog.json}"
 SERVICE="${SERVICE:-macprovider-coordinator}"
 COORDINATOR_BINARY="${COORDINATOR_BINARY:-$REPO_ROOT/phase4-coordinator/dist/coordinator-linux-amd64}"
 DEPLOY_COORDINATOR_BINARY="${DEPLOY_COORDINATOR_BINARY:-1}"
-COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.streamvc.live}"
-GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://api.streamvc.live}"
+COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://fake-coordinator.invalid}"
+GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://fake-gateway.invalid}"
 
 PIN_DIR=""
 CATALOG_OPERATOR=""
@@ -86,6 +91,8 @@ CATALOG_PIN_SHA=""
 REMOTE_STAGE=""
 SSH=()
 SCP=()
+CURL=()
+RESOLVED_FAKE_BIN=""
 
 log() { printf '[tier2-activate] %s\n' "$*" >&2; }
 die() { printf '[tier2-activate] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -413,6 +420,21 @@ remote_restore_and_report() {
     "${SSH[@]}" "systemctl status --no-pager -n 40 $(shell_quote "$SERVICE") || true"
     return
   fi
+  # SPEC-008: never restore a prior Tier-2 catalog alone as authority recovery.
+  # Catalog restore from backup is allowed only as part of a complete
+  # config(+binary) transactional undo of this harness apply. Newly created
+  # catalogs may still be removed when rolling back a partial apply.
+  local restore_catalog_backup=""
+  local remove_created_catalog="0"
+  if [ -n "$catalog_backup" ]; then
+    if [ -n "$config_backup" ] || [ -n "$binary_backup" ]; then
+      restore_catalog_backup="$catalog_backup"
+    else
+      log "refusing Tier-2-alone catalog restore from backup (SPEC-008); complete Pearl release recovery is required outside this harness"
+    fi
+  elif [ "$catalog_created" = "1" ]; then
+    remove_created_catalog="1"
+  fi
   "${SSH[@]}" "set -uo pipefail
     if [ -n $(shell_quote "$config_backup") ]; then
       cp -a $(shell_quote "$config_backup") $(shell_quote "$REMOTE_CONFIG")
@@ -421,9 +443,9 @@ remote_restore_and_report() {
       systemctl stop $(shell_quote "$SERVICE") || true
       cp -a $(shell_quote "$binary_backup") /opt/macprovider/coordinator
     fi
-    if [ -n $(shell_quote "$catalog_backup") ]; then
-      cp -a $(shell_quote "$catalog_backup") $(shell_quote "$REMOTE_CATALOG")
-    elif [ $(shell_quote "$catalog_created") = 1 ]; then
+    if [ -n $(shell_quote "$restore_catalog_backup") ]; then
+      cp -a $(shell_quote "$restore_catalog_backup") $(shell_quote "$REMOTE_CATALOG")
+    elif [ $(shell_quote "$remove_created_catalog") = 1 ]; then
       rm -f $(shell_quote "$REMOTE_CATALOG")
     fi
     systemctl restart $(shell_quote "$SERVICE") || true
@@ -445,7 +467,11 @@ rollback_and_exit() {
     log "restoring previous coordinator binary from $binary_backup"
   fi
   if [ -n "$catalog_backup" ]; then
-    log "restoring previous tier2 catalog from $catalog_backup"
+    if [ -n "$config_backup" ] || [ -n "$binary_backup" ]; then
+      log "restoring previous tier2 catalog from $catalog_backup (complete transaction undo)"
+    else
+      log "refusing Tier-2-alone catalog restore from $catalog_backup; complete Pearl release recovery required"
+    fi
   elif [ "$catalog_created" = "1" ]; then
     log "removing newly created remote tier2 catalog"
   fi
@@ -453,25 +479,43 @@ rollback_and_exit() {
   exit 1
 }
 
+require_hermetic_fake_bin() {
+  # Capability isolation: never resolve real ssh/scp/curl from PATH. OpenSSH
+  # Host aliases for fake-pearl.invalid must not be reachable because the
+  # invoked binaries are absolute fake scripts under the safety workdir.
+  [ -n "${TIER2_ACTIVATE_FAKE_BIN:-}" ] || die "TIER2_ACTIVATE_FAKE_BIN is required for the test-only apply harness"
+  [ -d "$TIER2_ACTIVATE_FAKE_BIN" ] || die "TIER2_ACTIVATE_FAKE_BIN is not a directory: $TIER2_ACTIVATE_FAKE_BIN"
+  RESOLVED_FAKE_BIN="$(cd -- "$TIER2_ACTIVATE_FAKE_BIN" && pwd -P)"
+  case "$RESOLVED_FAKE_BIN" in
+    */tier2-activate-safety.*/bin) ;;
+    *)
+      die "fake command directory is outside the hermetic workspace (want …/tier2-activate-safety.*/bin, got $RESOLVED_FAKE_BIN)"
+      ;;
+  esac
+  local command_name command_path
+  for command_name in ssh scp curl; do
+    command_path="$RESOLVED_FAKE_BIN/$command_name"
+    [ -e "$command_path" ] || die "missing hermetic fake: $command_path"
+    [ ! -L "$command_path" ] || die "hermetic fake must not be a symlink: $command_path"
+    [ -f "$command_path" ] || die "hermetic fake must be a regular file: $command_path"
+    [ -x "$command_path" ] || die "hermetic fake must be executable: $command_path"
+  done
+}
+
 apply_changes() {
   if [ "$VPS_HOST" != "fake-pearl.invalid" ] || [ "${TIER2_ACTIVATE_HERMETIC_TEST:-0}" != "1" ]; then
     die "test-only harness refuses apply unless VPS_HOST=fake-pearl.invalid and TIER2_ACTIVATE_HERMETIC_TEST=1"
   fi
-  # Network tools must come from the hermetic fake bin (not real OpenSSH), so an
-  # ssh Host alias for fake-pearl.invalid cannot reach Pearl.
-  [ -n "${TIER2_ACTIVATE_FAKE_BIN:-}" ] || die "TIER2_ACTIVATE_FAKE_BIN is required for the test-only apply harness"
-  [ -x "$TIER2_ACTIVATE_FAKE_BIN/ssh" ] || die "missing fake ssh: $TIER2_ACTIVATE_FAKE_BIN/ssh"
-  [ -x "$TIER2_ACTIVATE_FAKE_BIN/scp" ] || die "missing fake scp: $TIER2_ACTIVATE_FAKE_BIN/scp"
-  [ -x "$TIER2_ACTIVATE_FAKE_BIN/curl" ] || die "missing fake curl: $TIER2_ACTIVATE_FAKE_BIN/curl"
+  require_hermetic_fake_bin
   require_command python3
   require_file "$SSH_KEY"
   if [ -z "${DEMO_TOKEN:-}" ] && [ "${SKIP_GATEWAY_VERIFY:-0}" != "1" ]; then
     die "DEMO_TOKEN is required for /v1/models Tier-2 verification; set SKIP_GATEWAY_VERIFY=1 only if verifying manually"
   fi
 
-  SSH=("$TIER2_ACTIVATE_FAKE_BIN/ssh" -i "$SSH_KEY" -o ConnectTimeout=10 -p "$SSH_PORT" "$VPS_USER@$VPS_HOST")
-  SCP=("$TIER2_ACTIVATE_FAKE_BIN/scp" -i "$SSH_KEY" -P "$SSH_PORT")
-  CURL=("$TIER2_ACTIVATE_FAKE_BIN/curl")
+  SSH=("$RESOLVED_FAKE_BIN/ssh" -i "$SSH_KEY" -o ConnectTimeout=10 -p "$SSH_PORT" "$VPS_USER@$VPS_HOST")
+  SCP=("$RESOLVED_FAKE_BIN/scp" -i "$SSH_KEY" -P "$SSH_PORT")
+  CURL=("$RESOLVED_FAKE_BIN/curl")
 
   log "checking current coordinator pool size"
   local connected_count
