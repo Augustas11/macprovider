@@ -24,10 +24,23 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        # Pinned to actions/setup-go v6.5.0. Re-resolve deliberately.
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: Seal the Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /usr/local/lib/macprovider-go-verifier
+          sudo install -d -o root -g root -m 0755 /usr/local/lib/macprovider-go-verifier
+          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/
+          sudo chown -R root:root /usr/local/lib/macprovider-go-verifier
+          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier
+          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go
 
       - name: make vet-coordinator
         run: make vet-coordinator
@@ -314,6 +327,18 @@ jobs:
         with:
           go-version-file: phase4-coordinator/go.mod
           cache: false
+
+      - name: Seal the Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /usr/local/lib/macprovider-go-verifier
+          sudo install -d -o root -g root -m 0755 /usr/local/lib/macprovider-go-verifier
+          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/
+          sudo chown -R root:root /usr/local/lib/macprovider-go-verifier
+          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier
+          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go
 
       - name: make test-dist
         run: make test-dist

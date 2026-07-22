@@ -53,8 +53,9 @@ FIXED_GO_EXECUTABLES = (
     "/opt/homebrew/bin/go",
     "/usr/local/go/bin/go",
     "/usr/local/bin/go",
+    "/usr/local/lib/macprovider-go-verifier/bin/go",
 )
-HOSTED_GO_TOOLCACHE_ROOT = pathlib.Path("/opt/hostedtoolcache/go")
+ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES = frozenset({"/usr/local/lib/macprovider-go-verifier/bin/go"})
 
 
 class CatalogError(RuntimeError):
@@ -1127,27 +1128,28 @@ def go_executable() -> str:
     version probe before trusting the binary. Tier-2 authenticity must not
     depend on ambient process environment.
     """
-    candidates = list(FIXED_GO_EXECUTABLES)
-    for architecture in ("x64", "arm64"):
-        candidates.extend(
-            str(path)
-            for path in sorted(
-                HOSTED_GO_TOOLCACHE_ROOT.glob(f"*/{architecture}/bin/go"),
-                reverse=True,
-            )
-        )
+    candidates = [
+        candidate
+        for candidate in FIXED_GO_EXECUTABLES
+        if candidate in ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
+    ] + [
+        candidate
+        for candidate in FIXED_GO_EXECUTABLES
+        if candidate not in ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
+    ]
 
     checked: list[str] = []
     for candidate in candidates:
         if not candidate or candidate in checked:
             continue
         checked.append(candidate)
-        candidate_path = pathlib.Path(candidate)
-        hosted_toolcache_candidate = (
-            candidate_path.parts[: len(HOSTED_GO_TOOLCACHE_ROOT.parts)]
-            == HOSTED_GO_TOOLCACHE_ROOT.parts
-        )
-        if (os.geteuid() == 0 or hosted_toolcache_candidate) and not root_trusted_executable(candidate):
+        sealed_candidate = candidate in ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
+        if sealed_candidate:
+            if not os.path.lexists(candidate):
+                continue
+            if not root_trusted_executable(candidate):
+                fail(f"sealed Go verifier toolchain is not root-trusted: {candidate}")
+        elif os.geteuid() == 0 and not root_trusted_executable(candidate):
             continue
         try:
             result = subprocess.run(
@@ -1158,9 +1160,13 @@ def go_executable() -> str:
                 timeout=GO_PROBE_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
+            if sealed_candidate:
+                fail(f"sealed Go verifier toolchain cannot execute: {candidate}")
             continue
         if result.returncode == 0 and re.match(r"^go version go\d", result.stdout):
             return candidate
+        if sealed_candidate:
+            fail(f"sealed Go verifier toolchain failed its version probe: {candidate}")
 
     fail("a Go toolchain is required to authenticate the signed Tier-2 catalog's Ed25519 signature")
 
