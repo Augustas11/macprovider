@@ -140,6 +140,22 @@ _validate_catalog_canary_auth_token() {
   esac
 }
 
+_run_with_deadline_alarm() {
+  local timeout_s="$1"
+  shift
+  python3 -c '
+import os
+import signal
+import sys
+
+timeout_s = int(sys.argv[1])
+if timeout_s < 1:
+    raise SystemExit("deadline must be at least one second")
+signal.alarm(timeout_s)
+os.execvp(sys.argv[2], sys.argv[2:])
+' "$timeout_s" "$@"
+}
+
 _parse_model_hash_legacy_until() {
   python3 -c '
 import shlex
@@ -2822,13 +2838,15 @@ CANARY_SSH=(
   -o ServerAliveCountMax=3
   "$CATALOG_CANARY_SSH_TARGET"
 )
-if ! "${CANARY_SSH[@]}" python3 - \
+run_catalog_canary_mac_proof() {
+  local timeout_s="$1"
+  _run_with_deadline_alarm "$timeout_s" "${CANARY_SSH[@]}" python3 - \
   "$CATALOG_CANARY_INSTALL_DIR" \
   "$CATALOG_CANARY_PROVIDER_ID" \
   "$AUTOTUNE_RELEASE_ID" \
   "$AUTOTUNE_POLICY_VERSION" \
   "$AUTOTUNE_CANDIDATE_SHA256" \
-  "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" > "$CANARY_INSTALLED_BODY" <<'PY'
+  "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" <<'PY'
 import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request
 
 (
@@ -2841,6 +2859,7 @@ import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request
 ) = sys.argv[1:]
 home = os.path.expanduser("~")
 nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
 
 def open_dir(path):
@@ -2863,7 +2882,7 @@ def open_dir(path):
         raise
 
 def read_regular_at(directory_fd, name, limit, require_owner=True):
-    fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+    fd = os.open(name, os.O_RDONLY | nofollow | nonblock, dir_fd=directory_fd)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -2957,7 +2976,9 @@ try:
     if not isinstance(arguments, list) or len(arguments) < 4 or arguments[1:3] != ["serve", "--config"]:
         raise SystemExit("canary provider LaunchAgent has unexpected ProgramArguments")
 
-    binary_fd = os.open("macprovider-cli", os.O_RDONLY | nofollow, dir_fd=install_fd)
+    binary_fd = os.open(
+        "macprovider-cli", os.O_RDONLY | nofollow | nonblock, dir_fd=install_fd
+    )
     binary_info = os.fstat(binary_fd)
     if not stat.S_ISREG(binary_info.st_mode) or binary_info.st_uid != os.getuid() or binary_info.st_mode & 0o111 == 0:
         raise SystemExit("canary installation binary is not a safe executable")
@@ -3052,13 +3073,32 @@ finally:
         if fd is not None:
             os.close(fd)
 PY
-then
-  echo "SPEC-023 canary failed: could not read exact installed catalog bytes from $CATALOG_CANARY_SSH_TARGET" >&2
-  exit 1
-fi
+}
 
-# Bind coordinator admission to the exact session observed on the proved Mac.
-read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY < <(python3 - "$CANARY_INSTALLED_BODY" <<'PY'
+# A coordinator restart can make a healthy provider rotate its PID and assigned
+# session while its recovery watchdog drains in-flight work. Retry the complete
+# Mac proof and bind each admission query to the session from that same attempt;
+# never carry an assigned_id across retries. This mirrors the signed updater's
+# full-proof retry and keeps every success predicate fail-closed.
+CANARY_PROVIDER_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CATALOG_CANARY_PROVIDER_ID")
+(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
+CANARY_OK=0
+CANARY_LAST_ERROR="canary proof did not start"
+CANARY_STATUS="000"
+CANARY_ATTEMPT=1
+CANARY_MAX_ATTEMPTS=36
+CANARY_RECOVERY_TIMEOUT_S=180
+CANARY_RECOVERY_DEADLINE=$((SECONDS + CANARY_RECOVERY_TIMEOUT_S))
+while [ "$CANARY_ATTEMPT" -le "$CANARY_MAX_ATTEMPTS" ] && [ "$SECONDS" -lt "$CANARY_RECOVERY_DEADLINE" ]; do
+  rm -f "$CANARY_INSTALLED_BODY" "$CANARY_POOL_BODY"
+  CANARY_PROOF_ERROR="$STATIC_SMOKE_DIR/catalog-canary-proof.err"
+  CANARY_REMAINING_S=$((CANARY_RECOVERY_DEADLINE - SECONDS))
+  CANARY_PROOF_TIMEOUT_S=45
+  if [ "$CANARY_REMAINING_S" -lt "$CANARY_PROOF_TIMEOUT_S" ]; then
+    CANARY_PROOF_TIMEOUT_S="$CANARY_REMAINING_S"
+  fi
+  if run_catalog_canary_mac_proof "$CANARY_PROOF_TIMEOUT_S" > "$CANARY_INSTALLED_BODY" 2> "$CANARY_PROOF_ERROR"; then
+    CANARY_BINDING=$(python3 - "$CANARY_INSTALLED_BODY" <<'PY'
 import json, pathlib, re, sys
 proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assigned_id = proof.get("assigned_id")
@@ -3069,21 +3109,16 @@ if re.fullmatch(r"[0-9a-f]{64}", str(row_identity).lower()) is None:
     raise SystemExit("canary proof has no exact catalog row identity")
 print(assigned_id, str(row_identity).lower())
 PY
-) || {
-  echo "SPEC-023 canary failed: could not bind the live Mac session and catalog row" >&2
-  exit 1
-}
-CANARY_PROVIDER_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CATALOG_CANARY_PROVIDER_ID")
-CANARY_ASSIGNED_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CANARY_ASSIGNED_ID")
-(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
-CANARY_OK=0
-for CANARY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
-    "https://$DOMAIN/v1/pool/check?provider_id=$CANARY_PROVIDER_QUERY&assigned_id=$CANARY_ASSIGNED_QUERY&details=deployment" || true)
-  if [ "$STATUS" = "200" ] && python3 - \
-    "$CANARY_POOL_BODY" "$CATALOG_CANARY_PROVIDER_ID" "$CANARY_ASSIGNED_ID" \
-    "$AUTOTUNE_RELEASE_ID" "$AUTOTUNE_POLICY_VERSION" "$AUTOTUNE_CANDIDATE_SHA256" \
-    "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" "$CANARY_CATALOG_ROW_IDENTITY" <<'PY'
+) || CANARY_BINDING=""
+    if [ -n "$CANARY_BINDING" ]; then
+      read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY <<< "$CANARY_BINDING"
+      CANARY_ASSIGNED_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CANARY_ASSIGNED_ID")
+      CANARY_STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
+        "https://$DOMAIN/v1/pool/check?provider_id=$CANARY_PROVIDER_QUERY&assigned_id=$CANARY_ASSIGNED_QUERY&details=deployment" || true)
+      if [ "$CANARY_STATUS" = "200" ] && python3 - \
+        "$CANARY_POOL_BODY" "$CATALOG_CANARY_PROVIDER_ID" "$CANARY_ASSIGNED_ID" \
+        "$AUTOTUNE_RELEASE_ID" "$AUTOTUNE_POLICY_VERSION" "$AUTOTUNE_CANDIDATE_SHA256" \
+        "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" "$CANARY_CATALOG_ROW_IDENTITY" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 if (
@@ -3100,16 +3135,33 @@ if (
 ):
     raise SystemExit(1)
 PY
-  then
-    CANARY_OK=1
-    break
+      then
+        CANARY_OK=1
+        break
+      fi
+      CANARY_LAST_ERROR="exact session $CANARY_ASSIGNED_ID was not buyer-serving (status=$CANARY_STATUS)"
+    else
+      CANARY_LAST_ERROR="could not bind the live Mac session and catalog row"
+    fi
+  else
+    CANARY_PROOF_RC=$?
+    CANARY_LAST_ERROR="trusted Mac proof failed (exit=$CANARY_PROOF_RC)"
   fi
-  sleep 5
+  CANARY_REMAINING_S=$((CANARY_RECOVERY_DEADLINE - SECONDS))
+  if [ "$CANARY_ATTEMPT" -lt "$CANARY_MAX_ATTEMPTS" ] && [ "$CANARY_REMAINING_S" -gt 0 ]; then
+    echo "  waiting for exact catalog canary recovery ($CANARY_ATTEMPT/$CANARY_MAX_ATTEMPTS): $CANARY_LAST_ERROR" >&2
+    CANARY_SLEEP_S=5
+    if [ "$CANARY_REMAINING_S" -lt "$CANARY_SLEEP_S" ]; then
+      CANARY_SLEEP_S="$CANARY_REMAINING_S"
+    fi
+    sleep "$CANARY_SLEEP_S"
+  fi
+  CANARY_ATTEMPT=$((CANARY_ATTEMPT + 1))
 done
 rm -f "$CANARY_CURL_CONFIG"
 if [ "$CANARY_OK" != "1" ]; then
-  echo "SPEC-023 canary failed: exact session $CANARY_ASSIGNED_ID did not return buyer-serving admission" >&2
-  echo "  last status=$STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
+  echo "SPEC-023 canary failed after $((CANARY_ATTEMPT - 1)) full proof attempts within ${CANARY_RECOVERY_TIMEOUT_S}s: $CANARY_LAST_ERROR" >&2
+  echo "  last status=$CANARY_STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
   exit 1
 fi
 
