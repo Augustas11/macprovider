@@ -101,15 +101,19 @@ func (s *Server) runConnectionEventWorker() {
 }
 
 // FlushConnectionEvents stops intake and waits briefly for queued journal
-// writes before SQLite close during coordinator shutdown.
+// writes before SQLite close during coordinator shutdown. The queue channel
+// is closed only while holding connectionEventQueueMu so producers cannot
+// race a send-on-closed-channel panic.
 func (s *Server) FlushConnectionEvents(timeout time.Duration) {
 	if s == nil {
 		return
 	}
 	s.connectionEventStopOnce.Do(func() {
-		s.connectionEventsStopped.Store(true)
 		s.ensureConnectionEventWorker()
+		s.connectionEventQueueMu.Lock()
+		s.connectionEventsStopped.Store(true)
 		close(s.connectionEventQueue)
+		s.connectionEventQueueMu.Unlock()
 	})
 	if s.connectionEventDone == nil {
 		return
@@ -224,13 +228,35 @@ func (s *Server) recordConnectionEvent(event providerevents.Event) {
 		event.FailureReason = providerevents.NormalizeFailureReason(event.FailureReason)
 	}
 	job := connectionEventJob{event: &event}
+	s.connectionEventQueueMu.Lock()
+	if s.connectionEventsStopped.Load() {
+		s.connectionEventQueueMu.Unlock()
+		return
+	}
 	select {
 	case s.connectionEventQueue <- job:
+		s.connectionEventQueueMu.Unlock()
 	default:
+		s.connectionEventQueueMu.Unlock()
+		// Identity-bound events fall back to synchronous persist so overflow
+		// cannot silently drop operator-visible failures (SPEC-035-R001).
+		if event.ProviderID != providerevents.AnonymousProviderID && s.connectionEvents != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := s.connectionEvents.Record(ctx, event); err != nil {
+				s.log.Warn().Err(err).
+					Str("provider_id", event.ProviderID).
+					Str("kind", event.Kind).
+					Msg("provider connection event sync fallback failed")
+			} else if s.connectionEventMetrics != nil {
+				s.connectionEventMetrics.IncProviderConnectionEvent(event.Kind, event.Outcome, event.FailureReason)
+			}
+			return
+		}
 		s.log.Warn().
 			Str("provider_id", event.ProviderID).
 			Str("kind", event.Kind).
-			Msg("provider connection event queue full; dropping")
+			Msg("provider connection event queue full; dropping anonymous")
 	}
 }
 
@@ -288,18 +314,8 @@ func (s *Server) recordCloseEventFromMeta(meta closeEventMeta, code gobwas.Statu
 		CloseReason:   reason,
 		Diagnostic:    meta.diagnostic,
 	})
-	if meta.identityVerified {
-		if pid := strings.TrimSpace(meta.providerID); pid != "" && pid != providerevents.AnonymousProviderID {
-			s.enqueueLastKnown(providerevents.LastKnown{
-				ProviderID:    pid,
-				AssignedID:    meta.sessionID,
-				BinaryVersion: meta.binaryVersion,
-				State:         "unavailable",
-				LastSeenAt:    s.now().UTC(),
-				Presence:      "offline",
-			}, true)
-		}
-	}
+	// Last-known snapshots are updated only from admitted sessions
+	// (register/disconnect/heartbeat), never from pre-admission closes.
 }
 
 func (s *Server) rememberProviderSnapshot(provider pool.Provider) {
@@ -330,9 +346,26 @@ func (s *Server) enqueueLastKnown(snap providerevents.LastKnown, force bool) {
 		s.lastKnownFlushMu.Unlock()
 	}
 	job := connectionEventJob{snap: &snap}
+	s.connectionEventQueueMu.Lock()
+	if s.connectionEventsStopped.Load() {
+		s.connectionEventQueueMu.Unlock()
+		return
+	}
 	select {
 	case s.connectionEventQueue <- job:
+		s.connectionEventQueueMu.Unlock()
 	default:
+		s.connectionEventQueueMu.Unlock()
+		if s.connectionEvents != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := s.connectionEvents.UpsertLastKnown(ctx, snap); err != nil {
+				s.log.Warn().Err(err).
+					Str("provider_id", snap.ProviderID).
+					Msg("provider last-known sync fallback failed")
+			}
+			return
+		}
 		s.log.Warn().
 			Str("provider_id", snap.ProviderID).
 			Msg("provider last-known queue full; dropping")

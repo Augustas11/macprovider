@@ -40,10 +40,14 @@ admission). Owns authority domain `provider-connection-diagnostics`.
 
 **SPEC-035-R001 — Durable redacted connection events.** The coordinator MUST
 persist provider connection lifecycle events to a bounded durable journal. Events
-MUST include provider ID when known, timestamps, kind/outcome, normalized failure
-reason, auth stage, first-message family when applicable, binary version when
-known, and bounded redacted diagnostic/close fields. Implementations MUST NOT
-persist raw tokens, Authorization headers, or raw protocol payloads.
+MUST include provider ID when known and identity-bound, timestamps, kind/outcome,
+normalized failure reason, auth stage, first-message family when applicable,
+binary version when known, and bounded redacted diagnostic/close fields.
+Implementations MUST NOT persist raw tokens, Authorization headers, or raw
+protocol payloads. Pre-identity failures MAY be attributed to the reserved
+`_anonymous` bucket under rate and row caps. Identity-bound writes MUST NOT be
+silently dropped on journal-queue overflow (synchronous fallback is permitted);
+anonymous overflow MAY be sampled/dropped.
 
 **SPEC-035-R002 — Closed failure taxonomy.** Failure reasons MUST normalize to
 the closed set: `invalid_token`, `invalid_auth_request`, `no_common_aead_suite`,

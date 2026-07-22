@@ -132,31 +132,38 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 	}
 
 	out := make([]adminProviderView, 0, limit)
-	seen := map[string]struct{}{}
-	// First page only: stable-sorted live providers missing from last-known.
+	var lastEmittedKnown string
+	for _, snap := range known {
+		if len(out) >= limit {
+			break
+		}
+		if p, ok := live[snap.ProviderID]; ok {
+			out = append(out, adminViewFromLive(p))
+		} else {
+			snap.Presence = "offline"
+			out = append(out, adminViewFromLastKnown(snap))
+		}
+		lastEmittedKnown = snap.ProviderID
+	}
+	// First page only: append stable-sorted live providers missing from this
+	// durable page without advancing the durable cursor past unseen rows.
 	if after == "" {
 		for _, id := range liveIDs {
 			if len(out) >= limit {
 				break
 			}
+			already := false
+			for _, view := range out {
+				if view.ProviderID == id {
+					already = true
+					break
+				}
+			}
+			if already {
+				continue
+			}
 			out = append(out, adminViewFromLive(live[id]))
-			seen[id] = struct{}{}
 		}
-	}
-	for _, snap := range known {
-		if len(out) >= limit {
-			break
-		}
-		if _, ok := seen[snap.ProviderID]; ok {
-			continue
-		}
-		if p, ok := live[snap.ProviderID]; ok {
-			out = append(out, adminViewFromLive(p))
-			seen[snap.ProviderID] = struct{}{}
-			continue
-		}
-		snap.Presence = "offline"
-		out = append(out, adminViewFromLastKnown(snap))
 	}
 	resp := map[string]any{
 		"providers": out,
@@ -166,8 +173,10 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 			"limit":     limit,
 		},
 	}
-	if len(known) == limit && len(known) > 0 {
-		resp["next_after"] = known[len(known)-1].ProviderID
+	// Cursor tracks the last emitted durable row only, so live-only fillers
+	// cannot advance past unseen offline inventory.
+	if lastEmittedKnown != "" && len(known) == limit {
+		resp["next_after"] = lastEmittedKnown
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

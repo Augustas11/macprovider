@@ -138,6 +138,7 @@ type Server struct {
 	connectionEventMetrics         ConnectionEventMetrics
 	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
 	connectionEventQueue           chan connectionEventJob
+	connectionEventQueueMu         sync.Mutex
 	connectionEventWorkerOnce      sync.Once
 	connectionEventStopOnce        sync.Once
 	connectionEventDone            chan struct{}
@@ -974,6 +975,7 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 
 func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthenticated func()) {
 	defer conn.Close()
+	defer func() { _ = s.takeCloseEvent(conn) }()
 	var releaseOnce sync.Once
 	releaseUnauth := func() {
 		if releaseUnauthenticated != nil {

@@ -76,7 +76,7 @@ const (
 var (
 	// secretLike strips credential-shaped substrings. Hyphen/underscore
 	// continuations after mpk_ are included so fragments cannot survive.
-	secretLike = regexp.MustCompile(`(?i)(bearer\s+[a-z0-9._\-+=/]+|mpk_[a-z0-9_\-]+|token\s*[:=]\s*\S+|"token"\s*:\s*"[^"]+"|provider_token\s*[:=]\s*\S+)`)
+	secretLike = regexp.MustCompile(`(?i)(bearer\s+\S+|mpk_[a-z0-9_\-]+|token\s*[:=]\s*\S+|"token"\s*:\s*"[^"]+"|provider_token\s*[:=]\s*\S+)`)
 	// authorizationLike consumes the remainder of the header/value so
 	// "Authorization: Bearer opaque" cannot leave the opaque token behind.
 	authorizationLike = regexp.MustCompile(`(?i)"?authorization"?\s*[:=]\s*[^\r\n]+`)
