@@ -55,9 +55,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # #615 stable-promotion gate: fail closed on expired, unbounded-active,
-          # ownerless, scope-mismatched, or resurrected exception rows.
-          python3 scripts/check-production-exceptions.py gate --mode=promote
+          # #615 stable-promotion gate against current origin/main authority,
+          # not a stale workflow dispatch snapshot.
+          git fetch --no-tags origin main
+          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/exception-promote.XXXXXX")"
+          git show origin/main:ops/exceptions/production-exceptions.json \
+            > "$work/production-exceptions.json"
+          git show origin/main:ops/exceptions/removed-exception-tombstones.json \
+            > "$work/removed-exception-tombstones.json" 2>/dev/null || \
+            printf '%s\n' '{"schema_version":"macprovider-removed-exception-tombstones-v1","updated_at":"1970-01-01T00:00:00Z","updated_by":"missing","environment":"pearl-production","tombstones":[]}' \
+              > "$work/removed-exception-tombstones.json"
+          # Base tombstones from the checked-out commit detect ledger deletions.
+          python3 scripts/check-production-exceptions.py \
+            --register "$work/production-exceptions.json" \
+            --tombstones "$work/removed-exception-tombstones.json" \
+            --base-tombstones ops/exceptions/removed-exception-tombstones.json \
+            --previous-register ops/exceptions/production-exceptions.json \
+            gate --mode=promote
 
       - name: Validate immutable promotion request
         id: request

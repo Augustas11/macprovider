@@ -8,13 +8,18 @@ deploy / stable-promotion when configured.
 
 Default-safe deploy behavior (MACPROVIDER_EXCEPTION_ENFORCEMENT unset/0):
   - Hard-fail: malformed register, duplicate IDs, ownerless rows, scope/environment
-    mismatch, active rows past expires_at, resurrection of tombstoned IDs.
+    mismatch, active rows past expires_at, resurrection of tombstoned IDs,
+    removed rows without tombstones, tombstone deletions vs a provided base.
   - Warn only: status=expired rows, active rows with expires_at=null,
-    approaching-expiry alerts.
+    approaching-expiry alerts, blocks_stable_promotion=true rows.
 
 Enforcement (MACPROVIDER_EXCEPTION_ENFORCEMENT=1) or --mode=promote:
-  - All hard-fails above, plus status=expired, active null-expiry, and
-    approaching-expiry (within alert window) become hard-fails.
+  - All hard-fails above, plus status=expired, active null-expiry,
+    approaching-expiry (within alert window), and blocks_stable_promotion=true
+    for active/planned/expired rows become hard-fails.
+
+These gates enforce registered-row policy only. They do not discover unregistered
+live Pearl/config/DB exceptions; that remains an open #615 item.
 """
 
 from __future__ import annotations
@@ -54,26 +59,33 @@ ISSUE_RE = re.compile(
 ID_RE = re.compile(r"^exc-[a-z0-9]+(?:-[a-z0-9]+)*$")
 OQ_ID_RE = re.compile(r"^oq-[a-z0-9]+(?:-[a-z0-9]+)*$")
 RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-OWNERLESS = frozenset(
-    {
-        "",
-        "tbd",
-        "todo",
-        "unknown",
-        "none",
-        "n/a",
-        "na",
-        "unowned",
-        "owner",
-        "???",
-    }
+OWNER_PLACEHOLDER_RE = re.compile(
+    r"(?i)(^|\b)(tbd|todo|unknown|unowned|n/?a|none|owner|\?\?\?)(\b|$)|^\s*$"
 )
 SECRET_RE = re.compile(
-    r"(?i)(bearer\s+[a-z0-9._\-]+|sk-[a-z0-9]{10,}|ghp_[a-z0-9]{20,}|"
-    r"xox[baprs]-[a-z0-9-]{10,}|-----BEGIN [A-Z ]+PRIVATE KEY-----|"
-    r"password\s*[:=]\s*\S+|token\s*[:=]\s*\S+)"
+    r"(?is)("
+    r"bearer\s+[a-z0-9._\-]+|"
+    r"sk-[a-z0-9]{10,}|"
+    r"ghp_[a-z0-9]{20,}|"
+    r"xox[baprs]-[a-z0-9-]{10,}|"
+    r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----|"
+    r"password\s*[:=]\s*\S+|"
+    r"token\s*[:=]\s*\S+|"
+    r"\b[a-f0-9]{64}\b"
+    r")"
 )
-REQUIRED_EXCEPTION_FIELDS = (
+REGISTER_ROOT_KEYS = frozenset(
+    {
+        "$schema",
+        "schema_version",
+        "updated_at",
+        "updated_by",
+        "environment",
+        "exceptions",
+        "open_questions",
+    }
+)
+EXCEPTION_KEYS = frozenset(REQUIRED_EXCEPTION_FIELDS := (
     "id",
     "status",
     "environment",
@@ -91,8 +103,27 @@ REQUIRED_EXCEPTION_FIELDS = (
     "post_removal_validation",
     "blocks_stable_promotion",
     "evidence",
+)) | {"expiry_unknown_reason"}
+OPEN_QUESTION_KEYS = frozenset(
+    {"id", "question", "owner", "status", "evidence_target"}
+)
+TOMBSTONE_ROOT_KEYS = frozenset(
+    {
+        "schema_version",
+        "updated_at",
+        "updated_by",
+        "environment",
+        "tombstones",
+        "notes",
+    }
+)
+TOMBSTONE_ENTRY_KEYS = frozenset(
+    {"id", "removed_at", "removal_evidence", "authority_surface"}
 )
 DEFAULT_ALERT_HOURS = 72
+WIDE_SCOPE_RE = re.compile(
+    r"(?i)(\b(all providers|every provider|global (production )?fleet|entire fleet)\b|(?<![^\s])\*(?![^\s]))"
+)
 
 
 @dataclass
@@ -104,7 +135,7 @@ class Finding:
 
     def format(self) -> str:
         loc = self.exception_id or "<register>"
-        return f"{self.severity.upper()} {self.code} {loc}: {self.message}"
+        return f"{self.severity.upper()} {self.code} {loc}: {redact_secrets(self.message)}"
 
 
 @dataclass
@@ -125,6 +156,20 @@ class ValidationResult:
     def warnings(self) -> list[Finding]:
         return [f for f in self.findings if f.severity == "warn"]
 
+    def extend(self, other: "ValidationResult") -> None:
+        self.findings.extend(other.findings)
+
+    def dedupe(self) -> "ValidationResult":
+        seen: set[tuple[str, str, str | None]] = set()
+        out = ValidationResult()
+        for finding in self.findings:
+            key = (finding.severity, finding.code, finding.exception_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.findings.append(finding)
+        return out
+
 
 def repo_root_from_here() -> Path:
     return Path(__file__).resolve().parent.parent
@@ -143,13 +188,17 @@ def default_schema_path(root: Path | None = None) -> Path:
 
 
 def parse_rfc3339(value: str) -> datetime:
-    if not RFC3339_RE.fullmatch(value):
+    if not isinstance(value, str) or not RFC3339_RE.fullmatch(value):
         raise ValueError(f"not RFC3339Z: {value!r}")
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
 def redact_secrets(text: str) -> str:
     return SECRET_RE.sub("[REDACTED]", text)
+
+
+def contains_secret(text: str) -> bool:
+    return bool(SECRET_RE.search(text))
 
 
 def load_json(path: Path) -> Any:
@@ -165,7 +214,9 @@ def _owner_ok(owner: Any) -> bool:
     if not isinstance(owner, str):
         return False
     cleaned = owner.strip()
-    return bool(cleaned) and cleaned.lower() not in OWNERLESS
+    if not cleaned:
+        return False
+    return OWNER_PLACEHOLDER_RE.search(cleaned) is None
 
 
 def _scope_ok(entry: dict[str, Any], register_env: str) -> str | None:
@@ -180,15 +231,17 @@ def _scope_ok(entry: dict[str, Any], register_env: str) -> str | None:
     component = entry.get("component")
     if component not in COMPONENTS:
         return f"component {component!r} is not in the allowed set"
-    # Scope widening signals that are never acceptable on active/planned rows.
+    # Heuristic only — semantic scope bounds remain partially open (#615).
     if entry.get("status") in {"active", "planned"}:
         lowered = scope.lower()
-        if "all providers" in lowered and "must not widen" not in lowered:
-            return "scope appears globally widened without an explicit 'must not widen' bound"
+        if WIDE_SCOPE_RE.search(lowered) and "must not widen" not in lowered:
+            return (
+                "scope appears globally widened without an explicit "
+                "'must not widen' bound (heuristic)"
+            )
         if "arbitrary" in lowered:
             prohibited = (
                 "must not" in lowered
-                or "must not widen" in lowered
                 or "no arbitrary" in lowered
                 or "not arbitrary" in lowered
                 or "without arbitrary" in lowered
@@ -205,12 +258,17 @@ def validate_register(
     tombstones: dict[str, Any] | None = None,
     alert_hours: int = DEFAULT_ALERT_HOURS,
     previous_doc: dict[str, Any] | None = None,
+    base_tombstones: dict[str, Any] | None = None,
 ) -> ValidationResult:
     result = ValidationResult()
     now = now or datetime.now(timezone.utc)
     if not isinstance(doc, dict):
         result.error("register_type", "register root must be an object")
         return result
+
+    unknown_root = sorted(set(doc) - REGISTER_ROOT_KEYS)
+    if unknown_root:
+        result.error("additional_properties", f"unknown root fields: {unknown_root}")
 
     if doc.get("schema_version") != SCHEMA_VERSION:
         result.error(
@@ -223,10 +281,14 @@ def validate_register(
             f"environment must be {ENVIRONMENT!r}, got {doc.get('environment')!r}",
         )
     updated_at = doc.get("updated_at")
-    if not isinstance(updated_at, str) or not RFC3339_RE.fullmatch(updated_at):
-        result.error("updated_at", "updated_at must be RFC3339Z")
+    try:
+        parse_rfc3339(updated_at)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        result.error("updated_at", "updated_at must be a valid RFC3339Z timestamp")
     if not isinstance(doc.get("updated_by"), str) or not doc.get("updated_by", "").strip():
         result.error("updated_by", "updated_by must be a non-empty string")
+    if "$schema" not in doc or not isinstance(doc.get("$schema"), str) or not doc["$schema"]:
+        result.error("$schema", "$schema must be a non-empty string")
 
     exceptions = doc.get("exceptions")
     if not isinstance(exceptions, list) or not exceptions:
@@ -239,6 +301,9 @@ def validate_register(
         if not isinstance(entry, dict):
             result.error("entry_type", f"{loc} must be an object")
             continue
+        unknown = sorted(set(entry) - EXCEPTION_KEYS)
+        if unknown:
+            result.error("additional_properties", f"unknown fields: {unknown}", loc)
         exc_id = entry.get("id") if isinstance(entry.get("id"), str) else loc
         missing = [key for key in REQUIRED_EXCEPTION_FIELDS if key not in entry]
         if missing:
@@ -250,11 +315,7 @@ def validate_register(
         if entry.get("status") not in STATUSES:
             result.error("status", f"invalid status {entry.get('status')!r}", exc_id)
         if entry.get("environment") != ENVIRONMENT:
-            result.error(
-                "environment",
-                f"environment must be {ENVIRONMENT!r}",
-                exc_id,
-            )
+            result.error("environment", f"environment must be {ENVIRONMENT!r}", exc_id)
         if entry.get("component") not in COMPONENTS:
             result.error("component", f"invalid component {entry.get('component')!r}", exc_id)
         for text_field in (
@@ -279,12 +340,23 @@ def validate_register(
                 "blocks_stable_promotion must be a boolean",
                 exc_id,
             )
-        if not isinstance(entry.get("evidence"), list):
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, list):
             result.error("evidence", "evidence must be an array", exc_id)
+        else:
+            for evid_index, item in enumerate(evidence):
+                if not isinstance(item, str) or not item.strip():
+                    result.error(
+                        "evidence",
+                        f"evidence[{evid_index}] must be a non-empty string",
+                        exc_id,
+                    )
 
         created_at = entry.get("created_at")
         if created_at is not None:
-            if not isinstance(created_at, str) or not RFC3339_RE.fullmatch(created_at):
+            try:
+                parse_rfc3339(created_at)
+            except (TypeError, ValueError):
                 result.error("created_at", "created_at must be RFC3339Z or null", exc_id)
 
         expires_at = entry.get("expires_at")
@@ -303,33 +375,40 @@ def validate_register(
                     exc_id,
                 )
         else:
-            if not isinstance(expires_at, str) or not RFC3339_RE.fullmatch(expires_at):
+            try:
+                expiry = parse_rfc3339(expires_at)
+            except (TypeError, ValueError):
                 result.error("expires_at", "expires_at must be RFC3339Z or null", exc_id)
             else:
-                try:
-                    expiry = parse_rfc3339(expires_at)
-                except ValueError as exc:
-                    result.error("expires_at", str(exc), exc_id)
-                else:
-                    if entry.get("status") == "active" and expiry <= now:
-                        result.error(
-                            "expired_active",
-                            f"active exception is past expires_at={expires_at} (fail-closed)",
-                            exc_id,
-                        )
-                    elif entry.get("status") == "active" and expiry <= now + timedelta(
-                        hours=alert_hours
-                    ):
-                        result.warn(
-                            "expiry_soon",
-                            f"active exception expires at {expires_at} (within {alert_hours}h)",
-                            exc_id,
-                        )
+                if entry.get("status") == "active" and expiry <= now:
+                    result.error(
+                        "expired_active",
+                        f"active exception is past expires_at={expires_at} (fail-closed)",
+                        exc_id,
+                    )
+                elif entry.get("status") == "active" and expiry <= now + timedelta(
+                    hours=alert_hours
+                ):
+                    result.warn(
+                        "expiry_soon",
+                        f"active exception expires at {expires_at} (within {alert_hours}h)",
+                        exc_id,
+                    )
 
         if entry.get("status") == "expired":
             result.warn(
                 "status_expired",
                 "exception is marked expired; stable promotion and enforced deploy must reject it",
+                exc_id,
+            )
+
+        if (
+            entry.get("blocks_stable_promotion") is True
+            and entry.get("status") in {"active", "planned", "expired"}
+        ):
+            result.warn(
+                "blocks_stable_promotion",
+                "blocks_stable_promotion=true; stable promotion must reject this row",
                 exc_id,
             )
 
@@ -350,6 +429,13 @@ def validate_register(
             if not isinstance(item, dict):
                 result.error("open_question_type", f"open_questions[{index}] must be an object")
                 continue
+            unknown = sorted(set(item) - OPEN_QUESTION_KEYS)
+            if unknown:
+                result.error(
+                    "additional_properties",
+                    f"unknown open_question fields: {unknown}",
+                    f"open_questions[{index}]",
+                )
             oq_id = item.get("id") if isinstance(item.get("id"), str) else f"open_questions[{index}]"
             for key in ("id", "question", "owner", "status", "evidence_target"):
                 if key not in item:
@@ -359,6 +445,10 @@ def validate_register(
                     result.error("open_question_id", "invalid open-question id", oq_id)
                 else:
                     oq_ids.append(item["id"])
+            for text_key in ("question", "evidence_target"):
+                value = item.get(text_key)
+                if not isinstance(value, str) or not value.strip():
+                    result.error(text_key, f"{text_key} must be a non-empty string", oq_id)
             if not _owner_ok(item.get("owner")):
                 result.error("ownerless", "open question owner is missing or placeholder", oq_id)
             if item.get("status") not in {"pending", "answered"}:
@@ -367,7 +457,7 @@ def validate_register(
         if oq_dupes:
             result.error("duplicate_oq_ids", f"duplicate open_question ids: {oq_dupes}")
 
-    tombstone_ids = set()
+    tombstone_ids: set[str] = set()
     if tombstones is not None:
         tombstone_ids = validate_tombstones(tombstones, result)
 
@@ -377,6 +467,12 @@ def validate_register(
         exc_id = entry.get("id")
         if not isinstance(exc_id, str):
             continue
+        if entry.get("status") == "removed" and exc_id not in tombstone_ids:
+            result.error(
+                "missing_tombstone",
+                "removed exception lacks a tombstone entry",
+                exc_id,
+            )
         if exc_id in tombstone_ids and entry.get("status") != "removed":
             result.error(
                 "resurrection",
@@ -384,10 +480,20 @@ def validate_register(
                 exc_id,
             )
 
+    if base_tombstones is not None:
+        base_ids = validate_tombstones(base_tombstones, result)
+        deleted = sorted(base_ids - tombstone_ids)
+        if deleted:
+            result.error(
+                "tombstone_deleted",
+                f"tombstone ids removed vs trusted base: {deleted}",
+            )
+
     if previous_doc is not None:
         check_anti_resurrection(previous_doc, doc, tombstone_ids, result)
+        check_expiry_self_extension(previous_doc, doc, result)
 
-    return result
+    return result.dedupe()
 
 
 def validate_tombstones(doc: dict[str, Any], result: ValidationResult | None = None) -> set[str]:
@@ -396,6 +502,9 @@ def validate_tombstones(doc: dict[str, Any], result: ValidationResult | None = N
     if not isinstance(doc, dict):
         result.error("tombstone_type", "tombstone root must be an object")
         return ids
+    unknown = sorted(set(doc) - TOMBSTONE_ROOT_KEYS)
+    if unknown:
+        result.error("tombstone_additional", f"unknown tombstone root fields: {unknown}")
     if doc.get("schema_version") != TOMBSTONE_SCHEMA_VERSION:
         result.error(
             "tombstone_schema",
@@ -403,6 +512,10 @@ def validate_tombstones(doc: dict[str, Any], result: ValidationResult | None = N
         )
     if doc.get("environment") != ENVIRONMENT:
         result.error("tombstone_environment", f"environment must be {ENVIRONMENT!r}")
+    try:
+        parse_rfc3339(doc.get("updated_at"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        result.error("tombstone_updated_at", "updated_at must be RFC3339Z")
     rows = doc.get("tombstones")
     if not isinstance(rows, list):
         result.error("tombstones", "tombstones must be an array")
@@ -411,6 +524,13 @@ def validate_tombstones(doc: dict[str, Any], result: ValidationResult | None = N
         if not isinstance(row, dict):
             result.error("tombstone_entry", f"tombstones[{index}] must be an object")
             continue
+        unknown_row = sorted(set(row) - TOMBSTONE_ENTRY_KEYS)
+        if unknown_row:
+            result.error(
+                "tombstone_additional",
+                f"unknown tombstone fields: {unknown_row}",
+                f"tombstones[{index}]",
+            )
         exc_id = row.get("id")
         if not isinstance(exc_id, str) or not ID_RE.fullmatch(exc_id):
             result.error("tombstone_id", f"tombstones[{index}].id is invalid")
@@ -418,8 +538,9 @@ def validate_tombstones(doc: dict[str, Any], result: ValidationResult | None = N
         if exc_id in ids:
             result.error("tombstone_duplicate", f"duplicate tombstone id {exc_id}")
         ids.add(exc_id)
-        removed_at = row.get("removed_at")
-        if not isinstance(removed_at, str) or not RFC3339_RE.fullmatch(removed_at):
+        try:
+            parse_rfc3339(row.get("removed_at"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
             result.error("tombstone_removed_at", "removed_at must be RFC3339Z", exc_id)
         if not isinstance(row.get("removal_evidence"), str) or not row["removal_evidence"].strip():
             result.error("tombstone_evidence", "removal_evidence required", exc_id)
@@ -434,7 +555,6 @@ def check_anti_resurrection(
     tombstone_ids: set[str],
     result: ValidationResult,
 ) -> None:
-    """Fail if a removed/tombstoned exception returns as active/planned/expired."""
     prev_by_id = {
         entry["id"]: entry
         for entry in previous_doc.get("exceptions", [])
@@ -444,7 +564,6 @@ def check_anti_resurrection(
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
             continue
         exc_id = entry["id"]
-        prev = prev_by_id.get(exc_id)
         resurrecting = entry.get("status") in {"active", "planned", "expired"}
         if not resurrecting:
             continue
@@ -454,11 +573,46 @@ def check_anti_resurrection(
                 "config/register sync would restore a tombstoned exception id",
                 exc_id,
             )
+        prev = prev_by_id.get(exc_id)
         if prev is not None and prev.get("status") == "removed":
             result.error(
                 "resurrection",
                 "removed exception id was restored from a non-removed status",
                 exc_id,
+            )
+
+
+def check_expiry_self_extension(
+    previous_doc: dict[str, Any],
+    next_doc: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Reject silent expires_at extensions when a previous register is supplied."""
+    prev_by_id = {
+        entry["id"]: entry
+        for entry in previous_doc.get("exceptions", [])
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    for entry in next_doc.get("exceptions", []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        prev = prev_by_id.get(entry["id"])
+        if prev is None:
+            continue
+        prev_exp = prev.get("expires_at")
+        next_exp = entry.get("expires_at")
+        if not isinstance(prev_exp, str) or not isinstance(next_exp, str):
+            continue
+        try:
+            prev_dt = parse_rfc3339(prev_exp)
+            next_dt = parse_rfc3339(next_exp)
+        except ValueError:
+            continue
+        if next_dt > prev_dt and entry.get("status") in {"active", "planned"}:
+            result.error(
+                "expiry_self_extension",
+                f"expires_at moved later from {prev_exp} to {next_exp} without a new exception id",
+                entry["id"],
             )
 
 
@@ -468,6 +622,17 @@ def simulate_config_sync_restore(
     tombstones: dict[str, Any],
 ) -> ValidationResult:
     """Model a sync/rollback that re-applies stale authoritative exception rows."""
+    result = ValidationResult()
+    result.extend(validate_register(current_doc, tombstones=tombstones))
+    # Validate stale shape without requiring its removed rows to be tombstoned
+    # (stale may predate tombstones); still reject malformed JSON objects.
+    if not isinstance(stale_authoritative_doc, dict):
+        result.error("stale_type", "stale register must be an object")
+        return result.dedupe()
+    if result.errors:
+        # Malformed current/tombstones already fail closed; do not pretend OK.
+        return result.dedupe()
+
     merged = deepcopy(current_doc)
     by_id = {
         entry["id"]: entry
@@ -477,13 +642,10 @@ def simulate_config_sync_restore(
     for entry in stale_authoritative_doc.get("exceptions", []):
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
             continue
-        # Stale sync restores the old row verbatim.
         by_id[entry["id"]] = deepcopy(entry)
     merged["exceptions"] = list(by_id.values())
-    tombstone_ids = validate_tombstones(tombstones)
-    result = ValidationResult()
+    tombstone_ids = validate_tombstones(tombstones, result)
     check_anti_resurrection(current_doc, merged, tombstone_ids, result)
-    # Also treat tombstone membership as authoritative even if previous lacked removed.
     for entry in merged.get("exceptions", []):
         if not isinstance(entry, dict):
             continue
@@ -498,13 +660,14 @@ def simulate_config_sync_restore(
                 "stale authoritative sync restored a tombstoned exception",
                 exc_id,
             )
-    return result
+    return result.dedupe()
 
 
 def build_health_report(
     doc: dict[str, Any],
     *,
     now: datetime | None = None,
+    alert_hours: int = DEFAULT_ALERT_HOURS,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
@@ -514,22 +677,26 @@ def build_health_report(
         expires_at = entry.get("expires_at")
         clock_state = "unknown"
         if isinstance(expires_at, str) and RFC3339_RE.fullmatch(expires_at):
-            expiry = parse_rfc3339(expires_at)
-            if expiry <= now:
-                clock_state = "past_due"
-            elif expiry <= now + timedelta(hours=DEFAULT_ALERT_HOURS):
-                clock_state = "expiring_soon"
+            try:
+                expiry = parse_rfc3339(expires_at)
+            except ValueError:
+                clock_state = "invalid"
             else:
-                clock_state = "within_window"
+                if expiry <= now:
+                    clock_state = "past_due"
+                elif expiry <= now + timedelta(hours=alert_hours):
+                    clock_state = "expiring_soon"
+                else:
+                    clock_state = "outside_alert_window"
         elif expires_at is None:
             clock_state = "unbounded"
         rows.append(
             {
-                "id": entry.get("id"),
-                "status": entry.get("status"),
-                "component": entry.get("component"),
-                "owner": entry.get("owner"),
-                "issue": entry.get("issue"),
+                "id": redact_secrets(str(entry.get("id", ""))),
+                "status": redact_secrets(str(entry.get("status", ""))),
+                "component": redact_secrets(str(entry.get("component", ""))),
+                "owner": redact_secrets(str(entry.get("owner", ""))),
+                "issue": redact_secrets(str(entry.get("issue", ""))),
                 "expires_at": expires_at,
                 "clock_state": clock_state,
                 "blocks_stable_promotion": entry.get("blocks_stable_promotion"),
@@ -544,11 +711,14 @@ def build_health_report(
         status = row.get("status")
         if status in by_status and isinstance(row.get("id"), str):
             by_status[status].append(row["id"])
+    blob = json.dumps(rows)
+    secrets_clean = not contains_secret(blob)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "environment": doc.get("environment"),
         "register_updated_at": doc.get("updated_at"),
+        "alert_hours": alert_hours,
         "counts": {status: len(ids) for status, ids in by_status.items()},
         "active_or_blocking": [
             row
@@ -557,10 +727,11 @@ def build_health_report(
             or row.get("blocks_stable_promotion") is True
         ],
         "exceptions": rows,
-        "secrets_redacted": True,
+        "secrets_redacted": secrets_clean,
         "note": (
-            "Operator-visible exception inventory. No bearer tokens, HMAC secrets, "
-            "referral codes, or private keys are included."
+            "Operator-visible exception inventory for registered rows only. "
+            "Does not prove Pearl has no unregistered exceptions. "
+            "Secret-like substrings are redacted when recognized."
         ),
     }
 
@@ -581,12 +752,12 @@ def promote_warns_to_errors(result: ValidationResult, codes: Iterable[str]) -> V
 def apply_gate_policy(result: ValidationResult, mode: str, enforce: bool) -> ValidationResult:
     """Apply deploy/promote policy on top of structural validation findings."""
     if mode == "validate" and not enforce:
-        # Validate keeps structural errors; demote policy warnings stay warnings.
         return result
     promote_codes = {
         "status_expired",
         "unbounded_active",
         "expiry_soon",
+        "blocks_stable_promotion",
     }
     if mode == "promote" or enforce:
         return promote_warns_to_errors(result, promote_codes)
@@ -601,18 +772,25 @@ def enforcement_enabled(cli_flag: bool | None = None) -> bool:
     return os.environ.get("MACPROVIDER_EXCEPTION_ENFORCEMENT", "0") == "1"
 
 
-def cmd_validate(args: argparse.Namespace) -> int:
+def _load_pair(args: argparse.Namespace) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     root = Path(args.root) if args.root else repo_root_from_here()
-    doc = load_json(Path(args.register) if args.register else default_register_path(root))
-    tombstones = load_json(
-        Path(args.tombstones) if args.tombstones else default_tombstone_path(root)
-    )
+    register_path = Path(args.register) if args.register else default_register_path(root)
+    tombstone_path = Path(args.tombstones) if args.tombstones else default_tombstone_path(root)
+    return root, load_json(register_path), load_json(tombstone_path)
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    _root, doc, tombstones = _load_pair(args)
     now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
+    base = load_json(Path(args.base_tombstones)) if args.base_tombstones else None
+    previous = load_json(Path(args.previous_register)) if args.previous_register else None
     result = validate_register(
         doc,
         now=now,
         tombstones=tombstones,
         alert_hours=args.alert_hours,
+        previous_doc=previous,
+        base_tombstones=base,
     )
     for finding in result.findings:
         print(finding.format(), file=sys.stderr if finding.severity == "error" else sys.stdout)
@@ -627,35 +805,30 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    root = Path(args.root) if args.root else repo_root_from_here()
-    doc = load_json(Path(args.register) if args.register else default_register_path(root))
+    _root, doc, tombstones = _load_pair(args)
     now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
-    # Still validate so a broken register cannot look healthy.
-    tombstones = load_json(
-        Path(args.tombstones) if args.tombstones else default_tombstone_path(root)
-    )
     result = validate_register(doc, now=now, tombstones=tombstones, alert_hours=args.alert_hours)
-    report = build_health_report(doc, now=now)
+    report = build_health_report(doc, now=now, alert_hours=args.alert_hours)
     report["validation"] = {
         "errors": [f.format() for f in result.errors],
         "warnings": [f.format() for f in result.warnings],
         "ok": not result.errors,
     }
+    if not report["secrets_redacted"]:
+        result.error("secrets_present", "report still contains secret-like material after redaction")
+        report["validation"]["errors"] = [f.format() for f in result.errors]
+        report["validation"]["ok"] = False
     text = json.dumps(report, indent=2, sort_keys=False) + "\n"
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8")
         print(f"wrote {args.output}")
     else:
         sys.stdout.write(text)
-    return 1 if result.errors else 0
+    return 1 if result.errors or not report["secrets_redacted"] else 0
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
-    root = Path(args.root) if args.root else repo_root_from_here()
-    doc = load_json(Path(args.register) if args.register else default_register_path(root))
-    tombstones = load_json(
-        Path(args.tombstones) if args.tombstones else default_tombstone_path(root)
-    )
+    _root, doc, tombstones = _load_pair(args)
     now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
     if args.enforce and args.no_enforce:
         print("cannot combine --enforce and --no-enforce", file=sys.stderr)
@@ -666,11 +839,15 @@ def cmd_gate(args: argparse.Namespace) -> int:
         enforce = True
     else:
         enforce = enforcement_enabled()
+    base = load_json(Path(args.base_tombstones)) if args.base_tombstones else None
+    previous = load_json(Path(args.previous_register)) if args.previous_register else None
     result = validate_register(
         doc,
         now=now,
         tombstones=tombstones,
         alert_hours=args.alert_hours,
+        previous_doc=previous,
+        base_tombstones=base,
     )
     result = apply_gate_policy(result, args.mode, enforce)
     for finding in result.findings:
@@ -680,13 +857,13 @@ def cmd_gate(args: argparse.Namespace) -> int:
     if result.errors:
         print(
             f"production-exceptions gate[{mode}]: FAIL "
-            f"(enforce={int(enforce)}, errors={len(result.errors)})",
+            f"(enforce={int(enforce or mode == 'promote')}, errors={len(result.errors)})",
             file=sys.stderr,
         )
         return 1
     print(
         f"production-exceptions gate[{mode}]: OK "
-        f"(enforce={int(enforce)}, warnings={len(result.warnings)})"
+        f"(enforce={int(enforce or mode == 'promote')}, warnings={len(result.warnings)})"
     )
     return 0
 
@@ -704,7 +881,7 @@ def cmd_sync_check(args: argparse.Namespace) -> int:
         print(finding.format(), file=sys.stderr if finding.severity == "error" else sys.stdout)
     if result.errors:
         print(
-            f"production-exceptions sync-check: FAIL ({len(result.errors)} resurrection error(s))",
+            f"production-exceptions sync-check: FAIL ({len(result.errors)} error(s))",
             file=sys.stderr,
         )
         return 1
@@ -719,6 +896,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", help="Repository root (default: inferred from script path)")
     parser.add_argument("--register", help="Path to production-exceptions.json")
     parser.add_argument("--tombstones", help="Path to removed-exception-tombstones.json")
+    parser.add_argument(
+        "--base-tombstones",
+        help="Trusted previous tombstone ledger; deletions vs this base hard-fail",
+    )
+    parser.add_argument(
+        "--previous-register",
+        help="Previous register for anti-resurrection and expiry self-extension checks",
+    )
     parser.add_argument("--now", help="RFC3339Z clock override for deterministic tests")
     parser.add_argument(
         "--alert-hours",
@@ -740,7 +925,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=("deploy", "promote", "validate"),
         default="deploy",
-        help="deploy=default-safe; promote=fail-closed on expired/unbounded",
+        help="deploy=default-safe; promote=fail-closed on expired/unbounded/blocking",
     )
     p_gate.add_argument(
         "--enforce",
@@ -767,6 +952,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--stale",
         required=True,
         help="Stale authoritative register/export that sync might restore",
+    )
+    p_sync.add_argument(
+        "--tombstones",
+        help="Path to removed-exception-tombstones.json",
     )
     p_sync.set_defaults(func=cmd_sync_check)
     return parser

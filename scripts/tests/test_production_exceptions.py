@@ -83,9 +83,13 @@ class ProductionExceptionsTests(unittest.TestCase):
         self.assertTrue(any(f.code == "duplicate_ids" for f in result.errors))
 
     def test_ownerless_fails(self):
-        doc = _minimal_register([_minimal_entry(owner="TBD")])
-        result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
-        self.assertTrue(any(f.code == "ownerless" for f in result.errors))
+        for owner in ("TBD", "TBD - assign ops", "unknown owner", "TODO/team"):
+            doc = _minimal_register([_minimal_entry(owner=owner)])
+            result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
+            self.assertTrue(
+                any(f.code == "ownerless" for f in result.errors),
+                msg=owner,
+            )
 
     def test_clock_boundary_expired_active_fail_closed(self):
         doc = _minimal_register(
@@ -115,22 +119,31 @@ class ProductionExceptionsTests(unittest.TestCase):
         self.assertTrue(any(f.code in {"environment", "scope_mismatch"} for f in result.errors))
 
     def test_scope_widening_rejected(self):
-        doc = _minimal_register(
-            [_minimal_entry(scope="all providers in production without bounds")]
-        )
-        result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
-        self.assertTrue(any(f.code == "scope_mismatch" for f in result.errors))
+        for scope in (
+            "all providers in production without bounds",
+            "every provider in pearl",
+            "global production fleet",
+            "*",
+        ):
+            doc = _minimal_register([_minimal_entry(scope=scope)])
+            result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
+            self.assertTrue(
+                any(f.code == "scope_mismatch" for f in result.errors),
+                msg=scope,
+            )
 
-    def test_deploy_default_warns_expired_status(self):
+    def test_deploy_default_warns_expired_and_blocking(self):
         doc = _minimal_register(
             [_minimal_entry(status="expired", expires_at="2026-07-26T23:59:59Z")]
         )
         result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
         gated = pe.apply_gate_policy(result, "deploy", enforce=False)
         self.assertEqual(gated.errors, [])
-        self.assertTrue(any(f.code == "status_expired" for f in gated.warnings))
+        codes = {f.code for f in gated.warnings}
+        self.assertIn("status_expired", codes)
+        self.assertIn("blocks_stable_promotion", codes)
 
-    def test_promote_fails_expired_and_unbounded(self):
+    def test_promote_fails_expired_unbounded_and_blocking_bit(self):
         doc = _minimal_register(
             [
                 _minimal_entry(status="expired", expires_at="2026-07-26T23:59:59Z"),
@@ -139,6 +152,11 @@ class ProductionExceptionsTests(unittest.TestCase):
                     expires_at=None,
                     expiry_unknown_reason="no pearl evidence yet",
                 ),
+                _minimal_entry(
+                    id="exc-bounded-blocking",
+                    expires_at="2026-09-01T00:00:00Z",
+                    blocks_stable_promotion=True,
+                ),
             ]
         )
         result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
@@ -146,6 +164,26 @@ class ProductionExceptionsTests(unittest.TestCase):
         codes = {f.code for f in gated.errors}
         self.assertIn("status_expired", codes)
         self.assertIn("unbounded_active", codes)
+        self.assertIn("blocks_stable_promotion", codes)
+
+    def test_promote_allows_non_blocking_bounded_active(self):
+        doc = _minimal_register(
+            [
+                _minimal_entry(
+                    id="exc-ok",
+                    expires_at="2026-09-01T00:00:00Z",
+                    blocks_stable_promotion=False,
+                )
+            ]
+        )
+        result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
+        gated = pe.apply_gate_policy(result, "promote", enforce=False)
+        self.assertEqual(gated.errors, [], [f.format() for f in gated.errors])
+
+    def test_removed_requires_tombstone(self):
+        doc = _minimal_register([_minimal_entry(id="exc-removed-sample", status="removed")])
+        result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
+        self.assertTrue(any(f.code == "missing_tombstone" for f in result.errors))
 
     def test_anti_resurrection_on_stale_sync(self):
         removed = _minimal_entry(id="exc-removed-sample", status="removed")
@@ -166,6 +204,29 @@ class ProductionExceptionsTests(unittest.TestCase):
         result = pe.simulate_config_sync_restore(current, stale, tombstones)
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
+    def test_sync_check_fails_on_malformed_tombstones(self):
+        current = _minimal_register([_minimal_entry(status="removed", id="exc-x")])
+        stale = _minimal_register([_minimal_entry(id="exc-x", status="active")])
+        bad = {"schema_version": "wrong", "environment": "nope", "tombstones": "nope"}
+        result = pe.simulate_config_sync_restore(current, stale, bad)
+        self.assertTrue(result.errors)
+
+    def test_tombstone_deletion_vs_base_fails(self):
+        tombs = _tombstones()
+        base = _tombstones(
+            [
+                {
+                    "id": "exc-old",
+                    "removed_at": "2026-07-20T00:00:00Z",
+                    "removal_evidence": "prior",
+                    "authority_surface": "test",
+                }
+            ]
+        )
+        doc = _minimal_register()
+        result = pe.validate_register(doc, now=NOW, tombstones=tombs, base_tombstones=base)
+        self.assertTrue(any(f.code == "tombstone_deleted" for f in result.errors))
+
     def test_tombstone_blocks_non_removed_status(self):
         doc = _minimal_register([_minimal_entry(id="exc-ghost", status="active")])
         tombstones = _tombstones(
@@ -181,12 +242,35 @@ class ProductionExceptionsTests(unittest.TestCase):
         result = pe.validate_register(doc, now=NOW, tombstones=tombstones)
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
+    def test_schema_parity_rejects_bad_shapes(self):
+        doc = _minimal_register()
+        doc["unexpected"] = True
+        doc["updated_at"] = "2026-99-99T99:99:99Z"
+        doc["exceptions"][0]["evidence"] = [123, ""]
+        result = pe.validate_register(doc, now=NOW, tombstones=_tombstones())
+        codes = {f.code for f in result.errors}
+        self.assertIn("additional_properties", codes)
+        self.assertIn("updated_at", codes)
+        self.assertIn("evidence", codes)
+
+    def test_expiry_self_extension_detected(self):
+        previous = _minimal_register(
+            [_minimal_entry(id="exc-ext", expires_at="2026-08-01T00:00:00Z")]
+        )
+        nxt = copy.deepcopy(previous)
+        nxt["exceptions"][0]["expires_at"] = "2026-09-01T00:00:00Z"
+        result = pe.validate_register(
+            nxt, now=NOW, tombstones=_tombstones(), previous_doc=previous
+        )
+        self.assertTrue(any(f.code == "expiry_self_extension" for f in result.errors))
+
     def test_health_report_redacts_secrets_and_lists_active(self):
         doc = _minimal_register(
             [
                 _minimal_entry(
+                    owner="ops password=hunter2",
                     policy_delta="uses Bearer SUPERSECRETTOKEN123 and still temporary",
-                    reason="password: hunter2 should not appear",
+                    reason="token: abcdefghijklmnop",
                 )
             ]
         )
@@ -198,13 +282,15 @@ class ProductionExceptionsTests(unittest.TestCase):
         self.assertTrue(report["secrets_redacted"])
         self.assertEqual(report["counts"]["active"], 1)
 
-    def test_cli_gate_and_report_roundtrip(self):
+    def test_cli_gate_report_and_sync_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             register = tmp_path / "production-exceptions.json"
             tombs = tmp_path / "removed-exception-tombstones.json"
+            stale = tmp_path / "stale.json"
             register.write_text(json.dumps(_minimal_register()), encoding="utf-8")
             tombs.write_text(json.dumps(_tombstones()), encoding="utf-8")
+            stale.write_text(json.dumps(_minimal_register()), encoding="utf-8")
             out = tmp_path / "report.json"
             rc = pe.main(
                 [
@@ -232,9 +318,35 @@ class ProductionExceptionsTests(unittest.TestCase):
                     "gate",
                     "--mode",
                     "deploy",
+                    "--no-enforce",
                 ]
             )
             self.assertEqual(rc_gate, 0)
+            rc_sync = pe.main(
+                [
+                    "--tombstones",
+                    str(tombs),
+                    "sync-check",
+                    "--current",
+                    str(register),
+                    "--stale",
+                    str(stale),
+                ]
+            )
+            self.assertEqual(rc_sync, 0)
+            # Documented form with --tombstones after subcommand also works.
+            rc_sync2 = pe.main(
+                [
+                    "sync-check",
+                    "--current",
+                    str(register),
+                    "--stale",
+                    str(stale),
+                    "--tombstones",
+                    str(tombs),
+                ]
+            )
+            self.assertEqual(rc_sync2, 0)
 
     def test_previous_removed_restored_detected(self):
         previous = _minimal_register(
@@ -243,8 +355,18 @@ class ProductionExceptionsTests(unittest.TestCase):
         nxt = copy.deepcopy(previous)
         nxt["exceptions"][0]["status"] = "active"
         nxt["exceptions"][0]["expires_at"] = "2026-08-01T00:00:00Z"
+        tombs = _tombstones(
+            [
+                {
+                    "id": "exc-was-removed",
+                    "removed_at": "2026-07-20T00:00:00Z",
+                    "removal_evidence": "unit-test",
+                    "authority_surface": "test",
+                }
+            ]
+        )
         result = pe.validate_register(
-            nxt, now=NOW, tombstones=_tombstones(), previous_doc=previous
+            nxt, now=NOW, tombstones=tombs, previous_doc=previous
         )
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
