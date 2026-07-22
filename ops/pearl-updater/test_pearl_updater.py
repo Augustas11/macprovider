@@ -144,6 +144,7 @@ class PearlUpdaterTests(unittest.TestCase):
             candidate_uid=os.geteuid(),
             candidate_gid=os.getegid(),
             catalog_verifier=REPO_ROOT / "scripts/catalog-release.py",
+            tier2_coordinator_config=REPO_ROOT / "phase4-coordinator/dist/coordinator.yaml",
             catalog_canary_proof=SCRIPT.with_name("catalog-canary-proof.py"),
             canary_rollback_authorization=self.root / "canary-runtime" / "legacy-rollback.json",
             sleep=lambda _: None,
@@ -177,6 +178,7 @@ class PearlUpdaterTests(unittest.TestCase):
         catalog_sources = {
             "release.json": REPO_ROOT / "phase3-binary/catalog/autotune/release.json",
             "trusted-keys.json": REPO_ROOT / "phase3-binary/catalog/autotune/trusted-keys.json",
+            "tier2-catalog.json": REPO_ROOT / "phase3-binary/catalog/autotune/tier2-catalog.json",
             "autotune-candidates.json": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json",
             "autotune-candidates.json.sig": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json.sig",
             "demand-rank.json": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json",
@@ -264,7 +266,8 @@ class PearlUpdaterTests(unittest.TestCase):
             "coordinator": str(release.version),
             "gateway": str(release.version),
         }
-        catalog_release = install / "autotune" / "releases" / release.catalog.release_id
+        catalog_directory_name = self.updater._catalog_release_directory_name(release)
+        catalog_release = install / "autotune" / "releases" / catalog_directory_name
         catalog_release.mkdir(parents=True, mode=0o750, exist_ok=True)
         (install / "autotune").chmod(0o750)
         (install / "autotune" / "releases").chmod(0o750)
@@ -273,8 +276,10 @@ class PearlUpdaterTests(unittest.TestCase):
             (catalog_release / name).chmod(0o640)
         (install / "autotune" / "current").unlink(missing_ok=True)
         (install / "autotune" / "current").symlink_to(
-            f"releases/{release.catalog.release_id}"
+            f"releases/{catalog_directory_name}"
         )
+        shutil.copy2(release.directory / "tier2-catalog.json", install / "tier2-catalog.json")
+        (install / "tier2-catalog.json").chmod(0o640)
         self.updater.state_root.mkdir(parents=True, exist_ok=True)
         state = self.updater.state_root / "current-release.json"
         state.write_text(
@@ -425,6 +430,7 @@ class PearlUpdaterTests(unittest.TestCase):
 
     def test_catalog_install_and_rollback_restore_exact_pointers(self):
         release = self.stage(self.verify())
+        catalog_directory_name = self.updater._catalog_release_directory_name(release)
         install = self.updater.install_root
         releases = install / "autotune" / "releases"
         releases.mkdir(parents=True, mode=0o750)
@@ -436,29 +442,47 @@ class PearlUpdaterTests(unittest.TestCase):
         previous = install / "autotune" / ".previous-target"
         previous.write_text("releases/older-catalog\n")
         previous.chmod(0o600)
+        legacy_tier2 = install / "tier2-catalog.json"
+        legacy_tier2.write_bytes(b'previous signed Tier-2 bytes\n')
+        legacy_tier2.chmod(0o600)
+        legacy_stat = legacy_tier2.stat()
 
         self.updater.install_catalog(release)
 
         self.assertEqual(
             os.readlink(install / "autotune" / "current"),
-            f"releases/{release.catalog.release_id}",
+            f"releases/{catalog_directory_name}",
         )
         self.assertEqual(previous.read_text().strip(), "releases/old-catalog")
         for name in updater_module.CATALOG_ASSETS:
             self.assertEqual(
-                updater_module.sha256_file(releases / release.catalog.release_id / name),
+                updater_module.sha256_file(releases / catalog_directory_name / name),
                 release.catalog.files[name],
             )
+        self.assertEqual(
+            updater_module.sha256_file(legacy_tier2),
+            release.catalog.files["tier2-catalog.json"],
+        )
 
         tx = self.root / "catalog-rollback"
         tx.mkdir(mode=0o700)
+        previous_tier2 = tx / "previous-tier2-catalog.json"
+        previous_tier2.write_bytes(b'previous signed Tier-2 bytes\n')
+        previous_tier2.chmod(0o600)
         (tx / "catalog-manifest.json").write_text(
             json.dumps(
                 {
                     "current_target": "releases/old-catalog",
                     "previous_target": "releases/older-catalog",
                     "candidate_existed": False,
-                    "candidate_release_id": release.catalog.release_id,
+                    "candidate_release_id": catalog_directory_name,
+                    "legacy_tier2": {
+                        "existed": True,
+                        "sha256": updater_module.sha256_file(previous_tier2),
+                        "uid": legacy_stat.st_uid,
+                        "gid": legacy_stat.st_gid,
+                        "mode": 0o600,
+                    },
                 }
             )
             + "\n"
@@ -469,7 +493,11 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(previous.read_text().strip(), "releases/older-catalog")
         self.assertEqual(previous.stat().st_gid, self.updater.catalog_gid)
         self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o640)
-        self.assertFalse((releases / release.catalog.release_id).exists())
+        self.assertFalse((releases / catalog_directory_name).exists())
+        self.assertEqual(legacy_tier2.read_bytes(), b'previous signed Tier-2 bytes\n')
+        self.assertEqual(legacy_tier2.stat().st_uid, legacy_stat.st_uid)
+        self.assertEqual(legacy_tier2.stat().st_gid, legacy_stat.st_gid)
+        self.assertEqual(stat.S_IMODE(legacy_tier2.stat().st_mode), 0o600)
 
     def test_catalog_install_uses_service_group_and_repairs_restrictive_umask(self):
         release = self.stage(self.verify())
@@ -495,7 +523,7 @@ class PearlUpdaterTests(unittest.TestCase):
             self.assertEqual(call.args[2], service_gid)
             self.assertEqual(call.kwargs, {"follow_symlinks": False})
         releases = install / "autotune" / "releases"
-        destination = releases / release.catalog.release_id
+        destination = releases / self.updater._catalog_release_directory_name(release)
         self.assertIn(install / "autotune", [call.args[0] for call in chown.call_args_list])
         self.assertIn(releases, [call.args[0] for call in chown.call_args_list])
         for directory in (install / "autotune", releases, destination):
@@ -513,7 +541,7 @@ class PearlUpdaterTests(unittest.TestCase):
         release = self.stage(self.verify())
         install = self.updater.install_root
         releases = install / "autotune" / "releases"
-        destination = releases / release.catalog.release_id
+        destination = releases / self.updater._catalog_release_directory_name(release)
         destination.mkdir(parents=True, mode=0o700)
         (install / "autotune").chmod(0o700)
         releases.chmod(0o700)
@@ -542,7 +570,7 @@ class PearlUpdaterTests(unittest.TestCase):
             self.updater.install_root
             / "autotune"
             / "releases"
-            / release.catalog.release_id
+            / self.updater._catalog_release_directory_name(release)
         )
         destination.mkdir(parents=True, mode=0o700)
         (self.updater.install_root / "autotune").chmod(0o700)
@@ -2493,7 +2521,7 @@ class PearlUpdaterTests(unittest.TestCase):
             self.updater.install_root
             / "autotune"
             / "releases"
-            / release.catalog.release_id
+            / self.updater._catalog_release_directory_name(release)
         )
         installed_catalog.chmod(0o700)
         (installed_catalog / updater_module.CATALOG_ASSETS[0]).chmod(0o600)
@@ -3789,7 +3817,8 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(monitor.read_text(), "GMAIL_APP_PASSWORD=preserve-me\n")
         self.assertEqual(stat.S_IMODE(monitor.stat().st_mode), 0o640)
         self.assertTrue((prefix / "usr/local/sbin/macprovider-pearl-update-gate").is_file())
-        self.assertTrue((prefix / "usr/local/share/macprovider/catalog-release.py").is_file())
+        self.assertTrue((prefix / "usr/local/share/macprovider/scripts/catalog-release.py").is_file())
+        self.assertTrue((prefix / "usr/local/share/macprovider/scripts/sign-catalog.go").is_file())
         self.assertTrue((prefix / "usr/local/share/macprovider/catalog-canary-proof.py").is_file())
         installer = SCRIPT.with_name("install-pearl-updater.sh").read_text(encoding="utf-8")
         self.assertIn("useradd --system --gid macprovider-updater-validate", installer)

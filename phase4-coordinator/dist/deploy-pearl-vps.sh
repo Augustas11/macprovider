@@ -250,8 +250,6 @@ NGINX_STATS_CORS_429="$DIST_DIR/nginx-snippets/cors-429.conf"
 NGINX_STATS_PROXY_PUBLIC="$DIST_DIR/nginx-snippets/stats-proxy-public.conf"
 NGINX_STATS_PROXY_PARTNER="$DIST_DIR/nginx-snippets/stats-proxy-partner.conf"
 NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
-CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
-
 # SPEC-023 signed recommendation feeds served on the buyer mux at
 # /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
 # Files live in phase3-binary/dist/static/ in the repo. Deploy installs
@@ -263,7 +261,10 @@ STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 AUTOTUNE_RELEASE_MANIFEST="$DIST_DIR/../../phase3-binary/catalog/autotune/release.json"
 AUTOTUNE_TRUSTED_KEYS="$DIST_DIR/../../phase3-binary/catalog/autotune/trusted-keys.json"
+AUTOTUNE_TIER2_JSON="$DIST_DIR/../../phase3-binary/catalog/autotune/tier2-catalog.json"
 AUTOTUNE_RELEASE_VERIFY="$DIST_DIR/../../scripts/catalog-release.py"
+AUTOTUNE_TIER2_VERIFIER="$DIST_DIR/../../scripts/sign-catalog.go"
+CATALOG_SOURCE="${CATALOG_SOURCE:-$AUTOTUNE_TIER2_JSON}"
 
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify
 AUTOTUNE_RELEASE_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
@@ -286,10 +287,17 @@ import json, pathlib, sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["autotune-candidates.json"]["signer_key_id"])
 PY
 )"
+AUTOTUNE_TIER2_SHA256="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["tier2-catalog.json"]["sha256"])
+PY
+)"
+AUTOTUNE_RELEASE_MANIFEST_SHA256="$(shasum -a 256 "$AUTOTUNE_RELEASE_MANIFEST" | awk '{print $1}')"
 if ! printf '%s' "$AUTOTUNE_RELEASE_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
   echo "invalid autotune release_id: $AUTOTUNE_RELEASE_ID" >&2
   exit 1
 fi
+AUTOTUNE_RELEASE_DIR_NAME="$AUTOTUNE_RELEASE_ID-$(printf '%s' "$AUTOTUNE_RELEASE_MANIFEST_SHA256" | cut -c1-16)"
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
@@ -304,7 +312,8 @@ for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRRO
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
          "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG" \
-         "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_RELEASE_VERIFY"; do
+         "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_TIER2_JSON" \
+         "$AUTOTUNE_RELEASE_VERIFY" "$AUTOTUNE_TIER2_VERIFIER"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -733,12 +742,8 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 5
   fi
   if [ ! -f "$CATALOG_SOURCE" ]; then
-    echo "aborting deploy: configured tier2.catalog_path requires local catalog artifact, missing: $CATALOG_SOURCE" >&2
-    echo "  Override with CATALOG_SOURCE=<signed-catalog-json>" >&2
-    exit 5
-  fi
-  if ! command -v go >/dev/null 2>&1; then
-    echo "aborting deploy: go is required to verify the signed catalog before upload" >&2
+    echo "aborting deploy: configured tier2.catalog_path requires release-bound Tier-2 catalog artifact, missing: $CATALOG_SOURCE" >&2
+    echo "  Default source is $AUTOTUNE_TIER2_JSON; any override must match release.json." >&2
     exit 5
   fi
   TMP_CATALOG_PUBKEY="$(mktemp)"
@@ -748,11 +753,20 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # Cleanup of TMP_CATALOG_* happens in the unconditional EXIT trap (#244 R6 / #608).
   cp "$CATALOG_SOURCE" "$TMP_CATALOG_PINNED"
   CATALOG_PIN_SHA="$(shasum -a 256 "$TMP_CATALOG_PINNED" | awk '{print $1}')"
-  printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
-  go run "$DIST_DIR/../../scripts/sign-catalog.go" verify -public-key "$TMP_CATALOG_PUBKEY" "$TMP_CATALOG_PINNED" >/dev/null || {
-    echo "aborting deploy: signed catalog does not verify against tier2.catalog_public_key" >&2
+  if [ "$CATALOG_PIN_SHA" != "$AUTOTUNE_TIER2_SHA256" ]; then
+    echo "aborting deploy: Tier-2 source digest does not match release.json feed binding" >&2
+    echo "  source=$CATALOG_PIN_SHA release.json=$AUTOTUNE_TIER2_SHA256" >&2
     exit 5
-  }
+  fi
+  if ! cmp -s "$TMP_CATALOG_PINNED" "$AUTOTUNE_TIER2_JSON"; then
+    echo "aborting deploy: Tier-2 source bytes differ from canonical release envelope file $AUTOTUNE_TIER2_JSON" >&2
+    exit 5
+  fi
+  printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
+  # The canonical release verifier above already authenticated the exact
+  # canonical Tier-2 bytes with its fixed Go verifier and configured trust
+  # root. Digest equality plus cmp prove this pinned upload is those bytes;
+  # do not introduce a second PATH-selectable verifier here.
   # #608 Partial: refuse deploy when Tier-2 identity drifts from the autotune
   # release about to be activated. Overlapping model_id rows must agree on
   # artifact hash; Tier-2-only / autotune-only rows remain allowed for now.
@@ -766,9 +780,10 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     echo "aborting deploy: Tier-2 catalog conflicts with autotune release identity (#608)" >&2
     exit 5
   }
-  echo "  ok: pinned catalog sha256=$CATALOG_PIN_SHA verifies, binds to autotune release, and will install to $CATALOG_REMOTE_PATH"
+  echo "  ok: pinned release-bound catalog sha256=$CATALOG_PIN_SHA verifies, binds to autotune release, and will install to $CATALOG_REMOTE_PATH"
 else
-  echo "  tier2.catalog_path unset — public /catalog/current will return 404 by design"
+  echo "aborting deploy: tier2.catalog_path must be set for release-bound Tier-2 publish (#608 Step B)" >&2
+  exit 5
 fi
 
 log "step 1/9: confirm SSH + DNS"
@@ -2114,10 +2129,10 @@ $SSH "set -e
     cp -p /opt/macprovider/autotune/.previous-target \"\$_rollback_stage/catalog-previous-target\"
     touch \"\$_rollback_stage/had-previous-target\"
   fi
-  if [ ! -d /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_ID ]; then
+  if [ ! -d /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME ]; then
     touch \"\$_rollback_stage/release-was-absent\"
   fi
-  printf '%s' '$AUTOTUNE_RELEASE_ID' > \"\$_rollback_stage/release-id\"
+  printf '%s' '$AUTOTUNE_RELEASE_DIR_NAME' > \"\$_rollback_stage/release-id\"
   if systemctl is-active --quiet macprovider-coordinator; then
     touch \"\$_rollback_stage/service-was-active\"
   fi
@@ -2167,6 +2182,7 @@ case "$DEPLOY_TMP" in
     ;;
 esac
 log "  staging dir: $DEPLOY_TMP (root:root 0700)"
+$SSH "install -d -o root -g root -m 0700 $DEPLOY_TMP/scripts"
 
 $SCP "$BINARY"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
 $SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64"
@@ -2201,7 +2217,9 @@ $SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candida
 $SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
-$SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/catalog-release.py"
+$SCP "$AUTOTUNE_TIER2_JSON"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
+$SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/scripts/catalog-release.py"
+$SCP "$AUTOTUNE_TIER2_VERIFIER"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/scripts/sign-catalog.go"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   if [ -z "${TMP_CATALOG_PINNED:-}" ] || [ ! -f "$TMP_CATALOG_PINNED" ]; then
     echo "aborting deploy: pinned Tier-2 catalog snapshot missing before upload" >&2
@@ -2213,6 +2231,7 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 5
   fi
   $SCP "$TMP_CATALOG_PINNED" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
+  $SCP "$TMP_CATALOG_PUBKEY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.pub"
 fi
 
 # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
@@ -2284,9 +2303,9 @@ $SSH "set -e
   # Stage the complete immutable catalog release. Activation happens only
   # after the late connected-provider safeguard immediately before restart.
   _autotune_root=/opt/macprovider/autotune
-  _autotune_release=\$_autotune_root/releases/$AUTOTUNE_RELEASE_ID
+  _autotune_release=\$_autotune_root/releases/$AUTOTUNE_RELEASE_DIR_NAME
   _autotune_lock=\$_autotune_release.lock
-  _autotune_stage=\$_autotune_root/releases/.stage-$AUTOTUNE_RELEASE_ID-\$\$
+  _autotune_stage=\$_autotune_root/releases/.stage-$AUTOTUNE_RELEASE_DIR_NAME-\$\$
   install -d -o root -g macprovider -m 0750 \$_autotune_root \$_autotune_root/releases
   if ! mkdir \$_autotune_lock; then
     echo 'catalog release staging is already in progress for $AUTOTUNE_RELEASE_ID' >&2
@@ -2299,42 +2318,33 @@ $SSH "set -e
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig \$_autotune_stage/demand-rank.json.sig
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json \$_autotune_stage/autotune-candidates.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig \$_autotune_stage/autotune-candidates.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json \$_autotune_stage/tier2-catalog.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
-  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_stage
+  python3 $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_autotune_stage --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub
   sync
   if [ -e \$_autotune_release ]; then
     if ! diff -qr \$_autotune_stage \$_autotune_release >/dev/null; then
-      echo 'catalog release ID $AUTOTUNE_RELEASE_ID already exists with different bytes' >&2
+      echo 'catalog release envelope $AUTOTUNE_RELEASE_DIR_NAME already exists with different bytes' >&2
       exit 1
     fi
     rm -rf \$_autotune_stage
   else
     mv \$_autotune_stage \$_autotune_release
   fi
-  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_release
+  python3 $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_autotune_release --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub
   # First rollout: the new on-disk coordinator config already points at
   # autotune/current. Establish that path as soon as the immutable release is
   # staged so an abort before the late restart gate cannot leave the next
   # service restart without feeds. Existing rollouts remain untouched here.
   if [ ! -e \$_autotune_root/current ] && [ ! -L \$_autotune_root/current ]; then
-    ln -sfn releases/$AUTOTUNE_RELEASE_ID \$_autotune_root/current.bootstrap
+    install -o root -g macprovider -m 0640 \$_autotune_release/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
+    ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME \$_autotune_root/current.bootstrap
     mv -Tf \$_autotune_root/current.bootstrap \$_autotune_root/current
   fi
   rmdir \$_autotune_lock
   trap - EXIT
 "
-if [ -n "$CATALOG_REMOTE_PATH" ]; then
-  # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
-  # created in step 3 as root-owned 0750; root writes the catalog file
-  # into it. The destination is the hardcoded canonical path validated
-  # at startup; no operator-controlled value reaches the SSH command.
-  $SSH "set -e
-    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
-    flock -s 8
-    install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
-  "
-fi
 
 # nginx + Let's Encrypt strategy (issue #244 R1+R2+R3+R4 — TLS-safety hardening):
 #
@@ -2634,7 +2644,10 @@ $SSH "set -e
   printf '%s' \"\$_previous\" > \"\$_catalog_root/.previous-target\"
   chown root:macprovider \"\$_catalog_root/.previous-target\"
   chmod 0640 \"\$_catalog_root/.previous-target\"
-  ln -sfn releases/$AUTOTUNE_RELEASE_ID \"\$_catalog_root/current.next\"
+  install -o root -g macprovider -m 0640 \
+    \"\$_catalog_root/releases/$AUTOTUNE_RELEASE_DIR_NAME/tier2-catalog.json\" \
+    $CATALOG_REMOTE_PATH_CANONICAL
+  ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME \"\$_catalog_root/current.next\"
   mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"
 "
 log "step 7/9: enable + start coordinator service"
@@ -2764,6 +2777,7 @@ for STATIC_SPEC in \
 done
 cp "$AUTOTUNE_RELEASE_MANIFEST" "$STATIC_SMOKE_DIR/release.json"
 cp "$AUTOTUNE_TRUSTED_KEYS" "$STATIC_SMOKE_DIR/trusted-keys.json"
+cp "$AUTOTUNE_TIER2_JSON" "$STATIC_SMOKE_DIR/tier2-catalog.json"
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify-directory --directory "$STATIC_SMOKE_DIR"
 AUTOTUNE_STATUS_BODY="$STATIC_SMOKE_DIR/autotune-release-status.json"
 STATUS=$(curl -sS -o "$AUTOTUNE_STATUS_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN/v1/autotune-release")
@@ -3019,6 +3033,7 @@ try:
         "autotune-candidates.json.sig",
         "demand-rank.json",
         "demand-rank.json.sig",
+        "tier2-catalog.json",
     )
     hashes = {}
     for name in names:
@@ -3107,7 +3122,8 @@ if ! python3 - \
   "$STATIC_AUTOTUNE_JSON" \
   "$STATIC_AUTOTUNE_SIG" \
   "$STATIC_DEMAND_JSON" \
-  "$STATIC_DEMAND_SIG" <<'PY'
+  "$STATIC_DEMAND_SIG" \
+  "$AUTOTUNE_TIER2_JSON" <<'PY'
 import hashlib, json, pathlib, re, sys
 
 proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))

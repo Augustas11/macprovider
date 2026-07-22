@@ -20,6 +20,7 @@ REQUIRED_ROLES = (
     "catalog_demand",
     "catalog_demand_signature",
     "catalog_manifest",
+    "catalog_tier2",
     "catalog_trusted_keys",
     "compatibility_manifest",
     "coordinator",

@@ -277,7 +277,7 @@ install -m 0755 "$coordinator_cli" "$output_dir/coordinator-cli-linux-amd64"
 install -m 0755 "$gateway" "$output_dir/gateway-linux-amd64"
 install -m 0644 "$toolchain" "$output_dir/release-toolchain.json"
 install -m 0644 "$cli_work/compatibility-set.json" "$output_dir/compatibility-set.json"
-for catalog_name in release.json trusted-keys.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+for catalog_name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
   install -m 0644 "$cli_work/catalog-release/$catalog_name" "$output_dir/$catalog_name"
 done
 
@@ -312,6 +312,7 @@ artifact_arguments=(
   --artifact "gateway=$output_dir/gateway-linux-amd64"
   --artifact "compatibility_manifest=$output_dir/compatibility-set.json"
   --artifact "catalog_manifest=$output_dir/release.json"
+  --artifact "catalog_tier2=$output_dir/tier2-catalog.json"
   --artifact "catalog_trusted_keys=$output_dir/trusted-keys.json"
   --artifact "catalog_candidates=$output_dir/autotune-candidates.json"
   --artifact "catalog_candidates_signature=$output_dir/autotune-candidates.json.sig"

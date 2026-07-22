@@ -22,6 +22,7 @@ import urllib.request
 CATALOG_FILES = (
     "release.json",
     "trusted-keys.json",
+    "tier2-catalog.json",
     "autotune-candidates.json",
     "autotune-candidates.json.sig",
     "demand-rank.json",

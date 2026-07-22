@@ -74,6 +74,7 @@ validate_artifact_entries() {
   local has_metal=0
   local has_catalog_manifest=0
   local has_catalog_keyring=0
+  local has_catalog_tier2=0
   local has_catalog_candidates=0
   local has_catalog_candidates_signature=0
   local has_catalog_demand=0
@@ -134,6 +135,9 @@ validate_artifact_entries() {
       catalog-release/trusted-keys.json)
         has_catalog_keyring=$((has_catalog_keyring + 1))
         ;;
+      catalog-release/tier2-catalog.json)
+        has_catalog_tier2=$((has_catalog_tier2 + 1))
+        ;;
       catalog-release/autotune-candidates.json)
         has_catalog_candidates=$((has_catalog_candidates + 1))
         ;;
@@ -169,6 +173,7 @@ EOF
      { [ "$version_major" -eq 1 ] && [ "$version_minor" -eq 8 ] && [ "$version_patch" -ge 31 ]; }; then
     [ "$has_catalog_manifest" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/release.json"
     [ "$has_catalog_keyring" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/trusted-keys.json"
+    [ "$has_catalog_tier2" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/tier2-catalog.json"
     [ "$has_catalog_candidates" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/autotune-candidates.json"
     [ "$has_catalog_candidates_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/autotune-candidates.json.sig"
     [ "$has_catalog_demand" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json"

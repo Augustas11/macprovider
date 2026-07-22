@@ -245,6 +245,7 @@ for requirement in (
     "gateway=$gateway_asset",
     "compatibility_manifest=$compatibility_manifest",
     "catalog_trusted_keys=trusted-keys.json",
+    "catalog_tier2=tier2-catalog.json",
     "pearl_metadata=$pearl_metadata",
     "pearl_metadata_signature=$pearl_metadata_sig",
 ):
@@ -255,6 +256,7 @@ if "ops/pearl-updater/release-signing-public.pem" not in prepare:
 for asset in (
     "release.json",
     "trusted-keys.json",
+    "tier2-catalog.json",
     "autotune-candidates.json",
     "autotune-candidates.json.sig",
     "demand-rank.json",

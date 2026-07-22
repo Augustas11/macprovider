@@ -5258,6 +5258,7 @@ validate_staged_entries() {
   has_bundled_metallib=0
   has_catalog_manifest=0
   has_catalog_keyring=0
+  has_catalog_tier2=0
   has_catalog_candidates=0
   has_catalog_candidates_signature=0
   has_catalog_demand=0
@@ -5326,6 +5327,9 @@ validate_staged_entries() {
       catalog-release/trusted-keys.json)
         has_catalog_keyring=1
         ;;
+      catalog-release/tier2-catalog.json)
+        has_catalog_tier2=1
+        ;;
       catalog-release/autotune-candidates.json)
         has_catalog_candidates=1
         ;;
@@ -5351,6 +5355,7 @@ EOF
   catalog_member_count=$((
     has_catalog_manifest +
     has_catalog_keyring +
+    has_catalog_tier2 +
     has_catalog_candidates +
     has_catalog_candidates_signature +
     has_catalog_demand +
@@ -5364,6 +5369,7 @@ EOF
     [ "$has_metallib" -eq 1 ] || die 5 "$label does not contain mlx.metallib"
     [ "$has_catalog_manifest" -eq 1 ] || die 5 "$label does not contain catalog-release/release.json"
     [ "$has_catalog_keyring" -eq 1 ] || die 5 "$label does not contain catalog-release/trusted-keys.json"
+    [ "$has_catalog_tier2" -eq 1 ] || die 5 "$label does not contain catalog-release/tier2-catalog.json"
     [ "$has_catalog_candidates" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json"
     [ "$has_catalog_candidates_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json.sig"
     [ "$has_catalog_demand" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json"

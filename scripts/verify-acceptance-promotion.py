@@ -129,6 +129,7 @@ def verify_directory(args: argparse.Namespace) -> None:
         "compatibility-set.json",
         "release.json",
         "trusted-keys.json",
+        "tier2-catalog.json",
         "autotune-candidates.json",
         "autotune-candidates.json.sig",
         "demand-rank.json",
@@ -244,6 +245,7 @@ def verify_directory(args: argparse.Namespace) -> None:
     catalog_names = {
         "release.json",
         "trusted-keys.json",
+        "tier2-catalog.json",
         "autotune-candidates.json",
         "autotune-candidates.json.sig",
         "demand-rank.json",

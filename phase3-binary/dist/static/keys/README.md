@@ -44,7 +44,8 @@ The runtime verification model relies on:
    `scripts/resign-autotune-static.sh` locally. It never enters
    git, CI logs, or `coordinator.streamvc.live`.
 3. **Deployment** copies the freshly-signed `autotune-candidates.json`
-   / `demand-rank.json` and their `.sig` sidecars to Pearl VPS via
+   / `demand-rank.json`, their `.sig` sidecars, and the release-bound signed
+   `tier2-catalog.json` to Pearl VPS via
    `phase4-coordinator/dist/deploy-pearl-vps.sh`; the coordinator buyer
    mux serves them under `/v1/demand-rank` and `/v1/autotune-candidates`.
 
