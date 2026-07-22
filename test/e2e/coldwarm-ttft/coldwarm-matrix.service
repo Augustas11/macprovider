@@ -1,0 +1,31 @@
+# macprovider cold/warm TTFT — MATRIX rebuild (systemd oneshot).
+#
+# Reads the accumulated NDJSON store and rewrites the matrix (Prometheus textfile
+# + JSON artifact + advisory calibration recommendations). No token needed; reads
+# the local store only. Companion to coldwarm-warm.service. See that unit's
+# header for install steps.
+[Unit]
+Description=macprovider cold/warm TTFT — rebuild matrix + calibration from store
+
+[Service]
+Type=oneshot
+User=macprovider
+Group=macprovider
+EnvironmentFile=-/etc/macprovider/coldwarm-ttft.env
+Environment=COLDWARM_NODE_BIN=/usr/bin/node
+Environment=COLDWARM_STORE=/var/lib/macprovider/coldwarm-ttft/coldwarm-samples.ndjson
+Environment=COLDWARM_METRICS_OUT=/var/lib/macprovider/coldwarm-ttft/coldwarm.prom
+Environment=COLDWARM_JSON_OUT=/var/lib/macprovider/coldwarm-ttft/artifacts
+ExecStart=/bin/bash /opt/macprovider/coldwarm-ttft/run-coldwarm.sh --build-matrix
+TimeoutStartSec=120
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/macprovider/coldwarm-ttft
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=coldwarm-ttft
