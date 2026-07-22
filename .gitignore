@@ -75,3 +75,6 @@ phase4-coordinator/stats.test
 .deepsec-local/
 test/network-harness/artifacts/
 test/network-harness/harness
+
+# Local audit scratchpads
+scratchpad/
