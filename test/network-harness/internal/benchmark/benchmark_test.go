@@ -627,6 +627,33 @@ func TestB8_CacheReuse_Warn(t *testing.T) {
 	}
 }
 
+func TestB8_CacheReuse_BandBoundaries(t *testing.T) {
+	// Pin the exact reband boundaries: PASS >= 0.60, WARN [0.50, 0.60),
+	// FAIL < 0.50. Guards against a silent threshold drift.
+	cases := []struct {
+		name       string
+		cached     int64
+		prompt     int64
+		wantStatus Status
+	}{
+		{"at target 0.60 -> PASS", 1800, 3000, StatusPass},
+		{"at floor 0.50 -> WARN", 1500, 3000, StatusWarn},
+		{"just below floor 0.499 -> FAIL", 1497, 3000, StatusFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results := []buyer.Result{okPrimer()}
+			for i := 0; i < 6; i++ {
+				results = append(results, makeCacheResult(300, "cached", true, tc.cached, tc.prompt))
+			}
+			res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
+			if got := res.Verdicts[0].Status; got != tc.wantStatus {
+				t.Fatalf("reuse %.4f: want %s, got %s: %s", float64(tc.cached)/float64(tc.prompt), tc.wantStatus, got, res.Verdicts[0].Detail)
+			}
+		})
+	}
+}
+
 func TestB8_CacheReuse_Fail_Collapsed(t *testing.T) {
 	// Cache collapsed: every cached turn reports cached_prompt_tokens=0
 	// but the field IS present → reuse 0.0 < 0.50 → FAIL (armed, not SKIP).

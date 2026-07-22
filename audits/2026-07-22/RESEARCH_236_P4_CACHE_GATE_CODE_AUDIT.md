@@ -24,7 +24,12 @@ prefix-cache reuse win (#376). Files:
   added to the known-invariants map.
 - `internal/benchmark/benchmark.go` — `CacheReuseMetrics`, compute of
   reuse ratios + cached/uncached TTFT split, `evalB8`/`evalB9`, case
-  dispatch, provisional threshold constants.
+  dispatch. CALIBRATED threshold constants (RE-AUDIT R6): B8 armed
+  `CacheReuseTarget=0.60` / `CacheReuseBareMin=0.50` (PASS ≥0.60, WARN
+  [0.50,0.60), FAIL <0.50), calibrated from the 0.725 prod baseline; B9
+  record-only (SKIP, no Target/BareMin). Confirm the reband + its unit test
+  (WARN case at 0.55) + SPEC band text are internally consistent and that
+  `go test ./...` / `go vet` pass.
 - tests: `internal/buyer/loadgen_cache_reuse_test.go`,
   additions to `internal/benchmark/benchmark_test.go`.
 - `scenarios/16_sticky_cache_reuse.yaml`, `docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md` §3.5.

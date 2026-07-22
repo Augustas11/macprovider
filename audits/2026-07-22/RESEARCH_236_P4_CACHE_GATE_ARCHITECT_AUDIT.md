@@ -16,15 +16,18 @@ Files listed in the CODE-lane prompt in this directory.
    reuse (vs probe.mjs's multi-message approach)? Any way it silently
    measures 0 even when reuse IS working (e.g. prefix below cache
    granularity, cross-buyer cache pollution, provider eviction)?
-2. **Threshold design.** B8 floor 0.40 (vs measured 0.64) and B9 ratio 0.90
-   are PROVISIONAL — the 2026-07-22 prod baseline found 0 reuse on the
-   current pool, so a working floor could not be transcribed. Is shipping
-   provisional thresholds (clearly labelled) with a documented
-   calibration-pending note the right call, or should the gate ship
-   SKIP-only until a reuse-capable provider is present? Is FAIL-on-0
-   (present-but-zero) the correct semantics, or should sustained-0 be a
-   WARN to avoid a permanently-red gate on a pool that never supported
-   reuse?
+2. **Threshold design (RE-AUDIT R6 — post-reband).** The 2026-07-22 scenario-16
+   prod baseline measured a median reuse of **0.725** over 7 warm turns
+   (corroborating #376's ~0.64, range 0.638-0.70); the gate is ARMED and
+   CALIBRATED (not provisional). Following the R5 architect HIGH — that a soft
+   WARN below the advertised floor broke the fail-loud promise — B8 was rebanded
+   to **PASS ≥ 0.60 (target) / WARN [0.50, 0.60) / FAIL < 0.50 (hard floor)**, so
+   0.50 is now the actual FAIL boundary. B9 is record-only (always SKIP, no
+   gate-shaped Target/BareMin). Confirm: (a) the R5 HIGH is fully resolved — a
+   real regression through 0.50 now FAILs loud, not WARNs; (b) the SPEC-NETWORK-
+   BENCHMARK B8 band text matches the implementation; (c) the reband introduced
+   no new correctness/coherence issue. Is FAIL-on-present-but-collapsed the
+   correct semantics vs SKIP-on-absent?
 3. **SKIP vs FAIL taxonomy.** Is the SKIP (usage absent / no cached turns)
    vs FAIL (present-but-collapsed) split coherent with how B5/B6/B7 already
    SKIP, and does it avoid both false-green and false-red?

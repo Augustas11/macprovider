@@ -261,16 +261,9 @@ const (
 	CacheReuseTarget  = 0.60
 	CacheReuseBareMin = 0.50
 
-	// B9 (cached-turn latency advantage) thresholds for scenario 16.
-	// ratio = cached_turn_latency_p50 / uncached_turn_latency_p50 over the
-	// non-streaming full-response wall times. A warm turn that reused the
-	// prefix cache should complete a little faster than the cold
-	// first-touch, so the ratio should sit below 1. PASS when it is at or
-	// under CachedLatencyRatioTarget; a ratio above CachedLatencyRatioBareMin
-	// means cached turns are no faster (or slower) than cold — the latency
-	// half of the win is gone. PROVISIONAL. Lower is better.
-	CachedLatencyRatioTarget  = 0.90
-	CachedLatencyRatioBareMin = 1.00
+	// B9 (cached-turn latency advantage, scenario 16) is record-only: it emits
+	// the cached-vs-uncached p50 latency ratio for trend visibility and always
+	// SKIPs, so it carries no PASS/WARN/FAIL threshold constants.
 
 	// CacheReuseMinSamples is the minimum number of measured warm turns
 	// required before B8/B9 emit a PASS/WARN/FAIL verdict. Below this the

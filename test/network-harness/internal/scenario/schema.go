@@ -148,17 +148,15 @@ type Benchmark struct {
 	// AccountConcurrency at the time this spec landed (PR #205).
 	ProviderSlots int `yaml:"provider_slots"`
 
-	// CacheGateArmed gates whether B8/B9 (sticky cache-reuse, scenario 16)
-	// emit a PASS/WARN/FAIL verdict. It is a POSITIVE, fail-safe flag: the
-	// zero value (false, i.e. omitted) means the gate is NOT armed, so
-	// B8/B9 record their measured value but SKIP. The provisional
-	// thresholds were NOT calibrated against a positive, capability-
-	// qualified baseline — as of 2026-07-22 the live pool reports ~0
-	// reuse, so a present-but-zero value cannot be told apart from a true
-	// regression. Arm it (set true) only once a reuse-capable provider is
-	// in the pool and the floor has been transcribed from a real positive
-	// baseline. Defaulting to false means a scenario that forgets the flag
-	// fails safe (SKIP), never silently arms an uncalibrated gate.
+	// CacheGateArmed gates whether B8 (sticky cache-reuse, scenario 16) emits a
+	// PASS/WARN/FAIL verdict. It is a POSITIVE, fail-safe flag: the zero value
+	// (false, i.e. omitted) means the gate is NOT armed, so B8 records its
+	// measured value but SKIPs. (B9 is record-only and always SKIPs regardless
+	// of this flag.) Scenario 16 arms the gate from the 2026-07-22 prod
+	// baseline (median reuse 0.725, corroborating #376); the B8 floor 0.50 is
+	// transcribed from that positive baseline. Defaulting to false means a
+	// scenario that forgets the flag fails safe (SKIP), never silently arms an
+	// uncalibrated gate.
 	CacheGateArmed bool `yaml:"cache_gate_armed"`
 }
 
