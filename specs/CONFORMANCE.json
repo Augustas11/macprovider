@@ -997,6 +997,35 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/535",
         "rationale": "Partial #535 lands coordinator durable events + operator GETs; provider diagnostic_status over WSS, pearlctl inspect/alerts, and HTTPS beacon remain deferred."
       }
+    },
+    {
+      "spec_id": "SPEC-036",
+      "title": "Compute-Integrity Receipt Companion",
+      "version": "v0.1",
+      "path": "specs/SPEC-036-compute-integrity-receipt.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "compute-integrity-settlement"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-026",
+        "SPEC-030"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
     }
   ],
   "requirements": [

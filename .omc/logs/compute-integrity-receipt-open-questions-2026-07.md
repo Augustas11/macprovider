@@ -1,7 +1,7 @@
 # Compute-Integrity Receipt Open Questions
 
 **Date:** 2026-07-10
-**Spec:** `specs/SPEC-030-compute-integrity-receipt.md`
+**Spec:** `specs/SPEC-036-compute-integrity-receipt.md`
 **Research memo:** `docs/research/compute-integrity-receipt-2026-07.md`
 
 Maintainer-input items before moving beyond v0.1-draft:

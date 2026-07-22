@@ -3,7 +3,7 @@
 **Date:** 2026-07-10
 **Branch:** `feat/compute-integrity-receipt-companion`
 **Requested by:** `specs/RESEARCH_COMPUTE_INTEGRITY_RECEIPT_PROMPT.md`
-**Spec draft:** `specs/SPEC-030-compute-integrity-receipt.md`
+**Spec draft:** `specs/SPEC-036-compute-integrity-receipt.md`
 
 ## Summary
 
@@ -41,9 +41,9 @@ Recommended v0.1 shape:
   about $0.0118/canary, about $11.80/day at N=3, at the current high MoE
   rate-card row if paid as token opportunity cost.
 
-The hard limitation is adversarial: SPEC-029 v0.1 probes are overt and explicitly
-do not prove compute integrity (`specs/SPEC-029-losslessness-probe.md:72`,
-`specs/SPEC-029-losslessness-probe.md:584`). This companion can close the
+The hard limitation is adversarial: SPEC-030 v0.1 probes are overt and explicitly
+do not prove compute integrity (`specs/SPEC-030-losslessness-probe.md:72`,
+`specs/SPEC-030-losslessness-probe.md:584`). This companion can close the
 settlement policy gap for measurable drift, misconfiguration, degraded model
 paths, and non-perfect cheating. It must not claim cryptographic proof that a
 malicious provider honestly ran the target model until a later covert or
@@ -68,17 +68,17 @@ Local anchors:
   `phase4-coordinator/internal/billing/settlement_verifier.go:79`,
   `phase4-coordinator/internal/billing/settlement_verifier.go:321`,
   `phase4-coordinator/internal/billing/settlement_verifier.go:548`.
-- SPEC-029 probe primitive and limits:
-  `specs/SPEC-029-losslessness-probe.md:3`,
-  `specs/SPEC-029-losslessness-probe.md:10`,
-  `specs/SPEC-029-losslessness-probe.md:28`,
-  `specs/SPEC-029-losslessness-probe.md:60`,
-  `specs/SPEC-029-losslessness-probe.md:120`,
-  `specs/SPEC-029-losslessness-probe.md:327`,
-  `specs/SPEC-029-losslessness-probe.md:397`,
-  `specs/SPEC-029-losslessness-probe.md:552`,
-  `specs/SPEC-029-losslessness-probe.md:560`,
-  `specs/SPEC-029-losslessness-probe.md:576`.
+- SPEC-030 probe primitive and limits:
+  `specs/SPEC-030-losslessness-probe.md:3`,
+  `specs/SPEC-030-losslessness-probe.md:10`,
+  `specs/SPEC-030-losslessness-probe.md:28`,
+  `specs/SPEC-030-losslessness-probe.md:60`,
+  `specs/SPEC-030-losslessness-probe.md:120`,
+  `specs/SPEC-030-losslessness-probe.md:327`,
+  `specs/SPEC-030-losslessness-probe.md:397`,
+  `specs/SPEC-030-losslessness-probe.md:552`,
+  `specs/SPEC-030-losslessness-probe.md:560`,
+  `specs/SPEC-030-losslessness-probe.md:576`.
 - SPEC-026 onboarding seams:
   `specs/SPEC-026-browserless-provider-onboarding.md:1893`,
   `specs/SPEC-026-browserless-provider-onboarding.md:1905`,
@@ -144,13 +144,13 @@ Additive verifier surface:
   quorum count, reference-fault check version, window id, circuit-breaker hold
   status/scope, expiry cause, and reason.
 - Keep `SettlementVerifyResult.Outcome` as the current enum.
-- Add a reason from the closed SPEC-030 enum when the inherited fleet-time state
+- Add a reason from the closed SPEC-036 enum when the inherited fleet-time state
   blocks settlement, including `compute_drift_quarantined` for
   `quarantined_compute_drift`.
 - Do not add fields to the v0.4 receipt tuple or `usage`; SPEC-015 and
-  SPEC-029 both forbid optional receipt/usage expansion for these probes
+  SPEC-030 both forbid optional receipt/usage expansion for these probes
   (`specs/SPEC-015-receipts.md:4051`,
-  `specs/SPEC-029-losslessness-probe.md:552`).
+  `specs/SPEC-030-losslessness-probe.md:552`).
 
 ## B. Reference Distribution Source
 
@@ -193,10 +193,10 @@ Refresh cadence:
 
 ## C. Threshold Semantics
 
-SPEC-029 already defines TV lower/upper interval semantics for compact
-probability snapshots (`specs/SPEC-029-losslessness-probe.md:54`) and draft
+SPEC-030 already defines TV lower/upper interval semantics for compact
+probability snapshots (`specs/SPEC-030-losslessness-probe.md:54`) and draft
 defaults for losslessness warning/quarantine thresholds
-(`specs/SPEC-029-losslessness-probe.md:397`). Compute-integrity should reuse the
+(`specs/SPEC-030-losslessness-probe.md:397`). Compute-integrity should reuse the
 same metric shape but compare provider-vs-reference instead of plain-vs-spec.
 
 Terminology:
@@ -223,7 +223,7 @@ tau_quarantine_position =
   max(0.120, baseline_position_tv_upper_p99 + 0.080)
 ```
 
-The fixed floors are intentionally wider than SPEC-029 losslessness defaults
+The fixed floors are intentionally wider than SPEC-030 losslessness defaults
 because this comparison crosses machines and may compare different MLX runtime
 builds, quantization kernels, and sampler implementations. The baseline term is
 model/profile-specific: high-temperature and high-entropy prompts naturally have
@@ -310,12 +310,12 @@ reference and runtime calibration are still young.
 ## E. SPEC-011 Warm-Swap Interaction
 
 The compute-integrity window must reset across target-generation boundaries.
-SPEC-029 already defines `target_generation` as coordinator-owned and
+SPEC-030 already defines `target_generation` as coordinator-owned and
 incremented on target hash change, completed warm-swap, runtime reload,
 unproven reconnect continuity, or same-hash target reload
-(`specs/SPEC-029-losslessness-probe.md:64`). SPEC-029 also says probe results
+(`specs/SPEC-030-losslessness-probe.md:64`). SPEC-030 also says probe results
 must not carry across target/draft generation boundaries
-(`specs/SPEC-029-losslessness-probe.md:560`).
+(`specs/SPEC-030-losslessness-probe.md:560`).
 
 Compute-integrity should use the same target-generation rule:
 
@@ -351,8 +351,8 @@ Recommended surfaces:
 Reasoning:
 
 Coordinator-issued probes are tied to provider-control auth, nonce/replay
-checks, bounded K, freshness, and audit logging in SPEC-029
-(`specs/SPEC-029-losslessness-probe.md:120`). A buyer or external auditor cannot
+checks, bounded K, freshness, and audit logging in SPEC-030
+(`specs/SPEC-030-losslessness-probe.md:120`). A buyer or external auditor cannot
 be assumed to have the same scheduling, identity, or anti-abuse context.
 Third-party measurements can be useful allegations or diagnostic evidence, but
 they should not be admissible for automatic quarantine until a later spec defines
@@ -362,7 +362,7 @@ auth, rate limits, challenge selection, and abuse handling.
 
 Phase 0 - draft/spec audit:
 
-- Land `SPEC-030` as draft.
+- Land `SPEC-036` as draft.
 - Do not modify SPEC-015, SPEC-022, or code.
 
 Phase 1 - observe/warn-only:
@@ -374,7 +374,7 @@ Phase 1 - observe/warn-only:
   provider credit, earnings, payout readiness, or buyer-facing claims. This
   matches SPEC-022 observe-mode semantics
   (`specs/SPEC-022-verified-model-settlement.md:335`).
-- Prepare approved disclosure copy before enforce: SPEC-030 is not
+- Prepare approved disclosure copy before enforce: SPEC-036 is not
   cryptographic proof, hardware integrity, or binary integrity; `warn` remains
   payable in enforce when payable-window prerequisites are satisfied and the
   latest valid result is warning-class below the quarantine-candidate threshold;
@@ -412,7 +412,7 @@ Phase 3 - enforce:
   stale, unreadable, or under-sampled states fail closed until clear rules pass.
 - If state is `quarantined_compute_drift`, settlement returns `quarantined` with
   reason `compute_drift_quarantined`; other non-payable compute-integrity states
-  map to the closed SPEC-030 reason enum.
+  map to the closed SPEC-036 reason enum.
 - `zero_settled` remains reserved for verified non-creditable terminal outcomes,
   not trust failures (`specs/SPEC-022-verified-model-settlement.md:545`).
 
@@ -424,8 +424,8 @@ Assumptions for concrete budgeting:
   keys = 1,000 covered keys.
 - Cadence: 1 compute-integrity canary per stable provider/model/hash/tokenizer/
   sampler-stage/profile key per day.
-- Canary shape inherits SPEC-029 bounds: at most 4 prompts and 8 stochastic
-  measurement positions per result (`specs/SPEC-029-losslessness-probe.md:126`).
+- Canary shape inherits SPEC-030 bounds: at most 4 prompts and 8 stochastic
+  measurement positions per result (`specs/SPEC-030-losslessness-probe.md:126`).
 - Average measured context: 512 prompt-token-equivalent per position.
 - Daily reference workload per active reference replica:
   `1,000 * 4 * 8 * 512 = 16,384,000` prompt-token-equivalent forward-pass
@@ -461,8 +461,8 @@ Consensus telemetry opportunity cost:
 Funding decision:
 
 - v0.1 should be network/operator funded, not buyer pass-through. Buyers did not
-  request the probes, probes are non-billable under SPEC-029
-  (`specs/SPEC-029-losslessness-probe.md:135`), and adding buyer-visible usage
+  request the probes, probes are non-billable under SPEC-030
+  (`specs/SPEC-030-losslessness-probe.md:135`), and adding buyer-visible usage
   would violate the strict SPEC-015 v0.4 `usage` shape.
 - Future staker-reward or provider-quality budgets can absorb consensus
   telemetry, but enforce-mode reference budgets still require at least two
@@ -472,8 +472,8 @@ Funding decision:
 ## Self-Review
 
 - Every A-H question is answered.
-- SPEC-029 prerequisite is satisfied by `specs/SPEC-029-losslessness-probe.md`
-  at v0.1-draft (`specs/SPEC-029-losslessness-probe.md:3`).
+- SPEC-030 prerequisite is satisfied by `specs/SPEC-030-losslessness-probe.md`
+  at v0.1-draft (`specs/SPEC-030-losslessness-probe.md:3`).
 - Reference-source recommendation is explicit: hybrid is recommended, trusted
   reference is enforcement authority, and trusted-reference-only enforce remains
   an open question.

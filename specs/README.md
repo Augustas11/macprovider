@@ -44,6 +44,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.6.1 | draft | pending | pending: 1 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.5 | normative | pending | pending: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.1.1 | draft | complete | pending: 5 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
+| SPEC-036 | Compute-Integrity Receipt Companion | v0.1 | draft | pending | pending corpus migration | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

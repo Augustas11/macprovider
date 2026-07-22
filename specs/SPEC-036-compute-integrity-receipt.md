@@ -1,13 +1,26 @@
-# SPEC-030 Compute-Integrity Receipt Companion
+# SPEC-036 — Compute-Integrity Receipt Companion
 
 **Status:** v0.1-draft
 **Date:** 2026-07-10
-**Depends on:** SPEC-015 v0.4.2, SPEC-022 v0.1.4, SPEC-026, SPEC-029 v0.1-draft
+**Depends on:** SPEC-015 v0.4.2, SPEC-022 v0.1.5, SPEC-026 v0.26, SPEC-030 v0.1 (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Numbering + dependency note (2026-07-22).** This spec was drafted as `SPEC-030`
+against `SPEC-029` before the 2026-07-10 corpus-hygiene renumber. It is now
+canonical **SPEC-036** to resolve the collision with
+`SPEC-030-losslessness-probe.md`, and its shared measurement primitive dependency
+is rewired from the pre-renumber `SPEC-029` to canonical **SPEC-030 (Losslessness
+Probe)**, which owns the distribution-snapshot / `support_selection_v1` /
+TV-interval / authenticated-probe-transport machinery this spec composes on. See
+`beta/DECISION_CRITERIA.md` Entry 181 for the compose-vs-duplicate reconciliation.
+The settlement-bearing wire constant remains `compute_integrity_probe_v1`
+(distinct from SPEC-030's non-settlement `losslessness_probe_v1`); it is the
+SPEC-036 carrier and is intentionally NOT renamed, since nothing is shipped yet
+and a distinct settlement profile is a load-bearing safety boundary (FR-6).
 
 ## 1. Purpose
 
-SPEC-030 defines an additive compute-integrity drift gate for MacProvider paid
+SPEC-036 defines an additive compute-integrity drift gate for MacProvider paid
 settlement. It extends the SPEC-022 settlement decision with coordinator-owned
 provider/model drift state while preserving the existing SPEC-015 v0.4 receipt
 wire shape.
@@ -18,7 +31,7 @@ prompt/output hashes, usage, and terminal state. They do not prove that the
 provider actually computed the output with the pinned model if the provider can
 lie about its local computation and still sign a syntactically valid receipt.
 
-SPEC-030 adds a measurable drift state:
+SPEC-036 adds a measurable drift state:
 
 ```text
 quarantined_compute_drift
@@ -36,8 +49,9 @@ In scope:
 - Coordinator-owned compute-integrity canary state keyed by provider, model,
   target model hash, tokenizer identity, sampler stage, target generation,
   sampling profile, corpus version, and threshold version.
-- Provider-vs-reference TV-distance measurement using the SPEC-029
-  distribution snapshot primitive.
+- Provider-vs-reference TV-distance measurement composed on the SPEC-030
+  (Losslessness Probe) distribution-snapshot / `support_selection_v1` /
+  TV-interval primitive, specialized to a provider-vs-trusted-reference arm.
 - Hybrid reference-source policy: trusted coordinator reference as enforcement
   authority, N-provider consensus as telemetry.
 - Additive settlement-verifier context and reason code.
@@ -51,8 +65,10 @@ Out of scope:
 - Any change to SPEC-015 v0.4 receipt tuple fields.
 - Any change to SPEC-015 v0.4 `usage` fields.
 - Rewriting SPEC-022's top-level settlement outcome enum.
-- Designing the probe transport or distribution snapshot mechanism; SPEC-030
-  inherits SPEC-029.
+- Redefining the probe transport or distribution-snapshot mechanism; SPEC-036
+  composes on SPEC-030 (Losslessness Probe) §FR-3 (transport/auth/load bounds),
+  §FR-4 (probe identity/replay binding), §FR-7 (`support_selection_v1`), and
+  §FR-9 (TV-interval computation) rather than re-specifying them.
 - Covert canaries or buyer-indistinguishable probes.
 - Hardware attestation, binary attestation, or cryptographic proof that a
   malicious provider honestly ran a model.
@@ -115,10 +131,10 @@ are `pre_temperature_logits`, `post_temperature_logits`, and
 `post_sampler_probabilities`. A policy MUST choose exactly one sampler stage for
 each covered key. V0.1 enforce mode supports only `post_sampler_probabilities`,
 defined as the full-vocabulary next-token probability distribution after the
-sampling-profile processors and before the stochastic draw, mapped to SPEC-029's
+sampling-profile processors and before the stochastic draw, mapped to SPEC-030's
 `post_processors_post_sampling_profile_next_emitted_token` capture point.
 `pre_temperature_logits` and `post_temperature_logits` are observe/warn-only
-until a future SPEC-029 addendum defines their provider-side capture mechanism
+until a future SPEC-030 addendum defines their provider-side capture mechanism
 and normalization basis.
 
 **Compute-integrity state:** One of `unknown`, `pending`, `verified`,
@@ -146,14 +162,14 @@ stale reference events, or uncovered sampling profiles MUST fail closed.
 
 ## 4. Threat Model
 
-SPEC-030 v0.1 is not a cryptographic proof of honest computation. It detects
+SPEC-036 v0.1 is not a cryptographic proof of honest computation. It detects
 measurable divergence from an approved reference distribution under
 coordinator-issued probes. It is useful against implementation drift, stale or
 wrong model artifacts, broken sampler paths, low-effort substitution, and
 providers that cannot make their output distribution match the trusted
 reference.
 
-SPEC-030 v0.1 does not defeat a malicious provider that can identify overt
+SPEC-036 v0.1 does not defeat a malicious provider that can identify overt
 probes and return perfect reference-matching distributions only for those
 probes. Covert or independently verifiable probes require a later spec because
 they interact with buyer traffic, billing, receipts, and abuse resistance.
@@ -211,16 +227,17 @@ buyer-facing verification claims.
 
 `enforce` MUST refuse activation unless:
 
-- SPEC-029 is at least v0.1-draft and the implementation exposes the inherited
-  authentication, replay, load-bound, and TV-bound primitives required by
-  SPEC-030 FR-6 and FR-7.
+- SPEC-030 (Losslessness Probe) is at least v0.1-draft and the implementation
+  exposes the inherited authentication, replay, load-bound, and TV-bound
+  primitives (SPEC-030 §FR-3, §FR-4, §FR-7, §FR-9) required by SPEC-036 FR-6 and
+  FR-7.
 - All covered models have signed catalog entries.
 - At least two independent fresh trusted reference events are active for every
   covered `(model_id, target_model_hash, tokenizer_identity, sampler_stage,
   sampling_profile, corpus_version, threshold_version)` key. Single-reference
   operation is allowed only for observe or warn-only keys and MUST NOT activate
   enforce for that key.
-- The active `compute_integrity_settlement.sampler_stage` has a SPEC-030-defined
+- The active `compute_integrity_settlement.sampler_stage` has a SPEC-036-defined
   provider-side capture mechanism and coherent `normalization_basis`. In v0.1,
   enforce activation MUST refuse `pre_temperature_logits` and
   `post_temperature_logits`.
@@ -229,7 +246,7 @@ buyer-facing verification claims.
   requirements.
 - Settlement storage can persist request-start compute-integrity state.
 - Billing and payout storage already exclude non-`verified` SPEC-022 outcomes.
-- Disclosure surfaces use approved copy that says SPEC-030 is an overt
+- Disclosure surfaces use approved copy that says SPEC-036 is an overt
   distribution-drift detector, not cryptographic proof of honest computation,
   hardware integrity, or binary integrity.
 - Signed third-party audit bundles from FR-13 are available for every
@@ -239,18 +256,18 @@ buyer-facing verification claims.
 
 ### FR-2 Receipt compatibility
 
-SPEC-030 MUST NOT add fields to SPEC-015 v0.4 receipts.
+SPEC-036 MUST NOT add fields to SPEC-015 v0.4 receipts.
 
-SPEC-030 MUST NOT add fields to SPEC-015 v0.4 `usage`.
+SPEC-036 MUST NOT add fields to SPEC-015 v0.4 `usage`.
 
-SPEC-030 MUST NOT require a future `receipt_version` to enter warn-only mode.
+SPEC-036 MUST NOT require a future `receipt_version` to enter warn-only mode.
 
 Future receipt versions MAY bind a digest of the request-start
-compute-integrity state, but that is outside SPEC-030 v0.1.
+compute-integrity state, but that is outside SPEC-036 v0.1.
 
 ### FR-3 Settlement outcome mapping
 
-SPEC-030 MUST NOT introduce a fifth top-level SPEC-022 settlement outcome in
+SPEC-036 MUST NOT introduce a fifth top-level SPEC-022 settlement outcome in
 v0.1.
 
 When mode is `enforce` and the covered request's request-start
@@ -262,13 +279,13 @@ compute-integrity state is `quarantined_compute_drift`, settlement MUST return:
 `zero_settled` MUST NOT be used for compute-integrity drift because drift is a
 trust failure, not a verified non-creditable terminal outcome.
 
-SPEC-030 is an additional enforce-mode AND-gate on top of SPEC-022 receipt
+SPEC-036 is an additional enforce-mode AND-gate on top of SPEC-022 receipt
 verification. For covered enforce rows, compute-integrity quarantine overrides
 SPEC-022 R-8.1/R-8.4 final debit and provider-credit eligibility even when the
 SPEC-015 receipt is cryptographically valid. Implementations SHOULD record the
 orthogonal SPEC-015 cryptographic/schema verifier result in an internal audit
 field such as `receipt_crypto_result`, but SPEC-022 money rules MUST read the
-settlement field that SPEC-030 sets to `quarantined`.
+settlement field that SPEC-036 sets to `quarantined`.
 
 In enforce mode, a covered paid request MUST NOT create buyer final debit,
 provider credit, earnings visibility, settlement-sweep inclusion, or payout
@@ -484,28 +501,52 @@ catalog rotation, reference runtime/build update, runtime-build provenance diges
 change, signed golden-fixture validation digest change, tokenizer identity
 change, sampler stage change, corpus version change, or threshold version change.
 
-### FR-6 Probe schema and SPEC-029 inheritance
+### FR-6 Probe schema and SPEC-030 (Losslessness Probe) inheritance
 
-Compute-integrity probes MUST inherit only the SPEC-029 primitives listed here:
+Compute-integrity probes compose on the SPEC-030 (Losslessness Probe) shared
+measurement machinery and MUST inherit only the following SPEC-030 primitives, by
+the cited SPEC-030 sections, rather than re-specifying them:
 
-- Authenticated provider-control channel.
-- Single-use unpredictable nonce.
-- Expiry no more than 120 seconds after issuance.
-- Request/result digest binding.
-- K limited to 64 or 256.
-- At most 4 prompts and 8 stochastic measurement positions per result.
-- Per-provider concurrent compute-integrity probes limited to 1.
-- Provider probe work is non-billable.
-- TV lower/upper bound computation over compact distributions and tails.
+- Authenticated provider-control channel (SPEC-030 §FR-3).
+- Single-use unpredictable nonce (SPEC-030 §FR-3).
+- Expiry no more than 120 seconds after issuance (SPEC-030 §FR-3).
+- Request/result digest binding over an outer envelope with an inner `payload`
+  computed by RFC 8785/JCS (SPEC-030 §FR-4).
+- K limited to 64 or 256 (SPEC-030 §FR-3).
+- At most 4 prompts and 8 stochastic measurement positions per result
+  (SPEC-030 §FR-3).
+- Per-provider concurrent compute-integrity probes limited to 1 (SPEC-030 §FR-3).
+- Provider probe work is non-billable (SPEC-030 §FR-3, §FR-17).
+- The `support_selection_v1` shared-support construction rule (SPEC-030 §FR-7):
+  the numeric-ascending union of the two arms' top-K token ids, with
+  full-distribution probabilities reported over the union and tail mass outside
+  it. SPEC-036 carries this rule under the settlement-scoped constant
+  `compute_integrity_support_selection_v1` (its second arm is the coordinator-held
+  trusted reference, not SPEC-030's provider plain path); the construction
+  algorithm is identical and inherited by normative reference.
+- TV lower/upper bound computation over compact distributions and tails
+  (SPEC-030 §FR-9).
 
-SPEC-030 MUST NOT reuse SPEC-029's `losslessness_probe_v1` request/result
-payload fields for settlement-impacting compute-integrity probes. The
-compute-integrity probe profile name is `compute_integrity_probe_v1`.
-SPEC-029 prohibitions on settlement use apply to SPEC-029
-`losslessness_probe_v1` verdicts, not to SPEC-030 `compute_integrity_probe_v1`
-verdicts. SPEC-030 MUST still treat SPEC-029's losslessness results as
-non-settlement telemetry unless a later SPEC-029 addendum explicitly changes
-that boundary.
+SPEC-036 introduces exactly one genuinely new measurement arm on top of that
+inherited machinery: the comparison is **provider-vs-coordinator-held-trusted-
+reference** (cross-node), not SPEC-030's provider **plain-vs-spec** self-
+consistency. Everything downstream of the raw compact distributions that differs
+(reference admission/quorum, the settlement-gating consumer, and the
+`quarantined_compute_drift` state) is specified in FR-2/FR-3/FR-5/FR-10 of this
+spec and is not inherited.
+
+The two probe profiles are deliberately kept as distinct wire constants because
+their trust consumers differ: SPEC-030 `losslessness_probe_v1` is non-settlement
+implementation-health telemetry, while SPEC-036 `compute_integrity_probe_v1`
+gates paid settlement. SPEC-036 MUST NOT reuse SPEC-030's `losslessness_probe_v1`
+request/result payload fields, `type`, or `schema_version` for
+settlement-impacting compute-integrity probes. SPEC-030's prohibitions on
+settlement use apply to SPEC-030 `losslessness_probe_v1` verdicts, not to
+SPEC-036 `compute_integrity_probe_v1` verdicts. SPEC-036 MUST still treat
+SPEC-030's losslessness results as non-settlement telemetry unless a later
+SPEC-030 addendum explicitly changes that boundary. Sharing the `support_selection_v1`
+and TV-interval definitions across the two profiles is a normative-reference
+reuse of the same algorithm, not a reuse of the settlement-bearing wire payload.
 
 `compute_integrity_probe_v1.request` MUST use an outer envelope containing:
 
@@ -800,7 +841,7 @@ Clear rule:
 
 ### FR-11 Onboarding gate
 
-SPEC-030 MUST NOT block the SPEC-026 local App onboarding flow before identity
+SPEC-036 MUST NOT block the SPEC-026 local App onboarding flow before identity
 registration is complete.
 
 After identity registration and before covered paid routing, each new
@@ -903,7 +944,7 @@ The coordinator MUST audit:
 - State transition.
 - Enforce-mode activation/refusal.
 - Manual review clear/block decisions.
-- Every SPEC-030 settlement decision using the closed reason enum, including the
+- Every SPEC-036 settlement decision using the closed reason enum, including the
   captured request-start state, effective reason, circuit-breaker status,
   request-start snapshot digest, and settlement row id.
 
@@ -918,9 +959,9 @@ before enforce activation.
 
 The disclosure copy MUST state:
 
-- SPEC-030 is an overt distribution-drift detector against approved references.
-- SPEC-030 v0.1 is not cryptographic proof of honest computation.
-- SPEC-030 v0.1 is not hardware integrity, runtime binary integrity, or covert
+- SPEC-036 is an overt distribution-drift detector against approved references.
+- SPEC-036 v0.1 is not cryptographic proof of honest computation.
+- SPEC-036 v0.1 is not hardware integrity, runtime binary integrity, or covert
   canary attestation.
 - Covered models, policy mode, sampling-profile coverage, and
   unknown/pending/expired semantics.
@@ -937,7 +978,7 @@ The disclosure copy MUST state:
   FR-17 time-to-quarantine SLO and can be about 5 days at the default cadence.
 
 Buyer-facing claims such as "proved honest computation", "guaranteed model
-integrity", or "cryptographic compute proof" MUST NOT be used for SPEC-030 v0.1.
+integrity", or "cryptographic compute proof" MUST NOT be used for SPEC-036 v0.1.
 
 ### FR-16 Operator controls and manual review
 
@@ -1055,7 +1096,7 @@ The initial deployment budget MUST assume either:
 
 ## 6. Migration
 
-1. **Draft:** Land SPEC-030 and research memo. No code or existing spec edits.
+1. **Draft:** Land SPEC-036 and research memo. No code or existing spec edits.
 2. **Observe:** Implement reference and canary telemetry with no money effect.
 3. **Warn-only:** Emit onboarding readiness, drift, reference, disclosure, and
    audit-bundle telemetry with no money effect and no paid-routing block.
@@ -1092,7 +1133,7 @@ fresh-pass or manual-review clear rule succeeds.
 
 ## 7. Acceptance Criteria
 
-Before SPEC-030 can move toward LOCK:
+Before SPEC-036 can move toward LOCK:
 
 1. A threshold-calibration fixture covers records keyed by `(model_id,
    target_model_hash, tokenizer_identity, sampler_stage, sampling_profile,
@@ -1195,24 +1236,65 @@ Before SPEC-030 can move toward LOCK:
     that v0.1 enforce refuses sampler stages without defined capture and
     normalization semantics.
 
-## 8. Open Questions
+## 8. Resolved v0.1 Decisions
 
-1. Should v0.1 enforce allow trusted-reference-only mode with two active
-   independent trusted-reference nodes/events, or should funded hybrid mode be
-   mandatory for all enforce deployments?
-2. Are the initial fixed threshold floors (`0.015/0.030/0.060/0.120`) acceptable
-   for the first warn-only calibration period?
-3. Should the new-provider gate require 5 passes over 30 minutes, or a longer
-   24-hour window before paid routing for arbitrary providers?
-4. Should the proposed per-covered-key warn-only calibration gate be the minimum
-   enforce timeline: 30 warn-only days, at least 100 eligible canaries, at least
-   10 distinct stable provider identities when available, and at least one
-   relevant reference refresh after reference runtime/build, runtime-build
-   provenance digest, signed golden-fixture validation digest, tokenizer,
-   sampler-stage, corpus, threshold, or catalog change? Or should maintainers
-   require longer observation or larger per-key samples before activation?
-5. What capped non-buyer credit mechanism should fund consensus telemetry if
-   hybrid mode becomes mandatory?
+The five drafting open questions are resolved for v0.1 as follows. Each item
+marked **maintainer-approval-required at LOCK** is a defensible v0.1 default that
+the MacProvider SPEC Maintainers group must ratify before enforce activation; the
+default holds unless maintainers record a stricter value in the LOCK PR or
+`beta/DECISION_CRITERIA.md`.
+
+1. **Enforce reference mode — trusted-reference-only is permitted; funded hybrid
+   is NOT mandatory in v0.1.** Enforce for a covered key requires at least two
+   independent fresh trusted reference events (FR-1, FR-5); the coordinator-held
+   trusted reference is the sole enforcement authority. N-provider consensus is
+   telemetry-only and MUST NOT create automatic quarantine without a fresh
+   trusted-reference event (FR-5). Rationale: funded N≥3 independent-provider
+   participation is not available at beta scale, and two independence-checked
+   trusted references already give a defensible enforcement envelope; mandating
+   hybrid would block enforce indefinitely. Rejected alternative: mandatory
+   funded hybrid — deferred to a future version when consensus funding
+   (item 5) exists. *Maintainer-approval-required at LOCK* for making hybrid
+   mandatory on any specific covered key.
+
+2. **Initial threshold floors `0.015/0.030/0.060/0.120` are accepted as the v0.1
+   warn-only calibration-period defaults.** They are floors under the FR-8
+   `max(floor, baseline_p99 + delta)` formulas, so they only widen for noisier
+   keys and never tighten below the floor. No key may enter enforce on floors
+   alone: FR-8 still requires an approved per-key calibration record meeting the
+   minimum sample/position/coverage/tail-mass/false-positive-target requirements.
+   *Maintainer-approval-required at LOCK* for the final per-key threshold table.
+
+3. **New-provider onboarding gate is 5 `pass` canaries over at least 30 minutes**
+   (FR-11), not a longer fixed 24-hour pre-routing window. Rationale: paired with
+   FR-10 targeted burst probing for onboarding keys, 5 passes over ≥30 minutes is
+   achievable without multi-day latency while still resisting single-shot
+   laundering; the stricter 24-hour clock is retained where it matters most —
+   quarantine and block *clear* rules (FR-10) still require `clear_pass_count`
+   consecutive passes over at least 24 hours. Rejected alternative: a blanket
+   24-hour pre-routing hold for all new providers — rejected as onboarding-UX
+   hostile for the marginal laundering resistance it adds over the 30-minute
+   burst gate plus stable-identity inheritance (FR-12). *Maintainer-approval-
+   required at LOCK* for lengthening the onboarding gate on high-risk model sets.
+
+4. **The proposed per-covered-key warn-only calibration gate is adopted as the
+   minimum enforce timeline** (Migration §6): at least 30 warn-only days, at least
+   100 eligible canaries, at least 10 distinct stable provider identities when
+   available, and at least one relevant trusted-reference refresh after the latest
+   reference runtime/build, runtime-build provenance digest, signed golden-fixture
+   validation digest, tokenizer, sampler-stage, corpus, threshold, or catalog
+   change. Fleet-wide evidence MAY be additionally required but MUST NOT substitute
+   for a missing covered-key gate. *Maintainer-approval-required at LOCK* if
+   maintainers require longer observation or larger per-key samples.
+
+5. **Consensus-telemetry funding is not required for v0.1 enforce**, because
+   enforce is trusted-reference-only (item 1). If consensus telemetry is enabled,
+   it MUST be funded only from capped non-buyer operator/network credits with
+   per-provider daily caps and anti-Sybil eligibility (FR-5, FR-17). Buyer usage,
+   SPEC-015 v0.4 `usage`, and uncapped MALIBU rewards MUST NOT fund it. The
+   concrete capped-credit instrument for a future mandatory-hybrid mode is
+   deferred to that later version and its funding decision. *Maintainer-approval-
+   required at LOCK* before any mandatory-hybrid enforce deployment.
 
 ## 9. Non-Goals
 
