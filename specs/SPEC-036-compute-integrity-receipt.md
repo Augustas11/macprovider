@@ -1057,9 +1057,13 @@ The request `payload` MUST include:
   transition, or calibration; it MAY be omitted only for schema dry-runs that
   cannot affect calibration or state.
 
-The request payload key set is closed: any additional key MUST cause the provider
-to reject the probe and MUST cause the coordinator to reject a result that echoes
-an out-of-schema request.
+- `retry_of_probe_id`: present exactly for a mandatory K=256 retry (FR-7), echoing
+  the `probe_id` of the K=64 attempt it retries; MUST be absent (or null) for an
+  initial K=64 probe. The result payload MUST echo `retry_of_probe_id` when present.
+
+The request payload key set is closed to exactly the fields above: any OTHER
+additional key MUST cause the provider to reject the probe and MUST cause the
+coordinator to reject a result that echoes an out-of-schema request.
 
 `compute_integrity_probe_v1.result` MUST use an outer envelope containing:
 
@@ -1080,6 +1084,8 @@ The result `payload` MUST include:
 - `result_kind`: `"measurement"` or `"provider_inconclusive"` (see FR-6 "Result
   kind"). The payload is a discriminated union on `result_kind`; each variant's key
   set is closed exactly as specified below.
+- `retry_of_probe_id`: present exactly when the issued request carried it (a K=256
+  retry), echoing the same value; absent/null otherwise.
 - Identity echoes: `model_id`, `target_model_hash`, `tokenizer_identity`,
   `target_generation`, `sampling_profile`, `corpus_version`, `threshold_version`,
   `hardware_runtime_class`. The coordinator MUST reject a result whose
@@ -1674,6 +1680,16 @@ a non-zero 24-hour onboarding-failure count. This carries provider-attributable 
 accumulators) across hash/tokenizer churn, closing the escape path, while a clean
 provider (no active risk) changing artifacts is not penalized. A single benign
 `warn` with no accumulated risk and no artifact change does NOT trigger escalation.
+
+Because SPEC-030 `target_generation` is scoped to `(provider_id, assigned_id,
+model_id)` and restarts at `1`, a new `assigned_id` can reuse a prior generation
+number that would otherwise collide with an old positive `verified`/`warn` window on
+the window key (which projects away `assigned_id`). Therefore an `assigned_id` change
+MUST atomically invalidate/purge the affected positive window state (`verified`,
+`warn`, `pending`) and any outstanding probes for those keys — forcing fresh
+measurement under the new assignment — while preserving the assigned-id-free adverse
+overlay state and all accumulators. A re-onboarded provider MUST re-earn positive
+state; it can never inherit a stale payable window across an `assigned_id` change.
 
 If a provider re-onboards and receives a new `assigned_id`, the coordinator MUST
 look up active `quarantined_compute_drift` and `blocked:<reason>` state on the
