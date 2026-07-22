@@ -1,0 +1,94 @@
+{
+  "catalog_id": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b",
+  "expires_at": "2026-10-07T00:00:00Z",
+  "issued_at": "2026-07-07T00:00:00Z",
+  "models": [
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+      "min_ram_gb": 28,
+      "notes": "google-gemma-4-26b-a4b-it",
+      "sha256": "436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/gpt-oss-20b-MXFP4-Q8",
+      "min_ram_gb": 24,
+      "notes": "openai/gpt-oss-20b",
+      "sha256": "f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "min_ram_gb": 4,
+      "notes": "meta-llama/llama-3.2-3b-instruct",
+      "sha256": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+      "min_ram_gb": 12,
+      "notes": "meta-llama/llama-3.1-8b-instruct",
+      "sha256": "67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+      "min_ram_gb": 32,
+      "notes": "nvidia/nemotron-3-nano-30b-a3b",
+      "sha256": "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
+      "min_ram_gb": 48,
+      "notes": "qwen2.5-coder-32b-instruct",
+      "sha256": "b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/Qwen3-32B-4bit",
+      "min_ram_gb": 48,
+      "notes": "qwen3-32b",
+      "sha256": "69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/Qwen3-8B-4bit",
+      "min_ram_gb": 12,
+      "notes": "qwen3-8b",
+      "sha256": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "artifact_manifest",
+      "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "min_ram_gb": 28,
+      "notes": "qwen3-coder-30b-a3b-instruct",
+      "sha256": "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
+      "source": "operator-curated"
+    }
+  ],
+  "signature": {
+    "alg": "Ed25519",
+    "key_id": "catalog-key-2026q2",
+    "sig": "tpKikfl94xLFOXnqIqA0681e5zInX9yPunt4T0bEMQdY31WP9ZO9dukT4NHZKeLeIZtsz0qNh198zGH2eOIlDw"
+  },
+  "version": 1
+}

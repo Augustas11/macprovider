@@ -29,7 +29,7 @@ cp "$root/ops/macprovider-watchdog/watchdog.sh" "$local_artifacts/watchdog.sh"
 cp "$root/phase3-binary/dist/compatibility-set-assets/"*.template "$local_artifacts/"
 cp "$root/phase3-binary/dist/compatibility-set-assets/updater-rollback.json" "$local_artifacts/"
 cp -R "$local_artifacts" "$payload/compatibility-set-local"
-cp "$catalog/release.json" "$catalog/trusted-keys.json" "$payload/catalog-release/"
+cp "$catalog/release.json" "$catalog/trusted-keys.json" "$catalog/tier2-catalog.json" "$payload/catalog-release/"
 cp "$catalog_feeds/autotune-candidates.json" "$catalog_feeds/autotune-candidates.json.sig" \
   "$catalog_feeds/demand-rank.json" "$catalog_feeds/demand-rank.json.sig" "$payload/catalog-release/"
 
@@ -127,6 +127,7 @@ for required in (
     'NOTICES_FILE="$PACKAGE_WORK_DIR/THIRD-PARTY-NOTICES.txt"',
     'STAGE_DIR="$PACKAGE_WORK_DIR/stage"',
     'cp "$COMPATIBILITY_SET_MANIFEST" "$STAGE_DIR/compatibility-set.json"',
+    'cp "$PHASE3_DIR/catalog/autotune/tier2-catalog.json" "$STAGE_DIR/catalog-release/"',
     '--provider-cli-version "$PROVIDER_CLI_VERSION"',
     '--malibu-app-version "$MALIBU_APP_VERSION"',
     'cp -R "$LOCAL_COMPATIBILITY_SET_DIR" "$STAGE_DIR/compatibility-set-local"',

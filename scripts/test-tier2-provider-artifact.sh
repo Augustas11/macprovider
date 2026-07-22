@@ -139,7 +139,7 @@ good_dir="$WORKDIR/good"
 good_tar="$WORKDIR/good.tar.gz"
 make_fake_binary "$good_dir" "1.2.6" "1"
 mkdir -p "$good_dir/catalog-release"
-for catalog_member in release.json trusted-keys.json autotune-candidates.json \
+for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
   autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
   printf '{}\n' > "$good_dir/catalog-release/$catalog_member"
 done
@@ -157,7 +157,7 @@ preflight_tar="$WORKDIR/release-preflight.tar.gz"
 fake_bin="$WORKDIR/fake-bin"
 make_fake_binary "$preflight_dir" "1.8.39" "1"
 mkdir -p "$preflight_dir/catalog-release" "$preflight_dir/compatibility-set-local" "$fake_bin"
-for catalog_member in release.json trusted-keys.json autotune-candidates.json \
+for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
   autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
   printf '{}\n' > "$preflight_dir/catalog-release/$catalog_member"
 done
@@ -192,6 +192,22 @@ PATH="$fake_bin:$PATH" \
 assert_contains "$WORKDIR/preflight-success.err" \
   "staged provider validated its signed compatibility release payload"
 
+missing_tier2_dir="$WORKDIR/missing-tier2"
+missing_tier2_tar="$WORKDIR/missing-tier2.tar.gz"
+cp -R "$preflight_dir/." "$missing_tier2_dir/"
+rm -f "$missing_tier2_dir/catalog-release/tier2-catalog.json"
+make_tarball "$missing_tier2_dir" "$missing_tier2_tar"
+missing_tier2_sha="$(sha256_file "$missing_tier2_tar")"
+if PATH="$fake_bin:$PATH" \
+  PROVIDER_ARTIFACT="$missing_tier2_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$missing_tier2_sha" \
+  "$CHECKER" >"$WORKDIR/missing-tier2.out" 2>"$WORKDIR/missing-tier2.err"; then
+  die "provider artifact missing Tier-2 catalog unexpectedly passed"
+fi
+assert_contains "$WORKDIR/missing-tier2.err" \
+  "exactly one catalog-release/tier2-catalog.json"
+
 historical_dir="$WORKDIR/historical-release"
 historical_tar="$WORKDIR/historical-release.tar.gz"
 mkdir -p "$historical_dir"
@@ -215,7 +231,7 @@ missing_catalog_dir="$WORKDIR/missing-catalog"
 missing_catalog_tar="$WORKDIR/missing-catalog.tar.gz"
 make_fake_binary "$missing_catalog_dir" "1.8.31" "1"
 mkdir -p "$missing_catalog_dir/catalog-release"
-for catalog_member in release.json trusted-keys.json autotune-candidates.json \
+for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
   autotune-candidates.json.sig demand-rank.json; do
   printf '{}\n' > "$missing_catalog_dir/catalog-release/$catalog_member"
 done

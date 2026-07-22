@@ -15,8 +15,10 @@ resources.
 One immutable network release is the publication and activation unit. Its
 catalog member contains:
 
-- exact `autotune-candidates.json` and `demand-rank.json` bytes;
-- one detached Ed25519 sidecar per JSON file;
+- exact `autotune-candidates.json`, `demand-rank.json`, and signed
+  `tier2-catalog.json` bytes;
+- detached Ed25519 sidecars for the autotune and demand feeds, plus the
+  Tier-2 catalog's embedded Ed25519 signature;
 - a manifest that binds release ID, timestamps, signer key IDs, and SHA-256;
 - an append-only `release-ledger.json` entry that permanently binds the release
   ID to those hashes and signer identities;
@@ -27,10 +29,36 @@ catalog member contains:
 ### Tier-2 identity binding (#608 Partial → finish slice: derived-only mutate)
 
 `tier2-identity-binding.json` is a **repository-local derived projection**
-written by `catalog-release.py generate`. It is **not** yet a member of the
+written by `catalog-release.py generate`. It is **not** a member of the
 signed autotune release envelope (`release.json` / ledger / Pearl immutable
 release directory / provider package). Operators must not treat it as a
 substitute for the signed Tier-2 file.
+
+A **signed** `tier2-catalog.json` (the `sign-catalog.go`-produced file, not
+the derived binding above) is a mandatory third `release.json` /
+`release-ledger.json` feed member alongside `autotune-candidates.json` and
+`demand-rank.json`. `generate`, `verify`, and `verify-directory` fail closed
+when it is absent, drifts from its manifest record, conflicts with autotune,
+or fails Ed25519 authentication against the exact configured Tier-2 trust
+root. Provider packaging, compatibility-set metadata, acceptance promotion,
+Pearl updater, and direct Pearl deploy all carry and validate the same bytes.
+
+Historical two-feed ledger rows remain valid as immutable history. A legacy
+current release may be enriched once with the canonical Tier-2 member only
+when its release metadata and both existing feed records remain byte-for-byte
+identical; no new two-feed row or later Tier-2 removal is accepted.
+
+Pearl release directories are content-addressed as
+`<release_id>-<release.json sha256 prefix>`, so a three-feed publication never
+overwrites the older two-feed directory that may share its release ID. The
+updater and direct deploy snapshot the active pointer and the independent
+`/opt/macprovider/tier2-catalog.json`, install the Tier-2 file from the same
+verified envelope, then switch `autotune/current`. Rollback restores the
+previous pointer and matching independent Tier-2 bytes together.
+
+This step does not flip `tier2.require_hash_verified`, remove the independent
+Tier-2 path, clear compatibility exceptions, or enable canary. Those actions
+remain gated by the later #608/#609 serial steps.
 
 Autotune admission identity and the Tier-2 attestation catalog remain separate
 signed files during migration (`exc-catalog-compatibility-bridges` stays
@@ -72,11 +100,11 @@ Until then the interim rule is **derived-only mutate**:
 6. Admission identity remains autotune-only (Entry 170 / #609). This binding
    check does **not** add a Tier-2 fallback.
 
-Follow-up on #608 (still blocked for exception clearance): fold signed Tier-2
-bytes into the release ledger / compatibility-set envelope, remove the
-physical `/opt/macprovider/tier2-catalog.json` dual path, and collect Pearl
-journey proof that no `model_hash_uncatalogued` events fire for active
-release rows.
+Follow-up on #608 remains blocked for exception clearance: physical dual-path
+removal and Pearl journey proof that no `model_hash_uncatalogued` events fire
+for active-release rows are separate later steps. Until then, the release
+envelope and independent coordinator path must be mutated and rolled back as
+one transaction.
 
 The same signed network-release manifest also binds:
 

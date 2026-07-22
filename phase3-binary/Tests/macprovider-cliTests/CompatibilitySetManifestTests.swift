@@ -236,6 +236,7 @@ final class CompatibilityManifestFixture {
         "demand-rank.json",
         "demand-rank.json.sig",
         "release.json",
+        "tier2-catalog.json",
         "trusted-keys.json",
     ]
 

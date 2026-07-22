@@ -66,6 +66,7 @@ final class CompatibilityArtifactIndexTests: XCTestCase {
             "catalog_demand": "demand-rank.json",
             "catalog_demand_signature": "demand-rank.json.sig",
             "catalog_manifest": "release.json",
+            "catalog_tier2": "tier2-catalog.json",
             "catalog_trusted_keys": "trusted-keys.json",
             "compatibility_manifest": "compatibility-set.json",
             "coordinator": "coordinator-linux-amd64",

@@ -17,8 +17,17 @@ bash -n "$DEPLOY_SH"
 bash -n "$RECOVER_SH"
 [ -f "$WATCHDOG_UNIT" ] || fail "remote deploy watchdog unit is missing"
 
-grep -q '_autotune_release=\\$_autotune_root/releases/$AUTOTUNE_RELEASE_ID' "$DEPLOY_SH" ||
-  fail "deploy must stage an immutable versioned autotune release"
+grep -q '_autotune_release=\\$_autotune_root/releases/$AUTOTUNE_RELEASE_DIR_NAME' "$DEPLOY_SH" ||
+  fail "deploy must stage a content-addressed immutable catalog envelope"
+
+grep -q 'install .*tier2-catalog.json \\$_autotune_stage/tier2-catalog.json' "$DEPLOY_SH" &&
+  grep -q 'verify-directory --directory \\$_autotune_stage --tier2-public-key-file' "$DEPLOY_SH" ||
+  fail "deploy must stage and authenticate Tier-2 inside the release envelope"
+
+activation_line=$(grep -nF 'ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
+tier2_install_line=$(grep -nF '\$_catalog_root/releases/$AUTOTUNE_RELEASE_DIR_NAME/tier2-catalog.json' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
+[ -n "$activation_line" ] && [ -n "$tier2_install_line" ] && [ "$tier2_install_line" -lt "$activation_line" ] ||
+  fail "legacy Tier-2 path and release current must activate together under the deploy mutex"
 
 grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json' "$DEPLOY_SH" ||
   fail "deploy smoke must verify macprovider can read autotune feeds"
