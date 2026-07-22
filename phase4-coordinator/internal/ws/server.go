@@ -899,10 +899,11 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	auth, ok := s.validateProviderToken(r)
 	if !ok {
 		s.rememberCloseEvent(conn, closeEventMeta{
-			providerID:    auth.providerID,
-			authStage:     providerevents.AuthStageUpgrade,
-			messageFamily: providerevents.MessageFamilyNone,
-			diagnostic:    "bearer_validation_failed",
+			providerID:       auth.providerID,
+			authStage:        providerevents.AuthStageUpgrade,
+			messageFamily:    providerevents.MessageFamilyNone,
+			diagnostic:       "bearer_validation_failed",
+			identityVerified: false,
 		})
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		s.releaseUnauthenticatedConn()
@@ -1227,10 +1228,11 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	s.rememberCloseEvent(conn, closeEventMeta{
-		providerID:    hello.ProviderID,
-		authStage:     providerevents.AuthStageFirstMessage,
-		messageFamily: providerevents.MessageFamilyHello,
-		binaryVersion: hello.BinaryVersion,
+		providerID:       hello.ProviderID,
+		authStage:        providerevents.AuthStageFirstMessage,
+		messageFamily:    providerevents.MessageFamilyHello,
+		binaryVersion:    hello.BinaryVersion,
+		identityVerified: connectionAuth.validated && connectionAuth.providerID != "" && connectionAuth.providerID == hello.ProviderID,
 	})
 	if hello.Version != 1 {
 		s.close(conn, CloseVersionUnsupported, "version_unsupported: protocol version "+itoa(hello.Version))
@@ -1375,10 +1377,11 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	s.rememberCloseEvent(conn, closeEventMeta{
-		providerID:    initial.ProviderID,
-		authStage:     providerevents.AuthStageFirstMessage,
-		messageFamily: providerevents.MessageFamilyAuthRequest,
-		binaryVersion: initial.BinaryVersion,
+		providerID:       initial.ProviderID,
+		authStage:        providerevents.AuthStageFirstMessage,
+		messageFamily:    providerevents.MessageFamilyAuthRequest,
+		binaryVersion:    initial.BinaryVersion,
+		identityVerified: connectionAuth.validated && connectionAuth.providerID != "" && connectionAuth.providerID == initial.ProviderID,
 	})
 	if !s.requireCompatibleSet(conn, initial.CompatibilitySetID, true) {
 		return "", ""
@@ -1425,12 +1428,13 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	authAttemptID := "auth-" + s.newUUID()
 	s.rememberCloseEvent(conn, closeEventMeta{
-		providerID:    initial.ProviderID,
-		sessionID:     entry.AssignedID,
-		attemptID:     authAttemptID,
-		authStage:     providerevents.AuthStageProof,
-		messageFamily: providerevents.MessageFamilyAuthRequest,
-		binaryVersion: initial.BinaryVersion,
+		providerID:       initial.ProviderID,
+		sessionID:        entry.AssignedID,
+		attemptID:        authAttemptID,
+		authStage:        providerevents.AuthStageProof,
+		messageFamily:    providerevents.MessageFamilyAuthRequest,
+		binaryVersion:    initial.BinaryVersion,
+		identityVerified: connectionAuth.validated && connectionAuth.providerID != "" && connectionAuth.providerID == initial.ProviderID,
 	})
 	challengeExpiresAt := s.now().Add(10 * time.Minute).UTC()
 	// SPEC-002 v1.3.5 §7.9 + R-7.9.8 — L-1 baseline gate:
@@ -2572,6 +2576,7 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 	session.probeWrites = true
 	session.onWriteFailure = s.handleProviderWriteFailure
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
+	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
 	s.rememberProviderSnapshot(*entry)
 	s.recordConnectionEvent(providerevents.Event{
 		ProviderID:    entry.ProviderID,
@@ -2677,10 +2682,11 @@ func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, 
 	if session != nil {
 		session.closeEventOnce.Do(func() {
 			meta := closeEventMeta{
-				providerID:    session.providerID,
-				sessionID:     session.assignedID,
-				authStage:     providerevents.AuthStagePostAuth,
-				messageFamily: providerevents.MessageFamilyNone,
+				providerID:       session.providerID,
+				sessionID:        session.assignedID,
+				authStage:        providerevents.AuthStagePostAuth,
+				messageFamily:    providerevents.MessageFamilyNone,
+				identityVerified: true,
 			}
 			if p, ok := s.pool.Resolve(session.providerID, session.assignedID); ok {
 				meta.binaryVersion = p.BinaryVersion
@@ -4236,10 +4242,17 @@ func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
 	s.pruneIdlePrewarmLimits(s.now())
 	binaryVersion := ""
+	var conn net.Conn
+	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+		conn = session.conn
+	}
 	if provider, ok := s.pool.Resolve(providerID, assignedID); ok {
 		provider.State = pool.StateUnavailable
 		binaryVersion = provider.BinaryVersion
 		s.rememberProviderSnapshot(provider)
+	}
+	if conn != nil {
+		_ = s.takeCloseEvent(conn)
 	}
 	s.recordConnectionEvent(providerevents.Event{
 		ProviderID:    providerID,

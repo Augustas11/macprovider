@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -111,14 +112,17 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 	after := strings.TrimSpace(r.URL.Query().Get("after"))
 
 	live := map[string]pool.Provider{}
+	var liveIDs []string
 	connected := 0
 	for _, p := range s.pool.Snapshot() {
 		if !s.isProviderTransportConnected(p) {
 			continue
 		}
 		live[p.ProviderID] = p
+		liveIDs = append(liveIDs, p.ProviderID)
 		connected++
 	}
+	sort.Strings(liveIDs)
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	known, err := s.connectionEvents.ListLastKnown(ctx, limit, after)
@@ -127,16 +131,16 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	out := make([]adminProviderView, 0, len(live)+len(known))
+	out := make([]adminProviderView, 0, limit)
 	seen := map[string]struct{}{}
-	// Prefer live connected providers first when no cursor is set.
+	// First page only: stable-sorted live providers missing from last-known.
 	if after == "" {
-		for _, p := range live {
-			out = append(out, adminViewFromLive(p))
-			seen[p.ProviderID] = struct{}{}
+		for _, id := range liveIDs {
 			if len(out) >= limit {
 				break
 			}
+			out = append(out, adminViewFromLive(live[id]))
+			seen[id] = struct{}{}
 		}
 	}
 	for _, snap := range known {
@@ -146,7 +150,9 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 		if _, ok := seen[snap.ProviderID]; ok {
 			continue
 		}
-		if _, ok := live[snap.ProviderID]; ok {
+		if p, ok := live[snap.ProviderID]; ok {
+			out = append(out, adminViewFromLive(p))
+			seen[snap.ProviderID] = struct{}{}
 			continue
 		}
 		snap.Presence = "offline"
@@ -155,9 +161,8 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 	resp := map[string]any{
 		"providers": out,
 		"summary": map[string]any{
-			"total":     len(out),
+			"returned":  len(out),
 			"connected": connected,
-			"offline":   max(0, len(out)-connected),
 			"limit":     limit,
 		},
 	}

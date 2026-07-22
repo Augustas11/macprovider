@@ -52,8 +52,12 @@ func TestNormalizeFailureReasonTaxonomy(t *testing.T) {
 func TestRedactDiagnosticStripsSecretsAndBounds(t *testing.T) {
 	raw := "Authorization: Bearer mpk_abc123DEF and more text that should be clipped eventually because it is long"
 	got := RedactDiagnostic(raw, 40)
-	if containsAny(got, "mpk_", "Bearer mpk", "Authorization: Bearer") {
+	if containsAny(got, "mpk_", "Bearer mpk", "Authorization: Bearer", "opaque") {
 		t.Fatalf("secret leaked in %q", got)
+	}
+	opaque := RedactDiagnostic("Authorization: Bearer opaque-secret-value trailing", 120)
+	if containsAny(opaque, "opaque-secret", "Bearer opaque") {
+		t.Fatalf("opaque bearer leaked: %q", opaque)
 	}
 	hyphen := RedactDiagnostic("token=mpk_alpha-beta-gamma leftover", 80)
 	if strings.Contains(hyphen, "beta") || strings.Contains(hyphen, "mpk_") {

@@ -260,16 +260,22 @@ INSERT INTO provider_last_known (
 	last_seen_at_utc, routing_eligible
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(provider_id) DO UPDATE SET
-	assigned_id = excluded.assigned_id,
-	binary_version = excluded.binary_version,
-	model_id = excluded.model_id,
-	state = excluded.state,
-	auth_state = excluded.auth_state,
-	connected_at_utc = excluded.connected_at_utc,
-	last_heartbeat_at_utc = excluded.last_heartbeat_at_utc,
-	last_activity_at_utc = excluded.last_activity_at_utc,
-	last_seen_at_utc = excluded.last_seen_at_utc,
-	routing_eligible = excluded.routing_eligible`,
+	assigned_id = CASE WHEN excluded.assigned_id = '' THEN provider_last_known.assigned_id ELSE excluded.assigned_id END,
+	binary_version = CASE WHEN excluded.binary_version = '' THEN provider_last_known.binary_version ELSE excluded.binary_version END,
+	model_id = CASE WHEN excluded.model_id = '' THEN provider_last_known.model_id ELSE excluded.model_id END,
+	state = CASE WHEN excluded.state = '' THEN provider_last_known.state ELSE excluded.state END,
+	auth_state = CASE WHEN excluded.auth_state = '' THEN provider_last_known.auth_state ELSE excluded.auth_state END,
+	connected_at_utc = CASE WHEN excluded.connected_at_utc = '' THEN provider_last_known.connected_at_utc ELSE excluded.connected_at_utc END,
+	last_heartbeat_at_utc = CASE WHEN excluded.last_heartbeat_at_utc = '' THEN provider_last_known.last_heartbeat_at_utc ELSE excluded.last_heartbeat_at_utc END,
+	last_activity_at_utc = CASE WHEN excluded.last_activity_at_utc = '' THEN provider_last_known.last_activity_at_utc ELSE excluded.last_activity_at_utc END,
+	last_seen_at_utc = CASE
+		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.last_seen_at_utc
+		ELSE provider_last_known.last_seen_at_utc
+	END,
+	routing_eligible = CASE
+		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.routing_eligible
+		ELSE provider_last_known.routing_eligible
+	END`,
 		providerID,
 		strings.TrimSpace(snap.AssignedID),
 		RedactDiagnostic(snap.BinaryVersion, 64),
@@ -323,16 +329,20 @@ FROM provider_last_known
 ORDER BY last_seen_at_utc DESC, provider_id ASC
 LIMIT ?`, limit)
 	} else {
+		// Cursor is provider_id; resume after that row in last_seen DESC, provider_id ASC order.
 		rows, err = s.db.QueryContext(ctx, `
 SELECT provider_id, assigned_id, binary_version, model_id, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
 	last_seen_at_utc, routing_eligible
 FROM provider_last_known
-WHERE (last_seen_at_utc, provider_id) < (
-	SELECT last_seen_at_utc, provider_id FROM provider_last_known WHERE provider_id = ?
+WHERE (last_seen_at_utc < (
+	SELECT last_seen_at_utc FROM provider_last_known WHERE provider_id = ?
+)) OR (
+	last_seen_at_utc = (SELECT last_seen_at_utc FROM provider_last_known WHERE provider_id = ?)
+	AND provider_id > ?
 )
 ORDER BY last_seen_at_utc DESC, provider_id ASC
-LIMIT ?`, afterProviderID, limit)
+LIMIT ?`, afterProviderID, afterProviderID, afterProviderID, limit)
 	}
 	if err != nil {
 		return nil, err

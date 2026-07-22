@@ -1460,10 +1460,12 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) Prune",
-        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) enforcePerProviderCap"
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) enforceProviderCap",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) ReconcileBounds"
       ],
       "tests": [
-        "phase4-coordinator/internal/providerevents/store_test.go:TestRecordRetentionAndPerProviderCap"
+        "phase4-coordinator/internal/providerevents/store_test.go:TestRecordRetentionAndPerProviderCap",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestAnonymousBucketCapped"
       ],
       "journeys": [],
       "evidence": [],

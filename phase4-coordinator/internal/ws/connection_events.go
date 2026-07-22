@@ -35,13 +35,14 @@ type ConnectionEventMetrics interface {
 }
 
 type closeEventMeta struct {
-	providerID    string
-	sessionID     string
-	attemptID     string
-	authStage     string
-	messageFamily string
-	binaryVersion string
-	diagnostic    string
+	providerID       string
+	sessionID        string
+	attemptID        string
+	authStage        string
+	messageFamily    string
+	binaryVersion    string
+	diagnostic       string
+	identityVerified bool
 }
 
 type connectionEventJob struct {
@@ -140,6 +141,9 @@ func mergeCloseEventMeta(cur, next closeEventMeta) closeEventMeta {
 	if next.diagnostic != "" {
 		cur.diagnostic = next.diagnostic
 	}
+	if next.identityVerified {
+		cur.identityVerified = true
+	}
 	return cur
 }
 
@@ -231,10 +235,20 @@ func (s *Server) recordCloseEventFromMeta(meta closeEventMeta, code gobwas.Statu
 	if family == "" {
 		family = providerevents.MessageFamilyNone
 	}
+	providerID := strings.TrimSpace(meta.providerID)
+	sessionID := meta.sessionID
+	attemptID := meta.attemptID
+	// Unverified claimed identities must not bypass the anonymous bucket or
+	// create last-known rows (reconnect-storm / disk exhaustion).
+	if !meta.identityVerified || providerID == "" {
+		providerID = providerevents.AnonymousProviderID
+		sessionID = ""
+		attemptID = ""
+	}
 	s.recordConnectionEvent(providerevents.Event{
-		ProviderID:    meta.providerID,
-		SessionID:     meta.sessionID,
-		AttemptID:     meta.attemptID,
+		ProviderID:    providerID,
+		SessionID:     sessionID,
+		AttemptID:     attemptID,
 		Kind:          kind,
 		Outcome:       providerevents.OutcomeFailure,
 		FailureReason: failure,
@@ -245,15 +259,17 @@ func (s *Server) recordCloseEventFromMeta(meta closeEventMeta, code gobwas.Statu
 		CloseReason:   reason,
 		Diagnostic:    meta.diagnostic,
 	})
-	if pid := strings.TrimSpace(meta.providerID); pid != "" && pid != providerevents.AnonymousProviderID {
-		s.enqueueLastKnown(providerevents.LastKnown{
-			ProviderID:    pid,
-			AssignedID:    meta.sessionID,
-			BinaryVersion: meta.binaryVersion,
-			State:         "unavailable",
-			LastSeenAt:    s.now().UTC(),
-			Presence:      "offline",
-		}, true)
+	if meta.identityVerified {
+		if pid := strings.TrimSpace(meta.providerID); pid != "" && pid != providerevents.AnonymousProviderID {
+			s.enqueueLastKnown(providerevents.LastKnown{
+				ProviderID:    pid,
+				AssignedID:    meta.sessionID,
+				BinaryVersion: meta.binaryVersion,
+				State:         "unavailable",
+				LastSeenAt:    s.now().UTC(),
+				Presence:      "offline",
+			}, true)
+		}
 	}
 }
 
