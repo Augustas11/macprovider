@@ -188,7 +188,7 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
 
 ```json
 {
-  "scenario": "15_thermal_soak",
+  "scenario": "thermal_soak",
   "scenario_version": "v0.1",
   "run_id": "20260628T180000Z",
   "duration_seconds": 3600,

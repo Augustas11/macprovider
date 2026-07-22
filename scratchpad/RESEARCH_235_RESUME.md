@@ -64,10 +64,24 @@ Scenario 15 `--dry-run` validates; fails safely without LAB_* env.
   - README recipe (arch M): path-stable abs paths, points to
     benchmark_summary.json (buyer_metrics.sustained_tps), no top-level sudo.
   - LOW: .gitignore thermal artifacts; SPEC §5 example gains sustained_tps.
-- R2: RE-AUDIT the touched lanes (all 3 touched) → need 0 C/H/M to PR.
+- R2 (3 lanes): code 2H/1L, security 1H/1L, architect 1H/2M/2L — ALL from the
+  R1 prod-host DENYLIST being bypassable + skipped when benchmark.enabled=false.
+  R2-fix: replaced denylist with POSITIVE lab-host allowlist (LabHostAllowed:
+  loopback/private/link-local/localhost only), applied regardless of
+  benchmark.enabled, + CheckRedirect guard in loadgen; joiner mirrors B10
+  success filter; stale skew→null; wording/SPEC-example fixes.
+- R3 (3 lanes): **ALL 0 CRITICAL / 0 HIGH / 0 MEDIUM** — code APPROVE,
+  security APPROVE, architect WATCH. Merge bar MET. Remaining LOWs carried
+  documented: (1) scoped IPv6 link-local `[fe80::1%25en0]` rejected by
+  net.ParseIP — FALSE-NEGATIVE, fails safe (never allows prod); (2) join-thermal
+  loads inputs fully into memory (local operator tool); (3) redirect barrier
+  lacks a dedicated regression test (impl verified correct by all 3 lanes).
+  Post-R3 doc-only fixes applied (no audited logic touched): README stale
+  rejectProdHost→LabHostAllowed; SPEC §5 example scenario name thermal_soak.
 
 ## Next steps (this session)
-1. [ ] R2 three-lane codex re-audit (code/security/architect) via `omc ask codex
+1. [x] R2/R3 three-lane codex re-audit — R3 all 0 C/H/M. DONE.
+1b. [ ] (superseded) via `omc ask codex
    --prompt "$(cat <promptfile>)"`. Prompts under `audits/_prompts/` or
    `audits/<date>/`. Bar 0 C/H/M. Loop→fix→re-audit.
 2. [ ] Rebase on origin/main.

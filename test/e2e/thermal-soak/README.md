@@ -37,11 +37,16 @@ disconnects the single prod mac** (~30 → 8.9 → 5.3 tok/s, then stale
 heartbeats → WS EOF → removed from pool). Running this soak against
 `streamvc.live` with the prod provider in the pool reproduces the outage.
 
-This is enforced in code: scenario 15 declares `B10`, and the harness rejects
-any `B10` scenario whose `gateway_url` or `coordinator_url` resolves to
-`streamvc.live` (or a subdomain) — see `rejectProdHost` in
-`test/network-harness/internal/scenario/schema.go`. A soak **cannot** be pointed
-at prod even by setting `LAB_GATEWAY_URL` to the prod host.
+This is enforced in code by a **positive lab-host allowlist**: any scenario
+declaring `B10` must have both `gateway_url` and `coordinator_url` resolve to a
+loopback / private (RFC1918) / link-local IP or `localhost` — see
+`LabHostAllowed` / `validateLabOnlyHost` in
+`test/network-harness/internal/scenario/schema.go`. Every public host (prod, any
+subdomain, trailing-dot or Unicode-separator variants, or any other FQDN) is
+rejected, the check runs even when `benchmark.enabled=false`, and a
+`CheckRedirect` guard (`loadgen.go`) refuses a lab gateway that tries to
+3xx-redirect the soak to a non-lab host. A soak **cannot** be pointed at prod
+even by setting `LAB_GATEWAY_URL` to the prod host.
 
 Requirements for a valid run:
 - A Mac you **fully control** (you will run `powermetrics`/`pmset` on it and
