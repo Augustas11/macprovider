@@ -5,15 +5,15 @@
 // ("the network does not lie"), the benchmark invariants (B1-Bn) are
 // quantitative performance verdicts:
 //
-//   B1  TTFT p50 within target
-//   B2  Streaming TPS p50 within target
-//   B3  Tail ratio (p99/p50) bounded
-//   B4  Error rate per 1000 requests bounded
-//   B5  Provider slot utilization reasonable
-//   B6  Earnings/hr viable at current tier-2 pricing
-//   B7  Cold/warm TTFT ratio bounded (scenario 08)
-//   B8  Sticky KV-cache reuse retention (scenario 16)
-//   B9  Cached-turn latency advantage (scenario 16)
+//	B1  TTFT p50 within target
+//	B2  Streaming TPS p50 within target
+//	B3  Tail ratio (p99/p50) bounded
+//	B4  Error rate per 1000 requests bounded
+//	B5  Provider slot utilization reasonable
+//	B6  Earnings/hr viable at current tier-2 pricing
+//	B7  Cold/warm TTFT ratio bounded (scenario 08)
+//	B8  Sticky KV-cache reuse retention (scenario 16)
+//	B9  Cached-turn latency advantage (scenario 16)
 //
 // Each verdict carries a Status (PASS / WARN / FAIL / SKIP), the
 // measured value, the target and bare-min thresholds, and a one-line
@@ -138,9 +138,9 @@ type CacheReuseMetrics struct {
 // ColdWarmMetrics is the cold-vs-warm TTFT cross-section. Cold = first
 // request after each idle gap; warm = the immediately-following request.
 type ColdWarmMetrics struct {
-	ColdTTFTMs  Histogram `json:"cold_ttft_ms"`
-	WarmTTFTMs  Histogram `json:"warm_ttft_ms"`
-	RatioP50    float64   `json:"ratio_p50"`
+	ColdTTFTMs Histogram `json:"cold_ttft_ms"`
+	WarmTTFTMs Histogram `json:"warm_ttft_ms"`
+	RatioP50   float64   `json:"ratio_p50"`
 }
 
 // PerProvider is the provider-side cross-section per spec §5.
@@ -244,17 +244,16 @@ const (
 	CacheReuseTarget  = 0.40
 	CacheReuseBareMin = 0.20
 
-	// B9 (cached-turn TTFT advantage) thresholds for scenario 16.
-	// ratio = cached_turn_ttft_p50 / uncached_turn_ttft_p50. A warm turn
-	// that reused the prefix cache should start at least a little faster
-	// than the cold first-touch, so the ratio should sit below 1. PASS
-	// when it is at or under CachedTTFTRatioTarget; a ratio above
-	// CachedTTFTRatioBareMin means cached turns are no faster (or slower)
-	// than cold — the latency half of the win is gone.
-	// PROVISIONAL — transcribed from the scenario-16 baseline. Lower is
-	// better.
-	CachedTTFTRatioTarget  = 0.90
-	CachedTTFTRatioBareMin = 1.00
+	// B9 (cached-turn latency advantage) thresholds for scenario 16.
+	// ratio = cached_turn_latency_p50 / uncached_turn_latency_p50 over the
+	// non-streaming full-response wall times. A warm turn that reused the
+	// prefix cache should complete a little faster than the cold
+	// first-touch, so the ratio should sit below 1. PASS when it is at or
+	// under CachedLatencyRatioTarget; a ratio above CachedLatencyRatioBareMin
+	// means cached turns are no faster (or slower) than cold — the latency
+	// half of the win is gone. PROVISIONAL. Lower is better.
+	CachedLatencyRatioTarget  = 0.90
+	CachedLatencyRatioBareMin = 1.00
 
 	// CacheReuseMinSamples is the minimum number of measured warm turns
 	// required before B8/B9 emit a PASS/WARN/FAIL verdict. Below this the
@@ -263,6 +262,32 @@ const (
 	// samples.
 	CacheReuseMinSamples = 3
 )
+
+// cacheReuseCovered reports whether the warm-turn reuse sample is both
+// large enough (>= CacheReuseMinSamples) AND complete enough that a
+// majority of the attempted warm turns actually produced a valid
+// measurement — so a survivorship-biased run (e.g. 3 healthy of 7, the
+// rest failed/usage-absent/invalid) is treated as incomplete and SKIPs
+// rather than scoring off the surviving few.
+func cacheReuseCovered(cr CacheReuseMetrics) bool {
+	if cr.ReuseCount < CacheReuseMinSamples {
+		return false
+	}
+	minCovered := (cr.AttemptedCachedTurns + 1) / 2 // ceil(n/2)
+	if minCovered < CacheReuseMinSamples {
+		minCovered = CacheReuseMinSamples
+	}
+	return cr.ReuseCount >= minCovered
+}
+
+// cacheReuseConclusivePositive reports whether the run demonstrates real,
+// well-sampled prefix-cache reuse: enough covered measurements AND a
+// median at or above the degraded-band floor. B9 (latency) requires this
+// so a collapsed-reuse run (median ~0, even with many valid 0 samples)
+// cannot PASS on keep-alive/connection-setup latency effects alone.
+func cacheReuseConclusivePositive(cr CacheReuseMetrics) bool {
+	return cacheReuseCovered(cr) && cr.ReuseP50 >= CacheReuseBareMin
+}
 
 // Evaluate computes the benchmark summary and per-invariant verdicts.
 // pricing is nil when no pricing manifest was loaded; verdicts that
@@ -318,9 +343,9 @@ func Evaluate(
 		case "B7":
 			verdicts = append(verdicts, evalB7(buyerMetrics))
 		case "B8":
-			verdicts = append(verdicts, evalB8(buyerMetrics, sc.Benchmark.CacheCalibrationPending))
+			verdicts = append(verdicts, evalB8(buyerMetrics, sc.Benchmark.CacheGateArmed))
 		case "B9":
-			verdicts = append(verdicts, evalB9(buyerMetrics, sc.Benchmark.CacheCalibrationPending))
+			verdicts = append(verdicts, evalB9(buyerMetrics, sc.Benchmark.CacheGateArmed))
 		default:
 			verdicts = append(verdicts, Verdict{
 				ID:     id,
@@ -478,13 +503,13 @@ func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 
 func computeProviderMetrics(results []buyer.Result, providerSlots int, windowSeconds float64, pricing *Pricing) ProviderMetrics {
 	type acc struct {
-		Requests    int
-		Tokens      int64
-		Busy        float64
-		Earnings    float64
-		FirstSeen   time.Time
-		LastSeen    time.Time
-		PromptTok   int64
+		Requests  int
+		Tokens    int64
+		Busy      float64
+		Earnings  float64
+		FirstSeen time.Time
+		LastSeen  time.Time
+		PromptTok int64
 	}
 	perID := map[string]*acc{}
 	attributionFound := false
@@ -803,23 +828,35 @@ func evalB7(bm BuyerMetrics) Verdict {
 //     not a cache regression.
 //   - usage/cache fields absent on every measured turn → gateway omitted
 //     usage (hard rule #2).
-//   - fewer than CacheReuseMinSamples valid measurements → inconclusive.
-//   - calibrationPending → the threshold has not yet been calibrated
-//     against a positive, capability-qualified baseline (as of
-//     2026-07-22 the live pool reports 0 reuse), so a present-but-zero
-//     value cannot be distinguished from a true regression; report the
-//     measured value but do not PASS/FAIL until a reuse-capable provider
-//     baseline exists and the floor is transcribed from it.
+//   - the uncached first-touch never succeeded (cache never warmed).
+//   - fewer than CacheReuseMinSamples valid measurements, OR a partial
+//     run where a majority of attempted warm turns failed/were
+//     unmeasurable (survivorship bias) → inconclusive.
+//   - gate not armed (Benchmark.CacheGateArmed=false) → the threshold has
+//     not yet been calibrated against a positive, capability-qualified
+//     baseline (as of 2026-07-22 the live pool reports 0 reuse), so a
+//     present-but-zero value cannot be distinguished from a true
+//     regression; report the measured value but do not PASS/FAIL until a
+//     reuse-capable provider baseline exists and the floor is transcribed
+//     from it, then arm the gate.
 //
 // When conclusive: PASS at/above the floor, WARN in the degraded band,
 // FAIL below (reuse collapsed). Higher reuse is better.
-func evalB8(bm BuyerMetrics, calibrationPending bool) Verdict {
+func evalB8(bm BuyerMetrics, gateArmed bool) Verdict {
 	v := Verdict{ID: "B8", Title: "sticky cache-reuse retention", Unit: "ratio",
 		Target: CacheReuseTarget, BareMin: CacheReuseBareMin}
 	cr := bm.CacheReuse
 	if cr.AttemptedCachedTurns == 0 {
 		v.Status = StatusSkip
 		v.Detail = "no cache-phase turns — scenario did not use the sticky_cache pattern"
+		return v
+	}
+	// The uncached first-touch is what warms the provider prefix cache; if
+	// it never succeeded, the "warm" turns are not actually warm and any
+	// reuse figure is meaningless. Require a successful primer.
+	if cr.UncachedLatencyMs.Count == 0 {
+		v.Status = StatusSkip
+		v.Detail = fmt.Sprintf("uncached first-touch never succeeded (%d attempted) — prefix cache was never warmed; cannot assess reuse", cr.AttemptedUncachedTurns)
 		return v
 	}
 	if cr.CachedTurns == 0 {
@@ -838,10 +875,16 @@ func evalB8(bm BuyerMetrics, calibrationPending bool) Verdict {
 		v.Detail = fmt.Sprintf("only %d valid reuse samples (< %d) — inconclusive; median so far %.3f", cr.ReuseCount, CacheReuseMinSamples, cr.ReuseP50)
 		return v
 	}
-	if calibrationPending {
+	if !cacheReuseCovered(cr) {
 		v.Value = cr.ReuseP50
 		v.Status = StatusSkip
-		v.Detail = fmt.Sprintf("calibration pending — median reuse %.3f measured over %d turns, but the floor is not yet calibrated against a positive reuse-capable baseline (2026-07-22 pool reports ~0 reuse); recording only", cr.ReuseP50, cr.ReuseCount)
+		v.Detail = fmt.Sprintf("partial run — only %d of %d attempted warm turns produced a valid measurement (%d usage-absent, %d invalid); too incomplete to score", cr.ReuseCount, cr.AttemptedCachedTurns, cr.UsageAbsentTurns, cr.InvalidTurns)
+		return v
+	}
+	if !gateArmed {
+		v.Value = cr.ReuseP50
+		v.Status = StatusSkip
+		v.Detail = fmt.Sprintf("calibration pending (gate not armed) — median reuse %.3f measured over %d turns, but the floor is not yet calibrated against a positive reuse-capable baseline (2026-07-22 pool reports ~0 reuse); recording only", cr.ReuseP50, cr.ReuseCount)
 		return v
 	}
 	v.Value = cr.ReuseP50
@@ -871,12 +914,12 @@ func evalB8(bm BuyerMetrics, calibrationPending bool) Verdict {
 // Caveat recorded for calibration: the single cold sample also pays
 // one-time TLS/connection setup that the warm turns (keep-alive) do not,
 // which biases the ratio downward. B9 therefore only emits a verdict once
-// calibrated; until then it SKIPs. It also requires actual reuse evidence
-// (a measured warm reuse sample) so a run with no cache reporting cannot
-// FAIL on latency alone.
-func evalB9(bm BuyerMetrics, calibrationPending bool) Verdict {
+// the gate is armed; until then it SKIPs. It also requires CONCLUSIVE
+// POSITIVE reuse (well-sampled, median at/above the degraded-band floor)
+// so a run with no/collapsed cache reuse cannot PASS on latency alone.
+func evalB9(bm BuyerMetrics, gateArmed bool) Verdict {
 	v := Verdict{ID: "B9", Title: "cached-turn latency advantage", Unit: "ratio",
-		Target: CachedTTFTRatioTarget, BareMin: CachedTTFTRatioBareMin}
+		Target: CachedLatencyRatioTarget, BareMin: CachedLatencyRatioBareMin}
 	cr := bm.CacheReuse
 	un := cr.UncachedLatencyMs
 	ca := cr.CachedLatencyMs
@@ -890,22 +933,30 @@ func evalB9(bm BuyerMetrics, calibrationPending bool) Verdict {
 		v.Detail = fmt.Sprintf("incomplete cached/uncached latency sample (uncached=%d cached=%d) — cannot compute advantage", un.Count, ca.Count)
 		return v
 	}
-	if cr.ReuseCount == 0 {
+	// A latency advantage is only meaningful if the warm turns actually
+	// reused the cache. Require conclusive, well-sampled POSITIVE reuse
+	// (>= CacheReuseMinSamples covered measurements AND a median at/above
+	// the degraded-band floor) — otherwise a collapsed-reuse run (median
+	// ~0, even with many valid 0 samples) or a thin sample could PASS on
+	// keep-alive/connection-setup latency effects that have nothing to do
+	// with the cache. This also inherits B8's min-sample requirement.
+	if !cacheReuseConclusivePositive(cr) {
+		v.Value = cr.LatencyRatioP50
 		v.Status = StatusSkip
-		v.Detail = "no cache-reuse evidence (no measured warm reuse sample) — latency gap is not attributable to cache reuse; not scoring"
+		v.Detail = fmt.Sprintf("no conclusive positive cache reuse (median %.3f over %d valid of %d attempted warm turns) — latency gap is not attributable to cache reuse; not scoring", cr.ReuseP50, cr.ReuseCount, cr.AttemptedCachedTurns)
 		return v
 	}
 	v.Value = cr.LatencyRatioP50
-	if calibrationPending {
+	if !gateArmed {
 		v.Status = StatusSkip
-		v.Detail = fmt.Sprintf("calibration pending — cached/uncached latency p50 ratio %.2f (cached=%.0fms uncached=%.0fms), but the margin is not yet calibrated against a reuse-capable baseline; recording only", v.Value, ca.P50, un.P50)
+		v.Detail = fmt.Sprintf("calibration pending (gate not armed) — cached/uncached latency p50 ratio %.2f (cached=%.0fms uncached=%.0fms), but the margin is not yet calibrated against a reuse-capable baseline; recording only", v.Value, ca.P50, un.P50)
 		return v
 	}
 	switch {
-	case v.Value <= CachedTTFTRatioTarget:
+	case v.Value <= CachedLatencyRatioTarget:
 		v.Status = StatusPass
 		v.Detail = fmt.Sprintf("cached/uncached latency p50 ratio %.2f ≤ target %.2f (cached p50=%.0fms uncached p50=%.0fms, n_cached=%d n_uncached=%d)", v.Value, v.Target, ca.P50, un.P50, ca.Count, un.Count)
-	case v.Value <= CachedTTFTRatioBareMin:
+	case v.Value <= CachedLatencyRatioBareMin:
 		v.Status = StatusWarn
 		v.Detail = fmt.Sprintf("cached/uncached latency p50 ratio %.2f over target %.2f but ≤ bare-min %.2f — cached turns only marginally faster (cached p50=%.0fms uncached p50=%.0fms)", v.Value, v.Target, v.BareMin, ca.P50, un.P50)
 	default:

@@ -604,8 +604,8 @@ func consumeSSE(body io.Reader, res *Result) {
 // attribution. Other fields are preserved as-is by the SSE byte counter.
 type chunkPayload struct {
 	Usage struct {
-		PromptTokens     int64  `json:"prompt_tokens"`
-		CompletionTokens int64  `json:"completion_tokens"`
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
 		// CachedPromptTokens is a pointer so an absent field (a
 		// spec-strict gateway) is distinguishable from a genuine 0
 		// (cache collapsed) — the B8 SKIP-vs-FAIL distinction.
@@ -859,8 +859,8 @@ type nonStreamingChatCompletion struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int64  `json:"prompt_tokens"`
-		CompletionTokens int64  `json:"completion_tokens"`
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
 		// Pointer so an omitted cached_prompt_tokens (spec-strict
 		// gateway) is distinguishable from a genuine 0 (cache cold).
 		CachedPromptTokens *int64 `json:"cached_prompt_tokens"`

@@ -109,13 +109,18 @@ silent_hang_threshold: 30s
 
 benchmark:
   enabled: true
-  invariants: [B1, B8, B9]
-  # Records B8/B9 measured values but SKIPs the PASS/WARN/FAIL verdict: the
-  # 0.40 floor is not yet calibrated against a positive reuse-capable
-  # baseline (2026-07-22 pool reports ~0 reuse). Flip to false once a
-  # reuse-capable provider is in the pool and the floor is transcribed from
-  # a real positive measurement, to arm the gate.
-  cache_calibration_pending: true
+  # B8 (cache-reuse retention) + B9 (cached-turn latency advantage) only.
+  # B1 (TTFT) is intentionally omitted: these turns are non-streaming, so
+  # the harness records full-response wall time as "TTFT" and B1 would
+  # score a misleading number here.
+  invariants: [B8, B9]
+  # cache_gate_armed is a positive, fail-safe flag: omitted/false means the
+  # gate is NOT armed, so B8/B9 record their measured value but SKIP the
+  # PASS/WARN/FAIL. The 0.40 floor is not yet calibrated against a positive
+  # reuse-capable baseline (2026-07-22 pool reports ~0 reuse). Set true
+  # only once a reuse-capable provider is in the pool and the floor is
+  # transcribed from a real positive measurement.
+  cache_gate_armed: false
 
 prompts:
   - model: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit

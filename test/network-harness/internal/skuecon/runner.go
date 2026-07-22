@@ -60,11 +60,11 @@ type ViabilityRow struct {
 }
 
 type BestRow struct {
-	Model                         string  `json:"model"`
-	PromptRateUSDPerMtok          float64 `json:"best_prompt_rate_usd_per_mtok"`
-	CompletionRateUSDPerMtok      float64 `json:"best_completion_rate_usd_per_mtok"`
-	Eligible                      bool    `json:"eligible"`
-	RawScore                      float64 `json:"raw_score,omitempty"`
+	Model                    string  `json:"model"`
+	PromptRateUSDPerMtok     float64 `json:"best_prompt_rate_usd_per_mtok"`
+	CompletionRateUSDPerMtok float64 `json:"best_completion_rate_usd_per_mtok"`
+	Eligible                 bool    `json:"eligible"`
+	RawScore                 float64 `json:"raw_score,omitempty"`
 }
 
 type catalogSnapshot struct {
@@ -374,11 +374,11 @@ func synthesizeEnvelope(
 			"diversificationID":    "sim-" + row.Label,
 			"hardwareIdentityHash": "sim-" + row.Label,
 		},
-		"rateCard":                json.RawMessage(rateCardBytes),
-		"candidateCatalog":        json.RawMessage(catalogBytes),
-		"candidateCatalogSHA256":  catalogSHA,
-		"demandRank":              json.RawMessage(demandBytes),
-		"benchmarks":              benchmarks,
+		"rateCard":               json.RawMessage(rateCardBytes),
+		"candidateCatalog":       json.RawMessage(catalogBytes),
+		"candidateCatalogSHA256": catalogSHA,
+		"demandRank":             json.RawMessage(demandBytes),
+		"benchmarks":             benchmarks,
 		"warnings":               []string{},
 		"generatedAt":            generatedAt,
 		"donorMode":              false,

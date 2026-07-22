@@ -198,8 +198,10 @@ cold-turn connection-setup bias to calibrate out before arming.
 - **Measures**: turn-2+ provider prefix-cache reuse (`cached_prompt_tokens
   / prompt_tokens`) and the cached-vs-uncached full-response latency
   advantage.
-- **Invariants**: B1 (aggregate TTFT), B8 (cache-reuse retention),
-  B9 (cached-turn latency advantage).
+- **Invariants**: B8 (cache-reuse retention), B9 (cached-turn latency
+  advantage). B1 is intentionally omitted — these turns are non-streaming
+  so the harness records full-response wall time as "TTFT" and B1 would
+  score a misleading number.
 - **Phase C — regression-gate instrument**: the eventual guard for the
   #376 reuse win. Intended to be wired as a scheduled/CI run that parses
   `benchmark_verdict.json` (benchmark verdicts are advisory — they do not
@@ -228,7 +230,21 @@ cold-turn connection-setup bias to calibrate out before arming.
     "tail_ratio_p99_p50": 2.7,
     "error_rate_per_1k": 3.0,
     "total_requests": 150,
-    "non_2xx_breakdown": {"429": 2, "503": 1, "502": 0}
+    "non_2xx_breakdown": {"429": 2, "503": 1, "502": 0},
+    "cache_reuse": {
+      "attempted_cached_turns": 7,
+      "attempted_uncached_turns": 1,
+      "cached_turns": 7,
+      "usage_absent_turns": 0,
+      "invalid_turns": 0,
+      "reuse_count": 7,
+      "reuse_p50": 0.64,
+      "reuse_mean": 0.63,
+      "reuse_min": 0.61,
+      "uncached_latency_ms": {"p50": 1800, "p95": 1800, "p99": 1800},
+      "cached_latency_ms": {"p50": 900, "p95": 1050, "p99": 1100},
+      "latency_ratio_p50": 0.50
+    }
   },
   "provider_metrics": {
     "per_provider": [

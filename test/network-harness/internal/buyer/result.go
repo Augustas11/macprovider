@@ -135,6 +135,6 @@ type Result struct {
 	// large prefix) and "cached" for the warm follow-ups (request_index
 	// >= 1) that should hit that prefix cache on the sticky-routed
 	// provider. Empty for all other patterns. Drives the B8 (cache-reuse
-	// retention) and B9 (cached-turn TTFT advantage) verdicts.
+	// retention) and B9 (cached-turn latency advantage) verdicts.
 	CachePhase string `json:"cache_phase,omitempty"`
 }

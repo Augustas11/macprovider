@@ -34,12 +34,12 @@ type Bundle struct {
 
 // Write produces:
 //
-//   scenario.yaml          — verbatim copy of the input
-//   run_meta.json          — scenario name, UTC window, git sha
-//   per_request.jsonl      — one row per request (the raw evidence)
-//   metrics_summary.json   — aggregated histograms + route distribution
-//   ledger_reconcile.json  — three-way diff (omitted when skipped)
-//   invariants.json        — the 4 hard verdicts
+//	scenario.yaml          — verbatim copy of the input
+//	run_meta.json          — scenario name, UTC window, git sha
+//	per_request.jsonl      — one row per request (the raw evidence)
+//	metrics_summary.json   — aggregated histograms + route distribution
+//	ledger_reconcile.json  — three-way diff (omitted when skipped)
+//	invariants.json        — the 4 hard verdicts
 func (b *Bundle) Write(outDir string) error {
 	if err := copyFile(b.ScenarioPath, filepath.Join(outDir, "scenario.yaml")); err != nil {
 		return fmt.Errorf("copy scenario.yaml: %w", err)

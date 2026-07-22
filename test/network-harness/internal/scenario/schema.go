@@ -148,16 +148,18 @@ type Benchmark struct {
 	// AccountConcurrency at the time this spec landed (PR #205).
 	ProviderSlots int `yaml:"provider_slots"`
 
-	// CacheCalibrationPending, when true, makes B8/B9 (sticky cache-reuse,
-	// scenario 16) record their measured value but return SKIP instead of
-	// PASS/WARN/FAIL. The provisional thresholds were NOT calibrated
-	// against a positive, capability-qualified baseline — as of 2026-07-22
-	// the live pool reports ~0 reuse, so a present-but-zero value cannot
-	// be told apart from a true regression. Keep this true until a
-	// reuse-capable provider is in the pool and a positive baseline is
-	// captured; then transcribe the floor and flip this to false to arm
-	// the gate. Default false so a calibrated scenario gates normally.
-	CacheCalibrationPending bool `yaml:"cache_calibration_pending"`
+	// CacheGateArmed gates whether B8/B9 (sticky cache-reuse, scenario 16)
+	// emit a PASS/WARN/FAIL verdict. It is a POSITIVE, fail-safe flag: the
+	// zero value (false, i.e. omitted) means the gate is NOT armed, so
+	// B8/B9 record their measured value but SKIP. The provisional
+	// thresholds were NOT calibrated against a positive, capability-
+	// qualified baseline — as of 2026-07-22 the live pool reports ~0
+	// reuse, so a present-but-zero value cannot be told apart from a true
+	// regression. Arm it (set true) only once a reuse-capable provider is
+	// in the pool and the floor has been transcribed from a real positive
+	// baseline. Defaulting to false means a scenario that forgets the flag
+	// fails safe (SKIP), never silently arms an uncalibrated gate.
+	CacheGateArmed bool `yaml:"cache_gate_armed"`
 }
 
 // ChaosEvent is one scheduled shell action. `At` is measured from
