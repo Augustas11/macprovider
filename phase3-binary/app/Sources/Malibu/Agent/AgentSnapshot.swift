@@ -168,8 +168,15 @@ struct AgentSnapshot: Equatable {
               (1...60_000).contains(validForMS) else {
             return false
         }
+        // Retain a trusted observation across Malibu's ~15s poll cadence so a
+        // healthy buyer_serving provider does not demote to Connected solely
+        // because the CLI's shorter valid_for_ms lease elapsed between polls.
+        // Hard failures still clear freshness via invalidateLocalStatusObservation().
+        let validForSeconds = LocalStatusObservationPolicy.effectiveValidForSeconds(
+            reportedValidForMS: validForMS
+        )
         return observedAt <= now.addingTimeInterval(1)
-            && observedAt.addingTimeInterval(Double(validForMS) / 1_000) >= now
+            && observedAt.addingTimeInterval(validForSeconds) >= now
     }
 
     func isCredentialStatusCurrent(at now: Date = Date()) -> Bool {
@@ -387,9 +394,9 @@ enum AgentSnapshotPresenter {
         s.state == .serving || s.state == .paused || isLocalOnly(s)
     }
 
-    static func isNetworkReady(_ s: AgentSnapshot) -> Bool {
+    static func isNetworkReady(_ s: AgentSnapshot, at now: Date = Date()) -> Bool {
         guard s.state == .serving else { return false }
-        return s.isLocalStatusObservationCurrent() && s.networkState == "buyer_serving"
+        return s.isLocalStatusObservationCurrent(at: now) && s.networkState == "buyer_serving"
     }
 
     private static func isLocalOnly(_ s: AgentSnapshot) -> Bool {
@@ -409,7 +416,7 @@ enum AgentSnapshotPresenter {
                 safeNextAction: "Choose Resume when ready."
             )
         }
-        if isNetworkReady(s) {
+        if isNetworkReady(s, at: Date()) {
             return PublicStatus(
                 title: "Provider is ready",
                 detail: "This Mac is approved and available for customer work.",
@@ -604,12 +611,12 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    static func short(_ s: AgentSnapshot) -> String {
+    static func short(_ s: AgentSnapshot, at now: Date = Date()) -> String {
         switch s.state {
         case .idle: return s.lifecycleState == "uninstalled" ? "Uninstalled" : "Stopped"
         case .starting: return "Starting"
         case .serving:
-            guard isNetworkReady(s) else { return "Connected" }
+            guard isNetworkReady(s, at: now) else { return "Connected" }
             if let usdc = s.earningsUsdcToday { return String(format: "$%.2f", usdc) }
             return "Serving"
         case .paused:         return "Paused"

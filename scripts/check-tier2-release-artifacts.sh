@@ -16,6 +16,7 @@ COORDINATOR_SHA256="${COORDINATOR_SHA256:-8b8bbb58f1062e504d414aaec3712660bf4c98
 CATALOG="${CATALOG:-$REPO_ROOT/.omc/tier2/tier2-catalog.json}"
 PUBLIC_KEY_FILE="${PUBLIC_KEY_FILE:-$REPO_ROOT/.omc/tier2/catalog-signing-key.pub}"
 PUBLIC_KEY="${PUBLIC_KEY:-IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ}"
+AUTOTUNE_CANDIDATES="${AUTOTUNE_CANDIDATES:-$REPO_ROOT/phase3-binary/catalog/autotune/autotune-candidates.json}"
 
 log() { printf '[tier2-artifacts] %s\n' "$*" >&2; }
 die() { printf '[tier2-artifacts] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -97,5 +98,14 @@ log "catalog public key ok: $actual_public_key"
 go run "$REPO_ROOT/scripts/sign-catalog.go" verify \
   -public-key "$PUBLIC_KEY_FILE" \
   "$CATALOG"
+
+if [ -f "$AUTOTUNE_CANDIDATES" ]; then
+  python3 "$REPO_ROOT/scripts/catalog-release.py" check-tier2-binding \
+    --candidate "$AUTOTUNE_CANDIDATES" \
+    --tier2 "$CATALOG" || die "autotune/tier2 identity conflict (#608); refuse Tier-2 artifacts that drift from AUTOTUNE_CANDIDATES"
+  log "autotune/tier2 identity binding ok"
+else
+  log "warning: AUTOTUNE_CANDIDATES missing ($AUTOTUNE_CANDIDATES); skipped check-tier2-binding"
+fi
 
 log "SPEC-008 Phase 1 activation bundle preflight passed"

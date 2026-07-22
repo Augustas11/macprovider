@@ -560,12 +560,173 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testObservationLeaseShorterThanPollCadenceKeepsBuyerServingStable() {
+        // CLI valid_for_ms is 5s; Malibu polls ~15s. Public status must remain
+        // Serving across that gap while the same healthy observation is retained.
+        let ages: [TimeInterval] = [0, 4.9, 6, 14.9, 19.9]
+        let origin = Date(timeIntervalSince1970: 1_800_000_000)
+        for age in ages {
+            let observedAt = origin
+            let now = origin.addingTimeInterval(age)
+            let snapshot = buyerServingObservationSnapshot(observedAt: observedAt)
+            XCTAssertTrue(
+                snapshot.isLocalStatusObservationCurrent(at: now),
+                "observation should remain current at age \(age)s"
+            )
+            XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot, at: now))
+            XCTAssertEqual(AgentSnapshotPresenter.short(snapshot, at: now), "Serving")
+        }
+    }
+
+    func testTenHealthyPollCyclesRemainServingAcrossUnrelatedMetricsPhases() {
+        // Simulate Malibu's 15s refresh cadence with a 5s CLI lease for ≥10 cycles.
+        // Between polls, only wall-clock advances (unrelated metrics/UI ticks).
+        let origin = Date(timeIntervalSince1970: 1_800_000_000)
+        for cycle in 0..<10 {
+            let observedAt = origin.addingTimeInterval(Double(cycle) * LocalStatusObservationPolicy.pollIntervalSeconds)
+            let snapshot = buyerServingObservationSnapshot(observedAt: observedAt)
+            let justAfterPoll = observedAt.addingTimeInterval(0.5)
+            let beforeNextPoll = observedAt.addingTimeInterval(
+                LocalStatusObservationPolicy.pollIntervalSeconds - 0.1
+            )
+            XCTAssertEqual(
+                AgentSnapshotPresenter.short(snapshot, at: justAfterPoll),
+                "Serving",
+                "cycle \(cycle) just after poll"
+            )
+            XCTAssertEqual(
+                AgentSnapshotPresenter.short(snapshot, at: beforeNextPoll),
+                "Serving",
+                "cycle \(cycle) before next poll"
+            )
+            XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot, at: beforeNextPoll))
+        }
+
+        // Without a refresh after the final observation, retention expiry demotes.
+        let lastObserved = origin.addingTimeInterval(9 * LocalStatusObservationPolicy.pollIntervalSeconds)
+        let expired = lastObserved.addingTimeInterval(
+            LocalStatusObservationPolicy.displayRetentionSeconds + 0.1
+        )
+        let stale = buyerServingObservationSnapshot(observedAt: lastObserved)
+        XCTAssertEqual(AgentSnapshotPresenter.short(stale, at: expired), "Connected")
+    }
+
+    func testObservationRetentionExpiryEventuallyDemotesPublicServing() {
+        let snapshot = buyerServingObservationSnapshot(
+            observedAt: Date().addingTimeInterval(
+                -(LocalStatusObservationPolicy.displayRetentionSeconds + 1)
+            )
+        )
+
+        XCTAssertFalse(snapshot.isLocalStatusObservationCurrent())
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Connected")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.statusContractLine(snapshot),
+            "Compatible · checking again"
+        )
+    }
+
+    func testHardObservationInvalidationDemotesImmediately() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+
+        snapshot.invalidateLocalStatusObservation()
+
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(snapshot.networkState, "buyer_serving_unknown")
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Connected")
+    }
+
+    func testAuthoritativeNotBuyerServingDemotesEvenWithinRetention() {
+        var snapshot = buyerServingObservationSnapshot(
+            observedAt: Date().addingTimeInterval(-6)
+        )
+        snapshot.networkState = "not_buyer_serving"
+
+        XCTAssertTrue(snapshot.isLocalStatusObservationCurrent())
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "This Mac is not currently eligible"
+        )
+    }
+
+    func testDisplayRetentionStrictlyExceedsSharedPollInterval() {
+        XCTAssertEqual(LocalStatusObservationPolicy.pollIntervalSeconds, 15)
+        XCTAssertGreaterThan(
+            LocalStatusObservationPolicy.displayRetentionSeconds,
+            LocalStatusObservationPolicy.pollIntervalSeconds
+        )
+        XCTAssertEqual(
+            LocalStatusObservationPolicy.pollIntervalNanoseconds,
+            UInt64(LocalStatusObservationPolicy.pollIntervalSeconds * 1_000_000_000)
+        )
+    }
+
+    @MainActor
+    func testObservationExpiryDiagnosticEmitsOnPresentedServingToConnectedTransition() {
+        PublicStatusTransitionDiagnostics.resetForTests()
+        let fresh = buyerServingObservationSnapshot(observedAt: Date())
+        XCTAssertFalse(PublicStatusTransitionDiagnostics.notePresentedSnapshot(fresh))
+        XCTAssertEqual(AgentSnapshotPresenter.short(fresh), "Serving")
+
+        let expired = buyerServingObservationSnapshot(
+            observedAt: Date().addingTimeInterval(
+                -(LocalStatusObservationPolicy.displayRetentionSeconds + 1)
+            )
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.short(expired), "Connected")
+        XCTAssertTrue(PublicStatusTransitionDiagnostics.notePresentedSnapshot(expired))
+        // Rate-limited: immediate repeat must not emit again.
+        XCTAssertFalse(PublicStatusTransitionDiagnostics.notePresentedSnapshot(expired))
+    }
+
+    func testHardFailuresDemoteEvenWhenObservationWouldStillBeWithinRetention() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var snapshot = buyerServingObservationSnapshot(observedAt: now.addingTimeInterval(-1))
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot, at: now))
+
+        // Failed refresh / provider exit / service-identity mismatch all call
+        // invalidateLocalStatusObservation() before reconcile (MalibuAgent).
+        snapshot.invalidateLocalStatusObservation()
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot, at: now))
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot, at: now), "Connected")
+
+        snapshot = buyerServingObservationSnapshot(observedAt: now.addingTimeInterval(-1))
+        snapshot.networkState = "not_buyer_serving"
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot, at: now))
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "This Mac is not currently eligible"
+        )
+
+        // Coordinator disconnect while still within retention: authoritative
+        // network state leaves buyer_serving.
+        snapshot = buyerServingObservationSnapshot(observedAt: now.addingTimeInterval(-1))
+        snapshot.coordinatorConnected = false
+        snapshot.networkState = "live_verified"
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot, at: now))
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot, at: now), "Connected")
+
+        // Service-instance change arrives as a fresh observation with a new ID;
+        // same buyer_serving verdict stays Serving (identity mismatch would have
+        // invalidated instead of applying the new observation).
+        snapshot = buyerServingObservationSnapshot(observedAt: now)
+        snapshot.serviceInstanceID = "instance-b"
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot, at: now.addingTimeInterval(1)), "Serving")
+    }
+
     func testObservationExpiryBetweenPollsSuppressesServingRepairAndLifecycle() {
+        // Past the display retention floor (poll interval + margin), observation
+        // expiry still fail-closes repair/lifecycle surfaces.
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.localStatusCapabilities = ["status_observation_v1"]
         snapshot.statusObservationID = "observation-a"
-        snapshot.statusObservedAt = Date().addingTimeInterval(-6)
+        snapshot.statusObservedAt = Date().addingTimeInterval(
+            -(LocalStatusObservationPolicy.displayRetentionSeconds + 1)
+        )
         snapshot.statusObservationValidForMS = 5_000
         snapshot.statusObservationFresh = true
         snapshot.networkState = "buyer_serving"
@@ -774,5 +935,19 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertTrue(details.contains("coordinator join requires model_artifact_sha256 in /tmp/macprovider.err.log"))
         XCTAssertTrue(details.contains("[redacted]"))
         XCTAssertTrue(details.contains("watchdog recovery started"))
+    }
+
+    private func buyerServingObservationSnapshot(observedAt: Date) -> AgentSnapshot {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "observation-a"
+        snapshot.statusObservedAt = observedAt
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+        snapshot.networkState = "buyer_serving"
+        snapshot.coordinatorConnected = true
+        snapshot.serviceInstanceID = "instance-a"
+        return snapshot
     }
 }

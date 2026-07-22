@@ -1,5 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Static export of MalibuConstructionSunburstGeometry constants. -->
   <rect width="64" height="64" rx="14" fill="#143A45"/>
-  <line x1="10" y1="42" x2="54" y2="42" stroke="#FFFBF2" stroke-width="3.4" stroke-linecap="round"/>
-  <path d="M19 42 a13 13 0 0 1 26 0 Z" fill="#FF6E5B"/>
+  <g fill="#FF6E5B">
+    <path d="M19.50 38.00 A12.5 12.5 0 0 1 44.50 38.00 Z"/>
+    <path d="M44.75 33.56 L59.39 32.18 L45.45 36.87 Z"/>
+    <path d="M42.54 29.56 L55.87 23.37 L44.30 32.44 Z"/>
+    <path d="M39.11 26.53 L49.62 16.24 L41.74 28.66 Z"/>
+    <path d="M34.88 24.81 L41.35 11.61 L38.07 25.94 Z"/>
+    <path d="M30.31 24.61 L32.00 10.00 L33.69 24.61 Z"/>
+    <path d="M25.93 25.94 L22.65 11.61 L29.12 24.81 Z"/>
+    <path d="M22.26 28.66 L14.38 16.24 L24.89 26.53 Z"/>
+    <path d="M19.70 32.44 L8.13 23.37 L21.46 29.56 Z"/>
+    <path d="M18.55 36.87 L4.61 32.18 L19.25 33.56 Z"/>
+  </g>
 </svg>

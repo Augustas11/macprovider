@@ -29,16 +29,149 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertNil(status.availableInviteURL)
         XCTAssertEqual(
             ReferralPanelPresenter.headline(availability: .available, status: status),
-            "Serve once to unlock invites"
+            "Serve once to unlock your base invite"
         )
+        XCTAssertTrue(
+            ReferralPanelPresenter.detail(availability: .available, status: status)
+                .contains("base invite")
+        )
+        XCTAssertTrue(ReferralPanelPresenter.pathChrome.contains("first paid serve"))
+        XCTAssertTrue(ReferralPanelPresenter.pathChrome.contains("Optional X"))
     }
 
     func testEligibleStatusUsesExactCoordinatorCapacity() throws {
         let status = try XCTUnwrap(makeStatus())
 
         XCTAssertEqual(status.availableInviteURL?.absoluteString, "https://malibu.tech/j#/CODE")
-        XCTAssertEqual(ReferralPanelPresenter.capacity(status), "1 remaining · 0 redeemed · 1 total")
+        XCTAssertEqual(
+            ReferralPanelPresenter.capacity(status),
+            "1 remaining · 0 redeemed · 1 base · X bonus available"
+        )
+        XCTAssertEqual(
+            ReferralPanelPresenter.headline(availability: .available, status: status),
+            "Base invite ready"
+        )
+        XCTAssertTrue(
+            ReferralPanelPresenter.detail(availability: .available, status: status)
+                .contains("Optional: share on X")
+        )
         XCTAssertTrue(status.canStartSocialChallenge)
+    }
+
+    func testMaturedStatusShowsBaseAndXBonusSplit() throws {
+        let status = try XCTUnwrap(makeStatus(
+            socialState: ReferralStatusProjection.matured,
+            remaining: 3,
+            bonusCapacity: 2
+        ))
+
+        XCTAssertEqual(
+            ReferralPanelPresenter.headline(availability: .available, status: status),
+            "Base invite unlocked · X bonus awarded"
+        )
+        let detail = ReferralPanelPresenter.detail(availability: .available, status: status)
+        XCTAssertTrue(detail.contains("1 base from serving"))
+        XCTAssertTrue(detail.contains("2 from X bonus"))
+        XCTAssertTrue(detail.contains("X is not required to invite"))
+        XCTAssertEqual(
+            ReferralPanelPresenter.capacity(status),
+            "3 remaining · 0 redeemed · 1 base + 2 X bonus (3 total)"
+        )
+        XCTAssertFalse(status.canStartSocialChallenge)
+        XCTAssertNotNil(status.availableInviteURL)
+    }
+
+    func testCapacityDoesNotAdvertiseXBonusOutsideActionableStates() throws {
+        let locked = try XCTUnwrap(makeStatus(
+            socialState: ReferralStatusProjection.locked,
+            firstServingSeen: false
+        ))
+        XCTAssertFalse(locked.canStartSocialChallenge)
+        XCTAssertEqual(
+            ReferralPanelPresenter.capacity(locked),
+            "1 remaining · 0 redeemed · 1 total"
+        )
+
+        let pending = try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.pending))
+        XCTAssertEqual(
+            ReferralPanelPresenter.capacity(pending),
+            "1 remaining · 0 redeemed · 1 total"
+        )
+    }
+
+    func testFailedHeadlineTracksInviteAvailability() throws {
+        let ready = try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.failed))
+        XCTAssertEqual(
+            ReferralPanelPresenter.headline(availability: .available, status: ready),
+            "Base invite ready · X bonus not awarded"
+        )
+
+        let exhausted = try XCTUnwrap(makeStatus(
+            socialState: ReferralStatusProjection.failed,
+            redemptions: 1,
+            remaining: 0
+        ))
+        XCTAssertEqual(
+            ReferralPanelPresenter.headline(availability: .available, status: exhausted),
+            "Invite capacity used · X bonus not awarded"
+        )
+
+        let unlockedNoLink = try XCTUnwrap(ReferralStatusProjection(
+            campaign: "prebeta",
+            joinBaseURL: URL(string: "https://malibu.tech/j")!,
+            socialState: ReferralStatusProjection.failed,
+            baseCapacity: 1,
+            configuredBonusCapacity: 2,
+            bonusCapacity: 0,
+            redemptions: 0,
+            remaining: 1,
+            firstServingSeen: true,
+            joinLinksEnabled: true,
+            socialBonusEnabled: true,
+            inviteCode: nil,
+            inviteURL: nil,
+            observedAt: Date(),
+            pendingChallenge: nil
+        ))
+        XCTAssertEqual(
+            ReferralPanelPresenter.headline(availability: .available, status: unlockedNoLink),
+            "Base invite unlocked · X bonus not awarded"
+        )
+    }
+
+    func testEligibleCopyClaimsInviteOnlyWhenURLPresent() throws {
+        let withInvite = try XCTUnwrap(makeStatus())
+        XCTAssertTrue(
+            ReferralPanelPresenter.detail(availability: .available, status: withInvite)
+                .contains("Copy your private invite anytime")
+        )
+
+        let withoutInvite = try XCTUnwrap(ReferralStatusProjection(
+            campaign: "prebeta",
+            joinBaseURL: URL(string: "https://malibu.tech/j")!,
+            socialState: ReferralStatusProjection.eligible,
+            baseCapacity: 1,
+            configuredBonusCapacity: 2,
+            bonusCapacity: 0,
+            redemptions: 0,
+            remaining: 1,
+            firstServingSeen: true,
+            joinLinksEnabled: true,
+            socialBonusEnabled: true,
+            inviteCode: nil,
+            inviteURL: nil,
+            observedAt: Date(),
+            pendingChallenge: nil
+        ))
+        XCTAssertNil(withoutInvite.availableInviteURL)
+        XCTAssertEqual(
+            ReferralPanelPresenter.detail(availability: .available, status: withoutInvite),
+            "1 invite use remaining · 0 redeemed."
+        )
+        XCTAssertFalse(
+            ReferralPanelPresenter.detail(availability: .available, status: withoutInvite)
+                .contains("Copy your private invite")
+        )
     }
 
     func testInviteMayUseCoordinatorDeclaredPublicJoinDomain() throws {
@@ -85,10 +218,10 @@ final class ReferralProjectionTests: XCTestCase {
 
     func testPendingCopyNeverClaimsBonusWasEarned() throws {
         let status = try XCTUnwrap(makeStatus(socialState: ReferralStatusProjection.pending))
-        XCTAssertEqual(
-            ReferralPanelPresenter.detail(availability: .available, status: status),
-            "No bonus is earned until the public post is verified."
-        )
+        let detail = ReferralPanelPresenter.detail(availability: .available, status: status)
+        XCTAssertTrue(detail.contains("base invite is already unlocked"))
+        XCTAssertTrue(detail.contains("No X bonus is earned until the public post is verified"))
+        XCTAssertFalse(detail.lowercased().contains("earned from the x"))
     }
 
     func testReferralPublicCopyDoesNotExposeInternalTerms() throws {

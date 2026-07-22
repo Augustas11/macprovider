@@ -352,10 +352,16 @@ func readPrivateKey(path string) (ed25519.PrivateKey, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "sign-catalog: Ed25519 helper for Tier-2 catalog files")
+	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  go run scripts/sign-catalog.go keygen [-public-out PATH] [-private-out PATH]")
 	fmt.Fprintln(os.Stderr, "  go run scripts/sign-catalog.go sign [-key PATH] [-key-id ID] [-out PATH] UNSIGNED_CATALOG_JSON")
 	fmt.Fprintln(os.Stderr, "  go run scripts/sign-catalog.go verify [-public-key PATH] SIGNED_CATALOG_JSON")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "#608: signing alone does not authorize a live catalog. Before Pearl publish,")
+	fmt.Fprintln(os.Stderr, "run scripts/catalog-release.py check-tier2-binding against the autotune release")
+	fmt.Fprintln(os.Stderr, "being activated (deploy-pearl-vps.sh / activate-tier2-observe.sh enforce this).")
+	fmt.Fprintln(os.Stderr, "Do not treat a freshly signed Tier-2 file as an independent second authority.")
 }
 
 func exitf(format string, args ...any) {
