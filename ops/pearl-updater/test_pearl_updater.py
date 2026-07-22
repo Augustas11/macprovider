@@ -2011,7 +2011,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r7")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "9e6b70c4adada918c394a1a603b6533c73cae75b",
+            "43138cee6dd26f18a11934390fc6b3b0623f1e00",
         )
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_FILE_MODES,
