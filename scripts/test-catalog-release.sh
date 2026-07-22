@@ -484,6 +484,7 @@ PY
 # Historical 2-feed release-ledger rows remain valid (validate_release_ledger
 # still accepts them); only a *new* release generate requires Tier-2.
 python3 - "$VERIFY" "$CANONICAL" "$STATIC" <<'PY'
+import atexit
 import base64
 import importlib.util
 import json
@@ -542,6 +543,7 @@ def signed_tier2(catalog_id, model_sha256, *, key_id="catalog-key-2026q2", sig="
 
 # --- real Ed25519 keypairs for signature-authentication tests ---
 keys_dir = pathlib.Path(tempfile.mkdtemp(prefix="tier2-test-keys-"))
+atexit.register(shutil.rmtree, keys_dir, ignore_errors=True)
 trusted_pub = keys_dir / "trusted.pub"
 trusted_priv = keys_dir / "trusted.priv"
 other_pub = keys_dir / "other.pub"
@@ -556,7 +558,14 @@ subprocess.run(
      "-public-out", str(other_pub), "-private-out", str(other_priv)],
     check=True, cwd=str(module.ROOT), capture_output=True, text=True,
 )
-os.environ[module.TIER2_PUBLIC_KEY_ENV] = trusted_pub.read_text().strip()
+# No env-var override exists for the trusted key (an ambient env var could
+# swap the trust root outside PR review); monkeypatch the module-level
+# COORDINATOR_YAML_PATH constant instead, the same pattern already used for
+# TIER2_CATALOG_PATH below.
+original_coordinator_yaml_path = module.COORDINATOR_YAML_PATH
+test_coordinator_yaml = keys_dir / "coordinator.yaml"
+test_coordinator_yaml.write_text(f"tier2:\n  catalog_public_key: {trusted_pub.read_text().strip()}\n")
+module.COORDINATOR_YAML_PATH = test_coordinator_yaml
 
 
 def sign_with(priv_path, unsigned_body, *, key_id="test-tier2-key"):
@@ -597,8 +606,33 @@ tier2_obj = module.validate_tier2_catalog(agreeing_tier2)
 if tier2_obj["catalog_id"] != "test-catalog-agree":
     raise SystemExit("validate_tier2_catalog did not round-trip catalog_id")
 
+trusted_key_fingerprint = module.tier2_trusted_key_fingerprint(trusted_pub.read_text().strip())
+
 # --- signature authentication: verify_tier2_signature must actually check crypto ---
-module.verify_tier2_signature(agreeing_tier2)  # trusted key + matching signature: accepted
+authenticated_signer = module.verify_tier2_signature(agreeing_tier2)  # trusted key + matching signature: accepted
+if authenticated_signer != trusted_key_fingerprint:
+    raise SystemExit("verify_tier2_signature must return the trusted key's fingerprint")
+
+# key_id is metadata alongside the signature, not covered by
+# sign-catalog.go's signed canonical body (#608 audit): a catalog whose
+# signature.key_id is tampered after signing must still verify (the bytes
+# Ed25519 covers are unchanged), but the *recorded* signer identity must be
+# the authenticated trusted-key fingerprint, never the tampered claim.
+key_id_tampered = json.loads(agreeing_tier2)
+key_id_tampered["signature"]["key_id"] = "forged-id"
+key_id_tampered_bytes = json.dumps(key_id_tampered).encode()
+key_id_tampered_obj = module.validate_tier2_catalog(key_id_tampered_bytes)
+key_id_tampered_signer = module.verify_tier2_signature(key_id_tampered_bytes)
+if key_id_tampered_signer != trusted_key_fingerprint:
+    raise SystemExit("verify_tier2_signature must ignore the catalog's own claimed key_id")
+key_id_tampered_manifest = module.manifest(
+    candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+    tier2=key_id_tampered_bytes, tier2_obj=key_id_tampered_obj, tier2_signer_key_id=key_id_tampered_signer,
+)
+if json.loads(key_id_tampered_manifest)["feeds"]["tier2-catalog.json"]["signer_key_id"] == "forged-id":
+    raise SystemExit("manifest() recorded an unauthenticated key_id claim instead of the authenticated fingerprint")
+
+print("tier2 key_id tampering does not affect authentication and is never recorded as signer_key_id")
 
 tampered = bytearray(agreeing_tier2)
 marker = b"operator-curated"
@@ -610,6 +644,19 @@ rejected("tampered tier2 catalog bytes", lambda: module.verify_tier2_signature(b
 
 wrong_signer_tier2 = real_signed_tier2("test-catalog-wrong-signer", qwen_row["model_sha256"], priv_path=other_priv)
 rejected("tier2 catalog signed by an untrusted key", lambda: module.verify_tier2_signature(wrong_signer_tier2))
+
+# The trust root is the committed coordinator.yaml only. An ambient
+# environment variable set by anything other than a reviewed PR touching
+# that file must NOT be able to authenticate a catalog signed by a
+# different (untrusted) key.
+os.environ["CATALOG_RELEASE_TIER2_PUBLIC_KEY"] = other_pub.read_text().strip()
+try:
+    rejected(
+        "wrong-signer tier2 catalog authenticated via an ambient env var (no such override exists)",
+        lambda: module.verify_tier2_signature(wrong_signer_tier2),
+    )
+finally:
+    os.environ.pop("CATALOG_RELEASE_TIER2_PUBLIC_KEY", None)
 
 dummy_signed_tier2 = signed_tier2("test-catalog-dummy-sig", qwen_row["model_sha256"])
 module.validate_tier2_catalog(dummy_signed_tier2)  # structurally valid...
@@ -685,6 +732,43 @@ rejected("padded base64 signature", lambda: module.validate_tier2_catalog(
 rejected("standard-alphabet (non-urlsafe) signature", lambda: module.validate_tier2_catalog(
     mutated(lambda b: b["signature"].__setitem__("sig", "A" * 84 + "+/"))
 ))
+
+
+def malleable_variant(value):
+    """Find a same-length base64url string that decodes to the same bytes
+    as `value` but is not itself the canonical encoding (trailing unused
+    bits in the final character differ). Returns None if no such variant
+    exists among the base64url alphabet."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    pad = "=" * (-len(value) % 4)
+    original = base64.urlsafe_b64decode(value + pad)
+    for c in alphabet:
+        if c == value[-1]:
+            continue
+        candidate = value[:-1] + c
+        try:
+            if base64.urlsafe_b64decode(candidate + pad) == original:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+malleable_sig = malleable_variant(base_body["signature"]["sig"])
+if malleable_sig is None:
+    raise SystemExit("malleability probe setup failed: no alternate trailing-bit signature found")
+rejected("non-canonical base64url signature (trailing-bit malleability)", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["signature"].__setitem__("sig", malleable_sig))
+))
+
+malleable_pubkey = malleable_variant(trusted_pub.read_text().strip())
+if malleable_pubkey is None:
+    raise SystemExit("malleability probe setup failed: no alternate trailing-bit public key found")
+rejected(
+    "non-canonical base64url public key (trailing-bit malleability)",
+    lambda: module.canonical_urlsafe_b64_decode(malleable_pubkey, 32, "test pubkey"),
+)
+
 module.validate_tier2_catalog(agreeing_tier2)  # baseline still accepted after mutation probes
 
 # --- check-tier2-binding fail-closed on conflicting hash ---
@@ -699,9 +783,12 @@ else:
     raise SystemExit("conflicting tier2 feed candidate was accepted")
 
 # --- manifest() binds tier2-catalog.json as a third feed ---
+# signer_key_id must come from the authenticated verify_tier2_signature()
+# result (a fingerprint of the trusted key), NOT from the catalog's own
+# unauthenticated signature.key_id claim (#608 audit).
 manifest_with_tier2 = module.manifest(
     candidate_bytes, demand_bytes, candidate_obj, demand_obj,
-    tier2=agreeing_tier2, tier2_obj=tier2_obj,
+    tier2=agreeing_tier2, tier2_obj=tier2_obj, tier2_signer_key_id=trusted_key_fingerprint,
 )
 manifest_value = json.loads(manifest_with_tier2)
 if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.json", "tier2-catalog.json"}:
@@ -709,8 +796,16 @@ if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.jso
 tier2_feed = manifest_value["feeds"]["tier2-catalog.json"]
 if tier2_feed["sha256"] != module.sha256(agreeing_tier2) or tier2_feed["bytes"] != len(agreeing_tier2):
     raise SystemExit("tier2 feed digest/bytes do not bind the signed catalog")
-if tier2_feed["version"] != "test-catalog-agree" or tier2_feed["signer_key_id"] != "test-tier2-key":
-    raise SystemExit("tier2 feed version/signer_key_id must come from the signed catalog, not the release train")
+if tier2_feed["version"] != "test-catalog-agree" or tier2_feed["signer_key_id"] != trusted_key_fingerprint:
+    raise SystemExit("tier2 feed version must come from the signed catalog; signer_key_id from the authenticated trusted key")
+
+rejected(
+    "manifest() with tier2 bytes but no authenticated tier2_signer_key_id",
+    lambda: module.manifest(
+        candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+        tier2=agreeing_tier2, tier2_obj=tier2_obj,
+    ),
+)
 
 manifest_without_tier2 = module.manifest(candidate_bytes, demand_bytes, candidate_obj, demand_obj)
 if "tier2-catalog.json" in json.loads(manifest_without_tier2)["feeds"]:
@@ -727,7 +822,7 @@ new_demand_obj = json.loads(json.dumps(demand_obj))
 new_demand_obj["version"] = new_candidate_obj["version"]
 new_manifest_with_tier2 = module.manifest(
     candidate_bytes, demand_bytes, new_candidate_obj, new_demand_obj,
-    tier2=agreeing_tier2, tier2_obj=tier2_obj,
+    tier2=agreeing_tier2, tier2_obj=tier2_obj, tier2_signer_key_id=trusted_key_fingerprint,
 )
 bound_release_id, bound_record = module.release_record(new_manifest_with_tier2)
 if bound_release_id == hist_release_id:
@@ -778,22 +873,26 @@ print("release-ledger accepts historical 2-feed rows and Tier-2-bound 3-feed row
 # catalog IS staged it is never a silent bystander -- it must authenticate.
 original_tier2_path = module.TIER2_CATALOG_PATH
 require_env = module.REQUIRE_TIER2_FOR_GENERATE_ENV
+staged_tier2_dir = pathlib.Path(tempfile.mkdtemp(prefix="tier2-test-staged-"))
+atexit.register(shutil.rmtree, staged_tier2_dir, ignore_errors=True)
 try:
-    module.TIER2_CATALOG_PATH = pathlib.Path(tempfile.mkdtemp()) / "tier2-catalog.json"
+    module.TIER2_CATALOG_PATH = staged_tier2_dir / "tier2-catalog.json"
 
     os.environ.pop(require_env, None)
-    absent_tier2, absent_obj = module.require_tier2_catalog_for_generate()
-    if absent_tier2 is not None or absent_obj is not None:
-        raise SystemExit("require_tier2_catalog_for_generate must return (None, None) when Tier-2 is optional and absent")
+    absent_tier2, absent_obj, absent_signer = module.require_tier2_catalog_for_generate()
+    if absent_tier2 is not None or absent_obj is not None or absent_signer is not None:
+        raise SystemExit("require_tier2_catalog_for_generate must return (None, None, None) when Tier-2 is optional and absent")
 
     os.environ[require_env] = "1"
     rejected(f"generate without tier2-catalog.json when {require_env}=1", module.require_tier2_catalog_for_generate)
     os.environ.pop(require_env, None)
 
     module.TIER2_CATALOG_PATH.write_bytes(agreeing_tier2)
-    returned_tier2, returned_obj = module.require_tier2_catalog_for_generate()
+    returned_tier2, returned_obj, returned_signer = module.require_tier2_catalog_for_generate()
     if returned_tier2 != agreeing_tier2 or returned_obj["catalog_id"] != "test-catalog-agree":
         raise SystemExit("require_tier2_catalog_for_generate did not round-trip the signed catalog")
+    if returned_signer != trusted_key_fingerprint:
+        raise SystemExit("require_tier2_catalog_for_generate did not return the authenticated signer fingerprint")
 
     module.TIER2_CATALOG_PATH.write_bytes(dummy_signed_tier2)
     rejected(
@@ -833,9 +932,14 @@ with tempfile.TemporaryDirectory() as directory:
 
     # A staged catalog that is structurally declared but forged/unauthenticated
     # must fail closed even though its bytes match the declared manifest digest.
+    # tier2_signer_key_id here is a fabricated claim (this manifest is built
+    # directly, bypassing verify_tier2_signature, to simulate a forged
+    # release.json); verify_directory must re-authenticate independently and
+    # reject regardless of what signer_key_id the manifest claims.
     forged_manifest = module.manifest(
         candidate_bytes, demand_bytes, candidate_obj, demand_obj,
         tier2=wrong_signer_tier2, tier2_obj=module.validate_tier2_catalog(wrong_signer_tier2),
+        tier2_signer_key_id="forged-claim-does-not-matter",
     )
     (release / "tier2-catalog.json").write_bytes(wrong_signer_tier2)
     (release / "release.json").write_bytes(forged_manifest)
@@ -843,6 +947,8 @@ with tempfile.TemporaryDirectory() as directory:
               lambda: module.verify_directory(release))
 
 print("verify-directory requires tier2-catalog.json to be a declared AND authenticated feed member")
+
+module.COORDINATOR_YAML_PATH = original_coordinator_yaml_path
 PY
 
 echo "PASS: catalog release generation and trust failures are locked"
