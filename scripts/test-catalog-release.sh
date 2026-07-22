@@ -289,4 +289,110 @@ stage_release
 printf ' {}' >> "$TMP/release/demand-rank.json"
 expect_rejected "trailing JSON"
 
+# #608 Partial: Tier-2 identity binding derived from the autotune release.
+python3 - "$VERIFY" "$CANONICAL" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("catalog_release", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+canonical = pathlib.Path(sys.argv[2])
+candidate = (canonical / "autotune-candidates.json").read_bytes()
+candidate_obj = module.validate_candidate(candidate)
+binding_path = canonical / "tier2-identity-binding.json"
+module.validate_tier2_identity_binding(binding_path.read_bytes(), candidate, candidate_obj)
+
+qwen = next(
+    m for m in json.loads(binding_path.read_bytes())["models"]
+    if m["model_id"] == "mlx-community/Qwen3-8B-4bit"
+)
+assert qwen["sha256"] == candidate_obj["rows"]["qwen3-8b"]["model_sha256"]
+
+with tempfile.TemporaryDirectory() as directory:
+    good = pathlib.Path(directory) / "tier2-good.json"
+    bad = pathlib.Path(directory) / "tier2-bad.json"
+    body = {
+        "catalog_id": "binding-test",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "issued_at": "2026-07-10T00:00:00Z",
+        "models": [{
+            "artifact_kind": "mlx_weight_file",
+            "hash_scope": "primary_weight_file",
+            "model_id": "mlx-community/Qwen3-8B-4bit",
+            "min_ram_gb": 12,
+            "sha256": qwen["sha256"],
+            "source": "operator-curated",
+        }],
+        "version": 1,
+    }
+    good.write_text(json.dumps(body))
+    module.check_tier2_binding(candidate, good.read_bytes())
+    body["models"][0]["sha256"] = "f" * 64
+    bad.write_text(json.dumps(body))
+    try:
+        module.check_tier2_binding(candidate, bad.read_bytes())
+    except module.CatalogError as exc:
+        if "conflicts" not in str(exc):
+            raise SystemExit(f"conflict error missing detail: {exc}")
+    else:
+        raise SystemExit("stale/conflicting tier2 binding was accepted")
+
+    try:
+        module.derive_tier2_unsigned_body(
+            candidate_obj,
+            catalog_id="should-not-write",
+            issued_at="2026-07-10T00:00:00Z",
+            expires_at="2099-01-01T00:00:00Z",
+        )
+    except module.CatalogError as exc:
+        if "disabled" not in str(exc):
+            raise SystemExit(f"derive-tier2 disable message missing: {exc}")
+    else:
+        raise SystemExit("derive-tier2 must remain disabled until snapshot-manifest scope exists")
+
+    conflicted = json.loads(candidate)
+    first_key = next(iter(conflicted["rows"]))
+    row = dict(conflicted["rows"][first_key])
+    row["model_sha256"] = "a" * 64
+    conflicted["rows"][first_key + "-dup"] = row
+    try:
+        module.validate_candidate(module.canonical_bytes(conflicted))
+    except module.CatalogError as exc:
+        if "conflicting model_sha256" not in str(exc):
+            raise SystemExit(f"duplicate-hash rejection missing: {exc}")
+    else:
+        raise SystemExit("conflicting duplicate model_sha256 was accepted")
+print("tier2 binding checks locked")
+PY
+
+stage_release
+cp "$CANONICAL/tier2-identity-binding.json" "$TMP/release/" 2>/dev/null || true
+python3 - "$TMP/release" <<'PY'
+import json, pathlib, sys
+release = pathlib.Path(sys.argv[1])
+# Plant a conflicting Tier-2 catalog beside the release and ensure verify-directory fails closed.
+candidate = json.loads((release / "autotune-candidates.json").read_text())
+row = candidate["rows"]["qwen3-8b"]
+conflict = {
+    "catalog_id": "stale-backup",
+    "expires_at": "2099-01-01T00:00:00Z",
+    "issued_at": "2026-05-31T00:00:00Z",
+    "models": [{
+        "artifact_kind": "mlx_weight_file",
+        "hash_scope": "primary_weight_file",
+        "model_id": row["model_id"],
+        "min_ram_gb": row["min_ram_gb"],
+        "sha256": "0" * 64,
+        "source": "stale-backup",
+    }],
+    "version": 1,
+}
+(release / "tier2-catalog.json").write_text(json.dumps(conflict))
+PY
+expect_rejected "conflicting tier2 catalog in release directory"
+
 echo "PASS: catalog release generation and trust failures are locked"

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -194,7 +195,10 @@ func setDefaultForTest(c *Catalog) {
 //
 // Returns the newly-installed *Catalog on success for callers that want a
 // handle to it (e.g. for an immediate Active() / Configured() probe).
-func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger) (*Catalog, error) {
+func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger, guards ...func(*Catalog) error) (*Catalog, error) {
+	if len(guards) == 0 {
+		return nil, fmt.Errorf("tier2 config reload rejected: at least one post-load guard is required (#608 binding)")
+	}
 	next := NewCatalog()
 	if err := next.ConfigureStrict(cfg, logger); err != nil {
 		return nil, err
@@ -204,6 +208,14 @@ func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger) (*Cat
 			return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
 		}
 		return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires a configured catalog")
+	}
+	for _, guard := range guards {
+		if guard == nil {
+			return nil, fmt.Errorf("tier2 config reload rejected: nil post-load guard")
+		}
+		if err := guard(next); err != nil {
+			return nil, err
+		}
 	}
 	setDefault(next)
 	return next, nil
@@ -359,20 +371,53 @@ func hashStatusForState(st state, modelID, reportedHash string) pool.HashStatus 
 	return pool.HashStatusMismatch
 }
 
-// ExpectedHashPrefix returns the 8-hex-char prefix of the catalog hash for
-// modelID, or "" when not catalogued. Used in audit-log enrichment.
-func (c *Catalog) ExpectedHashPrefix(modelID string) string {
+// ExpectedHash returns the active catalog sha256 for modelID.
+func (c *Catalog) ExpectedHash(modelID string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	parsed := activeParsedLocked(c.st)
 	if parsed == nil {
-		return ""
+		return "", false
 	}
 	model, ok := parsed.Models[catalogModelKey(modelID)]
 	if !ok {
+		return "", false
+	}
+	hash := strings.ToLower(strings.TrimSpace(model.SHA256))
+	if hash == "" {
+		return "", false
+	}
+	return hash, true
+}
+
+// ModelIDs returns the active catalog's model_id values in sorted order.
+// Used by release-binding checks that compare Tier-2 rows against autotune.
+func (c *Catalog) ModelIDs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return nil
+	}
+	out := make([]string, 0, len(parsed.Models))
+	for _, model := range parsed.Models {
+		id := strings.TrimSpace(model.ModelID)
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ExpectedHashPrefix returns the 8-hex-char prefix of the catalog hash for
+// modelID, or "" when not catalogued. Used in audit-log enrichment.
+func (c *Catalog) ExpectedHashPrefix(modelID string) string {
+	hash, ok := c.ExpectedHash(modelID)
+	if !ok {
 		return ""
 	}
-	return hashPrefix(model.SHA256)
+	return hashPrefix(hash)
 }
 
 // CatalogID returns the active catalog's ID, or "" if no active catalog.

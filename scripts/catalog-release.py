@@ -28,6 +28,8 @@ GO_REJECTED_RELEASES_GENERATED = ROOT / "phase4-coordinator" / "internal" / "aut
 KEYS_PATH = CATALOG_DIR / "trusted-keys.json"
 MANIFEST_PATH = CATALOG_DIR / "release.json"
 LEDGER_PATH = CATALOG_DIR / "release-ledger.json"
+TIER2_BINDING_PATH = CATALOG_DIR / "tier2-identity-binding.json"
+TIER2_BINDING_SCHEMA = "macprovider.tier2-identity-binding.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 MODEL_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
@@ -238,6 +240,32 @@ def validate_candidate(data: bytes) -> dict:
         if not isinstance(gate["max_4k_ttft_ms"], int) or isinstance(gate["max_4k_ttft_ms"], bool) or gate["max_4k_ttft_ms"] < 0:
             fail(f"candidate row {key}: invalid max_4k_ttft_ms")
         validate_candidate_workloads(row, key)
+    # Reject keys that equal some model_id's normalized form while declaring a
+    # different model_id. Go HighestClaimedTier prefers rowsByKey[normalized]
+    # and would otherwise shadow the real model row (#608 audit MEDIUM).
+    for key, row in rows.items():
+        if key != row["model_id"].lower().strip() and any(
+            other["model_id"].lower().strip() == key for other in rows.values()
+        ):
+            fail(
+                f"candidate row {key}: key shadows model_id {key!r} but declares "
+                f"model_id {row['model_id']!r}"
+            )
+    # Reject conflicting artifact hashes under one normalized model_id so every
+    # consumer (including check-tier2-binding) inherits fail-closed parity.
+    by_model_hash: dict[str, str] = {}
+    for key, row in rows.items():
+        artifact_hash = row.get("model_sha256")
+        if not isinstance(artifact_hash, str) or not artifact_hash:
+            continue
+        normalized = row["model_id"].lower().strip()
+        prior = by_model_hash.get(normalized)
+        if prior is not None and prior != artifact_hash:
+            fail(
+                f"candidate row {key}: model_id {row['model_id']!r} has conflicting "
+                f"model_sha256 across catalog keys"
+            )
+        by_model_hash[normalized] = artifact_hash
     return value
 
 
@@ -698,6 +726,180 @@ def base_release_ledger() -> dict[str, dict]:
     return validate_release_ledger(result.stdout, f"release ledger at {base_ref}")
 
 
+def highest_claimed_autotune_rows(candidate_obj: dict) -> dict[str, tuple[str, dict]]:
+    """Return model_id(lower) -> (catalog_key, row) matching Go HighestClaimedTier."""
+    rows = candidate_obj["rows"]
+    by_model: dict[str, list[tuple[str, dict]]] = {}
+    for key, row in rows.items():
+        normalized = row["model_id"].lower().strip()
+        by_model.setdefault(normalized, []).append((key, row))
+    best: dict[str, tuple[str, dict]] = {}
+    for normalized, entries in by_model.items():
+        # Go checks rowsByKey[normalizedModelID] first, even when that key's
+        # row declares a different model_id. validate_candidate rejects that
+        # shadowing shape, so the direct hit here is always consistent.
+        if normalized in rows:
+            best[normalized] = (normalized, rows[normalized])
+            continue
+        best_key, best_row = entries[0]
+        for key, row in entries[1:]:
+            if row["min_ram_gb"] > best_row["min_ram_gb"] or (
+                row["min_ram_gb"] == best_row["min_ram_gb"] and key < best_key
+            ):
+                best_key, best_row = key, row
+        best[normalized] = (best_key, best_row)
+    return best
+
+
+def derive_tier2_identity_binding(candidate: bytes, candidate_obj: dict) -> bytes:
+    """Deterministic unsigned Tier-2 identity rows derived from autotune (#608)."""
+    models = []
+    for normalized, (key, row) in sorted(highest_claimed_autotune_rows(candidate_obj).items()):
+        artifact_hash = row.get("model_sha256")
+        if not isinstance(artifact_hash, str) or not artifact_hash:
+            continue
+        entry = {
+            "catalog_key": key,
+            "min_ram_gb": row["min_ram_gb"],
+            "model_id": row["model_id"],
+            "model_revision": row.get("model_revision"),
+            "sha256": artifact_hash,
+        }
+        models.append(entry)
+    if not models:
+        fail("tier2 identity binding: no autotune rows with model_sha256")
+    # Detect conflicting hashes under the same model_id across autotune keys.
+    by_model: dict[str, str] = {}
+    for key, row in candidate_obj["rows"].items():
+        artifact_hash = row.get("model_sha256")
+        if not isinstance(artifact_hash, str) or not artifact_hash:
+            continue
+        normalized = row["model_id"].lower().strip()
+        prior = by_model.get(normalized)
+        if prior is not None and prior != artifact_hash:
+            fail(
+                f"tier2 identity binding: autotune model_id {row['model_id']!r} "
+                f"has conflicting model_sha256 values across catalog keys"
+            )
+        by_model[normalized] = artifact_hash
+    binding = {
+        "schema_version": TIER2_BINDING_SCHEMA,
+        "release_id": candidate_obj["version"],
+        "generated_at": candidate_obj["generated_at"],
+        "policy_version": candidate_obj["policy_version"],
+        "autotune_candidates_sha256": sha256(candidate),
+        "models": models,
+    }
+    return json.dumps(binding, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+
+
+def validate_tier2_identity_binding(data: bytes, candidate: bytes, candidate_obj: dict) -> dict:
+    value = strict_json(data, "tier2 identity binding")
+    exact_keys(
+        value,
+        {
+            "schema_version",
+            "release_id",
+            "generated_at",
+            "policy_version",
+            "autotune_candidates_sha256",
+            "models",
+        },
+        {
+            "schema_version",
+            "release_id",
+            "generated_at",
+            "policy_version",
+            "autotune_candidates_sha256",
+            "models",
+        },
+        "tier2 identity binding",
+    )
+    if value["schema_version"] != TIER2_BINDING_SCHEMA:
+        fail("tier2 identity binding: unsupported schema_version")
+    if value["release_id"] != candidate_obj["version"]:
+        fail("tier2 identity binding: release_id does not match autotune release")
+    if value["generated_at"] != candidate_obj["generated_at"]:
+        fail("tier2 identity binding: generated_at does not match autotune release")
+    if value["policy_version"] != candidate_obj["policy_version"]:
+        fail("tier2 identity binding: policy_version does not match autotune release")
+    if value["autotune_candidates_sha256"] != sha256(candidate):
+        fail("tier2 identity binding: autotune_candidates_sha256 drift")
+    if data != derive_tier2_identity_binding(candidate, candidate_obj):
+        fail("tier2 identity binding: generated drift from autotune candidates")
+    return value
+
+
+def load_tier2_models(tier2_data: bytes) -> dict[str, str]:
+    value = strict_json(tier2_data, "tier2-catalog")
+    models = value.get("models")
+    if not isinstance(models, list) or not models:
+        fail("tier2-catalog: models required")
+    out: dict[str, str] = {}
+    for idx, entry in enumerate(models):
+        if not isinstance(entry, dict):
+            fail(f"tier2-catalog: models[{idx}] must be an object")
+        model_id = entry.get("model_id")
+        sha = entry.get("sha256")
+        if not isinstance(model_id, str) or not model_id.strip():
+            fail(f"tier2-catalog: models[{idx}] model_id required")
+        if not isinstance(sha, str) or not HEX64.fullmatch(sha):
+            fail(f"tier2-catalog: models[{idx}] sha256 must be lowercase 64-hex")
+        normalized = model_id.lower().strip()
+        if normalized in out and out[normalized] != sha:
+            fail(f"tier2-catalog: duplicate model_id {model_id!r} with conflicting sha256")
+        out[normalized] = sha
+    return out
+
+
+def check_tier2_binding(candidate_data: bytes, tier2_data: bytes) -> None:
+    """Fail closed when Tier-2 and autotune disagree on overlapping model hashes."""
+    candidate_obj = validate_candidate(candidate_data)
+    tier2_models = load_tier2_models(tier2_data)
+    claimed = highest_claimed_autotune_rows(candidate_obj)
+    conflicts = []
+    for normalized, (key, row) in sorted(claimed.items()):
+        auto_hash = row.get("model_sha256")
+        if not isinstance(auto_hash, str) or not auto_hash:
+            continue
+        tier2_hash = tier2_models.get(normalized)
+        if tier2_hash is None:
+            continue
+        if tier2_hash != auto_hash:
+            conflicts.append(
+                f"model_id {row['model_id']!r} autotune({candidate_obj['version']}/{key})={auto_hash} "
+                f"conflicts with tier2={tier2_hash}"
+            )
+    if conflicts:
+        fail(f"autotune/tier2 identity conflict on {len(conflicts)} model(s): " + "; ".join(conflicts))
+
+
+def derive_tier2_unsigned_body(
+    candidate_obj: dict,
+    *,
+    catalog_id: str,
+    issued_at: str,
+    expires_at: str,
+) -> bytes:
+    """Disabled until Tier-2 gains an explicit snapshot-manifest hash_scope.
+
+    Autotune `model_sha256` is `macprovider.snapshot-manifest.v1`. Existing
+    Tier-2 `hash_scope` enums (`primary_weight_file`, `artifact_manifest`,
+    `coordinator_endorsed_incremental`) mean different byte algorithms
+    (SPEC-008). Emitting a signable body under any of those scopes would
+    mislabel identity (#608 audit HIGH). Use `tier2-identity-binding.json`
+    from `generate` plus `check-tier2-binding` against an operator-reviewed
+    signed catalog until the schema follow-up lands.
+    """
+    del candidate_obj, catalog_id, issued_at, expires_at
+    fail(
+        "derive-tier2 is disabled until Tier-2 supports an explicit "
+        "macprovider.snapshot-manifest.v1 hash_scope (#608 follow-up). "
+        "Use tier2-identity-binding.json from `generate` and "
+        "`check-tier2-binding` against an operator-reviewed signed Tier-2 catalog."
+    )
+
+
 def updated_release_ledger(manifest_bytes: bytes) -> bytes:
     current = validate_release_ledger(LEDGER_PATH.read_bytes()) if LEDGER_PATH.exists() else {"releases": {}, "tombstones": {}}
     require_ledger_evolution(base_release_ledger(), current)
@@ -726,21 +928,29 @@ def generate(signer_key_id: str | None = None) -> None:
     demand = canonical_bytes(demand_obj)
     if signer_key_id is not None and signer_key_id not in keyring():
         fail(f"cannot generate for unknown or retired signer key ID: {signer_key_id}")
+    # Compute every derived artifact before mutating on-disk release state so a
+    # binding/derivation failure cannot leave a partially updated ledger.
     manifest_bytes = manifest(candidate, demand, candidate_obj, demand_obj, signer_key_id=signer_key_id)
+    binding_bytes = derive_tier2_identity_binding(candidate, candidate_obj)
+    swift_text = generated_swift(candidate, demand, signer_key_id)
     next_ledger = updated_release_ledger(manifest_bytes)
+    rejected_go = generated_rejected_releases_go(validate_release_ledger(next_ledger))
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     candidate_path.write_bytes(candidate)
     demand_path.write_bytes(demand)
     (STATIC_DIR / "autotune-candidates.json").write_bytes(candidate)
     (STATIC_DIR / "demand-rank.json").write_bytes(demand)
-    SWIFT_GENERATED.write_text(generated_swift(candidate, demand, signer_key_id))
+    SWIFT_GENERATED.write_text(swift_text)
     MANIFEST_PATH.write_bytes(manifest_bytes)
     LEDGER_PATH.write_bytes(next_ledger)
-    GO_REJECTED_RELEASES_GENERATED.write_text(
-        generated_rejected_releases_go(validate_release_ledger(next_ledger))
+    TIER2_BINDING_PATH.write_bytes(binding_bytes)
+    GO_REJECTED_RELEASES_GENERATED.write_text(rejected_go)
+    print(
+        f"generated catalog release {candidate_obj['version']} "
+        f"candidate={sha256(candidate)} demand={sha256(demand)} "
+        f"tier2_binding={sha256(binding_bytes)}"
     )
-    print(f"generated catalog release {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)}")
 
 
 def migrate_swift_source() -> None:
@@ -816,6 +1026,9 @@ def verify() -> None:
         fail(f"generated drift: {LEDGER_PATH}")
     if GO_REJECTED_RELEASES_GENERATED.read_text() != generated_rejected_releases_go(ledger):
         fail(f"generated drift: {GO_REJECTED_RELEASES_GENERATED}")
+    if not TIER2_BINDING_PATH.exists():
+        fail(f"missing tier2 identity binding: {TIER2_BINDING_PATH}")
+    validate_tier2_identity_binding(TIER2_BINDING_PATH.read_bytes(), candidate, candidate_obj)
     keys = keyring()
     for path, body in expected.items():
         sidecar_path = pathlib.Path(str(path) + ".sig")
@@ -824,7 +1037,11 @@ def verify() -> None:
         if public_key is None:
             fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
         verify_ed25519(public_key, signature, body, sidecar_path.name)
-    print(f"verified catalog release {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)}")
+    print(
+        f"verified catalog release {candidate_obj['version']} "
+        f"candidate={sha256(candidate)} demand={sha256(demand)} "
+        f"tier2_binding={sha256(TIER2_BINDING_PATH.read_bytes())}"
+    )
 
 
 def verify_directory(directory: pathlib.Path) -> None:
@@ -848,7 +1065,41 @@ def verify_directory(directory: pathlib.Path) -> None:
         if public_key is None:
             fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
         verify_ed25519(public_key, signature, body, sidecar_path.name)
+    binding_path = directory / "tier2-identity-binding.json"
+    if binding_path.exists():
+        validate_tier2_identity_binding(binding_path.read_bytes(), candidate, candidate_obj)
+        print(f"verified repo-local tier2 identity binding for {candidate_obj['version']}")
+    tier2_path = directory / "tier2-catalog.json"
+    if tier2_path.exists():
+        # Digest overlap check only — this does not replace sign-catalog.go verify.
+        check_tier2_binding(candidate, tier2_path.read_bytes())
+        print(f"verified tier2 digest binding against release {candidate_obj['version']}")
     print(f"verified release directory {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)}")
+
+
+def cmd_check_tier2_binding(candidate_path: pathlib.Path, tier2_path: pathlib.Path) -> None:
+    check_tier2_binding(candidate_path.read_bytes(), tier2_path.read_bytes())
+    print(f"tier2 binding ok: {tier2_path} agrees with {candidate_path}")
+
+
+def cmd_derive_tier2(
+    candidate_path: pathlib.Path,
+    output_path: pathlib.Path,
+    *,
+    catalog_id: str,
+    issued_at: str,
+    expires_at: str,
+) -> None:
+    candidate = candidate_path.read_bytes()
+    candidate_obj = validate_candidate(candidate)
+    # Intentionally fail closed: do not write a mislabeled unsigned body.
+    derive_tier2_unsigned_body(
+        candidate_obj,
+        catalog_id=catalog_id,
+        issued_at=issued_at,
+        expires_at=expires_at,
+    )
+    del output_path
 
 
 def main() -> int:
@@ -863,6 +1114,25 @@ def main() -> int:
     sub.add_parser("verify")
     directory_parser = sub.add_parser("verify-directory")
     directory_parser.add_argument("--directory", required=True, type=pathlib.Path)
+    check_parser = sub.add_parser("check-tier2-binding")
+    check_parser.add_argument(
+        "--candidate",
+        type=pathlib.Path,
+        default=CATALOG_DIR / "autotune-candidates.json",
+        help="autotune-candidates.json path",
+    )
+    check_parser.add_argument("--tier2", required=True, type=pathlib.Path, help="signed or unsigned tier2-catalog.json")
+    derive_parser = sub.add_parser("derive-tier2")
+    derive_parser.add_argument(
+        "--candidate",
+        type=pathlib.Path,
+        default=CATALOG_DIR / "autotune-candidates.json",
+        help="autotune-candidates.json path",
+    )
+    derive_parser.add_argument("--output", required=True, type=pathlib.Path)
+    derive_parser.add_argument("--catalog-id", required=True)
+    derive_parser.add_argument("--issued-at", required=True)
+    derive_parser.add_argument("--expires-at", required=True)
     args = parser.parse_args()
     try:
         if args.command == "bootstrap":
@@ -871,8 +1141,20 @@ def main() -> int:
             generate(args.signer_key_id)
         elif args.command == "verify":
             verify()
-        else:
+        elif args.command == "verify-directory":
             verify_directory(args.directory)
+        elif args.command == "check-tier2-binding":
+            cmd_check_tier2_binding(args.candidate, args.tier2)
+        elif args.command == "derive-tier2":
+            cmd_derive_tier2(
+                args.candidate,
+                args.output,
+                catalog_id=args.catalog_id,
+                issued_at=args.issued_at,
+                expires_at=args.expires_at,
+            )
+        else:
+            fail(f"unknown command {args.command!r}")
     except (CatalogError, OSError, subprocess.SubprocessError) as exc:
         print(f"catalog-release: ERROR: {exc}", file=sys.stderr)
         return 1

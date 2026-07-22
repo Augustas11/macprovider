@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/catalogbind"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -24,6 +25,16 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	b.routeSnapshotAttemptN++
 	b.settlementAttemptN = 0
 	b.hasSettlementAttemptN = false
+
+	reportedHash := strings.TrimSpace(provider.ModelHash)
+	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
+	// #608 Partial: fail closed on active Tier-2 vs admission-hash conflict
+	// before any settlement observe/skip path can mask the disagreement.
+	if isLowerHex64(expectedHash) {
+		if agrees, present := catalogbind.Tier2AgreesWithAdmittedHash(tier2.Default(), provider.ModelID, expectedHash); present && !agrees {
+			return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
+		}
+	}
 
 	store, _, _ := b.server.billingState()
 	if store == nil {
@@ -44,8 +55,6 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if err != nil {
 		return skipOrEnforceError("invalid provider receipt key")
 	}
-	reportedHash := strings.TrimSpace(provider.ModelHash)
-	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
 	if provider.ModelHashAlgorithm != modelidentity.SnapshotManifestV1 ||
 		!isLowerHex64(reportedHash) ||
 		!isLowerHex64(expectedHash) {
@@ -59,7 +68,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		return skipOrEnforceError("missing catalog material")
 	}
 	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != expectedHash {
-		return skipOrEnforceError("tier2 catalog does not match signed admission row")
+		return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
 	}
 	promptHash, err := coordinatorPromptHash(providerBody)
 	if err != nil {

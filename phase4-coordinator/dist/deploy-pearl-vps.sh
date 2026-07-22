@@ -443,6 +443,7 @@ trap '
   _deploy_rc=$?
   _final_rc=$_deploy_rc
   rm -f "${TMP_CATALOG_PUBKEY:-}"
+  rm -f "${TMP_CATALOG_PINNED:-}"
   rm -f "${CATALOG_SMOKE_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
   rm -rf "${STATIC_SMOKE_DIR:-}"
@@ -710,14 +711,31 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 5
   fi
   TMP_CATALOG_PUBKEY="$(mktemp)"
-  # Cleanup of TMP_CATALOG_PUBKEY happens in the unconditional EXIT
-  # trap registered above (#244 R6).
+  # Pin the exact Tier-2 bytes that pass verify+binding; later upload uses this
+  # snapshot so a mutable CATALOG_SOURCE cannot change between preflight and scp.
+  TMP_CATALOG_PINNED="$(mktemp)"
+  # Cleanup of TMP_CATALOG_* happens in the unconditional EXIT trap (#244 R6 / #608).
+  cp "$CATALOG_SOURCE" "$TMP_CATALOG_PINNED"
+  CATALOG_PIN_SHA="$(shasum -a 256 "$TMP_CATALOG_PINNED" | awk '{print $1}')"
   printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
-  go run "$DIST_DIR/../../scripts/sign-catalog.go" verify -public-key "$TMP_CATALOG_PUBKEY" "$CATALOG_SOURCE" >/dev/null || {
+  go run "$DIST_DIR/../../scripts/sign-catalog.go" verify -public-key "$TMP_CATALOG_PUBKEY" "$TMP_CATALOG_PINNED" >/dev/null || {
     echo "aborting deploy: signed catalog does not verify against tier2.catalog_public_key" >&2
     exit 5
   }
-  echo "  ok: signed catalog verifies and will install to $CATALOG_REMOTE_PATH"
+  # #608 Partial: refuse deploy when Tier-2 identity drifts from the autotune
+  # release about to be activated. Overlapping model_id rows must agree on
+  # artifact hash; Tier-2-only / autotune-only rows remain allowed for now.
+  if [ ! -f "$STATIC_AUTOTUNE_JSON" ]; then
+    echo "aborting deploy: cannot bind Tier-2 identity without $STATIC_AUTOTUNE_JSON" >&2
+    exit 5
+  fi
+  python3 "$DIST_DIR/../../scripts/catalog-release.py" check-tier2-binding \
+    --candidate "$STATIC_AUTOTUNE_JSON" \
+    --tier2 "$TMP_CATALOG_PINNED" || {
+    echo "aborting deploy: Tier-2 catalog conflicts with autotune release identity (#608)" >&2
+    exit 5
+  }
+  echo "  ok: pinned catalog sha256=$CATALOG_PIN_SHA verifies, binds to autotune release, and will install to $CATALOG_REMOTE_PATH"
 else
   echo "  tier2.catalog_path unset — public /catalog/current will return 404 by design"
 fi
@@ -2154,7 +2172,16 @@ $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
 $SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/catalog-release.py"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
-  $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
+  if [ -z "${TMP_CATALOG_PINNED:-}" ] || [ ! -f "$TMP_CATALOG_PINNED" ]; then
+    echo "aborting deploy: pinned Tier-2 catalog snapshot missing before upload" >&2
+    exit 5
+  fi
+  UPLOAD_CATALOG_SHA="$(shasum -a 256 "$TMP_CATALOG_PINNED" | awk '{print $1}')"
+  if [ "$UPLOAD_CATALOG_SHA" != "$CATALOG_PIN_SHA" ]; then
+    echo "aborting deploy: pinned Tier-2 catalog digest changed before upload ($UPLOAD_CATALOG_SHA != $CATALOG_PIN_SHA)" >&2
+    exit 5
+  fi
+  $SCP "$TMP_CATALOG_PINNED" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
 fi
 
 # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
