@@ -5,6 +5,20 @@ SERVICE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/canary-buyer.service
 grep -q '^DynamicUser=true$' "$SERVICE_FILE"
 grep -q '^ProtectSystem=strict$' "$SERVICE_FILE"
 grep -q '^Environment=CANARY_ENABLE_FILE=/etc/macprovider-canary-buyer/enabled$' "$SERVICE_FILE"
+grep -q '^ExecStart=.* --mode liveness --fail-on-degraded$' "$SERVICE_FILE"
+grep -q '^SuccessExitStatus=20 21$' "$SERVICE_FILE"
+if grep -q 'systemctl enable.*canary-buyer.timer' "$SERVICE_FILE"; then
+  echo "service documentation must not authorize the production timer" >&2
+  exit 1
+fi
+if grep -q '^ExecStart=.*qualification' "$SERVICE_FILE"; then
+  echo "scheduled service must never invoke qualification mode" >&2
+  exit 1
+fi
+if grep -q '<string>qualification</string>' "$(dirname "$SERVICE_FILE")/com.streamvc.canary-buyer.plist"; then
+  echo "scheduled launchd agent must never invoke qualification mode" >&2
+  exit 1
+fi
 grep -q '^Environment=CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS=1$' "$SERVICE_FILE"
 grep -q '^Environment=CANARY_LEGACY_ROLLBACK_AUTHORIZATION_FILE=/run/macprovider-canary-buyer/legacy-rollback.json$' "$SERVICE_FILE"
 if grep -q '^Environment=CANARY_ENABLE_FILE=/etc/macprovider/' "$SERVICE_FILE"; then

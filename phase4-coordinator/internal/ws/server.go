@@ -631,6 +631,15 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	if cfg.Pool.LosslessnessProbe.Enabled && registry != nil {
 		go s.runLosslessnessProbeLoop()
 	}
+	if registry != nil {
+		// Inject the request-independent buyer-serving predicate so the FR-CAN22 floor
+		// and the redundancy count apply the coordinator's routability gates
+		// (RoutingEligible + transport-reachable + positive context + not
+		// Tier-2-excluded), not just ServingCapable — a busy, negative-slot, or
+		// transport-unreachable peer must not lift the floor. Request-dependent
+		// context/quota are omitted (deferred to FR-CAN23, see canaryBuyerServing).
+		registry.SetBuyerServingPredicate(s.canaryBuyerServing)
+	}
 	// Issue #582 FIX A: bounded active-session hardware-trust revalidation.
 	// Gated on the trust checker being wired — i.e. only when the hardware
 	// trust hello gate (the admission trust join) is enabled — so non-onboarding
@@ -639,6 +648,74 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		go s.runTrustRevalidationLoop()
 	}
 	return s
+}
+
+// canaryBuyerServing reports whether p passes the coordinator's REQUEST-INDEPENDENT
+// buyer-routability gates, for the FR-CAN22 last-provider floor. It requires:
+//   - RoutingEligible() — state ready AND SlotsFree>0 AND auth/catalog/receipt gates
+//     (excludes busy [SlotsFree==0] and negative-slot peers, stored verbatim from
+//     heartbeats); AND
+//   - transport-reachable — a WS-tunneled peer needs a live, open STORED session
+//     (storedSessionFor; excludes the registration/disconnect windows where
+//     IsWSTunneled holds but no session is stored), else a non-empty EndpointURL;
+//     excludes an HTTPForwardingOnly peer with no endpoint; AND
+//   - MaxContextTokens > 0 — a sanity gate excluding the degenerate zero window; AND
+//   - not Tier-2-excluded (hash/encryption/attestation) — in-memory config + catalog.
+//
+// It deliberately does NOT evaluate REQUEST-DEPENDENT eligibility, because the floor
+// runs without a request in hand:
+//   - per-request context sufficiency (ProviderContextSufficient needs
+//     MaxContextTokens >= the request's token estimate, so a peer advertising a tiny
+//     positive window — e.g. 1 — passes here yet is filtered per request); and
+//   - provisional quota (admission.CheckQuota shares the admission mutex with the
+//     synchronous DB write in TryReserveRequest, so calling it under the registry
+//     lock would couple pool.mu to that DB write — an availability convoy).
+//
+// A same-model peer that passes these gates but is filtered per-request (tiny
+// context, exhausted quota) can therefore still lift the floor, and buyer routing
+// SKIPS it without recording an FR-P11a breaker fault — so the breaker is not a
+// universal backstop for that case. This is NOT a regression: the floor only ever
+// SPARES a provider the prior canary would have removed (it never removes one the
+// old code kept), so the adversarial-peer empty-pool outcome equals the pre-floor
+// baseline. Adversarial-safe multi-provider peer-genuineness (full request-aware /
+// coordinator-observed-serving eligibility) is deferred to FR-CAN23, with NO
+// current-prod impact (single provider, canary disabled). See DECISION_CRITERIA
+// Entry 180 / SPEC-031 §14.
+func (s *Server) canaryBuyerServing(p pool.Provider) bool {
+	if !p.RoutingEligible() {
+		return false
+	}
+	// Transport reachability, matching dispatch. A WS-tunneled peer is dispatchable
+	// only via a live, open STORED session — dispatch returns ErrRelayClosed otherwise,
+	// e.g. during the registration/disconnect windows where IsWSTunneled holds but
+	// the session is not yet stored / already deleted (checked via storedSessionFor,
+	// which touches only the sessions map — no pool.mu, so it is safe under the
+	// floor's registry lock). An HTTP-forwarding peer needs a non-empty endpoint; a
+	// provider-controlled `unknown_message_type` NAK can drop IsWSTunneled without
+	// establishing one. Either way an unreachable peer must not lift the floor.
+	if p.IsWSTunneled() {
+		session, ok := s.storedSessionFor(p.ProviderID, p.AssignedID)
+		if !ok || !session.isOpen() {
+			return false
+		}
+	} else if strings.TrimSpace(p.EndpointURL) == "" {
+		return false
+	}
+	// Sanity gate: a zero/negative context window can serve no request. NOTE this
+	// does NOT make the peer routable — per-request context sufficiency
+	// (MaxContextTokens >= the request's token estimate) is request-dependent and is
+	// NOT evaluated here; a peer advertising a tiny positive window (e.g. 1) still
+	// passes yet is filtered per-request. That request-dependent adversarial case,
+	// like provisional quota, is deferred to FR-CAN23 (see SPEC-031 §14). The floor
+	// remains a monotonic improvement — it only ever SPARES a provider the prior
+	// canary would have removed — so this is not a regression.
+	if p.MaxContextTokens <= 0 {
+		return false
+	}
+	if s.tier2WarmupExcluded(p) {
+		return false
+	}
+	return true
 }
 
 func (s *Server) autotuneCatalogBridgeActive() bool {
@@ -2259,11 +2336,24 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 		return "", "", onboarding.AdmittedTuple{}, false
 	}
 	if !ok {
-		s.log.Info().
+		// SPEC-032 redundancy decision (runbook item 1c): rejecting a would-be
+		// second provider for lack of verified hardware evidence is correct — the
+		// gate is NOT weakened here. Surface the redundancy cost so an operator sees
+		// a rejection that leaves the model non-redundant (the 2026-07-10 air5
+		// gated-out condition). NOTE: this is *partial rejection telemetry*, NOT the
+		// full SPEC-032 FR-HG5 below-two operator alert (which additionally requires
+		// a catalogued-demand-filtered structural count across ALL gate actions +
+		// episode dedup/cooldown — still a Gap). Count buyer-serving providers.
+		serving := s.pool.BuyerServingCountForModel(hello.ModelID)
+		event := s.log.Info().
 			Str("provider_id", hello.ProviderID).
 			Str("event", "autotune_evidence_required").
 			Str("model_id", hello.ModelID).
-			Msg("autotune hello gate rejected connect without verified hardware evidence")
+			Int("buyer_serving_for_model", serving)
+		if serving < 2 {
+			event = event.Bool("pool_redundancy_low", true)
+		}
+		event.Msg("autotune hello gate rejected connect without verified hardware evidence")
 		s.close(conn, CloseInvalidHello, "autotune_evidence_required")
 		return "", "", onboarding.AdmittedTuple{}, false
 	}
@@ -3529,6 +3619,21 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 			LastFailedAt:  &checkedAt,
 		})
 		s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider held degraded after canary threshold")
+	case pool.CanaryTripFloorHeld:
+		// SPEC-031 FR-CAN22 last-provider floor: the sole buyer-serving provider
+		// for this model reached the canary failure threshold but was spared to
+		// avoid emptying the pool (the incidents #1/#2 outage). It stays routable.
+		// This is canary-path redundancy telemetry (surface, never auto-remove) —
+		// NOT the full SPEC-032 FR-HG5 below-two operator alert (still a Gap). An
+		// operator must investigate the failing canary and/or add a second provider.
+		s.log.Warn().
+			Str("provider_id", provider.ProviderID).
+			Str("model_id", provider.ModelID).
+			Str("event", "canary_floor_held").
+			Int("canary_fail_count", result.Count).
+			Int("canary_failure_threshold", result.Threshold).
+			Bool("pool_redundancy_low", true).
+			Msg("sole buyer-serving provider for model failed canary threshold; spared to preserve availability (SPEC-031 FR-CAN22) — operator investigation required")
 	}
 	return true
 }

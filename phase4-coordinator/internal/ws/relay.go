@@ -314,12 +314,32 @@ func (ps *providerSession) completeFrame(f providerFrame, err error) {
 func (ps *providerSession) close() {
 	ps.closeOnce.Do(func() {
 		ps.writeMu.Lock()
+		// Publish the closed-state to isOpen() (which reads closedCh lock-free)
+		// BEFORE flipping ps.closed, both under writeMu. This makes isOpen() a
+		// conservative signal: it can only observe closedCh-closed at-or-before
+		// dispatch begins rejecting on ps.closed, so there is never a window where
+		// isOpen() returns true while enqueueFrame would return ErrRelayClosed (the
+		// canary floor must not count a session dispatch has already given up on).
+		close(ps.closedCh)
 		ps.closed = true
 		close(ps.writeCh)
 		ps.writeMu.Unlock()
-		close(ps.closedCh)
 		ps.failAll(ErrRelayClosed)
 	})
+}
+
+// isOpen reports whether the session has not yet been closed. Lock-free — a
+// non-blocking receive on closedCh (which close() closes) — so it is safe to call
+// from under the registry lock (canaryBuyerServing / the FR-CAN22 floor). Dispatch
+// to a closed-but-not-yet-deleted session returns ErrRelayClosed, so such a session
+// must not count as buyer-serving.
+func (ps *providerSession) isOpen() bool {
+	select {
+	case <-ps.closedCh:
+		return false
+	default:
+		return true
+	}
 }
 
 func (ps *providerSession) send(payload []byte) error {
