@@ -487,8 +487,10 @@ python3 - "$VERIFY" "$CANONICAL" "$STATIC" <<'PY'
 import base64
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -514,6 +516,12 @@ def rejected(label, fn):
 
 
 def signed_tier2(catalog_id, model_sha256, *, key_id="catalog-key-2026q2", sig="A" * 86, **overrides):
+    """Build a structurally-shaped catalog with a placeholder signature.
+
+    Used only against `validate_tier2_catalog` (structural checks) and
+    `check_tier2_binding`/`manifest()` (neither authenticate signatures).
+    Anything that trusts a catalog as "signed" needs `real_signed_tier2`.
+    """
     body = {
         "catalog_id": catalog_id,
         "issued_at": "2026-07-01T00:00:00Z",
@@ -532,10 +540,89 @@ def signed_tier2(catalog_id, model_sha256, *, key_id="catalog-key-2026q2", sig="
     return json.dumps(body).encode()
 
 
-agreeing_tier2 = signed_tier2("test-catalog-agree", qwen_row["model_sha256"])
+# --- real Ed25519 keypairs for signature-authentication tests ---
+keys_dir = pathlib.Path(tempfile.mkdtemp(prefix="tier2-test-keys-"))
+trusted_pub = keys_dir / "trusted.pub"
+trusted_priv = keys_dir / "trusted.priv"
+other_pub = keys_dir / "other.pub"
+other_priv = keys_dir / "other.priv"
+subprocess.run(
+    ["go", "run", str(module.SIGN_CATALOG_GO_PATH), "keygen",
+     "-public-out", str(trusted_pub), "-private-out", str(trusted_priv)],
+    check=True, cwd=str(module.ROOT), capture_output=True, text=True,
+)
+subprocess.run(
+    ["go", "run", str(module.SIGN_CATALOG_GO_PATH), "keygen",
+     "-public-out", str(other_pub), "-private-out", str(other_priv)],
+    check=True, cwd=str(module.ROOT), capture_output=True, text=True,
+)
+os.environ[module.TIER2_PUBLIC_KEY_ENV] = trusted_pub.read_text().strip()
+
+
+def sign_with(priv_path, unsigned_body, *, key_id="test-tier2-key"):
+    unsigned_path = keys_dir / f"unsigned-{abs(hash(json.dumps(unsigned_body, sort_keys=True)))}.json"
+    unsigned_path.write_text(json.dumps(unsigned_body))
+    result = subprocess.run(
+        ["go", "run", str(module.SIGN_CATALOG_GO_PATH), "sign",
+         "-key", str(priv_path), "-key-id", key_id, str(unsigned_path)],
+        check=True, cwd=str(module.ROOT), capture_output=True, text=True,
+    )
+    return result.stdout.encode()
+
+
+def unsigned_body(catalog_id, model_sha256, **overrides):
+    body = {
+        "catalog_id": catalog_id,
+        "issued_at": "2026-07-01T00:00:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "models": [{
+            "artifact_kind": "mlx_weight_file",
+            "hash_scope": "artifact_manifest",
+            "model_id": qwen_row["model_id"],
+            "sha256": model_sha256,
+            "source": "operator-curated",
+        }],
+        "version": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+def real_signed_tier2(catalog_id, model_sha256, *, priv_path=trusted_priv, **overrides):
+    return sign_with(priv_path, unsigned_body(catalog_id, model_sha256, **overrides))
+
+
+agreeing_tier2 = real_signed_tier2("test-catalog-agree", qwen_row["model_sha256"])
 tier2_obj = module.validate_tier2_catalog(agreeing_tier2)
 if tier2_obj["catalog_id"] != "test-catalog-agree":
     raise SystemExit("validate_tier2_catalog did not round-trip catalog_id")
+
+# --- signature authentication: verify_tier2_signature must actually check crypto ---
+module.verify_tier2_signature(agreeing_tier2)  # trusted key + matching signature: accepted
+
+tampered = bytearray(agreeing_tier2)
+marker = b"operator-curated"
+idx = bytes(tampered).find(marker)
+if idx == -1:
+    raise SystemExit("tamper fixture setup failed: marker not found")
+tampered[idx] = ord("O")
+rejected("tampered tier2 catalog bytes", lambda: module.verify_tier2_signature(bytes(tampered)))
+
+wrong_signer_tier2 = real_signed_tier2("test-catalog-wrong-signer", qwen_row["model_sha256"], priv_path=other_priv)
+rejected("tier2 catalog signed by an untrusted key", lambda: module.verify_tier2_signature(wrong_signer_tier2))
+
+dummy_signed_tier2 = signed_tier2("test-catalog-dummy-sig", qwen_row["model_sha256"])
+module.validate_tier2_catalog(dummy_signed_tier2)  # structurally valid...
+rejected("tier2 catalog with a structurally-valid but non-cryptographic signature",
+          lambda: module.verify_tier2_signature(dummy_signed_tier2))  # ...but not authentic
+
+expired_tier2 = signed_tier2(
+    "test-catalog-expired", qwen_row["model_sha256"],
+    issued_at="2020-01-01T00:00:00Z", expires_at="2020-06-01T00:00:00Z",
+)
+rejected("expired tier2 catalog", lambda: module.validate_tier2_catalog(expired_tier2))
+
+print("tier2 signature authentication (tamper/wrong-key/dummy-sig/expiry) rejects as expected")
 
 # --- structural rejections mirroring scripts/sign-catalog.go validateCatalogBody ---
 base_body = json.loads(agreeing_tier2)
@@ -583,6 +670,21 @@ rejected("bad sha256 format", lambda: module.validate_tier2_catalog(
 rejected("duplicate model_id case-insensitive", lambda: module.validate_tier2_catalog(
     mutated(lambda b: b["models"].append({**b["models"][0], "model_id": b["models"][0]["model_id"].upper()}))
 ))
+rejected("boolean version coincidentally equal to 1", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b.__setitem__("version", True))
+))
+rejected("float version coincidentally equal to 1", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b.__setitem__("version", 1.0))
+))
+rejected("non-string hash_scope", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["models"][0].__setitem__("hash_scope", ["artifact_manifest"]))
+))
+rejected("padded base64 signature", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["signature"].__setitem__("sig", "A" * 84 + "=="))
+))
+rejected("standard-alphabet (non-urlsafe) signature", lambda: module.validate_tier2_catalog(
+    mutated(lambda b: b["signature"].__setitem__("sig", "A" * 84 + "+/"))
+))
 module.validate_tier2_catalog(agreeing_tier2)  # baseline still accepted after mutation probes
 
 # --- check-tier2-binding fail-closed on conflicting hash ---
@@ -607,7 +709,7 @@ if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.jso
 tier2_feed = manifest_value["feeds"]["tier2-catalog.json"]
 if tier2_feed["sha256"] != module.sha256(agreeing_tier2) or tier2_feed["bytes"] != len(agreeing_tier2):
     raise SystemExit("tier2 feed digest/bytes do not bind the signed catalog")
-if tier2_feed["version"] != "test-catalog-agree" or tier2_feed["signer_key_id"] != "catalog-key-2026q2":
+if tier2_feed["version"] != "test-catalog-agree" or tier2_feed["signer_key_id"] != "test-tier2-key":
     raise SystemExit("tier2 feed version/signer_key_id must come from the signed catalog, not the release train")
 
 manifest_without_tier2 = module.manifest(candidate_bytes, demand_bytes, candidate_obj, demand_obj)
@@ -667,19 +769,44 @@ rejected(
 
 print("release-ledger accepts historical 2-feed rows and Tier-2-bound 3-feed rows")
 
-# --- generate() requires Tier-2 going forward; historical `verify` does not ---
+# --- generate(): Tier-2 requirement is staged behind an explicit opt-in ---
+# so the existing 2-feed release train is not broken the moment this lands
+# (no tier2-catalog.json exists yet at the canonical path, and downstream
+# compatibility-set/packaging/Pearl-updater tooling does not accept a 3-feed
+# manifest). Absence is silently fine by default; CATALOG_RELEASE_REQUIRE_TIER2=1
+# makes it a hard requirement for whoever is ready to enforce it, and once a
+# catalog IS staged it is never a silent bystander -- it must authenticate.
 original_tier2_path = module.TIER2_CATALOG_PATH
+require_env = module.REQUIRE_TIER2_FOR_GENERATE_ENV
 try:
     module.TIER2_CATALOG_PATH = pathlib.Path(tempfile.mkdtemp()) / "tier2-catalog.json"
-    rejected("generate without tier2-catalog.json", module.require_tier2_catalog_for_generate)
+
+    os.environ.pop(require_env, None)
+    absent_tier2, absent_obj = module.require_tier2_catalog_for_generate()
+    if absent_tier2 is not None or absent_obj is not None:
+        raise SystemExit("require_tier2_catalog_for_generate must return (None, None) when Tier-2 is optional and absent")
+
+    os.environ[require_env] = "1"
+    rejected(f"generate without tier2-catalog.json when {require_env}=1", module.require_tier2_catalog_for_generate)
+    os.environ.pop(require_env, None)
+
     module.TIER2_CATALOG_PATH.write_bytes(agreeing_tier2)
     returned_tier2, returned_obj = module.require_tier2_catalog_for_generate()
     if returned_tier2 != agreeing_tier2 or returned_obj["catalog_id"] != "test-catalog-agree":
         raise SystemExit("require_tier2_catalog_for_generate did not round-trip the signed catalog")
+
+    module.TIER2_CATALOG_PATH.write_bytes(dummy_signed_tier2)
+    rejected(
+        "require_tier2_catalog_for_generate with a structurally-valid but unauthenticated catalog",
+        module.require_tier2_catalog_for_generate,
+    )
 finally:
+    os.environ.pop(require_env, None)
     module.TIER2_CATALOG_PATH = original_tier2_path
 
-# --- verify_directory: tier2-catalog.json must be a declared feed member ---
+print("generate() Tier-2 requirement is staged behind an opt-in env var; staged catalogs must authenticate")
+
+# --- verify_directory: tier2-catalog.json must be a declared, authentic feed member ---
 with tempfile.TemporaryDirectory() as directory:
     release = pathlib.Path(directory)
     shutil.copy(canonical / "trusted-keys.json", release / "trusted-keys.json")
@@ -687,7 +814,7 @@ with tempfile.TemporaryDirectory() as directory:
         shutil.copy(static / name, release / name)
         shutil.copy(static / f"{name}.sig", release / f"{name}.sig")
 
-    # Happy path: tier2-catalog.json present AND declared in release.json.
+    # Happy path: tier2-catalog.json present, authentic, AND declared in release.json.
     (release / "tier2-catalog.json").write_bytes(agreeing_tier2)
     (release / "release.json").write_bytes(manifest_with_tier2)
     module.verify_directory(release)
@@ -704,7 +831,18 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise SystemExit("undeclared tier2-catalog.json feed membership was accepted")
 
-print("verify-directory requires tier2-catalog.json to be a declared feed member")
+    # A staged catalog that is structurally declared but forged/unauthenticated
+    # must fail closed even though its bytes match the declared manifest digest.
+    forged_manifest = module.manifest(
+        candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+        tier2=wrong_signer_tier2, tier2_obj=module.validate_tier2_catalog(wrong_signer_tier2),
+    )
+    (release / "tier2-catalog.json").write_bytes(wrong_signer_tier2)
+    (release / "release.json").write_bytes(forged_manifest)
+    rejected("verify_directory with a declared but untrusted-signer tier2-catalog.json",
+              lambda: module.verify_directory(release))
+
+print("verify-directory requires tier2-catalog.json to be a declared AND authenticated feed member")
 PY
 
 echo "PASS: catalog release generation and trust failures are locked"

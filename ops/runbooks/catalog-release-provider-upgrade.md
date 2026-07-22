@@ -39,13 +39,36 @@ the derived binding above) can now optionally be bound as a third
 (`scripts/catalog-release.py generate` / `verify` / `verify-directory`). This
 is historical-safe: every release-ledger row published before this change
 keeps its original 2-feed shape and `verify` still passes with no canonical
-`phase3-binary/catalog/autotune/tier2-catalog.json` present. Once a signed
-Tier-2 catalog exists at that path, `generate` requires it (fails closed if
-missing) and `verify` runs `check-tier2-binding` against it before trusting
-it as a feed member. This is still repo/ledger bookkeeping only: it does not
-flip `tier2.require_hash_verified`, does not remove the physical
+`phase3-binary/catalog/autotune/tier2-catalog.json` present. Whenever a Tier-2
+catalog IS staged at that path, it is never a silent bystander: `generate`,
+`verify`, and `verify-directory` all run `validate_tier2_catalog` (structural
+shape) **and** `verify_tier2_signature` (Ed25519 authentication against
+`tier2.catalog_public_key` in `phase4-coordinator/dist/coordinator.yaml`, via
+`sign-catalog.go verify` — the same trusted key and canonicalization
+`deploy-pearl-vps.sh` already pins before upload) before trusting it enough
+to bind `signer_key_id` into the manifest/ledger, then run
+`check-tier2-binding` before trusting it as a feed member. A catalog that is
+structurally well-formed but not authentically signed by the trusted key is
+rejected the same way as a malformed one.
+
+`generate` hard-requiring Tier-2 is staged behind
+`CATALOG_RELEASE_REQUIRE_TIER2=1` rather than unconditional: the
+compatibility-set builder (`scripts/compatibility-set-manifest.py`),
+provider packaging (`phase3-binary/dist/package.sh`), and the Pearl updater
+do not yet accept a 3-feed manifest, and no canonical
+`tier2-catalog.json` is staged in the repo today. Making Tier-2 mandatory on
+every `generate` run unconditionally would have broken the existing 2-feed
+release train the moment this change merged, before any of those downstream
+consumers were updated. Set `CATALOG_RELEASE_REQUIRE_TIER2=1` once ops are
+ready to require Tier-2 for every new release; until then, `generate` simply
+omits the Tier-2 feed when no catalog is staged, exactly as it always has.
+This remains repo/ledger bookkeeping only: it does not flip
+`tier2.require_hash_verified`, does not remove the physical
 `/opt/macprovider/tier2-catalog.json` dual path, and does not authorize a
-Pearl publish by itself.
+Pearl publish by itself. **Do not run `generate` to produce a real 3-feed
+release for production packaging/deploy** until the compatibility-set
+builder, packaging, and Pearl updater are updated to carry and validate the
+third feed (tracked separately; not part of this step).
 
 Autotune admission identity and the Tier-2 attestation catalog remain separate
 signed files during migration (`exc-catalog-compatibility-bridges` stays
@@ -88,10 +111,14 @@ Until then the interim rule is **derived-only mutate**:
    check does **not** add a Tier-2 fallback.
 
 Follow-up on #608 (still blocked for exception clearance): the repo-side
-ledger / compatibility-set feed membership for signed Tier-2 bytes described
-above is landed; remaining work is to remove the physical
-`/opt/macprovider/tier2-catalog.json` dual path and collect Pearl journey
-proof that no `model_hash_uncatalogued` events fire for active release rows.
+`catalog-release.py` **ledger** feed membership (`release.json` /
+`release-ledger.json`) for signed, authenticated Tier-2 bytes described
+above is landed. **Compatibility-set membership is not landed** —
+`scripts/compatibility-set-manifest.py`, `phase3-binary/dist/package.sh`,
+and `ops/pearl-updater/macprovider-pearl-update` all still assume exactly
+two feeds and reject a 3-feed manifest; that migration, physical dual-path
+removal, and Pearl journey proof that no `model_hash_uncatalogued` events
+fire for active release rows all remain open follow-up work.
 
 The same signed network-release manifest also binds:
 
