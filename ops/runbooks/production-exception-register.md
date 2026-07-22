@@ -180,6 +180,12 @@ and live discovery of unregistered production authority.
 
 ## 6. Pearl Verification Checklist
 
+Latest live clearance evidence (2026-07-22):
+`ops/runbooks/pearl-exception-clearance-20260722.md` (Entry 178). That pass
+answered the initial open questions, cleared elapsed signature exemptions and
+unexpected canary enable gates, and explicitly did **not** flip
+`require_hash_verified` or `require_autotune_hello_gate`.
+
 Use read-only commands and placeholders. Do not print bearer tokens, HMAC
 secrets, referral codes, private keys, or full DB rows containing secret
 material. Capture redacted evidence into the register's `evidence` fields or
