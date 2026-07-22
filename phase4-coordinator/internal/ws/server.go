@@ -137,6 +137,13 @@ type Server struct {
 	connectionEvents               ConnectionEventStore
 	connectionEventMetrics         ConnectionEventMetrics
 	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
+	connectionEventQueue           chan connectionEventJob
+	connectionEventWorkerOnce      sync.Once
+	anonymousEventMu               sync.Mutex
+	anonymousEventWindow           time.Time
+	anonymousEventCount            int
+	lastKnownFlushMu               sync.Mutex
+	lastKnownFlush                 map[string]time.Time
 	bootstrapLimiter               *bootstrapMintLimiter
 	idlePrewarmLimits              sync.Map
 	idlePrewarmQueue               chan idlePrewarmRecord
@@ -1210,9 +1217,21 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    connectionAuth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyHello,
+			diagnostic:    "invalid_hello",
+		})
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
 		return "", ""
 	}
+	s.rememberCloseEvent(conn, closeEventMeta{
+		providerID:    hello.ProviderID,
+		authStage:     providerevents.AuthStageFirstMessage,
+		messageFamily: providerevents.MessageFamilyHello,
+		binaryVersion: hello.BinaryVersion,
+	})
 	if hello.Version != 1 {
 		s.close(conn, CloseVersionUnsupported, "version_unsupported: protocol version "+itoa(hello.Version))
 		return "", ""
@@ -1335,6 +1354,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			badField = "stage"
 		}
 		s.log.Warn().Str("bad_field", badField).Msg("provider auth_request initial rejected")
+		s.rememberCloseEvent(conn, closeEventMeta{
+			providerID:    connectionAuth.providerID,
+			authStage:     providerevents.AuthStageFirstMessage,
+			messageFamily: providerevents.MessageFamilyAuthRequest,
+			diagnostic:    "bad_field=" + badField,
+		})
 		// SPEC-002 v1.3.5 §11 AC-K.15 / SPEC-010 v1.5 R-3.1.9 — when
 		// initial-stage parse fails on a SPEC-010 catalog validation
 		// rule, surface the LOCKED reason substring on the wire so
@@ -1349,6 +1374,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
 	}
+	s.rememberCloseEvent(conn, closeEventMeta{
+		providerID:    initial.ProviderID,
+		authStage:     providerevents.AuthStageFirstMessage,
+		messageFamily: providerevents.MessageFamilyAuthRequest,
+		binaryVersion: initial.BinaryVersion,
+	})
 	if !s.requireCompatibleSet(conn, initial.CompatibilitySetID, true) {
 		return "", ""
 	}
@@ -1393,6 +1424,14 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	authAttemptID := "auth-" + s.newUUID()
+	s.rememberCloseEvent(conn, closeEventMeta{
+		providerID:    initial.ProviderID,
+		sessionID:     entry.AssignedID,
+		attemptID:     authAttemptID,
+		authStage:     providerevents.AuthStageProof,
+		messageFamily: providerevents.MessageFamilyAuthRequest,
+		binaryVersion: initial.BinaryVersion,
+	})
 	challengeExpiresAt := s.now().Add(10 * time.Minute).UTC()
 	// SPEC-002 v1.3.5 §7.9 + R-7.9.8 — L-1 baseline gate:
 	// create retention state only if the initial-stage frame
@@ -2636,13 +2675,21 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, reason string) {
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
 	if session != nil {
-		s.rememberCloseEvent(session.conn, closeEventMeta{
-			providerID:    session.providerID,
-			sessionID:     session.assignedID,
-			authStage:     providerevents.AuthStagePostAuth,
-			messageFamily: providerevents.MessageFamilyNone,
+		session.closeEventOnce.Do(func() {
+			meta := closeEventMeta{
+				providerID:    session.providerID,
+				sessionID:     session.assignedID,
+				authStage:     providerevents.AuthStagePostAuth,
+				messageFamily: providerevents.MessageFamilyNone,
+			}
+			if p, ok := s.pool.Resolve(session.providerID, session.assignedID); ok {
+				meta.binaryVersion = p.BinaryVersion
+			}
+			// Drop any stale conn-keyed meta so a later takeCloseEvent cannot
+			// emit a second unattributed close event for the same socket.
+			_ = s.takeCloseEvent(session.conn)
+			s.recordCloseEventFromMeta(meta, code, reason)
 		})
-		s.recordCloseEvent(session.conn, code, reason)
 	}
 	body := gobwas.NewCloseFrameBody(code, reason)
 	var buf bytes.Buffer
@@ -4024,6 +4071,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
 		return
 	}
+	s.rememberProviderSnapshotCoalesced(*entry)
 	threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
 	if gap > threshold {
 		s.log.Warn().Str("provider_id", providerID).Dur("gap", gap).Dur("threshold", threshold).Msg("provider heartbeat stale")
@@ -4187,8 +4235,10 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
 	s.pruneIdlePrewarmLimits(s.now())
+	binaryVersion := ""
 	if provider, ok := s.pool.Resolve(providerID, assignedID); ok {
 		provider.State = pool.StateUnavailable
+		binaryVersion = provider.BinaryVersion
 		s.rememberProviderSnapshot(provider)
 	}
 	s.recordConnectionEvent(providerevents.Event{
@@ -4199,6 +4249,7 @@ func (s *Server) handleDisconnect(providerID, assignedID string) {
 		FailureReason: providerevents.ReasonProviderWebsocketDisconnected,
 		AuthStage:     providerevents.AuthStagePostAuth,
 		MessageFamily: providerevents.MessageFamilyNone,
+		BinaryVersion: binaryVersion,
 	})
 	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
 		session.close()

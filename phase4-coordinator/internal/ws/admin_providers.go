@@ -66,14 +66,62 @@ func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "not found", "code": "not_found"}})
 }
 
+func (s *Server) providerHasActiveSession(providerID string) bool {
+	var found bool
+	s.sessions.Range(func(key, value any) bool {
+		session, ok := value.(*providerSession)
+		if !ok || session == nil {
+			return true
+		}
+		if session.providerID == providerID {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// isProviderTransportConnected reports live presence. Active WS sessions are
+// connected. Registry-only StateUnavailable rows are the disconnect grace
+// ghost and must surface as offline (SPEC-035-R004).
+func (s *Server) isProviderTransportConnected(p pool.Provider) bool {
+	if _, ok := s.storedSessionFor(p.ProviderID, p.AssignedID); ok {
+		return true
+	}
+	if s.providerHasActiveSession(p.ProviderID) {
+		return true
+	}
+	return p.State != pool.StateUnavailable
+}
+
 func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) {
+	limit := providerevents.DefaultListPageCap
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid limit", "code": "invalid_request"}})
+			return
+		}
+		limit = n
+	}
+	if limit > providerevents.DefaultListPageCap {
+		limit = providerevents.DefaultListPageCap
+	}
+	after := strings.TrimSpace(r.URL.Query().Get("after"))
+
 	live := map[string]pool.Provider{}
+	connected := 0
 	for _, p := range s.pool.Snapshot() {
+		if !s.isProviderTransportConnected(p) {
+			continue
+		}
 		live[p.ProviderID] = p
+		connected++
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	known, err := s.connectionEvents.ListLastKnown(ctx)
+	known, err := s.connectionEvents.ListLastKnown(ctx, limit, after)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "list last-known failed", "code": "events_store_error"}})
 		return
@@ -81,26 +129,42 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 
 	out := make([]adminProviderView, 0, len(live)+len(known))
 	seen := map[string]struct{}{}
-	for _, p := range live {
-		view := adminViewFromLive(p)
-		out = append(out, view)
-		seen[p.ProviderID] = struct{}{}
+	// Prefer live connected providers first when no cursor is set.
+	if after == "" {
+		for _, p := range live {
+			out = append(out, adminViewFromLive(p))
+			seen[p.ProviderID] = struct{}{}
+			if len(out) >= limit {
+				break
+			}
+		}
 	}
 	for _, snap := range known {
+		if len(out) >= limit {
+			break
+		}
 		if _, ok := seen[snap.ProviderID]; ok {
+			continue
+		}
+		if _, ok := live[snap.ProviderID]; ok {
 			continue
 		}
 		snap.Presence = "offline"
 		out = append(out, adminViewFromLastKnown(snap))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"providers": out,
 		"summary": map[string]any{
 			"total":     len(out),
-			"connected": len(live),
-			"offline":   len(out) - len(live),
+			"connected": connected,
+			"offline":   max(0, len(out)-connected),
+			"limit":     limit,
 		},
-	})
+	}
+	if len(known) == limit && len(known) > 0 {
+		resp["next_after"] = known[len(known)-1].ProviderID
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) writeAdminProviderDetail(w http.ResponseWriter, r *http.Request, providerID string) {
@@ -108,7 +172,7 @@ func (s *Server) writeAdminProviderDetail(w http.ResponseWriter, r *http.Request
 	defer cancel()
 
 	var view adminProviderView
-	if p, ok := s.pool.Resolve(providerID, ""); ok {
+	if p, ok := s.pool.Resolve(providerID, ""); ok && s.isProviderTransportConnected(p) {
 		view = adminViewFromLive(p)
 	} else {
 		snap, found, err := s.connectionEvents.GetLastKnown(ctx, providerID)
@@ -116,12 +180,28 @@ func (s *Server) writeAdminProviderDetail(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "last-known lookup failed", "code": "events_store_error"}})
 			return
 		}
-		if !found {
-			writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "provider not found", "code": "provider_not_found"}})
-			return
+		if found {
+			snap.Presence = "offline"
+			view = adminViewFromLastKnown(snap)
+		} else {
+			ev, ok, err := s.connectionEvents.LatestEventProvider(ctx, providerID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "event lookup failed", "code": "events_store_error"}})
+				return
+			}
+			if !ok {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "provider not found", "code": "provider_not_found"}})
+				return
+			}
+			view = adminProviderView{
+				ProviderID:    ev.ProviderID,
+				Presence:      "offline",
+				AssignedID:    ev.SessionID,
+				BinaryVersion: ev.BinaryVersion,
+				State:         "unavailable",
+				LastSeenAt:    ev.OccurredAt,
+			}
 		}
-		snap.Presence = "offline"
-		view = adminViewFromLastKnown(snap)
 	}
 
 	events, err := s.connectionEvents.ListEvents(ctx, providerID, 20)

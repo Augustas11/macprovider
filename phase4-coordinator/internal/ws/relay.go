@@ -173,6 +173,7 @@ type providerSession struct {
 	probeWrites    bool
 	onWriteFailure func(*providerSession, error)
 	closeOnce      sync.Once
+	closeEventOnce sync.Once
 	writeMu        sync.Mutex
 	closed         bool
 	activeMu       sync.Mutex

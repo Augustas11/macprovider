@@ -38,6 +38,8 @@ func TestNormalizeFailureReasonTaxonomy(t *testing.T) {
 		"unrecognized auth message":             ReasonUnrecognizedAuthMessage,
 		"invalid_hello: read":                   ReasonInvalidAuthRequest,
 		"too_many_unauthenticated_connections":  ReasonPoolFull,
+		"too_many_auth_attempts":                ReasonPoolFull,
+		"credential_bootstrap_outstanding_full": ReasonPoolFull,
 		"Bearer mpk_secret_value exploded":      ReasonOther,
 	}
 	for in, want := range cases {
@@ -53,8 +55,14 @@ func TestRedactDiagnosticStripsSecretsAndBounds(t *testing.T) {
 	if containsAny(got, "mpk_", "Bearer mpk", "Authorization: Bearer") {
 		t.Fatalf("secret leaked in %q", got)
 	}
-	if got == "" {
-		t.Fatal("expected redacted text")
+	hyphen := RedactDiagnostic("token=mpk_alpha-beta-gamma leftover", 80)
+	if strings.Contains(hyphen, "beta") || strings.Contains(hyphen, "mpk_") {
+		t.Fatalf("hyphenated mpk fragment leaked: %q", hyphen)
+	}
+	hex := strings.Repeat("ab", 32)
+	gotHex := RedactDiagnostic("raw "+hex+" tail", 80)
+	if strings.Contains(gotHex, hex) {
+		t.Fatalf("64-hex token leaked: %q", gotHex)
 	}
 	if len([]rune(got)) > 40 {
 		t.Fatalf("length %d exceeds bound", len([]rune(got)))
@@ -80,7 +88,6 @@ func TestRecordRetentionAndPerProviderCap(t *testing.T) {
 	if err := store.Record(ctx, old); err != nil {
 		t.Fatalf("record old: %v", err)
 	}
-	// Insert with OccurredAt in the past still prunes on next write.
 	for i := 0; i < 5; i++ {
 		if err := store.Record(ctx, Event{
 			ProviderID:    "p1",
@@ -93,12 +100,15 @@ func TestRecordRetentionAndPerProviderCap(t *testing.T) {
 			t.Fatalf("record %d: %v", i, err)
 		}
 	}
+	if err := store.ReconcileBounds(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
 	events, err := store.ListEvents(ctx, "p1", 50)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(events) > 3 {
-		t.Fatalf("per-provider cap not enforced: got %d", len(events))
+	if len(events) != 3 {
+		t.Fatalf("per-provider cap not enforced: got %d want 3", len(events))
 	}
 	for _, ev := range events {
 		if containsAny(ev.Diagnostic, "mpk_", "Bearer ") {
@@ -107,6 +117,69 @@ func TestRecordRetentionAndPerProviderCap(t *testing.T) {
 		if ev.FailureReason != ReasonInvalidToken {
 			t.Fatalf("failure_reason=%q", ev.FailureReason)
 		}
+	}
+}
+
+func TestAnonymousBucketCapped(t *testing.T) {
+	store := openTestStore(t)
+	store.anonymousCap = 2
+	store.globalCap = 100
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if err := store.Record(ctx, Event{
+			Kind:          KindUpgradeFailed,
+			Outcome:       OutcomeFailure,
+			FailureReason: ReasonUpgradeFailed,
+		}); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+	events, err := store.ListEvents(ctx, AnonymousProviderID, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("anonymous cap got %d want 2", len(events))
+	}
+}
+
+func TestRejectCredentialShapedIdentifiers(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	err := store.Record(ctx, Event{
+		ProviderID:    "mpk_should_reject",
+		Kind:          KindAuthRejected,
+		Outcome:       OutcomeFailure,
+		FailureReason: ReasonInvalidToken,
+	})
+	if err == nil {
+		t.Fatal("expected credential-shaped provider_id rejection")
+	}
+}
+
+func TestFixedWidthOrderingNearFractionalBoundary(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	a := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	b := time.Date(2026, 7, 22, 12, 0, 0, 500000000, time.UTC)
+	if err := store.Record(ctx, Event{
+		ProviderID: "p1", Kind: KindDisconnect, Outcome: OutcomeFailure,
+		FailureReason: ReasonProviderWebsocketDisconnected, OccurredAt: a,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Record(ctx, Event{
+		ProviderID: "p1", Kind: KindAuthRejected, Outcome: OutcomeFailure,
+		FailureReason: ReasonInvalidToken, OccurredAt: b,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ListEvents(ctx, "p1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Kind != KindAuthRejected {
+		t.Fatalf("ordering wrong: %#v", events)
 	}
 }
 

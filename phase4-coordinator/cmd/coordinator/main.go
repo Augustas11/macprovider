@@ -228,9 +228,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
 		os.Exit(1)
 	}
-	connectionEventStore, err := providerevents.NewSQLiteStore(reqLogStore.DB())
+	connectionEventStore, err := providerevents.Open(providerevents.DefaultDBPath(cfg.Storage.DBPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "provider connection events storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer connectionEventStore.Close()
+	if err := connectionEventStore.ReconcileBounds(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "provider connection events reconcile: %v\n", err)
 		os.Exit(1)
 	}
 	billingStore, err := billing.NewStore(reqLogStore.DB())
@@ -1024,6 +1029,7 @@ func main() {
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
+	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
 
@@ -1204,6 +1210,32 @@ func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner,
 	prune()
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
+func startProviderConnectionEventPruner(ctx context.Context, store *providerevents.SQLiteStore, logger zerolog.Logger) {
+	if store == nil {
+		return
+	}
+	prune := func() {
+		if err := store.ReconcileBounds(ctx); err != nil {
+			logger.Warn().Err(err).Msg("provider connection events reconcile failed")
+			return
+		}
+		logger.Info().Msg("provider connection events bounds reconciled")
+	}
+	prune()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
 			select {

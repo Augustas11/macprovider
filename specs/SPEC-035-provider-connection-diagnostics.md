@@ -1,6 +1,6 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.1.0
+Version: v0.1.1
 Status: draft (Partial #535 coordinator journal + operator GET)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
@@ -13,12 +13,15 @@ provider secrets or providing remote shell access.
 
 In scope for v0.1 (this Partial):
 
-- Durable bounded `provider_connection_events` journal on the coordinator
-  SQLite DB shared with request-log/admission state.
+- Durable bounded `provider_connection_events` journal on a dedicated
+  coordinator SQLite file (sibling of the request-log DB) so journal
+  maintenance never shares the money-path writer lock.
 - Last-known non-secret provider snapshot for offline representation.
 - Closed failure taxonomy and redaction rules.
 - Operator-authenticated GET endpoints under `/admin/providers*`.
 - Optional Prometheus counters with closed-set labels.
+- Anonymous/`_anonymous` bucket + global/per-provider caps, async enqueue,
+  and periodic reconcile for reconnect storms.
 
 Out of scope (later Partials of #535):
 
@@ -60,10 +63,15 @@ currently connected MUST be represented as `presence=offline` with its last-know
 non-secret snapshot and recent failure events when available, not as an empty or
 unknown record. Connected providers MUST surface live pool fields for version,
 ID, model, readiness/state, auth state, and last-seen/heartbeat timestamps.
+Transport presence MUST follow an active provider websocket session (or an
+in-pool non-unavailable live admission). Disconnect-grace registry ghosts that
+are `unavailable` without a session MUST report `presence=offline`.
 
 **SPEC-035-R005 — Retention bound.** The journal MUST prune events older than a
-configured retention window (default 14 days) and MUST enforce a per-provider
-row cap so unbounded reconnect storms cannot grow storage without bound.
+configured retention window (default 14 days) and MUST enforce per-provider,
+anonymous-bucket, and global row caps so unbounded reconnect storms cannot grow
+storage without bound. Pre-identity failures MAY use the reserved
+`_anonymous` provider_id bucket under the anonymous cap.
 
 ## 4. Rollout
 

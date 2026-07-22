@@ -973,7 +973,7 @@
     {
       "spec_id": "SPEC-035",
       "title": "Provider connection diagnostics and failure history",
-      "version": "v0.1.0",
+      "version": "v0.1.1",
       "path": "specs/SPEC-035-provider-connection-diagnostics.md",
       "status": "draft",
       "owner": "@Augustas11",

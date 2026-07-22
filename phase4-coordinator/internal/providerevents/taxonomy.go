@@ -5,6 +5,7 @@ package providerevents
 import (
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -56,14 +57,26 @@ const (
 	MessageFamilyNone        = "none"
 )
 
+// AnonymousProviderID is the capped journal bucket for pre-identity failures
+// (upgrade failures, pool pressure before a provider_id is known).
+const AnonymousProviderID = "_anonymous"
+
 const (
-	DefaultMaxDiagnostic  = 256
-	DefaultEventsQueryCap = 100
-	DefaultPerProviderCap = 2000
+	DefaultMaxDiagnostic     = 256
+	DefaultEventsQueryCap    = 100
+	DefaultPerProviderCap    = 2000
+	DefaultAnonymousCap      = 5000
+	DefaultGlobalCap         = 100000
+	DefaultListPageCap       = 200
+	DefaultRetention         = 14 * 24 * time.Hour
+	FixedUTCLayout           = "2006-01-02T15:04:05.000000000Z"
 )
 
 var (
-	secretLike   = regexp.MustCompile(`(?i)(bearer\s+[a-z0-9._\-+=/]+|mpk_[a-z0-9]+|authorization\s*[:=]\s*\S+|token\s*[:=]\s*\S+)`)
+	// secretLike strips credential-shaped substrings. Hyphen/underscore
+	// continuations after mpk_ are included so fragments cannot survive.
+	secretLike = regexp.MustCompile(`(?i)(bearer\s+[a-z0-9._\-+=/]+|mpk_[a-z0-9_\-]+|authorization\s*[:=]\s*\S+|token\s*[:=]\s*\S+|"token"\s*:\s*"[^"]+"|provider_token\s*[:=]\s*\S+)`)
+	hex64Token = regexp.MustCompile(`(?i)\b[a-f0-9]{64}\b`)
 	knownReasons = map[string]struct{}{
 		ReasonInvalidToken:                  {},
 		ReasonInvalidAuthRequest:            {},
@@ -77,6 +90,18 @@ var (
 		ReasonUnrecognizedAuthMessage:       {},
 		ReasonPoolFull:                      {},
 		ReasonOther:                         {},
+	}
+	knownKinds = map[string]struct{}{
+		KindUpgradeFailed:  {},
+		KindAuthRejected:   {},
+		KindAuthAccepted:   {},
+		KindDisconnect:     {},
+		KindWarmupFailed:   {},
+		KindHeartbeatStale: {},
+	}
+	knownOutcomes = map[string]struct{}{
+		OutcomeSuccess: {},
+		OutcomeFailure: {},
 	}
 )
 
@@ -108,7 +133,9 @@ func NormalizeFailureReason(reason string) string {
 		return ReasonUnrecognizedAuthMessage
 	case strings.Contains(r, "invalid_hello") || strings.Contains(r, "invalid_auth"):
 		return ReasonInvalidAuthRequest
-	case strings.Contains(r, "too_many_unauthenticated") || strings.Contains(r, "pool_full") || strings.Contains(r, "provisional_pool"):
+	case strings.Contains(r, "too_many_unauthenticated") || strings.Contains(r, "too_many_auth_attempts") ||
+		strings.Contains(r, "pool_full") || strings.Contains(r, "provisional_pool") ||
+		strings.Contains(r, "credential_bootstrap_outstanding_full") || strings.Contains(r, "outstanding_full"):
 		return ReasonPoolFull
 	}
 	if _, ok := knownReasons[r]; ok {
@@ -123,6 +150,7 @@ func RedactDiagnostic(raw string, maxRunes int) string {
 		maxRunes = DefaultMaxDiagnostic
 	}
 	cleaned := secretLike.ReplaceAllString(raw, "[redacted]")
+	cleaned = hex64Token.ReplaceAllString(cleaned, "[redacted]")
 	cleaned = strings.ToValidUTF8(cleaned, "")
 	cleaned = strings.TrimSpace(cleaned)
 	if cleaned == "" {
@@ -135,8 +163,42 @@ func RedactDiagnostic(raw string, maxRunes int) string {
 	return string(runes[:maxRunes])
 }
 
+// LooksLikeCredential reports whether s resembles a bearer/token secret and
+// must not be persisted as an identifier.
+func LooksLikeCredential(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "mpk_") || strings.HasPrefix(lower, "bearer ") {
+		return true
+	}
+	if len(trimmed) == 64 && hex64Token.MatchString(trimmed) {
+		return true
+	}
+	return secretLike.MatchString(trimmed)
+}
+
 // KnownFailureReason reports whether reason is in the closed taxonomy.
 func KnownFailureReason(reason string) bool {
 	_, ok := knownReasons[reason]
 	return ok
+}
+
+// KnownKind reports whether kind is in the closed taxonomy.
+func KnownKind(kind string) bool {
+	_, ok := knownKinds[kind]
+	return ok
+}
+
+// KnownOutcome reports whether outcome is in the closed taxonomy.
+func KnownOutcome(outcome string) bool {
+	_, ok := knownOutcomes[outcome]
+	return ok
+}
+
+// FormatFixedUTC returns a fixed-width UTC timestamp for lexical ordering.
+func FormatFixedUTC(t time.Time) string {
+	return t.UTC().Format(FixedUTCLayout)
 }
