@@ -341,3 +341,20 @@ if [ "$rc" -ne 0 ]; then
   exit 1
 fi
 echo "config-drift check passed"
+
+# #615 production exception register gate (default-safe).
+# Hard-fails malformed/ownerless/scope-mismatched/clock-expired-active rows and
+# tombstone resurrection. status=expired and unbounded active rows warn unless
+# MACPROVIDER_EXCEPTION_ENFORCEMENT=1. See ops/runbooks/production-exception-register.md.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)"
+EXCEPTION_CHECK="$REPO_ROOT/scripts/check-production-exceptions.py"
+if [ ! -f "$EXCEPTION_CHECK" ]; then
+  echo "FAIL: production exception checker missing: $EXCEPTION_CHECK" >&2
+  exit 1
+fi
+echo "production exception register gate (deploy, default-safe unless ENFORCEMENT=1)"
+python3 "$EXCEPTION_CHECK" gate --mode=deploy || {
+  echo "production exception gate FAILED — fix ops/exceptions/ or set a reviewed enforcement override" >&2
+  exit 1
+}

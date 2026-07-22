@@ -27,6 +27,7 @@ for required in (
     "environment: production-release",
     "actions: read",
     "contents: write",
+    "scripts/check-production-exceptions.py gate --mode=promote",
     "scripts/verify-acceptance-promotion.py verify-run",
     "scripts/verify-acceptance-promotion.py verify-directory",
     "scripts/verify-release-checksums.sh",

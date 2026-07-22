@@ -51,6 +51,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Reject expired or invalid production exceptions
+        shell: bash
+        run: |
+          set -euo pipefail
+          # #615 stable-promotion gate: fail closed on expired, unbounded-active,
+          # ownerless, scope-mismatched, or resurrected exception rows.
+          python3 scripts/check-production-exceptions.py gate --mode=promote
+
       - name: Validate immutable promotion request
         id: request
         shell: bash

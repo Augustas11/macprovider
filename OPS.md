@@ -46,9 +46,20 @@ not duplicate the procedure here; the runbook is the operator surface for Entry
 
 Use [`ops/exceptions/production-exceptions.json`](./ops/exceptions/production-exceptions.json)
 and [`ops/runbooks/production-exception-register.md`](./ops/runbooks/production-exception-register.md)
-as the #615 operator-facing inventory of temporary production exceptions. This
-is docs/schema truth only for now; it does not enforce expiry, block promotion,
-mutate Pearl, or close #615.
+as the #615 operator-facing inventory of temporary production exceptions.
+
+Enforcement scaffolding (validator, CLI/JSON report, deploy gate via
+`check-deploy-config.sh`, stable-promotion gate, tombstone anti-resurrection
+check) is landed. Default deploy mode is fail-closed on invalid/ownerless/
+clock-expired-active/resurrected rows and warn-only on `status=expired` or
+unbounded active rows unless `MACPROVIDER_EXCEPTION_ENFORCEMENT=1`. Stable
+promotion always uses `--mode=promote` (fail-closed). This does not mutate
+Pearl, flip flags, or close #615.
+
+```bash
+make check-exceptions
+python3 scripts/check-production-exceptions.py report
+```
 
 ## 2. Safe coordinator restart
 

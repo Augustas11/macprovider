@@ -1,0 +1,8 @@
+{
+  "schema_version": "macprovider-removed-exception-tombstones-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "fix/615-exception-enforcement",
+  "environment": "pearl-production",
+  "tombstones": [],
+  "notes": "IDs listed here were removed from production authority. Config sync, overlay merge, rollback restore, or register edits must not recreate them as active/planned/expired without a new reviewed exception ID."
+}
