@@ -134,7 +134,7 @@ class Finding:
     exception_id: str | None = None
 
     def format(self) -> str:
-        loc = self.exception_id or "<register>"
+        loc = redact_secrets(self.exception_id or "<register>")
         return f"{self.severity.upper()} {self.code} {loc}: {redact_secrets(self.message)}"
 
 
@@ -361,6 +361,14 @@ def validate_register(
 
         expires_at = entry.get("expires_at")
         expiry_unknown = entry.get("expiry_unknown_reason")
+        if "expiry_unknown_reason" in entry and (
+            not isinstance(expiry_unknown, str) or not expiry_unknown.strip()
+        ):
+            result.error(
+                "expiry_unknown",
+                "expiry_unknown_reason must be a non-empty string when present",
+                exc_id,
+            )
         if expires_at is None:
             if not isinstance(expiry_unknown, str) or not expiry_unknown.strip():
                 result.error(
@@ -616,6 +624,46 @@ def check_expiry_self_extension(
             )
 
 
+def validate_stale_register(doc: dict[str, Any], result: ValidationResult) -> None:
+    """Structural validation for a stale/backup register before sync simulation.
+
+    Historical mode: do not require tombstones for removed rows (stale may
+    predate the tombstone ledger), but still reject malformed authority.
+    """
+    if not isinstance(doc, dict):
+        result.error("stale_type", "stale register must be an object")
+        return
+    unknown_root = sorted(set(doc) - REGISTER_ROOT_KEYS)
+    if unknown_root:
+        result.error("stale_additional", f"unknown stale root fields: {unknown_root}")
+    if doc.get("schema_version") != SCHEMA_VERSION:
+        result.error(
+            "stale_schema",
+            f"stale schema_version must be {SCHEMA_VERSION!r}",
+        )
+    if doc.get("environment") != ENVIRONMENT:
+        result.error("stale_environment", f"stale environment must be {ENVIRONMENT!r}")
+    try:
+        parse_rfc3339(doc.get("updated_at"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        result.error("stale_updated_at", "stale updated_at must be RFC3339Z")
+    exceptions = doc.get("exceptions")
+    if not isinstance(exceptions, list):
+        result.error("stale_exceptions", "stale exceptions must be an array")
+        return
+    for index, entry in enumerate(exceptions):
+        if not isinstance(entry, dict):
+            result.error("stale_entry", f"stale exceptions[{index}] must be an object")
+            continue
+        if not isinstance(entry.get("id"), str) or not ID_RE.fullmatch(entry["id"]):
+            result.error("stale_id", f"stale exceptions[{index}].id is invalid")
+        if entry.get("status") not in STATUSES:
+            result.error(
+                "stale_status",
+                f"stale exceptions[{index}] has invalid status {entry.get('status')!r}",
+            )
+
+
 def simulate_config_sync_restore(
     current_doc: dict[str, Any],
     stale_authoritative_doc: dict[str, Any],
@@ -624,13 +672,9 @@ def simulate_config_sync_restore(
     """Model a sync/rollback that re-applies stale authoritative exception rows."""
     result = ValidationResult()
     result.extend(validate_register(current_doc, tombstones=tombstones))
-    # Validate stale shape without requiring its removed rows to be tombstoned
-    # (stale may predate tombstones); still reject malformed JSON objects.
-    if not isinstance(stale_authoritative_doc, dict):
-        result.error("stale_type", "stale register must be an object")
-        return result.dedupe()
+    validate_stale_register(stale_authoritative_doc, result)
     if result.errors:
-        # Malformed current/tombstones already fail closed; do not pretend OK.
+        # Malformed current/stale/tombstones already fail closed; do not pretend OK.
         return result.dedupe()
 
     merged = deepcopy(current_doc)
@@ -663,11 +707,18 @@ def simulate_config_sync_restore(
     return result.dedupe()
 
 
+def _safe_scalar(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_secrets(value)
+    return value
+
+
 def build_health_report(
     doc: dict[str, Any],
     *,
     now: datetime | None = None,
     alert_hours: int = DEFAULT_ALERT_HOURS,
+    validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
@@ -692,18 +743,18 @@ def build_health_report(
             clock_state = "unbounded"
         rows.append(
             {
-                "id": redact_secrets(str(entry.get("id", ""))),
-                "status": redact_secrets(str(entry.get("status", ""))),
-                "component": redact_secrets(str(entry.get("component", ""))),
-                "owner": redact_secrets(str(entry.get("owner", ""))),
-                "issue": redact_secrets(str(entry.get("issue", ""))),
-                "expires_at": expires_at,
+                "id": _safe_scalar(str(entry.get("id", ""))),
+                "status": _safe_scalar(str(entry.get("status", ""))),
+                "component": _safe_scalar(str(entry.get("component", ""))),
+                "owner": _safe_scalar(str(entry.get("owner", ""))),
+                "issue": _safe_scalar(str(entry.get("issue", ""))),
+                "expires_at": _safe_scalar(expires_at) if expires_at is not None else None,
                 "clock_state": clock_state,
                 "blocks_stable_promotion": entry.get("blocks_stable_promotion"),
-                "scope": redact_secrets(str(entry.get("scope", ""))),
-                "authority_surface": redact_secrets(str(entry.get("authority_surface", ""))),
-                "policy_delta": redact_secrets(str(entry.get("policy_delta", ""))),
-                "reason": redact_secrets(str(entry.get("reason", ""))),
+                "scope": _safe_scalar(str(entry.get("scope", ""))),
+                "authority_surface": _safe_scalar(str(entry.get("authority_surface", ""))),
+                "policy_delta": _safe_scalar(str(entry.get("policy_delta", ""))),
+                "reason": _safe_scalar(str(entry.get("reason", ""))),
             }
         )
     by_status: dict[str, list[str]] = {status: [] for status in sorted(STATUSES)}
@@ -711,13 +762,11 @@ def build_health_report(
         status = row.get("status")
         if status in by_status and isinstance(row.get("id"), str):
             by_status[status].append(row["id"])
-    blob = json.dumps(rows)
-    secrets_clean = not contains_secret(blob)
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "environment": doc.get("environment"),
-        "register_updated_at": doc.get("updated_at"),
+        "environment": _safe_scalar(doc.get("environment")),
+        "register_updated_at": _safe_scalar(doc.get("updated_at")),
         "alert_hours": alert_hours,
         "counts": {status: len(ids) for status, ids in by_status.items()},
         "active_or_blocking": [
@@ -727,13 +776,25 @@ def build_health_report(
             or row.get("blocks_stable_promotion") is True
         ],
         "exceptions": rows,
-        "secrets_redacted": secrets_clean,
         "note": (
             "Operator-visible exception inventory for registered rows only. "
             "Does not prove Pearl has no unregistered exceptions. "
             "Secret-like substrings are redacted when recognized."
         ),
     }
+    if validation is not None:
+        report["validation"] = {
+            "errors": [redact_secrets(str(item)) for item in validation.get("errors", [])],
+            "warnings": [
+                redact_secrets(str(item)) for item in validation.get("warnings", [])
+            ],
+            "ok": bool(validation.get("ok")),
+        }
+    # Scan complete payload except the assertion field itself.
+    probe = {key: value for key, value in report.items() if key != "secrets_redacted"}
+    secrets_clean = not contains_secret(json.dumps(probe, sort_keys=True))
+    report["secrets_redacted"] = secrets_clean
+    return report
 
 
 def promote_warns_to_errors(result: ValidationResult, codes: Iterable[str]) -> ValidationResult:
@@ -808,23 +869,44 @@ def cmd_report(args: argparse.Namespace) -> int:
     _root, doc, tombstones = _load_pair(args)
     now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
     result = validate_register(doc, now=now, tombstones=tombstones, alert_hours=args.alert_hours)
-    report = build_health_report(doc, now=now, alert_hours=args.alert_hours)
-    report["validation"] = {
-        "errors": [f.format() for f in result.errors],
-        "warnings": [f.format() for f in result.warnings],
-        "ok": not result.errors,
-    }
+    report = build_health_report(
+        doc,
+        now=now,
+        alert_hours=args.alert_hours,
+        validation={
+            "errors": [f.format() for f in result.errors],
+            "warnings": [f.format() for f in result.warnings],
+            "ok": not result.errors,
+        },
+    )
     if not report["secrets_redacted"]:
-        result.error("secrets_present", "report still contains secret-like material after redaction")
-        report["validation"]["errors"] = [f.format() for f in result.errors]
-        report["validation"]["ok"] = False
+        print(
+            "ERROR secrets_present <report>: refusing to emit secret-bearing report",
+            file=sys.stderr,
+        )
+        return 1
+    if result.errors:
+        print(
+            f"production-exceptions report: FAIL ({len(result.errors)} validation error(s)); "
+            "not writing operator report",
+            file=sys.stderr,
+        )
+        for finding in result.errors:
+            print(finding.format(), file=sys.stderr)
+        return 1
     text = json.dumps(report, indent=2, sort_keys=False) + "\n"
+    if contains_secret(text):
+        print(
+            "ERROR secrets_present <report>: residual secret-like material in serialized report",
+            file=sys.stderr,
+        )
+        return 1
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8")
         print(f"wrote {args.output}")
     else:
         sys.stdout.write(text)
-    return 1 if result.errors or not report["secrets_redacted"] else 0
+    return 0
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -953,8 +1035,11 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Stale authoritative register/export that sync might restore",
     )
+    # SUPPRESS so a parent-level --tombstones is not overwritten by a missing
+    # subparser value (argparse otherwise resets it to None).
     p_sync.add_argument(
         "--tombstones",
+        default=argparse.SUPPRESS,
         help="Path to removed-exception-tombstones.json",
     )
     p_sync.set_defaults(func=cmd_sync_check)

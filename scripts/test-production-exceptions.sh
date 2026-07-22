@@ -69,13 +69,22 @@ skip_line="$(grep -nF 'elif [ "${SKIP_C2_CHECK:-0}" = "1" ]' phase5-gateway/dist
 [ -n "$exc_line" ] && [ -n "$skip_line" ] && [ "$exc_line" -lt "$skip_line" ] ||
   fail "gateway exception gate must precede SKIP_C2_CHECK branch (exc=$exc_line skip=$skip_line)"
 
-# Stable promotion workflow must invoke the promote gate against origin/main.
+# Stable promotion workflow must invoke the reusable promote gate helper.
+grep -qF 'scripts/gate-production-exceptions-promote.sh' \
+  .github/workflows/promote-acceptance-candidate.yml \
+  || fail "promote-acceptance-candidate.yml missing exception promote helper"
 grep -qF 'gate --mode=promote' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper missing gate --mode=promote"
+grep -qF 'origin/main' \
+  scripts/gate-production-exceptions-promote.sh \
+  || fail "promote helper must bind to origin/main"
+grep -qF 'Re-check production exceptions before draft creation' \
   .github/workflows/promote-acceptance-candidate.yml \
-  || fail "promote-acceptance-candidate.yml missing exception promote gate"
-grep -qF 'origin/main:ops/exceptions/production-exceptions.json' \
+  || fail "promote workflow missing pre-draft exception recheck"
+grep -qF 'Re-check production exceptions before undraft publish' \
   .github/workflows/promote-acceptance-candidate.yml \
-  || fail "promote gate must bind to origin/main register"
+  || fail "promote workflow missing pre-undraft exception recheck"
 
 # sync-check CLI (documented form with --tombstones after subcommand).
 work="$(mktemp -d "${TMPDIR:-/tmp}/exception-sync.XXXXXX")"

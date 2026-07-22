@@ -55,23 +55,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # #615 stable-promotion gate against current origin/main authority,
-          # not a stale workflow dispatch snapshot.
-          git fetch --no-tags origin main
-          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/exception-promote.XXXXXX")"
-          git show origin/main:ops/exceptions/production-exceptions.json \
-            > "$work/production-exceptions.json"
-          git show origin/main:ops/exceptions/removed-exception-tombstones.json \
-            > "$work/removed-exception-tombstones.json" 2>/dev/null || \
-            printf '%s\n' '{"schema_version":"macprovider-removed-exception-tombstones-v1","updated_at":"1970-01-01T00:00:00Z","updated_by":"missing","environment":"pearl-production","tombstones":[]}' \
-              > "$work/removed-exception-tombstones.json"
-          # Base tombstones from the checked-out commit detect ledger deletions.
-          python3 scripts/check-production-exceptions.py \
-            --register "$work/production-exceptions.json" \
-            --tombstones "$work/removed-exception-tombstones.json" \
-            --base-tombstones ops/exceptions/removed-exception-tombstones.json \
-            --previous-register ops/exceptions/production-exceptions.json \
-            gate --mode=promote
+          bash scripts/gate-production-exceptions-promote.sh
 
       - name: Validate immutable promotion request
         id: request
@@ -376,6 +360,12 @@ jobs:
             "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
             "${release_assets[@]}"
 
+      - name: Re-check production exceptions before draft creation
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/gate-production-exceptions-promote.sh
+
       - name: Create and fully verify a numeric draft
         id: draft
         shell: bash
@@ -415,6 +405,12 @@ jobs:
             "$RUNNER_TEMP/draft-publication.json" \
             "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
           printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+
+      - name: Re-check production exceptions before undraft publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/gate-production-exceptions-promote.sh
 
       - name: Reverify and publish only the captured numeric draft
         shell: bash

@@ -123,16 +123,13 @@ Promotes the warn-class findings above to hard-fail.
 
 ### Stable promotion (always fail-closed)
 
-`.github/workflows/promote-acceptance-candidate.yml` fetches current
-`origin/main` register + tombstones and runs:
+Before draft creation and again before undraft publication, the promote
+workflow re-runs `scripts/gate-production-exceptions-promote.sh`, which gates
+the current `origin/main` register against `origin/main^` previous/base
+authority (tombstone deletions and expiry self-extensions fail closed).
 
 ```bash
-python3 scripts/check-production-exceptions.py \
-  --register <origin/main register> \
-  --tombstones <origin/main tombstones> \
-  --base-tombstones ops/exceptions/removed-exception-tombstones.json \
-  --previous-register ops/exceptions/production-exceptions.json \
-  gate --mode=promote
+bash scripts/gate-production-exceptions-promote.sh
 ```
 
 Promote rejects expired, unbounded-active, approaching-expiry (72h),

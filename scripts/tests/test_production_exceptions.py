@@ -204,12 +204,62 @@ class ProductionExceptionsTests(unittest.TestCase):
         result = pe.simulate_config_sync_restore(current, stale, tombstones)
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
-    def test_sync_check_fails_on_malformed_tombstones(self):
-        current = _minimal_register([_minimal_entry(status="removed", id="exc-x")])
-        stale = _minimal_register([_minimal_entry(id="exc-x", status="active")])
-        bad = {"schema_version": "wrong", "environment": "nope", "tombstones": "nope"}
-        result = pe.simulate_config_sync_restore(current, stale, bad)
-        self.assertTrue(result.errors)
+    def test_sync_check_fails_on_malformed_stale(self):
+        current = _minimal_register()
+        stale = {"schema_version": "wrong", "environment": "nope", "exceptions": {}}
+        result = pe.simulate_config_sync_restore(current, stale, _tombstones())
+        self.assertTrue(any(f.code.startswith("stale_") for f in result.errors))
+
+    def test_parent_tombstones_arg_preserved_for_sync_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            current = _minimal_register(
+                [_minimal_entry(id="exc-sync-removed", status="removed")]
+            )
+            stale = _minimal_register(
+                [_minimal_entry(id="exc-sync-removed", status="active")]
+            )
+            tombs = _tombstones(
+                [
+                    {
+                        "id": "exc-sync-removed",
+                        "removed_at": "2026-07-20T00:00:00Z",
+                        "removal_evidence": "test",
+                        "authority_surface": "test",
+                    }
+                ]
+            )
+            empty = _tombstones()
+            (tmp_path / "current.json").write_text(json.dumps(current), encoding="utf-8")
+            (tmp_path / "stale.json").write_text(json.dumps(stale), encoding="utf-8")
+            (tmp_path / "tombs.json").write_text(json.dumps(tombs), encoding="utf-8")
+            (tmp_path / "empty.json").write_text(json.dumps(empty), encoding="utf-8")
+            # Parent-level --tombstones must not be clobbered by the subparser.
+            rc = pe.main(
+                [
+                    "--tombstones",
+                    str(tmp_path / "tombs.json"),
+                    "sync-check",
+                    "--current",
+                    str(tmp_path / "current.json"),
+                    "--stale",
+                    str(tmp_path / "stale.json"),
+                ]
+            )
+            self.assertEqual(rc, 1)
+            rc_ok = pe.main(
+                [
+                    "--tombstones",
+                    str(tmp_path / "empty.json"),
+                    "sync-check",
+                    "--current",
+                    str(tmp_path / "current.json"),
+                    "--stale",
+                    str(tmp_path / "stale.json"),
+                ]
+            )
+            # Empty tombstones + removed current fails missing_tombstone during validate.
+            self.assertEqual(rc_ok, 1)
 
     def test_tombstone_deletion_vs_base_fails(self):
         tombs = _tombstones()
