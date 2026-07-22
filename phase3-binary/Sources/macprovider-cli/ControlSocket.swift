@@ -480,7 +480,7 @@ public enum ControlSocketPaths {
     }
 }
 
-private struct ControlSocketFileIdentity: Equatable, Sendable {
+struct ControlSocketFileIdentity: Equatable, Sendable {
     let device: dev_t
     let inode: ino_t
     let owner: uid_t
@@ -491,6 +491,177 @@ private struct ControlSocketFileIdentity: Equatable, Sendable {
         inode = info.st_ino
         owner = info.st_uid
         mode = info.st_mode
+    }
+}
+
+enum ControlSocketStaleSocketOutcome: Equatable {
+    /// No live listener was found at the path; the orphaned inode was
+    /// safely quarantined and unlinked (or was already gone). Safe to bind.
+    case reclaimed
+    /// A live peer accepted a connection attempt on the path. Must stay
+    /// fail-closed; some other serve process currently owns this socket.
+    case live
+    /// The path could not be verified as our own control socket (wrong
+    /// owner/type/mode, unsafe parent directory, or an ambiguous connect
+    /// failure). Never reclaimed; caller must stay fail-closed.
+    case unverified
+}
+
+/// Reclaims a control socket path left behind by a serve process that died
+/// without running its watchdog exit cleanup (e.g. SIGKILL, launchd
+/// KeepAlive restart racing a crash). Applies the same identity-verification
+/// and atomic quarantine-then-unlink discipline as
+/// `ControlSocketWatchdogCleanup` so an unknown or live path is never
+/// touched — this only clears sockets we can prove are both ours and dead.
+enum ControlSocketStaleSocketReclaimer {
+    static func reclaimIfOrphaned(socketPath: URL) -> ControlSocketStaleSocketOutcome {
+        let parentPath = socketPath.deletingLastPathComponent().path
+        let socketName = socketPath.lastPathComponent
+
+        let parentFD = Darwin.open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard parentFD >= 0 else {
+            log("could not open control socket directory", error: errno)
+            return .unverified
+        }
+        defer { Darwin.close(parentFD) }
+
+        var parentInfo = stat()
+        guard Darwin.fstat(parentFD, &parentInfo) == 0,
+              parentInfo.st_uid == geteuid(),
+              (parentInfo.st_mode & S_IFMT) == S_IFDIR,
+              (parentInfo.st_mode & 0o777) == 0o700
+        else {
+            log("refused unverified control socket directory")
+            return .unverified
+        }
+
+        var socketInfo = stat()
+        guard Darwin.fstatat(parentFD, socketName, &socketInfo, AT_SYMLINK_NOFOLLOW) == 0 else {
+            let error = errno
+            if error == ENOENT { return .reclaimed }
+            log("could not inspect control socket", error: error)
+            return .unverified
+        }
+        guard socketInfo.st_uid == geteuid(),
+              (socketInfo.st_mode & S_IFMT) == S_IFSOCK,
+              (socketInfo.st_mode & 0o777) == 0o600
+        else {
+            log("refused unverified control socket")
+            return .unverified
+        }
+
+        switch probeLiveness(socketPath: socketPath.path) {
+        case .live:
+            return .live
+        case .unknown:
+            return .unverified
+        case .orphaned:
+            break
+        }
+
+        let expectedIdentity = ControlSocketFileIdentity(socketInfo)
+        return quarantineAndUnlink(
+            parentFD: parentFD,
+            socketName: socketName,
+            expectedIdentity: expectedIdentity
+        ) ? .reclaimed : .unverified
+    }
+
+    /// Test-only seam exercising the exact quarantine-then-unlink step used
+    /// by `reclaimIfOrphaned`, so tests can assert the race-safety guarantee
+    /// (a mismatched identity — i.e. someone else's live replacement won the
+    /// race — is preserved untouched) without depending on real thread
+    /// timing.
+    static func quarantineAndUnlinkForTest(
+        parentFD: Int32,
+        socketName: String,
+        expectedIdentity: ControlSocketFileIdentity
+    ) -> Bool {
+        quarantineAndUnlink(parentFD: parentFD, socketName: socketName, expectedIdentity: expectedIdentity)
+    }
+
+    private enum LivenessProbe {
+        case live
+        case orphaned
+        case unknown
+    }
+
+    private static func probeLiveness(socketPath: String) -> LivenessProbe {
+        guard let address = try? unixAddress(path: socketPath) else { return .unknown }
+        var raw = address.sockaddr
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return .unknown }
+        defer { Darwin.close(fd) }
+        let result = withUnsafePointer(to: &raw) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, address.length)
+            }
+        }
+        if result == 0 { return .live }
+        switch errno {
+        case ECONNREFUSED, ENOTSOCK, EPROTOTYPE, ENOENT:
+            return .orphaned
+        default:
+            return .unknown
+        }
+    }
+
+    private static func quarantineAndUnlink(
+        parentFD: Int32,
+        socketName: String,
+        expectedIdentity: ControlSocketFileIdentity
+    ) -> Bool {
+        let quarantineName = ".\(socketName).stale-reclaim-\(getpid())-\(UUID().uuidString.lowercased())"
+        guard Darwin.renameatx_np(
+            parentFD, socketName,
+            parentFD, quarantineName,
+            UInt32(RENAME_EXCL)
+        ) == 0 else {
+            let error = errno
+            if error == ENOENT { return true }
+            log("could not quarantine control socket", error: error)
+            return false
+        }
+
+        var quarantinedInfo = stat()
+        guard Darwin.fstatat(parentFD, quarantineName, &quarantinedInfo, AT_SYMLINK_NOFOLLOW) == 0 else {
+            let error = errno
+            if Darwin.renameatx_np(
+                parentFD, quarantineName,
+                parentFD, socketName,
+                UInt32(RENAME_EXCL)
+            ) != 0 {
+                log("preserved mismatched control socket as \(quarantineName)", error: errno)
+            } else {
+                log("could not inspect quarantined control socket", error: error)
+            }
+            return false
+        }
+        guard ControlSocketFileIdentity(quarantinedInfo) == expectedIdentity else {
+            if Darwin.renameatx_np(
+                parentFD, quarantineName,
+                parentFD, socketName,
+                UInt32(RENAME_EXCL)
+            ) != 0 {
+                log("preserved mismatched control socket as \(quarantineName)", error: errno)
+            } else {
+                log("refused replacement control socket cleanup")
+            }
+            return false
+        }
+
+        guard Darwin.unlinkat(parentFD, quarantineName, 0) == 0 else {
+            let error = errno
+            if error == ENOENT { return true }
+            log("could not remove quarantined control socket", error: error)
+            return false
+        }
+        return true
+    }
+
+    private static func log(_ message: String, error: Int32? = nil) {
+        let detail = error.map { ": \(String(cString: strerror($0)))" } ?? ""
+        FileHandle.standardError.write(Data("control socket stale reclaim \(message)\(detail)\n".utf8))
     }
 }
 
@@ -739,9 +910,17 @@ actor ControlSocketServer {
         chmod(parent.path, S_IRWXU)
 
         if FileManager.default.fileExists(atPath: socketPath.path) {
-            let error = ControlSocketServerError.staleSocket(path: socketPath.path)
-            FileHandle.standardError.write(Data(("\(error.description)\n").utf8))
-            throw error
+            // launchd KeepAlive restarts a serve process whose predecessor
+            // may have died (SIGKILL, OOM, power loss) before its watchdog
+            // exit cleanup ran, leaving an orphaned control socket file with
+            // no listener. Reclaim only when we can prove the path is both
+            // ours and dead; otherwise stay fail-closed exactly as before.
+            let outcome = ControlSocketStaleSocketReclaimer.reclaimIfOrphaned(socketPath: socketPath)
+            if outcome != .reclaimed {
+                let error = ControlSocketServerError.staleSocket(path: socketPath.path)
+                FileHandle.standardError.write(Data(("\(error.description)\n").utf8))
+                throw error
+            }
         }
 
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
