@@ -11,7 +11,8 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 
 | Thread | State | Recommendation / verdict | Next gate |
 |---|---|---|---|
-| **236** P4 cache-reuse regression gate | PR **#696** open (audited 0 C/H/M, governance green), awaiting user merge | B8 armed PASS≥0.60 / WARN[0.50,0.60) / FAIL<0.50 from measured **0.725** baseline; B9 record-only | merge #696; then wire the continuous/CI phase-C consumer (must treat WARN+SKIP non-green; run-salt the sticky tag) |
+| **236** P4 cache-reuse regression gate | **MERGED** (PR **#696**, 2026-07-22; 0 C/H/M, governance green) | B8 armed PASS≥0.60 / WARN[0.50,0.60) / FAIL<0.50 from measured **0.725** baseline; B9 record-only | wire the continuous/CI phase-C consumer (must treat WARN+SKIP non-green; run-salt the sticky tag) |
+| **235** P3 thermal-soak INSTRUMENT | **MERGED** (PR **#698**, 2026-07-22; B10 sustained-TPS retention) | instrument only; soak **campaign parked** for lab Mac | run campaign on lab Mac → safe-sustained-load envelope for #584 (Tier C) |
 | **234** cold/warm TTFT | harness merged (#668); campaign armed + accumulating | — | calibration PR / prewarm rec / cold-start SLO pend passive data; cold idle-evict cell = post-reboot-only (no lab Mac) |
 | **233** KV survival on restart | memo landed (`d6881b14`) | **Approach A** (encrypted disk tier behind `ConversationCache`), fallback C; provider-local, no receipt field | SPEC draft (awaiting go) |
 | **232** continuous batching | memo landed (`8d80f6c4`) | **Approach A** (upstream mlx-swift-lm batch API), fallback B; **pivot-gate = INDEPENDENT → parallel with 233** | SPEC draft (awaiting go) |
@@ -20,41 +21,52 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 ## Forward ranking (what to do next)
 
 ### Tier A — unblocked, do now
-1. **RESEARCH_235 (P3 thermal-soak) INSTRUMENT** — build the soak scenario
-   (`15_thermal_soak.yaml`), the sustained-TPS-retention invariant, and the
-   provider-side thermal capture collector NOW; **park the soak campaign** for the
-   lab Mac (same split we used for 234's cold cell and 236). Completes the 4-part
-   e2e suite (P1 shipped, P2/234 + P4/236 done, P3 is the last) and directly serves
-   OPEN **P0 #584** (canary collapses healthy providers → buyer 503s) — the biggest
-   unaddressed reliability gap. **ID collision:** 236 took `B8`/`B9`; 235's prompt
-   says `B8` for retention — use the next free ID (**B10**) instead.
+1. **RESEARCH_233 + RESEARCH_232 SPEC drafts — THE next work.** With 235's
+   instrument merged (#698), the entire e2e suite is delivered and Tier A's old
+   quick-win is gone; these two are now the only substantive levers that need
+   **no hardware and no external gate**. Both memos are landed with a chosen
+   approach, and they are confirmed **parallel-independent**, so they run as two
+   separate SPEC-draft sessions (same handoff pattern as the in-flight SPEC-036):
+   - **233 — KV survival on restart** (buyer TTFT): memo `d6881b14`, **Approach A**
+     = encrypted disk tier behind `ConversationCache`, fallback C; provider-local,
+     no receipt field. Handoff prompt:
+     `audits/_prompts/BUILD_SPEC_233_KV_SURVIVAL_DRIVE_TO_FULL_PROMPT.md`.
+   - **232 — continuous batching** (provider earnings): memo `8d80f6c4`,
+     **Approach A** = upstream mlx-swift-lm batch API, fallback B. Handoff prompt:
+     `audits/_prompts/BUILD_SPEC_232_CONTINUOUS_BATCHING_DRIVE_TO_FULL_PROMPT.md`.
+   - Number reservation to avoid collision with in-flight SPEC-036:
+     **233 → SPEC-037**, **232 → SPEC-038** (verify-and-bump at runtime).
 
-### Tier B — research done, decision-gated (no hardware)
-2. **233 + 232 SPEC drafts** — the two biggest levers (232 = provider earnings via
-   batching; 233 = buyer TTFT via KV survival), confirmed parallel-independent.
-   SPEC-draft stage needs only a go-ahead → codex SPEC-audit loop → BUILD_SPEC.
-3. **oMLX provisional-gates Stage 1** (issue #687) — cheap, unblocked; gated on the
+### In flight (parallel sessions)
+- **SPEC-036 — compute-integrity receipt companion** (settlement drift gate, from
+  stale PR #390): executing in another session off
+  `feat/compute-integrity-receipt-companion` — renumber 030→036 + dep rewire +
+  open-questions done; SPEC-audit → IMPL → money-path three-lane audit next.
+  Handoff: `audits/_prompts/BUILD_SPEC_036_COMPUTE_INTEGRITY_DRIVE_TO_FULL_PROMPT.md`.
+
+### Tier B — smaller unblocked / decision-gated (no hardware)
+2. **oMLX provisional-gates Stage 1** (issue #687) — cheap, unblocked; gated on the
    value call (how many rows blocked *only* on throughput self-verification).
-4. **RESEARCH_227 rate-card close-out** — Nemotron license + live OpenRouter
+3. **RESEARCH_227 rate-card close-out** — Nemotron license + live OpenRouter
    re-pull; unblocks catalog pricing.
 
 ### Tier C — the lab-Mac cluster (one M4 Max 64GB unblocks three)
-5. Acquire one controllable lab Mac → unblocks simultaneously:
-   - **RESEARCH_235 P3 thermal-soak CAMPAIGN** — run the (Tier-A-built) instrument
+4. Acquire one controllable lab Mac → unblocks simultaneously:
+   - **RESEARCH_235 P3 thermal-soak CAMPAIGN** — run the (now-merged #698) instrument
      to produce the "safe sustained-load envelope" #584's canary redesign consumes.
    - **RESEARCH_234 cold idle-evict cell** — the cold-TTFT measurement
      post-reboot-only can't cover.
    - **RESEARCH_231 FB-02/03/04** — catalog gate-loosening → provider availability.
 
 ### Tier D — second wave / gated
-6. Stochastic spec-decode enablement (SPEC-030 open items) → fleet-wide buyer TPS.
-7. Workload-class runtime classifier (SPEC-029 deferred).
-8. CPU-time instrumentation — cheap diagnostic; run before the 232 batching build.
-9. **RESEARCH_237 — Cluster F (oversized-model sharding across shared Macs)** —
+5. Stochastic spec-decode enablement (SPEC-030 losslessness-probe open items) → fleet-wide buyer TPS.
+6. Workload-class runtime classifier (SPEC-029 deferred).
+7. CPU-time instrumentation — cheap diagnostic; run before the 232 batching build.
+8. **RESEARCH_237 — Cluster F (oversized-model sharding across shared Macs)** —
    consolidated below. Runtime feasibility **de-risked**; **demand-gated, don't
    build**. Next action is a one-line upstream watch, not a campaign.
-10. Goodhart v0.2 demand-signal — traffic-gated, don't start.
-11. Standing hygiene — monthly oMLX snapshot (partly done 2026-07-22), Darkbloom re-pull.
+9. Goodhart v0.2 demand-signal — traffic-gated, don't start.
+10. Standing hygiene — monthly oMLX snapshot (partly done 2026-07-22), Darkbloom re-pull.
 
 ## RESEARCH_237 — Cluster F: run big models on shared different Macs (consolidated)
 
@@ -105,13 +117,18 @@ stack?" question is **no longer the blocker**. The real gates are all
    settlement SPEC**, not the inference engine.
 
 ## Organizing insights
-- Shape after 236: **one unblocked quick win left (235 instrument)**, **two
-  decision-gated big levers (232/233 SPEC drafts)**, **one hardware bottleneck
-  gating a cluster of three (235 campaign / 234 cold cell / 231 FB → one lab Mac)**.
-- The e2e-test suite is nearly complete: 235's instrument is the last piece
-  buildable without hardware. After it, the unblocked research backlog is
-  exhausted — remaining progress is either a SPEC-draft go-ahead (232/233) or the
-  lab-Mac procurement.
+- Shape after 235/236 merged: **the e2e suite is fully delivered** (P1–P4 all
+  landed; 235 instrument #698, 236 gate #696). The next work is **232/233 SPEC
+  drafts** — now Tier A, the only substantive levers needing neither hardware nor
+  an external gate — running as two parallel SPEC-draft sessions alongside the
+  in-flight SPEC-036.
+- **Three SPEC tracks can run in parallel right now:** SPEC-036 (compute-integrity,
+  in flight), SPEC-037/233 (KV survival, buyer TTFT), SPEC-038/232 (batching,
+  provider earnings). All three are memo/handoff-ready; none blocks another.
+- The remaining backlog splits cleanly: **SPEC-draft work (232/233, unblocked
+  now)**, **one hardware bottleneck gating a cluster of three (235 campaign / 234
+  cold cell / 231 FB → one lab Mac)**, and **demand-gated second-wave (237
+  Cluster-F, Goodhart)**.
 - The lab-Mac gap is a standalone procurement decision, not three separate stalls.
 - **Cluster-F sharding is now one thread, not two loose docs.** The shard track
   answered "can the engine work on MLX?" (yes, Spike 01) and the Mesh-LLM track
