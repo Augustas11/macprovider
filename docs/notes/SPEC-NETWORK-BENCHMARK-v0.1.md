@@ -124,7 +124,7 @@ single bad run doesn't trip the alert).
 | B5 | Slot util reasonable | ≥ 15% over 5-min window |
 | B6 | Earnings/hr viable | ≥ $0.30/hr at current pricing |
 | B7 | Cold/warm TTFT ratio bounded | cold p50 / warm p50 ≤ 2.0 (scenario 08) |
-| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens ≥ 0.50 on warm turns (scenario 16, provider prefix-cache probe; calibrated from a 0.725 baseline) |
+| B8 | Sticky cache-reuse retention | median cached_prompt_tokens / prompt_tokens on warm turns (scenario 16, provider prefix-cache probe; calibrated from a 0.725 baseline): PASS ≥ 0.60 (target), WARN [0.50, 0.60) (degrading, non-green), FAIL < 0.50 (floor breached — reuse collapsed) |
 | B9 | Cached-turn latency advantage (record-only) | records reuse-bearing cached vs uncached full-response p50 latency ratio (scenario 16; always SKIP, not a gate) |
 
 Like I1-I4, each invariant produces a structured verdict (PASS / WARN /
@@ -148,11 +148,14 @@ just one cold control and that lone cold turn also pays one-time
 connection setup — arming it soundly needs a multi-cold-control redesign,
 so B8 (reuse retention) is armed independently.
 
-B8 is **armed** with a floor of **0.50**, calibrated from the 2026-07-22
-scenario-16 prod baseline: the harness measured a median reuse of **0.725**
-over 7 warm turns on the live pool (corroborating #376's 2026-07-09 ~0.64,
-range 0.638-0.70). The floor sits well below both, so normal jitter — reuse
-is deterministic prefix caching and very stable — will not flap the gate,
+B8 is **armed** with a target of **0.60** and a hard FAIL floor of **0.50**,
+calibrated from the 2026-07-22 scenario-16 prod baseline: the harness measured a
+median reuse of **0.725** over 7 warm turns on the live pool (corroborating
+#376's 2026-07-09 ~0.64, range 0.638-0.70). PASS ≥ 0.60; WARN in [0.50, 0.60)
+(reuse degrading — a scheduled consumer must treat WARN, and SKIP, as non-green,
+not just FAIL); FAIL < 0.50 (the calibrated floor — reuse has collapsed). The
+0.50 floor sits below both the median and the #376 low end, so normal jitter —
+reuse is deterministic prefix caching and very stable — will not flap the gate,
 while a genuine collapse (a provider prefix-cache regression) drops below
 it and FAILs. `benchmark.cache_gate_armed` is a positive, fail-safe flag:
 false (its default, if omitted) makes B8 record-but-SKIP; the scenario sets

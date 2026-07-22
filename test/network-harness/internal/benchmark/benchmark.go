@@ -245,17 +245,21 @@ const (
 	// guards the ~64% turn-2 reuse win measured live on 2026-07-09 with a
 	// ~3.9k-token prefix (#376). CacheReuseTarget is deliberately
 	// conservative vs that 0.64 so normal jitter doesn't flap the gate;
-	// below CacheReuseBareMin the reuse win has effectively collapsed
-	// (a provider prefix-cache regression).
-	// CALIBRATED from the 2026-07-22 scenario-16 prod baseline: the
-	// harness measured a median reuse of 0.725 over 7 warm turns on the
-	// live pool (corroborating #376's 2026-07-09 measurement of ~0.64,
-	// range 0.638-0.70). The floor 0.50 sits well below both the measured
-	// median and the #376 low end, leaving ample headroom against jitter
-	// (reuse is deterministic prefix caching, so it is very stable); below
-	// bare-min 0.30 the win has effectively collapsed. Higher is better.
-	CacheReuseTarget  = 0.50
-	CacheReuseBareMin = 0.30
+	// CALIBRATED from the 2026-07-22 scenario-16 prod baseline: the harness
+	// measured a median reuse of 0.725 over 7 warm turns on the live pool
+	// (corroborating #376's 2026-07-09 ~0.64, range 0.638-0.70).
+	//   - PASS  >= CacheReuseTarget (0.60): healthy, within ~17% of the
+	//     0.725 baseline.
+	//   - WARN  in [0.50, 0.60): reuse degrading — early warning.
+	//   - FAIL  <  CacheReuseBareMin (0.50): the calibrated floor is
+	//     breached (a ~31%+ drop from baseline) — a provider prefix-cache
+	//     regression that must fail LOUD.
+	// The 0.50 floor sits below both the median and the #376 low end, so
+	// deterministic prefix-cache jitter won't flap it, while a genuine
+	// collapse drops through it. Higher is better. A scheduled consumer
+	// must treat WARN (and SKIP) as non-green, not just FAIL.
+	CacheReuseTarget  = 0.60
+	CacheReuseBareMin = 0.50
 
 	// B9 (cached-turn latency advantage) thresholds for scenario 16.
 	// ratio = cached_turn_latency_p50 / uncached_turn_latency_p50 over the
@@ -882,15 +886,13 @@ func evalB7(bm BuyerMetrics) Verdict {
 //     produced a valid measurement (survivorship bias / duration
 //     truncation, judged against the scenario's planned count) →
 //     inconclusive.
-//   - gate not armed (Benchmark.CacheGateArmed=false) → the threshold has
-//     not yet been calibrated against a positive, capability-qualified
-//     baseline (as of 2026-07-22 the live pool reports 0 reuse), so a
-//     present-but-zero value cannot be distinguished from a true
-//     regression; report the measured value but do not PASS/FAIL until a
-//     reuse-capable provider baseline exists and the floor is transcribed
-//     from it, then arm the gate.
+//   - gate not armed (Benchmark.CacheGateArmed=false) → the scenario has
+//     opted out of scoring (e.g. no positive baseline captured yet);
+//     report the measured value but do not PASS/WARN/FAIL. Scenario 16
+//     arms the gate from the 2026-07-22 baseline (median reuse 0.725).
 //
-// When conclusive: PASS at/above the floor, WARN in the degraded band,
+// When conclusive and armed: PASS at/above the target, WARN in the
+// degraded band down to the floor, FAIL below the floor (reuse collapsed),
 // FAIL below (reuse collapsed). Higher reuse is better.
 func evalB8(bm BuyerMetrics, expectedWarm int, gateArmed bool) Verdict {
 	v := Verdict{ID: "B8", Title: "sticky cache-reuse retention", Unit: "ratio",
@@ -945,13 +947,13 @@ func evalB8(bm BuyerMetrics, expectedWarm int, gateArmed bool) Verdict {
 	switch {
 	case v.Value >= CacheReuseTarget:
 		v.Status = StatusPass
-		v.Detail = fmt.Sprintf("median cache reuse %.3f ≥ floor %.2f (n=%d cached turns, %d measured, min=%.3f mean=%.3f, %d usage-absent, %d invalid)", v.Value, v.Target, cr.CachedTurns, cr.ReuseCount, cr.ReuseMin, cr.ReuseMean, cr.UsageAbsentTurns, cr.InvalidTurns)
+		v.Detail = fmt.Sprintf("median cache reuse %.3f ≥ target %.2f (n=%d cached turns, %d measured, min=%.3f mean=%.3f, %d usage-absent, %d invalid)", v.Value, v.Target, cr.CachedTurns, cr.ReuseCount, cr.ReuseMin, cr.ReuseMean, cr.UsageAbsentTurns, cr.InvalidTurns)
 	case v.Value >= CacheReuseBareMin:
 		v.Status = StatusWarn
-		v.Detail = fmt.Sprintf("median cache reuse %.3f over bare-min %.2f but under floor %.2f — reuse degrading (n=%d measured of %d cached)", v.Value, v.BareMin, v.Target, cr.ReuseCount, cr.CachedTurns)
+		v.Detail = fmt.Sprintf("median cache reuse %.3f over floor %.2f but under target %.2f — reuse degrading, treat as non-green (n=%d measured of %d cached)", v.Value, v.BareMin, v.Target, cr.ReuseCount, cr.CachedTurns)
 	default:
 		v.Status = StatusFail
-		v.Detail = fmt.Sprintf("median cache reuse %.3f under bare-min %.2f — sticky prefix-cache reuse has collapsed (stickiness or provider prefix-cache regression)", v.Value, v.BareMin)
+		v.Detail = fmt.Sprintf("median cache reuse %.3f below the calibrated floor %.2f — sticky prefix-cache reuse has collapsed (provider prefix-cache regression)", v.Value, v.BareMin)
 	}
 	return v
 }
@@ -975,8 +977,9 @@ func evalB8(bm BuyerMetrics, expectedWarm int, gateArmed bool) Verdict {
 // gating a run. The value is still gated behind conclusive positive reuse
 // so a collapsed/thin/truncated run reports no ratio at all.
 func evalB9(bm BuyerMetrics, expectedWarm int) Verdict {
-	v := Verdict{ID: "B9", Title: "cached-turn latency advantage (record-only)", Unit: "ratio",
-		Target: CachedLatencyRatioTarget, BareMin: CachedLatencyRatioBareMin}
+	// B9 is record-only (always SKIP) — no Target/BareMin so the artifact
+	// carries no gate-shaped fields that could mislead a downstream consumer.
+	v := Verdict{ID: "B9", Title: "cached-turn latency advantage (record-only)", Unit: "ratio"}
 	cr := bm.CacheReuse
 	un := cr.UncachedLatencyMs
 	// B9 records over the REUSE-BEARING cohort (warm turns with valid,

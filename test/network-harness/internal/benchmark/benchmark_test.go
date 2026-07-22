@@ -603,7 +603,7 @@ func okPrimer() buyer.Result {
 }
 
 func TestB8_CacheReuse_Pass(t *testing.T) {
-	// median reuse = 0.64 (2000/3125) ≥ floor 0.40 → PASS (gate armed)
+	// median reuse = 0.64 (2000/3125) ≥ target 0.60 → PASS (gate armed)
 	results := []buyer.Result{okPrimer()}
 	for i := 0; i < 8; i++ {
 		results = append(results, makeCacheResult(300, "cached", true, 2000, 3125))
@@ -615,20 +615,21 @@ func TestB8_CacheReuse_Pass(t *testing.T) {
 }
 
 func TestB8_CacheReuse_Warn(t *testing.T) {
-	// median reuse = 0.30 (in [0.20, 0.40)) → WARN
+	// median reuse = 0.55 (1650/3000, in [0.50, 0.60)) → WARN (degrading:
+	// over the 0.50 floor but under the 0.60 target)
 	results := []buyer.Result{okPrimer()}
 	for i := 0; i < 6; i++ {
-		results = append(results, makeCacheResult(300, "cached", true, 900, 3000))
+		results = append(results, makeCacheResult(300, "cached", true, 1650, 3000))
 	}
 	res := Evaluate(scCache(true, "B8"), results, nil, nil, nil, "test", 60)
 	if got := res.Verdicts[0].Status; got != StatusWarn {
-		t.Fatalf("B8 expected WARN at reuse 0.30, got %s: %s", got, res.Verdicts[0].Detail)
+		t.Fatalf("B8 expected WARN at reuse 0.55, got %s: %s", got, res.Verdicts[0].Detail)
 	}
 }
 
 func TestB8_CacheReuse_Fail_Collapsed(t *testing.T) {
 	// Cache collapsed: every cached turn reports cached_prompt_tokens=0
-	// but the field IS present → reuse 0.0 < 0.20 → FAIL (armed, not SKIP).
+	// but the field IS present → reuse 0.0 < 0.50 → FAIL (armed, not SKIP).
 	results := []buyer.Result{okPrimer()}
 	for i := 0; i < 6; i++ {
 		results = append(results, makeCacheResult(300, "cached", true, 0, 3000))
