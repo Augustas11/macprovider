@@ -510,7 +510,11 @@ block, fail, or corrupt the request being served.
   carrying the incremented purge generation, `fsync` its directory, and
   only then advance + `fsync` the high-watermark in namespace metadata —
   in that order, so a crash between the two always leaves an incomplete
-  tombstone for recovery to resume from; (2) delete the entry's DEK
+  tombstone for recovery to resume from; recovery of an incomplete
+  tombstone FIRST re-advances and durably persists the high-watermark to
+  the tombstone's generation if namespace metadata is behind, THEN runs
+  steps 2–4 and writes the completion mark (asserted in AC-4); (2) delete
+  the entry's DEK
   Keychain item and verify absence — from
   this instant the entry is unrecoverable even if every file is restored
   from a snapshot or backup of the cache directory; (3) remove the matching
@@ -780,10 +784,14 @@ independently hits), with exactly one reason code:
 | 25 | Promoted layers fail hot-tier predicate (LCP < 32, nothing-new, non-exact trim) | `disk_promote_rejected` + shipped reason |
 
 Partition rule: rows 2–12 and 14 are **envelope** mismatches against the
-live runtime or lifecycle (`disk_miss_envelope`/`disk_miss_expired`); rows
-13 and 15–18 are **artifact integrity** failures (`disk_miss_corrupt`) —
-the two sets are mutually exclusive by construction (a manifest is first
-checked for internal coherence, then compared against the runtime).
+live runtime (`disk_miss_envelope`); row 15 is lifecycle expiry
+(`disk_miss_expired`); rows 13, 16, and 18 are **artifact integrity**
+failures (`disk_miss_corrupt`); row 17 is an AC-3 activation-recovery
+event outside the request path; rows 19–25 are the fence, I/O, capacity,
+identity-availability, and predicate outcomes named in their own code
+column. The sets are mutually exclusive by construction: a manifest is
+first checked for internal coherence (integrity), then for lifecycle,
+then compared against the runtime (envelope).
 
 Write phase: successful durable publication → `disk_write_committed`; any
 write-side failure or refusal (identity unavailable, allowlist, geometry
@@ -801,9 +809,13 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
   keys and unknown fields rejected; parsed with §5a bounds before any
   dependent allocation. Fields (types): schema/codec IDs (strings);
   namespace ID (string); key epoch, generation, commit sequence, purge
-  generation, token count, chunk count (non-negative integers within
-  JSON-safe range); creation time and eligibility deadline (integer Unix
-  seconds UTC); model/tokenizer/catalog identities (strings ≤ 1 KiB);
+  generation, token count (non-negative integers within JSON-safe range;
+  the chunk count is NOT a serialized field — it is derived as
+  `chunks[].length` and used only as a bound/check); creation time and
+  eligibility deadline (integer Unix **milliseconds** UTC, converted from
+  the hot tier's `Date` by flooring `timeIntervalSince1970 × 1000`; the
+  same floored-millisecond values are used in deadline comparisons);
+  model/tokenizer/catalog identities (strings ≤ 1 KiB);
   hashes (lowercase base16); layer records — `layers[]` objects with the
   closed key set `{layer_index, class_id, layout_version, ndim, dims[],
   dtype}` (layout_version is per-layer, authenticated, exact-matched per
