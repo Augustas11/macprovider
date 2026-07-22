@@ -139,6 +139,9 @@ type Server struct {
 	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
 	connectionEventQueue           chan connectionEventJob
 	connectionEventWorkerOnce      sync.Once
+	connectionEventStopOnce        sync.Once
+	connectionEventDone            chan struct{}
+	connectionEventsStopped        atomic.Bool
 	anonymousEventMu               sync.Mutex
 	anonymousEventWindow           time.Time
 	anonymousEventCount            int

@@ -69,12 +69,14 @@ func (s *Server) ensureConnectionEventWorker() {
 	}
 	s.connectionEventWorkerOnce.Do(func() {
 		s.connectionEventQueue = make(chan connectionEventJob, connectionEventQueueSize)
+		s.connectionEventDone = make(chan struct{})
 		s.lastKnownFlush = make(map[string]time.Time)
 		go s.runConnectionEventWorker()
 	})
 }
 
 func (s *Server) runConnectionEventWorker() {
+	defer close(s.connectionEventDone)
 	for job := range s.connectionEventQueue {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if job.event != nil && s.connectionEvents != nil {
@@ -95,6 +97,30 @@ func (s *Server) runConnectionEventWorker() {
 			}
 		}
 		cancel()
+	}
+}
+
+// FlushConnectionEvents stops intake and waits briefly for queued journal
+// writes before SQLite close during coordinator shutdown.
+func (s *Server) FlushConnectionEvents(timeout time.Duration) {
+	if s == nil {
+		return
+	}
+	s.connectionEventStopOnce.Do(func() {
+		s.connectionEventsStopped.Store(true)
+		s.ensureConnectionEventWorker()
+		close(s.connectionEventQueue)
+	})
+	if s.connectionEventDone == nil {
+		return
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	select {
+	case <-s.connectionEventDone:
+	case <-time.After(timeout):
+		s.log.Warn().Msg("provider connection event drain timed out at shutdown")
 	}
 }
 
@@ -179,6 +205,9 @@ func (s *Server) allowAnonymousEvent() bool {
 
 func (s *Server) recordConnectionEvent(event providerevents.Event) {
 	if s == nil || s.connectionEvents == nil {
+		return
+	}
+	if s.connectionEventsStopped.Load() {
 		return
 	}
 	s.ensureConnectionEventWorker()
@@ -283,6 +312,9 @@ func (s *Server) rememberProviderSnapshotCoalesced(provider pool.Provider) {
 
 func (s *Server) enqueueLastKnown(snap providerevents.LastKnown, force bool) {
 	if s == nil || s.connectionEvents == nil || strings.TrimSpace(snap.ProviderID) == "" {
+		return
+	}
+	if s.connectionEventsStopped.Load() {
 		return
 	}
 	s.ensureConnectionEventWorker()

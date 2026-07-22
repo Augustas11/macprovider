@@ -1058,6 +1058,7 @@ func main() {
 			logger.Info().Str("signal", sig.String()).Dur("timeout", timeout).Msg("coordinator shutdown requested")
 			stopBackground()
 			wsServer.DrainAll("coordinator shutdown")
+			wsServer.FlushConnectionEvents(2 * time.Second)
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			if err := buyerHTTP.Shutdown(ctx); err != nil {

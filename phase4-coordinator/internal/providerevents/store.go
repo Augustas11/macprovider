@@ -68,6 +68,7 @@ type SQLiteStore struct {
 	perProviderCap int
 	anonymousCap   int
 	globalCap      int
+	lastKnownCap   int
 	now            func() time.Time
 }
 
@@ -110,6 +111,7 @@ func NewSQLiteStore(db *sql.DB) (*SQLiteStore, error) {
 		perProviderCap: DefaultPerProviderCap,
 		anonymousCap:   DefaultAnonymousCap,
 		globalCap:      DefaultGlobalCap,
+		lastKnownCap:   DefaultLastKnownCap,
 		now:            func() time.Time { return time.Now().UTC() },
 	}
 	if err := s.migrate(context.Background()); err != nil {
@@ -465,7 +467,24 @@ func (s *SQLiteStore) ReconcileBounds(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.enforceGlobalCap(ctx)
+	if err := s.enforceGlobalCap(ctx); err != nil {
+		return err
+	}
+	return s.enforceLastKnownCap(ctx)
+}
+
+func (s *SQLiteStore) enforceLastKnownCap(ctx context.Context) error {
+	if s.lastKnownCap <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM provider_last_known
+WHERE provider_id NOT IN (
+	SELECT provider_id FROM provider_last_known
+	ORDER BY last_seen_at_utc DESC, provider_id ASC
+	LIMIT ?
+)`, s.lastKnownCap)
+	return err
 }
 
 func sanitizeEvent(event Event, now time.Time) (Event, error) {

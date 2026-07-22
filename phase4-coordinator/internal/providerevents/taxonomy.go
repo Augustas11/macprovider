@@ -67,6 +67,7 @@ const (
 	DefaultPerProviderCap    = 2000
 	DefaultAnonymousCap      = 5000
 	DefaultGlobalCap         = 100000
+	DefaultLastKnownCap      = 20000
 	DefaultListPageCap       = 200
 	DefaultRetention         = 14 * 24 * time.Hour
 	FixedUTCLayout           = "2006-01-02T15:04:05.000000000Z"
