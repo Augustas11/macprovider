@@ -23,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
+	"github.com/augstar/macprovider-coordinator/internal/catalogbind"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
 	"github.com/augstar/macprovider-coordinator/internal/mdm"
@@ -175,6 +176,13 @@ func main() {
 		Msg("provider compatibility-set admission policy initialized")
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)
+		os.Exit(1)
+	}
+	// #608 Partial: fail closed when active Tier-2 rows conflict with the
+	// current autotune admission identity for the same model_id. Does not
+	// introduce a Tier-2 fallback (Entry 170 / #609); only rejects drift.
+	if err := catalogbind.RequireActiveReleaseBinding(autotuneCatalog, tier2.Default()); err != nil {
+		fmt.Fprintf(os.Stderr, "catalog binding: %v\n", err)
 		os.Exit(1)
 	}
 	metricsRegistry := prom.NewRegistry()
@@ -1026,7 +1034,7 @@ func main() {
 		select {
 		case sig := <-signals:
 			if sig == syscall.SIGHUP {
-				reloadTier2Config(*configPath, cfg.Tier2, logger, wsServer, buyerServer, billingStore)
+				reloadTier2Config(*configPath, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, billingStore)
 				continue
 			}
 			timeout := 30 * time.Second
@@ -1571,7 +1579,7 @@ func appTrackWalletNotImplementedHandler(w http.ResponseWriter, r *http.Request)
 	_, _ = w.Write([]byte(`{"error":"wallet_change_requires_spec_027"}` + "\n"))
 }
 
-func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, billingStores ...*billing.Store) {
+func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
@@ -1594,7 +1602,13 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	// post-condition + swap now happen atomically inside
 	// ConfigureDefaultStrict so this path cannot be bypassed by a future
 	// caller skipping a step.
-	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger); err != nil {
+	//
+	// #608 Partial: the optional guard rejects a reload that would install
+	// Tier-2 rows conflicting with the in-memory autotune admission catalog
+	// before the package singleton is swapped.
+	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger, func(next *tier2.Catalog) error {
+		return catalogbind.RequireActiveReleaseBinding(autotuneCatalog, next)
+	}); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}

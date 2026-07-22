@@ -21,7 +21,42 @@ catalog member contains:
 - an append-only `release-ledger.json` entry that permanently binds the release
   ID to those hashes and signer identities;
 - the generated Swift baked resources derived from those exact JSON bytes;
-- the model artifact identities consumed by provider evidence and Tier2.
+- the model artifact identities consumed by provider evidence (autotune
+  `model_sha256` / `macprovider.snapshot-manifest.v1`).
+
+### Tier-2 identity binding (#608 Partial — dual file still present)
+
+`tier2-identity-binding.json` is a **repository-local derived projection**
+written by `catalog-release.py generate`. It is **not** yet a member of the
+signed autotune release envelope (`release.json` / ledger / Pearl immutable
+release directory / provider package). Operators must not treat it as a
+substitute for the signed Tier-2 file.
+
+Autotune admission identity and the Tier-2 attestation catalog remain separate
+signed files during migration (`exc-catalog-compatibility-bridges` stays
+active until the physical dual-authority removal lands). Until then:
+
+1. `scripts/catalog-release.py generate` writes
+   `phase3-binary/catalog/autotune/tier2-identity-binding.json` from the
+   current autotune rows (HighestClaimedTier semantics) for operator tooling.
+2. `scripts/catalog-release.py derive-tier2` is **disabled** until Tier-2 gains
+   an explicit `macprovider.snapshot-manifest.v1` hash_scope (emitting under
+   existing SPEC-008 scopes would mislabel the digest). Operators continue to
+   author/sign Tier-2 with `scripts/sign-catalog.go` after review, using
+   `tier2-identity-binding.json` + `check-tier2-binding` as the drift gate.
+3. `scripts/catalog-release.py check-tier2-binding` and Pearl
+   `deploy-pearl-vps.sh` fail closed when an overlapping `model_id` has a
+   Tier-2 `sha256` that disagrees with the autotune `model_sha256`. Deploy
+   pins the verified Tier-2 bytes before upload.
+4. Coordinator startup and Tier-2 SIGHUP reload fail closed on the same
+   conflict (`internal/catalogbind`). Stale Tier-2 backups cannot be
+   restored against a newer autotune release when they drift on shared rows.
+5. Admission identity remains autotune-only (Entry 170 / #609). This binding
+   check does **not** add a Tier-2 fallback.
+
+Follow-up on #608: fold signed Tier-2 bytes into the release ledger /
+compatibility-set envelope and remove the independently editable
+`/opt/macprovider/tier2-catalog.json` authority.
 
 The same signed network-release manifest also binds:
 
@@ -717,6 +752,10 @@ it must never be promoted to `buyer_serving` by the CLI or Malibu.
       canary buyer-serving on the exact current catalog envelope, independently
       binds the trusted canary Mac's provider identity and live executable to
       its exact installed release bytes, and rolls back atomically on failure.
+- [ ] Repo-local `tier2-identity-binding.json` matches the current autotune
+      release; Pearl deploy pins Tier-2 bytes and `check-tier2-binding` rejects
+      overlapping model/hash drift before upload; coordinator refuses
+      conflicting Tier-2 on start/reload (#608).
 - [ ] Controller loss during a live mutation is serialized behind the remote
       operation barrier; rollback restores the exact prior Tier-2 catalog.
 - [ ] Signed Pearl updater and direct deploy contend on
