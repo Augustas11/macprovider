@@ -489,6 +489,93 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .miss = after else { return XCTFail("post-rotation read misses cleanly") }
     }
 
+    /// Item 7: a replacement commit that fails mid-protocol (post-blob dir fsync) leaves
+    /// NO unaccounted bytes — the partial new generation is removed and the reservation
+    /// released — and the committed OLD generation survives.
+    func testReplacementCommitFailureLeavesNoLeakAndKeepsOldGeneration() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:replace-fail"
+        let s1 = try await makeSnapshot(store: store, rawKey: key, seq: 5, seed: 0, commitSequence: 1, nowMillis: 1_000_000)
+        guard case .committed = try await store.write(s1, nowMillis: 1_000_000) else { return XCTFail("gen1 must commit") }
+        let index = try await idx(store, key)
+        let baseline = await store.inspect().bytesUsed
+        XCTAssertGreaterThan(baseline, 0)
+
+        // Fail the post-blob directory fsync of the replacement commit (a real error, not
+        // a modeled crash) so the real-error cleanup path runs.
+        await store.injectDirFsyncFailure(atCall: 2)
+        let s2 = try await makeSnapshot(store: store, rawKey: key, seq: 5, seed: 9, commitSequence: 2, nowMillis: 1_000_100)
+        guard case .skipped = try await store.write(s2, nowMillis: 1_000_100) else {
+            return XCTFail("replacement commit must skip on fsync failure")
+        }
+        await store.injectDirFsyncFailure(atCall: nil)
+
+        let afterInspect = await store.inspect()
+        XCTAssertEqual(afterInspect.bytesUsed, baseline, "failed replacement must not leak the partial new generation")
+        XCTAssertEqual(afterInspect.entryCount, 1)
+        let read = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_200)
+        guard case .hit = read else { return XCTFail("old generation must survive a failed replacement, got \(read)") }
+    }
+
+    /// Item 7: a superseded-blob deletion that FAILS at publication keeps the bytes
+    /// counted against quota (never silently subtracted); a restart sweep reclaims them.
+    func testFailedSupersededDeleteKeepsBytesCounted() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:superseded-leak"
+        let s1 = try await makeSnapshot(store: store, rawKey: key, seq: 5, seed: 0, commitSequence: 1, nowMillis: 1_000_000)
+        guard case .committed = try await store.write(s1, nowMillis: 1_000_000) else { return XCTFail("gen1") }
+        let index = try await idx(store, key)
+
+        // Replacement commits gen2, but deleting the superseded gen1 blob fails.
+        await store.injectUnlinkFailure(true)
+        let s2 = try await makeSnapshot(store: store, rawKey: key, seq: 5, seed: 9, commitSequence: 2, nowMillis: 1_000_100)
+        guard case .committed = try await store.write(s2, nowMillis: 1_000_100) else {
+            return XCTFail("replacement still commits; only the superseded-delete failed")
+        }
+        await store.injectUnlinkFailure(false)
+        let leak = await store.supersededLeakBytesForTest
+        XCTAssertGreaterThan(leak, 0, "an undeleted superseded blob is retained against quota")
+        await store.deactivate()
+
+        // Restart: the sweep deletes the orphan superseded blob and resets the leak.
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        let leakAfterRestart = await store2.supersededLeakBytesForTest
+        XCTAssertEqual(leakAfterRestart, 0, "restart sweep reclaims the superseded blob")
+        let gen1Blob = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+            .appendingPathComponent("entries/\(index)/gen-1.blob")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: gen1Blob.path), "orphan superseded blob swept on restart")
+    }
+
+    /// Item 7 (coordinator refinement 2): activation sweeps namespace-root atomic-write
+    /// temp files left by a crash mid-rename, so their bytes are not leaked/unaccounted.
+    func testActivationSweepsNamespaceRootAtomicTemps() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: "conv:kvs-synth:temp", seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        await store.deactivate()
+
+        let nsDir = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+        let strayMetaTemp = nsDir.appendingPathComponent(".meta.json.tmp.\(UUID().uuidString)")
+        let strayTombTemp = nsDir.appendingPathComponent("tombstones", isDirectory: true)
+            .appendingPathComponent(".1-abcdef.json.tmp.\(UUID().uuidString)")
+        try Data("garbage".utf8).write(to: strayMetaTemp)
+        try Data("garbage".utf8).write(to: strayTombTemp)
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: strayMetaTemp.path), "namespace-root atomic temp swept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: strayTombTemp.path), "tombstone atomic temp swept")
+    }
+
     /// Item 6 (FR-KVP6): activation with an unavailable Keychain is RETRYABLE dormancy
     /// — not active, not quarantined, not throwing — and becomes active on a later
     /// attempt once the Keychain is available (the bootstrap master is created then).

@@ -345,6 +345,11 @@ actor KVDiskCacheStore {
     /// to committedBytes only at publication; released by the writer's defer on every
     /// exit path. Writes are actor-serialized, so at most one reservation is live.
     private var reservedBytes = 0
+    /// Item 7: bytes of superseded-generation blobs whose deletion at publication FAILED
+    /// — retained against quota (they still occupy disk) until a later activation sweep
+    /// reclaims them, so a failed compaction-delete can never bypass the namespace cap.
+    /// Reset by `sweepOrphansAndAccount` (which deletes non-current-gen blobs).
+    private var supersededLeakBytes = 0
     /// Live entry indices with their committed byte size and last-eligible-use ms.
     private var liveEntries: [String: KVLiveEntry] = [:]
     /// At most one promotion in flight namespace-wide (FR-KVP9 back-pressure).
@@ -795,15 +800,18 @@ actor KVDiskCacheStore {
             return skip(.freeSpaceFloor, snapshot)
         }
 
-        // Quota reservation (M-11): reserve the NET byte delta into a distinct
-        // `reservedBytes` counter — never `committedBytes` (which would double-count
-        // at publication). A replacement reserves only the growth over the previous
-        // generation's bytes and does NOT trigger entry-count eviction. The
-        // reservation is released on EVERY exit via defer (no leak on skip/crash).
+        // Quota reservation (M-11 + HIGH-4): reserve the FULL new generation's bytes,
+        // NOT just the net growth. During construction the old generation's blob still
+        // exists on disk alongside the new blob + manifest temp, so reserving only
+        // `new - old` would let physical usage exceed the namespace cap by ~an entry
+        // near quota. `committedBytes` already includes the old generation (excluded
+        // from eviction), so `committedBytes(old) + reservedBytes(full new)` accounts
+        // old + new co-resident. The reservation is released on EVERY exit via defer;
+        // publication converts it to the committed NET delta (old blob deleted).
         let index = snapshot.indexHMAC
         let previousBytes = liveEntries[index]?.bytes ?? 0
         let isReplacement = liveEntries[index] != nil
-        let reservation = max(0, estimatedDiskBytes - previousBytes)
+        let reservation = estimatedDiskBytes
         guard try reserveQuota(reservation, isReplacement: isReplacement, excluding: index, nowMillis: nowMillis) else {
             return skip(.quotaExhausted, snapshot)
         }
@@ -851,6 +859,9 @@ actor KVDiskCacheStore {
 
         // Allocate the generation (max committed + 1).
         let generation = (lastGeneration[index] ?? 0) + 1
+        // Item 7: track the manifest temp so a NON-crash failure can delete it (the blob
+        // path is deterministic from `generation`). Cleanup runs in the real-error catch.
+        var manifestTempURL: URL?
 
         do {
             if newEntry {
@@ -942,6 +953,7 @@ actor KVDiskCacheStore {
                 throw KVStoreError.io("manifest exceeds cap")
             }
             let tempURL = dir.appendingPathComponent("manifest.json.tmp.\(UUID().uuidString)")
+            manifestTempURL = tempURL
             try writeFileExclusive(manifestData, to: tempURL)
             try crashIf(.afterManifestTempFsync)
 
@@ -972,9 +984,18 @@ actor KVDiskCacheStore {
             try crashIf(.afterRenameBeforeDirFsync)
             try fsyncDirectory(dir)
 
-            // Delete the superseded blob (compaction), keep the shared DEK.
+            // Delete the superseded blob (compaction), keep the shared DEK. Item 7: if
+            // the deletion FAILS, keep its bytes counted against quota
+            // (`supersededLeakBytes`) rather than silently subtracting them below — a
+            // later activation sweep reclaims it. Never bypass quota with an undeleted
+            // old generation.
             if let previousGen, previousGen != generation {
-                try? FileManager.default.removeItem(at: dir.appendingPathComponent("gen-\(previousGen).blob"))
+                let supersededURL = dir.appendingPathComponent("gen-\(previousGen).blob")
+                if fileExists(supersededURL) {
+                    let supersededSize = (try? fileSize(supersededURL)) ?? 0
+                    do { try removeEntryDirectory(supersededURL) }
+                    catch { supersededLeakBytes += supersededSize }
+                }
             }
 
             // Publish in-memory state.
@@ -1010,9 +1031,20 @@ actor KVDiskCacheStore {
             // ownership-checked so a delayed abort cannot delete a re-created DEK.
             throw crash
         } catch {
-            // Real failure: ownership-checked abort deletion — ONLY when THIS write
-            // created the DEK fresh (HIGH-4). A reused DEK backs a still-committed
-            // prior generation and must survive this write's failure.
+            // Item 7: on a NON-crash failure, delete the NEW generation's partial
+            // artifacts so their bytes never bypass quota (the reservation is released by
+            // write()'s defer). Only the new blob + manifest temp — and, for a brand-new
+            // entry, the whole orphan dir — are removed; a still-committed PRIOR
+            // generation (replacement case) is never touched. A crash path
+            // (KVInjectedCrash, handled above) deliberately leaves artifacts for
+            // activation recovery to sweep + account.
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("gen-\(generation).blob"))
+            if let manifestTempURL { try? FileManager.default.removeItem(at: manifestTempURL) }
+            if newEntry { try? FileManager.default.removeItem(at: dir) }
+            try? fsyncDirectory(newEntry ? entriesDir : dir)
+            // Ownership-checked abort deletion — ONLY when THIS write created the DEK
+            // fresh (HIGH-4). A reused DEK backs a still-committed prior generation and
+            // must survive this write's failure.
             if createdFreshDEK {
                 try? keys.destroyEntryDEKIfOwnedBy(epoch: metadata.keyEpoch, index: index, incarnation: snapshot.incarnation)
             }
@@ -1708,8 +1740,10 @@ actor KVDiskCacheStore {
     private func reserveQuota(_ bytes: Int, isReplacement: Bool, excluding index: String, nowMillis: Int) throws -> Bool {
         // FR-KVP7: reserve the ACTUAL non-entry artifact footprint (control doc +
         // tombstones + usage journal) when it exceeds the fixed metadata floor, so entry
-        // admission never overruns the quota by ignoring control-plane bytes.
-        let reserve = max(config.metadataReserveBytes, controlBytes)
+        // admission never overruns the quota by ignoring control-plane bytes. Item 7:
+        // also subtract any superseded-blob bytes whose deletion failed — they still
+        // occupy disk, so admission must account for them until a sweep reclaims them.
+        let reserve = max(config.metadataReserveBytes, controlBytes) + supersededLeakBytes
         let dataBudget = max(0, config.maxBytes - reserve)
         // Entry-count eviction applies only when admitting a NEW index.
         if !isReplacement {
@@ -1796,6 +1830,10 @@ actor KVDiskCacheStore {
 
     /// Test-only: whether the store has quarantined itself.
     var isQuarantinedForTest: Bool { quarantined != nil }
+
+    /// Test-only (Item 7): bytes of superseded blobs whose deletion failed and are
+    /// retained against quota until a sweep reclaims them.
+    var supersededLeakBytesForTest: Int { supersededLeakBytes }
 
     private func sweepClockMillis() -> Int {
         if let sweepClockOverride { return sweepClockOverride() }
@@ -1886,6 +1924,14 @@ actor KVDiskCacheStore {
     private func sweepOrphansAndAccount() throws {
         committedBytes = 0
         liveEntries.removeAll()
+        // Item 7: this sweep deletes every non-current-generation blob (and orphan dirs),
+        // reclaiming any superseded-blob bytes whose in-process deletion had failed.
+        supersededLeakBytes = 0
+        // Item 7 (coordinator refinement 2): reclaim namespace-root atomic temp files
+        // (meta/usage/tombstone `.tmp.*`) left by a crash mid atomic-rename, so their
+        // bytes are neither leaked nor unaccounted. A temp that cannot be removed
+        // quarantines the namespace rather than being silently ignored.
+        try sweepAtomicTemps(in: namespaceDir)
         guard fileExists(entriesDir) else { return }
         let dirs = (try? FileManager.default.contentsOfDirectory(at: entriesDir, includingPropertiesForKeys: nil)) ?? []
         for dir in dirs {
@@ -1934,6 +1980,35 @@ actor KVDiskCacheStore {
             try persistMetadata()
         }
         try fsyncDirectory(entriesDir)
+    }
+
+    /// Item 7 (coordinator refinement 2): reclaim atomic-write temp files
+    /// (`.<name>.tmp.<uuid>`) left in `dir` (and, for the namespace root, in the
+    /// tombstones subtree) by a crash mid-rename. A temp that cannot be inspected or
+    /// removed QUARANTINES the namespace (fail-closed) rather than being silently
+    /// ignored — an un-inspectable orphan could mask a tampered artifact and its bytes
+    /// would otherwise bypass quota. Entry-directory manifest temps are swept per-entry
+    /// in `sweepOrphansAndAccount`.
+    private func sweepAtomicTemps(in dir: URL) throws {
+        guard fileExists(dir) else { return }
+        let contents: [URL]
+        do {
+            contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        for url in contents where url.lastPathComponent.contains(".tmp.") {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                quarantine(.ioError)
+                throw KVStoreError.quarantined(.ioError)
+            }
+        }
+        if dir == namespaceDir { try sweepAtomicTemps(in: tombstonesDir) }
     }
 
     // MARK: - Inspection (FR-KVP12)
@@ -2023,17 +2098,29 @@ actor KVDiskCacheStore {
         return total
     }
 
-    /// Durably record a last-eligible-use for `index` (best-effort). Compacts when the
-    /// journal crosses the 1 MiB bound (FR-KVP7).
+    /// Durably record a last-eligible-use for `index` (best-effort LRU durability).
+    /// Item 7 (FR-KVP7): compact BEFORE the append would cross the 1 MiB bound, and STOP
+    /// growth if compaction fails (refuse the append) rather than appending first and
+    /// ignoring a failed compaction — which let the journal grow unbounded past 1 MiB.
+    /// Refusing an append only degrades LRU ordering durability, never correctness.
     private func appendUsageRecord(index: String, millis: Int) {
         guard let line = try? KVUsageJournalCodec.encodeLine(index: index, millis: millis) else { return }
+        if usageJournalBytes + line.count > KVUsageJournal.maxBytes {
+            // Compaction rewrites one record per live entry from the CURRENT
+            // lastUsedMillis (the caller updated it before this call), so it already
+            // captures this update — no separate append is needed. If compaction FAILS
+            // we return WITHOUT appending, so the journal never grows past 1 MiB
+            // (growth stopped) instead of appending past the bound and ignoring the
+            // failed compaction.
+            try? compactUsageJournal()
+            return
+        }
         let fd = open(usageJournalURL.path, O_CREAT | O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { return }
         defer { close(fd) }
         do { try writeAll(fd: fd, line) } catch { return }
         _ = fsync(fd)
         usageJournalBytes += line.count
-        if usageJournalBytes > KVUsageJournal.maxBytes { try? compactUsageJournal() }
     }
 
     /// Rewrite the journal with exactly one record per live entry (drops stale/evicted
