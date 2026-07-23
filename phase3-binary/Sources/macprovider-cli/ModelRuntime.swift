@@ -2061,25 +2061,21 @@ actor ModelRuntime: ModelRuntimeServing {
     /// direct-HTTP provenance; the identity core carries the live model identity.
     private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
         guard coldTierAttached else { return nil }
-        // HIGH-8: identity_unavailable — skip the cold tier (no fabricated identity)
-        // when the real catalog revision or the live tokenizer/template hashes are
-        // unreachable. The store also fail-closes on a nil model hash, but gating
-        // here avoids persisting an entry with a placeholder identity.
-        guard let catalogRevision = verifiedCatalogArtifactSHA256,
-              let tokenizerConfigSHA256 = currentTokenizerConfigSHA256,
-              let chatTemplateSHA256 = currentChatTemplateSHA256 else {
-            return nil
-        }
-        let eligible = KVDiskCacheGate.persists(
+        // Evaluate the FR-KVP11 gate FIRST (key sub-namespace + direct-HTTP provenance),
+        // independent of identity availability, so a gated request whose live identity is
+        // unavailable still reaches the telemetry sink (FR-KVP12) instead of the cold
+        // tier silently doing nothing. The pure resolution lives in
+        // `ConversationColdContext.resolve` (unit-tested per missing input).
+        let gated = KVDiskCacheGate.persists(
             conversationKey: request.conversationKey, provenance: request.ingestProvenance)
-        let identity = KVIdentityCore.build(
+        return ConversationColdContext.resolve(
+            gated: gated,
             requestModel: request.model,
             servedModelID: snapshot.modelID ?? request.model,
             modelSHA256: snapshot.modelHash,
-            catalogRevision: catalogRevision,
-            tokenizerConfigSHA256: tokenizerConfigSHA256,
-            chatTemplateSHA256: chatTemplateSHA256)
-        return ConversationColdContext(eligible: eligible, identity: identity)
+            catalogRevision: verifiedCatalogArtifactSHA256,
+            tokenizerConfigSHA256: currentTokenizerConfigSHA256,
+            chatTemplateSHA256: currentChatTemplateSHA256)
     }
 
     func measureStartupThroughput(maxTokens: Int = 8) async -> Double {

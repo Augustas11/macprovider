@@ -73,6 +73,17 @@ protocol ConversationColdTier: Sendable {
     /// Drain queued/pending persist work, bounded by `timeoutSeconds` (graceful
     /// shutdown, HIGH-5 / FR-KVP3).
     func drainPendingPersists(timeoutSeconds: Int) async
+
+    /// FR-KVP12: a GATED request whose live identity is unavailable emits
+    /// `disk_miss_identity_unavailable` through the store's telemetry sink on the
+    /// cold-read attempt (hot miss) before failing safe to a miss — never a silent
+    /// no-op. No promotion occurs.
+    func noteReadIdentityUnavailable(conversationKey: String) async
+
+    /// FR-KVP12: a GATED request whose live identity is unavailable emits
+    /// `disk_write_skipped(detail=identity_unavailable)` through the store's telemetry
+    /// sink on the commit (write) attempt before failing safe to skip. No persist occurs.
+    func noteWriteSkippedIdentityUnavailable(conversationKey: String) async
 }
 
 /// Per-request cold-tier context supplied by the caller (ModelRuntime), which
@@ -80,14 +91,59 @@ protocol ConversationColdTier: Sendable {
 /// A nil context, or `eligible == false`, disables all cold-tier behavior for
 /// the request.
 struct ConversationColdContext: Sendable {
-    /// FR-KVP11 gate decision: key in the `conv:kvs-synth:` sub-namespace AND
-    /// direct-HTTP provenance. Computed by the caller — the gate never infers
-    /// provenance from key shape alone.
+    /// Full-go flag: the FR-KVP11 gate accepted (key in the `conv:kvs-synth:`
+    /// sub-namespace AND direct-HTTP provenance) AND the live identity is available.
+    /// When true the cold tier may promote/persist. Computed by the caller — the gate
+    /// never infers provenance from key shape alone.
     let eligible: Bool
     /// The model/tokenizer identity core for this request. The cold-tier adapter
     /// completes it with build-pinned ABI fields, the store namespace/epoch, and
-    /// the live-model geometry template it owns.
+    /// the live-model geometry template it owns. Consumed only when `eligible`.
     let identity: KVIdentityCore
+    /// FR-KVP12: set (with `eligible == false`) when the request PASSED the gate but a
+    /// live-identity input (model hash / tokenizer hash / template hash / catalog
+    /// revision) is unavailable. The tier then emits the identity_unavailable telemetry
+    /// on the read/write attempt and fails safe (no promote, no persist) rather than
+    /// silently no-op'ing. Nil for a non-gated request (cold tier fully inert).
+    let identityUnavailableReason: KVReasonDetail?
+
+    init(eligible: Bool, identity: KVIdentityCore, identityUnavailableReason: KVReasonDetail? = nil) {
+        self.eligible = eligible
+        self.identity = identity
+        self.identityUnavailableReason = identityUnavailableReason
+    }
+
+    /// Pure FR-KVP11 gate + FR-KVP12 identity-availability resolution, factored out of
+    /// `ModelRuntime.coldContext` so it is unit-testable without a live model. `gated`
+    /// is the gate decision (synthetic key sub-namespace + direct-HTTP provenance); each
+    /// live-identity input is nil when unavailable this process. A gated request missing
+    /// ANY of model hash / tokenizer hash / template hash / catalog revision resolves to
+    /// `identityUnavailableReason == .identityUnavailable` (eligible false); a non-gated
+    /// request resolves inert; a gated request with every input present is eligible.
+    static func resolve(
+        gated: Bool, requestModel: String, servedModelID: String,
+        modelSHA256: String?, catalogRevision: String?,
+        tokenizerConfigSHA256: String?, chatTemplateSHA256: String?
+    ) -> ConversationColdContext {
+        func placeholder() -> KVIdentityCore {
+            KVIdentityCore.build(
+                requestModel: requestModel, servedModelID: servedModelID, modelSHA256: modelSHA256,
+                catalogRevision: catalogRevision ?? "", tokenizerConfigSHA256: tokenizerConfigSHA256 ?? "",
+                chatTemplateSHA256: chatTemplateSHA256 ?? "")
+        }
+        guard gated else {
+            return ConversationColdContext(eligible: false, identity: placeholder())
+        }
+        guard let catalogRevision, let tokenizerConfigSHA256, let chatTemplateSHA256, let modelSHA256 else {
+            return ConversationColdContext(
+                eligible: false, identity: placeholder(), identityUnavailableReason: .identityUnavailable)
+        }
+        let identity = KVIdentityCore.build(
+            requestModel: requestModel, servedModelID: servedModelID, modelSHA256: modelSHA256,
+            catalogRevision: catalogRevision, tokenizerConfigSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256)
+        return ConversationColdContext(eligible: true, identity: identity)
+    }
 }
 
 /// The per-request model + tokenizer identity that ModelRuntime can supply

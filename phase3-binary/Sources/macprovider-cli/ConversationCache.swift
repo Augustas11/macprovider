@@ -181,6 +181,12 @@ actor ConversationCache {
                 tokenCount: candidate.canonicalTokens.count)
             log("event=conv_cache action=promote key_hash=\(keyHash) canonical_tokens=\(candidate.canonicalTokens.count)")
         } else {
+            // FR-KVP12: a gated request whose live identity is unavailable emits
+            // disk_miss_identity_unavailable on this cold-read attempt (hot missed)
+            // before failing safe to a normal miss — no silent no-op, no promotion.
+            if let coldTier, let cold, cold.identityUnavailableReason != nil {
+                await coldTier.noteReadIdentityUnavailable(conversationKey: key)
+            }
             log("event=conv_cache action=miss key_hash=\(keyHash) reason=cold_start")
             return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
         }
@@ -241,7 +247,7 @@ actor ConversationCache {
             promotedFromCold: promotionCandidate != nil)
     }
 
-    func commit(_ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(), cold: ConversationColdContext? = nil) {
+    func commit(_ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(), cold: ConversationColdContext? = nil) async {
         // SPEC-037 FR-KVP8 — a `commit()` whose stamps predate a purge that landed
         // during the request reinserts nothing (neither RAM nor disk).
         let fencedLocal = (localPurgeGen[lease.key] ?? 0) > lease.localPurgeStamp
@@ -274,6 +280,10 @@ actor ConversationCache {
             // The adapter owns the persist Task (one pending per index, purge-all
             // cancellation, bounded shutdown drain). Non-blocking (CRITICAL-2/HIGH-5).
             coldTier.enqueuePersist(snapshot)
+        } else if let coldTier, let cold, cold.identityUnavailableReason != nil {
+            // FR-KVP12: a gated commit whose live identity is unavailable emits
+            // disk_write_skipped(identity_unavailable) before failing safe to skip.
+            await coldTier.noteWriteSkippedIdentityUnavailable(conversationKey: lease.key)
         }
         releaseTurn(lease.key)
     }

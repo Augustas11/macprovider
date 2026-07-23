@@ -1284,6 +1284,25 @@ actor KVDiskCacheStore {
         emit(.diskPromoteRejected, indexHashPrefix: prefixHash, fields: ["hot_reason": reason])
     }
 
+    /// FR-KVP12: emit `disk_miss_identity_unavailable` for a gated read attempt whose
+    /// live identity is unavailable, so the closed-enum code fires instead of the store
+    /// never being reached. Index prefix is best-effort (keychain may be dormant).
+    func noteIdentityUnavailableRead(rawKey: String) {
+        emitMiss(.diskMissIdentityUnavailable, detail: .identityUnavailable, prefix: identityPrefix(rawKey))
+    }
+
+    /// FR-KVP12: emit `disk_write_skipped(detail=identity_unavailable)` for a gated
+    /// commit whose live identity is unavailable.
+    func noteIdentityUnavailableWrite(rawKey: String) {
+        emit(.diskWriteSkipped, detail: .identityUnavailable, indexHashPrefix: identityPrefix(rawKey))
+    }
+
+    private func identityPrefix(_ rawKey: String) -> String? {
+        // `try?` flattens the throwing Optional; a nil epoch master ⇒ no prefix.
+        guard let index = try? currentIndex(rawKey: rawKey) else { return nil }
+        return indexPrefix(index)
+    }
+
     // MARK: - Purge (FR-KVP8)
 
     /// Single-key purge with the exact tombstone-first 5-step ordering. Idempotent

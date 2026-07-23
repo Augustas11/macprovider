@@ -57,6 +57,16 @@ final class KVConversationColdTierTests: XCTestCase {
         }
         func cancelPendingPersists() async { lock.lock(); cancelledPersists += 1; lock.unlock() }
         func drainPendingPersists(timeoutSeconds: Int) async {}
+        func noteReadIdentityUnavailable(conversationKey: String) async {
+            lock.lock(); readIdentityUnavailableKeys.append(conversationKey); lock.unlock()
+        }
+        func noteWriteSkippedIdentityUnavailable(conversationKey: String) async {
+            lock.lock(); writeIdentityUnavailableKeys.append(conversationKey); lock.unlock()
+        }
+        private(set) var readIdentityUnavailableKeys: [String] = []
+        private(set) var writeIdentityUnavailableKeys: [String] = []
+        var readIdentityUnavailable: [String] { lock.lock(); defer { lock.unlock() }; return readIdentityUnavailableKeys }
+        var writeIdentityUnavailable: [String] { lock.lock(); defer { lock.unlock() }; return writeIdentityUnavailableKeys }
 
         private(set) var enqueued: [ConversationColdSnapshot] = []
         private(set) var cancelledPersists = 0
@@ -170,6 +180,94 @@ final class KVConversationColdTierTests: XCTestCase {
         await cache.commit(lease!, cache: ConversationCacheLayers([trimmableCache(offset: 64)]),
                            fullTokens: tokens, cold: context(eligible: false))
         XCTAssertTrue(fake.capturedSnapshots.isEmpty, "no snapshot captured for a non-gated key")
+    }
+
+    // MARK: - HIGH-4: identity-unavailable telemetry (FR-KVP12)
+
+    /// The pure gate + identity-availability resolver maps a gated key missing ANY live
+    /// identity input to `identity_unavailable`, a fully-available gated key to eligible,
+    /// and a non-gated key to inert (no reason, not eligible).
+    func testColdContextResolutionMapsEachMissingIdentityInput() {
+        let m = "model-a", s = "served-a"
+        let h = String(repeating: "b", count: 64), c = String(repeating: "c", count: 64), t = String(repeating: "d", count: 64)
+        let cat = "catalog-rev-1"
+
+        let full = ConversationColdContext.resolve(
+            gated: true, requestModel: m, servedModelID: s, modelSHA256: h,
+            catalogRevision: cat, tokenizerConfigSHA256: c, chatTemplateSHA256: t)
+        XCTAssertTrue(full.eligible); XCTAssertNil(full.identityUnavailableReason)
+
+        // Each of the four live-identity inputs, individually nil on a gated key.
+        let cases: [(name: String, model: String?, cat: String?, tok: String?, tmpl: String?)] = [
+            ("model_hash", nil, cat, c, t),
+            ("catalog_revision", h, nil, c, t),
+            ("tokenizer_hash", h, cat, nil, t),
+            ("template_hash", h, cat, c, nil),
+        ]
+        for kase in cases {
+            let ctx = ConversationColdContext.resolve(
+                gated: true, requestModel: m, servedModelID: s, modelSHA256: kase.model,
+                catalogRevision: kase.cat, tokenizerConfigSHA256: kase.tok, chatTemplateSHA256: kase.tmpl)
+            XCTAssertFalse(ctx.eligible, "\(kase.name) must not be eligible")
+            XCTAssertEqual(ctx.identityUnavailableReason, .identityUnavailable, "\(kase.name)")
+        }
+
+        let nonGated = ConversationColdContext.resolve(
+            gated: false, requestModel: m, servedModelID: s, modelSHA256: h,
+            catalogRevision: cat, tokenizerConfigSHA256: c, chatTemplateSHA256: t)
+        XCTAssertFalse(nonGated.eligible)
+        XCTAssertNil(nonGated.identityUnavailableReason, "non-gated is inert, not identity_unavailable")
+    }
+
+    /// End-to-end through a real store + adapter + cache: a gated request with
+    /// unavailable identity emits `disk_miss_identity_unavailable` on the read (begin)
+    /// and `disk_write_skipped(identity_unavailable)` on the commit, and nothing is
+    /// promoted or persisted.
+    func testGatedIdentityUnavailableEmitsCodesAndDoesNotPersist() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvidu-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        var config = KVDiskCacheStoreConfig(
+            root: root, namespaceID: "ns-test",
+            maxBytes: 1 << 30, maxEntries: 16, maxEntryBytes: 1 << 28,
+            retentionSeconds: 3600, stagingMaxBytes: 1 << 28, writeStagingMaxBytes: 1 << 28,
+            minFreeBytes: 1 << 20, promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
+        config.freeSpaceOverride = 1 << 34
+        let store = KVDiskCacheStore(config: config, keychain: keychain, sink: sink)
+        try await store.activate()
+        let adapter = KVConversationColdTierAdapter(
+            store: store, namespaceID: "ns-test", eligibilityTTLSeconds: 900)
+        let cache = ConversationCache(config: Self.config)
+        await cache.attachColdTier(adapter)
+
+        // Gated key, but the context carries identityUnavailableReason (a live-identity
+        // input was missing at coldContext resolution).
+        let placeholder = KVIdentityCore.build(
+            requestModel: "m", servedModelID: "m", modelSHA256: nil, catalogRevision: "",
+            tokenizerConfigSHA256: "", chatTemplateSHA256: "")
+        let ctx = ConversationColdContext(
+            eligible: false, identity: placeholder, identityUnavailableReason: .identityUnavailable)
+
+        let key = "conv:kvs-synth:id-unavailable"
+        let tokens = int32Range(0..<20)
+        let lease = await cache.begin(
+            conversationKey: key, incomingTokens: tokens, modelID: "m", kvBits: nil, cold: ctx)
+        XCTAssertNil(lease?.reusableCache, "identity-unavailable read is a miss (no promotion)")
+        await cache.commit(lease!, cache: ConversationCacheLayers([trimmableCache(offset: tokens.count)]),
+                           fullTokens: tokens, cold: ctx)
+
+        XCTAssertGreaterThanOrEqual(sink.codes(.diskMissIdentityUnavailable), 1,
+                                    "read attempt must emit disk_miss_identity_unavailable")
+        XCTAssertGreaterThanOrEqual(sink.codes(.diskWriteSkipped), 1,
+                                    "commit must emit disk_write_skipped")
+        XCTAssertTrue(sink.events.contains { $0.code == .diskMissIdentityUnavailable && $0.detail == .identityUnavailable })
+        XCTAssertTrue(sink.events.contains { $0.code == .diskWriteSkipped && $0.detail == .identityUnavailable })
+
+        let entryCount = await store.inspect().entryCount
+        XCTAssertEqual(entryCount, 0, "nothing may be persisted for an identity-unavailable request")
+        await store.deactivate()
     }
 
     // MARK: - AC-9: snapshot captured synchronously at commit for a gated key

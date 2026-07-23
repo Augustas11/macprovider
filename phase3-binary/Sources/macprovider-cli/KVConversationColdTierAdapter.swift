@@ -330,6 +330,16 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         for task in tasks { await task.value }
     }
 
+    // MARK: - FR-KVP12 identity-unavailable telemetry
+
+    func noteReadIdentityUnavailable(conversationKey: String) async {
+        await store.noteIdentityUnavailableRead(rawKey: conversationKey)
+    }
+
+    func noteWriteSkippedIdentityUnavailable(conversationKey: String) async {
+        await store.noteIdentityUnavailableWrite(rawKey: conversationKey)
+    }
+
     func drainPendingPersists(timeoutSeconds: Int) async {
         taskLock.lock(); let tasks = Array(pendingTasks.values); taskLock.unlock()
         guard !tasks.isEmpty else { return }
