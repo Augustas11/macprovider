@@ -1625,12 +1625,12 @@ class PearlUpdaterTests(unittest.TestCase):
         proof = {
             "provider_id": "catalog-canary",
             "assigned_id": "session-canary",
-            "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "model_id": "llama-3.2-3b-instruct",
             "launchd_pid": 123,
             "local_status": {
                 "provider_id": "catalog-canary",
                 "network_state": "buyer_serving",
-                "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                "model": "llama-3.2-3b-instruct",
                 "model_loaded": True,
                 "coordinator": {"connected": True, "session": "session-canary"},
                 "catalog": {
@@ -1639,6 +1639,7 @@ class PearlUpdaterTests(unittest.TestCase):
                     "digest": digest,
                     "signer_key_id": signer,
                     "row_identity": row_identity,
+                    "catalog_key": "llama-3.2-3b-instruct",
                     "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
                 },
             },
@@ -1668,7 +1669,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CatalogCanaryEvidence(
                     row_identity=row_identity,
                     assigned_id="session-canary",
-                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                    model_id="llama-3.2-3b-instruct",
                 ),
             )
         args, kwargs = self.updater.run_command.call_args
@@ -1680,7 +1681,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("catalog-canary", args[0][-1])
         self.assertIn("running_text_vnode", kwargs["input_text"])
         self.assertIn('local_status.get("model_loaded") is not True', kwargs["input_text"])
-        self.assertIn("catalog_model_id != model_id", kwargs["input_text"])
+        self.assertIn("catalog_key != model_id", kwargs["input_text"])
         self.assertEqual(kwargs["timeout"], 25.0)
 
         proof["files"]["release.json"] = "0" * 64
@@ -1699,10 +1700,9 @@ class PearlUpdaterTests(unittest.TestCase):
         invalid_model_proofs = {
             "runtime model missing": {"local_status.model": None},
             "runtime model not loaded": {"local_status.model_loaded": False},
-            "catalog model mismatch": {
-                "local_status.catalog.model_id": "different/model"
-            },
-            "emitted model mismatch": {"model_id": "different/model"},
+            "catalog key mismatch": {"local_status.catalog.catalog_key": "different-key"},
+            "catalog model ID missing": {"local_status.catalog.model_id": None},
+            "emitted model key mismatch": {"model_id": "different-key"},
         }
         for label, mutations in invalid_model_proofs.items():
             with self.subTest(label=label):
