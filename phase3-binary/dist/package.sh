@@ -88,12 +88,14 @@ echo "==> Building Release configuration (this takes ~5-10 min)..."
 BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"
 if ! xcodebuild -scheme macprovider-cli \
                 -configuration Release \
-                -destination 'platform=macOS,arch=arm64' \
+                -destination 'generic/platform=macOS' \
                 -derivedDataPath "$RELEASE_DIR" \
                 -onlyUsePackageVersionsFromResolvedFile \
                 -skipPackagePluginValidation \
                 -skipMacroValidation \
-                clean build >"$BUILD_LOG" 2>&1; then
+                clean build \
+                ARCHS=arm64 \
+                ONLY_ACTIVE_ARCH=NO >"$BUILD_LOG" 2>&1; then
   tail -200 "$BUILD_LOG" >&2
   rm -f "$BUILD_LOG"
   exit 1
@@ -111,6 +113,11 @@ fi
 ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/macprovider-cli" --version | tr -d '\r\n')
 [ "$ACTUAL_PROVIDER_CLI_VERSION" = "$PROVIDER_CLI_VERSION" ] || {
   echo "FATAL: built provider CLI version $ACTUAL_PROVIDER_CLI_VERSION does not match declared component $PROVIDER_CLI_VERSION" >&2
+  exit 1
+}
+ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")
+[ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ] || {
+  echo "FATAL: built provider CLI architecture $ACTUAL_PROVIDER_CLI_ARCHES is not exact arm64" >&2
   exit 1
 }
 if [ ! -f "$PRODUCTS/mlx.metallib" ]; then

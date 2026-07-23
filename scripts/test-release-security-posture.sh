@@ -16,6 +16,7 @@ pearl_go_verifier="$root/scripts/verify-pearl-go-binaries.py"
 sealed_openssl_installer="$root/scripts/install-sealed-release-openssl.sh"
 sealed_openssl_wrapper="$root/scripts/sealed-release-openssl-wrapper.sh"
 catalog_release="$root/scripts/catalog-release.py"
+package_script="$root/phase3-binary/dist/package.sh"
 release_runbook="$root/phase3-binary/dist/release-signing-runbook.md"
 decision_log="$root/beta/DECISION_CRITERIA.md"
 ci_workflow="$root/.github/workflows/ci.yml"
@@ -43,7 +44,7 @@ python3 - "$workflow" "$root/phase3-binary/app/project.yml" \
   "$root/phase3-binary/app/Sources/Malibu/Info.plist" \
   "$trust_anchor_helper" "$malibu_artifact_verifier" "$coordinator_go_mod" \
   "$sealed_openssl_installer" "$sealed_openssl_wrapper" "$checksums_guard" \
-  "$catalog_release" "$ci_workflow" <<'PY'
+  "$catalog_release" "$ci_workflow" "$package_script" <<'PY'
 import pathlib
 import re
 import sys
@@ -60,6 +61,7 @@ sealed_openssl_wrapper = pathlib.Path(sys.argv[8]).read_text(encoding="utf-8")
 checksums_guard = pathlib.Path(sys.argv[9]).read_text(encoding="utf-8")
 catalog_release = pathlib.Path(sys.argv[10]).read_text(encoding="utf-8")
 ci_workflow = pathlib.Path(sys.argv[11]).read_text(encoding="utf-8")
+package_script = pathlib.Path(sys.argv[12]).read_text(encoding="utf-8")
 go_directive = re.search(
     r"(?m)^go ([0-9]+\.[0-9]+(?:\.[0-9]+)?)$", coordinator_go_mod
 )
@@ -373,6 +375,21 @@ if ci_workflow.count(CI_GO_SEAL_STEP) != 2:
     raise SystemExit("both Linux CI verifier seals must use the exact /private/var root-owned copy")
 if "/usr/local/lib/macprovider-go-verifier" in ci_workflow:
     raise SystemExit("Linux CI must not retain a divergent /usr/local sealed Go path")
+for requirement in (
+    "-destination 'generic/platform=macOS'",
+    "ARCHS=arm64",
+    "ONLY_ACTIVE_ARCH=NO",
+    'ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")',
+    '[ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ]',
+):
+    if package_script.count(requirement) != 1:
+        raise SystemExit(
+            f"provider package build must contain the exact Intel-to-arm64 cross-build guard: {requirement}"
+        )
+if "platform=macOS,arch=arm64" in package_script:
+    raise SystemExit(
+        "provider package build must not require a locally available arm64 Mac destination"
+    )
 
 
 def validate_protected_openssl(job):
