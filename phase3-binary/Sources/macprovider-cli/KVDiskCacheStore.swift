@@ -281,6 +281,8 @@ actor KVDiskCacheStore {
     /// commit a directory entry. Nil ⇒ no injection.
     private var dirFsyncFailAt: Int?
     private var dirFsyncCount = 0
+    /// Test-only unlink-failure injection (M-D).
+    private var unlinkFailInjected = false
 
     // Activation state
     private var lockFD: Int32 = -1
@@ -366,6 +368,22 @@ actor KVDiskCacheStore {
     func injectDirFsyncFailure(atCall k: Int?) {
         dirFsyncFailAt = k
         dirFsyncCount = 0
+    }
+
+    /// Test-only (M-D): force the next entry-directory unlink to fail, modeling a
+    /// filesystem that cannot remove the ciphertext. Pass false to clear.
+    func injectUnlinkFailure(_ enabled: Bool) { unlinkFailInjected = enabled }
+
+    /// Remove an entry directory, propagating any failure as `KVStoreError.io` (M-D):
+    /// callers MUST treat a failed unlink as purge_failed / eviction failure and retain
+    /// the incomplete tombstone + byte accounting for recovery retry.
+    private func removeEntryDirectory(_ url: URL) throws {
+        if unlinkFailInjected { throw KVStoreError.io("injected unlink failure") }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            throw KVStoreError.io("entry unlink failed: \(error.localizedDescription)")
+        }
     }
 
     /// Test-only (FR-KVP8 CRITICAL (d)): fill the purge high-watermark map with
@@ -1250,21 +1268,26 @@ actor KVDiskCacheStore {
         try keys.destroyEntryDEK(epoch: metadata.keyEpoch, index: index)
         try crashIf(.purgeAfterDEKDestroy)
 
-        // (3) remove hot-tier entry / cancel in-flight — integration wires the hot
-        //     callback; here we drop in-memory publication state for the index.
         let freed = liveEntries[index]?.bytes ?? 0
+
+        // (4) delete generations + manifest, fsync entry dir — BEFORE any accounting or
+        // tombstone-completion mutation (M-D). A failed unlink must PROPAGATE
+        // (purge_failed): the incomplete tombstone and the byte accounting are retained
+        // so recovery retries this deletion. Reporting success here would decrement
+        // accounting and admit new writes while the old ciphertext still exists on disk.
+        let dir = entryDir(index)
+        if fileExists(dir) {
+            try removeEntryDirectory(dir)
+        }
+        try fsyncDirectory(entriesDir)
+        try crashIf(.purgeAfterUnlink)
+
+        // Only now that the files are durably gone: drop in-memory publication state +
+        // accounting for the index.
         liveEntries.removeValue(forKey: index)
         lastGeneration.removeValue(forKey: index)
         lastCommitSequence.removeValue(forKey: index)
-
-        // (4) delete generations + manifest, fsync entry dir.
-        let dir = entryDir(index)
-        if fileExists(dir) {
-            try? FileManager.default.removeItem(at: dir)
-        }
-        try fsyncDirectory(entriesDir)
         committedBytes = max(0, committedBytes - freed)
-        try crashIf(.purgeAfterUnlink)
 
         // Mark the tombstone complete (fsync + dir fsync). New writes admitted only now.
         try writeTombstone(KVTombstone(epoch: metadata.keyEpoch, index: index,
@@ -1427,7 +1450,11 @@ actor KVDiskCacheStore {
         try keys.destroyEntryDEK(epoch: metadata.keyEpoch, index: index)
         let freed = liveEntries[index]?.bytes ?? 0
         let dir = entryDir(index)
-        if fileExists(dir) { try? FileManager.default.removeItem(at: dir) }
+        // M-D: a failed unlink must PROPAGATE so eviction/retention does not decrement
+        // accounting (nor emit success) while the ciphertext is still on disk.
+        if fileExists(dir) {
+            try removeEntryDirectory(dir)
+        }
         try fsyncDirectory(entriesDir)
         liveEntries.removeValue(forKey: index)
         lastGeneration.removeValue(forKey: index)

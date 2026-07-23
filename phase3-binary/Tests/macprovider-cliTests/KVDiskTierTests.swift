@@ -372,6 +372,31 @@ final class KVDiskTierTests: XCTestCase {
         await tier.shutdown()
     }
 
+    /// M-D: a purge whose entry-directory unlink fails must report purge_failed and
+    /// retain the byte accounting (the entry is NOT counted as removed) so a later
+    /// retry can complete the deletion.
+    func testPurgeReportsFailureWhenUnlinkFails() async throws {
+        let tier = makeTier(root: makeRoot())
+        let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
+        let key = "conv:kvs-synth:unlink-fail"
+        try await writeEntry(tier, key: key, seq: 5, nowMillis: 1_000_000)
+        let __c0 = await tier.status()?.entryCount; XCTAssertEqual(__c0, 1)
+
+        await tier.store.injectUnlinkFailure(true)
+        let failed = await tier.purge(rawKey: key)
+        guard case .failed = failed else { return XCTFail("expected purge_failed, got \(failed)") }
+        // Accounting retained: the entry still counts (ciphertext still on disk).
+        let midCount = await tier.status()?.entryCount
+        XCTAssertEqual(midCount, 1, "a failed unlink must not decrement accounting")
+
+        // Retry after the fault clears completes the deletion.
+        await tier.store.injectUnlinkFailure(false)
+        guard case .ok = await tier.purge(rawKey: key) else { return XCTFail("retry purge failed") }
+        let finalCount = await tier.status()?.entryCount
+        XCTAssertEqual(finalCount, 0, "retry after the fault clears completes the purge")
+        await tier.shutdown()
+    }
+
     /// M-13 / FR-KVP7: serve-lock contention is transient, not permanent dormancy —
     /// the tier retries with bounded backoff and runs full activation once the lock
     /// is released.
