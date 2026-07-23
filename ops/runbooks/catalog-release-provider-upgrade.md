@@ -50,19 +50,26 @@ identical; no new two-feed row or later Tier-2 removal is accepted.
 
 Pearl release directories are content-addressed as
 `<release_id>-<release.json sha256 prefix>`, so a three-feed publication never
-overwrites the older two-feed directory that may share its release ID. The
-updater and direct deploy snapshot the active pointer and the independent
-`/opt/macprovider/tier2-catalog.json`, install the Tier-2 file from the same
-verified envelope, then switch `autotune/current`. Rollback restores the
-previous pointer and matching independent Tier-2 bytes together.
+overwrites the older two-feed directory that may share its release ID. After
+Entry 190, the coordinator reads Tier-2 only from
+`/opt/macprovider/autotune/current/tier2-catalog.json`. Updater and direct
+deploy stage all three signed feeds inside the immutable release directory,
+then atomically switch the single `autotune/current` pointer. During the
+one-time Step D migration, any independent
+`/opt/macprovider/tier2-catalog.json` must exactly match the active
+release-bound feed before mutation; the rollback-armed transaction removes it
+instead of copying new bytes to it. Rollback from that first cutover restores
+the prior config, pointer, and legacy bytes together. Later rollback changes
+only the pointer and preserves the legacy path as absent.
 
-This step does not flip `tier2.require_hash_verified`, remove the independent
-Tier-2 path, clear compatibility exceptions, or enable canary. Those actions
+Step D does not flip `tier2.require_hash_verified`, enable canary, or clear a
+compatibility exception before production journey evidence. Those actions
 remain gated by the later #608/#609 serial steps.
 
 Autotune admission identity and the Tier-2 attestation catalog remain separate
-signed files during migration (`exc-catalog-compatibility-bridges` stays
-active until the physical dual-authority removal + Pearl clearance land).
+signed feed members inside one release envelope. The
+`exc-catalog-compatibility-bridges` exception stays active until Pearl proves
+the physical single-authority cutover and three exact buyer-serving journeys.
 Until then the interim rule is **derived-only mutate**:
 
 1. `scripts/catalog-release.py generate` writes
@@ -92,19 +99,23 @@ Until then the interim rule is **derived-only mutate**:
    `AUTOTUNE_CANDIDATES` (default:
    `phase3-binary/catalog/autotune/autotune-candidates.json`). Live `--apply`
    is retired; prefer `deploy-pearl-vps.sh` for the full release transaction.
-   Do not restore `/opt/macprovider/tier2-catalog.json` from a stale backup
-   without the matching autotune release.
+   Never restore `/opt/macprovider/tier2-catalog.json` as a standalone
+   authority. Only the rollback-armed first-cutover transaction may restore
+   that legacy path, and it restores the matching prior config and
+   `autotune/current` pointer in the same rollback.
 5. Coordinator startup and Tier-2 SIGHUP reload fail closed on the same
    conflict (`internal/catalogbind`). Stale Tier-2 backups cannot be
    restored against a newer autotune release when they drift on shared rows.
 6. Admission identity remains autotune-only (Entry 170 / #609). This binding
    check does **not** add a Tier-2 fallback.
 
-Follow-up on #608 remains blocked for exception clearance: physical dual-path
-removal and Pearl journey proof that no `model_hash_uncatalogued` events fire
-for active-release rows are separate later steps. Until then, the release
-envelope and independent coordinator path must be mutated and rolled back as
-one transaction.
+Follow-up on #608 remains blocked for exception clearance until Pearl proves
+the legacy path absent, the coordinator cold-started against the release-bound
+feed, three authenticated gateway requests with unique request IDs and exact
+physical-provider/model attribution plus a matching post-request
+`buyer_serving` catalog-admission proof, and zero `model_hash_uncatalogued` or
+`model_hash_mismatch` events for active-release rows.
+`tier2.require_hash_verified` stays false throughout this step.
 
 The same signed network-release manifest also binds:
 

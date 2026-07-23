@@ -174,6 +174,149 @@ print(values[0], end="")
 ' "$1"
 }
 
+_tier2_migration_gate_remote_script() {
+  cat <<'SH'
+set -eu
+python3 - <<'PY'
+import errno
+import os
+import re
+import stat
+import sys
+
+ROOT = "/opt/macprovider"
+REQUIRED_UID = 0
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+SAFE_RELEASE_TARGET = re.compile(r"^releases/([A-Za-z0-9][A-Za-z0-9._-]{0,191})$")
+
+
+def die(message):
+    raise SystemExit(message)
+
+
+def validate_trusted_dir(fd, label):
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        die(f"unsafe Tier-2 migration path is not a directory: {label}")
+    if info.st_uid not in (0, REQUIRED_UID) or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        die(f"unsafe Tier-2 migration directory ownership/mode: {label}")
+
+
+def validate_regular_file(fd, label):
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        die(f"unsafe Tier-2 migration path is not a regular file: {label}")
+    if info.st_uid != REQUIRED_UID or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        die(f"unsafe Tier-2 migration file ownership/mode: {label}")
+    if info.st_nlink != 1:
+        die(f"unsafe Tier-2 migration hardlinked file: {label}")
+
+
+def open_dir_at(parent_fd, name, label):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        die(f"cannot safely open Tier-2 migration directory {label}: {exc}")
+    validate_trusted_dir(fd, label)
+    return fd
+
+
+def open_file_at(parent_fd, name, label, *, absent_ok=False):
+    try:
+        fd = os.open(name, os.O_RDONLY | NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if absent_ok:
+            return None
+        die(f"missing Tier-2 migration file {label}")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            die(f"unsafe Tier-2 migration symlink: {label}")
+        die(f"cannot safely open Tier-2 migration file {label}: {exc}")
+    validate_regular_file(fd, label)
+    return fd
+
+
+def read_small_file_at(parent_fd, name, label):
+    fd = open_file_at(parent_fd, name, label, absent_ok=True)
+    if fd is None:
+        return None
+    with os.fdopen(fd, "rb", closefd=True) as handle:
+        value = handle.read(4096)
+        if handle.read(1):
+            die(f"unsafe Tier-2 migration state file too large: {label}")
+    try:
+        return value.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"unsafe Tier-2 migration state file is not ASCII: {label}") from exc
+
+
+def compare_fd(left_fd, right_fd):
+    os.lseek(left_fd, 0, os.SEEK_SET)
+    os.lseek(right_fd, 0, os.SEEK_SET)
+    while True:
+        left = os.read(left_fd, 1024 * 1024)
+        right = os.read(right_fd, 1024 * 1024)
+        if left != right:
+            return False
+        if not left:
+            return True
+
+
+slash_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+validate_trusted_dir(slash_fd, "/")
+root_fd = slash_fd
+root_label = ""
+for component in [part for part in ROOT.split("/") if part]:
+    root_label = f"{root_label}/{component}"
+    root_fd = open_dir_at(root_fd, component, root_label)
+
+legacy_fd = open_file_at(root_fd, "tier2-catalog.json", f"{ROOT}/tier2-catalog.json", absent_ok=True)
+if legacy_fd is None:
+    sys.exit(0)
+
+autotune_fd = open_dir_at(root_fd, "autotune", f"{ROOT}/autotune")
+
+current_next_fd = open_file_at(autotune_fd, "current.next", f"{ROOT}/autotune/current.next", absent_ok=True)
+if current_next_fd is not None:
+    os.close(current_next_fd)
+    die("unsafe transient autotune/current.next exists before deploy activation")
+try:
+    os.readlink("current.next", dir_fd=autotune_fd)
+except FileNotFoundError:
+    pass
+except OSError as exc:
+    if exc.errno != errno.ENOENT:
+        die(f"unsafe transient autotune/current.next exists before deploy activation: {exc}")
+else:
+    die("unsafe transient autotune/current.next symlink exists before deploy activation")
+
+previous_target = read_small_file_at(autotune_fd, ".previous-target", f"{ROOT}/autotune/.previous-target")
+if previous_target is not None:
+    if previous_target not in ("",) and SAFE_RELEASE_TARGET.fullmatch(previous_target) is None:
+        die("unsafe autotune/.previous-target contents before Tier-2 migration")
+
+try:
+    current_target = os.readlink("current", dir_fd=autotune_fd)
+except OSError as exc:
+    die(f"legacy Tier-2 migration requires autotune/current to be a safe releases/* symlink: {exc}")
+match = SAFE_RELEASE_TARGET.fullmatch(current_target)
+if match is None:
+    die("legacy Tier-2 migration requires autotune/current to be one safe releases/<content-addressed-id> symlink")
+
+releases_fd = open_dir_at(autotune_fd, "releases", f"{ROOT}/autotune/releases")
+release_name = match.group(1)
+release_fd = open_dir_at(releases_fd, release_name, f"{ROOT}/autotune/releases/{release_name}")
+current_fd = open_file_at(
+    release_fd,
+    "tier2-catalog.json",
+    f"{ROOT}/autotune/releases/{release_name}/tier2-catalog.json",
+)
+if not compare_fd(legacy_fd, current_fd):
+    die("legacy Tier-2 catalog bytes differ from active autotune/current release")
+PY
+SH
+}
+
 # Email validator — RFC-conformant pre-validation is overkill; we just
 # need to reject metacharacters that would split a shell arg.
 if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
@@ -668,6 +811,14 @@ if $SSH 'test -d /opt/macprovider/.coordinator-deploy-rollback'; then
 fi
 fi
 
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  log "step 0b/9: verify legacy Tier-2 migration bridge"
+  $SSH "$(_tier2_migration_gate_remote_script)" || {
+    echo "aborting deploy: legacy /opt/macprovider/tier2-catalog.json does not match active autotune/current release" >&2
+    exit 5
+  }
+fi
+
 log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Fail closed before touching the VPS if the config to be deployed has a
 # placeholder operator_key, an unsafe threshold, etc. (see check-deploy-config.sh).
@@ -750,18 +901,21 @@ CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"
 # permitted attacks: trailing slash → `dirname` yields `/opt` →
 # `install -d` re-chowns `/opt`; macprovider-writable parent →
 # attacker plants a symlink at the destination → root `install` follows
-# it. Single fixed path under a root-owned dir (see step 3 below)
-# closes both classes. coordinator.yaml MUST set catalog_path to this
-# exact value or deploy refuses.
-CATALOG_REMOTE_PATH_CANONICAL="/opt/macprovider/tier2-catalog.json"
+# it. The only accepted runtime path is now the release-bound current pointer:
+# root stages signed bytes under immutable /opt/macprovider/autotune/releases/
+# and activation atomically switches root-owned autotune/current. The deploy
+# never writes Tier-2 through the current symlink or through the old independent
+# /opt/macprovider/tier2-catalog.json bridge.
+CATALOG_REMOTE_PATH_CANONICAL="/opt/macprovider/autotune/current/tier2-catalog.json"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   if [ "$CATALOG_REMOTE_PATH" != "$CATALOG_REMOTE_PATH_CANONICAL" ]; then
     echo "aborting deploy: tier2.catalog_path must be exactly '$CATALOG_REMOTE_PATH_CANONICAL'" >&2
     echo "  Got: '$CATALOG_REMOTE_PATH'." >&2
-    echo "  This is hardcoded as a single defense-in-depth path: the parent" >&2
-    echo "  dir /opt/macprovider/ is root-owned 0750 so a same-uid attacker" >&2
-    echo "  cannot plant a symlink at the destination, AND no dynamic" >&2
-    echo "  dirname-derived directory can be re-chowned by the deploy." >&2
+    echo "  This is hardcoded as a single defense-in-depth path: deploy stages" >&2
+    echo "  signed bytes only under root-owned immutable release directories and" >&2
+    echo "  activates them by atomically switching /opt/macprovider/autotune/current." >&2
+    echo "  The deploy refuses dynamic dirname-derived destinations and never" >&2
+    echo "  writes Tier-2 through the current symlink." >&2
     exit 5
   fi
   if [ -z "$CATALOG_PUBLIC_KEY" ]; then
@@ -807,7 +961,7 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     echo "aborting deploy: Tier-2 catalog conflicts with autotune release identity (#608)" >&2
     exit 5
   }
-  echo "  ok: pinned release-bound catalog sha256=$CATALOG_PIN_SHA verifies, binds to autotune release, and will install to $CATALOG_REMOTE_PATH"
+  echo "  ok: pinned release-bound catalog sha256=$CATALOG_PIN_SHA verifies, binds to autotune release, and will activate at $CATALOG_REMOTE_PATH"
 else
   echo "aborting deploy: tier2.catalog_path must be set for release-bound Tier-2 publish (#608 Step B)" >&2
   exit 5
@@ -2053,6 +2207,7 @@ $SSH "set -e
     echo 'coordinator deploy transaction already exists; refusing to overwrite it' >&2
     exit 1
   fi
+  $(_tier2_migration_gate_remote_script)
   rm -rf \"\$_rollback_stage\"
   mkdir \"\$_rollback_stage\"
   trap 'rm -rf \"\$_rollback_stage\"' EXIT HUP INT TERM
@@ -2402,7 +2557,6 @@ $SSH "set -e
   # staged so an abort before the late restart gate cannot leave the next
   # service restart without feeds. Existing rollouts remain untouched here.
   if [ ! -e \$_autotune_root/current ] && [ ! -L \$_autotune_root/current ]; then
-    install -o root -g macprovider -m 0640 \$_autotune_release/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
     ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME \$_autotune_root/current.bootstrap
     mv -Tf \$_autotune_root/current.bootstrap \$_autotune_root/current
   fi
@@ -2702,17 +2856,70 @@ $SSH "set -e
   _catalog_root=/opt/macprovider/autotune
   _previous=\$(readlink \"\$_catalog_root/current\" 2>/dev/null || true)
   case \"\$_previous\" in
-    ''|releases/*) ;;
+    ''|releases/[A-Za-z0-9]*) ;;
     *) echo \"invalid existing autotune current target: \$_previous\" >&2; exit 1 ;;
   esac
-  printf '%s' \"\$_previous\" > \"\$_catalog_root/.previous-target\"
-  chown root:macprovider \"\$_catalog_root/.previous-target\"
-  chmod 0640 \"\$_catalog_root/.previous-target\"
-  install -o root -g macprovider -m 0640 \
-    \"\$_catalog_root/releases/$AUTOTUNE_RELEASE_DIR_NAME/tier2-catalog.json\" \
-    $CATALOG_REMOTE_PATH_CANONICAL
+  case \"\$_previous\" in
+    *[!A-Za-z0-9._/-]*|*'/../'*|*'/..'|*'/./'*|*'/.'|*'//'|releases/|releases) echo \"unsafe existing autotune current target: \$_previous\" >&2; exit 1 ;;
+  esac
+  [ ! -e \"\$_catalog_root/current.next\" ] && [ ! -L \"\$_catalog_root/current.next\" ] || {
+    echo 'unsafe transient autotune/current.next exists before activation' >&2
+    exit 1
+  }
+  python3 - \"\$_previous\" <<'PY'
+import grp
+import os
+import re
+import stat
+import sys
+
+ROOT = '/opt/macprovider'
+NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+previous = sys.argv[1]
+if previous and re.fullmatch(r'releases/[A-Za-z0-9][A-Za-z0-9._-]{0,191}', previous) is None:
+    raise SystemExit('invalid previous autotune current target')
+
+def validate_dir(fd, label):
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != 0
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise SystemExit(f'unsafe directory for previous-target publish: {label}')
+
+slash_fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+validate_dir(slash_fd, '/')
+opt_fd = os.open('opt', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=slash_fd)
+validate_dir(opt_fd, '/opt')
+root_fd = os.open('macprovider', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=opt_fd)
+validate_dir(root_fd, ROOT)
+autotune_fd = os.open('autotune', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=root_fd)
+validate_dir(autotune_fd, f'{ROOT}/autotune')
+
+gid = grp.getgrnam('macprovider').gr_gid
+tmp_name = f'.previous-target.tmp.{os.getpid()}'
+fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, 0o640, dir_fd=autotune_fd)
+try:
+    os.fchown(fd, 0, gid)
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != gid
+        or stat.S_IMODE(info.st_mode) != 0o640
+        or info.st_nlink != 1
+    ):
+        raise SystemExit('unsafe previous-target temp file')
+    os.write(fd, previous.encode('ascii'))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+os.rename(tmp_name, '.previous-target', src_dir_fd=autotune_fd, dst_dir_fd=autotune_fd)
+PY
   ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME \"\$_catalog_root/current.next\"
   mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"
+  rm -f /opt/macprovider/tier2-catalog.json
 "
 log "step 7/9: enable + start coordinator service"
 $SSH 'set -e

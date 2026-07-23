@@ -24,10 +24,43 @@ grep -q 'install .*tier2-catalog.json \\$_autotune_stage/tier2-catalog.json' "$D
   grep -q 'verify-directory --directory \\$_autotune_stage --tier2-public-key-file' "$DEPLOY_SH" ||
   fail "deploy must stage and authenticate Tier-2 inside the release envelope"
 
+grep -q 'CATALOG_REMOTE_PATH_CANONICAL="/opt/macprovider/autotune/current/tier2-catalog.json"' "$DEPLOY_SH" ||
+  fail "deploy must accept only the release-bound Tier-2 current path"
+
+grep -q 'never.*writes Tier-2 through the current symlink' "$DEPLOY_SH" &&
+  grep -q 'root-owned immutable release directories' "$DEPLOY_SH" ||
+  fail "deploy must explain root-owned immutable staging and pointer activation"
+
 activation_line=$(grep -nF 'ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
-tier2_install_line=$(grep -nF '\$_catalog_root/releases/$AUTOTUNE_RELEASE_DIR_NAME/tier2-catalog.json' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
-[ -n "$activation_line" ] && [ -n "$tier2_install_line" ] && [ "$tier2_install_line" -lt "$activation_line" ] ||
-  fail "legacy Tier-2 path and release current must activate together under the deploy mutex"
+stage_tier2_line=$(grep -nF 'install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json \$_autotune_stage/tier2-catalog.json' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
+legacy_remove_line=$(grep -nF 'rm -f /opt/macprovider/tier2-catalog.json' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
+restart_line=$(grep -nF 'systemctl restart macprovider-coordinator' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+[ -n "$stage_tier2_line" ] && [ -n "$activation_line" ] &&
+  [ "$stage_tier2_line" -lt "$activation_line" ] ||
+  fail "Tier-2 must be staged in the immutable release before current activation"
+[ -n "$legacy_remove_line" ] && [ -n "$restart_line" ] &&
+  [ "$activation_line" -lt "$legacy_remove_line" ] && [ "$legacy_remove_line" -lt "$restart_line" ] ||
+  fail "deploy must remove the independent Tier-2 bridge after current activation and before coordinator restart"
+
+if grep -Eq 'install .* /opt/macprovider/tier2-catalog\.json|install .* \$CATALOG_REMOTE_PATH_CANONICAL' "$DEPLOY_SH"; then
+  fail "successful deploy must not install Tier-2 through the independent path or current symlink"
+fi
+
+grep -q '_tier2_migration_gate_remote_script()' "$DEPLOY_SH" &&
+  grep -q 'legacy Tier-2 catalog bytes differ from active autotune/current release' "$DEPLOY_SH" ||
+  fail "deploy must preflight legacy Tier-2 bridge byte equality before mutation"
+grep -q 'ROOT = "/opt/macprovider"' "$DEPLOY_SH" &&
+  ! grep -q 'MACPROVIDER_ROOT' "$DEPLOY_SH" &&
+  grep -q 'O_NOFOLLOW' "$DEPLOY_SH" &&
+  grep -q 'dir_fd=' "$DEPLOY_SH" &&
+  grep -q 'info.st_nlink != 1' "$DEPLOY_SH" ||
+  fail "Tier-2 migration gate must be fixed-root and no-follow/dirfd hardened"
+grep -q 'unsafe transient autotune/current.next exists before deploy activation' "$DEPLOY_SH" &&
+  grep -q 'unsafe autotune/.previous-target contents before Tier-2 migration' "$DEPLOY_SH" ||
+  fail "Tier-2 migration gate must reject unsafe current.next and .previous-target state"
+grep -q 'os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW' "$DEPLOY_SH" &&
+  grep -q "os.rename(tmp_name, '.previous-target', src_dir_fd=autotune_fd, dst_dir_fd=autotune_fd)" "$DEPLOY_SH" ||
+  fail "deploy must publish .previous-target via no-follow temp and atomic rename"
 
 grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json' "$DEPLOY_SH" ||
   fail "deploy smoke must verify macprovider can read autotune feeds"
