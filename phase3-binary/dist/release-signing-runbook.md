@@ -435,7 +435,16 @@ test "$(codesign -dv --verbose=4 "$(command -v macprovider-cli)" 2>&1 | awk -F= 
   live.streamvc.macprovider.cli
 codesign --verify --strict --deep "$MALIBU_APP"
 test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleIdentifier)" = tech.malibu.app
-test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)" = "${TAG#v}"
+MALIBU_VERSION="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)"
+MALIBU_BUILD="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleVersion)"
+awk -F '\t' -v version="$MALIBU_VERSION" -v build="$MALIBU_BUILD" \
+  '$1 == version && $2 == build { found = 1 } END { exit !found }' \
+  phase3-binary/app/release-builds.tsv
+if test "$TAG" = v1.8.39; then
+  test "$MALIBU_VERSION/$MALIBU_BUILD" = 1.8.39/39
+else
+  test "$MALIBU_VERSION" != 1.8.39
+fi
 xcrun stapler validate "$MALIBU_APP"
 spctl -a -t exec "$MALIBU_APP"
 cmp "$HOME/macprovider/compatibility-set.json" \
@@ -481,6 +490,11 @@ gh workflow run release.yml --repo Augustas11/macprovider --ref main \
 
 Wait until the unsigned `build` job succeeds and `sign_publish` is waiting for
 the independent `production-release` environment review. Do not approve yet.
+The candidate build preflights Malibu's bundle identity, path shape, frozen
+bridge key, absence of legacy update keys, and absence of a Sparkle runtime
+before capturing unsigned inputs. Malibu remains independently versioned; only
+the frozen v1.8.39 bridge release requires the app version/build to match
+1.8.39/39.
 Recheck that `origin/main` is still the captured commit, create the signed
 annotated tag at that exact commit, push it, and verify the peeled remote target:
 
@@ -526,6 +540,12 @@ is 1-15 minutes for notarization. The workflow:
     numeric API transition from draft to public
 13. Re-fetches the published numeric release and requires GitHub immutability
     before recording the numeric release publication evidence
+
+If a protected job fails after tag creation but before any draft or public
+release exists, keep the signed tag immutable. Record the exact failure and
+absence of release assets, fix the reviewed source, and advance to a new
+version. Do not move, delete, or reuse the burned tag; the narrowly documented
+v1.8.39 recovery below is the sole historical exception.
 
 ### 8.1 Frozen v1.8.39 pre-publication tag recovery
 

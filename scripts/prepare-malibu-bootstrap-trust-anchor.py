@@ -158,29 +158,63 @@ def atomic_write_plist(
         raise
 
 
-def prepare(tag: str, app: pathlib.Path, key_path: pathlib.Path) -> None:
+def preflight(
+    tag: str,
+    app: pathlib.Path,
+    key_path: pathlib.Path,
+) -> tuple[
+    pathlib.Path,
+    str,
+    dict[str, object],
+    plistlib.PlistFormat,
+    int,
+    str,
+    str,
+]:
     if TAG_PATTERN.fullmatch(tag) is None:
         fail("release tag must be vX.Y.Z")
     contents = require_app(app)
     key = load_frozen_key(key_path)
     info = contents / "Info.plist"
     document, plist_format, mode = load_plist(info)
-    version, build = validate_identity(document, tag)
+    version, build = validate_identity(
+        document,
+        tag if tag == BRIDGE_TAG else None,
+    )
     found = legacy_update_keys(document)
     if found:
         fail("source Malibu app unexpectedly contains legacy update keys: " + ", ".join(found))
 
-    if tag != BRIDGE_TAG:
-        print(f"Malibu {tag} remains free of legacy app-update authority")
-        return
-    if version != BRIDGE_VERSION or build != BRIDGE_BUILD:
+    if tag == BRIDGE_TAG and (version != BRIDGE_VERSION or build != BRIDGE_BUILD):
         fail(
             f"{BRIDGE_TAG} trust anchor requires bundle version/build "
             f"{BRIDGE_VERSION}/{BRIDGE_BUILD}, got {version}/{build}"
         )
+    if tag != BRIDGE_TAG and version == BRIDGE_VERSION:
+        fail(
+            f"bundle version {BRIDGE_VERSION} is reserved for the "
+            f"{BRIDGE_TAG} trust-anchor release"
+        )
+    print(
+        f"preflighted Malibu {version}/{build} for {tag} without legacy "
+        "app-update authority"
+    )
+    return contents, key, document, plist_format, mode, version, build
+
+
+def prepare(tag: str, app: pathlib.Path, key_path: pathlib.Path) -> None:
+    contents, key, document, plist_format, mode, _, _ = preflight(
+        tag,
+        app,
+        key_path,
+    )
+
+    if tag != BRIDGE_TAG:
+        print(f"Malibu {tag} remains free of legacy app-update authority")
+        return
 
     document["SUPublicEDKey"] = key
-    atomic_write_plist(info, document, plist_format, mode)
+    atomic_write_plist(contents / "Info.plist", document, plist_format, mode)
     verify(app, key_path)
     print(f"injected frozen Malibu v1.8.32 trust anchor into {BRIDGE_TAG}")
 
@@ -223,6 +257,11 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument("app", type=pathlib.Path)
     prepare_parser.add_argument("public_key", type=pathlib.Path)
 
+    preflight_parser = subparsers.add_parser("preflight")
+    preflight_parser.add_argument("tag")
+    preflight_parser.add_argument("app", type=pathlib.Path)
+    preflight_parser.add_argument("public_key", type=pathlib.Path)
+
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("app", type=pathlib.Path)
     verify_parser.add_argument("public_key", type=pathlib.Path)
@@ -233,6 +272,8 @@ def main() -> None:
     arguments = parse_args()
     if arguments.command == "prepare":
         prepare(arguments.tag, arguments.app, arguments.public_key)
+    elif arguments.command == "preflight":
+        preflight(arguments.tag, arguments.app, arguments.public_key)
     else:
         verify(arguments.app, arguments.public_key)
 

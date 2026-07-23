@@ -104,6 +104,104 @@ PEARL_VERIFY_UPLOAD_SEQUENCE = (
     f"{PEARL_GO_VERIFY_STEP}\n"
     "\n      - name: Upload unsigned build artifact\n"
 )
+UNSIGNED_UPLOAD_STEP = (
+    "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
+    "        with:\n"
+    '          name: unsigned-release-${{ steps.release_source.outputs.commit }}\n'
+    "          path: unsigned-release-inputs/\n"
+    "          if-no-files-found: error\n"
+    "          retention-days: 1"
+)
+MALIBU_CANDIDATE_PREFLIGHT = (
+    '          python3 "$GITHUB_WORKSPACE/scripts/prepare-malibu-bootstrap-trust-anchor.py" preflight \\\n'
+    '            "$tag" "$RUNNER_TEMP/Malibu.app" \\\n'
+    '            "$GITHUB_WORKSPACE/scripts/dist/malibu-v1.8.32-sparkle-public-key"'
+)
+MALIBU_BUILD_STEP = r'''        shell: bash
+        run: |
+          set -euo pipefail
+          cd phase3-binary/app
+          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          xcodebuild \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
+            archive \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO
+          cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
+            "$RUNNER_TEMP/Malibu.app"'''
+MALIBU_CAPTURE_STEP = r'''        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          mkdir -p unsigned-release-inputs
+          cp "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" unsigned-release-inputs/
+          python3 "$GITHUB_WORKSPACE/scripts/prepare-malibu-bootstrap-trust-anchor.py" preflight \
+            "$tag" "$RUNNER_TEMP/Malibu.app" \
+            "$GITHUB_WORKSPACE/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+          tar czf unsigned-release-inputs/Malibu.app.tar.gz -C "$RUNNER_TEMP" Malibu.app
+          cp "$RUNNER_TEMP/release-toolchain.json" unsigned-release-inputs/
+          cp "$RUNNER_TEMP/coordinator-linux-amd64" \
+            "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
+            "$RUNNER_TEMP/gateway-linux-amd64" unsigned-release-inputs/
+          unsigned_assets=(
+            "unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz"
+            unsigned-release-inputs/Malibu.app.tar.gz
+            unsigned-release-inputs/release-toolchain.json
+            unsigned-release-inputs/coordinator-linux-amd64
+            unsigned-release-inputs/coordinator-cli-linux-amd64
+            unsigned-release-inputs/gateway-linux-amd64
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ steps.release_source.outputs.commit }}" \
+            "$GITHUB_REPOSITORY" "${{ steps.release_source.outputs.prerelease }}" \
+            unsigned-release-inputs/release-toolchain.json \
+            unsigned-release-inputs/unsigned-release-manifest.json \
+            "${unsigned_assets[@]}"'''
+
+
+def validate_malibu_candidate_preflight(job):
+    build_app = unique_step(job, "Build Malibu.app")
+    capture = unique_step(job, "Capture unsigned build artifact")
+    if build_app.strip("\n") != MALIBU_BUILD_STEP:
+        raise SystemExit(
+            "candidate Malibu build must retain the exact reviewed step"
+        )
+    if capture.strip("\n") != MALIBU_CAPTURE_STEP:
+        raise SystemExit(
+            "candidate artifact capture must retain the exact fail-closed preflight step"
+        )
+    build_marker = "\n      - name: Build Malibu.app\n"
+    capture_marker = "\n      - name: Capture unsigned build artifact\n"
+    verify_marker = "\n      - name: Verify staged Pearl Go binaries\n"
+    if job.count(build_marker + build_app + capture_marker) != 1:
+        raise SystemExit(
+            "candidate Malibu build and fail-closed capture must remain adjacent"
+        )
+    if job.count(capture_marker + capture + verify_marker) != 1:
+        raise SystemExit(
+            "candidate artifact capture and exact verifier must remain adjacent"
+        )
+    preflight_position = capture.find(MALIBU_CANDIDATE_PREFLIGHT)
+    tar_position = capture.find(
+        "tar czf unsigned-release-inputs/Malibu.app.tar.gz"
+    )
+    if preflight_position < 0 or tar_position < preflight_position:
+        raise SystemExit(
+            "candidate Malibu trust preflight must immediately guard captured app bytes"
+        )
+    if job.count(MALIBU_CANDIDATE_PREFLIGHT + "\n") != 1:
+        raise SystemExit(
+            "candidate build must run the exact Malibu trust preflight once"
+        )
+    if job.find("- name: Build Malibu.app") > job.find(
+        "- name: Capture unsigned build artifact"
+    ):
+        raise SystemExit("candidate Malibu trust preflight must precede artifact capture")
+    return build_app
 
 
 def validate_pearl_toolchain(job):
@@ -112,6 +210,7 @@ def validate_pearl_toolchain(job):
     pearl_build = unique_step(job, "Build Pearl linux-amd64 binaries")
     package_build = unique_step(job, "Build package")
     verifier_step = unique_step(job, "Verify staged Pearl Go binaries")
+    upload_step = unique_step(job, "Upload unsigned build artifact")
     setup_go_uses = re.findall(
         r"(?m)^        uses: actions/setup-go@([0-9a-f]{40})$", job
     )
@@ -144,6 +243,8 @@ def validate_pearl_toolchain(job):
         raise SystemExit("Pearl build must invoke the binary verifier exactly once")
     if job.count(PEARL_VERIFY_UPLOAD_SEQUENCE) != 1:
         raise SystemExit("staged Pearl binary verification must immediately precede upload")
+    if upload_step.strip("\n") != UNSIGNED_UPLOAD_STEP:
+        raise SystemExit("unsigned candidate upload must retain its exact pinned artifact step")
     for build_target in (
         '-o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator',
         '-o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator-cli',
@@ -231,6 +332,9 @@ for requirement in (
     'BRIDGE_VERSION = "1.8.39"',
     'BRIDGE_BUILD = "39"',
     'EXPECTED_PUBLIC_KEY = "JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="',
+    "tag if tag == BRIDGE_TAG else None",
+    "tag != BRIDGE_TAG and version == BRIDGE_VERSION",
+    'subparsers.add_parser("preflight")',
     'key.startswith("SU")',
     'document["SUPublicEDKey"] = key',
     "os.replace(temporary_path, path)",
@@ -293,6 +397,7 @@ if "gh release download" in text:
     raise SystemExit("release workflow must publish the captured workflow files")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must be pinned by commit")
+validate_malibu_candidate_preflight(build)
 pearl_build = validate_pearl_toolchain(build)
 for requirement in (
     "GOTOOLCHAIN=local",
@@ -370,6 +475,51 @@ gateway_role_substitution_mutation = build.replace(
     '-o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/coordinator',
     1,
 )
+malibu_preflight_removal_mutation = build.replace(
+    MALIBU_CANDIDATE_PREFLIGHT,
+    "",
+    1,
+)
+malibu_preflight_suppression_mutation = build.replace(
+    MALIBU_CANDIDATE_PREFLIGHT,
+    MALIBU_CANDIDATE_PREFLIGHT + " || true",
+    1,
+)
+malibu_preflight_group_suppression_mutation = build.replace(
+    MALIBU_CANDIDATE_PREFLIGHT,
+    "          {\n"
+    + MALIBU_CANDIDATE_PREFLIGHT
+    + "\n          } || true",
+    1,
+)
+malibu_step_continue_on_error_mutation = build.replace(
+    "\n      - name: Capture unsigned build artifact\n"
+    "        shell: bash\n",
+    "\n      - name: Capture unsigned build artifact\n"
+    "        continue-on-error: true\n"
+    "        shell: bash\n",
+    1,
+)
+malibu_intermediate_mutation_step = build.replace(
+    "\n      - name: Capture unsigned build artifact\n",
+    "\n      - name: Mutate Malibu after build\n"
+    "        run: mkdir -p \"$RUNNER_TEMP/Malibu.app/Contents/Frameworks/Sparkle.framework\"\n"
+    "\n      - name: Capture unsigned build artifact\n",
+    1,
+)
+malibu_in_capture_mutation = build.replace(
+    "          tar czf unsigned-release-inputs/Malibu.app.tar.gz",
+    '          mkdir -p "$RUNNER_TEMP/Malibu.app/Contents/Frameworks/Sparkle.framework"\n'
+    "          tar czf unsigned-release-inputs/Malibu.app.tar.gz",
+    1,
+)
+malibu_post_capture_mutation = build.replace(
+    "\n      - name: Verify staged Pearl Go binaries\n",
+    "\n      - name: Mutate captured Malibu archive\n"
+    '        run: printf tamper >> unsigned-release-inputs/Malibu.app.tar.gz\n'
+    "\n      - name: Verify staged Pearl Go binaries\n",
+    1,
+)
 for description, mutation in (
     ("case-folded setup-go override", setup_override_mutation),
     ("toolchain seal replacement", seal_replacement_mutation),
@@ -386,6 +536,26 @@ for description, mutation in (
 ):
     try:
         validate_pearl_toolchain(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
+for description, mutation in (
+    ("candidate Malibu preflight removal", malibu_preflight_removal_mutation),
+    ("candidate Malibu preflight failure suppression", malibu_preflight_suppression_mutation),
+    (
+        "candidate Malibu grouped preflight failure suppression",
+        malibu_preflight_group_suppression_mutation,
+    ),
+    (
+        "candidate Malibu step-level failure suppression",
+        malibu_step_continue_on_error_mutation,
+    ),
+    ("post-build Malibu mutation step", malibu_intermediate_mutation_step),
+    ("in-capture Malibu mutation", malibu_in_capture_mutation),
+    ("post-capture Malibu archive mutation", malibu_post_capture_mutation),
+):
+    try:
+        validate_malibu_candidate_preflight(mutation)
     except SystemExit:
         continue
     raise SystemExit(f"{description} mutation unexpectedly passed")

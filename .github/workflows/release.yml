@@ -208,6 +208,9 @@ jobs:
           tag="${{ steps.release_source.outputs.tag }}"
           mkdir -p unsigned-release-inputs
           cp "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" unsigned-release-inputs/
+          python3 "$GITHUB_WORKSPACE/scripts/prepare-malibu-bootstrap-trust-anchor.py" preflight \
+            "$tag" "$RUNNER_TEMP/Malibu.app" \
+            "$GITHUB_WORKSPACE/scripts/dist/malibu-v1.8.32-sparkle-public-key"
           tar czf unsigned-release-inputs/Malibu.app.tar.gz -C "$RUNNER_TEMP" Malibu.app
           cp "$RUNNER_TEMP/release-toolchain.json" unsigned-release-inputs/
           cp "$RUNNER_TEMP/coordinator-linux-amd64" \
