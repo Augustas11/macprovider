@@ -197,6 +197,22 @@ final class KVDiskCacheStoreTests: XCTestCase {
                        "retention basis must remain the original creation time across restart")
     }
 
+    /// M-E: activation reconciliation destroys entry DEKs with no matching live entry
+    /// and leaves live-entry DEKs and the epoch master intact.
+    func testReconcileOrphanEntryDEKsDestroysOnlyOrphans() throws {
+        let keychain = KVInMemoryKeychain()
+        let keys = KVKeyManager(keychain: keychain, namespaceID: "ns-reconcile")
+        _ = try keys.createEpochMaster(epoch: 1, incarnation: "boot")
+        _ = try keys.createEntryDEK(epoch: 1, index: "live-index", incarnation: "w1")
+        _ = try keys.createEntryDEK(epoch: 1, index: "orphan-index", incarnation: "w2")
+
+        let destroyed = try keys.reconcileOrphanEntryDEKs(epoch: 1, liveIndices: ["live-index"])
+        XCTAssertEqual(destroyed, 1, "exactly the orphan DEK is destroyed")
+        XCTAssertNil(try keys.entryDEK(epoch: 1, index: "orphan-index"), "orphan DEK must be gone")
+        XCTAssertNotNil(try keys.entryDEK(epoch: 1, index: "live-index"), "live-entry DEK must survive")
+        XCTAssertNotNil(try keys.epochMaster(epoch: 1), "the epoch master must not be touched")
+    }
+
     func testCrashAfterRenameRecoversCompleteGeneration() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

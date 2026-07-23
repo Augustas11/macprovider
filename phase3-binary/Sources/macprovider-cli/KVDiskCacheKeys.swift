@@ -255,6 +255,23 @@ struct KVKeyManager: Sendable {
         try keychain.enumerate(servicePrefix: naming.servicePrefix).count
     }
 
+    /// Reconcile orphaned entry DEKs at activation (FR-KVP6 / M-E): enumerate the
+    /// current-epoch DEK items by the delimited service prefix and destroy any whose
+    /// account (index) has no matching live entry — e.g. a DEK left behind by a crash
+    /// after the DEK was created but before/without a committed manifest, or after the
+    /// files were swept but the key survived. Returns the number of DEKs destroyed.
+    @discardableResult
+    func reconcileOrphanEntryDEKs(epoch: Int, liveIndices: Set<String>) throws -> Int {
+        let dekService = naming.dekService(epoch: epoch)
+        let items = try keychain.enumerate(servicePrefix: naming.servicePrefix)
+        var destroyed = 0
+        for item in items where item.service == dekService && !liveIndices.contains(item.account) {
+            try destroyEntryDEK(epoch: epoch, index: item.account)
+            destroyed += 1
+        }
+        return destroyed
+    }
+
     // MARK: Randomness
 
     /// CSPRNG. A failure surfaces as `.unavailable` (→ tier dormancy) rather than a

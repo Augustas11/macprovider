@@ -465,6 +465,15 @@ actor KVDiskCacheStore {
             try recoverRotationJournal()
             try recoverTombstones()
             try sweepOrphansAndAccount()
+            // M-E (FR-KVP6): destroy current-epoch entry DEKs with no matching live
+            // entry — orphans from a crash between DEK create and manifest commit, or
+            // from files swept without their key. Keychain unavailability is tolerated
+            // (the tier stays dormant rather than failing activation).
+            do {
+                try reconcileOrphanEntryDEKs()
+            } catch let e as KVKeychainError where isUnavailable(e) {
+                // dormant for keychain; reconciliation retries on the next activation
+            }
             activated = true
             notifyEpoch()
             startRetentionTimer()
@@ -1547,6 +1556,13 @@ actor KVDiskCacheStore {
     private func recoverRotationJournal() throws {
         guard metadata.rotationJournal != nil else { return }
         try driveRotationForward()
+    }
+
+    /// M-E: destroy current-epoch entry DEKs that have no matching live entry. Runs at
+    /// activation after `sweepOrphansAndAccount` populates `liveEntries`.
+    private func reconcileOrphanEntryDEKs() throws {
+        _ = try keys.reconcileOrphanEntryDEKs(
+            epoch: metadata.keyEpoch, liveIndices: Set(liveEntries.keys))
     }
 
     private func recoverTombstones() throws {
