@@ -173,6 +173,8 @@ enum KVPurgeResult: Sendable, Equatable {
 /// FR-KVP12 inspection snapshot.
 struct KVInspection: Sendable, Equatable {
     let namespaceID: String
+    /// Live entry bytes only (blobs + manifests). See `totalBytesUsed` for the full
+    /// namespace footprint across every artifact class.
     let bytesUsed: Int
     let entryCount: Int
     let maxBytes: Int
@@ -184,6 +186,11 @@ struct KVInspection: Sendable, Equatable {
     let eligibilityTTLSeconds: Int
     let purgeHighWatermarkEntries: Int
     let counters: [String: Int]
+    /// FR-KVP7 all-class accounting: non-entry artifacts (control doc + tombstones +
+    /// usage journal) and the grand total including entries.
+    let controlBytesUsed: Int
+    let usageJournalBytes: Int
+    let totalBytesUsed: Int
 }
 
 // MARK: - Configuration
@@ -306,6 +313,15 @@ actor KVDiskCacheStore {
     private var lastCommitSequence: [String: Int] = [:]
     /// Running committed byte accounting (blobs + manifests of live entries).
     private var committedBytes = 0
+    /// FR-KVP7 non-entry artifact byte accounting, recounted at activation and
+    /// maintained incrementally: the control document (`meta.json`), every tombstone,
+    /// and the usage journal. `controlBytes` is the sum; it is reserved out of the data
+    /// budget before any entry admission and reported on the inspection surface so
+    /// status bytes include EVERY namespace artifact class, not just entry blobs.
+    private var metadataBytes = 0
+    private var tombstoneBytes = 0
+    private var usageJournalBytes = 0
+    private var controlBytes: Int { metadataBytes + tombstoneBytes + usageJournalBytes }
     /// In-flight reservation bytes, distinct from committedBytes (M-11). Transitions
     /// to committedBytes only at publication; released by the writer's defer on every
     /// exit path. Writes are actor-serialized, so at most one reservation is live.
@@ -424,6 +440,8 @@ actor KVDiskCacheStore {
     private var entriesDir: URL { namespaceDir.appendingPathComponent("entries", isDirectory: true) }
     private var tombstonesDir: URL { namespaceDir.appendingPathComponent("tombstones", isDirectory: true) }
     private var metadataURL: URL { namespaceDir.appendingPathComponent("meta.json") }
+    /// Append-only usage journal (FR-KVP7): durable per-index last-eligible-use ordering.
+    private var usageJournalURL: URL { namespaceDir.appendingPathComponent("usage.jsonl") }
     private var lockURL: URL {
         config.root.appendingPathComponent(".locks", isDirectory: true)
             .appendingPathComponent("\(namespaceDigest).lock")
@@ -465,6 +483,11 @@ actor KVDiskCacheStore {
             try recoverRotationJournal()
             try recoverTombstones()
             try sweepOrphansAndAccount()
+            // FR-KVP7: seed durable LRU last-eligible-use ordering from the usage journal
+            // (a corrupt journal quarantines; a missing one falls back to the manifest
+            // creation times already seeded above). Then recount every artifact class so
+            // admission reserves — and status reports — the full namespace footprint.
+            try loadUsageJournal()
             // M-E (FR-KVP6): destroy current-epoch entry DEKs with no matching live
             // entry — orphans from a crash between DEK create and manifest commit, or
             // from files swept without their key. Keychain unavailability is tolerated
@@ -474,6 +497,7 @@ actor KVDiskCacheStore {
             } catch let e as KVKeychainError where isUnavailable(e) {
                 // dormant for keychain; reconciliation retries on the next activation
             }
+            recountArtifactAccounting()
             activated = true
             notifyEpoch()
             startRetentionTimer()
@@ -627,6 +651,7 @@ actor KVDiskCacheStore {
             throw KVStoreError.io("namespace metadata exceeds 256 KiB")
         }
         try writeFileAtomic(data, to: metadataURL)
+        metadataBytes = data.count   // FR-KVP7 control-plane accounting
     }
 
     // MARK: - Clock high-water (FR-KVP10)
@@ -1189,8 +1214,14 @@ actor KVDiskCacheStore {
         }
         peakStaging = max(peakStaging, decoder.decodedBytes)
 
-        // Update LRU last-eligible-use.
-        if var entry = liveEntries[index] { entry.lastUsedMillis = nowMillis; liveEntries[index] = entry }
+        // Update LRU last-eligible-use, durably (FR-KVP7 usage journal) so the ordering
+        // survives restart and drives eviction. The journal append is best-effort: a
+        // failure degrades LRU durability but never fails the hit.
+        if var entry = liveEntries[index] {
+            entry.lastUsedMillis = nowMillis
+            liveEntries[index] = entry
+            appendUsageRecord(index: index, millis: nowMillis)
+        }
 
         let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
         if emitHitEvent {
@@ -1416,6 +1447,10 @@ actor KVDiskCacheStore {
         lastGeneration.removeAll()
         lastCommitSequence.removeAll()
         committedBytes = 0
+        // FR-KVP7: every entry is crypto-shredded, so its usage journal is stale — clear
+        // it and recount the surviving artifact classes (control doc, any tombstones).
+        clearUsageJournal()
+        recountArtifactAccounting()
         return (entries, bytesFreed)
     }
 
@@ -1502,7 +1537,11 @@ actor KVDiskCacheStore {
     /// existing index does NOT trigger entry-count eviction (the count is unchanged).
     /// Returns false when it cannot be funded.
     private func reserveQuota(_ bytes: Int, isReplacement: Bool, excluding index: String, nowMillis: Int) throws -> Bool {
-        let dataBudget = max(0, config.maxBytes - config.metadataReserveBytes)
+        // FR-KVP7: reserve the ACTUAL non-entry artifact footprint (control doc +
+        // tombstones + usage journal) when it exceeds the fixed metadata floor, so entry
+        // admission never overruns the quota by ignoring control-plane bytes.
+        let reserve = max(config.metadataReserveBytes, controlBytes)
+        let dataBudget = max(0, config.maxBytes - reserve)
         // Entry-count eviction applies only when admitting a NEW index.
         if !isReplacement {
             while liveEntries.count >= config.maxEntries {
@@ -1723,7 +1762,10 @@ actor KVDiskCacheStore {
             keychainItemCount: kcCount,
             eligibilityTTLSeconds: config.eligibilityTTLSeconds,
             purgeHighWatermarkEntries: metadata.purgeHighWatermarks.count,
-            counters: counters)
+            counters: counters,
+            controlBytesUsed: controlBytes,
+            usageJournalBytes: usageJournalBytes,
+            totalBytesUsed: committedBytes + controlBytes)
     }
 
     // MARK: - Telemetry helpers
@@ -1763,6 +1805,80 @@ actor KVDiskCacheStore {
         let data = try KVTombstoneCodec.encode(tomb)
         try writeFileAtomic(data, to: url)
         try fsyncDirectory(tombstonesDir)
+        tombstoneBytes = sumDirBytes(tombstonesDir)   // FR-KVP7 accounting
+    }
+
+    // MARK: - Usage journal + artifact accounting (FR-KVP7)
+
+    /// Recount every non-entry artifact class from disk. Called at activation (after the
+    /// orphan sweep) and after rotation, so `controlBytes` — reserved out of the data
+    /// budget and reported on the inspection surface — reflects the true footprint.
+    private func recountArtifactAccounting() {
+        metadataBytes = fileExists(metadataURL) ? ((try? fileSize(metadataURL)) ?? 0) : 0
+        tombstoneBytes = sumDirBytes(tombstonesDir)
+        usageJournalBytes = fileExists(usageJournalURL) ? ((try? fileSize(usageJournalURL)) ?? 0) : 0
+    }
+
+    private func sumDirBytes(_ dir: URL) -> Int {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil) else { return 0 }
+        var total = 0
+        for file in files { total += (try? fileSize(file)) ?? 0 }
+        return total
+    }
+
+    /// Durably record a last-eligible-use for `index` (best-effort). Compacts when the
+    /// journal crosses the 1 MiB bound (FR-KVP7).
+    private func appendUsageRecord(index: String, millis: Int) {
+        guard let line = try? KVUsageJournalCodec.encodeLine(index: index, millis: millis) else { return }
+        let fd = open(usageJournalURL.path, O_CREAT | O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        do { try writeAll(fd: fd, line) } catch { return }
+        _ = fsync(fd)
+        usageJournalBytes += line.count
+        if usageJournalBytes > KVUsageJournal.maxBytes { try? compactUsageJournal() }
+    }
+
+    /// Rewrite the journal with exactly one record per live entry (drops stale/evicted
+    /// index records), atomically. Keeps the file ≤ 1 MiB in steady state.
+    private func compactUsageJournal() throws {
+        var data = Data()
+        for (index, entry) in liveEntries {
+            data.append(try KVUsageJournalCodec.encodeLine(index: index, millis: entry.lastUsedMillis))
+        }
+        try writeFileAtomic(data, to: usageJournalURL)
+        usageJournalBytes = data.count
+    }
+
+    private func clearUsageJournal() {
+        try? FileManager.default.removeItem(at: usageJournalURL)
+        usageJournalBytes = 0
+    }
+
+    /// Seed durable LRU ordering from the journal. Missing ⇒ fall back to the manifest
+    /// creation times already seeded by the orphan sweep. A malformed COMPLETE record
+    /// quarantines (FR-KVP5) rather than silently resetting the ordering; a torn trailing
+    /// partial line (crash mid-append) is tolerated and ignored.
+    private func loadUsageJournal() throws {
+        guard fileExists(usageJournalURL) else { return }
+        let data: Data
+        do {
+            data = try readBounded(usageJournalURL, maxBytes: KVUsageJournal.readCapBytes)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        let records: [(index: String, millis: Int)]
+        do {
+            records = try KVUsageJournalCodec.decode(data)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        for record in records where liveEntries[record.index] != nil {
+            liveEntries[record.index]?.lastUsedMillis = record.millis
+        }
     }
 
     // MARK: - Free space
@@ -2012,6 +2128,58 @@ enum KVMetadataCodec {
             providerNamespaceID: namespaceID, keyEpoch: epoch, schemaID: schemaID, codecID: codecID,
             purgeHighWatermarks: hw, clockHighWaterMillis: clockHW, rotationJournal: journal,
             retentionBasisMillis: basis)
+    }
+}
+
+// MARK: - Usage journal codec (FR-KVP7 append-only LRU ordering)
+
+enum KVUsageJournal {
+    /// Compaction threshold: the journal is rewritten (one record per live entry) once
+    /// it grows past this, so it stays bounded (FR-KVP7 "compacted ≤ 1 MiB").
+    static let maxBytes = 1024 * 1024
+    /// Load-time cap. A journal larger than this (never produced in steady state) is
+    /// treated as corrupt → quarantine, not silently truncated.
+    static let readCapBytes = 4 * 1024 * 1024
+}
+
+enum KVUsageJournalCodec {
+    /// One newline-terminated record: `{"i":"<index-hex>","u":<millis>}\n`.
+    static func encodeLine(index: String, millis: Int) throws -> Data {
+        var data = try JSONSerialization.data(
+            withJSONObject: ["i": index, "u": millis], options: [.sortedKeys])
+        data.append(0x0A)
+        return data
+    }
+
+    /// Parse complete newline-terminated records in file (chronological) order. A torn
+    /// trailing partial line (no terminating newline — a crash mid-append) is ignored;
+    /// a malformed COMPLETE record throws corrupt (→ quarantine, never a silent reset).
+    static func decode(_ data: Data) throws -> [(index: String, millis: Int)] {
+        let bytes = [UInt8](data)
+        var out: [(index: String, millis: Int)] = []
+        var lineStart = 0
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 0x0A {
+                if i > lineStart {
+                    try appendRecord(Data(bytes[lineStart ..< i]), into: &out)
+                }
+                lineStart = i + 1
+            }
+            i += 1
+        }
+        // bytes[lineStart ..< end] is an unterminated tail → torn append, ignored.
+        return out
+    }
+
+    private static func appendRecord(_ line: Data, into out: inout [(index: String, millis: Int)]) throws {
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              Set(obj.keys) == ["i", "u"],
+              let index = obj["i"] as? String, KVHex.decode(index) != nil,
+              let millis = obj["u"] as? Int, millis >= 0 else {
+            throw KVManifestParseError.corrupt("usage journal record malformed")
+        }
+        out.append((index, millis))
     }
 }
 

@@ -775,6 +775,120 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(used3, used1 * 2, "two same-size entries must sum exactly (no reservation leak)")
     }
 
+    // MARK: - HIGH-2 all-class artifact accounting + usage journal (FR-KVP7)
+
+    /// Inspection/accounting must include every namespace artifact class — the control
+    /// doc, tombstones, and the usage journal — and a temp orphan must be swept (not
+    /// counted) at activation.
+    func testArtifactAccountingIncludesTombstoneAndSweptOrphan() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let keyA = "conv:kvs-synth:acct-a", keyB = "conv:kvs-synth:acct-b"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: keyA, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: keyB, seq: 5, seed: 9, nowMillis: 1_000_050), nowMillis: 1_000_050)
+        let indexA = try await idx(store, keyA)
+        // Read A so a durable usage-journal record exists.
+        _ = try await store.read(rawKey: keyA, runtime: runtime(index: indexA, seq: 5), nowMillis: 1_000_100)
+        // Purge B → leaves a complete tombstone on disk.
+        _ = try await store.purge(rawKey: keyB)
+        await store.deactivate()
+
+        // Inject a temp orphan (crash-interrupted manifest temp) into entry A's dir.
+        let entryDirA = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+            .appendingPathComponent("entries/\(indexA)", isDirectory: true)
+        let orphan = entryDirA.appendingPathComponent("manifest.json.tmp.\(UUID().uuidString)")
+        try Data(repeating: 0x7a, count: 4096).write(to: orphan)
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        let inspection = await store2.inspect()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path), "temp orphan must be swept at activation")
+        XCTAssertEqual(inspection.entryCount, 1, "only entry A survives")
+        XCTAssertGreaterThanOrEqual(inspection.tombstoneCount, 1)
+        XCTAssertGreaterThan(inspection.controlBytesUsed, 0, "control bytes must include the tombstone + journal + meta")
+        XCTAssertGreaterThan(inspection.usageJournalBytes, 0, "the read's journal record must be accounted")
+        XCTAssertEqual(inspection.totalBytesUsed, inspection.bytesUsed + inspection.controlBytesUsed)
+        XCTAssertGreaterThan(inspection.bytesUsed, 0)
+        await store2.deactivate()
+    }
+
+    /// The usage-journal codec round-trips, tolerates a torn trailing append, rejects a
+    /// malformed complete record, and the store compacts the journal below 1 MiB to one
+    /// record per live entry.
+    func testUsageJournalRoundTripAndCompaction() async throws {
+        let a = String(repeating: "a", count: 8), b = String(repeating: "b", count: 8)
+        let r1 = try KVUsageJournalCodec.encodeLine(index: a, millis: 111)
+        let r2 = try KVUsageJournalCodec.encodeLine(index: b, millis: 222)
+        var buf = r1; buf.append(r2)
+        let decoded = try KVUsageJournalCodec.decode(buf)
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(decoded[0].index, a); XCTAssertEqual(decoded[0].millis, 111)
+        XCTAssertEqual(decoded[1].index, b); XCTAssertEqual(decoded[1].millis, 222)
+        // A torn trailing partial line (crash mid-append) is ignored.
+        var torn = buf; torn.append(Data("{\"i\":\"cc".utf8))
+        XCTAssertEqual(try KVUsageJournalCodec.decode(torn).count, 2)
+        // A malformed COMPLETE record throws (→ quarantine at load).
+        var bad = r1; bad.append(Data("not-json\n".utf8))
+        XCTAssertThrowsError(try KVUsageJournalCodec.decode(bad))
+
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:journal"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+        await store.deactivate()
+
+        // Pre-load the on-disk journal with > 1 MiB of valid records so the next append compacts.
+        let journalURL = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+            .appendingPathComponent("usage.jsonl")
+        var big = Data()
+        let line = try KVUsageJournalCodec.encodeLine(index: index, millis: 1)
+        while big.count <= KVUsageJournal.maxBytes { big.append(line) }
+        try big.write(to: journalURL)
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        _ = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_200)
+        let after = try Data(contentsOf: journalURL)
+        XCTAssertLessThanOrEqual(after.count, KVUsageJournal.maxBytes, "journal must compact under 1 MiB")
+        let records = try KVUsageJournalCodec.decode(after)
+        XCTAssertEqual(records.count, 1, "compaction keeps one record per live entry")
+        XCTAssertEqual(records[0].index, index)
+        await store2.deactivate()
+    }
+
+    /// Activation recounts byte accounting from surviving artifacts after a stale-
+    /// generation orphan blob is injected: the orphan is swept and excluded from the count.
+    func testActivationRecountsAfterInjectedOrphan() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:orphan"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+        let baseline = await store.inspect().bytesUsed
+        await store.deactivate()
+
+        let entryDir = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+            .appendingPathComponent("entries/\(index)", isDirectory: true)
+        let orphanBlob = entryDir.appendingPathComponent("gen-99.blob")
+        try Data(repeating: 0x11, count: 8192).write(to: orphanBlob)
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanBlob.path), "stale-generation orphan swept at activation")
+        let recounted = await store2.inspect().bytesUsed
+        XCTAssertEqual(recounted, baseline, "recount must exclude the swept orphan")
+        let result = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_100)
+        guard case .hit = result else { return XCTFail("entry must survive the orphan sweep") }
+        await store2.deactivate()
+    }
+
     func testFreeSpaceFloorRefusesWrite() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()
