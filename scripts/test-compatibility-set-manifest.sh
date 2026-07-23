@@ -137,7 +137,10 @@ for required in (
 ):
     assert required in package, required
 assert 'tar czf "$TARBALL" -C "$STAGE_DIR" .' not in package
-assert '"$WORK/macprovider-cli" release-payload-preflight' in workflow
+assert '"$WORK/macprovider-cli" release-payload-preflight' not in workflow
+assert "Verify exact arm64 provider runtime" in workflow
+assert 'provider_version="$("$provider_binary" --version)"' in workflow
+assert "scripts/compatibility-set-manifest.py validate" in workflow
 assert '"$provider_binary" release-payload-preflight' in artifact_checker
 assert 'provider_version_at_least 1 8 39' in artifact_checker
 archive_contract = re.search(

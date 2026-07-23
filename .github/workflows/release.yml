@@ -247,9 +247,75 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  verify_provider_runtime:
+    name: Verify unsigned provider runtime on arm64
+    needs: build
+    # GitHub's macos-15 label is the Apple Silicon image. The protected signer
+    # remains on macos-15-intel for the reviewed OpenSSL bottle.
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout reviewed release commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download unsigned build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-release-${{ needs.build.outputs.commit }}
+          path: ${{ runner.temp }}/unsigned-release-inputs
+
+      - name: Verify exact arm64 provider runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          tag="${{ needs.build.outputs.tag }}"
+          unsigned_dir="$RUNNER_TEMP/unsigned-release-inputs"
+          unsigned_assets=(
+            "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
+            "$unsigned_dir/Malibu.app.tar.gz"
+            "$unsigned_dir/release-toolchain.json"
+            "$unsigned_dir/coordinator-linux-amd64"
+            "$unsigned_dir/coordinator-cli-linux-amd64"
+            "$unsigned_dir/gateway-linux-amd64"
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ needs.build.outputs.commit }}" \
+            "$GITHUB_REPOSITORY" "${{ needs.build.outputs.prerelease }}" \
+            "$unsigned_dir/release-toolchain.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json" \
+            "${unsigned_assets[@]}"
+          cmp "$unsigned_dir/unsigned-release-manifest.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json"
+
+          provider_archive="$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
+          if tar tvzf "$provider_archive" \
+            | awk '{print substr($1,1,1), $0}' \
+            | grep -E '^[lhbcp]' >/dev/null; then
+            echo "::error::unsigned provider artifact contains an unsafe member" >&2
+            exit 1
+          fi
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/provider-runtime.XXXXXX")"
+          cleanup_runtime() {
+            rm -rf "$runtime_dir"
+          }
+          trap cleanup_runtime EXIT
+          tar -xzf "$provider_archive" -C "$runtime_dir" macprovider-cli
+          provider_binary="$runtime_dir/macprovider-cli"
+          test -x "$provider_binary"
+          provider_arches=$(/usr/bin/lipo -archs "$provider_binary")
+          test "$provider_arches" = arm64
+          provider_version="$("$provider_binary" --version)"
+          test "$provider_version" = "${tag#v}"
+
   sign_publish:
     name: Sign and publish reviewed release
-    needs: build
+    needs: [build, verify_provider_runtime]
     runs-on: macos-15-intel
     environment: production-release
     permissions:
@@ -508,7 +574,11 @@ jobs:
             echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
           }
-          "$WORK/macprovider-cli" release-payload-preflight
+          signed_provider_arches=$(/usr/bin/lipo -archs "$WORK/macprovider-cli")
+          [ "$signed_provider_arches" = arm64 ] || {
+            echo "::error::signed provider binary is not exact arm64" >&2
+            exit 1
+          }
 
           # Step 3: notarize. notarytool needs a zip or dmg, not a raw
           # binary, so wrap the binary in a transient zip for submission
@@ -1019,9 +1089,9 @@ jobs:
             exit 1
           fi
 
-          pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
-          if [ "$pkg_version" != "${tag#v}" ]; then
-            echo "::error::provider package version mismatch: got $pkg_version want ${tag#v}" >&2
+          pkg_provider_arches=$(/usr/bin/lipo -archs "$pkg_expand_dir/Payload/macprovider-cli")
+          if [ "$pkg_provider_arches" != arm64 ]; then
+            echo "::error::provider package binary is not exact arm64" >&2
             exit 1
           fi
 

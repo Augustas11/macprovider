@@ -80,7 +80,12 @@ candidate_input = re.search(
 )
 if candidate_input is None:
     raise SystemExit("candidate dispatch input must be a boolean defaulting to false")
-build = text.split("\n  build:\n", 1)[1].split("\n  sign_publish:\n", 1)[0]
+build = text.split("\n  build:\n", 1)[1].split(
+    "\n  verify_provider_runtime:\n", 1
+)[0]
+provider_runtime = text.split("\n  verify_provider_runtime:\n", 1)[1].split(
+    "\n  sign_publish:\n", 1
+)[0]
 publish = text.split("\n  sign_publish:\n", 1)[1]
 
 
@@ -381,6 +386,10 @@ for requirement in (
     "ONLY_ACTIVE_ARCH=NO",
     'ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")',
     '[ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ]',
+    'PACKAGE_HOST_ARCH=$(uname -m)',
+    'case "$PACKAGE_HOST_ARCH" in',
+    'ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/macprovider-cli" --version',
+    "Deferring arm64 provider runtime checks",
 ):
     if package_script.count(requirement) != 1:
         raise SystemExit(
@@ -476,6 +485,49 @@ def validate_protected_openssl(job):
 
 if "secrets." in build or "contents: write" in build:
     raise SystemExit("unprivileged build job contains a secret or write permission")
+if "secrets." in provider_runtime or "contents: write" in provider_runtime:
+    raise SystemExit("unprivileged arm64 runtime job contains a secret or write permission")
+if "environment:" in provider_runtime:
+    raise SystemExit("unsigned arm64 runtime verification must not enter a protected environment")
+if "runs-on: macos-15\n" not in provider_runtime:
+    raise SystemExit("provider runtime verification must use GitHub's arm64 macos-15 runner")
+for requirement in (
+    "needs: build",
+    'ref: ${{ needs.build.outputs.commit }}',
+    'name: unsigned-release-${{ needs.build.outputs.commit }}',
+    'test "$(uname -m)" = arm64',
+    "scripts/build-release-provenance.py",
+    'cmp "$unsigned_dir/unsigned-release-manifest.json"',
+    "unsigned provider artifact contains an unsafe member",
+    'provider_arches=$(/usr/bin/lipo -archs "$provider_binary")',
+    'test "$provider_arches" = arm64',
+    'provider_version="$("$provider_binary" --version)"',
+    'test "$provider_version" = "${tag#v}"',
+):
+    if provider_runtime.count(requirement) != 1:
+        raise SystemExit(
+            f"arm64 runtime verifier must contain the exact fail-closed gate: {requirement}"
+        )
+if "needs: [build, verify_provider_runtime]" not in publish:
+    raise SystemExit("protected publication must depend on the arm64 runtime verifier")
+for forbidden in (
+    '"$WORK/macprovider-cli" release-payload-preflight',
+    '"$pkg_expand_dir/Payload/macprovider-cli" --version',
+):
+    if forbidden in publish:
+        raise SystemExit(
+            f"Intel protected publication must not execute an arm64 payload: {forbidden}"
+        )
+for requirement in (
+    'signed_provider_arches=$(/usr/bin/lipo -archs "$WORK/macprovider-cli")',
+    '[ "$signed_provider_arches" = arm64 ]',
+    'pkg_provider_arches=$(/usr/bin/lipo -archs "$pkg_expand_dir/Payload/macprovider-cli")',
+    'if [ "$pkg_provider_arches" != arm64 ]; then',
+):
+    if publish.count(requirement) != 1:
+        raise SystemExit(
+            f"protected publication must retain non-executing exact-arm64 validation: {requirement}"
+        )
 if "environment: production-release" not in publish:
     raise SystemExit("secret-bearing publish job lacks the protected environment")
 if "scripts/verify-release-source.sh" not in build or "scripts/verify-release-source.sh" not in publish:

@@ -110,16 +110,28 @@ if [ ! -x "$PRODUCTS/macprovider-cli" ]; then
   echo "FATAL: macprovider-cli not found at $PRODUCTS"
   exit 1
 fi
-ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/macprovider-cli" --version | tr -d '\r\n')
-[ "$ACTUAL_PROVIDER_CLI_VERSION" = "$PROVIDER_CLI_VERSION" ] || {
-  echo "FATAL: built provider CLI version $ACTUAL_PROVIDER_CLI_VERSION does not match declared component $PROVIDER_CLI_VERSION" >&2
-  exit 1
-}
 ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")
 [ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ] || {
   echo "FATAL: built provider CLI architecture $ACTUAL_PROVIDER_CLI_ARCHES is not exact arm64" >&2
   exit 1
 }
+PACKAGE_HOST_ARCH=$(uname -m)
+case "$PACKAGE_HOST_ARCH" in
+  arm64)
+    ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/macprovider-cli" --version | tr -d '\r\n')
+    [ "$ACTUAL_PROVIDER_CLI_VERSION" = "$PROVIDER_CLI_VERSION" ] || {
+      echo "FATAL: built provider CLI version $ACTUAL_PROVIDER_CLI_VERSION does not match declared component $PROVIDER_CLI_VERSION" >&2
+      exit 1
+    }
+    ;;
+  x86_64)
+    echo "==> Deferring arm64 provider runtime checks to the release workflow's arm64 verifier."
+    ;;
+  *)
+    echo "FATAL: unsupported package host architecture $PACKAGE_HOST_ARCH" >&2
+    exit 1
+    ;;
+esac
 if [ ! -f "$PRODUCTS/mlx.metallib" ]; then
   if [ -f "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
     cp "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" "$PRODUCTS/mlx.metallib"
