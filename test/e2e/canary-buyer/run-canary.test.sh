@@ -132,6 +132,17 @@ grep -q 'class=emergency_disabled' "$TMP/disabled.err"
 test ! -e "$CANARY_TEST_ATTEMPTS"
 rm "$CANARY_DISABLE_FILE"
 
+# Drill paper + baseline matrix must ship with the kill-switch scripts so ops
+# can run the Pearl physical gate without inventing procedure mid-incident.
+repo_root="$(cd "$HERE/../../.." && pwd)"
+test -f "$repo_root/ops/runbooks/584-emergency-disable-drill.md"
+test -f "$repo_root/ops/runbooks/584-physical-baseline-matrix.md"
+grep -q 'class=emergency_disabled' "$repo_root/ops/runbooks/584-emergency-disable-drill.md"
+grep -Eq 'never[[:space:]*]*authorizes production re-enable|does not authorize production re-enable' \
+  "$repo_root/ops/runbooks/584-emergency-disable-drill.md"
+grep -q 'thermal' "$repo_root/ops/runbooks/584-physical-baseline-matrix.md"
+grep -q 'FR-CAN23' "$repo_root/ops/runbooks/584-physical-baseline-matrix.md"
+
 if CANARY_REQUIRE_HEARTBEAT=1 CANARY_NODE_BIN="$TMP/node-controlled" CANARY_CURL_BIN="$TMP/curl-ok" \
     "$HERE/run-canary.sh" >/dev/null 2>"$TMP/missing-heartbeat.err"; then
   echo "expected missing required heartbeat to fail" >&2
