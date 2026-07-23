@@ -159,6 +159,58 @@ intent and bringing in the idempotency-key feature added during
 review. Backup branch `backup-main-pre-merge-20260604` preserves the
 pre-merge tip in case of regression.
 
+## PR governance declaration gate (don't panic when it's red)
+
+Every PR runs the `spec-index` workflow's `check` job
+(`scripts/check_spec_pr_declaration.py`), which requires the **PR body** to
+contain exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
+`SPEC-GOVERNANCE-DECLARATION-END` block wrapping a
+`schema_version: "spec-pr-governance-v1"` JSON payload. Omit it and that
+job goes red with `PR body must contain exactly one ...DECLARATION-BEGIN/END`.
+
+**This `check` is advisory, not a merge blocker.** The `main` ruleset
+requires only the **`ci-required`** status context (the aggregation job at
+the bottom of `.github/workflows/ci.yml`; it does *not* `needs:` spec-index)
+plus **1 approving review**. A red `spec-index / check` does not block merge.
+
+Fill the block honestly when a spec fits (real example, PR #713):
+
+```
+SPEC-GOVERNANCE-DECLARATION-BEGIN
+{
+  "schema_version": "spec-pr-governance-v1",
+  "behavior_change": "yes",          // "none" or "yes"
+  "contract_change": "none",         // "yes" if you touch AUTHORITY.json,
+                                     // CONFORMANCE.json, or a canonical SPEC-NNN
+  "specs": ["SPEC-020"],
+  "requirements": ["SPEC-020-R001"],
+  "authority_domains": ["provider-autoupdate"],
+  "arbitration": ["CODE_BUG"],
+  "tests": ["scripts/test-catalog-release.sh"],
+  "journeys": ["not-required"],
+  "issue": "https://github.com/Augustas11/macprovider/issues/608"
+}
+SPEC-GOVERNANCE-DECLARATION-END
+```
+
+Rules: `behavior_change: "none"` is allowed **only** for governance-only
+paths (`specs/**`, the `check_spec_*`/`gen_spec_index` scripts,
+`schemas/spec-*`, `.github/CODEOWNERS`, `.github/workflows/spec-index.yml`,
+`beta/DECISION_CRITERIA.md`, `docs/spec-governance-foundation.md`,
+`docs/spec-history/**`). Any **other** changed path is "non-governance" and
+rejects `"none"` — it must be `"yes"` with ≥1 each of specs / requirements /
+authority_domains / arbitration / tests / journeys, all validated against
+`specs/AUTHORITY.json` and `specs/CONFORMANCE.json`.
+
+**Infra/CI-only PRs (e.g. a `ci.yml` tweak) have no honest declaration:**
+`ci.yml` is a non-governance path but no authority domain governs CI, so
+`"none"` is rejected and `"yes"` has no real spec to cite. Do **not**
+fabricate a spec link. Either merge past the advisory red (state in the PR
+body that `check` is non-required) or bundle the CI change into a
+spec-linked PR (how #713 shipped its `ci.yml` edit). Do not relax `ci.yml`
+into the governance-only allowlist to dodge this — that regime looks
+deliberate.
+
 ## Other repo conventions worth remembering
 
 - Every implementation slice must pass the audit loop before being treated as
