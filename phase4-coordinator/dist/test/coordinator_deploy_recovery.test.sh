@@ -224,6 +224,9 @@ run_recover
 [ ! -e "$NGINX_ROOT/sites-enabled/stats.streamvc.live" ] || fail "new stats nginx enablement was not removed"
 grep -qx -- "--restore=$ROLLBACK/request-log-db.acl" "$SETFACL_LOG" || fail "request-log ACL was not restored"
 [ "$(readlink "$ROOT/autotune/current")" = releases/old ] || fail "catalog current was not restored"
+[ "$(cat "$ROOT/tier2-catalog.json")" = old-tier2-catalog ] &&
+  [ "$(readlink "$ROOT/autotune/current")" = releases/old ] ||
+  fail "legacy Tier-2 bridge and current pointer were not restored together"
 [ "$(cat "$ROOT/autotune/.previous-target")" = releases/older ] || fail "catalog previous target was not restored"
 [ ! -d "$ROOT/autotune/releases/new" ] || fail "new release was not removed"
 [ ! -e "$ROLLBACK" ] || fail "successful recovery did not remove its snapshot"
@@ -244,6 +247,7 @@ seed_transaction
 rm -f "$ROLLBACK/tier2-catalog.json" "$ROLLBACK/had-tier2-catalog"
 run_recover
 [ ! -e "$ROOT/tier2-catalog.json" ] || fail "previously absent Tier-2 catalog was not removed"
+[ "$(readlink "$ROOT/autotune/current")" = releases/old ] || fail "current pointer was not restored when legacy Tier-2 was absent"
 
 seed_transaction
 rm -f "$ROLLBACK/coordinator"

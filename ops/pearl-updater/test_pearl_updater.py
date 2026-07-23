@@ -14,7 +14,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -156,6 +158,60 @@ class PearlUpdaterTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    class BuyerProofResponse:
+        def __init__(
+            self,
+            *,
+            request_id: str,
+            provider_id: str = "catalog-canary",
+            status: int = 200,
+            url: str = "https://api.streamvc.live/v1/chat/completions",
+            lines: list[bytes] | None = None,
+        ):
+            self.headers = {"X-Provider-Id": provider_id, "X-Request-Id": request_id}
+            self.status = status
+            self._url = url
+            self._lines = lines if lines is not None else [
+                b'data: {"model":"mlx-community/Llama-3.2-3B-Instruct-4bit","choices":[{"delta":{"content":"ok"}}]}\n\n',
+                b"data: [DONE]\n\n",
+            ]
+            self.readline_limits: list[int] = []
+            self._buffer = io.BytesIO(b"".join(self._lines))
+
+        def geturl(self):
+            return self._url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return iter(self._lines)
+
+        def readline(self, limit=-1):
+            self.readline_limits.append(limit)
+            return self._buffer.readline(limit)
+
+    class BuyerProofOpener:
+        def __init__(self, response_factory):
+            self.response_factory = response_factory
+            self.requests = []
+            self.timeouts = []
+
+        def open(self, request, *, timeout):
+            self.requests.append(request)
+            self.timeouts.append(timeout)
+            response = self.response_factory(request)
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+    def buyer_proof_opener(self, response_factory):
+        opener = self.BuyerProofOpener(response_factory)
+        return opener, mock.patch.object(updater_module, "_credential_safe_opener", return_value=opener)
+
     def sign(self, payload: Path, signature: Path):
         subprocess.run(
             ["openssl", "dgst", "-sha256", "-sign", str(self.key), "-out", str(signature), str(payload)],
@@ -279,8 +335,6 @@ class PearlUpdaterTests(unittest.TestCase):
         (install / "autotune" / "current").symlink_to(
             f"releases/{catalog_directory_name}"
         )
-        shutil.copy2(release.directory / "tier2-catalog.json", install / "tier2-catalog.json")
-        (install / "tier2-catalog.json").chmod(0o640)
         self.updater.state_root.mkdir(parents=True, exist_ok=True)
         state = self.updater.state_root / "current-release.json"
         state.write_text(
@@ -437,7 +491,11 @@ class PearlUpdaterTests(unittest.TestCase):
         releases.mkdir(parents=True, mode=0o750)
         (install / "autotune").chmod(0o750)
         releases.chmod(0o750)
-        (releases / "old-catalog").mkdir(mode=0o750)
+        old_catalog = releases / "old-catalog"
+        old_catalog.mkdir(mode=0o750)
+        old_catalog.chmod(0o750)
+        (old_catalog / "tier2-catalog.json").write_bytes(b'previous signed Tier-2 bytes\n')
+        (old_catalog / "tier2-catalog.json").chmod(0o640)
         (releases / "older-catalog").mkdir(mode=0o750)
         (install / "autotune" / "current").symlink_to("releases/old-catalog")
         previous = install / "autotune" / ".previous-target"
@@ -460,10 +518,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.sha256_file(releases / catalog_directory_name / name),
                 release.catalog.files[name],
             )
-        self.assertEqual(
-            updater_module.sha256_file(legacy_tier2),
-            release.catalog.files["tier2-catalog.json"],
-        )
+        self.assertFalse(legacy_tier2.exists())
 
         tx = self.root / "catalog-rollback"
         tx.mkdir(mode=0o700)
@@ -499,6 +554,41 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(legacy_tier2.stat().st_uid, legacy_stat.st_uid)
         self.assertEqual(legacy_tier2.stat().st_gid, legacy_stat.st_gid)
         self.assertEqual(stat.S_IMODE(legacy_tier2.stat().st_mode), 0o600)
+
+    def test_catalog_rollback_removes_legacy_when_previously_absent(self):
+        release = self.stage(self.verify())
+        catalog_directory_name = self.updater._catalog_release_directory_name(release)
+        install = self.updater.install_root
+        releases = install / "autotune" / "releases"
+        releases.mkdir(parents=True, mode=0o750)
+        (install / "autotune").chmod(0o750)
+        releases.chmod(0o750)
+        (install / "autotune" / "current").symlink_to(
+            f"releases/{catalog_directory_name}"
+        )
+        legacy_tier2 = install / "tier2-catalog.json"
+        legacy_tier2.write_text("candidate-created legacy file\n")
+        legacy_tier2.chmod(0o640)
+        tx = self.root / "catalog-rollback-absent"
+        tx.mkdir(mode=0o700)
+        (tx / "catalog-manifest.json").write_text(
+            json.dumps(
+                {
+                    "current_target": None,
+                    "previous_target": None,
+                    "candidate_existed": False,
+                    "candidate_release_id": catalog_directory_name,
+                    "legacy_tier2": {"existed": False},
+                }
+            )
+            + "\n"
+        )
+        (tx / "catalog-manifest.json").chmod(0o600)
+
+        self.updater._restore_catalog(tx)
+
+        self.assertFalse((install / "autotune" / "current").exists())
+        self.assertFalse(legacy_tier2.exists())
 
     def test_catalog_install_uses_service_group_and_repairs_restrictive_umask(self):
         release = self.stage(self.verify())
@@ -537,6 +627,178 @@ class PearlUpdaterTests(unittest.TestCase):
             installed = destination / name
             self.assertEqual(installed.stat().st_gid, service_gid)
             self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o640)
+
+    def test_catalog_cutover_gate_rejects_mismatched_legacy_before_mutation(self):
+        release = self.stage(self.verify())
+        install = self.updater.install_root
+        catalog_root = install / "autotune"
+        releases = catalog_root / "releases"
+        active = releases / "active-catalog"
+        active.mkdir(parents=True, mode=0o750)
+        catalog_root.chmod(0o750)
+        releases.chmod(0o750)
+        active.chmod(0o750)
+        shutil.copy2(release.directory / "tier2-catalog.json", active / "tier2-catalog.json")
+        (active / "tier2-catalog.json").chmod(0o640)
+        (catalog_root / "current").symlink_to("releases/active-catalog")
+        legacy = install / "tier2-catalog.json"
+        legacy.write_text("different legacy bytes\n")
+        legacy.chmod(0o640)
+
+        with mock.patch.object(self.updater, "_repair_catalog_directory") as repair:
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "does not match the active release-bound catalog",
+            ):
+                self.updater.install_catalog(release)
+
+        repair.assert_not_called()
+        self.assertTrue(legacy.exists())
+        self.assertEqual(os.readlink(catalog_root / "current"), "releases/active-catalog")
+
+    def test_catalog_cutover_gate_rejects_symlinked_release_directory(self):
+        release = self.stage(self.verify())
+        install = self.updater.install_root
+        catalog_root = install / "autotune"
+        releases = catalog_root / "releases"
+        releases.mkdir(parents=True, mode=0o750)
+        catalog_root.chmod(0o750)
+        releases.chmod(0o750)
+        external = self.root / "external-catalog"
+        external.mkdir(mode=0o750)
+        current_tier2 = external / "tier2-catalog.json"
+        shutil.copy2(release.directory / "tier2-catalog.json", current_tier2)
+        current_tier2.chmod(0o640)
+        (releases / "active-catalog").symlink_to(external, target_is_directory=True)
+        (catalog_root / "current").symlink_to("releases/active-catalog")
+        legacy = install / "tier2-catalog.json"
+        shutil.copy2(current_tier2, legacy)
+        legacy.chmod(0o640)
+
+        with mock.patch.object(self.updater, "_repair_catalog_directory") as repair:
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "installed catalog release is not a directory",
+            ):
+                self.updater.install_catalog(release)
+
+        repair.assert_not_called()
+        self.assertTrue(legacy.exists())
+        self.assertEqual(os.readlink(catalog_root / "current"), "releases/active-catalog")
+
+    def test_remove_legacy_tier2_rejects_non_regular_path(self):
+        legacy = self.updater.install_root / "tier2-catalog.json"
+        legacy.parent.mkdir(parents=True)
+        target = self.root / "legacy-target"
+        target.write_text("signed bytes\n")
+        legacy.symlink_to(target)
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "legacy Tier-2 catalog is not a regular file",
+        ):
+            self.updater._remove_legacy_tier2_catalog()
+
+        self.assertTrue(legacy.is_symlink())
+        self.assertEqual(target.read_text(), "signed bytes\n")
+
+    def test_candidate_assessment_rejects_legacy_mismatch_before_mutation(self):
+        release = self.stage(self.verify())
+        self.install_coherent_pair(release)
+        legacy = self.updater.install_root / "tier2-catalog.json"
+        legacy.write_text("different legacy bytes\n")
+        legacy.chmod(0o640)
+        self.updater.atomic_install = mock.Mock()
+        self.updater.install_catalog = mock.Mock()
+        self.updater.candidate_executions.clear()
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "does not match the active release-bound catalog",
+        ):
+            self.updater.assess_candidate(release)
+
+        self.updater.atomic_install.assert_not_called()
+        self.updater.install_catalog.assert_not_called()
+        self.assertEqual(self.updater.candidate_executions, [])
+
+    def test_candidate_assessment_rejects_upgrade_while_legacy_tier2_exists(self):
+        old_release = self.stage(self.verify())
+        self.install_coherent_pair(old_release)
+        legacy = self.updater.install_root / "tier2-catalog.json"
+        shutil.copy2(self.updater._current_tier2_catalog_path(), legacy)
+        legacy.chmod(0o640)
+        self.make_bundle("1.8.28")
+        self.updater.candidate_version = "v1.8.28"
+        upgrade = self.stage(self.updater.verify_release(self.bundle, "v1.8.28"))
+        self.updater.candidate_executions.clear()
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "requires same-version repair_pair before upgrade",
+        ):
+            self.updater.assess_candidate(upgrade)
+
+        self.assertEqual(self.updater.candidate_executions, [])
+
+    def test_catalog_cutover_gate_rejects_unsafe_legacy_before_mutation(self):
+        release = self.stage(self.verify())
+        install = self.updater.install_root
+        catalog_root = install / "autotune"
+        releases = catalog_root / "releases"
+        active = releases / "active-catalog"
+        active.mkdir(parents=True, mode=0o750)
+        catalog_root.chmod(0o750)
+        releases.chmod(0o750)
+        active.chmod(0o750)
+        shutil.copy2(release.directory / "tier2-catalog.json", active / "tier2-catalog.json")
+        (active / "tier2-catalog.json").chmod(0o640)
+        (catalog_root / "current").symlink_to("releases/active-catalog")
+        target = self.root / "unsafe-target"
+        target.write_text("do not overwrite\n")
+        legacy = install / "tier2-catalog.json"
+        legacy.symlink_to(target)
+
+        with mock.patch.object(self.updater, "_repair_catalog_directory") as repair:
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "legacy Tier-2 catalog is not a regular file",
+            ):
+                self.updater.install_catalog(release)
+
+        repair.assert_not_called()
+        self.assertTrue(legacy.is_symlink())
+        self.assertEqual(target.read_text(), "do not overwrite\n")
+
+    def test_catalog_cutover_gate_rejects_legacy_without_valid_current_before_mutation(self):
+        release = self.stage(self.verify())
+        install = self.updater.install_root
+        install.mkdir(mode=0o750)
+        legacy = install / "tier2-catalog.json"
+        legacy.write_bytes((release.directory / "tier2-catalog.json").read_bytes())
+        legacy.chmod(0o640)
+
+        with mock.patch.object(self.updater, "_repair_catalog_directory") as repair:
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "without a valid current catalog pointer",
+            ):
+                self.updater.install_catalog(release)
+
+        repair.assert_not_called()
+        self.assertTrue(legacy.exists())
+
+    def test_catalog_install_allows_bootstrap_when_current_and_legacy_are_absent(self):
+        release = self.stage(self.verify())
+        self.updater.install_root.mkdir(mode=0o750)
+        self.updater.install_catalog(release)
+
+        install = self.updater.install_root
+        self.assertEqual(
+            os.readlink(install / "autotune" / "current"),
+            f"releases/{self.updater._catalog_release_directory_name(release)}",
+        )
+        self.assertFalse((install / "tier2-catalog.json").exists())
 
     def test_catalog_install_repairs_existing_release_permissions_for_service(self):
         release = self.stage(self.verify())
@@ -716,6 +978,9 @@ class PearlUpdaterTests(unittest.TestCase):
             'coordinator_advertised_version:\n'
             '  latest_binary_version: "1.8.26" # preserve this comment\n'
             '  update_base_url: "https://github.com/Augustas11/macprovider/releases/download"\n'
+            'tier2:\n'
+            '  catalog_path: /opt/macprovider/tier2-catalog.json\n'
+            '  require_hash_verified: false\n'
         )
         base.write_text(original)
         self.updater.coordinator_runtime = mock.Mock(
@@ -738,6 +1003,11 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn('latest_binary_version: "1.8.27"', staged_text)
         self.assertIn('operator_key: "env:OPERATOR_KEY"', staged_text)
         self.assertIn("enforce_provider_admission: false", staged_text)
+        self.assertIn(
+            f"catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json",
+            staged_text,
+        )
+        self.assertIn("require_hash_verified: false", staged_text)
         self.assertRegex(staged_text, r'provider_admission_bridge_deadline: "[^"]+Z"')
 
         self.install_pair("1.8.26", "1.8.26")
@@ -819,6 +1089,9 @@ class PearlUpdaterTests(unittest.TestCase):
             '  provider_admission_bridge_deadline: "2026-07-12T00:00:00Z"\n'
             "coordinator_advertised_version:\n"
             '  latest_binary_version: "1.8.26"\n'
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
         )
         self.updater.config = updater_module.dataclasses.replace(
             self.updater.config,
@@ -888,7 +1161,12 @@ class PearlUpdaterTests(unittest.TestCase):
         install.mkdir(parents=True)
         base = install / "coordinator.yaml"
         overlay = self.root / "coordinator.overlay.yaml"
-        base.write_text('coordinator_advertised_version:\n  latest_binary_version: "1.8.25"\n')
+        base.write_text(
+            'coordinator_advertised_version:\n  latest_binary_version: "1.8.25"\n'
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
         overlay.write_text(
             'pool:\n  canary_enabled: false\n'
             'coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n'
@@ -902,8 +1180,14 @@ class PearlUpdaterTests(unittest.TestCase):
         update = self.updater.prepare_config_update(release)
 
         self.assertEqual(update.target, overlay)
+        self.assertEqual(update.catalog_target, base)
         self.assertIn('latest_binary_version: "1.8.27"', update.staged.read_text())
         self.assertIn('canary_enabled: false', update.staged.read_text())
+        self.assertIn(
+            f"catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json",
+            update.catalog_staged.read_text(),
+        )
+        self.assertNotIn("latest_binary_version: \"1.8.27\"", update.catalog_staged.read_text())
 
         (install / "gateway.yaml").write_text("gateway: config\n")
         self.install_pair("1.8.26", "1.8.26")
@@ -922,7 +1206,12 @@ class PearlUpdaterTests(unittest.TestCase):
         install = self.updater.install_root
         install.mkdir(parents=True)
         base = install / "coordinator.yaml"
-        base.write_text('coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n')
+        base.write_text(
+            'coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n'
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
         self.updater.coordinator_runtime = mock.Mock(
             return_value=updater_module.CoordinatorRuntime(base, None, {"TOKEN": "sentinel-secret"})
         )
@@ -1063,11 +1352,13 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.local_gateway_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_ready = mock.Mock(return_value=True)
+        self.updater.assert_effective_tier2_catalog_path = mock.Mock()
         self.updater.prove_serving_recovery = mock.Mock()
         self.updater.verify_provider_admission_rollout_policy = mock.Mock()
         self.updater.verify_exact_catalog_admission = mock.Mock()
         self.updater.verify_exact_provider_canary = mock.Mock()
         self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.verify_live_runtime_binding = mock.Mock()
         self.updater.restore_auxiliary_services = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
         self.updater._restore_canary_timer = mock.Mock()
@@ -1084,11 +1375,34 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.prove_serving_recovery.assert_called_once_with(
             self.updater.release_identity(release)
         )
+        self.updater.assert_effective_tier2_catalog_path.assert_called_once_with()
         self.updater.verify_provider_admission_rollout_policy.assert_called_once_with()
+        self.updater.verify_live_runtime_binding.assert_called_once_with(release)
         self.updater.verify_exact_catalog_admission.assert_called_once_with(release)
         self.updater.verify_exact_provider_canary.assert_called_once_with(release)
         self.updater.verify_buyer_canary_rollout_posture.assert_called_once_with()
         self.updater._restore_canary_timer.assert_called_once_with()
+
+    def test_rollout_rejects_tier2_drift_after_coordinator_health_before_gateway(self):
+        release = self.verify()
+        self.updater.systemctl = mock.Mock()
+        self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.local_coordinator_ready = mock.Mock(return_value=True)
+        self.updater.local_gateway_ready = mock.Mock(return_value=True)
+        self.updater.assert_effective_tier2_catalog_path = mock.Mock(
+            side_effect=updater_module.UpdateError("effective tier2.catalog_path is not the release-bound current catalog path")
+        )
+        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "effective tier2.catalog_path"):
+            self.updater.verify_rollout(release)
+
+        self.updater.assert_effective_tier2_catalog_path.assert_called_once_with()
+        self.assertEqual(
+            self.updater.systemctl.call_args_list,
+            [mock.call("start", "macprovider-coordinator.service")],
+        )
+        self.updater.local_gateway_ready.assert_not_called()
 
     def test_bridge_rollout_requires_capacity_and_safe_active_deadline(self):
         deadline = (
@@ -1463,6 +1777,346 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_row_identity=row_identity,
             assigned_id="session-after-reconnect",
         )
+
+    def test_gateway_buyer_stream_requires_provider_model_token_done_and_request_id(self):
+        token = self.root / "buyer-token"
+        token.write_text("buyer-token-value\n")
+        token.chmod(0o600)
+        opener, opener_patch = self.buyer_proof_opener(
+            lambda request: self.BuyerProofResponse(
+                request_id=request.get_header("X-request-id"),
+            )
+        )
+
+        with (
+            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+            opener_patch,
+        ):
+            proof = self.updater.prove_gateway_buyer_stream(
+                cycle=1,
+                provider_id="catalog-canary",
+                model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+            )
+
+        request = opener.requests[0]
+        self.assertEqual(request.full_url, "https://api.streamvc.live/v1/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer buyer-token-value")
+        self.assertEqual(request.get_header("Accept"), "text/event-stream")
+        payload = json.loads(request.data)
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["model"], "mlx-community/Llama-3.2-3B-Instruct-4bit")
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertIn("cycle 1", payload["messages"][0]["content"])
+        request_uuid = uuid.UUID(request.get_header("X-request-id"))
+        self.assertEqual(request_uuid.version, 4)
+        self.assertIsNone(request.get_header("X-macprovider-proof-cycle"))
+        self.assertIsNone(request.get_header("X-macprovider-proof-timestamp"))
+        self.assertEqual(proof["request_id"], str(request_uuid))
+        self.assertEqual(proof["response_request_id"], str(request_uuid))
+        self.assertEqual(proof["provider_id"], "catalog-canary")
+
+    def test_gateway_buyer_stream_rejects_wrong_provider_or_missing_done(self):
+        token = self.root / "buyer-token"
+        token.write_text("buyer-token-value\n")
+        token.chmod(0o600)
+        wrong_provider_opener, wrong_provider_patch = self.buyer_proof_opener(
+            lambda request: self.BuyerProofResponse(
+                request_id=request.get_header("X-request-id"),
+                provider_id="other-provider",
+                lines=[],
+            )
+        )
+        missing_done_opener, missing_done_patch = self.buyer_proof_opener(
+            lambda request: self.BuyerProofResponse(
+                request_id=request.get_header("X-request-id"),
+                lines=[
+                    b'data: {"model":"mlx-community/Llama-3.2-3B-Instruct-4bit","choices":[{"delta":{"content":"ok"}}]}\n\n',
+                ],
+            )
+        )
+
+        with (
+            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+            wrong_provider_patch,
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "X-Provider-Id"):
+                self.updater.prove_gateway_buyer_stream(
+                    cycle=1,
+                    provider_id="catalog-canary",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                )
+        with (
+            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+            missing_done_patch,
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "did not terminate"):
+                self.updater.prove_gateway_buyer_stream(
+                    cycle=1,
+                    provider_id="catalog-canary",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                )
+        self.assertEqual(len(wrong_provider_opener.requests), 1)
+        self.assertEqual(len(missing_done_opener.requests), 1)
+
+    def test_gateway_buyer_stream_rejects_mismatched_request_id(self):
+        token = self.root / "buyer-token"
+        token.write_text("buyer-token-value\n")
+        token.chmod(0o600)
+        opener, opener_patch = self.buyer_proof_opener(
+            lambda _request: self.BuyerProofResponse(
+                request_id="other-request",
+                lines=[],
+            )
+        )
+
+        with (
+            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+            opener_patch,
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "did not echo X-Request-Id"):
+                self.updater.prove_gateway_buyer_stream(
+                    cycle=1,
+                    provider_id="catalog-canary",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                )
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_gateway_buyer_stream_rejects_redirect_non_200_and_oversized_streams(self):
+        token = self.root / "buyer-token"
+        token.write_text("buyer-token-value\n")
+        token.chmod(0o600)
+
+        cases = [
+            (
+                lambda request: self.BuyerProofResponse(
+                    request_id=request.get_header("X-request-id"),
+                    url="https://api.streamvc.live/redirected",
+                ),
+                "exact HTTP 200",
+            ),
+            (
+                lambda request: self.BuyerProofResponse(
+                    request_id=request.get_header("X-request-id"),
+                    status=500,
+                ),
+                "exact HTTP 200",
+            ),
+            (
+                lambda request: self.BuyerProofResponse(
+                    request_id=request.get_header("X-request-id"),
+                    lines=[b"x" * (updater_module.MAX_BUYER_PROOF_STREAM_LINE_BYTES + 1)],
+                ),
+                "stream line exceeds",
+            ),
+            (
+                lambda request: self.BuyerProofResponse(
+                    request_id=request.get_header("X-request-id"),
+                    lines=[b":" + (b"x" * (updater_module.MAX_BUYER_PROOF_STREAM_LINE_BYTES - 2)) + b"\n"]
+                    * ((updater_module.MAX_BUYER_PROOF_STREAM_BYTES // updater_module.MAX_BUYER_PROOF_STREAM_LINE_BYTES) + 1),
+                ),
+                "stream exceeds",
+            ),
+        ]
+        for response_factory, message in cases:
+            opener, opener_patch = self.buyer_proof_opener(response_factory)
+            with (
+                self.subTest(message=message),
+                mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+                opener_patch,
+            ):
+                with self.assertRaisesRegex(updater_module.UpdateError, message):
+                    self.updater.prove_gateway_buyer_stream(
+                        cycle=1,
+                        provider_id="catalog-canary",
+                        model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                    )
+            self.assertEqual(len(opener.requests), 1)
+
+    def test_gateway_buyer_stream_rejects_oversized_unterminated_line_with_bounded_read(self):
+        token = self.root / "buyer-token"
+        token.write_text("buyer-token-value\n")
+        token.chmod(0o600)
+        responses = []
+
+        def response_factory(request):
+            response = self.BuyerProofResponse(
+                request_id=request.get_header("X-request-id"),
+                lines=[b"x" * (updater_module.MAX_BUYER_PROOF_STREAM_LINE_BYTES + 100)],
+            )
+            responses.append(response)
+            return response
+
+        opener, opener_patch = self.buyer_proof_opener(response_factory)
+        with (
+            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+            opener_patch,
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "stream line exceeds"):
+                self.updater.prove_gateway_buyer_stream(
+                    cycle=1,
+                    provider_id="catalog-canary",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                )
+
+        self.assertEqual(len(opener.requests), 1)
+        self.assertEqual(
+            responses[0].readline_limits,
+            [updater_module.MAX_BUYER_PROOF_STREAM_LINE_BYTES + 1],
+        )
+
+    def test_gateway_buyer_stream_rejects_elapsed_deadline(self):
+        token = self.root / "buyer-token"
+        token.write_text("buyer-token-value\n")
+        token.chmod(0o600)
+
+        class TimeoutResponse(self.BuyerProofResponse):
+            def readline(self, limit=-1):
+                self.readline_limits.append(limit)
+                raise TimeoutError("alarm")
+
+        opener, opener_patch = self.buyer_proof_opener(
+            lambda request: TimeoutResponse(
+                request_id=request.get_header("X-request-id"),
+            )
+        )
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            request_timeout_s=5,
+        )
+        with (
+            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+            opener_patch,
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "elapsed-time limit"):
+                self.updater.prove_gateway_buyer_stream(
+                    cycle=1,
+                    provider_id="catalog-canary",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                )
+        self.assertEqual(opener.timeouts, [5])
+
+    def test_gateway_buyer_stream_uses_no_proxy_no_redirect_opener(self):
+        token = self.root / "buyer-token"
+        token.write_text("buyer-token-value\n")
+        token.chmod(0o600)
+        opener = self.BuyerProofOpener(
+            lambda request: self.BuyerProofResponse(
+                request_id=request.get_header("X-request-id"),
+            )
+        )
+        with (
+            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
+            mock.patch.object(updater_module.urllib.request, "build_opener", return_value=opener) as build_opener,
+        ):
+            self.updater.prove_gateway_buyer_stream(
+                cycle=1,
+                provider_id="catalog-canary",
+                model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+            )
+
+        handlers = build_opener.call_args.args
+        self.assertEqual(handlers[0].proxies, {})
+        self.assertIsInstance(handlers[1], updater_module.NoRedirect)
+
+    def test_live_runtime_binding_checks_processes_after_config_and_catalog_publication(self):
+        release = self.stage(self.verify())
+        self.install_coherent_pair(release)
+        config = self.root / "coordinator.yaml"
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        gateway_config = self.root / "gateway.yaml"
+        gateway_config.write_text("gateway: config\n")
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(config, None, {})
+        )
+        self.updater.gateway_config_path = mock.Mock(return_value=gateway_config)
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.local_gateway_identity_ready = mock.Mock(return_value=True)
+        now = time.time_ns()
+        os.utime(config, ns=(now, now))
+        os.utime(gateway_config, ns=(now + 5, now + 5))
+        os.utime(self.updater.install_root / "autotune" / "current", ns=(now + 10, now + 10), follow_symlinks=False)
+        self.updater._prove_live_service_binary = mock.Mock(
+            side_effect=[
+                {"pid": 101, "inode": 201},
+                {"pid": 102, "inode": 202},
+            ]
+        )
+        self.updater.audit = mock.Mock()
+
+        self.updater.verify_live_runtime_binding(release)
+
+        min_start_after_ns = max(
+            config.lstat().st_mtime_ns,
+            gateway_config.lstat().st_mtime_ns,
+            (self.updater.install_root / "autotune" / "current").lstat().st_mtime_ns,
+        )
+        self.assertEqual(
+            self.updater._prove_live_service_binary.call_args_list,
+            [
+                mock.call(
+                    "macprovider-coordinator.service",
+                    self.updater.install_root / "coordinator",
+                    release.coordinator.sha256,
+                    release.tag,
+                    min_start_after_ns,
+                ),
+                mock.call(
+                    "macprovider-gateway.service",
+                    self.updater.install_root / "gateway",
+                    release.gateway.sha256,
+                    release.tag,
+                    min_start_after_ns,
+                ),
+            ],
+        )
+        self.updater.audit.assert_called_once()
+        self.assertEqual(self.updater.audit.call_args.args[:2], ("live_runtime_binding", "success"))
+
+    def test_live_service_binary_rejects_malformed_or_stale_systemd_start_timestamp(self):
+        binary = self.updater.install_root / "coordinator"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("binary\n")
+        binary.chmod(0o755)
+        self.updater.run_command = mock.Mock()
+
+        self.updater._service_properties = mock.Mock(
+            return_value={
+                "MainPID": "123",
+                "ExecMainStartTimestampMonotonic": "not-an-int",
+            }
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "ExecMainStartTimestampMonotonic is invalid"):
+            self.updater._prove_live_service_binary(
+                "macprovider-coordinator.service",
+                binary,
+                "a" * 64,
+                "1.8.60",
+                1_000_000_000,
+            )
+
+        self.updater._service_properties = mock.Mock(
+            return_value={
+                "MainPID": "123",
+                "ExecMainStartTimestampMonotonic": "2000000",
+            }
+        )
+        with (
+            mock.patch.object(updater_module.time, "time_ns", return_value=1_000_000_000),
+            mock.patch.object(updater_module.time, "monotonic_ns", return_value=2_000_000_000),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "did not start after"):
+                self.updater._prove_live_service_binary(
+                    "macprovider-coordinator.service",
+                    binary,
+                    "a" * 64,
+                    "1.8.60",
+                    1_000_500_000,
+                )
+        self.updater.run_command.assert_not_called()
 
     def test_exact_provider_canary_cannot_cross_the_outer_handoff_deadline(self):
         release = self.verify()
@@ -2824,6 +3478,203 @@ class PearlUpdaterTests(unittest.TestCase):
         _, decision = self.updater.eligibility(release)
         self.assertEqual(decision, "repair_pair")
 
+    def test_same_signed_v1860_repairs_legacy_duplicate_then_becomes_current(self):
+        self.make_bundle("1.8.60")
+        release = self.stage(self.updater.verify_release(self.bundle, "v1.8.60"))
+        self.install_coherent_pair(release)
+        legacy = self.updater.install_root / "tier2-catalog.json"
+        shutil.copy2(
+            self.updater._current_tier2_catalog_path(),
+            legacy,
+        )
+        legacy.chmod(0o640)
+
+        current, decision = self.updater.eligibility(release)
+
+        self.assertEqual((str(current), decision), ("1.8.60", "repair_pair"))
+
+        self.updater.install_catalog(release)
+        current, decision = self.updater.eligibility(release)
+
+        self.assertEqual((str(current), decision), ("1.8.60", "already_current"))
+        self.assertFalse(legacy.exists())
+
+    def test_prove_current_runs_three_single_authority_cycles(self):
+        release = self.stage(self.verify())
+        self.install_coherent_pair(release)
+        config = self.root / "coordinator.yaml"
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(config, None, {})
+        )
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+            catalog_canary_provider_id="catalog-canary",
+        )
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.verify_exact_provider_canary = mock.Mock()
+        self.updater.verify_live_runtime_binding = mock.Mock()
+        self.updater._catalog_canary_expected_model = mock.Mock(return_value="mlx-community/Llama-3.2-3B-Instruct-4bit")
+        self.updater.prove_gateway_buyer_stream = mock.Mock(
+            side_effect=[
+                {
+                    "request_id": f"request-{cycle}",
+                    "response_request_id": f"gateway-request-{cycle}",
+                    "requested_at": f"2026-07-23T00:00:0{cycle}Z",
+                    "provider_id": "catalog-canary",
+                    "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                }
+                for cycle in range(1, 4)
+            ]
+        )
+        proof_order = mock.Mock()
+        proof_order.attach_mock(self.updater.verify_buyer_canary_rollout_posture, "posture")
+        proof_order.attach_mock(self.updater.prove_gateway_buyer_stream, "buyer")
+        proof_order.attach_mock(self.updater.verify_exact_provider_canary, "provider")
+        self.updater.prepare_config_update = mock.Mock()
+        self.updater.snapshot = mock.Mock()
+        self.updater.install_release = mock.Mock()
+        self.updater.audit = mock.Mock()
+
+        current, decision = self.updater.prove_current_release(release)
+
+        self.assertEqual((str(current), decision), ("1.8.27", "already_current"))
+        self.updater.verify_live_runtime_binding.assert_called_once_with(release)
+        self.assertEqual(self.updater.verify_buyer_canary_rollout_posture.call_count, 3)
+        self.assertEqual(self.updater.verify_exact_provider_canary.call_args_list, [mock.call(release)] * 3)
+        self.assertEqual(
+            self.updater.prove_gateway_buyer_stream.call_args_list,
+            [
+                mock.call(
+                    cycle=cycle,
+                    provider_id="catalog-canary",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+                )
+                for cycle in range(1, 4)
+            ],
+        )
+        self.assertEqual(
+            [call[0] for call in proof_order.mock_calls],
+            ["posture", "buyer", "provider"] * 3,
+        )
+        proof_events = [
+            call
+            for call in self.updater.audit.call_args_list
+            if call.args[:2] == ("single_authority_buyer_serving_cycle", "success")
+        ]
+        self.assertEqual([call.kwargs["cycle"] for call in proof_events], [1, 2, 3])
+        self.updater.prepare_config_update.assert_not_called()
+        self.updater.snapshot.assert_not_called()
+        self.updater.install_release.assert_not_called()
+
+    def test_prove_current_rejects_preconditions_fail_closed(self):
+        release = self.stage(self.verify())
+        self.install_coherent_pair(release)
+        config = self.root / "coordinator.yaml"
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(config, None, {})
+        )
+        self.updater.verify_exact_provider_canary = mock.Mock()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.verify_live_runtime_binding = mock.Mock()
+        self.updater.prove_gateway_buyer_stream = mock.Mock()
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "release-bound current catalog path"):
+            self.updater.prove_current_release(release)
+        self.updater.verify_exact_provider_canary.assert_not_called()
+        self.updater.prove_gateway_buyer_stream.assert_not_called()
+
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        (self.updater.install_root / "tier2-catalog.json").write_text("legacy drift\n")
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "does not match the active release-bound catalog",
+        ):
+            self.updater.prove_current_release(release)
+        self.updater.verify_exact_provider_canary.assert_not_called()
+
+        (self.updater.install_root / "tier2-catalog.json").unlink()
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: true\n"
+        )
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "tier2.require_hash_verified must remain false",
+        ):
+            self.updater.prove_current_release(release)
+        self.updater.verify_exact_provider_canary.assert_not_called()
+
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_REQUIRED,
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "hard-disabled buyer canary"):
+            self.updater.prove_current_release(release)
+        self.updater.verify_exact_provider_canary.assert_not_called()
+
+    def test_prove_current_refuses_active_journal_before_reconcile(self):
+        config = self.root / "updater.conf"
+        config.write_text("PEARL_UPDATER_BUYER_CANARY_MODE=disabled\n")
+        config.chmod(0o600)
+        install = self.root / "proof-install"
+        state = self.root / "proof-state"
+        audit = self.root / "proof-audit.jsonl"
+        lock = self.root / "proof.lock"
+        install.mkdir(mode=0o750)
+        state.mkdir(mode=0o700)
+        journal = state / "active-transaction.json"
+        journal.write_text(json.dumps({"schema_version": updater_module.JOURNAL_SCHEMA_VERSION}) + "\n")
+        journal.chmod(0o600)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MACPROVIDER_UPDATER_TESTING": "1",
+                "PEARL_UPDATER_TEST_PUBLIC_KEY": str(self.public),
+                "PEARL_UPDATER_TEST_INSTALL_ROOT": str(install),
+                "PEARL_UPDATER_TEST_STATE_ROOT": str(state),
+                "PEARL_UPDATER_TEST_AUDIT_PATH": str(audit),
+                "PEARL_UPDATER_TEST_LOCK_PATH": str(lock),
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "active phase journal"):
+                updater_module.main(
+                    [
+                        "--prove-current",
+                        "--tag",
+                        "v1.8.27",
+                        "--source-dir",
+                        str(self.bundle),
+                        "--config",
+                        str(config),
+                    ]
+                )
+
     def test_deadman_rejects_legacy_or_inconsistent_schema(self):
         with self.assertRaisesRegex(updater_module.UpdateError, "status/paused_at"):
             self.updater._deadman_get_state({"data": {"attributes": {"paused": True}}})
@@ -3837,11 +4688,13 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.service_active = mock.Mock(return_value=True)
         self.updater.local_coordinator_ready = mock.Mock(return_value=True)
         self.updater.local_gateway_ready = mock.Mock(return_value=True)
+        self.updater.assert_effective_tier2_catalog_path = mock.Mock()
         self.updater.restore_auxiliary_services = mock.Mock()
         self.updater.prove_serving_recovery = mock.Mock()
         self.updater.verify_provider_admission_rollout_policy = mock.Mock()
         self.updater.verify_exact_catalog_admission = mock.Mock()
         self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.verify_live_runtime_binding = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
         self.updater._restore_canary_timer = mock.Mock()
         self.updater.validate_catalog_canary_configuration = mock.Mock(

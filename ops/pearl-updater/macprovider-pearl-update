@@ -24,6 +24,7 @@ import resource
 import secrets
 import shlex
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -33,6 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -101,6 +103,8 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
+MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
+MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
 CANARY_AUTHORITY_VERSION = "issue-585-integration-r7"
 CANARY_AUTHORITY_COMMIT = "43138cee6dd26f18a11934390fc6b3b0623f1e00"
 CANARY_UNIT_BUDGET_S = 180
@@ -347,6 +351,11 @@ class ConfigUpdate:
     original_sha256: str
     previous_version: str
     next_version: str
+    catalog_target: Path | None = None
+    catalog_staged: Path | None = None
+    catalog_original_sha256: str | None = None
+    previous_catalog_path: str | None = None
+    next_catalog_path: str | None = None
 
 
 def _trusted_file_stat(
@@ -443,6 +452,41 @@ def _read_trusted_text(
     if len(payload) > limit:
         raise UpdateError(f"{description} exceeds the updater safety limit: {path}")
     return payload
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _request, _fp, _code, _message, _headers, _new_url):
+        return None
+
+
+def _credential_safe_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+
+@contextlib.contextmanager
+def _elapsed_deadline(seconds: float, description: str):
+    if seconds <= 0:
+        raise UpdateError(f"{description} deadline expired")
+    if not hasattr(signal, "setitimer"):
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def deadline_handler(_signum, _frame):
+        raise TimeoutError(f"{description} exceeded the elapsed-time limit")
+
+    signal.signal(signal.SIGALRM, deadline_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    except TimeoutError as exc:
+        raise UpdateError(f"{description} exceeded the elapsed-time limit") from exc
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0 or previous_timer[1] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -785,6 +829,7 @@ class Updater:
         self.rollback_armed = False
         self.canary_timer_was_active = False
         self.canary_service_was_active = False
+        self.cutover_monotonic_us: int | None = None
         self.previous_services: dict[str, bool] = {}
         self.previous_auxiliary_units: dict[str, bool] = {}
         self.previous_versions: dict[str, str] = {}
@@ -1643,6 +1688,10 @@ class Updater:
 
     def assess_candidate(self, release: Release) -> tuple[SemVer, str]:
         current, decision = self.eligibility(release)
+        self._preflight_legacy_tier2_cutover()
+        if _path_entry_exists(self._legacy_tier2_catalog_path()):
+            if decision != "repair_pair" or release.version != current:
+                raise UpdateError("legacy Tier-2 cutover requires same-version repair_pair before upgrade")
         self.verify_candidate_versions(release)
         return current, decision
 
@@ -1665,8 +1714,7 @@ class Updater:
                 if sha256_file(installed / name) != release.catalog.files[name]:
                     return False
             legacy_tier2 = self.install_root / "tier2-catalog.json"
-            self._assert_catalog_asset(legacy_tier2, "installed legacy Tier-2 catalog")
-            if sha256_file(legacy_tier2) != release.catalog.files["tier2-catalog.json"]:
+            if _path_entry_exists(legacy_tier2):
                 return False
             return True
         except (OSError, UpdateError):
@@ -2199,6 +2247,7 @@ class Updater:
         if runtime.overlay_config is not None:
             config_paths.append(runtime.overlay_config)
         located: list[tuple[Path, int, re.Match[str], list[str]]] = []
+        tier2_catalog_owners: list[tuple[Path, str]] = []
         config_texts: dict[Path, str] = {}
         config_hashes: dict[Path, str] = {}
         for path in config_paths:
@@ -2212,11 +2261,23 @@ class Updater:
             field = self._advertised_field(text, path)
             if field is not None:
                 located.append((path, *field))
+            tier2_catalog_path = self._yaml_section_scalar(
+                text,
+                path,
+                "tier2",
+                "catalog_path",
+                required=False,
+            )
+            if tier2_catalog_path is not None:
+                tier2_catalog_owners.append((path, tier2_catalog_path))
         if not located:
             raise UpdateError("effective coordinator configuration has no advertised binary version field")
+        if not tier2_catalog_owners:
+            raise UpdateError("effective coordinator configuration has no tier2.catalog_path field")
         target, index, match, lines = located[-1]
         previous = next(value for value in match.groups()[1:4] if value is not None)
         lines[index] = f'{match.group(1)}"{release.provider_advertised_version}"{match.group(5)}{match.group(6) or ""}'
+        payloads = dict(config_texts)
         if self.config.provider_admission_policy != release.provider_admission_rollout.mode:
             raise UpdateError("signed provider-admission rollout policy does not match updater policy")
         rollout = release.provider_admission_rollout
@@ -2234,7 +2295,7 @@ class Updater:
                 datetime.datetime.now(datetime.timezone.utc)
                 + datetime.timedelta(seconds=bridge_budget)
             ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        target_payload = self._set_yaml_section_scalars(
+        payloads[target] = self._set_yaml_section_scalars(
             "".join(lines),
             target,
             "autotune",
@@ -2245,9 +2306,19 @@ class Updater:
                 ),
             },
         )
+        catalog_target, previous_catalog_path = tier2_catalog_owners[-1]
+        next_catalog_path = str(self._current_tier2_catalog_path())
+        payloads[catalog_target] = self._set_yaml_section_scalars(
+            payloads[catalog_target],
+            catalog_target,
+            "tier2",
+            {
+                "catalog_path": next_catalog_path,
+            },
+        )
         staged_configs: dict[Path, Path] = {}
         for config_index, path in enumerate(config_paths):
-            payload = target_payload if path == target else config_texts[path]
+            payload = payloads[path]
             staged_path = self.stage_candidate_config(
                 release.directory,
                 f"coordinator-validation-{config_index}.yaml",
@@ -2255,6 +2326,32 @@ class Updater:
             )
             staged_configs[path] = staged_path
         staged = staged_configs[target]
+        staged_catalog_path: str | None = None
+        staged_require_hash_verified: str | None = None
+        for path in config_paths:
+            staged_text = staged_configs[path].read_text(encoding="utf-8")
+            candidate_catalog_path = self._yaml_section_scalar(
+                staged_text,
+                staged_configs[path],
+                "tier2",
+                "catalog_path",
+                required=False,
+            )
+            if candidate_catalog_path is not None:
+                staged_catalog_path = candidate_catalog_path
+            candidate_require_hash = self._yaml_section_scalar(
+                staged_text,
+                staged_configs[path],
+                "tier2",
+                "require_hash_verified",
+                required=False,
+            )
+            if candidate_require_hash is not None:
+                staged_require_hash_verified = candidate_require_hash
+        if staged_catalog_path != next_catalog_path:
+            raise UpdateError("staged effective tier2.catalog_path is not the release-bound current catalog path")
+        if staged_require_hash_verified != "false":
+            raise UpdateError("staged effective tier2.require_hash_verified must remain false")
 
         validation_base = staged_configs[runtime.base_config]
         validation_argv = [
@@ -2283,6 +2380,11 @@ class Updater:
             original_sha256=config_hashes[target],
             previous_version=previous,
             next_version=release.provider_advertised_version,
+            catalog_target=catalog_target,
+            catalog_staged=staged_configs[catalog_target],
+            catalog_original_sha256=config_hashes[catalog_target],
+            previous_catalog_path=previous_catalog_path,
+            next_catalog_path=next_catalog_path,
         )
         self.config_update = update
         self.audit(
@@ -2292,6 +2394,9 @@ class Updater:
             target=str(target),
             previous_version=previous,
             next_version=release.provider_advertised_version,
+            catalog_target=str(catalog_target),
+            previous_catalog_path=previous_catalog_path,
+            next_catalog_path=next_catalog_path,
             provider_admission_policy=release.provider_admission_rollout.mode,
             provider_admission_bridge_deadline=bridge_deadline,
         )
@@ -2842,11 +2947,7 @@ class Updater:
             },
         )
 
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, _request, _fp, _code, _message, _headers, _new_url):
-                return None
-
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        opener = _credential_safe_opener()
         effective_timeout_s = (
             float(self.config.request_timeout_s)
             if timeout_s is None
@@ -3384,12 +3485,19 @@ class Updater:
             component_manifest[name] = sha256_file(tx / name)
         if sha256_file(self.config_update.target) != self.config_update.original_sha256:
             raise UpdateError("coordinator advertised-version config changed after candidate validation")
+        if (
+            self.config_update.catalog_target is not None
+            and self.config_update.catalog_original_sha256 is not None
+            and sha256_file(self.config_update.catalog_target) != self.config_update.catalog_original_sha256
+        ):
+            raise UpdateError("coordinator Tier-2 catalog config changed after candidate validation")
         config_dir = tx / "configurations"
         config_dir.mkdir(mode=0o700)
         config_manifest = []
         config_paths = [self.install_root / "coordinator.yaml", self.install_root / "gateway.yaml"]
-        if self.config_update.target not in config_paths:
-            config_paths.append(self.config_update.target)
+        for path in (self.config_update.target, self.config_update.catalog_target):
+            if path is not None and path not in config_paths:
+                config_paths.append(path)
         for index, source in enumerate(config_paths):
             self._trusted_config_file(source)
             source_stat = source.stat()
@@ -3561,6 +3669,52 @@ class Updater:
             raise UpdateError("catalog release manifest checksum is invalid")
         return f"{release.catalog.release_id}-{manifest_digest[:16]}"
 
+    def _current_tier2_catalog_path(self) -> Path:
+        return self.install_root / "autotune" / "current" / "tier2-catalog.json"
+
+    def _legacy_tier2_catalog_path(self) -> Path:
+        return self.install_root / "tier2-catalog.json"
+
+    def _preflight_legacy_tier2_cutover(self) -> None:
+        legacy = self._legacy_tier2_catalog_path()
+        legacy_exists = _path_entry_exists(legacy)
+        if not legacy_exists:
+            return
+        self._trusted_regular_file(legacy, "legacy Tier-2 catalog")
+        catalog_root = self.install_root / "autotune"
+        releases = catalog_root / "releases"
+        current_pointer = self.install_root / "autotune" / "current"
+        try:
+            current_pointer_info = current_pointer.lstat()
+        except OSError as exc:
+            raise UpdateError("legacy Tier-2 catalog exists without a valid current catalog pointer") from exc
+        if not stat.S_ISLNK(current_pointer_info.st_mode):
+            raise UpdateError("legacy Tier-2 catalog exists without a valid current catalog pointer")
+        current_target = os.readlink(current_pointer)
+        self._validate_catalog_target(current_target)
+        current_release = catalog_root / current_target
+        self._assert_catalog_directory(catalog_root, "installed catalog root")
+        self._assert_catalog_directory(releases, "installed catalog releases directory")
+        self._assert_catalog_directory(current_release, "installed catalog release")
+        current = current_release / "tier2-catalog.json"
+        self._assert_catalog_asset(current, "active release-bound Tier-2 catalog")
+        if sha256_file(legacy) != sha256_file(current):
+            raise UpdateError("legacy Tier-2 catalog does not match the active release-bound catalog")
+
+    def _remove_legacy_tier2_catalog(self) -> None:
+        legacy = self._legacy_tier2_catalog_path()
+        try:
+            entry = legacy.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise UpdateError(f"cannot inspect legacy Tier-2 catalog {legacy}: {exc}") from exc
+        if not stat.S_ISREG(entry.st_mode):
+            raise UpdateError(f"legacy Tier-2 catalog is not a regular file: {legacy}")
+        self._trusted_regular_file(legacy, "legacy Tier-2 catalog")
+        legacy.unlink()
+        _fsync_directory(legacy.parent)
+
     def _replace_catalog_pointer(self, name: str, target: str | None) -> None:
         catalog_root = self.install_root / "autotune"
         destination = catalog_root / name
@@ -3576,6 +3730,7 @@ class Updater:
         _fsync_directory(catalog_root)
 
     def install_catalog(self, release: Release) -> None:
+        self._preflight_legacy_tier2_cutover()
         catalog_root = self.install_root / "autotune"
         releases = catalog_root / "releases"
         for directory in (catalog_root, releases):
@@ -3645,14 +3800,8 @@ class Updater:
             uid=self.trusted_uid,
             gid=self.catalog_gid,
         )
-        self.atomic_replace(
-            destination / "tier2-catalog.json",
-            self.install_root / "tier2-catalog.json",
-            uid=self.trusted_uid,
-            gid=self.catalog_gid,
-            mode=0o640,
-        )
         self._replace_catalog_pointer("current", f"releases/{directory_name}")
+        self._remove_legacy_tier2_catalog()
         self.audit(
             "release_catalog_installed",
             "success",
@@ -3674,25 +3823,47 @@ class Updater:
         self._trusted_config_file(self.config_update.target)
         if sha256_file(self.config_update.target) != self.config_update.original_sha256:
             raise UpdateError("coordinator advertised-version config changed after snapshot")
+        if self.config_update.catalog_target is not None:
+            self._trusted_config_file(self.config_update.catalog_target)
+            if (
+                self.config_update.catalog_original_sha256 is not None
+                and sha256_file(self.config_update.catalog_target) != self.config_update.catalog_original_sha256
+            ):
+                raise UpdateError("coordinator Tier-2 catalog config changed after snapshot")
         self.atomic_install(release.directory / release.coordinator.asset, self.install_root / "coordinator")
         self.audit("release_component_installed", "success", candidate=release.tag, component="coordinator")
         self.atomic_install(release.directory / release.gateway.asset, self.install_root / "gateway")
         self.audit("release_component_installed", "success", candidate=release.tag, component="gateway")
         self.install_catalog(release)
-        target_stat = self.config_update.target.stat()
-        self.atomic_replace(
-            self.config_update.staged,
-            self.config_update.target,
-            uid=target_stat.st_uid,
-            gid=target_stat.st_gid,
-            mode=stat.S_IMODE(target_stat.st_mode),
-        )
+        installed_config_targets = []
+        for staged, destination in (
+            (self.config_update.staged, self.config_update.target),
+            (self.config_update.catalog_staged, self.config_update.catalog_target),
+        ):
+            if staged is None or destination is None or destination in installed_config_targets:
+                continue
+            target_stat = destination.stat()
+            self.atomic_replace(
+                staged,
+                destination,
+                uid=target_stat.st_uid,
+                gid=target_stat.st_gid,
+                mode=stat.S_IMODE(target_stat.st_mode),
+            )
+            installed_config_targets.append(destination)
+        self.cutover_monotonic_us = time.monotonic_ns() // 1000
         self.audit(
             "coordinator_config_installed",
             "success",
             candidate=release.tag,
             target=str(self.config_update.target),
+            catalog_target=(
+                str(self.config_update.catalog_target)
+                if self.config_update.catalog_target is not None
+                else ""
+            ),
             advertised_version=self.config_update.next_version,
+            tier2_catalog_path=self.config_update.next_catalog_path or "",
         )
 
     @staticmethod
@@ -3727,6 +3898,129 @@ class Updater:
 
     def local_gateway_ready(self, release: Release) -> bool:
         return self.local_gateway_identity_ready(self.release_identity(release))
+
+    def assert_effective_tier2_catalog_path(self) -> None:
+        expected = str(self._current_tier2_catalog_path())
+        actual = self.effective_coordinator_scalar("tier2", "catalog_path")
+        if actual != expected:
+            raise UpdateError("effective tier2.catalog_path is not the release-bound current catalog path")
+        if self.effective_coordinator_scalar("tier2", "require_hash_verified") != "false":
+            raise UpdateError("effective tier2.require_hash_verified must remain false")
+
+    def _service_properties(self, unit: str, properties: tuple[str, ...]) -> dict[str, str]:
+        result = self.run_command(
+            ["systemctl", "show", *(f"--property={name}" for name in properties), unit],
+            check=False,
+            timeout=10,
+        )
+        parsed: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                parsed[key] = value
+        if result.returncode != 0:
+            raise UpdateError(f"could not inspect {unit} runtime properties")
+        return parsed
+
+    def _prove_live_service_binary(
+        self,
+        unit: str,
+        binary: Path,
+        expected_sha256: str,
+        expected_version: str,
+        min_start_after_wall_ns: int,
+    ) -> dict[str, object]:
+        wall_now_ns = time.time_ns()
+        monotonic_now_ns = time.monotonic_ns()
+        min_start_after_monotonic_us = max(
+            0,
+            (min_start_after_wall_ns - wall_now_ns + monotonic_now_ns + 999) // 1000,
+        )
+        properties = self._service_properties(
+            unit,
+            ("MainPID", "ExecMainStartTimestampMonotonic"),
+        )
+        try:
+            pid = int(properties.get("MainPID", "0"))
+        except ValueError as exc:
+            raise UpdateError(f"{unit} MainPID is invalid") from exc
+        if pid <= 0:
+            raise UpdateError(f"{unit} has no live main process")
+        try:
+            proc_started_monotonic_us = int(properties.get("ExecMainStartTimestampMonotonic", "0"))
+        except ValueError as exc:
+            raise UpdateError(f"{unit} ExecMainStartTimestampMonotonic is invalid") from exc
+        if proc_started_monotonic_us <= 0:
+            raise UpdateError(f"{unit} has no valid monotonic start timestamp")
+        if proc_started_monotonic_us <= min_start_after_monotonic_us:
+            raise UpdateError(f"{unit} did not start after effective config/catalog publication")
+        proc_exe = Path("/proc") / str(pid) / "exe"
+        installed = self._trusted_regular_file(binary, f"installed {binary.name} binary")
+        try:
+            live = proc_exe.stat()
+        except OSError as exc:
+            raise UpdateError(f"cannot inspect live {unit} executable") from exc
+        if (live.st_dev, live.st_ino) != (installed.st_dev, installed.st_ino):
+            raise UpdateError(f"live {unit} executable inode does not match installed signed binary")
+        if sha256_file(proc_exe) != expected_sha256:
+            raise UpdateError(f"live {unit} executable hash does not match signed release")
+        result = self.run_command([str(binary), "--version"], check=False, timeout=10)
+        if result.returncode != 0 or result.stdout.strip() != expected_version:
+            raise UpdateError(f"installed {binary.name} version does not match signed release")
+        return {
+            "unit": unit,
+            "pid": pid,
+            "inode": live.st_ino,
+            "sha256": expected_sha256,
+            "version": expected_version,
+            "process_started_monotonic_us": proc_started_monotonic_us,
+        }
+
+    def verify_live_runtime_binding(self, release: Release) -> None:
+        self.assert_effective_tier2_catalog_path()
+        identity = self.release_identity(release)
+        if not self.local_coordinator_identity_ready(identity, False):
+            raise UpdateError("live coordinator version does not match signed release")
+        if not self.local_gateway_identity_ready(identity):
+            raise UpdateError("live gateway version does not match signed release")
+        runtime = self.coordinator_runtime()
+        gateway_config = self.gateway_config_path()
+        effective_config_paths = [runtime.base_config]
+        if runtime.overlay_config is not None:
+            effective_config_paths.append(runtime.overlay_config)
+        publication_paths = [
+            *effective_config_paths,
+            gateway_config,
+            self.install_root / "autotune" / "current",
+        ]
+        try:
+            min_start_after_ns = max(path.lstat().st_mtime_ns for path in publication_paths)
+        except OSError as exc:
+            raise UpdateError("cannot inspect effective config/catalog publication time") from exc
+        coordinator = self._prove_live_service_binary(
+            "macprovider-coordinator.service",
+            self.install_root / "coordinator",
+            release.coordinator.sha256,
+            release.tag,
+            min_start_after_ns,
+        )
+        gateway = self._prove_live_service_binary(
+            "macprovider-gateway.service",
+            self.install_root / "gateway",
+            release.gateway.sha256,
+            release.tag,
+            min_start_after_ns,
+        )
+        self.audit(
+            "live_runtime_binding",
+            "success",
+            coordinator_pid=coordinator["pid"],
+            gateway_pid=gateway["pid"],
+            coordinator_inode=coordinator["inode"],
+            gateway_inode=gateway["inode"],
+            tier2_catalog_path=str(self._current_tier2_catalog_path()),
+            tier2_catalog_sha256=release.catalog.files["tier2-catalog.json"],
+        )
 
     def gateway_serving_ready(self) -> bool:
         status = self.get_json("http://127.0.0.1:9443/v1/status")
@@ -4048,6 +4342,173 @@ class Updater:
             assigned_id=verified["assigned_id"],
         )
 
+    def _catalog_canary_expected_model(self) -> str:
+        for row in self._canary_expected_fleet():
+            if row["provider_id"] == self.config.catalog_canary_provider_id:
+                return row["model_id"]
+        raise UpdateError("catalog canary provider is not bound in the expected fleet")
+
+    def _buyer_token(self) -> str:
+        token = _read_trusted_text(
+            CANARY_BUYER_TOKEN,
+            "canary buyer token",
+            trusted_uid=self.trusted_uid,
+            private=True,
+            limit=64 * 1024,
+        ).strip()
+        if not token or any(character.isspace() for character in token):
+            raise UpdateError("canary buyer token is empty or contains whitespace")
+        return token
+
+    def prove_gateway_buyer_stream(
+        self,
+        *,
+        cycle: int,
+        provider_id: str,
+        model_id: str,
+    ) -> dict[str, str]:
+        url = "https://api.streamvc.live/v1/chat/completions"
+        request_id = str(uuid.uuid4())
+        requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        body = {
+            "model": model_id,
+            "stream": True,
+            "max_tokens": 8,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"Step D single-authority proof cycle {cycle} at {requested_at}",
+                }
+            ],
+        }
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + self._buyer_token(),
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "X-Request-Id": request_id,
+            },
+            method="POST",
+        )
+        opener = _credential_safe_opener()
+        deadline = time.monotonic() + float(self.config.request_timeout_s)
+        total_bytes = 0
+        try:
+            with _elapsed_deadline(float(self.config.request_timeout_s), "gateway buyer proof stream"):
+                with opener.open(request, timeout=self.config.request_timeout_s) as response:
+                    if response.status != 200 or response.geturl() != url:
+                        raise UpdateError("gateway buyer proof request did not return an exact HTTP 200")
+                    provider_header = response.headers.get("X-Provider-Id", "")
+                    response_request_id = response.headers.get("X-Request-Id", "")
+                    if provider_header != provider_id:
+                        raise UpdateError("gateway buyer proof response X-Provider-Id mismatches canary provider")
+                    if not response_request_id:
+                        raise UpdateError("gateway buyer proof response omitted X-Request-Id")
+                    if response_request_id != request_id:
+                        raise UpdateError("gateway buyer proof response did not echo X-Request-Id")
+                    saw_done = False
+                    saw_token = False
+                    saw_model = False
+                    while True:
+                        if time.monotonic() > deadline:
+                            raise UpdateError("gateway buyer proof stream exceeded the elapsed-time limit")
+                        raw = response.readline(MAX_BUYER_PROOF_STREAM_LINE_BYTES + 1)
+                        if raw == b"":
+                            break
+                        if len(raw) > MAX_BUYER_PROOF_STREAM_LINE_BYTES:
+                            raise UpdateError("gateway buyer proof stream line exceeds the safety limit")
+                        total_bytes += len(raw)
+                        if total_bytes > MAX_BUYER_PROOF_STREAM_BYTES:
+                            raise UpdateError("gateway buyer proof stream exceeds the safety limit")
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line or line.startswith(":"):
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            saw_done = True
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except ValueError as exc:
+                            raise UpdateError("gateway buyer proof emitted invalid streaming JSON") from exc
+                        chunk_model = chunk.get("model")
+                        if chunk_model is not None:
+                            if chunk_model != model_id:
+                                raise UpdateError("gateway buyer proof response model mismatches expected fleet model")
+                            saw_model = True
+                        choices = chunk.get("choices")
+                        if isinstance(choices, list):
+                            for choice in choices:
+                                if not isinstance(choice, dict):
+                                    continue
+                                delta = choice.get("delta")
+                                if isinstance(delta, dict) and isinstance(delta.get("content"), str) and delta["content"]:
+                                    saw_token = True
+                    if not saw_token:
+                        raise UpdateError("gateway buyer proof stream emitted no content token")
+                    if not saw_done:
+                        raise UpdateError("gateway buyer proof stream did not terminate with [DONE]")
+                    if not saw_model:
+                        raise UpdateError("gateway buyer proof stream did not expose a response model")
+                    if time.monotonic() > deadline:
+                        raise UpdateError("gateway buyer proof stream exceeded the elapsed-time limit")
+        except urllib.error.URLError as exc:
+            raise UpdateError(f"gateway buyer proof request failed: {exc}") from exc
+        return {
+            "request_id": request_id,
+            "response_request_id": response_request_id,
+            "requested_at": requested_at,
+            "provider_id": provider_id,
+            "model": model_id,
+        }
+
+    def prove_current_release(self, release: Release) -> tuple[SemVer, str]:
+        current, decision = self.assess_candidate(release)
+        if decision != "already_current":
+            raise UpdateError(f"prove-current requires already_current; candidate assessed as {decision}")
+        self.assert_effective_tier2_catalog_path()
+        if _path_entry_exists(self._legacy_tier2_catalog_path()):
+            raise UpdateError("legacy Tier-2 catalog path must be absent for prove-current")
+        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_DISABLED:
+            raise UpdateError("prove-current requires hard-disabled buyer canary configuration")
+        self.verify_live_runtime_binding(release)
+        provider_id = self.config.catalog_canary_provider_id
+        model_id = self._catalog_canary_expected_model()
+        seen_request_ids: set[str] = set()
+        seen_timestamps: set[str] = set()
+        for cycle in range(1, 4):
+            self.verify_buyer_canary_rollout_posture()
+            buyer_proof = self.prove_gateway_buyer_stream(
+                cycle=cycle,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            self.verify_exact_provider_canary(release)
+            if buyer_proof["response_request_id"] in seen_request_ids:
+                raise UpdateError("gateway buyer proof response request IDs are not unique")
+            if buyer_proof["requested_at"] in seen_timestamps:
+                raise UpdateError("gateway buyer proof request timestamps are not unique")
+            seen_request_ids.add(buyer_proof["response_request_id"])
+            seen_timestamps.add(buyer_proof["requested_at"])
+            self.audit(
+                "single_authority_buyer_serving_cycle",
+                "success",
+                cycle=cycle,
+                candidate=release.tag,
+                catalog_release_id=release.catalog.release_id,
+                catalog_policy_version=release.catalog.policy_version,
+                provider_id=provider_id,
+                model=model_id,
+                request_id=buyer_proof["request_id"],
+                response_request_id=buyer_proof["response_request_id"],
+                requested_at=buyer_proof["requested_at"],
+            )
+        return current, decision
+
     def protected_provider_fleet_ready(self) -> bool:
         if not self.previous_protected_providers:
             return True
@@ -4241,6 +4702,7 @@ class Updater:
             lambda: self.service_active("macprovider-coordinator.service"),
         )
         self.wait_for("coordinator health/version", self.config.service_health_timeout_s, lambda: self.local_coordinator_ready(release, False))
+        self.assert_effective_tier2_catalog_path()
         self.systemctl("start", "macprovider-gateway.service")
         self.wait_for(
             "gateway systemd active state",
@@ -4248,6 +4710,7 @@ class Updater:
             lambda: self.service_active("macprovider-gateway.service"),
         )
         self.wait_for("gateway health/version", self.config.service_health_timeout_s, lambda: self.local_gateway_ready(release))
+        self.verify_live_runtime_binding(release)
         self.restore_auxiliary_services()
         self.prove_serving_recovery(self.release_identity(release))
         self.verify_provider_admission_rollout_policy()
@@ -5090,6 +5553,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--plan", action="store_true", help="verify and report the newest eligible release without changing Pearl")
     mode.add_argument("--apply", action="store_true", help="perform a guarded transactional rollout")
     mode.add_argument("--reconcile", action="store_true", help="recover an interrupted rollout from its durable phase journal")
+    mode.add_argument("--prove-current", action="store_true", help="prove the selected signed release is already serving from the single Tier-2 authority")
     parser.add_argument("--tag", help="select one exact vMAJOR.MINOR.PATCH release")
     parser.add_argument("--source-dir", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
@@ -5098,6 +5562,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.prove_current and not args.tag:
+        raise UpdateError("--prove-current requires --tag")
     testing = os.environ.get("MACPROVIDER_UPDATER_TESTING") == "1"
     if args.source_dir and not testing:
         raise UpdateError("--source-dir is available only with MACPROVIDER_UPDATER_TESTING=1")
@@ -5161,6 +5627,8 @@ def main(argv: list[str]) -> int:
     lock_uid = trusted_uid
     with FileLock(updater.lock_path, required_uid=lock_uid), tempfile.TemporaryDirectory(prefix="macprovider-pearl-update-") as temporary:
         updater.validate_recovery_inputs(args.config)
+        if args.prove_current and updater._load_journal() is not None:
+            raise UpdateError("--prove-current refuses an active phase journal; run --reconcile first")
         updater.reconcile()
         if args.reconcile:
             return 0
@@ -5177,6 +5645,21 @@ def main(argv: list[str]) -> int:
                     reason=str(exc),
                 )
             raise
+        if args.prove_current:
+            current, decision = updater.prove_current_release(release)
+            print(
+                json.dumps(
+                    {
+                        "action": "prove_current",
+                        "candidate": release.tag,
+                        "current_version": str(current),
+                        "tier2_catalog_path": str(updater._current_tier2_catalog_path()),
+                        "single_authority_buyer_serving_cycles": 3,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         current, decision = updater.assess_candidate(release)
         config_update = updater.prepare_config_update(release)
         updater.verify_buyer_canary_rollout_posture()

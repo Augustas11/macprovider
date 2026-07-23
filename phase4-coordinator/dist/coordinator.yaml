@@ -282,7 +282,7 @@ admission:
   provisional_tier_weight: 0.3
 
 tier2:
-  catalog_path: /opt/macprovider/tier2-catalog.json
+  catalog_path: /opt/macprovider/autotune/current/tier2-catalog.json
   catalog_public_key: IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ
   require_hash_verified: false
   # Required only while pre-canonical providers remain connected. The deploy
