@@ -18,6 +18,7 @@ import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+SEALED_OUTPUT = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
 for required in (
     "candidate_run_id:",
     "candidate_sha:",
@@ -51,6 +52,43 @@ for match in re.finditer(r"^\s*uses:\s*(\S+)", text, re.MULTILINE):
         raise SystemExit(f"promotion action is not commit-pinned: {value}")
 if text.count('out "$accepted/checksums.txt.sig"') != 1:
     raise SystemExit("promoter must generate only one new release asset")
+for requirement in (
+    "- name: Seal reviewed OpenSSL 3",
+    "id: protected_openssl",
+    "scripts/install-sealed-release-openssl.sh",
+    "/private/var/macprovider-openssl-acceptance-promotion",
+    "printf 'bin=%s\\n' \"$sealed_bin\" >> \"$GITHUB_OUTPUT\"",
+):
+    if requirement not in text:
+        raise SystemExit(f"promotion OpenSSL seal omits: {requirement}")
+if "brew install openssl@3" in text or "brew --prefix openssl@3" in text:
+    raise SystemExit("promotion must not select mutable Homebrew OpenSSL directly")
+if "OPENSSL_BIN=" in text or "GITHUB_ENV" in text:
+    raise SystemExit("promotion must not publish mutable OpenSSL environment state")
+if text.count(SEALED_OUTPUT) != 5:
+    raise SystemExit("every promotion crypto consumer must bind the sealed step output")
+for step_name in (
+    "Verify the signed acceptance set and production metadata",
+    "Require an advancing immutable discovery head",
+    "Generate only the production checksum signature",
+    "Reverify and publish only the captured numeric draft",
+    "Publish one append-only immutable discovery transport",
+):
+    step = text.split(f"- name: {step_name}", 1)[1].split("\n      - name:", 1)[0]
+    if step.count(SEALED_OUTPUT) != 1:
+        raise SystemExit(f"{step_name} does not bind the sealed OpenSSL output")
+for step_name in (
+    "Generate only the production checksum signature",
+    "Reverify and publish only the captured numeric draft",
+):
+    step = text.split(f"- name: {step_name}", 1)[1].split("\n      - name:", 1)[0]
+    if (
+        "scripts/verify-release-checksums.sh \\\n"
+        '            --openssl "$OPENSSL_BIN" \\\n'
+    ) not in step:
+        raise SystemExit(
+            f"{step_name} does not pass sealed OpenSSL to checksum verification"
+        )
 if "go build" in text or "xcodebuild" in text or "./package.sh" in text:
     raise SystemExit("protected promoter contains a build capability")
 protected, separator, public_verify = text.partition("\n  verify_public:\n")

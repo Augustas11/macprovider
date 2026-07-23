@@ -1107,9 +1107,70 @@ for requirement in (
         raise SystemExit(f"append-only release transport omits: {requirement}")
 if "--clobber" in transport_publish:
     raise SystemExit("append-only discovery transport must never overwrite an asset")
-renewal = (
-    pathlib.Path(sys.argv[1]).resolve().parent / "renew-release-discovery-head.yml"
-).read_text(encoding="utf-8")
+workflow_dir = pathlib.Path(sys.argv[1]).resolve().parent
+renewal = (workflow_dir / "renew-release-discovery-head.yml").read_text(
+    encoding="utf-8"
+)
+promotion = (workflow_dir / "promote-acceptance-candidate.yml").read_text(
+    encoding="utf-8"
+)
+sealed_output = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
+for label, auxiliary, sealed_root, consumer_count in (
+    (
+        "protected discovery renewal",
+        renewal,
+        "/private/var/macprovider-openssl-discovery-renewal",
+        2,
+    ),
+    (
+        "acceptance promotion",
+        promotion,
+        "/private/var/macprovider-openssl-acceptance-promotion",
+        5,
+    ),
+):
+    for requirement in (
+        "- name: Seal reviewed OpenSSL 3",
+        "id: protected_openssl",
+        "scripts/install-sealed-release-openssl.sh",
+        sealed_root,
+        "GITHUB_OUTPUT",
+    ):
+        if requirement not in auxiliary:
+            raise SystemExit(f"{label} OpenSSL seal omits: {requirement}")
+    for forbidden in (
+        "brew install openssl@3",
+        "brew --prefix openssl@3",
+        "GITHUB_ENV",
+        "OPENSSL_BIN=",
+    ):
+        if forbidden in auxiliary:
+            raise SystemExit(f"{label} retains mutable OpenSSL state: {forbidden}")
+    if auxiliary.count(sealed_output) != consumer_count:
+        raise SystemExit(
+            f"{label} does not bind every crypto consumer to the sealed output"
+        )
+    sealed_position = auxiliary.find("- name: Seal reviewed OpenSSL 3")
+    if re.search(r"\bsudo\b", auxiliary[sealed_position:].split(
+        "\n  verify_public:", 1
+    )[0]):
+        raise SystemExit(f"{label} retains root mutation authority after sealing")
+    if re.search(r"(?m)^\s*openssl\b", auxiliary[sealed_position:]):
+        raise SystemExit(f"{label} falls back to PATH-selected OpenSSL")
+for step_name in (
+    "Generate only the production checksum signature",
+    "Reverify and publish only the captured numeric draft",
+):
+    checksum_step = promotion.split(f"- name: {step_name}", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    if (
+        "bash scripts/verify-release-checksums.sh \\\n"
+        '            --openssl "$OPENSSL_BIN" \\\n'
+    ) not in checksum_step:
+        raise SystemExit(
+            f"{step_name} omits sealed OpenSSL checksum verification"
+        )
 for requirement in (
     "environment: production-release",
     "scripts/build-release-discovery-head.py",
