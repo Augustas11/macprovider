@@ -2005,11 +2005,11 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-037 stage 5 (FR-KVP7) — attach the activated disk cold tier. Called by
     /// the serve lifecycle after the store acquires its namespace lock, so the hot
     /// tier only reaches disk once single-writer ownership is established.
-    func attachKVDiskTier(_ tier: KVDiskTier) {
+    func attachKVDiskTier(_ tier: KVDiskTier) async {
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds)
-        Task { await conversationCache.attachColdTier(adapter) }
+        await conversationCache.attachColdTier(adapter)
         coldTierAttached = true
     }
 
