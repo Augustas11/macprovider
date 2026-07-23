@@ -73,10 +73,14 @@ test-dist:
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_tier2_enforcement_watchdog.py
+	bash scripts/test-tier2-enforcement-safety.sh
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
 	bash scripts/test-catalog-release.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
+	bash -n phase4-coordinator/dist/deploy-malibu-emission-pearl.sh
+	bash -n phase4-coordinator/dist/deploy-opoi-v0-pearl.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh

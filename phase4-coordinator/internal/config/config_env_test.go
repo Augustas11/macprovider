@@ -149,8 +149,14 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	if cfg.Stats.RollupDSN != "postgres://rollup@localhost/macprovider" {
 		t.Fatalf("Stats.RollupDSN=%q", cfg.Stats.RollupDSN)
 	}
-	if cfg.Tier2.ModelHashLegacyUntil != "2099-07-19T00:00:00Z" {
-		t.Fatalf("Tier2.ModelHashLegacyUntil=%q", cfg.Tier2.ModelHashLegacyUntil)
+	if cfg.Tier2.ModelHashLegacyUntil != "" {
+		t.Fatalf(
+			"production config unexpectedly activated the model-hash legacy bridge from ambient env: %q",
+			cfg.Tier2.ModelHashLegacyUntil,
+		)
+	}
+	if !cfg.Tier2.RequireHashVerified {
+		t.Fatal("production config Tier2.RequireHashVerified=false, want true")
 	}
 	if !slices.Contains(cfg.Stats.CORS.PartnerOriginAllowlist, "https://www.malibu.tech") {
 		t.Fatalf("Malibu origin missing from stats CORS allowlist: %#v", cfg.Stats.CORS.PartnerOriginAllowlist)

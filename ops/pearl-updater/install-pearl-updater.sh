@@ -62,6 +62,7 @@ install -d -o "$INSTALL_OWNER" -g "$INSTALL_GROUP" -m 0750 "$INSTALL_PREFIX/etc/
 install -d -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0700 "$INSTALL_PREFIX/var/lib/macprovider-pearl-updater"
 install -d -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$INSTALL_PREFIX/usr/local/sbin" "$INSTALL_PREFIX/etc/systemd/system"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-pearl-update" "$INSTALL_PREFIX/usr/local/sbin/macprovider-pearl-update"
+install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-tier2-enforcement-watchdog" "$INSTALL_PREFIX/usr/local/sbin/macprovider-tier2-enforcement-watchdog"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-pearl-update-gate" "$INSTALL_PREFIX/usr/local/sbin/macprovider-pearl-update-gate"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-pearl-updater-alert" "$INSTALL_PREFIX/usr/local/sbin/macprovider-pearl-updater-alert"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/release-signing-public.pem" "$INSTALL_PREFIX/usr/local/share/macprovider/release-signing-public.pem"
@@ -72,6 +73,7 @@ install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater.timer" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater.timer"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater-alert@.service" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater-alert@.service"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater-reconcile.service" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater-reconcile.service"
+install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-tier2-enforcement-reconcile.service" "$INSTALL_PREFIX/etc/systemd/system/macprovider-tier2-enforcement-reconcile.service"
 
 for gated_unit in \
   macprovider-coordinator.service \
@@ -95,6 +97,7 @@ fi
 
 if [ "$SKIP_SYSTEMD" != "1" ]; then
   systemctl daemon-reload
+  systemctl enable macprovider-tier2-enforcement-reconcile.service
   systemctl enable macprovider-pearl-updater-reconcile.service
 fi
 echo "installed disabled-by-default Pearl updater"

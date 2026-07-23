@@ -1,0 +1,40 @@
+[Unit]
+Description=Reconcile an interrupted Pearl Tier-2 enforcement transaction at boot
+Documentation=https://github.com/Augustas11/macprovider/issues/608
+After=local-fs.target
+Before=macprovider-pearl-updater-reconcile.service macprovider-coordinator.service macprovider-gateway.service canary-buyer.service canary-buyer.timer macprovider-archive-rotate.service macprovider-archive-rotate.timer stats-billing-mirror.service stats-billing-mirror.timer macprovider-pearl-updater.service
+ConditionPathExists=/var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json
+OnFailure=macprovider-pearl-updater-alert@%n.service
+OnFailureJobMode=replace-irreversibly
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+Restart=on-failure
+RestartSec=30s
+User=root
+Group=root
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/local/sbin/macprovider-tier2-enforcement-watchdog --reconcile
+TimeoutStartSec=5min
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+LockPersonality=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=macprovider-tier2-enforcement-reconcile
+
+[Install]
+WantedBy=multi-user.target

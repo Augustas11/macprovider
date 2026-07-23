@@ -1025,6 +1025,54 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.get_json.return_value["recommended_binary_version"] = "1.8.26"
         self.assertFalse(self.updater.local_coordinator_ready(release, False))
 
+    def test_advertised_version_update_preserves_hash_enforcement(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            'coordinator_advertised_version:\n'
+            '  latest_binary_version: "1.8.26"\n'
+            'tier2:\n'
+            f'  catalog_path: {install}/autotune/current/tier2-catalog.json\n'
+            '  require_hash_verified: true\n'
+        )
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, None, {})
+        )
+        release = self.stage(self.verify())
+        self.updater.verify_candidate_versions(release)
+
+        update = self.updater.prepare_config_update(release)
+
+        self.assertIn("require_hash_verified: true", update.staged.read_text())
+
+    def test_advertised_version_update_rejects_legacy_algorithm_bridge_when_enforced(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            'coordinator_advertised_version:\n'
+            '  latest_binary_version: "1.8.26"\n'
+            'tier2:\n'
+            f'  catalog_path: {install}/autotune/current/tier2-catalog.json\n'
+            '  require_hash_verified: true\n'
+            '  model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL\n'
+        )
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(
+                base,
+                None,
+                {"MODEL_HASH_LEGACY_UNTIL": "2026-07-24T00:00:00Z"},
+            )
+        )
+        release = self.stage(self.verify())
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "cannot retain the model hash algorithm legacy bridge",
+        ):
+            self.updater.prepare_config_update(release)
+
     def test_atomic_install_uses_backend_group_not_legacy_destination_group(self):
         source = self.root / "candidate-coordinator"
         destination = self.root / "coordinator"
@@ -1679,6 +1727,9 @@ class PearlUpdaterTests(unittest.TestCase):
             "UserKnownHostsFile=/etc/macprovider/catalog-canary-known-hosts",
             args[0],
         )
+        self.assertIn("GlobalKnownHostsFile=/dev/null", args[0])
+        self.assertIn("-F", args[0])
+        self.assertIn("/dev/null", args[0])
         self.assertEqual(args[0][-2], "operator@canary.example")
         self.assertIn("catalog-canary", args[0][-1])
         self.assertIn("running_text_vnode", kwargs["input_text"])
@@ -2143,6 +2194,47 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.updater.audit.assert_called_once()
         self.assertEqual(self.updater.audit.call_args.args[:2], ("live_runtime_binding", "success"))
+
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: true\n"
+        )
+        self.updater._prove_live_service_binary.reset_mock(
+            side_effect=True,
+            return_value=True,
+        )
+        self.updater._prove_live_service_binary.side_effect = [
+            {"pid": 101, "inode": 201},
+            {"pid": 102, "inode": 202},
+        ]
+        self.updater.audit.reset_mock()
+
+        self.updater.verify_live_sighup_binding(release, "true")
+
+        self.assertEqual(
+            self.updater._prove_live_service_binary.call_args_list,
+            [
+                mock.call(
+                    "macprovider-coordinator.service",
+                    self.updater.install_root / "coordinator",
+                    release.coordinator.sha256,
+                    release.tag,
+                    None,
+                ),
+                mock.call(
+                    "macprovider-gateway.service",
+                    self.updater.install_root / "gateway",
+                    release.gateway.sha256,
+                    release.tag,
+                    None,
+                ),
+            ],
+        )
+        self.assertEqual(
+            self.updater.audit.call_args.args[:2],
+            ("live_sighup_binding", "success"),
+        )
 
     def test_live_service_binary_rejects_malformed_or_stale_systemd_start_timestamp(self):
         binary = self.updater.install_root / "coordinator"
@@ -3595,6 +3687,7 @@ class PearlUpdaterTests(unittest.TestCase):
             return_value=provider_evidence
         )
         self.updater.verify_live_runtime_binding = mock.Mock()
+        self.updater.verify_live_sighup_binding = mock.Mock()
         self.updater.prove_gateway_buyer_stream = mock.Mock(
             side_effect=[
                 {
@@ -3619,7 +3712,7 @@ class PearlUpdaterTests(unittest.TestCase):
         current, decision = self.updater.prove_current_release(release)
 
         self.assertEqual((str(current), decision), ("1.8.27", "already_current"))
-        self.updater.verify_live_runtime_binding.assert_called_once_with(release)
+        self.updater.verify_live_runtime_binding.assert_called_once_with(release, "false")
         self.assertEqual(self.updater.verify_buyer_canary_rollout_posture.call_count, 3)
         self.assertEqual(self.updater.verify_exact_provider_canary.call_args_list, [mock.call(release)] * 4)
         self.assertEqual(
@@ -3654,6 +3747,63 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.snapshot.assert_not_called()
         self.updater.install_release.assert_not_called()
 
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: true\n"
+        )
+        self.updater.verify_live_sighup_binding.reset_mock()
+        self.updater.verify_exact_provider_canary.reset_mock(
+            side_effect=True,
+            return_value=True,
+        )
+        self.updater.verify_exact_provider_canary.return_value = provider_evidence
+        self.updater.prove_gateway_buyer_stream.reset_mock(
+            side_effect=True,
+            return_value=True,
+        )
+        self.updater.prove_gateway_buyer_stream.side_effect = [
+            {
+                "request_id": f"enforced-request-{cycle}",
+                "response_request_id": f"enforced-gateway-request-{cycle}",
+                "requested_at": f"2026-07-23T00:02:0{cycle}Z",
+                "provider_id": "catalog-canary",
+                "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            }
+            for cycle in range(1, 4)
+        ]
+        self.updater.audit.reset_mock()
+
+        current, decision = self.updater.prove_hash_enforced_release(release)
+
+        self.assertEqual((str(current), decision), ("1.8.27", "already_current"))
+        self.updater.verify_live_sighup_binding.assert_called_once_with(release, "true")
+        enforced_events = [
+            call
+            for call in self.updater.audit.call_args_list
+            if call.args[:2] == ("hash_enforced_buyer_serving_cycle", "success")
+        ]
+        self.assertEqual([call.kwargs["cycle"] for call in enforced_events], [1, 2, 3])
+
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: true\n"
+            "  model_hash_legacy_until: 2026-07-24T00:00:00Z\n"
+        )
+        self.updater.verify_exact_provider_canary.reset_mock()
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "hash-enforced proof refuses the model hash algorithm legacy bridge",
+        ):
+            self.updater.prove_hash_enforced_release(release)
+        self.updater.verify_exact_provider_canary.assert_not_called()
+
+        config.write_text(
+            "tier2:\n"
+            f"  catalog_path: {self.updater.install_root}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
         self.updater.verify_exact_provider_canary.reset_mock(
             side_effect=True,
             return_value=True,
@@ -3737,7 +3887,7 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             updater_module.UpdateError,
-            "tier2.require_hash_verified must remain false",
+            "tier2.require_hash_verified must be false",
         ):
             self.updater.prove_current_release(release)
         self.updater.verify_exact_provider_canary.assert_not_called()
@@ -3793,6 +3943,38 @@ class PearlUpdaterTests(unittest.TestCase):
                         str(config),
                     ]
                 )
+
+    def test_enforcement_journal_blocks_updater_reconcile(self):
+        config = self.root / "updater.conf"
+        config.write_text("PEARL_UPDATER_BUYER_CANARY_MODE=disabled\n")
+        config.chmod(0o600)
+        install = self.root / "enforcement-gate-install"
+        state = self.root / "enforcement-gate-state"
+        audit = self.root / "enforcement-gate-audit.jsonl"
+        lock = self.root / "enforcement-gate.lock"
+        install.mkdir(mode=0o750)
+        state.mkdir(mode=0o700)
+        journal = state / "tier2-enforcement-transaction.json"
+        journal.write_text("{}\n")
+        journal.chmod(0o600)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MACPROVIDER_UPDATER_TESTING": "1",
+                "PEARL_UPDATER_TEST_PUBLIC_KEY": str(self.public),
+                "PEARL_UPDATER_TEST_INSTALL_ROOT": str(install),
+                "PEARL_UPDATER_TEST_STATE_ROOT": str(state),
+                "PEARL_UPDATER_TEST_AUDIT_PATH": str(audit),
+                "PEARL_UPDATER_TEST_LOCK_PATH": str(lock),
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "Tier-2 enforcement transaction is active",
+            ):
+                updater_module.main(["--reconcile", "--config", str(config)])
 
     def test_deadman_rejects_legacy_or_inconsistent_schema(self):
         with self.assertRaisesRegex(updater_module.UpdateError, "status/paused_at"):
@@ -4627,6 +4809,40 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(orphaned.returncode, 1)
         self.assertIn("no running updater/reconciler", orphaned.stderr)
 
+    def test_transaction_gate_blocks_every_start_during_tier2_enforcement(self):
+        enforcement_journal = self.root / "enforcement-state"
+        enforcement_journal.mkdir(mode=0o700)
+        journal = enforcement_journal / "tier2-enforcement-transaction.json"
+        journal.write_text(
+            json.dumps(
+                {
+                    "schema_version": "macprovider-tier2-enforcement-transaction-v1",
+                    "transaction_id": "e" * 64,
+                    "phase": "applied",
+                }
+            )
+            + "\n"
+        )
+        journal.chmod(0o600)
+        gate = SCRIPT.with_name("macprovider-pearl-update-gate")
+        result = subprocess.run(
+            [str(gate), "macprovider-coordinator.service"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "MACPROVIDER_UPDATER_GATE_TESTING": "1",
+                "PEARL_UPDATER_GATE_JOURNAL": str(self.updater.journal_path),
+                "PEARL_UPDATER_GATE_ENFORCEMENT_JOURNAL": str(journal),
+                "PEARL_UPDATER_GATE_ROOT": str(self.updater.gate_state_root),
+                "PEARL_UPDATER_GATE_BOOT_ID": str(self.boot_id),
+                "PEARL_UPDATER_GATE_LOCK": str(self.updater.lock_path),
+            },
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("active Tier-2 enforcement transaction blocks", result.stderr)
+
     def test_start_permit_is_removed_when_directory_sync_fails_after_publish(self):
         release = self.verify()
         self.updater._start_journal(release, updater_module.SemVer.parse("1.8.26"))
@@ -5089,11 +5305,32 @@ class PearlUpdaterTests(unittest.TestCase):
             boot,
         )
         self.assertIn("WantedBy=multi-user.target", boot)
+        enforcement_boot = SCRIPT.with_name(
+            "macprovider-tier2-enforcement-reconcile.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "ConditionPathExists=/var/lib/macprovider-pearl-updater/"
+            "tier2-enforcement-transaction.json",
+            enforcement_boot,
+        )
+        self.assertIn(
+            "ExecStart=/usr/local/sbin/macprovider-tier2-enforcement-watchdog --reconcile",
+            enforcement_boot,
+        )
+        self.assertIn(
+            "Before=macprovider-pearl-updater-reconcile.service "
+            "macprovider-coordinator.service macprovider-gateway.service",
+            enforcement_boot,
+        )
+        self.assertIn("Restart=on-failure", enforcement_boot)
+        self.assertIn("RestartSec=30s", enforcement_boot)
+        self.assertIn("StartLimitIntervalSec=0", enforcement_boot)
+        self.assertIn("WantedBy=multi-user.target", enforcement_boot)
         alert = SCRIPT.with_name("macprovider-pearl-updater-alert@.service").read_text(encoding="utf-8")
         self.assertIn("User=macprovider", alert)
         self.assertIn("Group=macprovider", alert)
         self.assertIn("ExecStart=/usr/local/sbin/macprovider-pearl-updater-alert %i", alert)
-        for hardened in (unit, boot):
+        for hardened in (unit, boot, enforcement_boot):
             self.assertIn("NoNewPrivileges=true", hardened)
             self.assertIn("PrivateDevices=true", hardened)
             self.assertIn("MemoryDenyWriteExecute=true", hardened)
@@ -5134,11 +5371,24 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(monitor.read_text(), "GMAIL_APP_PASSWORD=preserve-me\n")
         self.assertEqual(stat.S_IMODE(monitor.stat().st_mode), 0o640)
         self.assertTrue((prefix / "usr/local/sbin/macprovider-pearl-update-gate").is_file())
+        self.assertTrue(
+            (prefix / "usr/local/sbin/macprovider-tier2-enforcement-watchdog").is_file()
+        )
+        self.assertTrue(
+            (
+                prefix
+                / "etc/systemd/system/macprovider-tier2-enforcement-reconcile.service"
+            ).is_file()
+        )
         self.assertTrue((prefix / "usr/local/share/macprovider/scripts/catalog-release.py").is_file())
         self.assertTrue((prefix / "usr/local/share/macprovider/scripts/sign-catalog.go").is_file())
         self.assertTrue((prefix / "usr/local/share/macprovider/catalog-canary-proof.py").is_file())
         installer = SCRIPT.with_name("install-pearl-updater.sh").read_text(encoding="utf-8")
         self.assertIn("useradd --system --gid macprovider-updater-validate", installer)
+        self.assertIn(
+            "systemctl enable macprovider-tier2-enforcement-reconcile.service",
+            installer,
+        )
         for unit in updater_module.GATED_SERVICE_UNITS:
             dropin = (
                 prefix

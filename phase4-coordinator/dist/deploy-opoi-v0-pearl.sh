@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-opoi-v0-pearl.sh — OPoI v0 only: coordinator binary + canary overlay.
+# deploy-opoi-v0-pearl.sh — retired Pearl rollout; dry-run reference only.
 #
 # Does NOT run the full deploy-pearl-vps.sh (no nginx/certbot/coordinator.yaml
 # overwrite). Use after merging PR #478+ to main.
@@ -49,6 +49,12 @@ run() {
   fi
 }
 
+if [ "$DRY_RUN" != "1" ]; then
+  echo "REFUSING: this coordinator-only Pearl deploy authority is retired." >&2
+  echo "Use the signed backend-pair updater; do not replace the hash-proven coordinator independently." >&2
+  exit 5
+fi
+
 for f in "$OVERLAY" "$DROPIN"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
@@ -96,7 +102,6 @@ else
     /tmp/macprovider-opoi-deploy.*) ;;
     *) echo "unexpected mktemp path: $DEPLOY_TMP" >&2; exit 1 ;;
   esac
-  trap "${SSH[@]} rm -rf $DEPLOY_TMP" EXIT
   "${SCP[@]}" "$BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
   "${SCP[@]}" "$OVERLAY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.opoi-v0-staging.yaml"
   "${SCP[@]}" "$DROPIN" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/opoi-v0.conf"

@@ -27,13 +27,13 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: scripts/verify-tier2-live.sh [--full|--catalog-only|--enforced|--b6-ready|--encrypted-leg|--attested]
+usage: scripts/verify-tier2-live.sh [--full|--catalog-only|--enforce-ready|--enforced|--b6-ready|--encrypted-leg|--attested]
 
 Environment:
   GATEWAY_ORIGIN        default: https://api.streamvc.live
   COORDINATOR_ORIGIN   default: https://coordinator.streamvc.live
   DEMO_TOKEN           required unless VERIFY_TIER2_FIXTURES is set
-  OPERATOR_KEY         required for --full/--enforced/--b6-ready/
+  OPERATOR_KEY         required for --full/--enforce-ready/--enforced/--b6-ready/
                        --encrypted-leg/--attested unless VERIFY_TIER2_FIXTURES is set
   VERIFY_TIER2_FIXTURES optional directory with status.json, healthz.json,
                        models.json, and poolz.json for local parser testing
@@ -44,6 +44,7 @@ mode="full"
 case "${1:---full}" in
   --full) mode="full" ;;
   --catalog-only) mode="catalog-only" ;;
+  --enforce-ready) mode="enforce-ready" ;;
   --enforced) mode="enforced" ;;
   --b6-ready) mode="b6-ready" ;;
   --encrypted-leg) mode="encrypted-leg" ;;
@@ -57,7 +58,7 @@ COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.streamvc.live}"
 
 if [ -z "${VERIFY_TIER2_FIXTURES:-}" ]; then
   [ -n "${DEMO_TOKEN:-}" ] || { echo "verify-tier2-live: DEMO_TOKEN is required" >&2; exit 2; }
-  if [ "$mode" = "full" ] || [ "$mode" = "enforced" ] || [ "$mode" = "b6-ready" ] || [ "$mode" = "encrypted-leg" ] || [ "$mode" = "attested" ]; then
+  if [ "$mode" = "full" ] || [ "$mode" = "enforce-ready" ] || [ "$mode" = "enforced" ] || [ "$mode" = "b6-ready" ] || [ "$mode" = "encrypted-leg" ] || [ "$mode" = "attested" ]; then
     [ -n "${OPERATOR_KEY:-}" ] || { echo "verify-tier2-live: OPERATOR_KEY is required for --$mode" >&2; exit 2; }
   fi
 fi
@@ -65,9 +66,23 @@ fi
 python3 - "$mode" "$GATEWAY_ORIGIN" "$COORDINATOR_ORIGIN" <<'PY'
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
+
+MAX_RESPONSE_BYTES = 1024 * 1024
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    NoRedirect(),
+)
 
 mode, gateway_origin, coordinator_origin = sys.argv[1:4]
 gateway_origin = gateway_origin.rstrip("/")
@@ -86,11 +101,26 @@ def get_json(url, headers=None):
     headers = headers or {}
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read()
+        with opener.open(req, timeout=10) as resp:
+            if resp.geturl() != url:
+                fail(f"GET {url} changed origin or path to {resp.geturl()}")
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                except ValueError:
+                    fail(f"GET {url} returned invalid Content-Length")
+                if declared_length < 0 or declared_length > MAX_RESPONSE_BYTES:
+                    fail(f"GET {url} response exceeds size limit")
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                fail(f"GET {url} response exceeds size limit")
             status = resp.getcode()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+        body = exc.read(MAX_RESPONSE_BYTES + 1)
+        if len(body) > MAX_RESPONSE_BYTES:
+            fail(f"GET {url} error response exceeds size limit")
+        body = body.decode("utf-8", errors="replace")
         fail(f"GET {url} failed with HTTP {exc.code}: {body[:300]}")
     except Exception as exc:
         fail(f"GET {url} failed: {exc}")
@@ -150,7 +180,7 @@ if model_hash.get("catalog_available") is not True:
     fail("tier2 model catalog is not available")
 if mode == "full" and state not in ("partial", "all"):
     fail(f"full verification requires verified provider evidence; model_hash.state={state!r}")
-if mode in ("enforced", "b6-ready", "encrypted-leg", "attested") and state != "all":
+if mode in ("enforce-ready", "enforced", "b6-ready", "encrypted-leg", "attested") and state != "all":
     fail(f"{mode} verification requires all models hash-verified; model_hash.state={state!r}")
 
 summary = {
@@ -165,7 +195,7 @@ summary = {
     "catalog_available": model_hash.get("catalog_available"),
 }
 
-if mode in ("full", "enforced", "b6-ready", "encrypted-leg", "attested"):
+if mode in ("full", "enforce-ready", "enforced", "b6-ready", "encrypted-leg", "attested"):
     pool_headers = {"Authorization": "Bearer " + os.environ.get("OPERATOR_KEY", "")}
     poolz = source_json("poolz.json", f"{coordinator_origin}/poolz", pool_headers)
     providers = poolz.get("pool")
@@ -214,6 +244,35 @@ if mode in ("full", "enforced", "b6-ready", "encrypted-leg", "attested"):
         except (TypeError, ValueError):
             slots_free = 0
         return slots_free > 0
+
+    if mode in ("enforce-ready", "enforced"):
+        if not providers:
+            fail("hash enforcement requires a non-empty physical provider cohort")
+        invalid_snapshot_providers = []
+        for provider in providers:
+            if (
+                provider.get("model_hash_algorithm") != "macprovider.snapshot-manifest.v1"
+                or re.fullmatch(r"[0-9a-f]{64}", str(provider.get("model_hash") or "")) is None
+                or provider.get("hash_status") != "hash_verified"
+                or str(provider.get("state") or "") != "ready"
+                or provider.get("routing_eligible") is not True
+            ):
+                invalid_snapshot_providers.append(
+                    {
+                        "provider_id": provider.get("provider_id"),
+                        "model_id": provider.get("model_id"),
+                        "model_hash_algorithm": provider.get("model_hash_algorithm"),
+                        "hash_status": provider.get("hash_status"),
+                        "state": provider.get("state"),
+                        "routing_eligible": provider.get("routing_eligible"),
+                    }
+                )
+        if invalid_snapshot_providers:
+            fail(
+                "physical provider cohort is not snapshot-manifest hash-verified and buyer-routable: "
+                + json.dumps(invalid_snapshot_providers, sort_keys=True)
+            )
+        summary["snapshot_manifest_provider_count"] = len(providers)
 
     if mode in ("b6-ready", "encrypted-leg", "attested"):
         tier1 = models.get("tier1_disclosure")
