@@ -21,8 +21,10 @@
 #                       user:<suffix>]) on the persisted key: expected disk_hit with
 #                       cached_prompt_tokens EXACTLY equal to the persisted prefix
 #                       length (persist prompt + completion) by the unchanged LCP rule;
-#        B) warm      — the SAME restored request repeated in the SAME process: an
-#                       in-RAM hot-tier hit, the paired warm control;
+#        B) warm      — a genuine THIRD turn (full committed transcript + a new suffix)
+#                       in the SAME process: an in-RAM hot-tier hit with nonzero
+#                       cached_prompt_tokens, the paired warm control. (Repeating the
+#                       exact restored request would be nothing_new — LCP == incoming.)
 #        C) miss      — the genuine-second-turn shape on a FRESH never-persisted key,
 #                       tier enabled: a disk miss / full prefill baseline;
 #        D) disabled  — the restored request after a clean restart with the tier
@@ -190,29 +192,54 @@ field() { sed -nE "s/.*[[:space:]]$2=([^[:space:]]+).*/\1/p" <<<"$1" | tail -1; 
 # Extract a JSON field (string or number) from a probe record.
 json_get() { "$NODE_BIN" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s)[process.argv[1]];process.stdout.write(v==null?"":String(v))}catch{process.stdout.write("")}})' "$1"; }
 
-# Merge one probe record + disk-side §6 fields, append to the store, echo the merged
-# record on stdout so callers can read back TTFT / cached tokens.
-merge_record() { # $1=probe json $2=log-line-for-disk $3=cycle $4=prompt_tokens
+# Merge one probe record with the disk-side §6 fields from BOTH the promotion event
+# (disk_hit — restore bytes/ms/peak + identity) and the persist event
+# (disk_write_committed — commit-latency delta + serialized bytes + identity), append to
+# the store, and echo the merged record on stdout so callers can read it back. Identity/
+# format fields come from either event (the persist event is authoritative — it is the
+# turn whose commit-latency delta §6 measures).
+merge_record() { # $1=probe json $2=hit-line(disk_hit/miss) $3=write-line(disk_write_committed) $4=cycle $5=prompt_tokens
   "$NODE_BIN" -e '
-    const [probe, hitLine, cyc, promptClass] = process.argv.slice(1);
+    const [probe, hitLine, writeLine, cyc, promptClass] = process.argv.slice(1);
     let rec = {}; try { rec = JSON.parse(probe); } catch {}
-    const f = (k) => { const m = hitLine.match(new RegExp("(?:^|\\s)" + k + "=([^\\s]+)")); return m ? m[1] : null; };
-    const num = (k) => { const v = f(k); return v == null ? null : Number(v); };
+    const scan = (line, k) => { if (!line) return null; const m = line.match(new RegExp("(?:^|\\s)" + k + "=([^\\s]+)")); return m ? m[1] : null; };
+    const either = (k) => scan(writeLine, k) ?? scan(hitLine, k);
+    const numHit = (k) => { const v = scan(hitLine, k); return v == null ? null : Number(v); };
+    const numWrite = (k) => { const v = scan(writeLine, k); return v == null ? null : Number(v); };
     rec.cycle = Number(cyc);
     rec.disk_reason = (hitLine.match(/code=([a-z_]+)/) || [])[1] || null;
-    rec.restore_bytes = num("restore_bytes");
-    rec.restore_ms = num("decrypt_ms");
-    rec.staging_peak_bytes = num("peak_staging_bytes");
-    rec.commit_serialized_bytes = num("serialized_bytes");
-    rec.commit_latency_ms = num("write_ms");
-    // §6 disk-side identity fields (emitted by the provider when present).
-    rec.model_sha256 = f("model_sha256");
-    rec.catalog_revision = f("catalog_revision");
-    rec.format_schema_id = f("schema_id") || f("format_schema_id");
-    rec.kv_bits = num("kv_bits");
+    // promotion (restore) metrics from the disk_hit line:
+    rec.restore_bytes = numHit("restore_bytes");
+    rec.restore_ms = numHit("decrypt_ms");
+    rec.staging_peak_bytes = numHit("peak_staging_bytes");
+    // persist (commit-latency delta) metrics from the disk_write_committed line:
+    rec.commit_serialized_bytes = numWrite("serialized_bytes");
+    rec.commit_latency_ms = numWrite("write_ms");
+    // §6 identity/build/format fields (from either event; persist preferred):
+    rec.model_sha256 = either("model_sha256");
+    rec.catalog_revision = either("catalog_revision");
+    rec.format_schema_id = either("schema_id") || either("format_schema_id");
+    rec.format_codec_id = either("codec_id");
+    const kb = either("kv_bits");
+    rec.kv_bits = (kb == null || kb === "null") ? null : Number(kb);  // null = v1 unquantized
     rec.prompt_class_tokens = Number(promptClass);
     process.stdout.write(JSON.stringify(rec) + "\n");
-  ' "$1" "$2" "$3" "$4"
+  ' "$1" "$2" "$3" "$4" "$5"
+}
+
+# Reject a restored record missing any REQUIRED §6 evidence field (kv_bits null is a
+# legitimate unquantized value and is not required). Exits nonzero on the first miss.
+six_ok() { # $1=merged json
+  "$NODE_BIN" -e '
+    let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+      let r = {}; try { r = JSON.parse(s); } catch { process.exit(1); }
+      const req = ["model_sha256","catalog_revision","format_schema_id","format_codec_id",
+                   "restore_bytes","restore_ms","staging_peak_bytes",
+                   "commit_serialized_bytes","commit_latency_ms"];
+      for (const k of req) { if (r[k] == null) { process.stderr.write("kvs-01a: restored record missing §6 field " + k + "\n"); process.exit(1); } }
+      process.exit(0);
+    });
+  ' <<<"$1"
 }
 
 # ------------------------------------------------------------------ one cycle -------
@@ -225,7 +252,9 @@ run_one_cycle() { # $1=cycle
   local SEED_CONVERSATION="conv:kvs-synth:seed-$(uuidgen | tr 'A-Z' 'a-z')"
   local MISS_CONVERSATION="conv:kvs-synth:miss-$(uuidgen | tr 'A-Z' 'a-z')"
   local SUFFIX="continue-$RANDOM"
+  local SUFFIX2="continue2-$RANDOM"
   local RESP="$WORK/response-$cycle.txt"
+  local RESP2="$WORK/response2-$cycle.txt"
 
   echo "kvs-01a[c$cycle]: persist turn key_hash=$(printf '%s' "$CONVERSATION" | shasum -a 256 | cut -c1-8)" >&2
 
@@ -270,35 +299,47 @@ run_one_cycle() { # $1=cycle
 
   local ok=0
 
-  # (4A) restored arm — genuine second turn on the persisted key → disk_hit.
-  local R_JSON R_HIT R_TTFT R_CACHED R_CORRECT
+  # (4A) restored arm — genuine second turn on the persisted key → disk_hit. Capture ITS
+  # assistant response (RESP2) so the warm arm can form a genuine THIRD turn.
+  local R_JSON R_HIT R_MERGED R_TTFT R_CACHED R_CORRECT
   R_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS01A_BASE" --conversation "$CONVERSATION" --model "$MODEL" \
     --regime kvs01a_restored --arm restored --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
-    --assistant-file "$RESP" --suffix "$SUFFIX")"
+    --assistant-file "$RESP" --suffix "$SUFFIX" --response-out "$RESP2")"
   R_HIT="$(await_log "$LOG2" 'code=disk_(hit|promote_rejected|miss_[a-z_]+)' 30 || true)"
-  merge_record "$R_JSON" "$R_HIT" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
+  # Merge the promotion (disk_hit) AND the persist (WRITE_LINE) §6 fields into one record.
+  R_MERGED="$(merge_record "$R_JSON" "$R_HIT" "$WRITE_LINE" "$cycle" "$KVS01A_PROMPT_TOKENS")"
+  printf '%s' "$R_MERGED" | tee -a "$KVS01A_STORE" >/dev/null
   R_TTFT="$(json_get ttft_ms <<<"$R_JSON")"
   R_CACHED="$(json_get cached_prompt_tokens <<<"$R_JSON")"
   R_CORRECT="$(json_get correctness <<<"$R_JSON")"
   local R_CODE; R_CODE="$(sed -nE 's/.*code=([a-z_]+).*/\1/p' <<<"$R_HIT" | tail -1)"
   [[ -n "$R_TTFT" ]] && echo "$R_TTFT" >>"$WORK/ttft.restored.txt"
-  if [[ "$R_CODE" == "disk_hit" && "$R_CORRECT" == "ok" && -n "$R_CACHED" && "$R_CACHED" == "$EXPECTED_CACHED" ]]; then
+  local R_SIX_OK=1
+  if [[ "$KVS01A_SMOKE" != "1" ]] && ! six_ok "$R_MERGED"; then R_SIX_OK=0; fi
+  if [[ "$R_CODE" == "disk_hit" && "$R_CORRECT" == "ok" && -n "$R_CACHED" && "$R_CACHED" == "$EXPECTED_CACHED" && "$R_SIX_OK" == "1" ]]; then
     echo "kvs-01a[c$cycle]: PASS restored disk_hit cached=$R_CACHED (=$EXPECTED_CACHED) ttft=${R_TTFT:-none}ms" >&2
     ok=1
   else
-    echo "kvs-01a[c$cycle]: FAIL restored code=${R_CODE:-none} correctness=${R_CORRECT:-none} cached=${R_CACHED:-none} expected=$EXPECTED_CACHED" >&2
+    echo "kvs-01a[c$cycle]: FAIL restored code=${R_CODE:-none} correctness=${R_CORRECT:-none} cached=${R_CACHED:-none} expected=$EXPECTED_CACHED six_ok=$R_SIX_OK" >&2
   fi
 
-  # (4B) warm arm — repeat the SAME request in-process → in-RAM hot hit (paired control).
-  local W_JSON W_TTFT
+  # (4B) warm arm — a genuine THIRD turn (full committed transcript + new suffix) in the
+  # SAME process → in-RAM hot hit with nonzero cached_prompt_tokens (the paired control).
+  # Repeating the exact restored request would be nothing_new (LCP == incoming length).
+  local W_JSON W_TTFT W_CACHED
   W_JSON="$("$NODE_BIN" "$HERE/kvs-01a-probe.mjs" \
     --base "$KVS01A_BASE" --conversation "$CONVERSATION" --model "$MODEL" \
     --regime kvs01a_warm --arm warm --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
-    --assistant-file "$RESP" --suffix "$SUFFIX")"
-  merge_record "$W_JSON" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
+    --assistant-file "$RESP" --suffix "$SUFFIX" --assistant-file2 "$RESP2" --suffix2 "$SUFFIX2")"
+  merge_record "$W_JSON" "" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
   W_TTFT="$(json_get ttft_ms <<<"$W_JSON")"
+  W_CACHED="$(json_get cached_prompt_tokens <<<"$W_JSON")"
   [[ -n "$W_TTFT" ]] && echo "$W_TTFT" >>"$WORK/ttft.warm.txt"
+  if [[ -z "$W_CACHED" ]] || (( W_CACHED <= 0 )); then
+    echo "kvs-01a[c$cycle]: FAIL warm arm cached=${W_CACHED:-none} (expected nonzero hot hit — turn-3 control)" >&2
+    ok=0
+  fi
 
   # (4C) miss arm — fresh never-persisted key, tier enabled → disk miss / full prefill.
   local M_JSON M_HIT M_TTFT
@@ -307,7 +348,7 @@ run_one_cycle() { # $1=cycle
     --regime kvs01a_miss --arm miss --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
     --assistant-file "$RESP" --suffix "$SUFFIX")"
   M_HIT="$(await_log "$LOG2" 'code=disk_(hit|miss_[a-z_]+)' 15 || true)"
-  merge_record "$M_JSON" "$M_HIT" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
+  merge_record "$M_JSON" "$M_HIT" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
   M_TTFT="$(json_get ttft_ms <<<"$M_JSON")"
   [[ -n "$M_TTFT" ]] && echo "$M_TTFT" >>"$WORK/ttft.miss.txt"
 
@@ -323,7 +364,7 @@ run_one_cycle() { # $1=cycle
       --base "$KVS01A_BASE" --conversation "$CONVERSATION" --model "$MODEL" \
       --regime kvs01a_disabled --arm disabled --prompt-tokens "$KVS01A_PROMPT_TOKENS" \
       --assistant-file "$RESP" --suffix "$SUFFIX")"
-    merge_record "$D_JSON" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
+    merge_record "$D_JSON" "" "" "$cycle" "$KVS01A_PROMPT_TOKENS" | tee -a "$KVS01A_STORE" >/dev/null
     D_TTFT="$(json_get ttft_ms <<<"$D_JSON")"
     [[ -n "$D_TTFT" ]] && echo "$D_TTFT" >>"$WORK/ttft.disabled.txt"
   fi

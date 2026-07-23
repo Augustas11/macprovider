@@ -177,6 +177,12 @@ struct ColdPromotionCandidate: Sendable {
     let bytesRead: Int
     let decryptMillis: Int
     let peakStagingBytes: Int
+    /// §6 (Item 9): identity/format fields carried into the terminal `disk_hit` event so
+    /// the KVS-01a harness records the full §6 evidence set. Defaulted so test doubles
+    /// need not supply them.
+    var modelSHA256: String = ""
+    var catalogRevision: String = ""
+    var kvBits: Int? = nil
 }
 
 /// An immutable, `Sendable` hand-off from a synchronous hot-tier commit to the

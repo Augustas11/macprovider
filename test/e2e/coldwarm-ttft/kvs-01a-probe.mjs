@@ -48,6 +48,12 @@ const ARM = String(args.get('arm') || 'restored');
 const PROMPT_TOKENS = Number(args.get('prompt-tokens') || 2500);
 const ASSISTANT_FILE = args.get('assistant-file') && args.get('assistant-file') !== true ? String(args.get('assistant-file')) : null;
 const SUFFIX = args.get('suffix') && args.get('suffix') !== true ? String(args.get('suffix')) : 'continue';
+// The WARM arm forms a genuine THIRD turn: it carries the RESTORED turn's assistant
+// response (--assistant-file2) plus a new user suffix (--suffix2) so the incoming render
+// is strictly longer than the just-committed turn-2 canonical — a real warm hot hit with
+// nonzero cached_prompt_tokens, not a nothing_new miss (LCP == incoming length).
+const ASSISTANT_FILE2 = args.get('assistant-file2') && args.get('assistant-file2') !== true ? String(args.get('assistant-file2')) : null;
+const SUFFIX2 = args.get('suffix2') && args.get('suffix2') !== true ? String(args.get('suffix2')) : 'continue-again';
 const RESPONSE_OUT = args.get('response-out') && args.get('response-out') !== true ? String(args.get('response-out')) : null;
 const MAX_TOKENS = Number(args.get('max-tokens') || 8);
 const REQ_TIMEOUT_MS = Number(args.get('timeout-ms') || 120000);
@@ -77,15 +83,19 @@ function buildBasePrompt() {
 // and WARM arms are a genuine second conversation turn that carries the persist turn's
 // assistant response, making the persisted canonical an exact prefix of this render.
 function buildMessages(base) {
+  const msgs = [{ role: 'user', content: base }];
   if (ASSISTANT_FILE && existsSync(ASSISTANT_FILE)) {
-    const assistant = readFileSync(ASSISTANT_FILE, 'utf8');
-    return [
-      { role: 'user', content: base },
-      { role: 'assistant', content: assistant },
-      { role: 'user', content: SUFFIX },
-    ];
+    msgs.push({ role: 'assistant', content: readFileSync(ASSISTANT_FILE, 'utf8') });
+    msgs.push({ role: 'user', content: SUFFIX });
+    // Genuine THIRD turn (WARM arm): carry the restored turn's assistant response + a
+    // new suffix so the persisted/promoted turn-2 canonical is a strict prefix and the
+    // hot tier reports nonzero cached_prompt_tokens instead of nothing_new.
+    if (ASSISTANT_FILE2 && existsSync(ASSISTANT_FILE2)) {
+      msgs.push({ role: 'assistant', content: readFileSync(ASSISTANT_FILE2, 'utf8') });
+      msgs.push({ role: 'user', content: SUFFIX2 });
+    }
   }
-  return [{ role: 'user', content: base }];
+  return msgs;
 }
 
 async function main() {

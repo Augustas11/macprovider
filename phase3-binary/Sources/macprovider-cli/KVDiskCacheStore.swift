@@ -1052,12 +1052,20 @@ actor KVDiskCacheStore {
                 try persistMetadata()
             }
 
-            emit(.diskWriteCommitted, indexHashPrefix: indexPrefix(index), fields: [
+            // §6 (Item 9): the disk_write_committed event carries the identity/build/
+            // format record correlated by commit sequence + index hash, so the KVS-01a
+            // harness can merge the persist event's identity + commit-latency delta into
+            // the restored measurement (the buyer stream cannot see these fields).
+            var writeFields: [String: String] = [
                 "generation": "\(generation)",
                 "commit_sequence": "\(snapshot.commitSequence)",
                 "serialized_bytes": "\(writtenBlobBytes)",
                 "write_ms": "\(Int(Date().timeIntervalSince(writeStarted) * 1000))",
-            ])
+            ]
+            for (k, v) in identityFields(
+                modelSHA256: snapshot.identity.modelSHA256, catalogRevision: snapshot.identity.catalogRevision,
+                kvBits: snapshot.identity.kvBits) { writeFields[k] = v }
+            emit(.diskWriteCommitted, indexHashPrefix: indexPrefix(index), fields: writeFields)
             return .committed(generation: generation, commitSequence: snapshot.commitSequence)
         } catch let crash as KVInjectedCrash {
             // Simulated crash: leave on-disk side effects; abort-path DEK cleanup is
@@ -1388,11 +1396,15 @@ actor KVDiskCacheStore {
             }
             let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
             if emitHitEvent {
-                emit(.diskHit, indexHashPrefix: prefix, fields: [
+                var hitFields: [String: String] = [
                     "restore_bytes": "\(blobSize)",
                     "decrypt_ms": "\(elapsedMillis)",
                     "peak_staging_bytes": "\(peakStaging)",
-                ])
+                ]
+                for (k, v) in identityFields(
+                    modelSHA256: manifest.modelSHA256, catalogRevision: manifest.catalogRevision,
+                    kvBits: manifest.kvBits) { hitFields[k] = v }
+                emit(.diskHit, indexHashPrefix: prefix, fields: hitFields)
             }
             return .hit(KVReadHit(tokens: tokens, layers: layers,
                                   bytesRead: blobSize, decryptMillis: elapsedMillis,
@@ -1432,15 +1444,34 @@ actor KVDiskCacheStore {
         return try write(snapshot, nowMillis: nowMillis)
     }
 
+    /// §6 (Item 9): the identity/build/format fields appended to both disk_hit and
+    /// disk_write_committed structured events, correlated by the index-hash prefix, so
+    /// the KVS-01a harness records every §6 evidence field. `kv_bits=null` denotes the
+    /// v1 unquantized `KVCacheSimple` class (a legitimate value, not a missing field).
+    private func identityFields(modelSHA256: String, catalogRevision: String, kvBits: Int?) -> [String: String] {
+        [
+            "model_sha256": modelSHA256,
+            "catalog_revision": catalogRevision,
+            "schema_id": KVDiskCacheFormat.manifestSchemaID,
+            "codec_id": KVDiskCacheFormat.codecID,
+            "kv_bits": kvBits.map(String.init) ?? "null",
+        ]
+    }
+
     /// Emit `disk_hit` for a promotion the hot predicate accepted (§5 row 25). Kept
     /// separate from `read` so the terminal code is emitted once, after the hot
-    /// tier confirms reuse.
-    func notePromotedHit(prefixHash: String, bytesRead: Int, decryptMillis: Int, peakStagingBytes: Int) {
-        emit(.diskHit, indexHashPrefix: prefixHash, fields: [
+    /// tier confirms reuse. Carries the §6 identity/build/format fields (Item 9).
+    func notePromotedHit(prefixHash: String, bytesRead: Int, decryptMillis: Int, peakStagingBytes: Int,
+                         modelSHA256: String, catalogRevision: String, kvBits: Int?) {
+        var fields: [String: String] = [
             "restore_bytes": "\(bytesRead)",
             "decrypt_ms": "\(decryptMillis)",
             "peak_staging_bytes": "\(peakStagingBytes)",
-        ])
+        ]
+        for (k, v) in identityFields(modelSHA256: modelSHA256, catalogRevision: catalogRevision, kvBits: kvBits) {
+            fields[k] = v
+        }
+        emit(.diskHit, indexHashPrefix: prefixHash, fields: fields)
     }
 
     /// Emit `disk_promote_rejected` when the hot predicate rejected restored layers.

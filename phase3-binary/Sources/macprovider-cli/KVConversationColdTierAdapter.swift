@@ -207,14 +207,19 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             keyHashPrefix: prefix,
             bytesRead: hit.bytesRead,
             decryptMillis: hit.decryptMillis,
-            peakStagingBytes: hit.peakStagingBytes)
+            peakStagingBytes: hit.peakStagingBytes,
+            modelSHA256: identity.modelSHA256 ?? "",
+            catalogRevision: identity.catalogRevision,
+            kvBits: identity.kvBits)
     }
 
     func finishPromotion(_ candidate: ColdPromotionCandidate, accepted: Bool, rejectionReason: String?) async {
         if accepted {
             await store.notePromotedHit(
                 prefixHash: candidate.keyHashPrefix, bytesRead: candidate.bytesRead,
-                decryptMillis: candidate.decryptMillis, peakStagingBytes: candidate.peakStagingBytes)
+                decryptMillis: candidate.decryptMillis, peakStagingBytes: candidate.peakStagingBytes,
+                modelSHA256: candidate.modelSHA256, catalogRevision: candidate.catalogRevision,
+                kvBits: candidate.kvBits)
         } else {
             await store.notePromoteRejected(prefixHash: candidate.keyHashPrefix, reason: rejectionReason ?? "unknown")
         }
