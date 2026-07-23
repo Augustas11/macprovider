@@ -1665,10 +1665,10 @@ class PearlUpdaterTests(unittest.TestCase):
                     signer,
                     deadline=125.0,
                 ),
-                (
-                    row_identity,
-                    "session-canary",
-                    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                updater_module.CatalogCanaryEvidence(
+                    row_identity=row_identity,
+                    assigned_id="session-canary",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
                 ),
             )
         args, kwargs = self.updater.run_command.call_args
@@ -1746,10 +1746,10 @@ class PearlUpdaterTests(unittest.TestCase):
         order = []
         self.updater.prove_catalog_canary_mac = mock.Mock(
             side_effect=lambda *_args, **_kwargs: order.append("mac")
-            or (
-                "b" * 64,
-                "session-canary",
-                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            or updater_module.CatalogCanaryEvidence(
+                row_identity="b" * 64,
+                assigned_id="session-canary",
+                model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
             )
         )
         self.updater.catalog_provider_admission_ready = mock.Mock(
@@ -1763,7 +1763,11 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertEqual(
             self.updater.verify_exact_provider_canary(release),
-            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            updater_module.CatalogCanaryEvidence(
+                row_identity="b" * 64,
+                assigned_id="session-canary",
+                model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+            ),
         )
 
         self.assertEqual(order, ["mac", "pool"])
@@ -1792,15 +1796,15 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.prove_catalog_canary_mac = mock.Mock(
             side_effect=[
                 updater_module.UpdateError("provider not installed yet"),
-                (
-                    row_identity,
-                    "session-before-reconnect",
-                    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                updater_module.CatalogCanaryEvidence(
+                    row_identity=row_identity,
+                    assigned_id="session-before-reconnect",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
                 ),
-                (
-                    row_identity,
-                    "session-after-reconnect",
-                    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                updater_module.CatalogCanaryEvidence(
+                    row_identity=row_identity,
+                    assigned_id="session-after-reconnect",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
                 ),
             ]
         )
@@ -3573,8 +3577,13 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_canary_provider_id="catalog-canary",
         )
         self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        provider_evidence = updater_module.CatalogCanaryEvidence(
+            row_identity="b" * 64,
+            assigned_id="session-canary",
+            model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
+        )
         self.updater.verify_exact_provider_canary = mock.Mock(
-            return_value="mlx-community/Llama-3.2-3B-Instruct-4bit"
+            return_value=provider_evidence
         )
         self.updater.verify_live_runtime_binding = mock.Mock()
         self.updater.prove_gateway_buyer_stream = mock.Mock(
@@ -3625,6 +3634,13 @@ class PearlUpdaterTests(unittest.TestCase):
             if call.args[:2] == ("single_authority_buyer_serving_cycle", "success")
         ]
         self.assertEqual([call.kwargs["cycle"] for call in proof_events], [1, 2, 3])
+        self.assertTrue(
+            all(
+                call.kwargs["assigned_id"] == provider_evidence.assigned_id
+                and call.kwargs["catalog_row_identity"] == provider_evidence.row_identity
+                for call in proof_events
+            )
+        )
         self.updater.prepare_config_update.assert_not_called()
         self.updater.snapshot.assert_not_called()
         self.updater.install_release.assert_not_called()
@@ -3634,8 +3650,11 @@ class PearlUpdaterTests(unittest.TestCase):
             return_value=True,
         )
         self.updater.verify_exact_provider_canary.side_effect = [
-            "mlx-community/Llama-3.2-3B-Instruct-4bit",
-            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            provider_evidence,
+            updater_module.dataclasses.replace(
+                provider_evidence,
+                assigned_id="replacement-session",
+            ),
         ]
         self.updater.prove_gateway_buyer_stream.reset_mock(
             side_effect=True,
@@ -3652,7 +3671,7 @@ class PearlUpdaterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             updater_module.UpdateError,
-            "catalog canary model changed",
+            "catalog canary identity changed",
         ):
             self.updater.prove_current_release(release)
 
@@ -4792,10 +4811,10 @@ class PearlUpdaterTests(unittest.TestCase):
             return_value=("catalog-canary", "t" * 32)
         )
         self.updater.prove_catalog_canary_mac = mock.Mock(
-            return_value=(
-                expected_row_identity,
-                "session-canary",
-                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            return_value=updater_module.CatalogCanaryEvidence(
+                row_identity=expected_row_identity,
+                assigned_id="session-canary",
+                model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
             )
         )
         self.updater.get_authorized_json = mock.Mock(
