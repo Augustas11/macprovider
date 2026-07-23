@@ -47,6 +47,9 @@ make_fake_binary() {
   mkdir -p "$dir"
   cat >"$dir/macprovider-cli" <<EOF
 #!/usr/bin/env bash
+if [ -n "\${FAKE_PROVIDER_EXECUTION_MARKER:-}" ]; then
+  : > "\$FAKE_PROVIDER_EXECUTION_MARKER"
+fi
 if [ "\${1:-}" = "--version" ]; then
   printf '%s\n' "$version"
   exit 0
@@ -170,7 +173,17 @@ cat > "$fake_bin/python3" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "$fake_bin/python3"
+cat > "$fake_bin/lipo-arm64" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "-archs" ] || exit 64
+printf 'arm64\n'
+EOF
+cat > "$fake_bin/lipo-x86_64" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "-archs" ] || exit 64
+printf 'x86_64\n'
+EOF
+chmod +x "$fake_bin/python3" "$fake_bin/lipo-arm64" "$fake_bin/lipo-x86_64"
 make_tarball "$preflight_dir" "$preflight_tar"
 preflight_sha="$(sha256_file "$preflight_tar")"
 
@@ -191,6 +204,33 @@ PATH="$fake_bin:$PATH" \
   "$CHECKER" >"$WORKDIR/preflight-success.out" 2>"$WORKDIR/preflight-success.err"
 assert_contains "$WORKDIR/preflight-success.err" \
   "staged provider validated its signed compatibility release payload"
+
+structural_marker="$WORKDIR/structural-executed"
+PATH="$fake_bin:$PATH" \
+  FAKE_PROVIDER_EXECUTION_MARKER="$structural_marker" \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  PROVIDER_RUNTIME_MODE=structural \
+  PROVIDER_EXPECTED_ARCHES=arm64 \
+  PROVIDER_LIPO_BIN="$fake_bin/lipo-arm64" \
+  "$CHECKER" >"$WORKDIR/structural.out" 2>"$WORKDIR/structural.err"
+[ ! -e "$structural_marker" ] || die "structural mode executed the provider binary"
+assert_contains "$WORKDIR/structural.err" "provider architecture ok: arm64"
+assert_contains "$WORKDIR/structural.err" \
+  "provider runtime execution deferred to an architecture-compatible verifier"
+if PATH="$fake_bin:$PATH" \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  PROVIDER_RUNTIME_MODE=structural \
+  PROVIDER_EXPECTED_ARCHES=arm64 \
+  PROVIDER_LIPO_BIN="$fake_bin/lipo-x86_64" \
+  "$CHECKER" >"$WORKDIR/structural-wrong-arch.out" 2>"$WORKDIR/structural-wrong-arch.err"; then
+  die "structural mode accepted the wrong provider architecture"
+fi
+assert_contains "$WORKDIR/structural-wrong-arch.err" \
+  "provider architecture mismatch: got x86_64 want arm64"
 
 missing_tier2_dir="$WORKDIR/missing-tier2"
 missing_tier2_tar="$WORKDIR/missing-tier2.tar.gz"
