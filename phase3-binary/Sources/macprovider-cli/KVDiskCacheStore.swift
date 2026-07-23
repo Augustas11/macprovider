@@ -229,6 +229,11 @@ struct KVNamespaceMetadata: Sendable, Equatable {
     var clockHighWaterMillis: Int
     /// Open rotation-intent journal entry (nil when none).
     var rotationJournal: KVRotationJournal?
+    /// Immutable per-index retention basis (creation ms), persisted so the
+    /// creation-based retention deadline survives restart independently of the current
+    /// generation's manifest timestamp (M-C). Bounded by maxEntries; cleared on
+    /// purge/eviction/rotation.
+    var retentionBasisMillis: [String: Int] = [:]
 
     static let maxBytes = 256 * 1024   // FR-KVP7 control-plane bound
     static let highWatermarkCap = 4096 // FR-KVP7
@@ -859,11 +864,22 @@ actor KVDiskCacheStore {
             let entryBytes = blob.count + manifestData.count
             committedBytes += entryBytes - previousBytes
             // Preserve the entry's original creation time across generations (M-12).
-            let creationMillis = liveEntries[index]?.creationMillis ?? snapshot.createdAtMillis
+            // M-C: the retention basis is the persisted value if present, else the
+            // in-memory creation time, else this first commit's created_at — so the
+            // creation-based retention deadline never shifts forward on a replacement.
+            let creationMillis = metadata.retentionBasisMillis[index]
+                ?? liveEntries[index]?.creationMillis
+                ?? snapshot.createdAtMillis
             liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: nowMillis,
                                              creationMillis: creationMillis, generation: generation)
             lastGeneration[index] = generation
             lastCommitSequence[index] = snapshot.commitSequence
+            // M-C: persist the immutable retention basis on first observation so it
+            // survives restart independently of the newest manifest's timestamp.
+            if metadata.retentionBasisMillis[index] != creationMillis {
+                metadata.retentionBasisMillis[index] = creationMillis
+                try persistMetadata()
+            }
 
             emit(.diskWriteCommitted, indexHashPrefix: indexPrefix(index), fields: [
                 "generation": "\(generation)",
@@ -1291,6 +1307,7 @@ actor KVDiskCacheStore {
         liveEntries.removeValue(forKey: index)
         lastGeneration.removeValue(forKey: index)
         lastCommitSequence.removeValue(forKey: index)
+        metadata.retentionBasisMillis.removeValue(forKey: index)   // M-C
         committedBytes = max(0, committedBytes - freed)
 
         // Mark the tombstone complete (fsync + dir fsync). New writes admitted only now.
@@ -1364,6 +1381,7 @@ actor KVDiskCacheStore {
             // (2) durably commit the new epoch + reset the high-watermark map.
             metadata.keyEpoch = journal.to
             metadata.purgeHighWatermarks = [:]
+            metadata.retentionBasisMillis = [:]   // M-C: all entries are crypto-shredded
             metadata.rotationJournal = KVRotationJournal(from: journal.from, to: journal.to, phase: "committed")
             try persistMetadata()
             notifyEpoch()   // CRITICAL-2: adapter caches the new epoch for capture-time stamping.
@@ -1463,6 +1481,7 @@ actor KVDiskCacheStore {
         liveEntries.removeValue(forKey: index)
         lastGeneration.removeValue(forKey: index)
         lastCommitSequence.removeValue(forKey: index)
+        metadata.retentionBasisMillis.removeValue(forKey: index)   // M-C
         committedBytes = max(0, committedBytes - freed)
         emit(reason, indexHashPrefix: indexPrefix(index), fields: ["bytes_freed": "\(freed)"])
     }
@@ -1597,10 +1616,22 @@ actor KVDiskCacheStore {
             let blobBytes = (try? fileSize(blobURL)) ?? 0
             let entryBytes = blobBytes + data.count
             committedBytes += entryBytes
+            // M-C: restore the retention basis from the persisted control state — NOT
+            // the newest manifest's created_at, which shifts the deadline forward on a
+            // post-replacement restart. Fall back to the manifest only for pre-M-C
+            // metadata that lacks a persisted basis.
+            let creationMillis = metadata.retentionBasisMillis[index] ?? manifest.createdAtMillis
             liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: manifest.createdAtMillis,
-                                             creationMillis: manifest.createdAtMillis, generation: manifest.generation)
+                                             creationMillis: creationMillis, generation: manifest.generation)
             lastGeneration[index] = manifest.generation
             lastCommitSequence[index] = manifest.commitSequence
+        }
+        // M-C: drop retention-basis entries for indices that no longer have a live
+        // manifest (swept orphans), keeping the persisted map bounded to live entries.
+        let pruned = metadata.retentionBasisMillis.filter { liveEntries[$0.key] != nil }
+        if pruned.count != metadata.retentionBasisMillis.count {
+            metadata.retentionBasisMillis = pruned
+            try persistMetadata()
         }
         try fsyncDirectory(entriesDir)
     }
@@ -1788,6 +1819,7 @@ enum KVMetadataCodec {
             "codec_id": m.codecID,
             "purge_high_watermarks": m.purgeHighWatermarks,
             "clock_high_water_ms": m.clockHighWaterMillis,
+            "retention_basis_ms": m.retentionBasisMillis,
         ]
         if let journal = m.rotationJournal {
             object["rotation_journal"] = ["from": journal.from, "to": journal.to, "phase": journal.phase]
@@ -1808,8 +1840,11 @@ enum KVMetadataCodec {
         let allowed: Set<String> = [
             "provider_namespace_id", "key_epoch", "schema_id", "codec_id",
             "purge_high_watermarks", "clock_high_water_ms", "rotation_journal",
+            "retention_basis_ms",
         ]
-        let required: Set<String> = allowed.subtracting(["rotation_journal"])
+        // retention_basis_ms is optional (back-compat: metadata written before M-C
+        // lacks it) — recovery falls back to the manifest timestamp for a missing basis.
+        let required: Set<String> = allowed.subtracting(["rotation_journal", "retention_basis_ms"])
         let present = Set(object.keys)
         guard present.isSubset(of: allowed), required.isSubset(of: present) else { return nil }
 
@@ -1829,6 +1864,17 @@ enum KVMetadataCodec {
             hw[k] = n
         }
 
+        // retention_basis_ms (optional): every value a non-negative integer, bounded.
+        var basis: [String: Int] = [:]
+        if let raw = object["retention_basis_ms"] {
+            guard let map = raw as? [String: Any],
+                  map.count <= KVNamespaceMetadata.highWatermarkCap else { return nil }
+            for (k, v) in map {
+                guard let n = v as? Int, n >= 0 else { return nil }
+                basis[k] = n
+            }
+        }
+
         var journal: KVRotationJournal?
         if let raw = object["rotation_journal"] {
             guard let j = raw as? [String: Any],
@@ -1840,7 +1886,8 @@ enum KVMetadataCodec {
         }
         return KVNamespaceMetadata(
             providerNamespaceID: namespaceID, keyEpoch: epoch, schemaID: schemaID, codecID: codecID,
-            purgeHighWatermarks: hw, clockHighWaterMillis: clockHW, rotationJournal: journal)
+            purgeHighWatermarks: hw, clockHighWaterMillis: clockHW, rotationJournal: journal,
+            retentionBasisMillis: basis)
     }
 }
 

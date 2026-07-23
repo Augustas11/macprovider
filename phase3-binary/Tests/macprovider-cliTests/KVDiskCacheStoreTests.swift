@@ -167,6 +167,36 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(code, .diskMissAbsent)
     }
 
+    /// M-C: the retention basis is the IMMUTABLE first-creation time, persisted so a
+    /// restart after a replacement (newer manifest created_at) does not shift the
+    /// retention deadline forward.
+    func testRetentionBasisSurvivesRestartAfterReplacement() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let key = "conv:kvs-synth:retain-basis"
+        let t0 = 1_000_000
+        let retentionMs = 3600 * 1000
+        let t1 = t0 + retentionMs / 2   // a later replacement, still within t0's window
+
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        // First write at t0 establishes the basis; a replacement at t1 must not move it.
+        let s0 = try await makeSnapshot(store: store1, rawKey: key, seq: 5, commitSequence: 1, nowMillis: t0)
+        _ = try await store1.write(s0, nowMillis: t0)
+        let s1 = try await makeSnapshot(store: store1, rawKey: key, seq: 6, commitSequence: 2, nowMillis: t1)
+        _ = try await store1.write(s1, nowMillis: t1)
+        await store1.deactivate()
+
+        // Restart: recovery must restore the basis as t0, not the newest manifest's t1.
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        // A retention sweep just past the t0 deadline (but far before t1's) evicts it.
+        try await store2.runRetention(nowMillis: t0 + retentionMs + 1)
+        let inspection = await store2.inspect()
+        XCTAssertEqual(inspection.entryCount, 0,
+                       "retention basis must remain the original creation time across restart")
+    }
+
     func testCrashAfterRenameRecoversCompleteGeneration() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()
