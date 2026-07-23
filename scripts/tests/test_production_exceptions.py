@@ -679,7 +679,7 @@ class ProductionExceptionsTests(unittest.TestCase):
                 msg=overrides,
             )
 
-    def test_committed_register_seals_608_catalog_bridge_only(self):
+    def test_committed_register_seals_608_catalog_and_609_hash_bridges(self):
         doc = pe.load_json(pe.default_register_path(ROOT))
         row = next(
             entry
@@ -694,14 +694,21 @@ class ProductionExceptionsTests(unittest.TestCase):
             for entry in doc["exceptions"]
             if entry["id"] == "exc-tier2-hash-mismatch-containment"
         )
-        self.assertEqual(containment["status"], "active")
-        self.assertTrue(containment["blocks_stable_promotion"])
+        self.assertEqual(containment["status"], "removed")
+        self.assertFalse(containment["blocks_stable_promotion"])
+        self.assertNotIn("still_blocked_for_clearance", containment)
+        self.assertNotIn("partial_progress", containment)
         containment_blob = json.dumps(containment, sort_keys=True)
         self.assertNotIn(
             "Independent /opt/macprovider/tier2-catalog.json authority remains",
             containment_blob,
         )
-        self.assertIn("require_hash_verified remains false", containment_blob)
+        self.assertIn("require_hash_verified=true", containment_blob)
+        self.assertIn("macprovider.snapshot-manifest.v1", containment_blob)
+        self.assertIn(
+            "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5064599896",
+            containment["evidence"],
+        )
         tombstones = pe.load_json(pe.default_tombstone_path(ROOT))
         tombstone = next(
             row
@@ -712,6 +719,22 @@ class ProductionExceptionsTests(unittest.TestCase):
             tombstone["removal_evidence"],
             "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5062822871",
         )
+        containment_tombstone = next(
+            row
+            for row in tombstones["tombstones"]
+            if row["id"] == "exc-tier2-hash-mismatch-containment"
+        )
+        self.assertEqual(
+            containment_tombstone["removal_evidence"],
+            "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5064599896",
+        )
+        canary = next(
+            entry
+            for entry in doc["exceptions"]
+            if entry["id"] == "exc-canary-disabled-enable-gate"
+        )
+        self.assertEqual(canary["status"], "active")
+        self.assertTrue(canary["blocks_stable_promotion"])
         result = pe.validate_register(doc, now=NOW, tombstones=tombstones)
         self.assertEqual(result.errors, [], [f.format() for f in result.errors])
 

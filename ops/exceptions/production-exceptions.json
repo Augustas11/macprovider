@@ -1,8 +1,8 @@
 {
   "$schema": "./production-exceptions.schema.json",
   "schema_version": "macprovider-production-exceptions-v1",
-  "updated_at": "2026-07-23T20:05:45Z",
-  "updated_by": "fix/608-stepd-clear-compat-bridge",
+  "updated_at": "2026-07-23T23:40:33Z",
+  "updated_by": "fix/609-clear-hash-containment",
   "environment": "pearl-production",
   "exceptions": [
     {
@@ -107,41 +107,37 @@
     },
     {
       "id": "exc-tier2-hash-mismatch-containment",
-      "status": "active",
+      "status": "removed",
       "environment": "pearl-production",
       "component": "tier2",
       "policy_delta": "Tier-2 model-hash mismatch enforcement remains contained or bridged for legacy/missing `model_hash_algorithm` providers instead of strictly rejecting every untyped or mismatched model hash.",
       "authority_surface": "Pearl keys `tier2.require_hash_verified` and `tier2.model_hash_legacy_until` / env `MODEL_HASH_LEGACY_UNTIL`; event `model_hash_algorithm_legacy_bridge`.",
-      "reason": "#609 records that v1.8.40 compared unlike hash algorithms and production temporarily deactivated the Tier-2 catalog consumer while retaining signed catalog files. Entry 170 permits only a finite legacy algorithm bridge.",
+      "reason": "#609 Step E is sealed on Pearl: the reviewed rollback-armed transaction enabled fail-closed Tier-2 hash verification on the already-running v1.8.60 coordinator, both physical providers reported canonical snapshot-manifest identity and remained buyer-serving, three pre- and three post-enforcement journeys passed, and the stop-condition scan was empty.",
       "owner": "model-catalog identity/provider admission",
       "issue": "https://github.com/Augustas11/macprovider/issues/609",
       "created_at": "2026-07-16T00:00:00Z",
-      "expires_at": null,
-      "expiry_unknown_reason": "Pearl live coordinator.yaml has tier2.require_hash_verified=false and does NOT set tier2.model_hash_legacy_until; process environ has no MODEL_HASH_LEGACY_UNTIL. Containment is the require_hash_verified=false posture on coordinator v1.8.60, not a dated legacy-until env bridge. Flip requires reviewed promote + algorithm fail-closed evidence.",
-      "scope": "Pearl production Tier-2 hash enforcement while require_hash_verified remains false on coordinator v1.8.60. The #608 dual-file authority blocker is cleared; containment remains only for #609 algorithm fail-closed and physical-provider evidence. Must not widen to arbitrary unsigned catalogs.",
+      "expires_at": "2026-07-23T23:40:33Z",
+      "scope": "Pearl production Tier-2 hash enforcement on coordinator v1.8.60. The signed release-bound Tier-2 authority remains singular and every buyer-routable physical provider must remain hash-verified with `macprovider.snapshot-manifest.v1` identity.",
       "removal_condition": "Observed legacy provider count reaches zero, a physical provider reports canonical `macprovider.snapshot-manifest.v1` identity and buyer-serves, and the Tier-2 bridge field is removed so missing algorithms fail closed.",
-      "rollback_command": "ssh pearl 'sudo grep -E \"MODEL_HASH_LEGACY_UNTIL|model_hash_legacy_until|require_hash_verified\" /etc/macprovider/coordinator.env /etc/macprovider/coordinator.yaml' # read-only; then remove the bridge via reviewed coordinator config PR/deploy.",
-      "post_removal_validation": "Coordinator rejects missing/unknown `model_hash_algorithm`, emits no `model_hash_algorithm_legacy_bridge`, and #613 physical evidence shows buyer-serving with canonical artifact identity.",
-      "blocks_stable_promotion": true,
+      "rollback_command": "Do not directly edit `tier2.require_hash_verified`, restore a legacy algorithm bridge, or recreate this exception ID. During an armed transaction the reviewed remote watchdog restores enforcement=false automatically. After durable commit, any rollback requires a new reviewed rollback-armed recovery Partial and a new exception ID while preserving the signed release-bound Tier-2 authority.",
+      "post_removal_validation": "2026-07-23 Pearl evidence proves require_hash_verified=true, no algorithm bridge in config or process environment, two of two physical providers reporting `macprovider.snapshot-manifest.v1` with `hash_verified`, three pre- and three post-enforcement buyer-serving journeys, active coordinator/gateway, hard-disabled canary, cleared transaction state, and zero hash/catalog stop-condition journal matches.",
+      "blocks_stable_promotion": false,
       "evidence": [
         "https://github.com/Augustas11/macprovider/issues/615",
         "https://github.com/Augustas11/macprovider/issues/609",
         "https://github.com/Augustas11/macprovider/issues/608",
+        "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5064599896",
+        "https://github.com/Augustas11/macprovider/pull/732",
+        "https://github.com/Augustas11/macprovider/pull/733",
         "beta/DECISION_CRITERIA.md Entry 170",
+        "beta/DECISION_CRITERIA.md Entry 191",
+        "beta/DECISION_CRITERIA.md Entry 192",
         "phase4-coordinator/dist/coordinator.yaml",
         "phase4-coordinator/internal/ws/server.go",
+        "scripts/enforce-tier2-hash.sh",
+        "scripts/verify-tier2-live.sh",
         "specs/SPEC-010-model-catalog.md",
         "ops/runbooks/pearl-exception-clearance-20260722.md#tier2-hash-mismatch-containment"
-      ],
-      "partial_progress": [
-        "2026-07-22 Pearl: MODEL_HASH_LEGACY_UNTIL absent from coordinator.env and coordinator process environ.",
-        "2026-07-22 Pearl: settlement_route_snapshots all-time spec008_hash_status=hash_verified (n=1109); mismatches last 7d=0.",
-        "2026-07-22 Pearl: live Qwen settlement reported hash 10adb5da\u2026 matches expected catalog hash (canonical snapshot identity).",
-        "2026-07-22 Pearl: autotune Qwen model_sha256 and Tier-2 Qwen sha256 agree at 10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0.",
-        "2026-07-22 Pearl: 48h journal counts model_hash_algorithm_legacy_bridge=0 and hash_mismatch=0."
-      ],
-      "still_blocked_for_clearance": [
-        "Do not set require_hash_verified=true until coordinator promote includes Entry 170 algorithm fail-closed and physical providers prove model_hash_algorithm=macprovider.snapshot-manifest.v1 into buyer_serving."
       ]
     },
     {
