@@ -34,6 +34,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Self-test the path detector
+        # Runs the detector's regression suite here so a broken detector fails
+        # THIS job; ci-required requires `changes` to succeed, so a regression
+        # blocks merge instead of silently mis-gating the macOS jobs.
+        shell: bash
+        run: bash scripts/tests/test-ci-detect-changed-paths.sh
+
       - name: Detect changed paths
         id: filter
         shell: bash
@@ -45,57 +52,17 @@ jobs:
           PUSH_AFTER: ${{ github.sha }}
         run: |
           set -euo pipefail
-
-          # Fail OPEN. `swift` gates the macOS Swift/xcodebuild job and `code`
-          # gates the macOS SPEC-015 cross-service acceptance. Any uncertainty
-          # about the diff (missing base, unknown commit, git error, or an
-          # unexpected event) leaves BOTH true so every macOS job still runs.
-          # A missed detection must never skip a job a real change depends on.
-          swift=true
-          code=true
-
+          # Resolve base/head per event; the detector fails open on anything
+          # it cannot resolve. All logic (rename-safe, NUL-safe, fixture
+          # coverage) lives in the script so it is unit-testable above.
           base=""
           head=""
           case "$EVENT_NAME" in
             pull_request) base="$PR_BASE_SHA"; head="$PR_HEAD_SHA" ;;
             push) base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
           esac
-
-          zero="0000000000000000000000000000000000000000"
-          if [ -n "$base" ] && [ -n "$head" ] && [ "$base" != "$zero" ] \
-             && git cat-file -e "${base}^{commit}" 2>/dev/null \
-             && git cat-file -e "${head}^{commit}" 2>/dev/null \
-             && files="$(git diff --name-only "$base" "$head" 2>/dev/null)"; then
-            # Diff resolved: compute precise booleans from the file list.
-            swift=false
-            code=false
-            while IFS= read -r f; do
-              [ -n "$f" ] || continue
-              # Swift job covers phase3-binary sources, the build/xcodegen/
-              # sparkle scripts it invokes, the Makefile, and this workflow.
-              case "$f" in
-                phase3-binary/*|scripts/*|Makefile|.github/workflows/ci.yml)
-                  swift=true ;;
-              esac
-              # SPEC-015 acceptance is skipped only for documentation-only
-              # PRs: the docs/ tree and root-level Markdown (README.md,
-              # CLAUDE.md, ...). ANY file nested in a directory — including a
-              # nested *.md that might be a test fixture — is significant and
-              # runs the acceptance, as does any spec or root non-doc file.
-              case "$f" in
-                docs/*) : ;;
-                */*) code=true ;;
-                *.md) : ;;
-                *) code=true ;;
-              esac
-            done <<< "$files"
-          fi
-
-          {
-            echo "swift=$swift"
-            echo "code=$code"
-          } >> "$GITHUB_OUTPUT"
-          echo "detect: event=$EVENT_NAME base=$base head=$head -> swift=$swift code=$code"
+          echo "event=$EVENT_NAME base=$base head=$head"
+          bash scripts/ci-detect-changed-paths.sh "$base" "$head"
 
   coordinator:
     name: phase4-coordinator (go vet + test)
@@ -523,6 +490,7 @@ jobs:
     needs:
       - changes
       - coordinator
+      - coordinator-lint
       - coordinator-stats-integration
       - coordinator-nginx-integration
       - gateway
@@ -539,7 +507,10 @@ jobs:
         shell: bash
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
+          SWIFT_GATE: ${{ needs.changes.outputs.swift }}
+          CODE_GATE: ${{ needs.changes.outputs.code }}
           COORDINATOR_RESULT: ${{ needs.coordinator.result }}
+          COORDINATOR_LINT_RESULT: ${{ needs.coordinator-lint.result }}
           COORDINATOR_STATS_INTEGRATION_RESULT: ${{ needs.coordinator-stats-integration.result }}
           NGINX_INTEGRATION_RESULT: ${{ needs.coordinator-nginx-integration.result }}
           GATEWAY_RESULT: ${{ needs.gateway.result }}
@@ -563,18 +534,34 @@ jobs:
               failed=1
             fi
           }
-          # Path-gated macOS jobs. A skip (the change did not touch their
-          # paths) is a legitimate pass. Anything other than success or skipped
-          # (failure, cancelled, timed_out) still fails the gate.
+          # Path-gated macOS jobs. A skip is legitimate ONLY when its detector
+          # boolean is exactly 'false'. If the gate said 'true' the job must
+          # have succeeded; a missing/malformed gate value (e.g. the detector
+          # failed) is fatal. This ties every skip to a real gate decision so
+          # an accidental `if:` or dependency change cannot drop coverage while
+          # ci-required still passes.
           allow_skip() {
-            if [ "$2" != "success" ] && [ "$2" != "skipped" ]; then
-              printf '%s result=%s (expected success or skipped)\n' "$1" "$2" >&2
-              failed=1
-            fi
+            local name="$1" result="$2" gate="$3"
+            case "$gate" in
+              false)
+                if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+                  printf '%s result=%s gate=false (expected success or skipped)\n' "$name" "$result" >&2
+                  failed=1
+                fi ;;
+              true)
+                if [ "$result" != "success" ]; then
+                  printf '%s result=%s gate=true (expected success)\n' "$name" "$result" >&2
+                  failed=1
+                fi ;;
+              *)
+                printf '%s gate=%s malformed detector output\n' "$name" "$gate" >&2
+                failed=1 ;;
+            esac
           }
 
           require_success "detect changed paths" "$CHANGES_RESULT"
           require_success "phase4-coordinator (go vet + test)" "$COORDINATOR_RESULT"
+          require_success "phase4-coordinator (golangci-lint depguard AC-16)" "$COORDINATOR_LINT_RESULT"
           require_success "phase4-coordinator (stats Postgres AC-9/10/19/20)" "$COORDINATOR_STATS_INTEGRATION_RESULT"
           require_success "phase4-coordinator (nginx Step 4.B behavior smoke)" "$NGINX_INTEGRATION_RESULT"
           require_success "phase5-gateway (go vet + test)" "$GATEWAY_RESULT"
@@ -583,7 +570,7 @@ jobs:
           require_success "integration (cross-service)" "$INTEGRATION_RESULT"
           require_success "spec-014-v0-2-gate" "$SPEC_014_RESULT"
           require_success "deploy tooling (check-deploy-config gate)" "$DIST_TOOLING_RESULT"
-          allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT"
-          allow_skip "spec-015-acceptance" "$SPEC_015_RESULT"
+          allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT" "$SWIFT_GATE"
+          allow_skip "spec-015-acceptance" "$SPEC_015_RESULT" "$CODE_GATE"
 
           exit "$failed"
