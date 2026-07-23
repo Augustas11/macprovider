@@ -487,9 +487,14 @@ extension KVDiskManifest {
     }
 
     /// Full JCS canonical bytes of the manifest (for `manifest.json` serialization).
+    /// Uses the RAW code-point JCS path (M-10): the shared error-envelope JCS
+    /// NFC-normalizes string values, which would collapse composed vs decomposed
+    /// forms in identity/AAD fields and let a decomposed-key manifest authenticate
+    /// against a composed live identity (and vice versa). The KV manifest codec must
+    /// preserve the exact code points it was built from.
     func jcsCanonicalData() throws -> Data {
         do {
-            let s = try RFC8785JCS.canonicalString(jcsValue(omitBlobSHA256: false))
+            let s = try RFC8785JCS.canonicalStringRawStrings(jcsValue(omitBlobSHA256: false))
             return Data(s.utf8)
         } catch {
             throw KVFormatError.jcsFailed("\(error)")
@@ -497,10 +502,11 @@ extension KVDiskManifest {
     }
 
     /// The AAD for chunk `ordinal`: JCS(manifest without `blob_sha256`) ‖ BE32(ordinal).
+    /// Raw code-point JCS (M-10) — see `jcsCanonicalData`.
     func aad(ordinal: Int) throws -> Data {
         let base: Data
         do {
-            let s = try RFC8785JCS.canonicalString(jcsValue(omitBlobSHA256: true))
+            let s = try RFC8785JCS.canonicalStringRawStrings(jcsValue(omitBlobSHA256: true))
             base = Data(s.utf8)
         } catch {
             throw KVFormatError.jcsFailed("\(error)")

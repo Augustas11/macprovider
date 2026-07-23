@@ -204,6 +204,9 @@ struct KVDiskCacheStoreConfig: Sendable {
     var metadataReserveBytes: Int = 4 * 1024 * 1024
     /// Test hook: override host free-space (bytes). Nil ⇒ real statvfs.
     var freeSpaceOverride: Int? = nil
+    /// Test hook (M-19): simulate a statvfs failure so the free-space floor fails
+    /// closed (skip write) rather than assuming headroom.
+    var simulateStatvfsFailure: Bool = false
 
     static let promotionCeilingHardMax = 256 * 1024 * 1024   // FR-KVP9
     static let writeStagingHardMax = 1024 * 1024 * 1024      // FR-KVP3
@@ -575,8 +578,9 @@ actor KVDiskCacheStore {
         let estimatedDiskBytes = estimateDiskBytes(decodedLength: decodedLength)
         guard estimatedDiskBytes <= config.maxEntryBytes else { return skip(.perEntryCap, snapshot) }
 
-        // Free-space floor.
-        guard hostFreeBytes() - estimatedDiskBytes >= config.minFreeBytes else {
+        // Free-space floor. Fail closed when free space is unreadable (M-19): a
+        // statvfs failure skips the write rather than assuming headroom.
+        guard let freeBytes = hostFreeBytes(), freeBytes - estimatedDiskBytes >= config.minFreeBytes else {
             return skip(.freeSpaceFloor, snapshot)
         }
 
@@ -656,7 +660,7 @@ actor KVDiskCacheStore {
             var chunkRecords: [KVChunkRecord] = []
             var nonces: [Data] = []
             for (ordinal, chunk) in plaintextChunks.enumerated() {
-                let nonce = KVKeyManager.randomBytes(KVDiskCacheFormat.chunkNonceBytes)
+                let nonce = try KVKeyManager.randomBytes(KVDiskCacheFormat.chunkNonceBytes)
                 nonces.append(nonce)
                 chunkRecords.append(KVChunkRecord(ordinal: ordinal, ctLength: chunk.count, nonce: nonce))
             }
@@ -1367,7 +1371,7 @@ actor KVDiskCacheStore {
             entryCount: liveEntries.count,
             maxBytes: config.maxBytes,
             maxEntries: config.maxEntries,
-            freeSpaceHeadroom: hostFreeBytes(),
+            freeSpaceHeadroom: hostFreeBytes() ?? 0,
             keyEpoch: metadata.keyEpoch,
             tombstoneCount: tombstoneCount,
             keychainItemCount: kcCount,
@@ -1417,10 +1421,14 @@ actor KVDiskCacheStore {
 
     // MARK: - Free space
 
-    private func hostFreeBytes() -> Int {
+    /// Host free bytes, or nil when `statvfs` fails (M-19). Callers MUST treat nil as
+    /// fail-closed (skip the write) — returning a large number would let a write
+    /// proceed past the free-space floor on an unreadable filesystem.
+    private func hostFreeBytes() -> Int? {
+        if config.simulateStatvfsFailure { return nil }
         if let override = config.freeSpaceOverride { return override }
         var st = statvfs()
-        guard statvfs(namespaceDir.path, &st) == 0 else { return Int.max }
+        guard statvfs(namespaceDir.path, &st) == 0 else { return nil }
         return Int(st.f_bavail) * Int(st.f_frsize)
     }
 

@@ -448,6 +448,21 @@ final class KVDiskCacheStoreTests: XCTestCase {
         await store.injectDirFsyncFailure(atCall: nil)
     }
 
+    /// M-19: a statvfs failure fails closed — the free-space floor skips the write
+    /// rather than assuming headroom.
+    func testFreeSpaceFloorFailsClosedOnStatvfsError() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let config = makeConfig(root: root) { $0.freeSpaceOverride = nil; $0.simulateStatvfsFailure = true }
+        let store = KVDiskCacheStore(config: config, keychain: keychain, sink: sink)
+        try await store.activate()
+        let snap = try await makeSnapshot(store: store, rawKey: "conv:kvs-synth:statvfs", seq: 5, nowMillis: 1_000_000)
+        let result = try await store.write(snap, nowMillis: 1_000_000)
+        guard case .skipped(let d) = result else { return XCTFail("statvfs failure must skip, got \(result)") }
+        XCTAssertEqual(d, .freeSpaceFloor)
+    }
+
     func testAbsentKeyPurgeNoOps() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()
@@ -690,6 +705,18 @@ final class KVDiskCacheStoreTests: XCTestCase {
             throw XCTSkip("KVCacheSimple bridge needs the MLX Metal runtime; set KV_ENABLE_MLX_TESTS on a capable host")
         }
         try KVBridgeProbe.roundTrip()
+    }
+
+    /// M-15: keychain namespace enumeration must be unambiguous — namespace "prov"
+    /// must not prefix-match namespace "prov.sub" (the old "root.<id>." scheme did).
+    func testKeychainNamespaceEnumerationIsUnambiguous() throws {
+        let keychain = KVInMemoryKeychain()
+        let a = KVKeyManager(keychain: keychain, namespaceID: "prov")
+        let ab = KVKeyManager(keychain: keychain, namespaceID: "prov.sub")
+        _ = try a.createEpochMaster(epoch: 1, incarnation: "i")
+        _ = try ab.createEpochMaster(epoch: 1, incarnation: "i")
+        XCTAssertEqual(try a.keychainItemCount(), 1, "'prov' must not enumerate 'prov.sub' items")
+        XCTAssertEqual(try ab.keychainItemCount(), 1, "'prov.sub' must not enumerate 'prov' items")
     }
 
     // MARK: - Real keychain adapter graceful skip

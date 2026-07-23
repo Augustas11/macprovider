@@ -81,11 +81,20 @@ struct KVKeychainNaming: Sendable {
 
     let namespaceID: String
 
-    /// Prefix covering every item (masters + DEKs) for this namespace.
-    var servicePrefix: String { "\(Self.root).\(namespaceID)." }
+    /// Fixed-length digest of the namespace ID (M-15). Using a 32-hex digest plus a
+    /// terminating delimiter makes the enumeration prefix unambiguous — namespace
+    /// "A" can never prefix-match namespace "AB" (or "A.B") regardless of how the raw
+    /// provider ID is punctuated — and additionally hides the raw provider ID.
+    private var namespaceDigest: String {
+        SHA256.hash(data: Data(namespaceID.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
 
-    func masterService(epoch: Int) -> String { "\(servicePrefix)master.epoch\(epoch)" }
-    func dekService(epoch: Int) -> String { "\(servicePrefix)dek.epoch\(epoch)" }
+    /// Prefix covering every item (masters + DEKs) for this namespace. The trailing
+    /// `;` terminates the namespace field so no other namespace's items can share it.
+    var servicePrefix: String { "\(Self.root).ns:\(namespaceDigest);" }
+
+    func masterService(epoch: Int) -> String { "\(servicePrefix)epoch:\(epoch);master" }
+    func dekService(epoch: Int) -> String { "\(servicePrefix)epoch:\(epoch);dek" }
 
     /// Fixed account for the single per-epoch master item.
     static let masterAccount = "master"
@@ -119,7 +128,7 @@ struct KVKeyManager: Sendable {
     /// item is deleted then re-added (rotation re-entry after a crash).
     @discardableResult
     func createEpochMaster(epoch: Int, incarnation: String) throws -> Data {
-        let secret = Self.randomBytes(32)
+        let secret = try Self.randomBytes(32)
         let service = naming.masterService(epoch: epoch)
         do {
             try keychain.add(service: service, account: KVKeychainNaming.masterAccount,
@@ -208,7 +217,7 @@ struct KVKeyManager: Sendable {
     /// delete-then-add). Records the creating write's incarnation identifier.
     @discardableResult
     func createEntryDEK(epoch: Int, index: String, incarnation: String) throws -> Data {
-        let secret = Self.randomBytes(32)
+        let secret = try Self.randomBytes(32)
         let service = naming.dekService(epoch: epoch)
         do {
             try keychain.add(service: service, account: index, secret: secret, incarnation: incarnation)
@@ -248,13 +257,16 @@ struct KVKeyManager: Sendable {
 
     // MARK: Randomness
 
-    static func randomBytes(_ count: Int) -> Data {
+    /// CSPRNG. A failure surfaces as `.unavailable` (→ tier dormancy) rather than a
+    /// process-fatal `precondition` (LOW): the KV disk tier is an optimization and
+    /// must never crash the serve loop because entropy was momentarily unavailable.
+    static func randomBytes(_ count: Int) throws -> Data {
         var data = Data(count: count)
         let ok = data.withUnsafeMutableBytes { buffer -> Bool in
             guard let base = buffer.baseAddress else { return false }
             return SecRandomCopyBytes(kSecRandomDefault, count, base) == errSecSuccess
         }
-        precondition(ok, "SecRandomCopyBytes failed")
+        guard ok else { throw KVKeychainError.unavailable(errSecNotAvailable) }
         return data
     }
 }
@@ -272,7 +284,7 @@ enum KVChunkCrypto {
     }
 
     static func seal(plaintext: Data, dek: Data, aad: Data) throws -> Sealed {
-        let nonceData = KVKeyManager.randomBytes(KVDiskCacheFormat.chunkNonceBytes)
+        let nonceData = try KVKeyManager.randomBytes(KVDiskCacheFormat.chunkNonceBytes)
         let nonce = try AES.GCM.Nonce(data: nonceData)
         let box = try AES.GCM.seal(plaintext, using: SymmetricKey(data: dek),
                                    nonce: nonce, authenticating: aad)

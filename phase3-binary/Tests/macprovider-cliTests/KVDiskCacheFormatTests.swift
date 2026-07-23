@@ -62,7 +62,8 @@ final class KVDiskCacheFormatTests: XCTestCase {
     func testAADOmitsBlobSHAAndAppendsBigEndianOrdinal() throws {
         let manifest = Self.referenceManifest()
         let aad = try manifest.aad(ordinal: 0x01020304)
-        let base = try RFC8785JCS.canonicalString(manifest.jcsValue(omitBlobSHA256: true))
+        // The AAD base uses the RAW code-point JCS path (M-10).
+        let base = try RFC8785JCS.canonicalStringRawStrings(manifest.jcsValue(omitBlobSHA256: true))
         let baseData = Data(base.utf8)
         // blob_sha256 must not appear in the AAD projection.
         XCTAssertFalse(base.contains("blob_sha256"))
@@ -70,6 +71,22 @@ final class KVDiskCacheFormatTests: XCTestCase {
         XCTAssertEqual(aad.count, baseData.count + 4)
         XCTAssertEqual(Array(aad.suffix(4)), [0x01, 0x02, 0x03, 0x04])
         XCTAssertEqual(aad.prefix(baseData.count), baseData)
+    }
+
+    /// M-10: the KV manifest codec must NOT NFC-normalize string values, so a
+    /// composed vs decomposed identity field yields DISTINCT manifest bytes and
+    /// DISTINCT AAD. (The shared error-envelope JCS normalizes; the KV codec uses
+    /// the raw code-point path.)
+    func testManifestCodecPreservesComposedVsDecomposed() throws {
+        // U+00E9 (é, composed) vs U+0065 U+0301 (e + combining acute, decomposed).
+        let composed = Self.mutate(Self.referenceManifest()) { $0.servedModelID = "caf\u{00E9}-model" }
+        let decomposed = Self.mutate(Self.referenceManifest()) { $0.servedModelID = "cafe\u{0301}-model" }
+        let cBytes = try composed.jcsCanonicalData()
+        let dBytes = try decomposed.jcsCanonicalData()
+        XCTAssertNotEqual(cBytes, dBytes, "composed and decomposed identities must not collapse in the manifest")
+        let cAAD = try composed.aad(ordinal: 0)
+        let dAAD = try decomposed.aad(ordinal: 0)
+        XCTAssertNotEqual(cAAD, dAAD, "composed and decomposed identities must not collapse in the AAD")
     }
 
     // MARK: - Manifest parse round trip + bounds
