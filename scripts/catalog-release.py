@@ -53,9 +53,9 @@ FIXED_GO_EXECUTABLES = (
     "/opt/homebrew/bin/go",
     "/usr/local/go/bin/go",
     "/usr/local/bin/go",
-    "/usr/local/lib/macprovider-go-verifier/bin/go",
+    "/private/var/macprovider-go-verifier/bin/go",
 )
-ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES = frozenset({"/usr/local/lib/macprovider-go-verifier/bin/go"})
+ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES = frozenset({"/private/var/macprovider-go-verifier/bin/go"})
 REQUIRE_SEALED_GO_ENV = "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER"
 
 

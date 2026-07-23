@@ -35,12 +35,12 @@ jobs:
         run: |
           set -euo pipefail
           source_root="$(go env GOROOT)"
-          sudo test ! -e /usr/local/lib/macprovider-go-verifier
-          sudo install -d -o root -g root -m 0755 /usr/local/lib/macprovider-go-verifier
-          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/
-          sudo chown -R root:root /usr/local/lib/macprovider-go-verifier
-          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier
-          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go
+          sudo test ! -e /private/var/macprovider-go-verifier
+          sudo install -d -o root -g root -m 0755 /private/var/macprovider-go-verifier
+          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
+          sudo chown -R root:root /private/var/macprovider-go-verifier
+          sudo chmod -R go-w /private/var/macprovider-go-verifier
+          sudo test -x /private/var/macprovider-go-verifier/bin/go
 
       - name: make vet-coordinator
         run: make vet-coordinator
@@ -333,12 +333,12 @@ jobs:
         run: |
           set -euo pipefail
           source_root="$(go env GOROOT)"
-          sudo test ! -e /usr/local/lib/macprovider-go-verifier
-          sudo install -d -o root -g root -m 0755 /usr/local/lib/macprovider-go-verifier
-          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/
-          sudo chown -R root:root /usr/local/lib/macprovider-go-verifier
-          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier
-          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go
+          sudo test ! -e /private/var/macprovider-go-verifier
+          sudo install -d -o root -g root -m 0755 /private/var/macprovider-go-verifier
+          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
+          sudo chown -R root:root /private/var/macprovider-go-verifier
+          sudo chmod -R go-w /private/var/macprovider-go-verifier
+          sudo test -x /private/var/macprovider-go-verifier/bin/go
 
       - name: make test-dist
         run: make test-dist

@@ -15,6 +15,7 @@ coordinator_go_mod="$root/phase4-coordinator/go.mod"
 pearl_go_verifier="$root/scripts/verify-pearl-go-binaries.py"
 sealed_openssl_installer="$root/scripts/install-sealed-release-openssl.sh"
 sealed_openssl_wrapper="$root/scripts/sealed-release-openssl-wrapper.sh"
+catalog_release="$root/scripts/catalog-release.py"
 release_runbook="$root/phase3-binary/dist/release-signing-runbook.md"
 decision_log="$root/beta/DECISION_CRITERIA.md"
 ci_workflow="$root/.github/workflows/ci.yml"
@@ -41,7 +42,8 @@ fi
 python3 - "$workflow" "$root/phase3-binary/app/project.yml" \
   "$root/phase3-binary/app/Sources/Malibu/Info.plist" \
   "$trust_anchor_helper" "$malibu_artifact_verifier" "$coordinator_go_mod" \
-  "$sealed_openssl_installer" "$sealed_openssl_wrapper" "$checksums_guard" <<'PY'
+  "$sealed_openssl_installer" "$sealed_openssl_wrapper" "$checksums_guard" \
+  "$catalog_release" "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -56,6 +58,8 @@ coordinator_go_mod = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 sealed_openssl_installer = pathlib.Path(sys.argv[7]).read_text(encoding="utf-8")
 sealed_openssl_wrapper = pathlib.Path(sys.argv[8]).read_text(encoding="utf-8")
 checksums_guard = pathlib.Path(sys.argv[9]).read_text(encoding="utf-8")
+catalog_release = pathlib.Path(sys.argv[10]).read_text(encoding="utf-8")
+ci_workflow = pathlib.Path(sys.argv[11]).read_text(encoding="utf-8")
 go_directive = re.search(
     r"(?m)^go ([0-9]+\.[0-9]+(?:\.[0-9]+)?)$", coordinator_go_mod
 )
@@ -91,13 +95,17 @@ PEARL_GO_SEAL_STEP = (
     "        run: |\n"
     "          set -euo pipefail\n"
     '          source_root="$(go env GOROOT)"\n'
-    "          sudo test ! -e /usr/local/lib/macprovider-go-verifier\n"
-    "          sudo install -d -o root -g wheel -m 0755 /usr/local/lib/macprovider-go-verifier\n"
-    '          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/\n'
-    "          sudo chown -R root:wheel /usr/local/lib/macprovider-go-verifier\n"
-    "          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier\n"
-    "          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go"
+    "          sudo test ! -e /private/var/macprovider-go-verifier\n"
+    "          sudo install -d -o root -g wheel -m 0755 /private/var/macprovider-go-verifier\n"
+    '          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/\n'
+    "          sudo chown -R root:wheel /private/var/macprovider-go-verifier\n"
+    "          sudo chmod -R go-w /private/var/macprovider-go-verifier\n"
+    "          sudo test -x /private/var/macprovider-go-verifier/bin/go"
 )
+CI_GO_SEAL_STEP = PEARL_GO_SEAL_STEP.replace("-g wheel", "-g root").replace(
+    "root:wheel", "root:root"
+)
+SEALED_GO_EXECUTABLE = "/private/var/macprovider-go-verifier/bin/go"
 PEARL_SETUP_SEAL_BUILD_SEQUENCE = (
     "\n      - name: Setup Go for Pearl binaries\n"
     "{setup_go}\n"
@@ -324,7 +332,7 @@ def validate_pearl_toolchain(job):
         raise SystemExit("Pearl Setup Go must not carry a second hardcoded Go version")
     if seal_go.strip("\n") != PEARL_GO_SEAL_STEP:
         raise SystemExit("Tier-2 verifier toolchain seal must contain only the exact root-owned copy")
-    sealed_go_path = "/usr/local/lib/macprovider-go-verifier"
+    sealed_go_path = str(pathlib.PurePosixPath(SEALED_GO_EXECUTABLE).parent.parent)
     if job.count(sealed_go_path) != PEARL_GO_SEAL_STEP.count(sealed_go_path):
         raise SystemExit("sealed Go verifier path must appear only in the exact seal step")
     expected_sequence = PEARL_SETUP_SEAL_BUILD_SEQUENCE.format(setup_go=setup_go.rstrip("\n"))
@@ -352,6 +360,19 @@ def validate_pearl_toolchain(job):
     if pearl_build.count("go build -mod=readonly -trimpath -buildvcs=true") != 3:
         raise SystemExit("all Pearl binaries must use explicit reviewed VCS stamping")
     return pearl_build
+
+
+if catalog_release.count(f'"{SEALED_GO_EXECUTABLE}"') != 2:
+    raise SystemExit(
+        "catalog verifier must name the single /private/var sealed Go executable "
+        "in both its fixed and always-root-trusted sets"
+    )
+if "/usr/local/lib/macprovider-go-verifier" in catalog_release:
+    raise SystemExit("catalog verifier must not trust the Homebrew-writable /usr/local ancestry")
+if ci_workflow.count(CI_GO_SEAL_STEP) != 2:
+    raise SystemExit("both Linux CI verifier seals must use the exact /private/var root-owned copy")
+if "/usr/local/lib/macprovider-go-verifier" in ci_workflow:
+    raise SystemExit("Linux CI must not retain a divergent /usr/local sealed Go path")
 
 
 def validate_protected_openssl(job):
@@ -729,7 +750,7 @@ seal_failure_suppression_mutation = build.replace(
 post_seal_override_mutation = build.replace(
     "\n      - name: Build package\n",
     "\n      - name: Override sealed Pearl Go\n"
-    "        run: sudo cp /bin/true /usr/local/lib/macprovider-go-verifier/bin/go\n"
+    "        run: sudo cp /bin/true /private/var/macprovider-go-verifier/bin/go\n"
     "\n      - name: Build package\n",
     1,
 )
