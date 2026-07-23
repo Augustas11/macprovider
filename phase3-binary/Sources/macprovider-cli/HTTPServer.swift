@@ -640,11 +640,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
 	                    }
-	                    // Do not stamp every unexpected error as model_not_loaded.
-	                    // Once the request was admitted the model was loaded; a
-	                    // template/tools failure (e.g. historical NSNull→Jinja)
-	                    // is an inference/request problem, not a missing model.
-	                    let apiError = Self.unexpectedInferenceAPIError(error: error)
+	                    let apiError =
+                        APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
                     do {
                         let receipt = try Self.errorReceiptHeaderResult(
                             providerID: providerID,
@@ -1000,15 +997,20 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 if providerRequestStarted {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 }
-                let apiError = Self.unexpectedInferenceAPIError(
-                    error: error,
-                    sseStarted: sseStarted
-                )
                 if sseStarted {
-                    writer.writeSSEJSON(apiError.envelope)
+                    writer.writeSSEJSON(
+                        APIError(
+                            status: 500,
+                            message: "Inference engine error",
+                            type: "server_error",
+                            code: "internal_error"
+                        ).envelope
+                    )
                     writer.writeSSEDone()
                 } else {
-                    writer.writeAPIError(apiError)
+                    writer.writeAPIError(
+                        APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
+                    )
                 }
             }
         }
@@ -1025,52 +1027,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "code": "swap_drain_timeout",
             ]
         ]
-    }
-
-    /// Maps unexpected non-APIError throws into a buyer-visible envelope.
-    ///
-    /// Residual catches historically stamped every failure as
-    /// `503 model_not_loaded`, which mislabeled chat-template / tools-schema
-    /// failures (e.g. `NSNull` in tool parameters → swift-jinja) as an unloaded
-    /// model. Detect those render failures and emit a 400 `chat_template_error`
-    /// instead. All other unexpected errors keep the historical envelope so
-    /// existing error-receipt eligibility (`model_not_loaded`) is unchanged.
-    static func unexpectedInferenceAPIError(
-        error: Error,
-        sseStarted: Bool = false
-    ) -> APIError {
-        if Self.looksLikeChatTemplateFailure(error) {
-            return APIError(
-                status: 400,
-                message: "Chat template rendering failed: \(error.localizedDescription)",
-                type: "invalid_request_error",
-                code: "chat_template_error",
-                retryable: false
-            )
-        }
-        if sseStarted {
-            return APIError(
-                status: 500,
-                message: "Inference engine error",
-                type: "server_error",
-                code: "internal_error"
-            )
-        }
-        return APIError(
-            status: 503,
-            message: "Model inference failed",
-            type: "server_error",
-            code: "model_not_loaded"
-        )
-    }
-
-    private static func looksLikeChatTemplateFailure(_ error: Error) -> Bool {
-        let text = "\(error) \(error.localizedDescription)".lowercased()
-        return text.contains("nsnull")
-            || text.contains("jinja")
-            || text.contains("chat template")
-            || text.contains("applychattemplate")
-            || text.contains("cannot convert value of type")
     }
 
     static let receiptHeaderName = "X-MacProvider-Receipt"
