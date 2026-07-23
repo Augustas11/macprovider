@@ -502,6 +502,23 @@ final class KVDiskCacheStoreTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await store2.activate())
     }
 
+    /// M-16: a pre-existing cache directory with group/other-writable mode is not
+    /// trusted — activation quarantines rather than reusing it.
+    func testTamperedDirModeQuarantinesOnActivate() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        _ = try await store1.write(try await makeSnapshot(store: store1, rawKey: "conv:kvs-synth:sec", seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        await store1.deactivate()
+
+        let nsDir = root.appendingPathComponent(namespaceDigest("ns-test"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: nsDir.path)
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        await XCTAssertThrowsErrorAsync(try await store2.activate())
+    }
+
     func testAbsentKeyPurgeNoOps() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

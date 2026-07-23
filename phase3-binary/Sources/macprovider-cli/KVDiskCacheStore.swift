@@ -399,6 +399,10 @@ actor KVDiskCacheStore {
         if let detail = quarantined { throw KVStoreError.quarantined(detail) }
 
         try ensureDirectories()
+        // M-16: never trust pre-existing cache-directory components. Verify each is a
+        // real directory we own, is not a symlink (O_NOFOLLOW), and is not writable by
+        // group/other — the data dirs strictly 0700. A violation quarantines.
+        try verifyDirectorySecurity()
         guard try acquireLock(deadline: retryDeadline) else { return false }
 
         do {
@@ -482,6 +486,32 @@ actor KVDiskCacheStore {
         try createDir(namespaceDir)
         try createDir(entriesDir)
         try createDir(tombstonesDir)
+    }
+
+    /// M-16: verify a directory is owned by us, a real directory, not a symlink
+    /// (O_NOFOLLOW), and no wider than `maxMode` (permission bits outside `maxMode`
+    /// forbidden). Throws on any violation ⇒ quarantine.
+    private func verifyDir(_ url: URL, maxMode: mode_t) throws {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else { throw KVStoreError.io("dir security open failed \(url.lastPathComponent) errno=\(errno)") }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == geteuid(),
+              (info.st_mode & ~maxMode & 0o777) == 0 else {
+            throw KVStoreError.io("dir security check failed for \(url.lastPathComponent)")
+        }
+    }
+
+    /// Verify the store root + lock dir (no group/other WRITE — a shared cache root
+    /// may be group/other-readable) and the private data dirs (strict 0700).
+    private func verifyDirectorySecurity() throws {
+        try verifyDir(config.root, maxMode: 0o755)
+        try verifyDir(config.root.appendingPathComponent(".locks", isDirectory: true), maxMode: 0o755)
+        try verifyDir(namespaceDir, maxMode: 0o700)
+        try verifyDir(entriesDir, maxMode: 0o700)
+        try verifyDir(tombstonesDir, maxMode: 0o700)
     }
 
     private func acquireLock(deadline: Date) throws -> Bool {
@@ -1410,6 +1440,9 @@ actor KVDiskCacheStore {
         for dir in dirs {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            // M-16: an entry dir we recover from must be ours, a real 0700 directory,
+            // and not a symlink — a tampered entry dir quarantines the store.
+            try verifyDir(dir, maxMode: 0o700)
             let index = dir.lastPathComponent
             let manifestURL = dir.appendingPathComponent("manifest.json")
             // Sweep temp files always.
