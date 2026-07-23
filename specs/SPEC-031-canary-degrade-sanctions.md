@@ -644,16 +644,19 @@ floor. Requirements below assume that stronger predicate:
 > sole provider can therefore no longer be removed by a coordinator-config fault
 > (incidents #1/#2 are closed) — including a max_tokens truncation (which on the
 > shipped WS path surfaces as a `nonce_mismatch`, §5/AC-3), which the floor protects
-> against regardless of how it is classified. **Still Gap:** runtime
-> coordinator-attribution of a truncation (deferred — the runtime signals are
-> provider-forgeable; coordinator-verifiable evidence such as the
-> `≥-expected-length` config validation is required); the status/soft/hard
-> `relay_error` sub-class split; and the FR-CAN23 **multi-provider** correlation
-> epoch with **staged results** (pre-sweep snapshot + shared-fingerprint re-dispatch
-> + bank-generation fencing + discard-on-suspicion) and atomic multi-provider
-> evaluation — `RecordCanaryResult` still gets no correlation snapshot/staging.
-> Because prod runs a single provider with `observe` and canary disabled, the
-> outstanding FR-CAN23 work matters only for a re-enabled ≥2-provider pool (§16).
+> against regardless of how it is classified. **Partial (package 2026-07-23):** the
+> FR-CAN23 pure correlation-epoch state machine lives in
+> `phase4-coordinator/internal/canarycorr` (staged results, shared-fingerprint +
+> bank-generation fencing on Stage-reject, strict-majority discard + FR-CAN29a-shaped
+> alert, observed-serving peer residual for floor lifts, complete-epoch fail-closed
+> Resolve). See `audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md`. **Still Gap
+> (live path):** package is **not** wired into `ws.Server` canary dispatch;
+> `RecordCanaryResult` still receives only a pass/fail bool with no correlation
+> snapshot/staging; no live shared-fingerprint re-dispatch; no `LastBuyerSuccessAt`
+> stamps; the status/soft/hard `relay_error` sub-class split is not on the wire path;
+> runtime coordinator-attribution of a truncation remains deferred (provider-forgeable
+> signals). Because prod runs with canary disabled, outstanding FR-CAN23 **wiring**
+> matters only for a re-enabled ≥2-provider pool (§16).
 
 ## 11. Config surface and reload contract
 
@@ -817,7 +820,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Follows SPEC-010 R-3.3.4 `ModelKnown()` union (#555, authoritative); SPEC-002 R-3.X.6 `MAY` / SPEC-006 §17.2 wording is the carried item-22 cross-spec inconsistency, not claimed as fully aligned. |
 | FR-CAN22 sole-provider floor | **Implemented** (v0.2) | `RecordCanaryResult` spares the **sole buyer-serving provider** on **any** canary-only signal: it returns `CanaryTripFloorHeld` (no state change, keeps accruing the counter) instead of degrading/banning, and the caller emits `canary_floor_held` / `pool_redundancy_low` redundancy telemetry (`hasOtherBuyerServingForModelLocked`). The **injected predicate** (`canaryBuyerServing`) applies the coordinator's **request-independent** routability gates: `RoutingEligible` (state ready AND `SlotsFree>0` AND auth/catalog/receipt gates) AND transport-reachable (a WS-tunneled peer needs a live stored session; else a non-empty `EndpointURL`) AND `MaxContextTokens>0` (sanity, excludes the degenerate zero) AND not Tier-2-excluded (hash/encryption/attestation), keyed on the **active** model (case-folded `ModelID`, not declared-but-cold `SupportedModels`). Excluded: declared-only, degraded, Tier-2-excluded, **busy** (`SlotsFree==0`), **negative** free slots, and transport-unreachable (`HTTPForwardingOnly` with no endpoint) peers. Excluding a genuinely-busy real peer is **over-protective** — the safe direction; it re-counts when a slot frees. **Request-DEPENDENT eligibility is deliberately NOT evaluated** and cannot be, because the floor runs without a request in hand: per-request **context sufficiency** (`MaxContextTokens ≥ the request's token estimate`, so a peer advertising a tiny positive window like 1 passes yet is filtered per request) and **provisional quota** (checking `admission.CheckQuota` under `pool.mu` would couple the registry lock to the admission-DB mutex — an availability convoy). A same-model peer that passes the request-independent gates but is filtered per-request (tiny context, exhausted quota) can therefore still lift the floor, and — because buyer routing **skips** such a peer *without* recording an FR-P11a breaker fault — the breaker is not a universal backstop for that case. **This is not a regression:** the floor only ever *spares* a provider the pre-floor canary would have removed; it never removes one the old code kept, so the adversarial-peer empty-pool outcome is *identical to the pre-floor baseline*. Adversarial-safe multi-provider peer-genuineness (full request-aware / coordinator-observed-serving eligibility) is **deferred to FR-CAN23**, with no current-prod impact (single provider, canary disabled). Applies to both tiers (precedes the tier branch). Removing a sole provider still requires evidence independent of the canary — the FR-P11a buyer-path breaker (on real failing requests), a confirmed transport death, or item-9 weight evidence. |
-| FR-CAN23 correlated-fault epoch (multi-provider) | **Gap** | The correlation epoch with **staged results** (pre-sweep snapshot + shared-fingerprint re-dispatch + bank-generation fencing + discard-on-suspicion) and the `relay_error` **hard/status/soft** sub-class split are **not** implemented — `RecordCanaryResult` still receives only a pass/fail bool with no per-signal class. The FR-CAN22 floor already prevents the single-provider outage (incidents #1/#2); the correlation epoch matters only at **≥2** providers and remains the authorized follow-up. (Its v0.1 design: ephemeral discard + alert only, no correlated-majority verdict creating persistent containment; ordinary per-provider FR-CAN11/15 sanctions still apply — see FR-CAN23.) |
+| FR-CAN23 correlated-fault epoch (multi-provider) | **Partial** (package 2026-07-23) | Pure Sybil-safe state machine landed in `phase4-coordinator/internal/canarycorr`: fixed pre-sweep snapshot, shared-fingerprint + bank-generation fencing on `Stage`, strict-majority (`>N/2` and ≥2) suspicion → ephemeral discard + FR-CAN29a-shaped `OperatorAlert` (no durable containment), non-suspicious commit plan with observed-serving last-provider residual, relay soft/status/neutral neutrality. Hermetic tests cover Sybil single-provider non-suspicion, N=2/N=3 majorities, floor residual vs ghost peers, and no second resolve. **Still Gap / not production-true:** not wired into `ws.Server` canary dispatch or `RecordCanaryResult` (still pass/fail bool, no staged snapshot); no live shared-fingerprint re-dispatch; `LastBuyerSuccessAt` / observed-serving stamps not yet on `Provider`; `relay_error` hard/status/soft split not on the wire path. Design: `audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md`. Pearl canary remains disabled under #584. |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
 | FR-CAN27 failure logging | **Partial** | `canary_fail_reason` (#513); missing `assigned_id`/outcome and global-bank latency (gap). |
@@ -1098,9 +1101,24 @@ before the breaker and canary coexist under load.
     fail-toward-spare). (b) The enforce-mode TPS numerator is provider-authored
     (FR-CAN8 row) — pre-existing, gated by observe mode.
   - **Deferred (still Gap):** runtime FR-CAN3 attribution (needs coordinator-verifiable
-    evidence — see above); FR-CAN23 multi-provider correlation epoch + the
-    `relay_error` hard/status/soft sub-class split; FR-HG5; FR-CAN15/18/14/26.
+    evidence — see above); FR-CAN23 **live wiring** (dispatch staging +
+    `RecordCanaryResult` integration) + the wire-path `relay_error` hard/status/soft
+    sub-class split; FR-HG5; FR-CAN15/18/14/26.
     Sources: `internal/pool/provider.go`, `internal/ws/server.go`.
+- **v0.2.1-partial (2026-07-23) — FR-CAN23 package + #584 ops papers (no Pearl enable):**
+  - **FR-CAN23 pure package → Partial.** `internal/canarycorr` implements the
+    staged correlation epoch, strict-majority suspicion → discard+alert only,
+    observed-serving floor residual for commit plans, and bank-generation/fingerprint
+    fencing. Not wired into production canary dispatch; `RecordCanaryResult` unchanged.
+  - **Ops papers (no timer/enable-gate mutation authorized):** 
+    `ops/runbooks/584-emergency-disable-drill.md`,
+    `ops/runbooks/584-physical-baseline-matrix.md` (per-tier floors + thermal/memory
+    collection notes). Hermetic emergency-disable script coverage remains in
+    `test/e2e/canary-buyer/run-canary.test.sh`.
+  - **Re-enable still blocked** by physical baselines, Pearl emergency-disable drill
+    evidence, operating-day cadence, independent go/no-go, and a separately reviewed
+    timer flip (`exc-canary-disabled-enable-gate` stays active).
+  - Design memo: `audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md`.
 - **v0.1-draft (2026-07-11):** Initial reconstructed baseline (runbook item 8,
   Wave C), then **R1 codex three-lane audit absorbed** (code / security /
   architect; each returned 1 CRITICAL + HIGH/MEDIUM). Key absorptions:

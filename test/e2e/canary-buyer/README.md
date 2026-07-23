@@ -258,15 +258,22 @@ Do not re-enable Pearl from this runbook. Issue #584 remains open until all of
 the following physical and operational evidence is reviewed and signed:
 
 - per-model/per-hardware-tier cold and warm baselines with sample size,
-  percentile, variance, thermal/power conditions, and safety margin;
+  percentile, variance, thermal/power conditions, and safety margin
+  (collection matrix: `ops/runbooks/584-physical-baseline-matrix.md`);
 - the isolated qualification matrix on M1 8 GB and higher-memory M-series Macs,
   including thermal pressure, memory pressure, battery/AC, sustained load, and
   injected stream/heartbeat/provider failures;
 - a normal-operating-day liveness cadence with stable heartbeats, no provider
   disconnect/restart/drain, and the expected Ready pool after every soak;
 - a Pearl emergency-disable drill proving the sentinel is installed before the
-  service/timer are stopped and remain inactive afterward; and
+  service/timer are stopped and remain inactive afterward
+  (drill paper: `ops/runbooks/584-emergency-disable-drill.md`); and
 - an approved go/no-go record followed by a separately reviewed timer flip.
+
+FR-CAN23 multi-provider correlation is a software Partial in
+`phase4-coordinator/internal/canarycorr` (design:
+`audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md`). It is **not** wired
+into live canary dispatch and does not authorize re-enable.
 
 The coordinator's internal sanction loop is independently governed by
 SPEC-031 §16 and remains disabled until every requirement in that normative
