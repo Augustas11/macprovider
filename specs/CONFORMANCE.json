@@ -568,7 +568,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/658",
-        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55\u2192vNext update/rollback/buyer-serving journey remains open. #610 still owns broader first-hop recovery conformance."
+        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55→vNext update/rollback/buyer-serving journey remains open. #610 still owns broader first-hop recovery conformance."
       }
     },
     {
@@ -1028,6 +1028,35 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC lands first (RESEARCH_233 Approach A); IMPL follows in a separate PR behind a disabled-by-default flag; KVS-01 evidence pending."
+      }
+    },
+    {
+      "spec_id": "SPEC-036",
+      "title": "Compute-Integrity Receipt Companion",
+      "version": "v0.1",
+      "path": "specs/SPEC-036-compute-integrity-receipt.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "compute-integrity-settlement"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-026",
+        "SPEC-030"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
     }
   ],
@@ -1550,7 +1579,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the \u00a75a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the §5a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -1565,7 +1594,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per \u00a75a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -1701,6 +1730,244 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "FR-KVP13 (KVS gates, production fence, stop condition): normative in SPEC-037 v0.1.0; gate evidence requires a non-production host or maintenance window."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R001",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R002",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R003",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R004",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R005",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R006",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R007",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R008",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R009",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R010",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R011",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R012",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R013",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R014",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R015",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R016",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R017",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
     }
   ]
