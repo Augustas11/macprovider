@@ -55,9 +55,44 @@ enum KVCacheCommandSupport {
         return KVDiskTier(config: resolved.kvDiskCache, namespaceID: providerID, eligibilityTTLSeconds: ttl)
     }
 
+    /// Resolve the control-socket path from config (nil when unresolvable).
+    static func socketPath(configPath: String?, providerIDOverride: String?) -> URL? {
+        guard let resolved = try? ConfigLoader.load(
+            cli: CLIOverrides(providerID: providerIDOverride, configPath: configPath)) else { return nil }
+        return ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+    }
+
+    /// FR-KVP7 execution model: while a serve process holds the namespace flock,
+    /// purge/status are executed by that process via the control socket (no lock
+    /// re-acquisition). Returns the response frame, or nil to fall back to the
+    /// standalone lock path (socket absent/refused, or the serve tier is inactive).
+    static func trySocket(
+        _ request: ControlSocketFrame, configPath: String?, providerIDOverride: String?
+    ) async -> ControlSocketFrame? {
+        guard let path = socketPath(configPath: configPath, providerIDOverride: providerIDOverride) else { return nil }
+        let connection: ControlSocketConnection
+        do {
+            connection = try await ControlSocketClient.connect(socketPath: path)
+        } catch {
+            return nil   // socket absent/refused ⇒ no serve process holds the lock
+        }
+        defer { Task { await connection.close() } }
+        do {
+            try await connection.send(request)
+            return try await connection.receive(timeout: 180)
+        } catch {
+            return nil
+        }
+    }
+
     static func emit(_ object: [String: Any]) {
         let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
         FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+
+    static func emitRaw(_ json: String) {
+        FileHandle.standardOutput.write(Data(json.utf8))
         FileHandle.standardOutput.write(Data("\n".utf8))
     }
 }
@@ -97,21 +132,13 @@ struct KVCachePurgeCommand: AsyncParsableCommand {
             throw KVCacheCommandError.invalidSelection("--forget is only valid with --all")
         }
 
-        let tier = try KVCacheCommandSupport.makeTier(configPath: config, providerIDOverride: providerID)
-
-        let result: KVPurgeResult
+        // Resolve mode + raw key once (stdin may only be read once).
         let mode: String
+        var rawKey = ""
         if all {
-            if forget {
-                mode = "all_forget"
-                result = await tier.purgeAllAndForget()
-            } else {
-                mode = "all"
-                result = await tier.purgeAll()
-            }
+            mode = forget ? "all_forget" : "all"
         } else {
             mode = "single"
-            let rawKey: String
             if keyStdin {
                 let stdinData = FileHandle.standardInput.readDataToEndOfFile()
                 let raw = String(decoding: stdinData, as: UTF8.self)
@@ -121,7 +148,35 @@ struct KVCachePurgeCommand: AsyncParsableCommand {
             } else {
                 rawKey = key ?? ""
             }
-            result = await tier.purge(rawKey: rawKey)
+        }
+
+        // FR-KVP7: try the in-process control-socket route first (a running serve
+        // process holds the flock); fall back to the standalone lock path.
+        let socketRequest = ControlSocketFrame.kvCachePurgeRequest(mode: mode, key: mode == "single" ? rawKey : nil)
+        if case let .kvCachePurgeResponse(status, entriesRemoved, bytesFreed, detail)? =
+            await KVCacheCommandSupport.trySocket(socketRequest, configPath: config, providerIDOverride: providerID),
+           status != "unavailable" {
+            if status == "purge_ok" {
+                KVCacheCommandSupport.emit([
+                    "status": "purge_ok", "mode": mode, "route": "control_socket",
+                    "entries_removed": entriesRemoved, "bytes_freed": bytesFreed,
+                ])
+            } else {
+                KVCacheCommandSupport.emit([
+                    "status": "purge_failed", "mode": mode, "route": "control_socket",
+                    "detail": detail ?? "unknown",
+                ])
+                throw ExitCode(1)
+            }
+            return
+        }
+
+        let tier = try KVCacheCommandSupport.makeTier(configPath: config, providerIDOverride: providerID)
+        let result: KVPurgeResult
+        switch mode {
+        case "all_forget": result = await tier.purgeAllAndForget()
+        case "all": result = await tier.purgeAll()
+        default: result = await tier.purge(rawKey: rawKey)
         }
         await tier.shutdown()
 
@@ -157,6 +212,14 @@ struct KVCacheStatusCommand: AsyncParsableCommand {
     var providerID: String?
 
     func run() async throws {
+        // FR-KVP7: prefer the in-process control-socket route.
+        if case let .kvCacheStatusResponse(payloadJSON)? = await KVCacheCommandSupport.trySocket(
+            .kvCacheStatusRequest, configPath: config, providerIDOverride: providerID),
+           !payloadJSON.contains("\"unavailable\"") {
+            KVCacheCommandSupport.emitRaw(payloadJSON)
+            return
+        }
+
         let tier = try KVCacheCommandSupport.makeTier(configPath: config, providerIDOverride: providerID)
         let inspection = await tier.status()
         await tier.shutdown()

@@ -24,7 +24,9 @@ protocol ConversationColdTier: Sendable {
     /// so the caller runs the UNCHANGED `begin()` LCP/trim predicate against it
     /// (no second predicate) and then calls `finishPromotion` with the outcome.
     /// Nil on any store-side miss/failure (the store emits its own FR-KVP12 code).
-    func promoteCandidate(conversationKey: String, runtime: KVRuntimeIdentity) async
+    /// The adapter assembles the full runtime envelope identity from `identity`
+    /// plus the live-model geometry template it owns.
+    func promoteCandidate(conversationKey: String, identity: KVIdentityCore) async
         -> ColdPromotionCandidate?
 
     /// Emit the single terminal telemetry code for a promotion candidate after the
@@ -44,7 +46,7 @@ protocol ConversationColdTier: Sendable {
         layers: ConversationCacheLayers,
         fullTokens: [Int32],
         sampledPurgeGeneration: Int,
-        identity: KVWriteIdentity
+        identity: KVIdentityCore
     ) -> ConversationColdSnapshot?
 
     /// Hand a captured snapshot to the bounded async writer. MUST NOT block the
@@ -61,10 +63,31 @@ struct ConversationColdContext: Sendable {
     /// direct-HTTP provenance. Computed by the caller — the gate never infers
     /// provenance from key shape alone.
     let eligible: Bool
-    /// Runtime identity for envelope validation on promotion (read side).
-    let runtimeIdentity: KVRuntimeIdentity
-    /// Envelope identity captured into the snapshot on commit (write side).
-    let writeIdentity: KVWriteIdentity
+    /// The model/tokenizer identity core for this request. The cold-tier adapter
+    /// completes it with build-pinned ABI fields, the store namespace/epoch, and
+    /// the live-model geometry template it owns.
+    let identity: KVIdentityCore
+}
+
+/// The per-request model + tokenizer identity that ModelRuntime can supply
+/// directly (FR-KVP4 items 4–5, 9). The cold-tier adapter augments it with the
+/// build-pinned ABI epoch / MLX revisions (item 6), the ordinary decode-path
+/// class (item 10), the cache class + geometry (items 7–8), and the store's
+/// namespace/epoch — so write and read derive identical envelopes.
+struct KVIdentityCore: Sendable, Equatable {
+    let requestModel: String
+    let servedModelID: String
+    /// nil ⇒ the canonical model hash is unavailable this process (FR-KVP4): the
+    /// tier neither writes nor promotes.
+    let modelSHA256: String?
+    let catalogRevision: String
+    let tokenizerID: String
+    let tokenizerConfigSHA256: String
+    let chatTemplateSHA256: String
+    let kvBits: Int?
+    let kvGroupSize: Int?
+    let kvQuantMode: String?
+    let kvQuantPolicy: String?
 }
 
 /// A validated cold entry restored into hot-tier layers, pending the hot

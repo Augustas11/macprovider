@@ -983,6 +983,25 @@ struct ServeCommand: AsyncParsableCommand {
             )
             throw error
         }
+        // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
+        // disk tier when enabled, then hand the serve-owned, lock-holding store to
+        // the model runtime (data path) and the control socket (in-process
+        // purge/status). Fail-closed: activation failure leaves the tier off and
+        // never blocks the serve loop. A disabled tier is not activated here, so a
+        // standalone `macprovider-cli kv-cache` invocation can acquire the free
+        // namespace lock itself.
+        var kvDiskTier: KVDiskTier?
+        if resolved.kvDiskCache.effectiveEnabled,
+           let kvProviderID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !kvProviderID.isEmpty {
+            let kvTTL = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
+            let tier = KVDiskTier(config: resolved.kvDiskCache, namespaceID: kvProviderID, eligibilityTTLSeconds: kvTTL)
+            if await tier.activateForServe() {
+                await modelRuntime.attachKVDiskTier(tier)
+                kvDiskTier = tier
+            }
+        }
+
         // The serve runtime defaults `--max-batch` to 1 (the prior
         // single-slot behavior). Operators opting in via --max-batch >1
         // own the safety check; we surface the configured value in
@@ -1404,7 +1423,8 @@ struct ServeCommand: AsyncParsableCommand {
             providerToken: resolved.providerToken,
             pauseProvider: pauseProvider,
             resumeProvider: resumeProvider,
-            watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup
+            watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup,
+            kvDiskTier: kvDiskTier
         )
         do {
             try await controlSocket?.start()

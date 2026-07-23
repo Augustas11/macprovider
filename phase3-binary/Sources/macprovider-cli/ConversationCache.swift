@@ -106,7 +106,7 @@ actor ConversationCache {
 
     /// SPEC-037 stage 5 — optional encrypted disk cold tier. Nil ⇒ the hot tier
     /// behaves byte-identically to today (FR-KVP1 non-gated-key invariant).
-    private let coldTier: (any ConversationColdTier)?
+    private var coldTier: (any ConversationColdTier)?
     /// Within-process single-key purge generation (FR-KVP8 hot-lease fencing).
     private var localPurgeGen: [String: Int] = [:]
     /// Within-process purge-all generation.
@@ -115,6 +115,12 @@ actor ConversationCache {
     init(config: Config = .fromEnvironment(), coldTier: (any ConversationColdTier)? = nil) {
         self.config = config
         self.coldTier = coldTier
+    }
+
+    /// Attach the cold tier after construction (the serve process activates the
+    /// disk tier only once it holds the namespace lock, FR-KVP7).
+    func attachColdTier(_ tier: any ConversationColdTier) {
+        coldTier = tier
     }
 
     func begin(
@@ -163,7 +169,7 @@ actor ConversationCache {
         if let hot = entries.removeValue(forKey: key) {
             entry = hot
         } else if gated, let coldTier, let cold,
-                  let candidate = await coldTier.promoteCandidate(conversationKey: key, runtime: cold.runtimeIdentity) {
+                  let candidate = await coldTier.promoteCandidate(conversationKey: key, identity: cold.identity) {
             promotionCandidate = candidate
             entry = Entry(
                 canonicalPromptTokens: candidate.canonicalTokens,
@@ -263,7 +269,7 @@ actor ConversationCache {
         if let coldTier, let cold, cold.eligible,
            let snapshot = coldTier.captureSnapshot(
                conversationKey: lease.key, layers: cache, fullTokens: fullTokens,
-               sampledPurgeGeneration: lease.sampledPurgeGeneration, identity: cold.writeIdentity) {
+               sampledPurgeGeneration: lease.sampledPurgeGeneration, identity: cold.identity) {
             Task { await coldTier.persist(snapshot) }
         }
         releaseTurn(lease.key)

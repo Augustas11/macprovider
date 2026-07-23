@@ -402,6 +402,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private let kvBitsOverride: Int?
     private let prefillStepSize: Int
     private let conversationCache: ConversationCache
+    /// SPEC-037 stage 5 — set once the serve process activates the encrypted disk
+    /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
+    /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
+    private var coldTierAttached = false
     private let inferenceGate: AsyncSemaphore
     private let maxBatch: Int
     private let warmSwapEnabled: Bool
@@ -1249,6 +1253,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
+        // SPEC-037 stage 5 — per-request cold-tier context, captured before the
+        // nonisolated inference closure (nil unless the disk tier is attached).
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -1310,7 +1317,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         conversationKey: request.conversationKey,
                         incomingTokens: promptTokenIds,
                         modelID: request.model,
-                        kvBits: kvBitsOverride
+                        kvBits: kvBitsOverride,
+                        cold: coldContext
                     )
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
@@ -1409,7 +1417,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                         ), request: request)
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init))
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return completion
                     } catch {
@@ -1645,6 +1653,8 @@ actor ModelRuntime: ModelRuntimeServing {
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
+        // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -1766,7 +1776,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         conversationKey: request.conversationKey,
                         incomingTokens: promptTokenIds,
                         modelID: request.model,
-                        kvBits: kvBitsOverride
+                        kvBits: kvBitsOverride,
+                        cold: coldContext
                     )
                     let kvCache: [KVCache]
                     let iteratorInput: LMInput
@@ -1976,7 +1987,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             buyerVisibleContent: structuredAccumulator.content
                         )
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init))
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return validated
                     } catch {
@@ -1989,6 +2000,32 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             }
         }
+    }
+
+    /// SPEC-037 stage 5 (FR-KVP7) — attach the activated disk cold tier. Called by
+    /// the serve lifecycle after the store acquires its namespace lock, so the hot
+    /// tier only reaches disk once single-writer ownership is established.
+    func attachKVDiskTier(_ tier: KVDiskTier) {
+        let adapter = KVConversationColdTierAdapter(
+            store: tier.store, namespaceID: tier.namespaceID,
+            eligibilityTTLSeconds: tier.eligibilityTTLSeconds)
+        Task { await conversationCache.attachColdTier(adapter) }
+        coldTierAttached = true
+    }
+
+    /// Build the per-request cold-tier context (nil when the tier is not attached).
+    /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
+    /// direct-HTTP provenance; the identity core carries the live model identity.
+    private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
+        guard coldTierAttached else { return nil }
+        let eligible = KVDiskCacheGate.persists(
+            conversationKey: request.conversationKey, provenance: request.ingestProvenance)
+        let identity = KVIdentityCore.build(
+            requestModel: request.model,
+            servedModelID: snapshot.modelID ?? request.model,
+            modelSHA256: snapshot.modelHash,
+            catalogRevision: verifiedCatalogArtifactSHA256 ?? "unknown")
+        return ConversationColdContext(eligible: eligible, identity: identity)
     }
 
     func measureStartupThroughput(maxTokens: Int = 8) async -> Double {
