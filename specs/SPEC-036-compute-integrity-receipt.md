@@ -2247,8 +2247,10 @@ Before SPEC-036 can move toward LOCK:
     captured-state→reason table, every `expiry_cause`, every
     reference-set-admissibility status, every `blocked:<reason>`, unknown-value
     fail-closed behavior (→ `compute_integrity_unreadable`), and multi-condition
-    reason-precedence collisions (e.g. drift + breaker → `compute_drift_quarantined`;
-    reference-stale + drift → the higher-precedence provider-attributable reason),
+    reason-precedence collisions, distinguishing the two `reference_stale` producers
+    at different precedence tiers (e.g. drift + breaker → `compute_drift_quarantined`;
+    admissibility `stale_reference` (tier 5) + drift → `compute_integrity_reference_stale`;
+    but `expiry_cause=reference_stale` (tier 10) + drift → `compute_drift_quarantined`),
     proving every enforce-mode non-payable compute-integrity condition maps to exactly
     one member of the v0.1 settlement reason enum and no ad hoc reason is emitted.
 17. A sampler-stage test proves sampler stage is included in keys, thresholds,
