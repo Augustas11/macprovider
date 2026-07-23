@@ -266,6 +266,12 @@ actor KVDiskCacheStore {
     /// Test-only failpoint injector: throws `KVInjectedCrash` at the named boundary.
     private var failpoint: (@Sendable (KVFailpoint) throws -> Void)?
 
+    /// Test-only directory-fsync failure injection (HIGH-7): throw at the k-th
+    /// (1-based) `fsyncDirectory` call to model a filesystem that fails to durably
+    /// commit a directory entry. Nil ⇒ no injection.
+    private var dirFsyncFailAt: Int?
+    private var dirFsyncCount = 0
+
     // Activation state
     private var lockFD: Int32 = -1
     private var activated = false
@@ -319,6 +325,13 @@ actor KVDiskCacheStore {
 
     func setFailpoint(_ hook: (@Sendable (KVFailpoint) throws -> Void)?) {
         failpoint = hook
+    }
+
+    /// Test-only (HIGH-7): fail the k-th subsequent `fsyncDirectory` call. Resets the
+    /// call counter. Pass nil to disable.
+    func injectDirFsyncFailure(atCall k: Int?) {
+        dirFsyncFailAt = k
+        dirFsyncCount = 0
     }
 
     /// Wire the hot-tier purge callbacks (CRITICAL-1). `single` receives the raw
@@ -622,7 +635,7 @@ actor KVDiskCacheStore {
             if newEntry {
                 try createDir(dir)
                 try crashIf(.afterMkdirBeforeParentFsync)
-                fsyncDirectory(entriesDir)
+                try fsyncDirectory(entriesDir)
             }
 
             // Build plaintext payload, chunk it, and seal each chunk under the DEK.
@@ -677,7 +690,7 @@ actor KVDiskCacheStore {
             let blobURL = dir.appendingPathComponent("gen-\(generation).blob")
             try writeFileExclusive(blob, to: blobURL)
             try crashIf(.afterBlobFsync)
-            fsyncDirectory(dir)
+            try fsyncDirectory(dir)
             try crashIf(.afterEntryDirFsync)
 
             // Manifest → unique temp → fsync.
@@ -714,7 +727,7 @@ actor KVDiskCacheStore {
                 throw KVStoreError.io("manifest rename failed errno=\(errno)")
             }
             try crashIf(.afterRenameBeforeDirFsync)
-            fsyncDirectory(dir)
+            try fsyncDirectory(dir)
 
             // Delete the superseded blob (compaction), keep the shared DEK.
             if let previousGen, previousGen != generation {
@@ -1099,7 +1112,7 @@ actor KVDiskCacheStore {
         if fileExists(dir) {
             try? FileManager.default.removeItem(at: dir)
         }
-        fsyncDirectory(entriesDir)
+        try fsyncDirectory(entriesDir)
         committedBytes = max(0, committedBytes - freed)
         try crashIf(.purgeAfterUnlink)
 
@@ -1188,7 +1201,7 @@ actor KVDiskCacheStore {
         if fileExists(entriesDir) {
             try? FileManager.default.removeItem(at: entriesDir)
             try? createDir(entriesDir)
-            fsyncDirectory(namespaceDir)
+            try? fsyncDirectory(namespaceDir)   // best-effort cleanup after rotation
         }
     }
 
@@ -1245,7 +1258,7 @@ actor KVDiskCacheStore {
         let freed = liveEntries[index]?.bytes ?? 0
         let dir = entryDir(index)
         if fileExists(dir) { try? FileManager.default.removeItem(at: dir) }
-        fsyncDirectory(entriesDir)
+        try fsyncDirectory(entriesDir)
         liveEntries.removeValue(forKey: index)
         lastGeneration.removeValue(forKey: index)
         lastCommitSequence.removeValue(forKey: index)
@@ -1340,7 +1353,7 @@ actor KVDiskCacheStore {
             lastGeneration[index] = manifest.generation
             lastCommitSequence[index] = manifest.commitSequence
         }
-        fsyncDirectory(entriesDir)
+        try fsyncDirectory(entriesDir)
     }
 
     // MARK: - Inspection (FR-KVP12)
@@ -1399,7 +1412,7 @@ actor KVDiskCacheStore {
         let url = tombstonesDir.appendingPathComponent("\(tomb.epoch)-\(tomb.index).json")
         let data = try KVTombstoneCodec.encode(tomb)
         try writeFileAtomic(data, to: url)
-        fsyncDirectory(tombstonesDir)
+        try fsyncDirectory(tombstonesDir)
     }
 
     // MARK: - Free space
@@ -1461,7 +1474,7 @@ actor KVDiskCacheStore {
             try? FileManager.default.removeItem(at: temp)
             throw KVStoreError.io("rename failed errno=\(errno)")
         }
-        fsyncDirectory(dir)
+        try fsyncDirectory(dir)
     }
 
     /// Create a file with O_EXCL | O_NOFOLLOW at 0600, write all bytes, fsync fd.
@@ -1484,9 +1497,19 @@ actor KVDiskCacheStore {
         guard fsync(fd) == 0 else { throw KVStoreError.io("fsync failed errno=\(errno)") }
     }
 
-    private func fsyncDirectory(_ url: URL) {
+    /// Fsync a directory, throwing on open OR fsync failure (HIGH-7). A swallowed
+    /// directory fsync failure would let `disk_write_committed` claim durability the
+    /// filesystem never provided; propagating it turns the commit into a
+    /// `disk_write_skipped` instead. Best-effort cleanup call sites use `try?`.
+    private func fsyncDirectory(_ url: URL) throws {
+        dirFsyncCount += 1
+        if let k = dirFsyncFailAt, dirFsyncCount == k {
+            throw KVStoreError.io("injected dir fsync failure at call \(k)")
+        }
         let fd = open(url.path, O_RDONLY | O_CLOEXEC)
-        if fd >= 0 { fsync(fd); close(fd) }
+        guard fd >= 0 else { throw KVStoreError.io("dir open for fsync failed errno=\(errno)") }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else { throw KVStoreError.io("dir fsync failed errno=\(errno)") }
     }
 }
 

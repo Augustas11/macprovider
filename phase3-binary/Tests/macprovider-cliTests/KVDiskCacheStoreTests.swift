@@ -413,6 +413,41 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(hit.layers, s1.layers, "committed gen1 bytes survive the crashed replacement")
     }
 
+    /// HIGH-7: a directory fsync failure at ANY commit-protocol boundary yields
+    /// disk_write_skipped (io_error), never disk_write_committed. A swallowed dir
+    /// fsync would let the store claim durability the filesystem never provided.
+    func testDirFsyncFailureNeverReportsCommitted() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain, sink: sink)
+        try await store.activate()
+
+        // Warm-up write pins the clock high-water so the measured writes below do not
+        // re-persist metadata (which would fsync a directory and shift the counter).
+        let warm = try await makeSnapshot(store: store, rawKey: "conv:kvs-synth:warm", seq: 5, nowMillis: 2_000_000)
+        guard case .committed = try await store.write(warm, nowMillis: 2_000_000) else { return XCTFail("warm-up") }
+
+        // A clean new-entry write performs exactly three directory fsyncs:
+        // 1) entries/ after mkdir, 2) entry dir after the blob, 3) entry dir after the
+        // manifest rename. Fail each in turn on a fresh key.
+        for boundary in 1 ... 3 {
+            sink.reset()
+            await store.injectDirFsyncFailure(atCall: boundary)
+            let snap = try await makeSnapshot(store: store, rawKey: "conv:kvs-synth:fsync-\(boundary)",
+                                              seq: 5, seed: boundary, nowMillis: 2_000_000)
+            let result = try await store.write(snap, nowMillis: 2_000_000)
+            guard case .skipped(let d) = result else {
+                return XCTFail("dir fsync failure at boundary \(boundary) must skip, got \(result)")
+            }
+            XCTAssertEqual(d, .ioError, "boundary \(boundary)")
+            XCTAssertEqual(sink.codes(.diskWriteCommitted), 0,
+                           "no committed event may be emitted when dir fsync fails at boundary \(boundary)")
+            XCTAssertEqual(sink.codes(.diskWriteSkipped), 1, "boundary \(boundary)")
+        }
+        await store.injectDirFsyncFailure(atCall: nil)
+    }
+
     func testAbsentKeyPurgeNoOps() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()
