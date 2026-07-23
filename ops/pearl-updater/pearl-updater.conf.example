@@ -58,6 +58,7 @@ PEARL_UPDATER_DEADMAN_API_TOKEN_FILE=/etc/macprovider/pearl-updater.betterstack-
 PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID=
 PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE=/etc/macprovider/pearl-updater.catalog-canary-token
 PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET=
+PEARL_UPDATER_CATALOG_CANARY_SSH_PORT=22
 PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE=/etc/macprovider/pearl-updater.catalog-canary-ssh-key
 PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE=/etc/macprovider/pearl-updater.catalog-canary-known-hosts
 PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR=macprovider/catalog-release

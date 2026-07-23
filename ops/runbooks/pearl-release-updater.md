@@ -177,6 +177,7 @@ hardened service cannot read root's home directory and always uses
 PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID=<exact-provider-id>
 PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE=/etc/macprovider/pearl-updater.catalog-canary-token
 PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET=<operator-user>@<canary-host>
+PEARL_UPDATER_CATALOG_CANARY_SSH_PORT=<canary-ssh-port, default 22>
 PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE=/etc/macprovider/pearl-updater.catalog-canary-ssh-key
 PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE=/etc/macprovider/pearl-updater.catalog-canary-known-hosts
 PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR=macprovider/catalog-release

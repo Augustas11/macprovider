@@ -1697,6 +1697,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.config = updater_module.dataclasses.replace(
             self.updater.config,
             catalog_canary_ssh_target="operator@canary.example",
+            catalog_canary_ssh_port=2222,
             catalog_canary_ssh_key_file=Path("/run/secrets/catalog-canary-ssh-key"),
             catalog_canary_known_hosts_file=Path("/etc/macprovider/catalog-canary-known-hosts"),
         )
@@ -1730,6 +1731,8 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("GlobalKnownHostsFile=/dev/null", args[0])
         self.assertIn("-F", args[0])
         self.assertIn("/dev/null", args[0])
+        port_index = args[0].index("-p")
+        self.assertEqual(args[0][port_index + 1], "2222")
         self.assertEqual(args[0][-2], "operator@canary.example")
         self.assertIn("catalog-canary", args[0][-1])
         self.assertIn("running_text_vnode", kwargs["input_text"])
@@ -5194,6 +5197,7 @@ class PearlUpdaterTests(unittest.TestCase):
             updater_module.BUYER_CANARY_MODE_REQUIRED,
         )
         self.assertEqual(config.provider_recovery_timeout_s, 900)
+        self.assertEqual(config.catalog_canary_ssh_port, 22)
         self.assertEqual(config.provider_admission_policy, "")
         self.assertEqual(config.minimum_pool_ready_after_rollout, 0)
         self.assertEqual(config.minimum_bridge_remaining_s, 0)
@@ -5218,6 +5222,23 @@ class PearlUpdaterTests(unittest.TestCase):
         path.write_text("PEARL_UPDATER_BUYER_CANARY_MODE=optional\n")
         with self.assertRaisesRegex(updater_module.UpdateError, "buyer canary mode"):
             updater_module.load_config(path)
+
+    def test_config_accepts_bounded_catalog_canary_ssh_port(self):
+        path = self.root / "catalog-canary-ssh-port.conf"
+        path.write_text("PEARL_UPDATER_CATALOG_CANARY_SSH_PORT=2222\n")
+        config = updater_module.load_config(path)
+        self.assertEqual(config.catalog_canary_ssh_port, 2222)
+
+        for invalid in ("0", "65536", "not-a-port"):
+            with self.subTest(invalid=invalid):
+                path.write_text(
+                    f"PEARL_UPDATER_CATALOG_CANARY_SSH_PORT={invalid}\n"
+                )
+                with self.assertRaisesRegex(
+                    updater_module.UpdateError,
+                    "catalog canary SSH port",
+                ):
+                    updater_module.load_config(path)
 
     def test_no_sanction_recovery_or_internal_canary_enablement(self):
         source = SCRIPT.read_text(encoding="utf-8")
