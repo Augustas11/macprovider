@@ -640,8 +640,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
 	                    }
-	                    let apiError =
-                        APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
+	                    // Do not stamp every unexpected error as model_not_loaded.
+	                    // Once the request was admitted the model was loaded; a
+	                    // template/tools failure (e.g. historical NSNull→Jinja)
+	                    // is an inference/request problem, not a missing model.
+	                    let apiError = Self.unexpectedInferenceAPIError(error: error)
                     do {
                         let receipt = try Self.errorReceiptHeaderResult(
                             providerID: providerID,
@@ -997,20 +1000,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 if providerRequestStarted {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 }
+                let apiError = Self.unexpectedInferenceAPIError(
+                    error: error,
+                    sseStarted: sseStarted
+                )
                 if sseStarted {
-                    writer.writeSSEJSON(
-                        APIError(
-                            status: 500,
-                            message: "Inference engine error",
-                            type: "server_error",
-                            code: "internal_error"
-                        ).envelope
-                    )
+                    writer.writeSSEJSON(apiError.envelope)
                     writer.writeSSEDone()
                 } else {
-                    writer.writeAPIError(
-                        APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
-                    )
+                    writer.writeAPIError(apiError)
                 }
             }
         }
@@ -1027,6 +1025,42 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "code": "swap_drain_timeout",
             ]
         ]
+    }
+
+    /// Maps unexpected non-APIError throws into a buyer-visible envelope.
+    ///
+    /// The specific #718 mislabel (tool-schema `NSNull` → swift-jinja throw) is
+    /// fixed at the source: tool nulls now render as native Jinja nulls in
+    /// `ModelRuntime.jsonAnyForTemplate`, so that failure no longer reaches this
+    /// residual catch. Pre-existing behavior is preserved here deliberately: a
+    /// pre-SSE failure keeps the long-standing `model_not_loaded` (503) envelope
+    /// so the buyer still receives the SPEC-015 §M.5 (AC-31) null-usage error
+    /// receipt — 0 tokens out, proof of no charge — while a post-SSE failure,
+    /// where headers are already committed, surfaces as `internal_error` (500).
+    ///
+    /// NOTE: whether an unexpected internal defect *should* keep sharing the
+    /// `model_not_loaded` code (an availability signal) with genuine
+    /// unavailability is a live taxonomy question raised in audit; changing it
+    /// alters AC-31 receipt economics and is intentionally left to a governed
+    /// SPEC decision rather than folded into the #718 null-handling fix.
+    static func unexpectedInferenceAPIError(
+        error: Error,
+        sseStarted: Bool = false
+    ) -> APIError {
+        if sseStarted {
+            return APIError(
+                status: 500,
+                message: "Inference engine error",
+                type: "server_error",
+                code: "internal_error"
+            )
+        }
+        return APIError(
+            status: 503,
+            message: "Model inference failed",
+            type: "server_error",
+            code: "model_not_loaded"
+        )
     }
 
     static let receiptHeaderName = "X-MacProvider-Receipt"

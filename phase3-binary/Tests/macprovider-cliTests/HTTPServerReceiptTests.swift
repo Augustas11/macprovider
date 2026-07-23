@@ -731,6 +731,34 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertNil(header)
     }
 
+    func testUnexpectedInferenceStaysOnEstablishedTaxonomy() {
+        // The #718 NSNull mislabel is fixed at the source (native Jinja null in
+        // ModelRuntime.jsonAnyForTemplate), so no new buyer-facing error code is
+        // introduced here. This residual catch keeps the PRE-EXISTING taxonomy:
+        // a pre-SSE failure stays `model_not_loaded` (503) so the SPEC-015 §M.5
+        // (AC-31) null-usage error receipt is still issued; a post-SSE failure
+        // uses `internal_error` (500). Whether internal defects should keep
+        // sharing `model_not_loaded` is a separate governed SPEC decision, not
+        // part of the #718 fix.
+        struct FakeJinjaError: Error, LocalizedError {
+            var errorDescription: String? {
+                "Cannot convert value of type NSNull to Jinja Value"
+            }
+        }
+        let preSSE = RouterHandler.unexpectedInferenceAPIError(error: FakeJinjaError())
+        XCTAssertEqual(preSSE.status, 503)
+        XCTAssertEqual(preSSE.code, "model_not_loaded")
+
+        struct GenericFailure: Error {}
+        let generic = RouterHandler.unexpectedInferenceAPIError(error: GenericFailure())
+        XCTAssertEqual(generic.status, 503)
+        XCTAssertEqual(generic.code, "model_not_loaded")
+
+        let postSSE = RouterHandler.unexpectedInferenceAPIError(error: GenericFailure(), sseStarted: true)
+        XCTAssertEqual(postSSE.status, 500)
+        XCTAssertEqual(postSSE.code, "internal_error")
+    }
+
     func testNullUsageModelNotLoadedErrorGetsReceiptHeader() throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let request = try parseRequest([
