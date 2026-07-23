@@ -932,6 +932,9 @@ jobs:
           PROVIDER_ARTIFACT="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" \
             PROVIDER_VERSION="${tag#v}" \
             PROVIDER_SHA256="" \
+            PROVIDER_RUNTIME_MODE=structural \
+            PROVIDER_EXPECTED_ARCHES=arm64 \
+            PROVIDER_LIPO_BIN=/usr/bin/lipo \
             scripts/check-tier2-provider-artifact.sh
 
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
@@ -1099,6 +1102,9 @@ jobs:
           PROVIDER_ARTIFACT="$pkg_payload_tar" \
             PROVIDER_VERSION="${tag#v}" \
             PROVIDER_SHA256="" \
+            PROVIDER_RUNTIME_MODE=structural \
+            PROVIDER_EXPECTED_ARCHES=arm64 \
+            PROVIDER_LIPO_BIN=/usr/bin/lipo \
             scripts/check-tier2-provider-artifact.sh
 
           tar -xzf "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" \

@@ -11,6 +11,9 @@ PROVIDER_VERSION="${PROVIDER_VERSION:-1.2.6}"
 PROVIDER_SHA256="${PROVIDER_SHA256-d096ecb82863275478e919a4c0741750c272beb4a0ba5e5c3e778cba159184e2}"
 REQUIRE_TIER2_STRINGS="${REQUIRE_TIER2_STRINGS:-1}"
 FORBID_TIER2_STRINGS="${FORBID_TIER2_STRINGS-DeviceCheck devicecheck}"
+PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
+PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
+PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
 
 log() { printf '[tier2-provider-artifact] %s\n' "$*" >&2; }
 die() { printf '[tier2-provider-artifact] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -23,6 +26,26 @@ require_file() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
+
+case "$PROVIDER_RUNTIME_MODE" in
+  execute) ;;
+  structural)
+    [ -n "$PROVIDER_EXPECTED_ARCHES" ] || {
+      die "structural mode requires PROVIDER_EXPECTED_ARCHES"
+    }
+    ;;
+  *) die "PROVIDER_RUNTIME_MODE must be execute or structural" ;;
+esac
+
+if [ -n "$PROVIDER_EXPECTED_ARCHES" ]; then
+  case "$PROVIDER_LIPO_BIN" in
+    /*) ;;
+    *) die "PROVIDER_LIPO_BIN must be an absolute path when architecture validation is required" ;;
+  esac
+  [ -f "$PROVIDER_LIPO_BIN" ] && [ -x "$PROVIDER_LIPO_BIN" ] && [ ! -L "$PROVIDER_LIPO_BIN" ] || {
+    die "PROVIDER_LIPO_BIN must be a regular executable and not a symlink"
+  }
+fi
 
 provider_version_at_least() {
   local required_major="$1"
@@ -230,11 +253,23 @@ provider_binary="$tmpdir/macprovider-cli"
 
 log "provider artifact includes MLX Metal kernels"
 
-provider_version="$("$provider_binary" --version)"
-if [ "$provider_version" != "$PROVIDER_VERSION" ]; then
-  die "provider version mismatch: got $provider_version want $PROVIDER_VERSION"
+if [ -n "$PROVIDER_EXPECTED_ARCHES" ]; then
+  provider_arches="$("$PROVIDER_LIPO_BIN" -archs "$provider_binary")"
+  [ "$provider_arches" = "$PROVIDER_EXPECTED_ARCHES" ] || {
+    die "provider architecture mismatch: got $provider_arches want $PROVIDER_EXPECTED_ARCHES"
+  }
+  log "provider architecture ok: $provider_arches"
 fi
-log "provider version ok: $provider_version"
+
+if [ "$PROVIDER_RUNTIME_MODE" = execute ]; then
+  provider_version="$("$provider_binary" --version)"
+  if [ "$provider_version" != "$PROVIDER_VERSION" ]; then
+    die "provider version mismatch: got $provider_version want $PROVIDER_VERSION"
+  fi
+  log "provider version ok: $provider_version"
+else
+  log "provider runtime execution deferred to an architecture-compatible verifier"
+fi
 
 if [ -f "$tmpdir/compatibility-set.json" ]; then
   require_file "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem"
@@ -245,7 +280,7 @@ if [ -f "$tmpdir/compatibility-set.json" ]; then
     --public-key "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
     --expected-tag "v$PROVIDER_VERSION"
   log "compatibility-set manifest signature and provider version verified"
-  if provider_version_at_least 1 8 39; then
+  if provider_version_at_least 1 8 39 && [ "$PROVIDER_RUNTIME_MODE" = execute ]; then
     "$provider_binary" release-payload-preflight >/dev/null
     log "staged provider validated its signed compatibility release payload"
   fi

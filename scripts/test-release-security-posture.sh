@@ -528,6 +528,15 @@ for requirement in (
         raise SystemExit(
             f"protected publication must retain non-executing exact-arm64 validation: {requirement}"
         )
+for requirement in (
+    "PROVIDER_RUNTIME_MODE=structural",
+    "PROVIDER_EXPECTED_ARCHES=arm64",
+    "PROVIDER_LIPO_BIN=/usr/bin/lipo",
+):
+    if publish.count(requirement) != 2:
+        raise SystemExit(
+            f"both Intel Tier-2 artifact checks must use the exact non-executing mode: {requirement}"
+        )
 if "environment: production-release" not in publish:
     raise SystemExit("secret-bearing publish job lacks the protected environment")
 if "scripts/verify-release-source.sh" not in build or "scripts/verify-release-source.sh" not in publish:
