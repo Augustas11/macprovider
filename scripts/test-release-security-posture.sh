@@ -17,6 +17,7 @@ sealed_openssl_installer="$root/scripts/install-sealed-release-openssl.sh"
 sealed_openssl_wrapper="$root/scripts/sealed-release-openssl-wrapper.sh"
 catalog_release="$root/scripts/catalog-release.py"
 package_script="$root/phase3-binary/dist/package.sh"
+anonymous_discovery_verifier="$root/scripts/verify-anonymous-release-discovery.sh"
 release_runbook="$root/phase3-binary/dist/release-signing-runbook.md"
 decision_log="$root/beta/DECISION_CRITERIA.md"
 ci_workflow="$root/.github/workflows/ci.yml"
@@ -25,7 +26,12 @@ sparkle_validator_patch="$root/scripts/fixtures/SUUpdateValidator-2.6.4-ephemera
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-bash -n "$sealed_openssl_installer" "$sealed_openssl_wrapper"
+bash -n "$sealed_openssl_installer" "$sealed_openssl_wrapper" "$anonymous_discovery_verifier"
+grep -Fq "HOME=\"\$work/home\" CFFIXED_USER_HOME=\"\$work/home\" \"\$client\" update --check" \
+  "$anonymous_discovery_verifier" || {
+    echo "anonymous release discovery must isolate both shell and Foundation homes" >&2
+    exit 1
+  }
 printf '%s\n' ": > \"\$BASH_ENV_PROBE\"" > "$work/injected-bash-env"
 if BASH_ENV="$work/injected-bash-env" BASH_ENV_PROBE="$work/bash-env-ran" \
   "$sealed_openssl_wrapper" >"$work/wrapper.out" 2>&1; then
@@ -547,9 +553,9 @@ for requirement in (
     "PROVIDER_EXPECTED_ARCHES=arm64",
     "PROVIDER_LIPO_BIN=/usr/bin/lipo",
 ):
-    if publish.count(requirement) != 2:
+    if publish.count(requirement) != 3:
         raise SystemExit(
-            f"both Intel Tier-2 artifact checks must use the exact non-executing mode: {requirement}"
+            f"all Intel Tier-2 artifact checks must use the exact non-executing mode: {requirement}"
         )
 if "environment: production-release" not in publish:
     raise SystemExit("secret-bearing publish job lacks the protected environment")

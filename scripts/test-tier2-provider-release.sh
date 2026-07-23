@@ -50,6 +50,9 @@ make_fake_binary() {
   mkdir -p "$dir"
   cat >"$dir/macprovider-cli" <<EOF
 #!/usr/bin/env bash
+if [ -n "\${EXECUTION_MARKER:-}" ]; then
+  printf 'executed\n' >"\$EXECUTION_MARKER"
+fi
 if [ "\${1:-}" = "--version" ]; then
   printf '%s\n' "$version"
   exit 0
@@ -118,11 +121,12 @@ make_release_fixture() {
       cp "$binary_dir/macprovider-cli" "$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
       cp "$binary_dir/mlx.metallib" "$app_root/Malibu.app/Contents/MacOS/mlx.metallib"
       chmod +x "$app_root/Malibu.app/Contents/MacOS/Malibu" "$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
-      (cd "$app_root" && python3 - <<'PY'
+      (cd "$app_root" && python3 - "$app_asset" <<'PY'
 import os
+import sys
 import zipfile
 
-with zipfile.ZipFile("../Malibu-v1.2.6.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as archive:
     for root, dirs, files in os.walk("Malibu.app"):
         archive.write(root, root + "/")
         for file_name in files:
@@ -130,7 +134,6 @@ with zipfile.ZipFile("../Malibu-v1.2.6.zip", "w", zipfile.ZIP_DEFLATED) as archi
             archive.write(path, path)
 PY
       )
-      mv "$fixture_dir/Malibu-v1.2.6.zip" "$app_asset"
       sha256_file "$app_asset" | awk -v asset="$(basename "$app_asset")" '{ print $1 "  " asset }' >>"$fixture_dir/checksums.txt"
       ;;
     *)
@@ -228,6 +231,15 @@ exit 2
 SH
 chmod +x "$WORKDIR/ditto"
 
+cat >"$WORKDIR/lipo" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = "-archs" ] || exit 2
+[ -f "${2:-}" ] || exit 2
+printf 'arm64\n'
+SH
+chmod +x "$WORKDIR/lipo"
+
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$WORKDIR/private.pem" >/dev/null 2>&1
 openssl pkey -in "$WORKDIR/private.pem" -pubout -out "$WORKDIR/public.pem" >/dev/null 2>&1
 PUBLIC_KEY_PEM="$(cat "$WORKDIR/public.pem")"
@@ -293,6 +305,33 @@ PATH="$WORKDIR:$PATH" \
 assert_contains "$WORKDIR/package.err" "provider package sha256 verified"
 assert_contains "$WORKDIR/package.err" "provider package binary matches tarball binary"
 assert_contains "$WORKDIR/package.err" "provider package version ok"
+
+structural_marker="$WORKDIR/structural-executed"
+PATH="$WORKDIR:$PATH" \
+  CURL_BIN="$WORKDIR/curl" \
+  RELEASE_FIXTURE_DIR="$package_fixture" \
+  MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
+  RELEASE_TAG=v1.2.6 \
+  PROVIDER_RUNTIME_MODE=structural \
+  PROVIDER_EXPECTED_ARCHES=arm64 \
+  PROVIDER_LIPO_BIN="$WORKDIR/lipo" \
+  EXECUTION_MARKER="$structural_marker" \
+  "$VERIFIER" >"$WORKDIR/structural.out" 2>"$WORKDIR/structural.err"
+[ ! -e "$structural_marker" ] || die "structural verification executed the target provider binary"
+assert_contains "$WORKDIR/structural.err" "provider package architecture ok: arm64"
+assert_contains "$WORKDIR/structural.err" "provider package runtime execution deferred"
+assert_contains "$WORKDIR/structural.err" "provider architecture ok: arm64"
+
+if PATH="$WORKDIR:$PATH" \
+  CURL_BIN="$WORKDIR/curl" \
+  RELEASE_FIXTURE_DIR="$good_fixture" \
+  MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
+  RELEASE_TAG=v1.2.6 \
+  PROVIDER_RUNTIME_MODE=structural \
+  "$VERIFIER" >"$WORKDIR/missing-arches.out" 2>"$WORKDIR/missing-arches.err"; then
+  die "structural mode without expected arches unexpectedly passed"
+fi
+assert_contains "$WORKDIR/missing-arches.err" "structural mode requires PROVIDER_EXPECTED_ARCHES"
 
 app_fixture="$WORKDIR/app-release"
 make_release_fixture "$app_fixture" "1.2.6" "1" "none" "good"

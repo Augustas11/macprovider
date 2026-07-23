@@ -106,7 +106,7 @@ codesign --verify --strict --verbose=2 "$client"
 [[ "$("$client" --version)" == "${client_tag#v}" ]] || die "client binary version differs"
 
 mkdir "$work/home"
-output="$(HOME="$work/home" "$client" update --check 2>&1)" || {
+output="$(HOME="$work/home" CFFIXED_USER_HOME="$work/home" "$client" update --check 2>&1)" || {
   printf '%s\n' "$output" >&2
   die "$client_tag could not discover $target_tag anonymously"
 }
