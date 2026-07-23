@@ -463,6 +463,45 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(d, .freeSpaceFloor)
     }
 
+    /// M-9: namespace metadata uses a CLOSED schema — unknown fields, a missing
+    /// purge_high_watermarks map, or an invalid rotation phase are rejected.
+    func testMetadataDecodeIsClosedSchema() throws {
+        let valid = KVNamespaceMetadata(
+            providerNamespaceID: "ns", keyEpoch: 1, schemaID: "s", codecID: "c",
+            purgeHighWatermarks: ["ab": 2], clockHighWaterMillis: 10, rotationJournal: nil)
+        let data = try KVMetadataCodec.encode(valid)
+        XCTAssertNotNil(KVMetadataCodec.decode(data), "valid doc must decode")
+
+        func mutated(_ f: (inout [String: Any]) -> Void) throws -> Data {
+            var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            f(&obj)
+            return try JSONSerialization.data(withJSONObject: obj)
+        }
+        XCTAssertNil(KVMetadataCodec.decode(try mutated { $0["surprise"] = 1 }), "unknown field must reject")
+        XCTAssertNil(KVMetadataCodec.decode(try mutated { $0.removeValue(forKey: "purge_high_watermarks") }), "missing hw map must reject")
+        XCTAssertNil(KVMetadataCodec.decode(try mutated { $0["rotation_journal"] = ["from": 1, "to": 2, "phase": "bogus"] }), "invalid phase must reject")
+        XCTAssertNil(KVMetadataCodec.decode(try mutated { $0["key_epoch"] = 0 }), "epoch < 1 must reject")
+    }
+
+    /// M-9: a metadata doc that fails the closed schema quarantines the store on
+    /// activation (fail-closed, not fail-open).
+    func testCorruptMetadataQuarantinesOnActivate() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        _ = try await store1.write(try await makeSnapshot(store: store1, rawKey: "conv:kvs-synth:m", seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        await store1.deactivate()
+
+        let metaURL = root.appendingPathComponent(namespaceDigest("ns-test")).appendingPathComponent("meta.json")
+        var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: metaURL)) as? [String: Any])
+        obj["surprise"] = 1
+        try JSONSerialization.data(withJSONObject: obj).write(to: metaURL)
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        await XCTAssertThrowsErrorAsync(try await store2.activate())
+    }
+
     func testAbsentKeyPurgeNoOps() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

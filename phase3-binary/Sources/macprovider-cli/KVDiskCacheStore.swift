@@ -1630,19 +1630,47 @@ enum KVMetadataCodec {
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 
+    /// Allowed rotation-journal phases (M-9 closed schema).
+    static let rotationPhases: Set<String> = ["created", "committed", "old_deleted"]
+
+    /// CLOSED-schema decode (M-9): reject unknown top-level fields, validate epoch /
+    /// map size / rotation phase, and REQUIRE purge_high_watermarks to be present
+    /// (its absence while other state exists is corruption, not an empty map). Any
+    /// mismatch returns nil, which the store escalates to quarantine + dormancy.
     static func decode(_ data: Data) -> KVNamespaceMetadata? {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let namespaceID = object["provider_namespace_id"] as? String,
-              let epoch = object["key_epoch"] as? Int,
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        // Reject unknown fields (closed schema); rotation_journal is optional.
+        let allowed: Set<String> = [
+            "provider_namespace_id", "key_epoch", "schema_id", "codec_id",
+            "purge_high_watermarks", "clock_high_water_ms", "rotation_journal",
+        ]
+        let required: Set<String> = allowed.subtracting(["rotation_journal"])
+        let present = Set(object.keys)
+        guard present.isSubset(of: allowed), required.isSubset(of: present) else { return nil }
+
+        guard let namespaceID = object["provider_namespace_id"] as? String,
+              let epoch = object["key_epoch"] as? Int, epoch >= 1,
               let schemaID = object["schema_id"] as? String,
               let codecID = object["codec_id"] as? String,
-              let clockHW = object["clock_high_water_ms"] as? Int else { return nil }
-        let hwRaw = (object["purge_high_watermarks"] as? [String: Any]) ?? [:]
+              let clockHW = object["clock_high_water_ms"] as? Int, clockHW >= 0 else { return nil }
+
+        // purge_high_watermarks is REQUIRED and every value must be a non-negative
+        // integer; the map may not exceed the FR-KVP7 cap.
+        guard let hwRaw = object["purge_high_watermarks"] as? [String: Any],
+              hwRaw.count <= KVNamespaceMetadata.highWatermarkCap else { return nil }
         var hw: [String: Int] = [:]
-        for (k, v) in hwRaw { if let n = v as? Int { hw[k] = n } }
+        for (k, v) in hwRaw {
+            guard let n = v as? Int, n >= 0 else { return nil }
+            hw[k] = n
+        }
+
         var journal: KVRotationJournal?
-        if let j = object["rotation_journal"] as? [String: Any],
-           let from = j["from"] as? Int, let to = j["to"] as? Int, let phase = j["phase"] as? String {
+        if let raw = object["rotation_journal"] {
+            guard let j = raw as? [String: Any],
+                  Set(j.keys) == ["from", "to", "phase"],
+                  let from = j["from"] as? Int, from >= 1,
+                  let to = j["to"] as? Int, to == from + 1,
+                  let phase = j["phase"] as? String, rotationPhases.contains(phase) else { return nil }
             journal = KVRotationJournal(from: from, to: to, phase: phase)
         }
         return KVNamespaceMetadata(
@@ -1659,11 +1687,14 @@ enum KVTombstoneCodec {
         ], options: [.sortedKeys])
     }
 
+    /// CLOSED-schema decode (M-9): reject unknown fields + validate ranges; nil
+    /// escalates to quarantine during recovery.
     static func decode(_ data: Data) -> KVTombstone? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let epoch = object["epoch"] as? Int,
-              let index = object["index"] as? String,
-              let gen = object["purge_generation"] as? Int,
+              Set(object.keys) == ["epoch", "index", "purge_generation", "complete"],
+              let epoch = object["epoch"] as? Int, epoch >= 1,
+              let index = object["index"] as? String, KVHex.decode(index) != nil,
+              let gen = object["purge_generation"] as? Int, gen >= 0,
               let complete = object["complete"] as? Bool else { return nil }
         return KVTombstone(epoch: epoch, index: index, purgeGeneration: gen, complete: complete)
     }
