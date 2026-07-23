@@ -489,6 +489,41 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .miss = after else { return XCTFail("post-rotation read misses cleanly") }
     }
 
+    /// Item 8 (M-6 / FR-KVP10): the namespace root is marked excluded from Time Machine
+    /// backup at creation.
+    func testNamespaceRootExcludedFromBackup() async throws {
+        let root = makeRoot()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: KVInMemoryKeychain())
+        try await store.activate()
+        let nsDir = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+        let values = try nsDir.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(values.isExcludedFromBackup, true,
+                       "namespace root must be excluded from Time Machine backup (FR-KVP10)")
+    }
+
+    /// Item 8 (architect LOW): a tombstone from a PRIOR key epoch must NOT repopulate
+    /// the rotated epoch's high-watermark map at recovery (the map is reset by rotation;
+    /// revocation is preserved by crypto-shred, not by carrying stale tombstones forward).
+    func testStaleEpochTombstoneDoesNotRepopulateHighWatermark() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:stale-tomb"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        _ = try await store.purge(rawKey: key)                                  // epoch-1 tombstone
+        guard case .ok = try await store.purgeAll() else { return XCTFail("rotate to epoch 2") }
+        await store.deactivate()
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        let epoch = await store2.currentEpoch
+        XCTAssertEqual(epoch, 2)
+        let inspection = await store2.inspect()
+        XCTAssertEqual(inspection.purgeHighWatermarkEntries, 0,
+                       "stale epoch-1 tombstone must not repopulate the epoch-2 high-watermark map")
+    }
+
     /// Item 7: a replacement commit that fails mid-protocol (post-blob dir fsync) leaves
     /// NO unaccounted bytes — the partial new generation is removed and the reservation
     /// released — and the committed OLD generation survives.

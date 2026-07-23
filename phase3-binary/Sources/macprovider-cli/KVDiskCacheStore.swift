@@ -300,8 +300,11 @@ actor KVDiskCacheStore {
     private let sink: any KVEventSink
     private let naming: KVKeychainNaming
 
+    #if DEBUG
     /// Test-only failpoint injector: throws `KVInjectedCrash` at the named boundary.
+    /// Compiled only in DEBUG so crash-injection never ships in the release binary.
     private var failpoint: (@Sendable (KVFailpoint) throws -> Void)?
+    #endif
 
     /// Test-only directory-fsync failure injection (HIGH-7): throw at the k-th
     /// (1-based) `fsyncDirectory` call to model a filesystem that fails to durably
@@ -439,6 +442,7 @@ actor KVDiskCacheStore {
             rotationJournal: nil)
     }
 
+    #if DEBUG
     func setFailpoint(_ hook: (@Sendable (KVFailpoint) throws -> Void)?) {
         failpoint = hook
     }
@@ -453,6 +457,7 @@ actor KVDiskCacheStore {
     /// Test-only (M-D): force the next entry-directory unlink to fail, modeling a
     /// filesystem that cannot remove the ciphertext. Pass false to clear.
     func injectUnlinkFailure(_ enabled: Bool) { unlinkFailInjected = enabled }
+    #endif
 
     /// Remove an entry directory, propagating any failure as `KVStoreError.io` (M-D):
     /// callers MUST treat a failed unlink as purge_failed / eviction failure and retain
@@ -466,6 +471,7 @@ actor KVDiskCacheStore {
         }
     }
 
+    #if DEBUG
     /// Test-only (FR-KVP8 CRITICAL (d)): fill the purge high-watermark map with
     /// `count` dummy indices so the next single-key purge of a NEW index crosses the
     /// 4096 cap and routes through the namespace-fence rotation — without creating
@@ -473,6 +479,7 @@ actor KVDiskCacheStore {
     func seedPurgeWatermarksForTest(count: Int) {
         for i in 0 ..< count { metadata.purgeHighWatermarks["seed-\(i)"] = 1 }
     }
+    #endif
 
     /// Wire the hot-tier purge callbacks (CRITICAL-1). `single` receives the raw
     /// conversation key (the hot tier keys on the trimmed raw key, not the HMAC
@@ -485,9 +492,15 @@ actor KVDiskCacheStore {
         hotPurgeAll = all
     }
 
+    #if DEBUG
     private func crashIf(_ point: KVFailpoint) throws {
         try failpoint?(point)
     }
+    #else
+    /// Release: crash-injection is a no-op (the injector never compiles in), so the
+    /// FR-KVP3/6/8 ordering boundaries carry zero cost in the shipping binary.
+    @inline(__always) private func crashIf(_ point: KVFailpoint) throws {}
+    #endif
 
     // MARK: Paths
 
@@ -628,8 +641,28 @@ actor KVDiskCacheStore {
         try createDir(config.root)
         try createDir(config.root.appendingPathComponent(".locks", isDirectory: true))
         try createDir(namespaceDir)
+        // M-6 / FR-KVP10: exclude the namespace root from Time Machine backups so the
+        // encrypted cache is not copied into a backup set (where a data-volume rollback
+        // could otherwise reintroduce ciphertext — the DEK revocation anchor still fences
+        // it, but this is defense in depth). Best-effort: not all volumes support the
+        // flag, and it never blocks activation.
+        markExcludedFromBackup(namespaceDir)
         try createDir(entriesDir)
         try createDir(tombstonesDir)
+    }
+
+    /// M-6 / FR-KVP10: mark `url` excluded from Time Machine backup
+    /// (`URLResourceValues.isExcludedFromBackup`). Best-effort — logged, never fatal.
+    private func markExcludedFromBackup(_ url: URL) {
+        var target = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        do {
+            try target.setResourceValues(values)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "event=kv_disk_cache action=warn reason=backup_exclusion_failed detail=\"\(error.localizedDescription)\"\n".utf8))
+        }
     }
 
     /// M-16: verify a directory is owned by us, a real directory, not a symlink
@@ -1815,6 +1848,7 @@ actor KVDiskCacheStore {
         try? runRetention(nowMillis: now)
     }
 
+    #if DEBUG
     /// Test-only (M-F): the wall-clock source for the retention tick. Defaults to real
     /// time; a fake-clock idle test overrides it.
     func setSweepClockForTest(_ provider: @escaping @Sendable () -> Int) { sweepClockOverride = provider }
@@ -1834,6 +1868,7 @@ actor KVDiskCacheStore {
     /// Test-only (Item 7): bytes of superseded blobs whose deletion failed and are
     /// retained against quota until a sweep reclaims them.
     var supersededLeakBytesForTest: Int { supersededLeakBytes }
+    #endif
 
     private func sweepClockMillis() -> Int {
         if let sweepClockOverride { return sweepClockOverride() }
@@ -1884,6 +1919,15 @@ actor KVDiskCacheStore {
                   let tomb = KVTombstoneCodec.decode(data) else {
                 quarantine(.ioError)
                 throw KVStoreError.quarantined(.ioError)
+            }
+            // Architect LOW: a tombstone from a PRIOR key epoch is stale — that epoch's
+            // material is crypto-shredded and the new epoch's high-watermark map was
+            // reset at rotation. It MUST NOT repopulate the current epoch's HWM map (a
+            // fresh entry under the new epoch would then be wrongly fenced). Delete the
+            // stale tombstone and skip it.
+            guard tomb.epoch == metadata.keyEpoch else {
+                try? FileManager.default.removeItem(at: file)
+                continue
             }
             // Recovery FIRST re-advances + persists the high-watermark if metadata is
             // behind, THEN re-runs the destructive steps for an incomplete tombstone.
