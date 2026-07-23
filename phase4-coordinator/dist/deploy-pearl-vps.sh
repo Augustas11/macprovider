@@ -471,14 +471,25 @@ _sidecar_restore_on_abort() {
     flock -s 8 2>/dev/null || true
     _prior=/opt/macprovider/.coordinator-deploy-sidecar-prior-state
     [ -f "$_prior" ] || exit 0
-    timer_enabled=; timer_active=; service_enabled=
+    timer_enabled=; timer_active=; service_enabled=; parity_required=
     . "$_prior"
+    case "$parity_required" in
+      present)
+        touch /opt/macprovider/.coordinator-deploy-sidecar-parity-required
+        systemctl disable --now stats-inventory-sync.timer >/dev/null 2>&1 || exit 1
+        systemctl stop stats-inventory-sync.service >/dev/null 2>&1 || exit 1
+        rm -f "$_prior"
+        exit 0
+        ;;
+      absent) ;;
+      *) exit 1 ;;
+    esac
     [ "$service_enabled" = enabled ] && systemctl enable stats-inventory-sync.service >/dev/null 2>&1 || true
     [ "$timer_enabled" = enabled ] && systemctl enable stats-inventory-sync.timer >/dev/null 2>&1 || true
     [ "$timer_active" = active ] && systemctl start stats-inventory-sync.timer >/dev/null 2>&1 || true
     rm -f "$_prior"
   '; then
-    echo "coordinator deploy: stats-inventory-sync restored to its pre-quiesce state (safe early abort — schema/binary parity never crossed)" >&2
+    echo "coordinator deploy: stats-inventory-sync restored to its pre-deploy state (safe early abort — schema/binary parity never crossed)" >&2
   else
     echo "coordinator deploy: WARNING could not restore stats-inventory-sync after early abort; verify its enabled/active state manually" >&2
   fi
@@ -1096,34 +1107,54 @@ fi
 # Issue #582 (MEDIUM #6) — ARM the restore-on-failure path BEFORE quiescing:
 # record that a quiesce is being attempted (consumed by the EXIT trap), capture
 # the sidecar's prior enable/active state so a safe early abort can restore it,
-# and clear any stale parity marker so the trap does not wrongly leave the
-# sidecar stopped on this run. The capture runs INSIDE the same locked SSH, ahead
-# of the disable/stop, so the recorded state is the true pre-quiesce state.
+# and preserve whether a prior deploy deliberately left a schema/binary parity
+# hold before clearing the marker for this attempt. The capture runs INSIDE the
+# same locked SSH, ahead of the disable/stop, so the recorded state is the true
+# pre-quiesce state.
 SIDECAR_QUIESCE_ATTEMPTED=1
 $SSH 'set -eu
   exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
   flock -s 8
-  rm -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required
   _prior=/opt/macprovider/.coordinator-deploy-sidecar-prior-state
   _prior_next=$_prior.next.$$
+  if [ -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required ]; then
+    _parity_required=present
+  else
+    _parity_required=absent
+  fi
   ( umask 077
     {
       printf "timer_enabled=%s\n"   "$(systemctl is-enabled stats-inventory-sync.timer   2>/dev/null || true)"
       printf "timer_active=%s\n"    "$(systemctl is-active  stats-inventory-sync.timer   2>/dev/null || true)"
       printf "service_enabled=%s\n" "$(systemctl is-enabled stats-inventory-sync.service 2>/dev/null || true)"
+      printf "parity_required=%s\n"  "$_parity_required"
     } > "$_prior_next"
   )
   mv -f "$_prior_next" "$_prior"
+  rm -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required
   for unit in stats-inventory-sync.timer stats-inventory-sync.service; do
     load_state=$(systemctl show -p LoadState --value "$unit")
     [ "$load_state" = not-found ] && continue
-    systemctl disable "$unit" >/dev/null 2>&1 || true
+    if [ "$unit" = stats-inventory-sync.timer ]; then
+      systemctl disable "$unit" >/dev/null
+    else
+      # The oneshot service has no [Install] section and is expected to be
+      # static; the timer is the only persistent activation path.
+      systemctl disable "$unit" >/dev/null 2>&1 || true
+    fi
     systemctl stop "$unit"
     active_state=$(systemctl show -p ActiveState --value "$unit")
     case "$active_state" in
       inactive|failed) ;;
       *) echo "stats-inventory-sync unit did not quiesce before migration: $unit state=$active_state" >&2; exit 1 ;;
     esac
+    if [ "$unit" = stats-inventory-sync.timer ]; then
+      enabled_state=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+      [ "$enabled_state" = disabled ] || {
+        echo "stats-inventory-sync timer did not disable before migration: state=$enabled_state" >&2
+        exit 1
+      }
+    fi
   done
 '
 
@@ -2288,6 +2319,23 @@ $SSH "set -e
   # stats-inventory-sync is an operator sidecar, not a coordinator child.
   # It runs under its own Unix identity and only receives execute access
   # to this binary; its Postgres writer DSN lives under /etc/macprovider-stats.
+  # A pre-existing parity hold belongs to an earlier coordinator release. A
+  # catalog-only deploy may carry the live binary through byte-for-byte, but it
+  # must not silently promote a different sidecar before the signed matching
+  # coordinator/sidecar release does so.
+  if [ ! -r /opt/macprovider/.coordinator-deploy-sidecar-prior-state ]; then
+    echo "refusing stats-inventory sidecar install: missing pre-quiesce parity state" >&2
+    exit 1
+  elif grep -qx "parity_required=present" /opt/macprovider/.coordinator-deploy-sidecar-prior-state; then
+    if [ ! -x /opt/macprovider-stats/stats-inventory-sync ] ||
+       ! cmp -s $DEPLOY_TMP/stats-inventory-sync-linux-amd64 /opt/macprovider-stats/stats-inventory-sync; then
+      echo "refusing parity-held stats-inventory sidecar replacement: install the signed matching coordinator/sidecar release first" >&2
+      exit 1
+    fi
+  elif ! grep -qx "parity_required=absent" /opt/macprovider/.coordinator-deploy-sidecar-prior-state; then
+    echo "refusing stats-inventory sidecar install: invalid pre-quiesce parity state" >&2
+    exit 1
+  fi
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-inventory-sync-linux-amd64 /opt/macprovider-stats/stats-inventory-sync
   # stats-billing-mirror is an out-of-band stats sidecar. It runs as the
   # dedicated macprovider-stats identity and gets read access only to the
@@ -3299,17 +3347,59 @@ $SSH 'set -e
   # Sidecars remain frozen until every coordinator/catalog/canary check has
   # passed. Activate them as the final transaction mutation, immediately
   # before the commit marker.
-  if [ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ] && [ -f /etc/macprovider-stats/stats-inventory-sync.env ]; then
+  _sidecar_prior=/opt/macprovider/.coordinator-deploy-sidecar-prior-state
+  if [ ! -r "$_sidecar_prior" ]; then
+    echo "aborting deploy: missing stats-inventory prior state at final activation" >&2
+    exit 13
+  fi
+  assert_stats_inventory_quiescent() {
+    _timer_enabled=$(systemctl is-enabled stats-inventory-sync.timer 2>/dev/null || true)
+    _timer_active=$(systemctl is-active stats-inventory-sync.timer 2>/dev/null || true)
+    _service_active=$(systemctl is-active stats-inventory-sync.service 2>/dev/null || true)
+    if [ "$_timer_enabled" != disabled ] ||
+       [ "$_timer_active" != inactive ]; then
+      echo "aborting deploy: stats-inventory timer did not remain disabled/inactive after parity hold (enabled=$_timer_enabled active=$_timer_active)" >&2
+      exit 13
+    fi
+    case "$_service_active" in
+      inactive|failed) ;;
+      *)
+        echo "aborting deploy: stats-inventory service did not remain quiescent after parity hold (active=$_service_active)" >&2
+        exit 13
+        ;;
+    esac
+  }
+  _parity_required=$(sed -n "s/^parity_required=//p" "$_sidecar_prior")
+  case "$_parity_required" in
+    present)
+      systemctl disable --now stats-inventory-sync.timer
+      systemctl stop stats-inventory-sync.service
+      assert_stats_inventory_quiescent
+      touch /opt/macprovider/.coordinator-deploy-sidecar-parity-required
+      echo "stats inventory timer remains disabled: pre-existing schema/binary parity marker requires a matching sidecar promotion"
+      ;;
+    absent) ;;
+    *)
+      echo "aborting deploy: invalid stats-inventory parity state at final activation" >&2
+      exit 13
+      ;;
+  esac
+  if [ "$_parity_required" = absent ] && [ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ] && [ -f /etc/macprovider-stats/stats-inventory-sync.env ]; then
     systemctl enable --now stats-inventory-sync.timer
     if ! systemctl start stats-inventory-sync.service; then
-      echo "warning: stats-inventory-sync.service failed; leaving coordinator deploy running"
+      systemctl disable --now stats-inventory-sync.timer
+      systemctl stop stats-inventory-sync.service
+      assert_stats_inventory_quiescent
+      echo "warning: stats-inventory-sync.service failed; leaving coordinator deploy running with its parity marker and timer disabled"
       journalctl -u stats-inventory-sync.service -n 30 --no-pager || true
+    else
+      rm -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required
+      systemctl is-active stats-inventory-sync.timer
     fi
-    systemctl is-active stats-inventory-sync.timer
-  elif [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-inventory-timer-was-active ]; then
+  elif [ "$_parity_required" = absent ] && [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-inventory-timer-was-active ]; then
     systemctl start stats-inventory-sync.timer
     [ ! -f /opt/macprovider/.coordinator-deploy-rollback/stats-inventory-service-was-active ] || systemctl start stats-inventory-sync.service
-  else
+  elif [ "$_parity_required" = absent ]; then
     echo "stats inventory timer not enabled: missing /etc/macprovider-stats/stats-hardware-inventory.yaml or stats-inventory-sync.env"
   fi
   if [ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/request-log.sqlite ] && su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats; then
@@ -3354,6 +3444,7 @@ $SSH 'set -e
   else
     echo "stats hardware verifier timer not enabled: missing /etc/macprovider-stats/stats-hardware-verifier.env"
   fi
+  rm -f "$_sidecar_prior"
   touch /opt/macprovider/.coordinator-deploy-rollback/committed
   /opt/macprovider/coordinator-deploy-recover --recover-under-global
 '

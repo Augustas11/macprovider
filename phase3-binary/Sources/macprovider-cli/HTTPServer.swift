@@ -1029,25 +1029,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     /// Maps unexpected non-APIError throws into a buyer-visible envelope.
     ///
-    /// Residual catches historically stamped every failure as
-    /// `503 model_not_loaded`, which mislabeled chat-template / tools-schema
-    /// failures (e.g. `NSNull` in tool parameters → swift-jinja) as an unloaded
-    /// model. Detect those render failures and emit a 400 `chat_template_error`
-    /// instead. All other unexpected errors keep the historical envelope so
-    /// existing error-receipt eligibility (`model_not_loaded`) is unchanged.
+    /// The specific #718 mislabel (tool-schema `NSNull` → swift-jinja throw) is
+    /// fixed at the source: tool nulls now render as native Jinja nulls in
+    /// `ModelRuntime.jsonAnyForTemplate`, so that failure no longer reaches this
+    /// residual catch. Pre-existing behavior is preserved here deliberately: a
+    /// pre-SSE failure keeps the long-standing `model_not_loaded` (503) envelope
+    /// so the buyer still receives the SPEC-015 §M.5 (AC-31) null-usage error
+    /// receipt — 0 tokens out, proof of no charge — while a post-SSE failure,
+    /// where headers are already committed, surfaces as `internal_error` (500).
+    ///
+    /// NOTE: whether an unexpected internal defect *should* keep sharing the
+    /// `model_not_loaded` code (an availability signal) with genuine
+    /// unavailability is a live taxonomy question raised in audit; changing it
+    /// alters AC-31 receipt economics and is intentionally left to a governed
+    /// SPEC decision rather than folded into the #718 null-handling fix.
     static func unexpectedInferenceAPIError(
         error: Error,
         sseStarted: Bool = false
     ) -> APIError {
-        if Self.looksLikeChatTemplateFailure(error) {
-            return APIError(
-                status: 400,
-                message: "Chat template rendering failed: \(error.localizedDescription)",
-                type: "invalid_request_error",
-                code: "chat_template_error",
-                retryable: false
-            )
-        }
         if sseStarted {
             return APIError(
                 status: 500,
@@ -1062,15 +1061,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             type: "server_error",
             code: "model_not_loaded"
         )
-    }
-
-    private static func looksLikeChatTemplateFailure(_ error: Error) -> Bool {
-        let text = "\(error) \(error.localizedDescription)".lowercased()
-        return text.contains("nsnull")
-            || text.contains("jinja")
-            || text.contains("chat template")
-            || text.contains("applychattemplate")
-            || text.contains("cannot convert value of type")
     }
 
     static let receiptHeaderName = "X-MacProvider-Receipt"

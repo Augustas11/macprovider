@@ -852,7 +852,56 @@ private func validateTools(_ raw: Any?) throws {
         guard function["parameters"] is [String: Any] else {
             throw APIError(status: 400, message: "Invalid tools[\(index)]: missing function.parameters", code: "invalid_tools")
         }
+        // The whole tool object is later walked recursively by `JSONValue.parse`
+        // and the chat-template converter, both otherwise depth-unbounded. Bound
+        // its container nesting here — at the untrusted-input boundary, before
+        // any recursive walk — so those walks cannot overflow the native stack.
+        //
+        // This is a RAW structural recursion bound (a stack-safety backstop),
+        // not a JSON-Schema logical-depth contract: it counts nested container
+        // levels, each schema position measured from itself as depth 1 so the
+        // tool/function wrapper does not consume budget. EVERY member is probed
+        // — the `function`'s members (`parameters`, `description`, …) AND any
+        // other key an over-permissive client may attach to the tool object —
+        // because `JSONValue.parse` traverses all of them; probing only
+        // `function` would leave a `tools[i].<other>` bypass. The limit reuses
+        // the repo-wide `JSONSchemaValidator.maxDepth`, far above any realistic
+        // tool schema (a handful of levels). The probe is iterative so it cannot
+        // overflow on the very input it guards against.
+        func rejectIfTooDeep(_ value: Any) throws {
+            guard !jsonContainerNestingExceeds(value, limit: JSONSchemaValidator.maxDepth) else {
+                throw APIError(status: 400, message: "Invalid tools[\(index)]: schema exceeds maximum nesting depth", code: "invalid_tools")
+            }
+        }
+        for (key, member) in tool {
+            if key == "function", let functionObject = member as? [String: Any] {
+                for functionMember in functionObject.values { try rejectIfTooDeep(functionMember) }
+            } else {
+                try rejectIfTooDeep(member)
+            }
+        }
     }
+}
+
+/// Iterative (heap-stack) container-nesting probe over a Foundation JSON graph.
+/// Depth counts nested container (object/array) levels only — scalar leaves do
+/// not add depth — with `root` at depth 1. Returns `true` as soon as a
+/// container is found deeper than `limit`, so native stack usage stays constant
+/// regardless of how deeply nested `root` is. Exact boundary: a root whose
+/// deepest container sits at level `limit` returns `false`; at `limit + 1`,
+/// `true`.
+func jsonContainerNestingExceeds(_ root: Any, limit: Int) -> Bool {
+    var stack: [(node: Any, depth: Int)] = [(root, 1)]
+    while let (node, depth) = stack.popLast() {
+        if let dict = node as? [String: Any] {
+            if depth > limit { return true }
+            for value in dict.values { stack.append((value, depth + 1)) }
+        } else if let array = node as? [Any] {
+            if depth > limit { return true }
+            for value in array { stack.append((value, depth + 1)) }
+        }
+    }
+    return false
 }
 
 private func validateToolChoice(_ raw: Any?) throws {

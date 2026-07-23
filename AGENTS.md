@@ -74,4 +74,22 @@ source under any circumstance.
 - Decision log is `beta/DECISION_CRITERIA.md`. Append entries to
   capture what was decided and why.
 
+## 7. Audit the full fix diff — never a slice
+
+When running auditors (3-lane codex `code`/`security`/`architect`,
+`code-reviewer`, etc.) on a fix, always review the **full diff of the
+complete fix as it will land** — every commit of that fix combined,
+scoped to the fix's files — never an incremental follow-up slice
+layered on an already-merged earlier part of the same fix.
+
+Reviewing only the delta loses whole-change context, hides interactions
+between the earlier and later parts, and can bless a slice that is
+locally fine but wrong in the combined patch.
+
+Reconstruct it by finding the base commit **before the fix's first
+commit** and diffing that base to the working tree, scoped to the fix's
+files (`git diff <base> -- <files...>`). Do **not** diff against
+`origin/main` when `main` already contains an earlier part of the same
+fix.
+
 For the canonical, full version of every rule above, see `CLAUDE.md`.

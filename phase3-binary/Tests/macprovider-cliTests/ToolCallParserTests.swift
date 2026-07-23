@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import Jinja
 import MacProviderCore
 @testable import macprovider_cli
 
@@ -539,10 +540,14 @@ I'll validate that.
         XCTAssertFalse(Self.containsNSNull(tool), "template tools must not materialize NSNull")
     }
 
-    func testTemplateToolsOmitJSONNullsAndMissingDescription() {
-        // Regression for https://github.com/Augustas11/macprovider/issues/718:
-        // `"default": null` in tool parameters became NSNull, which swift-jinja
-        // cannot convert → 503 model_not_loaded mislabel.
+    func testTemplateToolsRenderJSONNullsAsJinjaNullPreservingShape() throws {
+        // Regression for https://github.com/Augustas11/macprovider/issues/718
+        // and correctness follow-up: `"default": null` in tool parameters
+        // became NSNull, which swift-jinja cannot convert → 503 model_not_loaded
+        // mislabel. The fix renders JSON nulls as native `Jinja.Value.null`
+        // WITHOUT dropping keys or array positions (the earlier omit-based fix
+        // silently mutated `enum:[null,…]`, `const:null`, and positional
+        // defaults).
         let tools: JSONValue = .array([
             .object([
                 "type": .string("function"),
@@ -583,37 +588,156 @@ I'll validate that.
             ]),
         ])
 
-        let converted = try! XCTUnwrap(ModelRuntime.mlxToolsForTemplate(from: tools))
+        let converted = try XCTUnwrap(ModelRuntime.mlxToolsForTemplate(from: tools))
         XCTAssertEqual(converted.count, 2)
 
         for tool in converted {
             XCTAssertFalse(Self.containsNSNull(tool), "converted tool must not contain NSNull: \(tool)")
         }
 
-        let first = try! XCTUnwrap(converted[0]["function"] as? [String: Any])
+        let first = try XCTUnwrap(converted[0]["function"] as? [String: Any])
         XCTAssertEqual(first["name"] as? String, "f")
-        XCTAssertNil(first["description"], "missing description must be omitted, not NSNull")
-        let firstParams = try! XCTUnwrap(first["parameters"] as? [String: Any])
-        let firstProps = try! XCTUnwrap(firstParams["properties"] as? [String: Any])
-        let timeout = try! XCTUnwrap(firstProps["timeout"] as? [String: Any])
+        // An absent description renders as a native Jinja null, matching the
+        // receipt canonical form where absent and explicit-null both hash to
+        // JCS null (PromptCanonicalizer.canonicalTool). Render must not diverge
+        // from the signed prompt hash by treating absent as "undefined".
+        XCTAssertTrue(first.keys.contains("description"), "absent description is rendered as null (hash parity)")
+        XCTAssertEqual(first["description"] as? Jinja.Value, Jinja.Value.null)
+        let firstParams = try XCTUnwrap(first["parameters"] as? [String: Any])
+        let firstProps = try XCTUnwrap(firstParams["properties"] as? [String: Any])
+        let timeout = try XCTUnwrap(firstProps["timeout"] as? [String: Any])
         XCTAssertEqual(timeout["type"] as? String, "integer")
-        XCTAssertNil(timeout["default"], "default:null must be omitted from template tools")
-        XCTAssertNil(firstProps["optional_hint"], "null-valued property entry must be omitted")
+        // default:null is PRESERVED as a native Jinja null (key retained).
+        XCTAssertTrue(timeout.keys.contains("default"), "default key must be preserved")
+        XCTAssertEqual(timeout["default"] as? Jinja.Value, Jinja.Value.null)
+        XCTAssertTrue(firstProps.keys.contains("optional_hint"), "null-valued property key must be preserved")
+        XCTAssertEqual(firstProps["optional_hint"] as? Jinja.Value, Jinja.Value.null)
 
-        let second = try! XCTUnwrap(converted[1]["function"] as? [String: Any])
+        let second = try XCTUnwrap(converted[1]["function"] as? [String: Any])
         XCTAssertEqual(second["name"] as? String, "g")
-        XCTAssertNil(second["description"], "description:null must be omitted, not NSNull")
-        let secondParams = try! XCTUnwrap(second["parameters"] as? [String: Any])
-        let secondProps = try! XCTUnwrap(secondParams["properties"] as? [String: Any])
-        let tags = try! XCTUnwrap(secondProps["tags"] as? [String: Any])
-        // Array null elements are dropped so Jinja never sees NSNull.
-        let defaultTags = try! XCTUnwrap(tags["default"] as? [Any])
-        XCTAssertEqual(defaultTags.count, 1)
-        XCTAssertEqual(defaultTags.first as? String, "x")
+        // description:null is PRESERVED as a native Jinja null.
+        XCTAssertTrue(second.keys.contains("description"), "present description key must be preserved")
+        XCTAssertEqual(second["description"] as? Jinja.Value, Jinja.Value.null)
+        let secondParams = try XCTUnwrap(second["parameters"] as? [String: Any])
+        let secondProps = try XCTUnwrap(secondParams["properties"] as? [String: Any])
+        let tags = try XCTUnwrap(secondProps["tags"] as? [String: Any])
+        // Array null elements keep their POSITION as a native Jinja null.
+        let defaultTags = try XCTUnwrap(tags["default"] as? [Any])
+        XCTAssertEqual(defaultTags.count, 2, "array null positions must be preserved, not dropped")
+        XCTAssertEqual(defaultTags[0] as? Jinja.Value, Jinja.Value.null)
+        XCTAssertEqual(defaultTags[1] as? String, "x")
         // Union type ["string","null"] keeps the string "null" (not a JSON null).
-        let items = try! XCTUnwrap(tags["items"] as? [String: Any])
-        let typeUnion = try! XCTUnwrap(items["type"] as? [Any])
+        let items = try XCTUnwrap(tags["items"] as? [String: Any])
+        let typeUnion = try XCTUnwrap(items["type"] as? [Any])
         XCTAssertEqual(typeUnion as? [String], ["string", "null"])
+
+        // The failing #718 boundary itself: the converted tools must round-trip
+        // through swift-jinja's `Value(any:)` (what the tokenizer calls) WITHOUT
+        // throwing — the original crash was here, not in the model.
+        XCTAssertNoThrow(try Jinja.Value(any: converted))
+    }
+
+    func testTemplateToolConverterPreservesDeepShapeWithoutTruncation() throws {
+        // Depth is bounded upstream at request validation (see the request-level
+        // test below), so the converter is a faithful shape-preserving pass with
+        // NO silent truncation: a deep-but-legal schema must reach its leaf
+        // intact rather than being collapsed to null partway down.
+        let depth = 20
+        var node: JSONValue = .object(["leaf": .string("bottom")])
+        for _ in 0..<depth {
+            node = .object(["nested": node])
+        }
+        let tools: JSONValue = .array([
+            .object([
+                "type": .string("function"),
+                "function": .object([
+                    "name": .string("deep"),
+                    "parameters": .object(["type": .string("object"), "properties": node]),
+                ]),
+            ]),
+        ])
+        let converted = try XCTUnwrap(ModelRuntime.mlxToolsForTemplate(from: tools))
+        var cursor: [String: Any] = try XCTUnwrap(
+            (try XCTUnwrap(converted[0]["function"] as? [String: Any])["parameters"] as? [String: Any])?["properties"] as? [String: Any]
+        )
+        for _ in 0..<depth {
+            cursor = try XCTUnwrap(cursor["nested"] as? [String: Any], "shape truncated before reaching the leaf")
+        }
+        XCTAssertEqual(cursor["leaf"] as? String, "bottom", "leaf value must survive the full depth")
+        XCTAssertNoThrow(try Jinja.Value(any: converted))
+    }
+
+    func testOverDeepToolSchemaRejectedAtRequestValidation() throws {
+        // Buyer-controlled tool schemas must not drive unbounded native
+        // recursion in JSONValue.parse or the template converter. The guard
+        // lives at the untrusted-input boundary (validateTools): it bounds the
+        // container nesting of each function member, measured with the member
+        // (here `parameters`) as depth 1, against JSONSchemaValidator.maxDepth.
+        // A schema whose deepest container sits AT the limit is accepted; one
+        // level past it is rejected 400 invalid_tools BEFORE any recursive walk.
+
+        // Build a `parameters` value whose deepest container is at exactly
+        // `containerDepth` (linear nesting so the boundary is precise).
+        func parametersOfDepth(_ containerDepth: Int) -> Any {
+            var node: Any = ["type": "object"]
+            for _ in 1..<containerDepth { node = ["nested": node] }
+            return node
+        }
+        func toolBody(depth: Int) -> [String: Any] {
+            [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hi"]],
+                "tools": [[
+                    "type": "function",
+                    "function": ["name": "f", "parameters": parametersOfDepth(depth)],
+                ]],
+            ]
+        }
+
+        let limit = 32 // JSONSchemaValidator.maxDepth
+
+        // Exactly AT the limit: accepted.
+        XCTAssertNoThrow(try parseRequest(toolBody(depth: limit)))
+
+        // Exactly ONE past the limit: rejected with the established taxonomy code.
+        XCTAssertThrowsError(try parseRequest(toolBody(depth: limit + 1))) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 400)
+            XCTAssertEqual(apiError?.code, "invalid_tools")
+        }
+
+        // A deep `description` object (not just parameters) is also bounded.
+        let deepDescription: [String: Any] = [
+            "model": "fixture-model",
+            "messages": [["role": "user", "content": "hi"]],
+            "tools": [[
+                "type": "function",
+                "function": [
+                    "name": "f",
+                    "description": parametersOfDepth(limit + 1),
+                    "parameters": ["type": "object"],
+                ],
+            ]],
+        ]
+        XCTAssertThrowsError(try parseRequest(deepDescription)) { error in
+            XCTAssertEqual((error as? APIError)?.code, "invalid_tools")
+        }
+
+        // A deep member OUTSIDE `function` (an over-permissive client may attach
+        // extra keys to the tool object) must not bypass the guard — JSONValue
+        // .parse still recurses it.
+        let deepExtraToolMember: [String: Any] = [
+            "model": "fixture-model",
+            "messages": [["role": "user", "content": "hi"]],
+            "tools": [[
+                "type": "function",
+                "function": ["name": "f", "parameters": ["type": "object"]],
+                "x": parametersOfDepth(limit + 1),
+            ]],
+        ]
+        XCTAssertThrowsError(try parseRequest(deepExtraToolMember)) { error in
+            XCTAssertEqual((error as? APIError)?.code, "invalid_tools")
+        }
     }
 
     func testNullAndEmptyToolsDoNotEnableTemplateTools() {

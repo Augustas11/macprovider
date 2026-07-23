@@ -25,6 +25,13 @@ let package = Package(
             url: "https://github.com/huggingface/swift-transformers.git",
             exact: "1.0.0"
         ),
+        // swift-transformers 1.0.0 resolves swift-jinja 2.3.6 transitively; pin
+        // it directly so `import Jinja` (native null tool-schema rendering,
+        // issue #718) binds to the same reviewed version.
+        .package(
+            url: "https://github.com/huggingface/swift-jinja.git",
+            exact: "2.3.6"
+        ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
             exact: "2.101.2"
@@ -57,6 +64,7 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),

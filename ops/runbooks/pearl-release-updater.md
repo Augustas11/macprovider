@@ -64,6 +64,12 @@ and the durable signed tag, commit, version, and component hashes match the
 candidate. A same-version binary or state-file mismatch triggers transactional
 pair repair instead of a skip.
 
+Live coordinator and gateway binaries are always normalized to
+`root:macprovider 0750` from the named systemd service group. The updater never
+inherits daemon ownership from a legacy or drifted destination file. The same
+invariant applies during rollback, and every atomic replacement is read back
+for exact group, mode, and checksum before service start.
+
 The first adoption may start from older deployment-script binaries whose
 embedded versions are clean `git describe` identities such as
 `v1.8.26-4-g64083ef`. The updater accepts that exact, non-dirty shape only when
@@ -80,16 +86,27 @@ exactly as reviewed, including its root-only `LoadCredential` files, safety
 observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
 `issue-585-integration-r7` at source commit `43138cee6dd26f18a11934390fc6b3b0623f1e00`;
-`--plan` fails on any SHA drift, missing credential, invalid two-provider
-expected-fleet document, absent reviewed enable gate, active emergency-disable
-sentinel, unexpected unit drop-in, stale systemd fragment, or changed
-three-minute canary budget. The one allowed canary drop-in is the updater's
-exact root-owned transaction gate installed below.
+the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
+on any SHA drift, missing credential, invalid two-provider expected-fleet
+document, absent reviewed enable gate, active emergency-disable sentinel,
+unexpected unit drop-in, stale systemd fragment, or changed three-minute
+canary budget. The one allowed canary drop-in is the updater's exact root-owned
+transaction gate installed below.
 Leave `/etc/macprovider-canary-buyer/enabled` absent until Issue #584's
 real-hardware, recovery, and operating-day evidence has reviewed sign-off.
-The updater intentionally refuses even `--plan` until that gate is present;
-creating it authorizes the redesigned liveness probe as a rollout gate, not the
-scheduled timer.
+The updater intentionally refuses even `--plan` in `required` mode until that
+gate is present; creating it authorizes the redesigned liveness probe as a
+rollout gate, not the scheduled timer.
+
+An explicitly sealed production window may instead set
+`PEARL_UPDATER_BUYER_CANARY_MODE=disabled` in the root-owned updater
+configuration. That mode never starts the buyer canary. It requires both
+enable gates absent, an empty root-owned `0644` `DISABLED` sentinel, the timer
+disabled/inactive, and the oneshot service inactive. The updater rechecks that
+posture before state capture, after stable public fleet recovery, and after
+the exact physical catalog-provider proof. Public identity, three consecutive
+protected-fleet samples, admission policy, exact catalog admission, and the
+physical provider canary remain mandatory. The default remains `required`.
 
 From the authority commit's reviewed checkout, install the four runtime files
 as executable root-owned files and the two units as non-executable root-owned
@@ -225,9 +242,9 @@ KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.39
    Keep the prior provider live. The verifier proves the signed checksum
    manifest, artifact hash, and complete provider payload; it does not authorize
    a provider-first install against the legacy coordinator.
-2. Confirm #584's redesigned canary runtime and credential configuration are
-   installed. The reviewed enable gate is required for rollout use; the
-   emergency-disable sentinel must remain absent:
+2. In the default `required` mode, confirm #584's redesigned canary runtime and
+   credential configuration are installed. The reviewed enable gate is
+   required for rollout use; the emergency-disable sentinel must remain absent:
 
 ```bash
 sudo systemctl start canary-buyer.service
@@ -240,6 +257,25 @@ sudo test -f /etc/macprovider-canary-buyer/enabled
 sudo test ! -e /var/lib/macprovider-canary-buyer/DISABLED
 sudo test ! -e /etc/macprovider/canary-buyer.env
 systemctl show --property=LoadCredential canary-buyer.service
+```
+
+   In a separately sealed `disabled` window, do not create an enable gate and
+   do not start the oneshot. Confirm the explicit updater mode and hard-disabled
+   posture instead:
+
+```bash
+sudo grep -Fx 'PEARL_UPDATER_BUYER_CANARY_MODE=disabled' \
+  /etc/macprovider/pearl-updater.conf
+systemctl is-enabled canary-buyer.timer || true
+systemctl is-active canary-buyer.timer || true
+systemctl is-active canary-buyer.service || true
+sudo test ! -e /etc/macprovider-canary-buyer/enabled
+sudo test ! -e /etc/macprovider/canary-buyer.enabled
+sudo test -f /var/lib/macprovider-canary-buyer/DISABLED
+sudo test ! -s /var/lib/macprovider-canary-buyer/DISABLED
+sudo test "$(stat -c '%U:%G:%a' \
+  /var/lib/macprovider-canary-buyer/DISABLED)" = root:root:644
+sudo test ! -e /run/macprovider-canary-buyer/legacy-rollback.json
 ```
 
    A fleet already emitting direct v2 telemetry must return exactly
@@ -331,7 +367,7 @@ curl -fsSL https://get.streamvc.live/install.sh | \
    The installer commits only after the bridge coordinator reports that exact
    provider buyer-serving on the `current` envelope. The updater independently
    binds the same provider ID, release, policy, digest, signer, and row identity
-   to the six on-Mac catalog files and the live text vnode before disarming
+   to the seven on-Mac catalog files and the live text vnode before disarming
    rollback. If the provider install fails, its transaction restores the prior
    provider while the still-armed updater rolls back the backend. Follow the
    explicit emergency prior-tag rollback contract in
@@ -362,18 +398,22 @@ with same-filesystem atomic renames. It
 starts the coordinator first, verifies local version and advertised provider
 version, starts the gateway, verifies the signed coordinator bridge settings and
 the configured `pool_ready` floor, waits for a routing-eligible provider to
-reconnect and pass warmup, verifies local and public semantic health, and finally runs
-`canary-buyer.service` with a 12-minute updater deadline around its verified
-three-minute unit budget. Systemd records deliberate no-load exits `20` and
-`21` as classified unit outcomes, but the updater requires both `Result=success`
-and the original `ExecMainStatus=0`; a removed enable gate or newly asserted
-emergency sentinel can never satisfy serving validation. It then requires the configured provider to be
+reconnect and pass warmup, and verifies local and public semantic health. In
+`required` mode it then runs `canary-buyer.service` with a 12-minute updater
+deadline around its verified three-minute unit budget. Systemd records
+deliberate no-load exits `20` and `21` as classified unit outcomes, but the
+updater requires both `Result=success` and the original `ExecMainStatus=0`; a
+removed enable gate or newly asserted emergency sentinel can never satisfy
+serving validation. In `disabled` mode it never starts the buyer canary and
+instead re-verifies the hard-disabled posture after public fleet convergence.
+It then requires the configured provider to be
 buyer-serving on the exact current release/policy/digest/signer/row envelope
-and independently proves that the trusted canary Mac has all six exact catalog
+and independently proves that the trusted canary Mac has all seven exact catalog
 files and that its live launchd PID uses the inspected binary text vnode and
 listener. The redesigned #584 buyer liveness canary alone cannot commit a catalog release.
-Only after both canaries succeed does the updater persist success and disarm
-rollback. A client-side timeout explicitly stops and verifies
+Only after the configured buyer-canary posture and the exact physical provider
+proof succeed does the updater persist success and disarm rollback. A
+client-side timeout in `required` mode explicitly stops and verifies
 cancellation of the canary systemd job. The prior timer state is restored after
 success or rollback only while both kill-switch conditions remain safe; the
 oneshot service is never replayed. The heartbeat's exact prior paused state is
@@ -444,7 +484,8 @@ coordinator and proves its exact captured health version before starting and
 proving the prior gateway version; gateway remains stopped if coordinator
 restoration fails. Rollback then proves provider reconnect/warmup, gateway
 serving state, exact public TLS versions, and the restored advertised provider
-version, and unconditionally reruns the #584 canary. The previously active
+version. It reruns the #584 canary in `required` mode; in `disabled` mode it
+instead re-proves the hard-disabled posture after public fleet recovery. The previously active
 archive/stats services are restored before their timers, and no timer is
 restored until that full serving proof succeeds. Even then the canary timer
 remains stopped if its enable gate is missing or its emergency-disable sentinel
