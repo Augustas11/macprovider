@@ -1,8 +1,15 @@
 {
   "schema_version": "macprovider-removed-exception-tombstones-v1",
-  "updated_at": "2026-07-22T00:00:00Z",
-  "updated_by": "fix/615-exception-enforcement",
+  "updated_at": "2026-07-23T20:05:45Z",
+  "updated_by": "fix/608-stepd-clear-compat-bridge",
   "environment": "pearl-production",
-  "tombstones": [],
+  "tombstones": [
+    {
+      "id": "exc-catalog-compatibility-bridges",
+      "removed_at": "2026-07-23T20:05:45Z",
+      "removal_evidence": "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5062822871",
+      "authority_surface": "Autotune current/previous catalog activation, tier2.catalog_path, tier2.model_hash_legacy_until, and catalog admission compatibility surfaces."
+    }
+  ],
   "notes": "IDs listed here were removed from production authority. Config sync, overlay merge, rollback restore, or register edits must not recreate them as active/planned/expired without a new reviewed exception ID."
 }

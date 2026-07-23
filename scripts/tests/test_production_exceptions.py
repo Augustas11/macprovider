@@ -679,18 +679,39 @@ class ProductionExceptionsTests(unittest.TestCase):
                 msg=overrides,
             )
 
-    def test_committed_register_includes_608_progress_notes(self):
+    def test_committed_register_seals_608_catalog_bridge_only(self):
         doc = pe.load_json(pe.default_register_path(ROOT))
         row = next(
             entry
             for entry in doc["exceptions"]
             if entry["id"] == "exc-catalog-compatibility-bridges"
         )
-        self.assertIsInstance(row.get("partial_progress"), list)
-        self.assertTrue(row["partial_progress"])
-        self.assertIsInstance(row.get("still_blocked_for_clearance"), list)
-        self.assertTrue(row["still_blocked_for_clearance"])
+        self.assertEqual(row["status"], "removed")
+        self.assertFalse(row["blocks_stable_promotion"])
+        self.assertNotIn("still_blocked_for_clearance", row)
+        containment = next(
+            entry
+            for entry in doc["exceptions"]
+            if entry["id"] == "exc-tier2-hash-mismatch-containment"
+        )
+        self.assertEqual(containment["status"], "active")
+        self.assertTrue(containment["blocks_stable_promotion"])
+        containment_blob = json.dumps(containment, sort_keys=True)
+        self.assertNotIn(
+            "Independent /opt/macprovider/tier2-catalog.json authority remains",
+            containment_blob,
+        )
+        self.assertIn("require_hash_verified remains false", containment_blob)
         tombstones = pe.load_json(pe.default_tombstone_path(ROOT))
+        tombstone = next(
+            row
+            for row in tombstones["tombstones"]
+            if row["id"] == "exc-catalog-compatibility-bridges"
+        )
+        self.assertEqual(
+            tombstone["removal_evidence"],
+            "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5062822871",
+        )
         result = pe.validate_register(doc, now=NOW, tombstones=tombstones)
         self.assertEqual(result.errors, [], [f.format() for f in result.errors])
 
