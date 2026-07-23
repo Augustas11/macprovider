@@ -536,12 +536,103 @@ I'll validate that.
         XCTAssertEqual(function["description"] as? String, "Find where a code symbol is defined")
         XCTAssertNotNil(function["parameters"])
         XCTAssertNil(function["x_function_extra"])
+        XCTAssertFalse(Self.containsNSNull(tool), "template tools must not materialize NSNull")
+    }
+
+    func testTemplateToolsOmitJSONNullsAndMissingDescription() {
+        // Regression for https://github.com/Augustas11/macprovider/issues/718:
+        // `"default": null` in tool parameters became NSNull, which swift-jinja
+        // cannot convert → 503 model_not_loaded mislabel.
+        let tools: JSONValue = .array([
+            .object([
+                "type": .string("function"),
+                "function": .object([
+                    "name": .string("f"),
+                    // description intentionally omitted
+                    "parameters": .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "timeout": .object([
+                                "type": .string("integer"),
+                                "default": .null,
+                            ]),
+                            "optional_hint": .null,
+                        ]),
+                        "additionalProperties": .bool(false),
+                    ]),
+                ]),
+            ]),
+            .object([
+                "type": .string("function"),
+                "function": .object([
+                    "name": .string("g"),
+                    "description": .null,
+                    "parameters": .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "tags": .object([
+                                "type": .string("array"),
+                                "items": .object([
+                                    "type": .array([.string("string"), .string("null")]),
+                                ]),
+                                "default": .array([.null, .string("x")]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ])
+
+        let converted = try! XCTUnwrap(ModelRuntime.mlxToolsForTemplate(from: tools))
+        XCTAssertEqual(converted.count, 2)
+
+        for tool in converted {
+            XCTAssertFalse(Self.containsNSNull(tool), "converted tool must not contain NSNull: \(tool)")
+        }
+
+        let first = try! XCTUnwrap(converted[0]["function"] as? [String: Any])
+        XCTAssertEqual(first["name"] as? String, "f")
+        XCTAssertNil(first["description"], "missing description must be omitted, not NSNull")
+        let firstParams = try! XCTUnwrap(first["parameters"] as? [String: Any])
+        let firstProps = try! XCTUnwrap(firstParams["properties"] as? [String: Any])
+        let timeout = try! XCTUnwrap(firstProps["timeout"] as? [String: Any])
+        XCTAssertEqual(timeout["type"] as? String, "integer")
+        XCTAssertNil(timeout["default"], "default:null must be omitted from template tools")
+        XCTAssertNil(firstProps["optional_hint"], "null-valued property entry must be omitted")
+
+        let second = try! XCTUnwrap(converted[1]["function"] as? [String: Any])
+        XCTAssertEqual(second["name"] as? String, "g")
+        XCTAssertNil(second["description"], "description:null must be omitted, not NSNull")
+        let secondParams = try! XCTUnwrap(second["parameters"] as? [String: Any])
+        let secondProps = try! XCTUnwrap(secondParams["properties"] as? [String: Any])
+        let tags = try! XCTUnwrap(secondProps["tags"] as? [String: Any])
+        // Array null elements are dropped so Jinja never sees NSNull.
+        let defaultTags = try! XCTUnwrap(tags["default"] as? [Any])
+        XCTAssertEqual(defaultTags.count, 1)
+        XCTAssertEqual(defaultTags.first as? String, "x")
+        // Union type ["string","null"] keeps the string "null" (not a JSON null).
+        let items = try! XCTUnwrap(tags["items"] as? [String: Any])
+        let typeUnion = try! XCTUnwrap(items["type"] as? [Any])
+        XCTAssertEqual(typeUnion as? [String], ["string", "null"])
     }
 
     func testNullAndEmptyToolsDoNotEnableTemplateTools() {
         XCTAssertNil(ModelRuntime.mlxToolsForTemplate(from: .null))
         XCTAssertNil(ModelRuntime.mlxToolsForTemplate(from: .array([])))
         XCTAssertNil(ModelRuntime.mlxToolsForTemplate(from: nil))
+    }
+
+    private static func containsNSNull(_ value: Any) -> Bool {
+        if value is NSNull {
+            return true
+        }
+        if let object = value as? [String: Any] {
+            return object.values.contains(where: containsNSNull)
+        }
+        if let array = value as? [Any] {
+            return array.contains(where: containsNSNull)
+        }
+        return false
     }
 
     private func argumentValue(_ arguments: String, key: String) throws -> Any? {

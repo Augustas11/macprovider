@@ -731,6 +731,26 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertNil(header)
     }
 
+    func testUnexpectedInferenceMapsJinjaNSNullToChatTemplateError() {
+        struct FakeJinjaError: Error, LocalizedError {
+            var errorDescription: String? {
+                "Cannot convert value of type NSNull to Jinja Value"
+            }
+        }
+        let apiError = RouterHandler.unexpectedInferenceAPIError(error: FakeJinjaError())
+        XCTAssertEqual(apiError.status, 400)
+        XCTAssertEqual(apiError.code, "chat_template_error")
+        XCTAssertEqual(apiError.type, "invalid_request_error")
+        XCTAssertFalse(apiError.retryableOverride ?? true)
+    }
+
+    func testUnexpectedInferenceKeepsModelNotLoadedForGenericFailures() {
+        struct GenericFailure: Error {}
+        let apiError = RouterHandler.unexpectedInferenceAPIError(error: GenericFailure())
+        XCTAssertEqual(apiError.status, 503)
+        XCTAssertEqual(apiError.code, "model_not_loaded")
+    }
+
     func testNullUsageModelNotLoadedErrorGetsReceiptHeader() throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let request = try parseRequest([

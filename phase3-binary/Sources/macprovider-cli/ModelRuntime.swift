@@ -2639,13 +2639,26 @@ actor ModelRuntime: ModelRuntimeServing {
             else {
                 return nil
             }
+            // Chat-template engines (swift-jinja via Tokenizers) cannot
+            // convert NSNull into a Jinja Value. Omit null object members
+            // and a missing description rather than materializing NSNull.
+            // `default: null` and similar schema nulls are irrelevant to
+            // Qwen tool-call prompt rendering.
+            guard let parametersAny = jsonAnyForTemplate(parameters) else {
+                return nil
+            }
+            var function: [String: Any] = [
+                "name": name,
+                "parameters": parametersAny,
+            ]
+            if let descriptionValue = functionObject["description"],
+               let description = jsonAnyForTemplate(descriptionValue)
+            {
+                function["description"] = description
+            }
             return [
                 "type": "function",
-                "function": [
-                    "name": name,
-                    "description": functionObject["description"].map(jsonAny) ?? NSNull(),
-                    "parameters": jsonAny(parameters),
-                ],
+                "function": function,
             ]
         }
         return converted.isEmpty ? nil : converted
@@ -2672,16 +2685,26 @@ actor ModelRuntime: ModelRuntimeServing {
         return names.isEmpty ? nil : Set(names)
     }
 
-    private static func jsonObject(_ object: [String: MacProviderCore.JSONValue]) -> [String: Any] {
-        object.mapValues(jsonAny)
+    /// Converts JSONValue for chat-template tools dicts.
+    /// Object members (and array elements) that are JSON null are omitted so
+    /// the result never contains `NSNull`, which swift-jinja cannot convert.
+    private static func jsonObjectForTemplate(_ object: [String: MacProviderCore.JSONValue]) -> [String: Any] {
+        var result: [String: Any] = [:]
+        result.reserveCapacity(object.count)
+        for (key, value) in object {
+            if let converted = jsonAnyForTemplate(value) {
+                result[key] = converted
+            }
+        }
+        return result
     }
 
-    private static func jsonAny(_ value: MacProviderCore.JSONValue) -> Any {
+    private static func jsonAnyForTemplate(_ value: MacProviderCore.JSONValue) -> Any? {
         switch value {
         case .object(let object):
-            return jsonObject(object)
+            return jsonObjectForTemplate(object)
         case .array(let array):
-            return array.map(jsonAny)
+            return array.compactMap(jsonAnyForTemplate)
         case .string(let string):
             return string
         case .int(let int):
@@ -2691,7 +2714,7 @@ actor ModelRuntime: ModelRuntimeServing {
         case .bool(let bool):
             return bool
         case .null:
-            return NSNull()
+            return nil
         }
     }
 
