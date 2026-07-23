@@ -161,17 +161,6 @@ jobs:
           set -euo pipefail
           bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
 
-      - name: Select OpenSSL 3 for catalog verification
-        shell: bash
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-        run: |
-          set -euo pipefail
-          brew install openssl@3
-          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
-          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
-          echo "OPENSSL_BIN=$openssl_bin" >> "$GITHUB_ENV"
-
       - name: Preflight protected OpenSSL seal before tag creation
         shell: bash
         run: |
@@ -179,6 +168,7 @@ jobs:
           candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
           "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
 
       - name: Build package
         shell: bash
@@ -354,7 +344,6 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           set -euo pipefail
-          brew install openssl@3
           sealed_bin="$(
             bash scripts/install-sealed-release-openssl.sh \
               /private/var/macprovider-openssl-verifier
@@ -1478,6 +1467,7 @@ jobs:
       - name: Create verified draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
         shell: bash
         run: |
@@ -1494,6 +1484,7 @@ jobs:
             [ -n "$release_asset" ] && release_assets+=("$release_asset")
           done < release-assets.txt
           bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
             checksums.txt checksums.txt.sig release-provenance.json \
             "$GITHUB_REPOSITORY" "$tag" "$release_commit" \
             "${release_assets[@]}"
@@ -1539,6 +1530,7 @@ jobs:
       - name: Publish only the revalidated numeric draft
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
           PRERELEASE_INPUT: ${{ needs.build.outputs.prerelease }}
         shell: bash
@@ -1577,6 +1569,7 @@ jobs:
             bash scripts/verify-github-release-posture.sh \
               "$GITHUB_REPOSITORY" production-release 28995904
           bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
             checksums.txt checksums.txt.sig release-provenance.json \
             "$GITHUB_REPOSITORY" "$tag" "$commit" \
             "${release_assets[@]}"
@@ -1693,6 +1686,7 @@ jobs:
         env:
           MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
           MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         shell: bash
         run: |
           set -euo pipefail

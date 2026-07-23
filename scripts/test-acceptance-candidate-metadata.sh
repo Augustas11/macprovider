@@ -317,7 +317,9 @@ rm "$work/hard-linked-provider-cli"
 production_signature="$work/assets/checksums.txt.sig"
 openssl dgst -sha256 -sign "$work/production-private.pem" \
   -out "$production_signature" "$checksums"
+production_openssl="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$(command -v openssl)")"
 bash "$mirror/scripts/verify-release-checksums.sh" \
+  --openssl "$production_openssl" \
   "$checksums" "$production_signature" "$provenance" "$repository" "$tag" "$candidate_commit" \
   "${assets[@]}" >/dev/null
 
@@ -329,6 +331,7 @@ fi
 mv "$work/canonical-acceptance-signature" "$signature"
 
 if bash "$mirror/scripts/verify-release-checksums.sh" \
+  --openssl "$production_openssl" \
   "$checksums" "$signature" "$provenance" "$repository" "$tag" "$candidate_commit" \
   "${assets[@]}" >"$work/production-domain.out" 2>&1; then
   fail "production verifier accepted an acceptance signature"

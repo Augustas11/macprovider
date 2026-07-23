@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 set -euo pipefail
 
 sealed_root="${0%/*}"
@@ -7,6 +7,7 @@ if [[ ! "$sealed_root" =~ ^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$ ]];
   exit 126
 fi
 
+unset BASH_ENV ENV
 for inherited_name in "${!DYLD_@}" "${!LD_@}" "${!OPENSSL_@}"; do
   unset "$inherited_name"
 done

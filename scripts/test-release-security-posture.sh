@@ -24,11 +24,24 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
 bash -n "$sealed_openssl_installer" "$sealed_openssl_wrapper"
+printf '%s\n' ": > \"\$BASH_ENV_PROBE\"" > "$work/injected-bash-env"
+if BASH_ENV="$work/injected-bash-env" BASH_ENV_PROBE="$work/bash-env-ran" \
+  "$sealed_openssl_wrapper" >"$work/wrapper.out" 2>&1; then
+  echo "sealed OpenSSL wrapper accepted a non-sealed execution path" >&2
+  exit 1
+else
+  wrapper_status="$?"
+fi
+[[ "$wrapper_status" == 126 ]]
+[[ ! -e "$work/bash-env-ran" ]] || {
+  echo "sealed OpenSSL wrapper executed inherited BASH_ENV startup code" >&2
+  exit 1
+}
 
 python3 - "$workflow" "$root/phase3-binary/app/project.yml" \
   "$root/phase3-binary/app/Sources/Malibu/Info.plist" \
   "$trust_anchor_helper" "$malibu_artifact_verifier" "$coordinator_go_mod" \
-  "$sealed_openssl_installer" "$sealed_openssl_wrapper" <<'PY'
+  "$sealed_openssl_installer" "$sealed_openssl_wrapper" "$checksums_guard" <<'PY'
 import pathlib
 import re
 import sys
@@ -42,6 +55,7 @@ malibu_artifact_verifier = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
 coordinator_go_mod = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 sealed_openssl_installer = pathlib.Path(sys.argv[7]).read_text(encoding="utf-8")
 sealed_openssl_wrapper = pathlib.Path(sys.argv[8]).read_text(encoding="utf-8")
+checksums_guard = pathlib.Path(sys.argv[9]).read_text(encoding="utf-8")
 go_directive = re.search(
     r"(?m)^go ([0-9]+\.[0-9]+(?:\.[0-9]+)?)$", coordinator_go_mod
 )
@@ -174,7 +188,6 @@ PROTECTED_OPENSSL3_STEP = r'''        id: protected_openssl
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           set -euo pipefail
-          brew install openssl@3
           sealed_bin="$(
             bash scripts/install-sealed-release-openssl.sh \
               /private/var/macprovider-openssl-verifier
@@ -188,8 +201,9 @@ PROTECTED_OPENSSL_CANDIDATE_STEP = r'''        shell: bash
           candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
           "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
 '''
-SEALED_OPENSSL_WRAPPER = r'''#!/bin/bash
+SEALED_OPENSSL_WRAPPER = r'''#!/bin/bash -p
 set -euo pipefail
 
 sealed_root="${0%/*}"
@@ -198,6 +212,7 @@ if [[ ! "$sealed_root" =~ ^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$ ]];
   exit 126
 fi
 
+unset BASH_ENV ENV
 for inherited_name in "${!DYLD_@}" "${!LD_@}" "${!OPENSSL_@}"; do
   unset "$inherited_name"
 done
@@ -213,7 +228,10 @@ PROTECTED_OPENSSL_CONSUMERS = (
     ("Sign + notarize binary", 1, 0),
     ("Prepare release assets", 4, 1),
     ("Require an advancing immutable discovery head", 2, 2),
+    ("Create verified draft GitHub release", 1, 1),
+    ("Publish only the revalidated numeric draft", 1, 1),
     ("Publish one append-only immutable discovery transport", 1, 1),
+    ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
 )
 
 
@@ -225,13 +243,12 @@ def validate_candidate_openssl(job):
         raise SystemExit(
             "candidate release must execute the exact protected OpenSSL seal preflight"
         )
-    selector_position = job.find("- name: Select OpenSSL 3 for catalog verification")
     preflight_position = job.find(
         "- name: Preflight protected OpenSSL seal before tag creation"
     )
     package_position = job.find("- name: Build package")
-    if min(selector_position, preflight_position, package_position) < 0 or not (
-        selector_position < preflight_position < package_position
+    if min(preflight_position, package_position) < 0 or not (
+        preflight_position < package_position
     ):
         raise SystemExit(
             "protected OpenSSL seal preflight must run before candidate packaging"
@@ -576,38 +593,95 @@ else:
     raise SystemExit(
         "sealed OpenSSL inherited-environment reset removal mutation unexpectedly passed"
     )
+def validate_sealed_openssl_installer(candidate):
+    for requirement in (
+        r"^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$",
+        'readonly expected_openssl_version="3.6.3"',
+        'readonly expected_bottle_tag="sequoia"',
+        'readonly expected_bottle_sha256="5477285c4ebec45713873ae4002affece39e427c5f1b655c6a3df49c6b90f924"',
+        'readonly expected_formula_sha256="773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"',
+        "brew fetch --force",
+        '--bottle-tag="$expected_bottle_tag"',
+        'brew reinstall --force-bottle openssl@3',
+        'brew install --force-bottle openssl@3',
+        'receipt.get("poured_from_bottle") is not True',
+        'config_root="$source_root/.bottle/etc/openssl@3"',
+        'sudo test ! -e "$sealed_root"',
+        '"$source_root/bin/openssl" "$sealed_root/bin/openssl"',
+        '"$source_root/lib/libssl.3.dylib" "$sealed_root/lib/libssl.3.dylib"',
+        '"$source_root/lib/libcrypto.3.dylib" "$sealed_root/lib/libcrypto.3.dylib"',
+        '"$source_root/lib/ossl-modules/legacy.dylib"',
+        '"$config_root/openssl.cnf" "$sealed_root/etc/openssl.cnf"',
+        '"$script_root/sealed-release-openssl-wrapper.sh" "$wrapper"',
+        "paths = [root, *root.rglob(\"*\")]",
+        "stat.S_ISLNK(metadata.st_mode)",
+        "metadata.st_uid != 0",
+        "stat.S_IMODE(metadata.st_mode) & 0o022",
+        '"$wrapper" version | grep -E',
+        "printf '%s\\n' \"$wrapper\"",
+    ):
+        if requirement not in candidate:
+            raise SystemExit(f"sealed OpenSSL installer omits: {requirement}")
+    if candidate.count("sudo install") != 7:
+        raise SystemExit(
+            "sealed OpenSSL installer must retain exactly seven root installs"
+        )
+    for forbidden in (
+        "|| true",
+        "sudo cp",
+        "sudo mv",
+        "sudo rm",
+        "sudo chown",
+        "sudo chmod",
+        "curl ",
+        "git ",
+    ):
+        if forbidden in candidate:
+            raise SystemExit(
+                f"sealed OpenSSL installer contains unsafe drift: {forbidden}"
+            )
+
+
+validate_sealed_openssl_installer(sealed_openssl_installer)
+for description, mutation in (
+    (
+        "reviewed bottle digest replacement",
+        sealed_openssl_installer.replace(
+            "5477285c4ebec45713873ae4002affece39e427c5f1b655c6a3df49c6b90f924",
+            "0" * 64,
+            1,
+        ),
+    ),
+    (
+        "reviewed formula digest removal",
+        sealed_openssl_installer.replace(
+            'readonly expected_formula_sha256="773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"\n',
+            "",
+            1,
+        ),
+    ),
+    (
+        "forced bottle fetch removal",
+        sealed_openssl_installer.replace("brew fetch --force", "brew fetch", 1),
+    ),
+):
+    try:
+        validate_sealed_openssl_installer(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
+
 for requirement in (
-    r"^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$",
-    'sudo test ! -e "$sealed_root"',
-    '"$source_root/bin/openssl" "$sealed_root/bin/openssl"',
-    '"$source_root/lib/libssl.3.dylib" "$sealed_root/lib/libssl.3.dylib"',
-    '"$source_root/lib/libcrypto.3.dylib" "$sealed_root/lib/libcrypto.3.dylib"',
-    '"$source_root/lib/ossl-modules/legacy.dylib"',
-    '"$config_root/openssl.cnf" "$sealed_root/etc/openssl.cnf"',
-    '"$script_root/sealed-release-openssl-wrapper.sh" "$wrapper"',
-    "paths = [root, *root.rglob(\"*\")]",
-    "stat.S_ISLNK(metadata.st_mode)",
-    "metadata.st_uid != 0",
-    "stat.S_IMODE(metadata.st_mode) & 0o022",
-    '"$wrapper" version | grep -E',
-    "printf '%s\\n' \"$wrapper\"",
+    "--openssl)",
+    '"$openssl_bin" dgst -sha256 -verify',
+    "production verification requires --openssl",
 ):
-    if requirement not in sealed_openssl_installer:
-        raise SystemExit(f"sealed OpenSSL installer omits: {requirement}")
-if sealed_openssl_installer.count("sudo install") != 7:
-    raise SystemExit("sealed OpenSSL installer must retain exactly seven root installs")
-for forbidden in (
-    "|| true",
-    "sudo cp",
-    "sudo mv",
-    "sudo rm",
-    "sudo chown",
-    "sudo chmod",
-    "curl ",
-    "git ",
-):
-    if forbidden in sealed_openssl_installer:
-        raise SystemExit(f"sealed OpenSSL installer contains unsafe drift: {forbidden}")
+    if requirement not in checksums_guard:
+        raise SystemExit(
+            f"release checksum verifier omits protected OpenSSL binding: {requirement}"
+        )
+if re.search(r"(?m)^\s*openssl\s+dgst", checksums_guard):
+    raise SystemExit("release checksum verifier falls back to PATH-selected OpenSSL")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must be pinned by commit")
 validate_candidate_openssl(build)
@@ -750,8 +824,8 @@ protected_openssl_removal_mutation = publish.replace(
 protected_openssl_suppression_mutation = publish.replace(
     PROTECTED_OPENSSL3_STEP,
     PROTECTED_OPENSSL3_STEP.replace(
-        "          brew install openssl@3\n",
-        "          brew install openssl@3 || true\n",
+        "          set -euo pipefail\n",
+        "          set +e\n",
         1,
     ),
     1,
@@ -1373,7 +1447,9 @@ printf '%s  asset.bin\n%s  release-provenance.json\n' \
 openssl ecparam -name prime256v1 -genkey -noout -out "$work/checksums/wrong-key.pem"
 openssl dgst -sha256 -sign "$work/checksums/wrong-key.pem" \
   -out "$work/checksums/checksums.txt.sig" "$work/checksums/checksums.txt"
+test_openssl="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$(command -v openssl)")"
 if bash "$checksums_guard" \
+  --openssl "$test_openssl" \
   "$work/checksums/checksums.txt" "$work/checksums/checksums.txt.sig" \
   "$work/checksums/release-provenance.json" Augustas11/macprovider v1.2.3 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
