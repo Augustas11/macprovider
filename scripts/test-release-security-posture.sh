@@ -11,6 +11,8 @@ sparkle_generator="$root/scripts/generate-malibu-appcast.sh"
 legacy_sparkle_key="$root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
 trust_anchor_helper="$root/scripts/prepare-malibu-bootstrap-trust-anchor.py"
 malibu_artifact_verifier="$root/scripts/verify-malibu-release-artifacts.sh"
+coordinator_go_mod="$root/phase4-coordinator/go.mod"
+pearl_go_verifier="$root/scripts/verify-pearl-go-binaries.py"
 release_runbook="$root/phase3-binary/dist/release-signing-runbook.md"
 decision_log="$root/beta/DECISION_CRITERIA.md"
 ci_workflow="$root/.github/workflows/ci.yml"
@@ -21,7 +23,7 @@ trap 'rm -rf "$work"' EXIT
 
 python3 - "$workflow" "$root/phase3-binary/app/project.yml" \
   "$root/phase3-binary/app/Sources/Malibu/Info.plist" \
-  "$trust_anchor_helper" "$malibu_artifact_verifier" <<'PY'
+  "$trust_anchor_helper" "$malibu_artifact_verifier" "$coordinator_go_mod" <<'PY'
 import pathlib
 import re
 import sys
@@ -32,6 +34,12 @@ current_app = "\n".join(
 )
 trust_anchor_helper = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 malibu_artifact_verifier = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
+coordinator_go_mod = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+go_directive = re.search(
+    r"(?m)^go ([0-9]+\.[0-9]+(?:\.[0-9]+)?)$", coordinator_go_mod
+)
+if go_directive is None:
+    raise SystemExit("phase4-coordinator go.mod lacks a valid Go directive")
 if "\n  push:" in text or "refs/tags/" in text:
     raise SystemExit("release workflow must not execute from a tag-push ref")
 if "\n  workflow_dispatch:" not in text:
@@ -47,6 +55,69 @@ if candidate_input is None:
     raise SystemExit("candidate dispatch input must be a boolean defaulting to false")
 build = text.split("\n  build:\n", 1)[1].split("\n  sign_publish:\n", 1)[0]
 publish = text.split("\n  sign_publish:\n", 1)[1]
+
+
+def unique_step(job, name):
+    marker = f"\n      - name: {name}\n"
+    if job.count(marker) != 1:
+        raise SystemExit(f"release build must contain exactly one {name} step")
+    return job.split(marker, 1)[1].split("\n      - name:", 1)[0]
+
+
+PEARL_SETUP_GO_SHA = "924ae3a1cded613372ab5595356fb5720e22ba16"
+PEARL_GO_VERIFY_STEP = (
+    "        env:\n"
+    '          EXPECTED_REVISION: ${{ steps.release_source.outputs.commit }}\n'
+    "        shell: bash\n"
+    "        run: |\n"
+    "          python3 scripts/verify-pearl-go-binaries.py \\\n"
+    "            unsigned-release-inputs/coordinator-linux-amd64 \\\n"
+    "            unsigned-release-inputs/coordinator-cli-linux-amd64 \\\n"
+    "            unsigned-release-inputs/gateway-linux-amd64"
+)
+PEARL_VERIFY_UPLOAD_SEQUENCE = (
+    "\n      - name: Verify staged Pearl Go binaries\n"
+    f"{PEARL_GO_VERIFY_STEP}\n"
+    "\n      - name: Upload unsigned build artifact\n"
+)
+
+
+def validate_pearl_toolchain(job):
+    setup_go = unique_step(job, "Setup Go for Pearl binaries")
+    pearl_build = unique_step(job, "Build Pearl linux-amd64 binaries")
+    verifier_step = unique_step(job, "Verify staged Pearl Go binaries")
+    setup_go_uses = re.findall(
+        r"(?m)^        uses: actions/setup-go@([0-9a-f]{40})$", job
+    )
+    if job.lower().count("actions/setup-go@") != 1 or setup_go_uses != [PEARL_SETUP_GO_SHA]:
+        raise SystemExit("release build must contain exactly one pinned setup-go action")
+    go_version_files = re.findall(
+        r"(?m)^          go-version-file:\s*(\S+)\s*$", setup_go
+    )
+    if go_version_files != ["phase4-coordinator/go.mod"]:
+        raise SystemExit(
+            "Pearl Setup Go must use phase4-coordinator/go.mod as its sole version source"
+        )
+    if re.search(r"(?m)^          go-version:\s*", setup_go):
+        raise SystemExit("Pearl Setup Go must not carry a second hardcoded Go version")
+    if verifier_step.strip("\n") != PEARL_GO_VERIFY_STEP:
+        raise SystemExit("Pearl verifier step must contain only the exact binary verifier command")
+    if job.count("scripts/verify-pearl-go-binaries.py") != 1:
+        raise SystemExit("Pearl build must invoke the binary verifier exactly once")
+    if job.count(PEARL_VERIFY_UPLOAD_SEQUENCE) != 1:
+        raise SystemExit("staged Pearl binary verification must immediately precede upload")
+    for build_target in (
+        '-o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator',
+        '-o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator-cli',
+        '-o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/gateway',
+    ):
+        if len(re.findall(rf"(?m)^\s*{re.escape(build_target)}\s*$", pearl_build)) != 1:
+            raise SystemExit(f"Pearl build target is missing or duplicated: {build_target}")
+    if pearl_build.count("go build -mod=readonly -trimpath -buildvcs=true") != 3:
+        raise SystemExit("all Pearl binaries must use explicit reviewed VCS stamping")
+    return pearl_build
+
+
 if "secrets." in build or "contents: write" in build:
     raise SystemExit("unprivileged build job contains a secret or write permission")
 if "environment: production-release" not in publish:
@@ -184,8 +255,8 @@ if "gh release download" in text:
     raise SystemExit("release workflow must publish the captured workflow files")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must be pinned by commit")
+pearl_build = validate_pearl_toolchain(build)
 for requirement in (
-    'go-version: "1.26.4"',
     "GOTOOLCHAIN=local",
     "CGO_ENABLED=0 GOOS=linux GOARCH=amd64",
     "go build -mod=readonly -trimpath",
@@ -193,8 +264,67 @@ for requirement in (
     "coordinator-cli-linux-amd64",
     "gateway-linux-amd64",
 ):
-    if requirement not in build:
+    if requirement not in pearl_build:
         raise SystemExit(f"reviewed Pearl build contract is missing: {requirement}")
+setup_override_mutation = build.replace(
+    "\n      - name: Build Pearl linux-amd64 binaries\n",
+    "\n      - name: Override Pearl Go version\n"
+    f'        uses: "ACTIONS/setup-go@{PEARL_SETUP_GO_SHA}"\n'
+    "        with:\n"
+    '          go-version: "1.26.4"\n'
+    "\n      - name: Build Pearl linux-amd64 binaries\n",
+    1,
+)
+verifier_replacement_mutation = build.replace(PEARL_GO_VERIFY_STEP, "        run: true", 1)
+verifier_suppression_mutation = build.replace(
+    PEARL_GO_VERIFY_STEP,
+    PEARL_GO_VERIFY_STEP.replace(
+        "        run: |\n",
+        "        run: |\n          set +e\n",
+        1,
+    ),
+    1,
+)
+compound_mutation = setup_override_mutation.replace(PEARL_GO_VERIFY_STEP, "        run: true", 1)
+post_verify_overwrite_mutation = build.replace(
+    PEARL_VERIFY_UPLOAD_SEQUENCE,
+    "\n      - name: Verify staged Pearl Go binaries\n"
+    f"{PEARL_GO_VERIFY_STEP}\n"
+    "\n      - name: Replace verified Pearl binary\n"
+    "        run: cp /bin/true unsigned-release-inputs/coordinator-linux-amd64\n"
+    "\n      - name: Upload unsigned build artifact\n",
+    1,
+)
+build_role_substitution_mutation = build.replace(
+    '-o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator-cli',
+    '-o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator',
+    1,
+)
+coordinator_role_substitution_mutation = build.replace(
+    '-o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator',
+    '-o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator-cli',
+    1,
+)
+gateway_role_substitution_mutation = build.replace(
+    '-o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/gateway',
+    '-o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/coordinator',
+    1,
+)
+for description, mutation in (
+    ("case-folded setup-go override", setup_override_mutation),
+    ("binary verifier replacement", verifier_replacement_mutation),
+    ("binary verifier failure suppression", verifier_suppression_mutation),
+    ("compound setup-go/verifier replacement", compound_mutation),
+    ("post-verification binary overwrite", post_verify_overwrite_mutation),
+    ("Pearl build role substitution", build_role_substitution_mutation),
+    ("coordinator build role substitution", coordinator_role_substitution_mutation),
+    ("gateway build role substitution", gateway_role_substitution_mutation),
+):
+    try:
+        validate_pearl_toolchain(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
 for requirement in (
     'grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64"',
     'grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64"',
@@ -414,6 +544,8 @@ anonymous = publish.find("- name: Verify anonymous signed discovery for stable r
 if anonymous < transport_position or '"$(cat discovery-transport-tag.txt)"' not in publish[anonymous:]:
     raise SystemExit("anonymous client proof is not bound to the published append-only transport")
 PY
+
+python3 "$pearl_go_verifier" --self-test
 
 for requirement in \
   '### 8.1 Frozen v1.8.39 pre-publication tag recovery' \
