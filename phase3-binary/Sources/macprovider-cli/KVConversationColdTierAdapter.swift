@@ -66,6 +66,25 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private let templateLock = NSLock()
     private var geometryTemplates: [String: [KVLayerGeometry]] = [:]
 
+    /// CRITICAL-2 — the current key epoch, cached synchronously so `captureSnapshot`
+    /// can stamp the epoch at commit time (NOT at persist time). Seeded + refreshed
+    /// by the store's epoch observer (activation + rotation).
+    private let epochLock = NSLock()
+    private var cachedEpoch = 1
+
+    /// CRITICAL-2 — per-index (keyed by raw conversation key) monotonic commit
+    /// sequence, allocated synchronously under the hot lease. Seeded from the store's
+    /// last published sequence at `sampledPurgeGeneration` (begin-time) so
+    /// post-restart writes are not rejected as stale.
+    private let seqLock = NSLock()
+    private var seqCounters: [String: Int] = [:]
+
+    /// HIGH-5 / CRITICAL-2 — one pending persist Task per index. A newer commit
+    /// displaces an unstarted older one; purge-all cancels all; shutdown drains.
+    private let taskLock = NSLock()
+    private var pendingTasks: [String: Task<Void, Never>] = [:]
+    private var pendingGen: [String: Int] = [:]
+
     init(store: KVDiskCacheStore, namespaceID: String, eligibilityTTLSeconds: Int,
          incarnation: String = UUID().uuidString) {
         self.store = store
@@ -74,12 +93,30 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         self.incarnation = incarnation
     }
 
+    /// Cache the current key epoch (store epoch observer). Called synchronously on
+    /// the store actor at activation and after each rotation epoch commit.
+    func cacheEpoch(_ epoch: Int) {
+        epochLock.lock(); cachedEpoch = epoch; epochLock.unlock()
+    }
+
+    private func currentCachedEpoch() -> Int {
+        epochLock.lock(); defer { epochLock.unlock() }; return cachedEpoch
+    }
+
     private static func nowMillis() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
 
     // MARK: - FR-KVP8 stamping
 
     func sampledPurgeGeneration(conversationKey: String) async -> Int {
-        (try? await store.highWatermark(rawKey: conversationKey)) ?? 0
+        let gen = (try? await store.highWatermark(rawKey: conversationKey)) ?? 0
+        // CRITICAL-2 — seed the synchronous commit-sequence counter from the store's
+        // last published sequence for this key, so the first post-restart commit
+        // allocates a sequence newer than any recovered manifest.
+        let lastSeq = await store.lastPublishedCommitSequence(rawKey: conversationKey)
+        seqLock.lock()
+        if (seqCounters[conversationKey] ?? 0) < lastSeq { seqCounters[conversationKey] = lastSeq }
+        seqLock.unlock()
+        return gen
     }
 
     // MARK: - FR-KVP9 promotion
@@ -164,6 +201,17 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         geometryTemplates[identity.servedModelID] = template
         templateLock.unlock()
 
+        // CRITICAL-2 — capture the key epoch AND allocate the commit sequence
+        // synchronously, under the still-held hot lease. The epoch is the store's
+        // cached current epoch; a purge-all rotation after this instant makes the
+        // captured epoch stale, so the store rejects this snapshot rather than
+        // restamping it into (and thereby resurrecting it under) the new epoch.
+        let capturedEpoch = currentCachedEpoch()
+        seqLock.lock()
+        let seq = (seqCounters[conversationKey] ?? 0) + 1
+        seqCounters[conversationKey] = seq
+        seqLock.unlock()
+
         let writeIdentity = KVWriteIdentity(
             requestModel: identity.requestModel,
             servedModelID: identity.servedModelID,
@@ -182,7 +230,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             kvQuantMode: identity.kvQuantMode,
             kvQuantPolicy: identity.kvQuantPolicy,
             decodePath: KVBuildIdentity.decodePathOrdinary,
-            keyEpoch: 0)                    // filled from the live epoch inside the store
+            keyEpoch: capturedEpoch)        // CRITICAL-2: captured at commit, not at persist
         let createdAt = Self.nowMillis()
         return ConversationColdSnapshot(
             rawKey: conversationKey,
@@ -190,28 +238,64 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             layers: payloads,
             identity: writeIdentity,
             sampledPurgeGeneration: sampledPurgeGeneration,
+            commitSequence: seq,
             createdAtMillis: createdAt,
             eligibleUntilMillis: createdAt + eligibilityTTLSeconds * 1000,
             incarnation: incarnation)
     }
 
-    func persist(_ snapshot: ConversationColdSnapshot) async {
-        // Stamp the live key epoch into the write identity at publish time.
-        let epoch = await store.currentEpoch
-        var identity = snapshot.identity
-        identity = KVWriteIdentity(
-            requestModel: identity.requestModel, servedModelID: identity.servedModelID,
-            modelSHA256: identity.modelSHA256, catalogRevision: identity.catalogRevision,
-            tokenizerID: identity.tokenizerID, tokenizerConfigSHA256: identity.tokenizerConfigSHA256,
-            chatTemplateSHA256: identity.chatTemplateSHA256, abiEpoch: identity.abiEpoch,
-            mlxSwiftLMRevision: identity.mlxSwiftLMRevision, mlxVersion: identity.mlxVersion,
-            cacheClass: identity.cacheClass, layerCount: identity.layerCount, kvBits: identity.kvBits,
-            kvGroupSize: identity.kvGroupSize, kvQuantMode: identity.kvQuantMode,
-            kvQuantPolicy: identity.kvQuantPolicy, decodePath: identity.decodePath, keyEpoch: epoch)
+    // MARK: - Bounded async write queue (one pending per index)
+
+    func enqueuePersist(_ snapshot: ConversationColdSnapshot) {
+        taskLock.lock()
+        // Displace an unstarted older pending write for this index (HIGH-5).
+        pendingTasks[snapshot.rawKey]?.cancel()
+        let gen = (pendingGen[snapshot.rawKey] ?? 0) + 1
+        pendingGen[snapshot.rawKey] = gen
+        let task = Task { [self] in await runPersist(snapshot, gen: gen) }
+        pendingTasks[snapshot.rawKey] = task
+        taskLock.unlock()
+    }
+
+    private func runPersist(_ snapshot: ConversationColdSnapshot, gen: Int) async {
+        if !Task.isCancelled { await doWrite(snapshot) }
+        taskLock.lock()
+        if pendingGen[snapshot.rawKey] == gen { pendingTasks.removeValue(forKey: snapshot.rawKey) }
+        taskLock.unlock()
+    }
+
+    private func doWrite(_ snapshot: ConversationColdSnapshot) async {
+        // No restamping: the identity already carries the epoch captured at commit,
+        // and the commit sequence was allocated under the hot lease (CRITICAL-2).
         _ = try? await store.writeColdSnapshot(
             rawKey: snapshot.rawKey, tokens: snapshot.tokens, layers: snapshot.layers,
-            identity: identity, sampledPurgeGeneration: snapshot.sampledPurgeGeneration,
+            identity: snapshot.identity, sampledPurgeGeneration: snapshot.sampledPurgeGeneration,
+            commitSequence: snapshot.commitSequence,
             createdAtMillis: snapshot.createdAtMillis, eligibleUntilMillis: snapshot.eligibleUntilMillis,
             incarnation: snapshot.incarnation, nowMillis: Self.nowMillis())
+    }
+
+    func cancelPendingPersists() async {
+        taskLock.lock()
+        let tasks = Array(pendingTasks.values)
+        pendingTasks.removeAll()
+        for key in pendingGen.keys { pendingGen[key, default: 0] += 1 }
+        taskLock.unlock()
+        for task in tasks { task.cancel() }
+        // Await so no in-flight write can publish into the rotated epoch.
+        for task in tasks { await task.value }
+    }
+
+    func drainPendingPersists(timeoutSeconds: Int) async {
+        taskLock.lock(); let tasks = Array(pendingTasks.values); taskLock.unlock()
+        guard !tasks.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { for task in tasks { await task.value } }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeoutSeconds)) * 1_000_000_000)
+            }
+            _ = await group.next()   // whichever completes first (all drained OR timeout)
+            group.cancelAll()
+        }
     }
 }

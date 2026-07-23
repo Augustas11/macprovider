@@ -380,6 +380,7 @@ actor KVDiskCacheStore {
             try recoverTombstones()
             try sweepOrphansAndAccount()
             activated = true
+            notifyEpoch()
             return true
         } catch let crash as KVInjectedCrash {
             throw crash
@@ -411,6 +412,26 @@ actor KVDiskCacheStore {
 
     /// Current key epoch (for snapshot identity + tests).
     var currentEpoch: Int { metadata.keyEpoch }
+
+    /// Last published commit sequence for a raw key's current-epoch index (0 when
+    /// none / keychain unavailable). Seeds the adapter's synchronous per-index
+    /// commit-sequence counter so post-restart writes are not rejected as stale
+    /// (CRITICAL-2). Never logs the raw key.
+    func lastPublishedCommitSequence(rawKey: String) -> Int {
+        guard let index = try? currentIndex(rawKey: rawKey) else { return 0 }
+        return lastCommitSequence[index] ?? 0
+    }
+
+    /// Observer invoked (synchronously, on the actor) whenever the current key epoch
+    /// is established or changes, so the cold-tier adapter can cache it for the
+    /// synchronous `captureSnapshot` epoch stamp (CRITICAL-2). Called at activation
+    /// and after every rotation phase that commits a new epoch.
+    private var epochObserver: (@Sendable (Int) -> Void)?
+    func setEpochObserver(_ observer: (@Sendable (Int) -> Void)?) {
+        epochObserver = observer
+        observer?(metadata.keyEpoch)
+    }
+    private func notifyEpoch() { epochObserver?(metadata.keyEpoch) }
 
     /// Current live purge-generation high-watermark for a raw key's index.
     func highWatermark(rawKey: String) throws -> Int {
@@ -948,20 +969,27 @@ actor KVDiskCacheStore {
     /// tensor bytes already happened at hot-tier commit (`captureSnapshot`).
     func writeColdSnapshot(
         rawKey: String, tokens: [Int32], layers: [KVLayerPayload], identity: KVWriteIdentity,
-        sampledPurgeGeneration: Int, createdAtMillis: Int, eligibleUntilMillis: Int,
+        sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int, eligibleUntilMillis: Int,
         incarnation: String, nowMillis: Int
     ) throws -> KVWriteResult {
         guard activated else { return .skipped(.ioError) }
         if let detail = quarantined { return .skipped(detail) }
+        // CRITICAL-2: `identity.keyEpoch` is the epoch captured synchronously at
+        // hot-tier commit (NOT the current epoch). A queued pre-purge-all snapshot
+        // whose captured epoch no longer matches is rejected here, so it can never
+        // be restamped into the new epoch and survive crypto-shredding.
         guard identity.keyEpoch == metadata.keyEpoch else { return .skipped(.fenceLost) }
         guard let index = try currentIndex(rawKey: rawKey) else {
             emit(.diskWriteSkipped, detail: .keychainUnavailable)
             return .skipped(.keychainUnavailable)
         }
-        let seq = (lastCommitSequence[index] ?? 0) + 1
+        // The commit sequence is allocated under the hot lease (adapter-held per-index
+        // counter). A sequence not newer than the last published one is dropped by
+        // `write()` as `snapshot_displaced`, so two commits publish in commit order
+        // regardless of persist-Task scheduling.
         let snapshot = KVWriteSnapshot(
             rawKey: rawKey, indexHMAC: index, tokens: tokens, layers: layers, identity: identity,
-            sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: seq,
+            sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: commitSequence,
             createdAtMillis: createdAtMillis, eligibleUntilMillis: eligibleUntilMillis, incarnation: incarnation)
         return try write(snapshot, nowMillis: nowMillis)
     }
@@ -1127,6 +1155,7 @@ actor KVDiskCacheStore {
             metadata.purgeHighWatermarks = [:]
             metadata.rotationJournal = KVRotationJournal(from: journal.from, to: journal.to, phase: "committed")
             try persistMetadata()
+            notifyEpoch()   // CRITICAL-2: adapter caches the new epoch for capture-time stamping.
             try crashIf(.rotationAfterEpochCommit)
         }
 

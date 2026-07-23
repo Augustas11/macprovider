@@ -41,15 +41,24 @@ final class KVConversationColdTierTests: XCTestCase {
             if captureReturnsNil { return nil }
             let snap = ConversationColdSnapshot(
                 rawKey: conversationKey, tokens: fullTokens, layers: [], identity: Self.writeIdentity,
-                sampledPurgeGeneration: sampledPurgeGeneration, createdAtMillis: 0, eligibleUntilMillis: 0,
-                incarnation: "test")
+                sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: 1,
+                createdAtMillis: 0, eligibleUntilMillis: 0, incarnation: "test")
             lock.lock(); captured.append(snap); lock.unlock()
             return snap
         }
 
-        func persist(_ snapshot: ConversationColdSnapshot) async {}
+        func enqueuePersist(_ snapshot: ConversationColdSnapshot) {
+            lock.lock(); enqueued.append(snapshot); lock.unlock()
+        }
+        func cancelPendingPersists() async { lock.lock(); cancelledPersists += 1; lock.unlock() }
+        func drainPendingPersists(timeoutSeconds: Int) async {}
+
+        private(set) var enqueued: [ConversationColdSnapshot] = []
+        private(set) var cancelledPersists = 0
 
         var capturedSnapshots: [ConversationColdSnapshot] { lock.lock(); defer { lock.unlock() }; return captured }
+        var enqueuedSnapshots: [ConversationColdSnapshot] { lock.lock(); defer { lock.unlock() }; return enqueued }
+        var cancelPersistCount: Int { lock.lock(); defer { lock.unlock() }; return cancelledPersists }
         var finishedOutcomes: [(accepted: Bool, reason: String?)] { lock.lock(); defer { lock.unlock() }; return finished }
         var promotionCallCount: Int { lock.lock(); defer { lock.unlock() }; return promoteCalls }
 

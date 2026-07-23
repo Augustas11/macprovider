@@ -323,6 +323,66 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertNil(try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index))
     }
 
+    /// CRITICAL-2: a snapshot whose key epoch was captured before a purge-all
+    /// rotation is REJECTED (fence_lost) when its persist Task finally publishes —
+    /// it can never be restamped into the new epoch and survive crypto-shredding.
+    func testColdSnapshotCapturedPreRotationRejectedAfterPurgeAll() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain, sink: sink)
+        try await store.activate()
+        let key = "conv:kvs-synth:pre-rotation"
+
+        // Capture identity under epoch 1 (Self.identity.keyEpoch == 1).
+        let epochBefore = await store.currentEpoch; XCTAssertEqual(epochBefore, 1)
+        // Purge-all rotates to epoch 2 (simulating the rotation racing a queued
+        // persist Task captured under epoch 1).
+        guard case .ok = try await store.purgeAll() else { return XCTFail("purge-all failed") }
+        let epochAfter = await store.currentEpoch; XCTAssertEqual(epochAfter, 2)
+
+        // The queued pre-rotation snapshot publishes with its captured (stale) epoch.
+        let result = try await store.writeColdSnapshot(
+            rawKey: key, tokens: Array(0 ..< Int32(5)), layers: makeLayers(seq: 5),
+            identity: Self.identity, sampledPurgeGeneration: 0, commitSequence: 1,
+            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000,
+            incarnation: "inc", nowMillis: 1_000_500)
+        guard case .skipped(let detail) = result else {
+            return XCTFail("pre-rotation snapshot must be rejected, got \(result)")
+        }
+        XCTAssertEqual(detail, .fenceLost, "stale captured epoch must be fenced, never restamped")
+    }
+
+    /// CRITICAL-2: two commits publish in commit order regardless of persist-Task
+    /// scheduling. The commit sequence is allocated under the hot lease, so an
+    /// earlier commit arriving late (lower sequence) cannot overwrite a later one.
+    func testCommitSequenceOrderingIndependentOfTaskScheduling() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:seq-order"
+        let identity1 = Self.identity   // keyEpoch 1
+
+        func writeSeq(_ seq: Int, seed: Int) async throws -> KVWriteResult {
+            try await store.writeColdSnapshot(
+                rawKey: key, tokens: Array(0 ..< Int32(5)), layers: makeLayers(seq: 5, seed: seed),
+                identity: identity1, sampledPurgeGeneration: 0, commitSequence: seq,
+                createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000,
+                incarnation: "inc-\(seq)", nowMillis: 1_000_000)
+        }
+
+        // The later commit (sequence 2) publishes first (its Task ran first).
+        guard case .committed = try await writeSeq(2, seed: 2) else { return XCTFail("seq 2 should commit") }
+        // The earlier commit (sequence 1) arrives late — it MUST NOT overwrite.
+        let late = try await writeSeq(1, seed: 1)
+        guard case .skipped(let d) = late else { return XCTFail("late lower sequence must be skipped, got \(late)") }
+        XCTAssertEqual(d, .snapshotDisplaced)
+
+        // A subsequent higher sequence (3) publishes normally.
+        guard case .committed = try await writeSeq(3, seed: 3) else { return XCTFail("seq 3 should commit") }
+    }
+
     func testAbsentKeyPurgeNoOps() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

@@ -2010,6 +2010,9 @@ actor ModelRuntime: ModelRuntimeServing {
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds)
         await conversationCache.attachColdTier(adapter)
+        // CRITICAL-2: keep the adapter's cached epoch in step with the store so
+        // captureSnapshot stamps the epoch at commit time. Seeds immediately.
+        await tier.store.setEpochObserver { [weak adapter] epoch in adapter?.cacheEpoch(epoch) }
         // CRITICAL-1: wire the store's purge path back to the hot tier so a purge /
         // purge-all drops the matching RAM entry and fences outstanding leases
         // before the on-disk generation is unlinked / the epoch is rotated.

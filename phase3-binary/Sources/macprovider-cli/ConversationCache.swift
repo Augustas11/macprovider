@@ -270,7 +270,9 @@ actor ConversationCache {
            let snapshot = coldTier.captureSnapshot(
                conversationKey: lease.key, layers: cache, fullTokens: fullTokens,
                sampledPurgeGeneration: lease.sampledPurgeGeneration, identity: cold.identity) {
-            Task { await coldTier.persist(snapshot) }
+            // The adapter owns the persist Task (one pending per index, purge-all
+            // cancellation, bounded shutdown drain). Non-blocking (CRITICAL-2/HIGH-5).
+            coldTier.enqueuePersist(snapshot)
         }
         releaseTurn(lease.key)
     }
@@ -288,10 +290,18 @@ actor ConversationCache {
     }
 
     /// Clear every hot entry and invalidate every outstanding lease's pending
-    /// commit (purge-all / epoch rotation, FR-KVP8).
-    func purgeAllHot() {
+    /// commit (purge-all / epoch rotation, FR-KVP8). Also cancels queued cold-tier
+    /// persist work so no pre-rotation snapshot publishes into the new epoch
+    /// (CRITICAL-2).
+    func purgeAllHot() async {
         globalPurgeGen += 1
         entries.removeAll()
+        await coldTier?.cancelPendingPersists()
+    }
+
+    /// Drain queued cold-tier persist work on graceful shutdown (HIGH-5).
+    func drainColdWrites(timeoutSeconds: Int) async {
+        await coldTier?.drainPendingPersists(timeoutSeconds: timeoutSeconds)
     }
 
     func abort(_ lease: ConversationCacheLease) {

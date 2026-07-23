@@ -49,9 +49,20 @@ protocol ConversationColdTier: Sendable {
         identity: KVIdentityCore
     ) -> ConversationColdSnapshot?
 
-    /// Hand a captured snapshot to the bounded async writer. MUST NOT block the
-    /// hot commit (callers fire-and-forget it after the lease is released).
-    func persist(_ snapshot: ConversationColdSnapshot) async
+    /// Enqueue a captured snapshot for the bounded async writer. Non-blocking: the
+    /// implementation owns the Task lifecycle, enforces one pending write per index
+    /// (a newer commit displaces an unstarted older one, HIGH-5), and supports
+    /// purge-all cancellation (CRITICAL-2) + bounded shutdown drain (HIGH-5).
+    func enqueuePersist(_ snapshot: ConversationColdSnapshot)
+
+    /// Cancel every queued/pending persist Task WITHOUT publishing (purge-all, before
+    /// epoch rotation, CRITICAL-2). Awaits in-flight tasks so none can publish into
+    /// the rotated epoch.
+    func cancelPendingPersists() async
+
+    /// Drain queued/pending persist work, bounded by `timeoutSeconds` (graceful
+    /// shutdown, HIGH-5 / FR-KVP3).
+    func drainPendingPersists(timeoutSeconds: Int) async
 }
 
 /// Per-request cold-tier context supplied by the caller (ModelRuntime), which
@@ -114,6 +125,10 @@ struct ConversationColdSnapshot: Sendable {
     let layers: [KVLayerPayload]
     let identity: KVWriteIdentity
     let sampledPurgeGeneration: Int
+    /// Monotonic per-index commit sequence, allocated synchronously under the hot
+    /// lease at capture time (CRITICAL-2). Two commits therefore publish in commit
+    /// order regardless of persist-Task scheduling.
+    let commitSequence: Int
     let createdAtMillis: Int
     let eligibleUntilMillis: Int
     let incarnation: String
