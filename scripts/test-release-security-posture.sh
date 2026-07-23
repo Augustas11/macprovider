@@ -382,8 +382,12 @@ if "/usr/local/lib/macprovider-go-verifier" in ci_workflow:
     raise SystemExit("Linux CI must not retain a divergent /usr/local sealed Go path")
 for requirement in (
     "-destination 'generic/platform=macOS'",
-    "ARCHS=arm64",
-    "ONLY_ACTIVE_ARCH=NO",
+    'BUILT_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")',
+    'case " $BUILT_PROVIDER_CLI_ARCHES " in',
+    '*" arm64 "*) ;;',
+    '/usr/bin/lipo "$PRODUCTS/macprovider-cli" -thin arm64 -output "$THIN_PROVIDER_CLI"',
+    'THIN_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$THIN_PROVIDER_CLI")',
+    '[ "$THIN_PROVIDER_CLI_ARCHES" = arm64 ]',
     'ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")',
     '[ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ]',
     'PACKAGE_HOST_ARCH=$(uname -m)',
@@ -394,6 +398,16 @@ for requirement in (
     if package_script.count(requirement) != 1:
         raise SystemExit(
             f"provider package build must contain the exact Intel-to-arm64 cross-build guard: {requirement}"
+        )
+for forbidden in (
+    "ARCHS=",
+    "ONLY_ACTIVE_ARCH=",
+    "-arch arm64",
+):
+    if forbidden in package_script:
+        raise SystemExit(
+            "provider package build must not force the product architecture "
+            f"across host-executed Swift targets: {forbidden}"
         )
 if "platform=macOS,arch=arm64" in package_script:
     raise SystemExit(

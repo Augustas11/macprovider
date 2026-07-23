@@ -42,6 +42,9 @@ LOCAL_COMPATIBILITY_SET_DIR="$PACKAGE_WORK_DIR/compatibility-set-local"
 PROVIDER_ADMISSION_POLICY="${MACPROVIDER_PROVIDER_ADMISSION_POLICY:-bridge_required}"
 
 cleanup() {
+  if [ -n "${PRODUCT_REPLACEMENT:-}" ]; then
+    rm -f "$PRODUCT_REPLACEMENT"
+  fi
   rm -rf "$PACKAGE_WORK_DIR"
 }
 trap cleanup EXIT
@@ -93,9 +96,7 @@ if ! xcodebuild -scheme macprovider-cli \
                 -onlyUsePackageVersionsFromResolvedFile \
                 -skipPackagePluginValidation \
                 -skipMacroValidation \
-                clean build \
-                ARCHS=arm64 \
-                ONLY_ACTIVE_ARCH=NO >"$BUILD_LOG" 2>&1; then
+                clean build >"$BUILD_LOG" 2>&1; then
   tail -200 "$BUILD_LOG" >&2
   rm -f "$BUILD_LOG"
   exit 1
@@ -106,13 +107,37 @@ rm -f "$BUILD_LOG"
 PRODUCTS="$RELEASE_DIR/Build/Products/Release"
 
 # Sanity: binary + Metal kernels present.
-if [ ! -x "$PRODUCTS/macprovider-cli" ]; then
+if [ ! -f "$PRODUCTS/macprovider-cli" ] ||
+   [ -L "$PRODUCTS/macprovider-cli" ] ||
+   [ ! -x "$PRODUCTS/macprovider-cli" ]; then
   echo "FATAL: macprovider-cli not found at $PRODUCTS"
   exit 1
 fi
+BUILT_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")
+case " $BUILT_PROVIDER_CLI_ARCHES " in
+  *" arm64 "*) ;;
+  *)
+    echo "FATAL: built provider CLI has no arm64 slice: $BUILT_PROVIDER_CLI_ARCHES" >&2
+    exit 1
+    ;;
+esac
+if [ "$BUILT_PROVIDER_CLI_ARCHES" != arm64 ]; then
+  THIN_PROVIDER_CLI="$PACKAGE_WORK_DIR/macprovider-cli.arm64"
+  PRODUCT_REPLACEMENT="$PRODUCTS/.macprovider-cli.arm64.$$"
+  /usr/bin/lipo "$PRODUCTS/macprovider-cli" -thin arm64 -output "$THIN_PROVIDER_CLI"
+  THIN_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$THIN_PROVIDER_CLI")
+  [ "$THIN_PROVIDER_CLI_ARCHES" = arm64 ] || {
+    echo "FATAL: thinned provider CLI architecture $THIN_PROVIDER_CLI_ARCHES is not exact arm64" >&2
+    exit 1
+  }
+  cp "$THIN_PROVIDER_CLI" "$PRODUCT_REPLACEMENT"
+  chmod 0755 "$PRODUCT_REPLACEMENT"
+  mv -f "$PRODUCT_REPLACEMENT" "$PRODUCTS/macprovider-cli"
+  PRODUCT_REPLACEMENT=
+fi
 ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")
 [ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ] || {
-  echo "FATAL: built provider CLI architecture $ACTUAL_PROVIDER_CLI_ARCHES is not exact arm64" >&2
+  echo "FATAL: packaged provider CLI architecture $ACTUAL_PROVIDER_CLI_ARCHES is not exact arm64" >&2
   exit 1
 }
 PACKAGE_HOST_ARCH=$(uname -m)
