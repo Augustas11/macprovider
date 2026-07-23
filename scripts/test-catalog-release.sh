@@ -691,6 +691,7 @@ unsealed_go.chmod(0o755)
 saved_fixed_go = module.FIXED_GO_EXECUTABLES
 saved_always_trusted = module.ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
 saved_root_trusted = module.root_trusted_executable
+saved_sealed_requirement = os.environ.get(module.REQUIRE_SEALED_GO_ENV)
 try:
     module.FIXED_GO_EXECUTABLES = (str(unsealed_go), str(sealed_go))
     module.ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES = frozenset({str(sealed_go)})
@@ -699,12 +700,21 @@ try:
     module.root_trusted_executable = lambda candidate: pathlib.Path(candidate) == sealed_go
     if module.go_executable() != str(sealed_go):
         raise SystemExit("root-trusted sealed Go verifier toolchain did not take precedence")
+    sealed_go.unlink()
+    os.environ[module.REQUIRE_SEALED_GO_ENV] = "1"
+    rejected("required sealed Go verifier toolchain is missing", module.go_executable)
+    os.environ[module.REQUIRE_SEALED_GO_ENV] = "0"
+    rejected("invalid sealed Go verifier requirement", module.go_executable)
 finally:
     module.FIXED_GO_EXECUTABLES = saved_fixed_go
     module.ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES = saved_always_trusted
     module.root_trusted_executable = saved_root_trusted
+    if saved_sealed_requirement is None:
+        os.environ.pop(module.REQUIRE_SEALED_GO_ENV, None)
+    else:
+        os.environ[module.REQUIRE_SEALED_GO_ENV] = saved_sealed_requirement
 
-print("sealed Go verifier toolchain requires root trust and wins candidate precedence")
+print("sealed Go verifier toolchain requires root trust and fails closed when required")
 
 # The trust root is the committed coordinator.yaml only. An ambient
 # environment variable set by anything other than a reviewed PR touching
