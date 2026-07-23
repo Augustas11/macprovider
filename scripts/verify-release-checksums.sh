@@ -13,11 +13,17 @@ acceptance_candidate_ref=""
 acceptance_run_id=""
 acceptance_run_attempt=""
 acceptance_control_commit=""
+openssl_bin=""
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --allow-partial)
       allow_partial=true
       shift
+      ;;
+    --openssl)
+      [[ "$#" -ge 2 ]] || die "--openssl requires an absolute executable path"
+      openssl_bin="$2"
+      shift 2
       ;;
     --acceptance-candidate)
       [[ "$#" -ge 6 ]] ||
@@ -33,9 +39,15 @@ while [[ "${1:-}" == --* ]]; do
     *) die "unknown option: $1" ;;
   esac
 done
-[[ "$#" -ge 7 ]] || die "usage: [--allow-partial] [--acceptance-candidate METADATA CANDIDATE_REF RUN_ID RUN_ATTEMPT CONTROL_COMMIT] CHECKSUMS SIGNATURE PROVENANCE REPOSITORY TAG COMMIT ASSET..."
+[[ "$#" -ge 7 ]] || die "usage: [--allow-partial] [--openssl ABSOLUTE_PATH] [--acceptance-candidate METADATA CANDIDATE_REF RUN_ID RUN_ATTEMPT CONTROL_COMMIT] CHECKSUMS SIGNATURE PROVENANCE REPOSITORY TAG COMMIT ASSET..."
 [[ "$acceptance_candidate" == false || "$allow_partial" == false ]] ||
   die "acceptance candidate verification must cover the complete release set"
+if [[ "$acceptance_candidate" == false ]]; then
+  [[ "$openssl_bin" == /* && -f "$openssl_bin" && ! -L "$openssl_bin" && -x "$openssl_bin" ]] ||
+    die "production verification requires --openssl with an absolute regular non-symlink executable"
+elif [[ -n "$openssl_bin" ]]; then
+  die "--openssl is not valid for domain-separated acceptance verification"
+fi
 checksums="$1"
 signature="$2"
 provenance="$3"
@@ -259,7 +271,7 @@ PY
     --commit "$commit" \
     "${artifact_arguments[@]}"
 else
-  openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$checksums" >/dev/null ||
+  "$openssl_bin" dgst -sha256 -verify "$public_key" -signature "$signature" "$checksums" >/dev/null ||
     die "checksums signature verification failed against the canonical installer key"
 fi
 

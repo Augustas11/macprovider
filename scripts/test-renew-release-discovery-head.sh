@@ -20,6 +20,13 @@ import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 bridge = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+SEALED_OUTPUT = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
+SEALED_RUNNER = "    runs-on: macos-15-intel"
+protected = workflow.split("\n  verify_public:", 1)[0]
+if protected.count(SEALED_RUNNER) != 1:
+    raise SystemExit(
+        "renewal runner must match the reviewed Intel OpenSSL bottle"
+    )
 for requirement in (
     "name: Renew signed release discovery head",
     "workflow_dispatch:",
@@ -44,6 +51,30 @@ for requirement in (
         raise SystemExit(f"renewal workflow omits: {requirement}")
 if "--clobber" in workflow:
     raise SystemExit("renewal workflow must never overwrite discovery assets")
+for requirement in (
+    "- name: Seal reviewed OpenSSL 3",
+    "id: protected_openssl",
+    "scripts/install-sealed-release-openssl.sh",
+    "/private/var/macprovider-openssl-discovery-renewal",
+    "printf 'bin=%s\\n' \"$sealed_bin\" >> \"$GITHUB_OUTPUT\"",
+):
+    if requirement not in workflow:
+        raise SystemExit(f"renewal OpenSSL seal omits: {requirement}")
+if "brew install openssl@3" in workflow or "brew --prefix openssl@3" in workflow:
+    raise SystemExit("renewal must not select mutable Homebrew OpenSSL directly")
+if "OPENSSL_BIN=" in workflow or "GITHUB_ENV" in workflow:
+    raise SystemExit("renewal must not publish mutable OpenSSL environment state")
+if workflow.count(SEALED_OUTPUT) != 2:
+    raise SystemExit("every renewal crypto consumer must bind the sealed step output")
+for step_name in (
+    "Sign a strictly greater renewal discovery head",
+    "Publish one append-only immutable renewal transport",
+):
+    step = workflow.split(f"- name: {step_name}", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    if step.count(SEALED_OUTPUT) != 1:
+        raise SystemExit(f"{step_name} does not bind the sealed OpenSSL output")
 publish = workflow.split("- name: Publish one append-only immutable renewal transport", 1)[1]
 if 'gh release create "release-discovery"' in publish or "gh release upload" in publish:
     raise SystemExit("renewal must not publish to the fixed release-discovery tag")

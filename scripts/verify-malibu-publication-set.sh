@@ -7,6 +7,9 @@ die() {
 }
 
 [[ "$#" == 7 ]] || die "usage: MANIFEST DMG APPCAST ARTIFACT_INDEX CHECKSUMS SIGNATURE PROVENANCE"
+openssl_bin="${OPENSSL_BIN:-}"
+[[ "$openssl_bin" == /* ]] ||
+  die "OPENSSL_BIN must identify the absolute reviewed release verifier"
 manifest="$1"
 dmg="$2"
 appcast="$3"
@@ -31,7 +34,8 @@ PY
 )"
 read -r expected_repository expected_tag expected_commit <<< "$expected_identity"
 [[ "$expected_tag" == v1.8.39 ]] || die "legacy Malibu publication is frozen to v1.8.39"
-bash "$repo_root/scripts/verify-release-checksums.sh" --allow-partial \
+bash "$repo_root/scripts/verify-release-checksums.sh" \
+  --allow-partial --openssl "$openssl_bin" \
   "$checksums" "$signature" "$provenance" \
   "$expected_repository" "$expected_tag" "$expected_commit" \
   "$dmg" "$appcast" "$artifact_index" "$provenance" >/dev/null

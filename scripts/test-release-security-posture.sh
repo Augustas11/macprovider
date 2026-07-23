@@ -13,6 +13,8 @@ trust_anchor_helper="$root/scripts/prepare-malibu-bootstrap-trust-anchor.py"
 malibu_artifact_verifier="$root/scripts/verify-malibu-release-artifacts.sh"
 coordinator_go_mod="$root/phase4-coordinator/go.mod"
 pearl_go_verifier="$root/scripts/verify-pearl-go-binaries.py"
+sealed_openssl_installer="$root/scripts/install-sealed-release-openssl.sh"
+sealed_openssl_wrapper="$root/scripts/sealed-release-openssl-wrapper.sh"
 release_runbook="$root/phase3-binary/dist/release-signing-runbook.md"
 decision_log="$root/beta/DECISION_CRITERIA.md"
 ci_workflow="$root/.github/workflows/ci.yml"
@@ -21,9 +23,25 @@ sparkle_validator_patch="$root/scripts/fixtures/SUUpdateValidator-2.6.4-ephemera
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+bash -n "$sealed_openssl_installer" "$sealed_openssl_wrapper"
+printf '%s\n' ": > \"\$BASH_ENV_PROBE\"" > "$work/injected-bash-env"
+if BASH_ENV="$work/injected-bash-env" BASH_ENV_PROBE="$work/bash-env-ran" \
+  "$sealed_openssl_wrapper" >"$work/wrapper.out" 2>&1; then
+  echo "sealed OpenSSL wrapper accepted a non-sealed execution path" >&2
+  exit 1
+else
+  wrapper_status="$?"
+fi
+[[ "$wrapper_status" == 126 ]]
+[[ ! -e "$work/bash-env-ran" ]] || {
+  echo "sealed OpenSSL wrapper executed inherited BASH_ENV startup code" >&2
+  exit 1
+}
+
 python3 - "$workflow" "$root/phase3-binary/app/project.yml" \
   "$root/phase3-binary/app/Sources/Malibu/Info.plist" \
-  "$trust_anchor_helper" "$malibu_artifact_verifier" "$coordinator_go_mod" <<'PY'
+  "$trust_anchor_helper" "$malibu_artifact_verifier" "$coordinator_go_mod" \
+  "$sealed_openssl_installer" "$sealed_openssl_wrapper" "$checksums_guard" <<'PY'
 import pathlib
 import re
 import sys
@@ -35,6 +53,9 @@ current_app = "\n".join(
 trust_anchor_helper = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 malibu_artifact_verifier = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
 coordinator_go_mod = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+sealed_openssl_installer = pathlib.Path(sys.argv[7]).read_text(encoding="utf-8")
+sealed_openssl_wrapper = pathlib.Path(sys.argv[8]).read_text(encoding="utf-8")
+checksums_guard = pathlib.Path(sys.argv[9]).read_text(encoding="utf-8")
 go_directive = re.search(
     r"(?m)^go ([0-9]+\.[0-9]+(?:\.[0-9]+)?)$", coordinator_go_mod
 )
@@ -161,6 +182,82 @@ MALIBU_CAPTURE_STEP = r'''        shell: bash
             unsigned-release-inputs/release-toolchain.json \
             unsigned-release-inputs/unsigned-release-manifest.json \
             "${unsigned_assets[@]}"'''
+PROTECTED_OPENSSL3_STEP = r'''        id: protected_openssl
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-verifier
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"'''
+PROTECTED_OPENSSL_ROOT = "/private/var/macprovider-openssl-verifier"
+PROTECTED_OPENSSL_CANDIDATE_STEP = r'''        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
+'''
+SEALED_OPENSSL_WRAPPER = r'''#!/bin/bash -p
+set -euo pipefail
+
+sealed_root="${0%/*}"
+if [[ ! "$sealed_root" =~ ^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$ ]]; then
+  echo "sealed OpenSSL wrapper must run from its root-trusted installation" >&2
+  exit 126
+fi
+
+unset BASH_ENV ENV
+for inherited_name in "${!DYLD_@}" "${!LD_@}" "${!OPENSSL_@}"; do
+  unset "$inherited_name"
+done
+
+export DYLD_LIBRARY_PATH="$sealed_root/lib"
+export OPENSSL_CONF="$sealed_root/etc/openssl.cnf"
+export OPENSSL_MODULES="$sealed_root/lib/ossl-modules"
+exec "$sealed_root/bin/openssl" "$@"'''
+PROTECTED_OPENSSL_OUTPUT_ENV = (
+    '          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
+)
+SEALED_OPENSSL_RUNNER = "    runs-on: macos-15-intel"
+PROTECTED_OPENSSL_CONSUMERS = (
+    ("Sign + notarize binary", 1, 0),
+    ("Prepare release assets", 4, 1),
+    ("Require an advancing immutable discovery head", 2, 2),
+    ("Create verified draft GitHub release", 1, 1),
+    ("Publish only the revalidated numeric draft", 1, 1),
+    ("Publish one append-only immutable discovery transport", 1, 1),
+    ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
+)
+
+
+def validate_candidate_openssl(job):
+    if job.count(SEALED_OPENSSL_RUNNER) != 1:
+        raise SystemExit(
+            "candidate release runner must match the reviewed Intel OpenSSL bottle"
+        )
+    preflight = unique_step(
+        job, "Preflight protected OpenSSL seal before tag creation"
+    )
+    if preflight.strip("\n") != PROTECTED_OPENSSL_CANDIDATE_STEP.strip("\n"):
+        raise SystemExit(
+            "candidate release must execute the exact protected OpenSSL seal preflight"
+        )
+    preflight_position = job.find(
+        "- name: Preflight protected OpenSSL seal before tag creation"
+    )
+    package_position = job.find("- name: Build package")
+    if min(preflight_position, package_position) < 0 or not (
+        preflight_position < package_position
+    ):
+        raise SystemExit(
+            "protected OpenSSL seal preflight must run before candidate packaging"
+        )
 
 
 def validate_malibu_candidate_preflight(job):
@@ -255,6 +352,88 @@ def validate_pearl_toolchain(job):
     if pearl_build.count("go build -mod=readonly -trimpath -buildvcs=true") != 3:
         raise SystemExit("all Pearl binaries must use explicit reviewed VCS stamping")
     return pearl_build
+
+
+def validate_protected_openssl(job):
+    if job.count(SEALED_OPENSSL_RUNNER) != 1:
+        raise SystemExit(
+            "protected release runner must match the reviewed Intel OpenSSL bottle"
+        )
+    selector = unique_step(
+        job, "Seal OpenSSL 3 for protected release verification"
+    )
+    if selector.strip("\n") != PROTECTED_OPENSSL3_STEP:
+        raise SystemExit(
+            "protected release must retain the exact fail-closed OpenSSL 3 selector"
+        )
+    selector_position = job.find(
+        "- name: Seal OpenSSL 3 for protected release verification"
+    )
+    toolchain_position = job.find("- name: Reverify captured release toolchain")
+    signing_position = job.find("- name: Sign + notarize binary")
+    discovery_position = job.find(
+        "- name: Require an advancing immutable discovery head"
+    )
+    if min(
+        selector_position,
+        toolchain_position,
+        signing_position,
+        discovery_position,
+    ) < 0 or not (
+        toolchain_position
+        < selector_position
+        < signing_position
+        < discovery_position
+    ):
+        raise SystemExit(
+            "protected OpenSSL 3 selection must follow toolchain verification "
+            "and precede signing and discovery verification"
+        )
+    if re.search(r"\bsudo\b", job[signing_position:]):
+        raise SystemExit(
+            "protected release must not retain root mutation authority after "
+            "the OpenSSL runtime is sealed"
+        )
+    if job.count(PROTECTED_OPENSSL_ROOT) != PROTECTED_OPENSSL3_STEP.count(
+        PROTECTED_OPENSSL_ROOT
+    ):
+        raise SystemExit(
+            "sealed OpenSSL runtime path must remain exclusive to the sealing step"
+        )
+    if job.count("brew --prefix openssl@3") != PROTECTED_OPENSSL3_STEP.count(
+        "brew --prefix openssl@3"
+    ):
+        raise SystemExit(
+            "protected release must not return to the mutable Homebrew OpenSSL path"
+        )
+    if "OPENSSL_BIN=" in job:
+        raise SystemExit(
+            "protected release must not allow mutable OPENSSL_BIN environment writes"
+        )
+    post_selector = job[selector_position:]
+    if re.search(r"(?m)^\s*openssl\b", post_selector) or "$(openssl" in post_selector:
+        raise SystemExit(
+            "protected release crypto must not fall back to a PATH-selected OpenSSL"
+        )
+    if job.count(PROTECTED_OPENSSL_OUTPUT_ENV) != len(PROTECTED_OPENSSL_CONSUMERS):
+        raise SystemExit(
+            "every protected discovery producer and verifier must bind the "
+            "immutable selector output"
+        )
+    for name, expected_references, expected_cli_flags in PROTECTED_OPENSSL_CONSUMERS:
+        consumer = unique_step(job, name)
+        if consumer.count(PROTECTED_OPENSSL_OUTPUT_ENV) != 1:
+            raise SystemExit(
+                f"{name} must bind the exact protected OpenSSL selector output"
+            )
+        if consumer.count('--openssl "$OPENSSL_BIN"') != expected_cli_flags:
+            raise SystemExit(
+                f"{name} must pass protected OpenSSL to every discovery command"
+            )
+        if consumer.count("OPENSSL_BIN") != expected_references + 1:
+            raise SystemExit(
+                f"{name} contains an unreviewed protected OpenSSL reference"
+            )
 
 
 if "secrets." in build or "contents: write" in build:
@@ -395,10 +574,129 @@ if "ensure-release-tag-target" in text or "git push" in text:
     raise SystemExit("release workflow must not create a release tag")
 if "gh release download" in text:
     raise SystemExit("release workflow must publish the captured workflow files")
+def validate_sealed_openssl_wrapper(candidate):
+    if candidate.strip() != SEALED_OPENSSL_WRAPPER:
+        raise SystemExit(
+            "sealed OpenSSL wrapper drifted from the reviewed runtime contract"
+        )
+    for prefix in ("DYLD_", "LD_", "OPENSSL_"):
+        if f'"${{!{prefix}@}}"' not in candidate:
+            raise SystemExit(
+                f"sealed OpenSSL wrapper does not clear inherited {prefix} overrides"
+            )
+
+
+validate_sealed_openssl_wrapper(sealed_openssl_wrapper)
+wrapper_environment_reset_removal_mutation = sealed_openssl_wrapper.replace(
+    'for inherited_name in "${!DYLD_@}" "${!LD_@}" "${!OPENSSL_@}"; do\n'
+    '  unset "$inherited_name"\n'
+    "done\n\n",
+    "",
+    1,
+)
+try:
+    validate_sealed_openssl_wrapper(wrapper_environment_reset_removal_mutation)
+except SystemExit:
+    pass
+else:
+    raise SystemExit(
+        "sealed OpenSSL inherited-environment reset removal mutation unexpectedly passed"
+    )
+def validate_sealed_openssl_installer(candidate):
+    for requirement in (
+        r"^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$",
+        'readonly expected_openssl_version="3.6.3"',
+        'readonly expected_bottle_tag="sequoia"',
+        'readonly expected_bottle_sha256="5477285c4ebec45713873ae4002affece39e427c5f1b655c6a3df49c6b90f924"',
+        'readonly expected_formula_sha256="773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"',
+        "brew fetch --force",
+        '--bottle-tag="$expected_bottle_tag"',
+        'brew reinstall --force-bottle openssl@3',
+        'brew install --force-bottle openssl@3',
+        'receipt.get("poured_from_bottle") is not True',
+        'config_root="$source_root/.bottle/etc/openssl@3"',
+        'sudo test ! -e "$sealed_root"',
+        '"$source_root/bin/openssl" "$sealed_root/bin/openssl"',
+        '"$source_root/lib/libssl.3.dylib" "$sealed_root/lib/libssl.3.dylib"',
+        '"$source_root/lib/libcrypto.3.dylib" "$sealed_root/lib/libcrypto.3.dylib"',
+        '"$source_root/lib/ossl-modules/legacy.dylib"',
+        '"$config_root/openssl.cnf" "$sealed_root/etc/openssl.cnf"',
+        '"$script_root/sealed-release-openssl-wrapper.sh" "$wrapper"',
+        "paths = [root, *root.rglob(\"*\")]",
+        "stat.S_ISLNK(metadata.st_mode)",
+        "metadata.st_uid != 0",
+        "stat.S_IMODE(metadata.st_mode) & 0o022",
+        '"$wrapper" version | grep -E',
+        "printf '%s\\n' \"$wrapper\"",
+    ):
+        if requirement not in candidate:
+            raise SystemExit(f"sealed OpenSSL installer omits: {requirement}")
+    if candidate.count("sudo install") != 7:
+        raise SystemExit(
+            "sealed OpenSSL installer must retain exactly seven root installs"
+        )
+    for forbidden in (
+        "|| true",
+        "sudo cp",
+        "sudo mv",
+        "sudo rm",
+        "sudo chown",
+        "sudo chmod",
+        "curl ",
+        "git ",
+    ):
+        if forbidden in candidate:
+            raise SystemExit(
+                f"sealed OpenSSL installer contains unsafe drift: {forbidden}"
+            )
+
+
+validate_sealed_openssl_installer(sealed_openssl_installer)
+for description, mutation in (
+    (
+        "reviewed bottle digest replacement",
+        sealed_openssl_installer.replace(
+            "5477285c4ebec45713873ae4002affece39e427c5f1b655c6a3df49c6b90f924",
+            "0" * 64,
+            1,
+        ),
+    ),
+    (
+        "reviewed formula digest removal",
+        sealed_openssl_installer.replace(
+            'readonly expected_formula_sha256="773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"\n',
+            "",
+            1,
+        ),
+    ),
+    (
+        "forced bottle fetch removal",
+        sealed_openssl_installer.replace("brew fetch --force", "brew fetch", 1),
+    ),
+):
+    try:
+        validate_sealed_openssl_installer(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
+
+for requirement in (
+    "--openssl)",
+    '"$openssl_bin" dgst -sha256 -verify',
+    "production verification requires --openssl",
+):
+    if requirement not in checksums_guard:
+        raise SystemExit(
+            f"release checksum verifier omits protected OpenSSL binding: {requirement}"
+        )
+if re.search(r"(?m)^\s*openssl\s+dgst", checksums_guard):
+    raise SystemExit("release checksum verifier falls back to PATH-selected OpenSSL")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must be pinned by commit")
+validate_candidate_openssl(build)
 validate_malibu_candidate_preflight(build)
 pearl_build = validate_pearl_toolchain(build)
+validate_protected_openssl(publish)
 for requirement in (
     "GOTOOLCHAIN=local",
     "CGO_ENABLED=0 GOOS=linux GOARCH=amd64",
@@ -520,6 +818,90 @@ malibu_post_capture_mutation = build.replace(
     "\n      - name: Verify staged Pearl Go binaries\n",
     1,
 )
+candidate_openssl_removal_mutation = build.replace(
+    "\n      - name: Preflight protected OpenSSL seal before tag creation\n"
+    + PROTECTED_OPENSSL_CANDIDATE_STEP,
+    "",
+    1,
+)
+candidate_openssl_runner_mutation = build.replace(
+    SEALED_OPENSSL_RUNNER,
+    "    runs-on: macos-15",
+    1,
+)
+protected_openssl_removal_mutation = publish.replace(
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "",
+    1,
+)
+protected_openssl_runner_mutation = publish.replace(
+    SEALED_OPENSSL_RUNNER,
+    "    runs-on: macos-15",
+    1,
+)
+protected_openssl_suppression_mutation = publish.replace(
+    PROTECTED_OPENSSL3_STEP,
+    PROTECTED_OPENSSL3_STEP.replace(
+        "          set -euo pipefail\n",
+        "          set +e\n",
+        1,
+    ),
+    1,
+)
+protected_openssl_reorder_mutation = publish.replace(
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "",
+    1,
+).replace(
+    "\n      - name: Require an advancing immutable discovery head\n",
+    "\n      - name: Require an advancing immutable discovery head\n"
+    + "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    1,
+)
+protected_openssl_override_mutation = publish.replace(
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP
+    + "\n\n      - name: Override protected OpenSSL selection\n"
+    + "        shell: bash\n"
+    + "        run: echo 'OPENSSL_BIN=/usr/bin/true' >> \"$GITHUB_ENV\"",
+    1,
+)
+protected_openssl_consumer_removal_mutation = publish.replace(
+    '            --openssl "$OPENSSL_BIN" \\\n',
+    "",
+    1,
+)
+protected_openssl_output_replacement_mutation = publish.replace(
+    PROTECTED_OPENSSL_OUTPUT_ENV,
+    "          OPENSSL_BIN: /usr/bin/true",
+    1,
+)
+protected_openssl_sealed_replacement_mutation = publish.replace(
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP
+    + "\n\n      - name: Replace sealed OpenSSL executable\n"
+    + "        shell: bash\n"
+    + "        run: sudo install -m 0555 /usr/bin/true "
+    + f"{PROTECTED_OPENSSL_ROOT}/bin/openssl",
+    1,
+)
+protected_openssl_sealed_removal_mutation = publish.replace(
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "\n      - name: Seal OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP
+    + "\n\n      - name: Remove sealed OpenSSL executable\n"
+    + "        shell: bash\n"
+    + f"        run: sudo unlink {PROTECTED_OPENSSL_ROOT}/bin/openssl",
+    1,
+)
 for description, mutation in (
     ("case-folded setup-go override", setup_override_mutation),
     ("toolchain seal replacement", seal_replacement_mutation),
@@ -539,6 +921,18 @@ for description, mutation in (
     except SystemExit:
         continue
     raise SystemExit(f"{description} mutation unexpectedly passed")
+try:
+    validate_candidate_openssl(candidate_openssl_removal_mutation)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("candidate OpenSSL seal removal mutation unexpectedly passed")
+try:
+    validate_candidate_openssl(candidate_openssl_runner_mutation)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("candidate OpenSSL runner mismatch mutation unexpectedly passed")
 for description, mutation in (
     ("candidate Malibu preflight removal", malibu_preflight_removal_mutation),
     ("candidate Malibu preflight failure suppression", malibu_preflight_suppression_mutation),
@@ -556,6 +950,37 @@ for description, mutation in (
 ):
     try:
         validate_malibu_candidate_preflight(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
+for description, mutation in (
+    ("protected OpenSSL 3 runner mismatch", protected_openssl_runner_mutation),
+    ("protected OpenSSL 3 selector removal", protected_openssl_removal_mutation),
+    (
+        "protected OpenSSL 3 selector failure suppression",
+        protected_openssl_suppression_mutation,
+    ),
+    ("protected OpenSSL 3 selector reorder", protected_openssl_reorder_mutation),
+    ("protected OpenSSL 3 environment override", protected_openssl_override_mutation),
+    (
+        "protected OpenSSL 3 consumer removal",
+        protected_openssl_consumer_removal_mutation,
+    ),
+    (
+        "protected OpenSSL 3 output replacement",
+        protected_openssl_output_replacement_mutation,
+    ),
+    (
+        "sealed OpenSSL executable replacement",
+        protected_openssl_sealed_replacement_mutation,
+    ),
+    (
+        "sealed OpenSSL executable removal",
+        protected_openssl_sealed_removal_mutation,
+    ),
+):
+    try:
+        validate_protected_openssl(mutation)
     except SystemExit:
         continue
     raise SystemExit(f"{description} mutation unexpectedly passed")
@@ -708,9 +1133,75 @@ for requirement in (
         raise SystemExit(f"append-only release transport omits: {requirement}")
 if "--clobber" in transport_publish:
     raise SystemExit("append-only discovery transport must never overwrite an asset")
-renewal = (
-    pathlib.Path(sys.argv[1]).resolve().parent / "renew-release-discovery-head.yml"
-).read_text(encoding="utf-8")
+workflow_dir = pathlib.Path(sys.argv[1]).resolve().parent
+renewal = (workflow_dir / "renew-release-discovery-head.yml").read_text(
+    encoding="utf-8"
+)
+promotion = (workflow_dir / "promote-acceptance-candidate.yml").read_text(
+    encoding="utf-8"
+)
+sealed_output = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
+for label, auxiliary, sealed_root, consumer_count in (
+    (
+        "protected discovery renewal",
+        renewal,
+        "/private/var/macprovider-openssl-discovery-renewal",
+        2,
+    ),
+    (
+        "acceptance promotion",
+        promotion,
+        "/private/var/macprovider-openssl-acceptance-promotion",
+        5,
+    ),
+):
+    protected_job = auxiliary.split("\n  verify_public:", 1)[0]
+    if protected_job.count(SEALED_OPENSSL_RUNNER) != 1:
+        raise SystemExit(
+            f"{label} runner must match the reviewed Intel OpenSSL bottle"
+        )
+    for requirement in (
+        "- name: Seal reviewed OpenSSL 3",
+        "id: protected_openssl",
+        "scripts/install-sealed-release-openssl.sh",
+        sealed_root,
+        "GITHUB_OUTPUT",
+    ):
+        if requirement not in auxiliary:
+            raise SystemExit(f"{label} OpenSSL seal omits: {requirement}")
+    for forbidden in (
+        "brew install openssl@3",
+        "brew --prefix openssl@3",
+        "GITHUB_ENV",
+        "OPENSSL_BIN=",
+    ):
+        if forbidden in auxiliary:
+            raise SystemExit(f"{label} retains mutable OpenSSL state: {forbidden}")
+    if auxiliary.count(sealed_output) != consumer_count:
+        raise SystemExit(
+            f"{label} does not bind every crypto consumer to the sealed output"
+        )
+    sealed_position = auxiliary.find("- name: Seal reviewed OpenSSL 3")
+    if re.search(r"\bsudo\b", auxiliary[sealed_position:].split(
+        "\n  verify_public:", 1
+    )[0]):
+        raise SystemExit(f"{label} retains root mutation authority after sealing")
+    if re.search(r"(?m)^\s*openssl\b", auxiliary[sealed_position:]):
+        raise SystemExit(f"{label} falls back to PATH-selected OpenSSL")
+for step_name in (
+    "Generate only the production checksum signature",
+    "Reverify and publish only the captured numeric draft",
+):
+    checksum_step = promotion.split(f"- name: {step_name}", 1)[1].split(
+        "\n      - name:", 1
+    )[0]
+    if (
+        "bash scripts/verify-release-checksums.sh \\\n"
+        '            --openssl "$OPENSSL_BIN" \\\n'
+    ) not in checksum_step:
+        raise SystemExit(
+            f"{step_name} omits sealed OpenSSL checksum verification"
+        )
 for requirement in (
     "environment: production-release",
     "scripts/build-release-discovery-head.py",
@@ -1048,7 +1539,9 @@ printf '%s  asset.bin\n%s  release-provenance.json\n' \
 openssl ecparam -name prime256v1 -genkey -noout -out "$work/checksums/wrong-key.pem"
 openssl dgst -sha256 -sign "$work/checksums/wrong-key.pem" \
   -out "$work/checksums/checksums.txt.sig" "$work/checksums/checksums.txt"
+test_openssl="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$(command -v openssl)")"
 if bash "$checksums_guard" \
+  --openssl "$test_openssl" \
   "$work/checksums/checksums.txt" "$work/checksums/checksums.txt.sig" \
   "$work/checksums/release-provenance.json" Augustas11/macprovider v1.2.3 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \

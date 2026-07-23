@@ -36,7 +36,7 @@ concurrency:
 jobs:
   promote:
     name: Publish only the accepted bytes
-    runs-on: macos-15
+    runs-on: macos-15-intel
     environment: production-release
     outputs:
       tag: ${{ steps.request.outputs.tag }}
@@ -125,16 +125,19 @@ jobs:
           name: acceptance-candidate-${{ steps.request.outputs.candidate_sha }}
           path: ${{ runner.temp }}/accepted
 
-      - name: Select OpenSSL 3
+      - name: Seal reviewed OpenSSL 3
+        id: protected_openssl
         shell: bash
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           set -euo pipefail
-          brew install openssl@3
-          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
-          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
-          printf 'OPENSSL_BIN=%s\n' "$openssl_bin" >> "$GITHUB_ENV"
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-acceptance-promotion
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
 
       - name: Verify the signed acceptance set and production metadata
         shell: bash
@@ -143,6 +146,7 @@ jobs:
           RUN_ATTEMPT: ${{ steps.run.outputs.run_attempt }}
           CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
           CONTROL_SHA: ${{ steps.run.outputs.control_sha }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           TAG: ${{ steps.request.outputs.tag }}
           EXPECTED_CHECKSUMS_SHA: ${{ steps.request.outputs.checksums_sha }}
         run: |
@@ -189,6 +193,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.request.outputs.tag }}
           CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         run: |
           set -euo pipefail
           accepted="$RUNNER_TEMP/accepted"
@@ -337,6 +342,7 @@ jobs:
         shell: bash
         env:
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           TAG: ${{ steps.request.outputs.tag }}
           CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
         run: |
@@ -355,6 +361,7 @@ jobs:
             [[ -n "$name" ]] && release_assets+=("$accepted/$name")
           done < "$accepted/release-assets.txt"
           bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
             "$accepted/checksums.txt" "$accepted/checksums.txt.sig" \
             "$accepted/release-provenance.json" \
             "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
@@ -410,6 +417,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
           TAG: ${{ steps.request.outputs.tag }}
           CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
@@ -433,6 +441,7 @@ jobs:
             bash scripts/verify-github-release-posture.sh \
               "$GITHUB_REPOSITORY" production-release 28995904
           bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
             "$accepted/checksums.txt" "$accepted/checksums.txt.sig" \
             "$accepted/release-provenance.json" \
             "$GITHUB_REPOSITORY" "$TAG" "$CANDIDATE_SHA" \
@@ -524,6 +533,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           TAG: ${{ steps.request.outputs.tag }}
           CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
           TRANSPORT_TAG: ${{ steps.discovery_base.outputs.transport_tag }}

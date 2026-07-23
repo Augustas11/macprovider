@@ -24,7 +24,7 @@ concurrency:
 jobs:
   renew:
     name: Append a renewed immutable discovery transport
-    runs-on: macos-15
+    runs-on: macos-15-intel
     environment: production-release
     permissions:
       actions: read
@@ -47,16 +47,19 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
         run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
 
-      - name: Select OpenSSL 3
+      - name: Seal reviewed OpenSSL 3
+        id: protected_openssl
         shell: bash
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: |
           set -euo pipefail
-          brew install openssl@3
-          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
-          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
-          printf 'OPENSSL_BIN=%s\n' "$openssl_bin" >> "$GITHUB_ENV"
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-discovery-renewal
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
 
       - name: Resolve latest stable target and current discovery ceiling
         id: target
@@ -167,6 +170,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           TAG: ${{ steps.target.outputs.tag }}
           COMMIT: ${{ steps.target.outputs.commit }}
           PREVIOUS_SEQUENCE: ${{ steps.target.outputs.previous_sequence }}
@@ -308,6 +312,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           TAG: ${{ steps.target.outputs.tag }}
           COMMIT: ${{ steps.target.outputs.commit }}
           TRANSPORT_TAG: ${{ steps.sign.outputs.transport_tag }}
