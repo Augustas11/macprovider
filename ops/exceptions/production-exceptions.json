@@ -209,7 +209,7 @@
         "Hermetic activation safety covers conflict, stale-backup-shaped refuse, pin-race, apply-retired gate, and root-owned remote staging."
       ],
       "still_blocked_for_clearance": [
-        "Signed Tier-2 bytes are not yet a ledger/compatibility-set feed member.",
+        "Pearl has not yet activated the release ledger/compatibility-set envelope that includes the signed Tier-2 feed member.",
         "Physical /opt/macprovider/tier2-catalog.json dual file still exists (live mutate gated via deploy-only; not deleted).",
         "Physical Pearl journey proof that no uncatalogued events fire for active release rows after single-authority cutover."
       ],

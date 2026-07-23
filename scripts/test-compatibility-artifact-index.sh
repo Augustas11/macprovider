@@ -14,7 +14,7 @@ printf '%s\n' '{"schema_version":"macprovider.compatibility-set-envelope.v1","si
 
 roles=(
   catalog_candidates catalog_candidates_signature catalog_demand
-  catalog_demand_signature catalog_manifest catalog_trusted_keys
+  catalog_demand_signature catalog_manifest catalog_tier2 catalog_trusted_keys
   compatibility_manifest coordinator coordinator_cli gateway malibu_app
   pearl_metadata pearl_metadata_signature provider_cli
 )

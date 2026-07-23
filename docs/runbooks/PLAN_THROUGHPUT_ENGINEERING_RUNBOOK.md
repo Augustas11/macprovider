@@ -534,10 +534,17 @@ Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM
 | Upstream | Kind | Runbook | Cursor Automation |
 |----------|------|---------|-------------------|
 | [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) | Issue | T2-01 / TG2 | Weekday blocker watch |
-| [mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | PR | T1-02 / TG1 | Weekday blocker watch |
+| [mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | PR (**merged**, awaiting release tag) | T1-02 / TG1 | Weekday blocker watch |
 | ml-explore release tags | Release | T1-01 pin bump | Weekly discovery watch |
 
-When the checker reports a **material change** (issue/PR closed or merged, new release above pin, KVCache compile-fix heuristic), the automation opens a macprovider tracking issue with unblock steps.
+When the checker exits **2** (material change: issue/PR closed or merged, new release above pin, KVCache compile-fix heuristic), the automation must **open or update a GitHub issue only — never open a draft PR**. Concretely:
+
+1. `gh issue list --repo Augustas11/macprovider --search "<sticky title>" --state all` to find the existing sticky issue for that blocker.
+2. If found, add a comment with the new checker snapshot (state, timestamps, pin status) and update checkboxes; if not found, create it fresh.
+3. For the mlx-swift-lm #364 (Gemma MoE) blocker specifically, the sticky issue is [#700](https://github.com/Augustas11/macprovider/issues/700) — "Awaiting mlx-swift-lm release containing #364 (Gemma MoE) — then T1-01 + T1-02". Always comment/update that issue rather than opening a new one while it stays open.
+4. Track blocker `status` as `awaiting_release_tag` once the upstream PR/issue is merged/closed but no release tag yet contains it, and flip it to `release_ready` once a tag > the current pin does contain it. Only `release_ready` clears the way for a pin bump (T1-01) and unblocking T1-02.
+
+See `beta/throughput-engineering/CURSOR_AUTOMATION_UPSTREAM_WATCH_PROMPT.md` for the paste-ready automation prompt implementing this contract.
 
 ---
 

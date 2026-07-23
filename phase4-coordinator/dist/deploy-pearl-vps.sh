@@ -131,6 +131,49 @@ _validate_dns_name() {
 _validate_dns_name "$DOMAIN"        DOMAIN
 _validate_dns_name "${STATS_DOMAIN:-stats.streamvc.live}" STATS_DOMAIN
 
+_validate_catalog_canary_auth_token() {
+  local value="$1" length
+  length=${#value}
+  [ "$length" -ge 32 ] && [ "$length" -le 512 ] || return 1
+  case "$value" in
+    *[!A-Za-z0-9._~-]*) return 1 ;;
+  esac
+}
+
+_run_with_deadline_alarm() {
+  local timeout_s="$1"
+  shift
+  python3 -c '
+import os
+import signal
+import sys
+
+timeout_s = int(sys.argv[1])
+if timeout_s < 1:
+    raise SystemExit("deadline must be at least one second")
+signal.alarm(timeout_s)
+os.execvp(sys.argv[2], sys.argv[2:])
+' "$timeout_s" "$@"
+}
+
+_parse_model_hash_legacy_until() {
+  python3 -c '
+import shlex
+import sys
+
+raw = sys.argv[1].strip()
+if not raw:
+    sys.exit(0)
+try:
+    values = shlex.split(raw, comments=False, posix=True)
+except ValueError as exc:
+    raise SystemExit(f"invalid MODEL_HASH_LEGACY_UNTIL quoting: {exc}")
+if len(values) != 1:
+    raise SystemExit("MODEL_HASH_LEGACY_UNTIL must be a single scalar value")
+print(values[0], end="")
+' "$1"
+}
+
 # Email validator — RFC-conformant pre-validation is overkill; we just
 # need to reject metacharacters that would split a shell arg.
 if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
@@ -143,7 +186,7 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
     echo "  Select a provider expected to reconnect after restart; deployment commits only after pool admission." >&2
     exit 1
   fi
-  if ! printf '%s' "$CATALOG_CANARY_AUTH_TOKEN" | grep -Eq '^[A-Za-z0-9._~-]{32,512}$'; then
+  if ! _validate_catalog_canary_auth_token "$CATALOG_CANARY_AUTH_TOKEN"; then
     echo "aborting deploy: CATALOG_CANARY_AUTH_TOKEN is required and must be a safe 32-512 character bearer token" >&2
     exit 1
   fi
@@ -223,8 +266,6 @@ NGINX_STATS_CORS_429="$DIST_DIR/nginx-snippets/cors-429.conf"
 NGINX_STATS_PROXY_PUBLIC="$DIST_DIR/nginx-snippets/stats-proxy-public.conf"
 NGINX_STATS_PROXY_PARTNER="$DIST_DIR/nginx-snippets/stats-proxy-partner.conf"
 NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
-CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
-
 # SPEC-023 signed recommendation feeds served on the buyer mux at
 # /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
 # Files live in phase3-binary/dist/static/ in the repo. Deploy installs
@@ -236,7 +277,10 @@ STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 AUTOTUNE_RELEASE_MANIFEST="$DIST_DIR/../../phase3-binary/catalog/autotune/release.json"
 AUTOTUNE_TRUSTED_KEYS="$DIST_DIR/../../phase3-binary/catalog/autotune/trusted-keys.json"
+AUTOTUNE_TIER2_JSON="$DIST_DIR/../../phase3-binary/catalog/autotune/tier2-catalog.json"
 AUTOTUNE_RELEASE_VERIFY="$DIST_DIR/../../scripts/catalog-release.py"
+AUTOTUNE_TIER2_VERIFIER="$DIST_DIR/../../scripts/sign-catalog.go"
+CATALOG_SOURCE="${CATALOG_SOURCE:-$AUTOTUNE_TIER2_JSON}"
 
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify
 AUTOTUNE_RELEASE_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
@@ -259,10 +303,17 @@ import json, pathlib, sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["autotune-candidates.json"]["signer_key_id"])
 PY
 )"
+AUTOTUNE_TIER2_SHA256="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["tier2-catalog.json"]["sha256"])
+PY
+)"
+AUTOTUNE_RELEASE_MANIFEST_SHA256="$(shasum -a 256 "$AUTOTUNE_RELEASE_MANIFEST" | awk '{print $1}')"
 if ! printf '%s' "$AUTOTUNE_RELEASE_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
   echo "invalid autotune release_id: $AUTOTUNE_RELEASE_ID" >&2
   exit 1
 fi
+AUTOTUNE_RELEASE_DIR_NAME="$AUTOTUNE_RELEASE_ID-$(printf '%s' "$AUTOTUNE_RELEASE_MANIFEST_SHA256" | cut -c1-16)"
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
@@ -277,7 +328,8 @@ for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRRO
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
          "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG" \
-         "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_RELEASE_VERIFY"; do
+         "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_TIER2_JSON" \
+         "$AUTOTUNE_RELEASE_VERIFY" "$AUTOTUNE_TIER2_VERIFIER"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -654,9 +706,13 @@ else
   # The deadline is not a secret, but it is operator-owned runtime state. Read
   # it as data from the same EnvironmentFile systemd uses; do not source the
   # file. The deploy gate validates syntax and freshness before any upload.
-  MODEL_HASH_LEGACY_UNTIL_FOR_GATE="$($SSH \
-    'if [ -r /etc/macprovider/coordinator.env ]; then sed -n "s/^[[:space:]]*MODEL_HASH_LEGACY_UNTIL=//p" /etc/macprovider/coordinator.env | tail -n 1 | sed "s/^[[:space:]]*[\"'\"']//; s/[\"'\"'][[:space:]]*$//"; fi')" || {
+  MODEL_HASH_LEGACY_UNTIL_RAW="$($SSH \
+    'if [ -r /etc/macprovider/coordinator.env ]; then sed -n "s/^[[:space:]]*MODEL_HASH_LEGACY_UNTIL=//p" /etc/macprovider/coordinator.env | tail -n 1; fi')" || {
     echo "aborting deploy: could not read MODEL_HASH_LEGACY_UNTIL from Pearl coordinator.env" >&2
+    exit 5
+  }
+  MODEL_HASH_LEGACY_UNTIL_FOR_GATE="$(_parse_model_hash_legacy_until "$MODEL_HASH_LEGACY_UNTIL_RAW")" || {
+    echo "aborting deploy: could not parse MODEL_HASH_LEGACY_UNTIL from Pearl coordinator.env" >&2
     exit 5
   }
   env MODEL_HASH_LEGACY_UNTIL="$MODEL_HASH_LEGACY_UNTIL_FOR_GATE" \
@@ -702,12 +758,8 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 5
   fi
   if [ ! -f "$CATALOG_SOURCE" ]; then
-    echo "aborting deploy: configured tier2.catalog_path requires local catalog artifact, missing: $CATALOG_SOURCE" >&2
-    echo "  Override with CATALOG_SOURCE=<signed-catalog-json>" >&2
-    exit 5
-  fi
-  if ! command -v go >/dev/null 2>&1; then
-    echo "aborting deploy: go is required to verify the signed catalog before upload" >&2
+    echo "aborting deploy: configured tier2.catalog_path requires release-bound Tier-2 catalog artifact, missing: $CATALOG_SOURCE" >&2
+    echo "  Default source is $AUTOTUNE_TIER2_JSON; any override must match release.json." >&2
     exit 5
   fi
   TMP_CATALOG_PUBKEY="$(mktemp)"
@@ -717,11 +769,20 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # Cleanup of TMP_CATALOG_* happens in the unconditional EXIT trap (#244 R6 / #608).
   cp "$CATALOG_SOURCE" "$TMP_CATALOG_PINNED"
   CATALOG_PIN_SHA="$(shasum -a 256 "$TMP_CATALOG_PINNED" | awk '{print $1}')"
-  printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
-  go run "$DIST_DIR/../../scripts/sign-catalog.go" verify -public-key "$TMP_CATALOG_PUBKEY" "$TMP_CATALOG_PINNED" >/dev/null || {
-    echo "aborting deploy: signed catalog does not verify against tier2.catalog_public_key" >&2
+  if [ "$CATALOG_PIN_SHA" != "$AUTOTUNE_TIER2_SHA256" ]; then
+    echo "aborting deploy: Tier-2 source digest does not match release.json feed binding" >&2
+    echo "  source=$CATALOG_PIN_SHA release.json=$AUTOTUNE_TIER2_SHA256" >&2
     exit 5
-  }
+  fi
+  if ! cmp -s "$TMP_CATALOG_PINNED" "$AUTOTUNE_TIER2_JSON"; then
+    echo "aborting deploy: Tier-2 source bytes differ from canonical release envelope file $AUTOTUNE_TIER2_JSON" >&2
+    exit 5
+  fi
+  printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
+  # The canonical release verifier above already authenticated the exact
+  # canonical Tier-2 bytes with its fixed Go verifier and configured trust
+  # root. Digest equality plus cmp prove this pinned upload is those bytes;
+  # do not introduce a second PATH-selectable verifier here.
   # #608 Partial: refuse deploy when Tier-2 identity drifts from the autotune
   # release about to be activated. Overlapping model_id rows must agree on
   # artifact hash; Tier-2-only / autotune-only rows remain allowed for now.
@@ -735,9 +796,10 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     echo "aborting deploy: Tier-2 catalog conflicts with autotune release identity (#608)" >&2
     exit 5
   }
-  echo "  ok: pinned catalog sha256=$CATALOG_PIN_SHA verifies, binds to autotune release, and will install to $CATALOG_REMOTE_PATH"
+  echo "  ok: pinned release-bound catalog sha256=$CATALOG_PIN_SHA verifies, binds to autotune release, and will install to $CATALOG_REMOTE_PATH"
 else
-  echo "  tier2.catalog_path unset — public /catalog/current will return 404 by design"
+  echo "aborting deploy: tier2.catalog_path must be set for release-bound Tier-2 publish (#608 Step B)" >&2
+  exit 5
 fi
 
 log "step 1/9: confirm SSH + DNS"
@@ -1798,7 +1860,7 @@ BEGIN
            FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
            JOIN pg_attribute a
              ON a.attrelid = c.conrelid AND a.attnum = k.attnum
-       ) = ARRAY['provider_id', 'hardware_identity_hash', 'source']
+       ) = ARRAY['provider_id', 'hardware_identity_hash', 'source']::name[]
   ) THEN
     RAISE EXCEPTION 'hardware_verification_trust PRIMARY KEY is not (provider_id, hardware_identity_hash, source) (migration 019 not applied)';
   END IF;
@@ -2083,10 +2145,10 @@ $SSH "set -e
     cp -p /opt/macprovider/autotune/.previous-target \"\$_rollback_stage/catalog-previous-target\"
     touch \"\$_rollback_stage/had-previous-target\"
   fi
-  if [ ! -d /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_ID ]; then
+  if [ ! -d /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME ]; then
     touch \"\$_rollback_stage/release-was-absent\"
   fi
-  printf '%s' '$AUTOTUNE_RELEASE_ID' > \"\$_rollback_stage/release-id\"
+  printf '%s' '$AUTOTUNE_RELEASE_DIR_NAME' > \"\$_rollback_stage/release-id\"
   if systemctl is-active --quiet macprovider-coordinator; then
     touch \"\$_rollback_stage/service-was-active\"
   fi
@@ -2136,6 +2198,7 @@ case "$DEPLOY_TMP" in
     ;;
 esac
 log "  staging dir: $DEPLOY_TMP (root:root 0700)"
+$SSH "install -d -o root -g root -m 0700 $DEPLOY_TMP/scripts"
 
 $SCP "$BINARY"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
 $SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64"
@@ -2170,7 +2233,9 @@ $SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candida
 $SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
-$SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/catalog-release.py"
+$SCP "$AUTOTUNE_TIER2_JSON"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
+$SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/scripts/catalog-release.py"
+$SCP "$AUTOTUNE_TIER2_VERIFIER"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/scripts/sign-catalog.go"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   if [ -z "${TMP_CATALOG_PINNED:-}" ] || [ ! -f "$TMP_CATALOG_PINNED" ]; then
     echo "aborting deploy: pinned Tier-2 catalog snapshot missing before upload" >&2
@@ -2182,6 +2247,7 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 5
   fi
   $SCP "$TMP_CATALOG_PINNED" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
+  $SCP "$TMP_CATALOG_PUBKEY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.pub"
 fi
 
 # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
@@ -2253,9 +2319,9 @@ $SSH "set -e
   # Stage the complete immutable catalog release. Activation happens only
   # after the late connected-provider safeguard immediately before restart.
   _autotune_root=/opt/macprovider/autotune
-  _autotune_release=\$_autotune_root/releases/$AUTOTUNE_RELEASE_ID
+  _autotune_release=\$_autotune_root/releases/$AUTOTUNE_RELEASE_DIR_NAME
   _autotune_lock=\$_autotune_release.lock
-  _autotune_stage=\$_autotune_root/releases/.stage-$AUTOTUNE_RELEASE_ID-\$\$
+  _autotune_stage=\$_autotune_root/releases/.stage-$AUTOTUNE_RELEASE_DIR_NAME-\$\$
   install -d -o root -g macprovider -m 0750 \$_autotune_root \$_autotune_root/releases
   if ! mkdir \$_autotune_lock; then
     echo 'catalog release staging is already in progress for $AUTOTUNE_RELEASE_ID' >&2
@@ -2268,42 +2334,33 @@ $SSH "set -e
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig \$_autotune_stage/demand-rank.json.sig
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json \$_autotune_stage/autotune-candidates.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig \$_autotune_stage/autotune-candidates.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json \$_autotune_stage/tier2-catalog.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
-  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_stage
+  python3 $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_autotune_stage --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub
   sync
   if [ -e \$_autotune_release ]; then
     if ! diff -qr \$_autotune_stage \$_autotune_release >/dev/null; then
-      echo 'catalog release ID $AUTOTUNE_RELEASE_ID already exists with different bytes' >&2
+      echo 'catalog release envelope $AUTOTUNE_RELEASE_DIR_NAME already exists with different bytes' >&2
       exit 1
     fi
     rm -rf \$_autotune_stage
   else
     mv \$_autotune_stage \$_autotune_release
   fi
-  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_release
+  python3 $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_autotune_release --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub
   # First rollout: the new on-disk coordinator config already points at
   # autotune/current. Establish that path as soon as the immutable release is
   # staged so an abort before the late restart gate cannot leave the next
   # service restart without feeds. Existing rollouts remain untouched here.
   if [ ! -e \$_autotune_root/current ] && [ ! -L \$_autotune_root/current ]; then
-    ln -sfn releases/$AUTOTUNE_RELEASE_ID \$_autotune_root/current.bootstrap
+    install -o root -g macprovider -m 0640 \$_autotune_release/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
+    ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME \$_autotune_root/current.bootstrap
     mv -Tf \$_autotune_root/current.bootstrap \$_autotune_root/current
   fi
   rmdir \$_autotune_lock
   trap - EXIT
 "
-if [ -n "$CATALOG_REMOTE_PATH" ]; then
-  # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
-  # created in step 3 as root-owned 0750; root writes the catalog file
-  # into it. The destination is the hardcoded canonical path validated
-  # at startup; no operator-controlled value reaches the SSH command.
-  $SSH "set -e
-    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
-    flock -s 8
-    install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
-  "
-fi
 
 # nginx + Let's Encrypt strategy (issue #244 R1+R2+R3+R4 — TLS-safety hardening):
 #
@@ -2603,7 +2660,10 @@ $SSH "set -e
   printf '%s' \"\$_previous\" > \"\$_catalog_root/.previous-target\"
   chown root:macprovider \"\$_catalog_root/.previous-target\"
   chmod 0640 \"\$_catalog_root/.previous-target\"
-  ln -sfn releases/$AUTOTUNE_RELEASE_ID \"\$_catalog_root/current.next\"
+  install -o root -g macprovider -m 0640 \
+    \"\$_catalog_root/releases/$AUTOTUNE_RELEASE_DIR_NAME/tier2-catalog.json\" \
+    $CATALOG_REMOTE_PATH_CANONICAL
+  ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME \"\$_catalog_root/current.next\"
   mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"
 "
 log "step 7/9: enable + start coordinator service"
@@ -2733,6 +2793,7 @@ for STATIC_SPEC in \
 done
 cp "$AUTOTUNE_RELEASE_MANIFEST" "$STATIC_SMOKE_DIR/release.json"
 cp "$AUTOTUNE_TRUSTED_KEYS" "$STATIC_SMOKE_DIR/trusted-keys.json"
+cp "$AUTOTUNE_TIER2_JSON" "$STATIC_SMOKE_DIR/tier2-catalog.json"
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify-directory --directory "$STATIC_SMOKE_DIR"
 AUTOTUNE_STATUS_BODY="$STATIC_SMOKE_DIR/autotune-release-status.json"
 STATUS=$(curl -sS -o "$AUTOTUNE_STATUS_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN/v1/autotune-release")
@@ -2777,13 +2838,15 @@ CANARY_SSH=(
   -o ServerAliveCountMax=3
   "$CATALOG_CANARY_SSH_TARGET"
 )
-if ! "${CANARY_SSH[@]}" python3 - \
+run_catalog_canary_mac_proof() {
+  local timeout_s="$1"
+  _run_with_deadline_alarm "$timeout_s" "${CANARY_SSH[@]}" python3 - \
   "$CATALOG_CANARY_INSTALL_DIR" \
   "$CATALOG_CANARY_PROVIDER_ID" \
   "$AUTOTUNE_RELEASE_ID" \
   "$AUTOTUNE_POLICY_VERSION" \
   "$AUTOTUNE_CANDIDATE_SHA256" \
-  "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" > "$CANARY_INSTALLED_BODY" <<'PY'
+  "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" <<'PY'
 import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request
 
 (
@@ -2796,6 +2859,7 @@ import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request
 ) = sys.argv[1:]
 home = os.path.expanduser("~")
 nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
 
 def open_dir(path):
@@ -2818,7 +2882,7 @@ def open_dir(path):
         raise
 
 def read_regular_at(directory_fd, name, limit, require_owner=True):
-    fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+    fd = os.open(name, os.O_RDONLY | nofollow | nonblock, dir_fd=directory_fd)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -2912,7 +2976,9 @@ try:
     if not isinstance(arguments, list) or len(arguments) < 4 or arguments[1:3] != ["serve", "--config"]:
         raise SystemExit("canary provider LaunchAgent has unexpected ProgramArguments")
 
-    binary_fd = os.open("macprovider-cli", os.O_RDONLY | nofollow, dir_fd=install_fd)
+    binary_fd = os.open(
+        "macprovider-cli", os.O_RDONLY | nofollow | nonblock, dir_fd=install_fd
+    )
     binary_info = os.fstat(binary_fd)
     if not stat.S_ISREG(binary_info.st_mode) or binary_info.st_uid != os.getuid() or binary_info.st_mode & 0o111 == 0:
         raise SystemExit("canary installation binary is not a safe executable")
@@ -2988,6 +3054,7 @@ try:
         "autotune-candidates.json.sig",
         "demand-rank.json",
         "demand-rank.json.sig",
+        "tier2-catalog.json",
     )
     hashes = {}
     for name in names:
@@ -3006,13 +3073,32 @@ finally:
         if fd is not None:
             os.close(fd)
 PY
-then
-  echo "SPEC-023 canary failed: could not read exact installed catalog bytes from $CATALOG_CANARY_SSH_TARGET" >&2
-  exit 1
-fi
+}
 
-# Bind coordinator admission to the exact session observed on the proved Mac.
-read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY < <(python3 - "$CANARY_INSTALLED_BODY" <<'PY'
+# A coordinator restart can make a healthy provider rotate its PID and assigned
+# session while its recovery watchdog drains in-flight work. Retry the complete
+# Mac proof and bind each admission query to the session from that same attempt;
+# never carry an assigned_id across retries. This mirrors the signed updater's
+# full-proof retry and keeps every success predicate fail-closed.
+CANARY_PROVIDER_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CATALOG_CANARY_PROVIDER_ID")
+(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
+CANARY_OK=0
+CANARY_LAST_ERROR="canary proof did not start"
+CANARY_STATUS="000"
+CANARY_ATTEMPT=1
+CANARY_MAX_ATTEMPTS=36
+CANARY_RECOVERY_TIMEOUT_S=180
+CANARY_RECOVERY_DEADLINE=$((SECONDS + CANARY_RECOVERY_TIMEOUT_S))
+while [ "$CANARY_ATTEMPT" -le "$CANARY_MAX_ATTEMPTS" ] && [ "$SECONDS" -lt "$CANARY_RECOVERY_DEADLINE" ]; do
+  rm -f "$CANARY_INSTALLED_BODY" "$CANARY_POOL_BODY"
+  CANARY_PROOF_ERROR="$STATIC_SMOKE_DIR/catalog-canary-proof.err"
+  CANARY_REMAINING_S=$((CANARY_RECOVERY_DEADLINE - SECONDS))
+  CANARY_PROOF_TIMEOUT_S=45
+  if [ "$CANARY_REMAINING_S" -lt "$CANARY_PROOF_TIMEOUT_S" ]; then
+    CANARY_PROOF_TIMEOUT_S="$CANARY_REMAINING_S"
+  fi
+  if run_catalog_canary_mac_proof "$CANARY_PROOF_TIMEOUT_S" > "$CANARY_INSTALLED_BODY" 2> "$CANARY_PROOF_ERROR"; then
+    CANARY_BINDING=$(python3 - "$CANARY_INSTALLED_BODY" <<'PY'
 import json, pathlib, re, sys
 proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assigned_id = proof.get("assigned_id")
@@ -3023,21 +3109,16 @@ if re.fullmatch(r"[0-9a-f]{64}", str(row_identity).lower()) is None:
     raise SystemExit("canary proof has no exact catalog row identity")
 print(assigned_id, str(row_identity).lower())
 PY
-) || {
-  echo "SPEC-023 canary failed: could not bind the live Mac session and catalog row" >&2
-  exit 1
-}
-CANARY_PROVIDER_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CATALOG_CANARY_PROVIDER_ID")
-CANARY_ASSIGNED_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CANARY_ASSIGNED_ID")
-(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
-CANARY_OK=0
-for CANARY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
-    "https://$DOMAIN/v1/pool/check?provider_id=$CANARY_PROVIDER_QUERY&assigned_id=$CANARY_ASSIGNED_QUERY&details=deployment" || true)
-  if [ "$STATUS" = "200" ] && python3 - \
-    "$CANARY_POOL_BODY" "$CATALOG_CANARY_PROVIDER_ID" "$CANARY_ASSIGNED_ID" \
-    "$AUTOTUNE_RELEASE_ID" "$AUTOTUNE_POLICY_VERSION" "$AUTOTUNE_CANDIDATE_SHA256" \
-    "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" "$CANARY_CATALOG_ROW_IDENTITY" <<'PY'
+) || CANARY_BINDING=""
+    if [ -n "$CANARY_BINDING" ]; then
+      read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY <<< "$CANARY_BINDING"
+      CANARY_ASSIGNED_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CANARY_ASSIGNED_ID")
+      CANARY_STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
+        "https://$DOMAIN/v1/pool/check?provider_id=$CANARY_PROVIDER_QUERY&assigned_id=$CANARY_ASSIGNED_QUERY&details=deployment" || true)
+      if [ "$CANARY_STATUS" = "200" ] && python3 - \
+        "$CANARY_POOL_BODY" "$CATALOG_CANARY_PROVIDER_ID" "$CANARY_ASSIGNED_ID" \
+        "$AUTOTUNE_RELEASE_ID" "$AUTOTUNE_POLICY_VERSION" "$AUTOTUNE_CANDIDATE_SHA256" \
+        "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" "$CANARY_CATALOG_ROW_IDENTITY" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 if (
@@ -3054,16 +3135,33 @@ if (
 ):
     raise SystemExit(1)
 PY
-  then
-    CANARY_OK=1
-    break
+      then
+        CANARY_OK=1
+        break
+      fi
+      CANARY_LAST_ERROR="exact session $CANARY_ASSIGNED_ID was not buyer-serving (status=$CANARY_STATUS)"
+    else
+      CANARY_LAST_ERROR="could not bind the live Mac session and catalog row"
+    fi
+  else
+    CANARY_PROOF_RC=$?
+    CANARY_LAST_ERROR="trusted Mac proof failed (exit=$CANARY_PROOF_RC)"
   fi
-  sleep 5
+  CANARY_REMAINING_S=$((CANARY_RECOVERY_DEADLINE - SECONDS))
+  if [ "$CANARY_ATTEMPT" -lt "$CANARY_MAX_ATTEMPTS" ] && [ "$CANARY_REMAINING_S" -gt 0 ]; then
+    echo "  waiting for exact catalog canary recovery ($CANARY_ATTEMPT/$CANARY_MAX_ATTEMPTS): $CANARY_LAST_ERROR" >&2
+    CANARY_SLEEP_S=5
+    if [ "$CANARY_REMAINING_S" -lt "$CANARY_SLEEP_S" ]; then
+      CANARY_SLEEP_S="$CANARY_REMAINING_S"
+    fi
+    sleep "$CANARY_SLEEP_S"
+  fi
+  CANARY_ATTEMPT=$((CANARY_ATTEMPT + 1))
 done
 rm -f "$CANARY_CURL_CONFIG"
 if [ "$CANARY_OK" != "1" ]; then
-  echo "SPEC-023 canary failed: exact session $CANARY_ASSIGNED_ID did not return buyer-serving admission" >&2
-  echo "  last status=$STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
+  echo "SPEC-023 canary failed after $((CANARY_ATTEMPT - 1)) full proof attempts within ${CANARY_RECOVERY_TIMEOUT_S}s: $CANARY_LAST_ERROR" >&2
+  echo "  last status=$CANARY_STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
   exit 1
 fi
 
@@ -3076,7 +3174,8 @@ if ! python3 - \
   "$STATIC_AUTOTUNE_JSON" \
   "$STATIC_AUTOTUNE_SIG" \
   "$STATIC_DEMAND_JSON" \
-  "$STATIC_DEMAND_SIG" <<'PY'
+  "$STATIC_DEMAND_SIG" \
+  "$AUTOTUNE_TIER2_JSON" <<'PY'
 import hashlib, json, pathlib, re, sys
 
 proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))

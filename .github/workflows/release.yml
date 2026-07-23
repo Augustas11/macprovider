@@ -103,10 +103,22 @@ jobs:
         # without CGO and carried as unsigned inputs into the protected signer.
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: "1.26.4"
+          go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: |
             phase4-coordinator/go.sum
             phase5-gateway/go.sum
+
+      - name: Seal the Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /usr/local/lib/macprovider-go-verifier
+          sudo install -d -o root -g wheel -m 0755 /usr/local/lib/macprovider-go-verifier
+          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/
+          sudo chown -R root:wheel /usr/local/lib/macprovider-go-verifier
+          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier
+          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go
 
       - name: Build Pearl linux-amd64 binaries
         shell: bash
@@ -116,18 +128,18 @@ jobs:
           (
             cd phase4-coordinator
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-              go build -mod=readonly -trimpath \
+              go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w -X main.version=$tag" \
               -o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-              go build -mod=readonly -trimpath \
+              go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w" \
               -o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
           )
           (
             cd phase5-gateway
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-              go build -mod=readonly -trimpath \
+              go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w -X main.version=$tag" \
               -o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/gateway
           )
@@ -138,11 +150,6 @@ jobs:
           grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
           grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
           grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
-          for binary in coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64; do
-            go version -m "$RUNNER_TEMP/$binary" > "$RUNNER_TEMP/$binary.buildinfo"
-            grep -Fq 'GOOS=linux' "$RUNNER_TEMP/$binary.buildinfo"
-            grep -Fq 'GOARCH=amd64' "$RUNNER_TEMP/$binary.buildinfo"
-          done
           strings "$RUNNER_TEMP/coordinator-linux-amd64" > "$RUNNER_TEMP/coordinator-linux-amd64.strings"
           strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-linux-amd64.strings"
           grep -Fq "$tag" "$RUNNER_TEMP/coordinator-linux-amd64.strings"
@@ -172,7 +179,8 @@ jobs:
         run: |
           set -euo pipefail
           cd phase3-binary/dist
-          MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \
+          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
+            MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \
             ./package.sh "${{ steps.release_source.outputs.tag }}"
 
       - name: Build Malibu.app
@@ -219,6 +227,16 @@ jobs:
             unsigned-release-inputs/release-toolchain.json \
             unsigned-release-inputs/unsigned-release-manifest.json \
             "${unsigned_assets[@]}"
+
+      - name: Verify staged Pearl Go binaries
+        env:
+          EXPECTED_REVISION: ${{ steps.release_source.outputs.commit }}
+        shell: bash
+        run: |
+          python3 scripts/verify-pearl-go-binaries.py \
+            unsigned-release-inputs/coordinator-linux-amd64 \
+            unsigned-release-inputs/coordinator-cli-linux-amd64 \
+            unsigned-release-inputs/gateway-linux-amd64
 
       - name: Upload unsigned build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -850,6 +868,7 @@ jobs:
             has_binary=0
             has_catalog_manifest=0
             has_catalog_keyring=0
+            has_catalog_tier2=0
             has_catalog_candidates=0
             has_catalog_candidates_signature=0
             has_catalog_demand=0
@@ -911,6 +930,9 @@ jobs:
                 catalog-release/trusted-keys.json)
                   has_catalog_keyring=$((has_catalog_keyring + 1))
                   ;;
+                catalog-release/tier2-catalog.json)
+                  has_catalog_tier2=$((has_catalog_tier2 + 1))
+                  ;;
                 catalog-release/autotune-candidates.json)
                   has_catalog_candidates=$((has_catalog_candidates + 1))
                   ;;
@@ -939,6 +961,7 @@ jobs:
             }
             [ "$has_catalog_manifest" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/release.json" >&2; exit 1; }
             [ "$has_catalog_keyring" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/trusted-keys.json" >&2; exit 1; }
+            [ "$has_catalog_tier2" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/tier2-catalog.json" >&2; exit 1; }
             [ "$has_catalog_candidates" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/autotune-candidates.json" >&2; exit 1; }
             [ "$has_catalog_candidates_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/autotune-candidates.json.sig" >&2; exit 1; }
             [ "$has_catalog_demand" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/demand-rank.json" >&2; exit 1; }
@@ -1045,6 +1068,7 @@ jobs:
           compatibility_artifact_index="compatibility-artifact-index.json"
           catalog_manifest_src="phase3-binary/catalog/autotune/release.json"
           catalog_keys_src="phase3-binary/catalog/autotune/trusted-keys.json"
+          catalog_tier2_src="phase3-binary/catalog/autotune/tier2-catalog.json"
           catalog_candidates_src="phase3-binary/dist/static/autotune-candidates.json"
           catalog_candidates_sig_src="phase3-binary/dist/static/autotune-candidates.json.sig"
           catalog_demand_src="phase3-binary/dist/static/demand-rank.json"
@@ -1066,6 +1090,7 @@ jobs:
           release_assets=("$tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")
           cp "$catalog_manifest_src" release.json
           cp "$catalog_keys_src" trusted-keys.json
+          cp "$catalog_tier2_src" tier2-catalog.json
           cp "$catalog_candidates_src" autotune-candidates.json
           cp "$catalog_candidates_sig_src" autotune-candidates.json.sig
           cp "$catalog_demand_src" demand-rank.json
@@ -1073,6 +1098,7 @@ jobs:
           catalog_assets=(
             release.json
             trusted-keys.json
+            tier2-catalog.json
             autotune-candidates.json
             autotune-candidates.json.sig
             demand-rank.json
@@ -1136,6 +1162,7 @@ jobs:
           catalog_names = (
               "release.json",
               "trusted-keys.json",
+              "tier2-catalog.json",
               "autotune-candidates.json",
               "autotune-candidates.json.sig",
               "demand-rank.json",
@@ -1214,6 +1241,7 @@ jobs:
             --artifact "compatibility_manifest=$compatibility_manifest"
             --artifact "catalog_manifest=release.json"
             --artifact "catalog_trusted_keys=trusted-keys.json"
+            --artifact "catalog_tier2=tier2-catalog.json"
             --artifact "catalog_candidates=autotune-candidates.json"
             --artifact "catalog_candidates_signature=autotune-candidates.json.sig"
             --artifact "catalog_demand=demand-rank.json"

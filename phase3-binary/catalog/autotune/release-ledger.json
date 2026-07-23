@@ -103,6 +103,12 @@
           "sha256": "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2",
           "signer_key_id": "streamvc-autotune-static-v4",
           "version": "published-2026-07-10-catalog-recovery-v1"
+        },
+        "tier2-catalog.json": {
+          "bytes": 3449,
+          "sha256": "ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92",
+          "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
+          "version": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b"
         }
       },
       "generated_at": "2026-07-10T19:00:00Z",

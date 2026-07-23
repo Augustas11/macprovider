@@ -16,7 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -30,9 +30,14 @@ MANIFEST_PATH = CATALOG_DIR / "release.json"
 LEDGER_PATH = CATALOG_DIR / "release-ledger.json"
 TIER2_BINDING_PATH = CATALOG_DIR / "tier2-identity-binding.json"
 TIER2_BINDING_SCHEMA = "macprovider.tier2-identity-binding.v1"
+TIER2_CATALOG_PATH = CATALOG_DIR / "tier2-catalog.json"
+TIER2_CATALOG_FEED_NAME = "tier2-catalog.json"
+LEGACY_LEDGER_FEEDS = frozenset({"autotune-candidates.json", "demand-rank.json"})
+TIER2_BOUND_LEDGER_FEEDS = LEGACY_LEDGER_FEEDS | {TIER2_CATALOG_FEED_NAME}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 TIER2_HASH_SCOPES = {"primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental"}
+TIER2_SIG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{86}$")
 MODEL_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
@@ -40,6 +45,18 @@ INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 OPENSSL_PROBE_TIMEOUT_SECONDS = 5
 OPENSSL_VERIFY_TIMEOUT_SECONDS = 15
+SIGN_CATALOG_GO_PATH = ROOT / "scripts" / "sign-catalog.go"
+COORDINATOR_YAML_PATH = ROOT / "phase4-coordinator" / "dist" / "coordinator.yaml"
+GO_PROBE_TIMEOUT_SECONDS = 5
+TIER2_SIGN_VERIFY_TIMEOUT_SECONDS = 60
+FIXED_GO_EXECUTABLES = (
+    "/opt/homebrew/bin/go",
+    "/usr/local/go/bin/go",
+    "/usr/local/bin/go",
+    "/usr/local/lib/macprovider-go-verifier/bin/go",
+)
+ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES = frozenset({"/usr/local/lib/macprovider-go-verifier/bin/go"})
+REQUIRE_SEALED_GO_ENV = "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER"
 
 
 class CatalogError(RuntimeError):
@@ -516,6 +533,9 @@ def manifest(
     demand_obj: dict,
     sidecar_directory: pathlib.Path = STATIC_DIR,
     signer_key_id: str | None = None,
+    tier2: bytes | None = None,
+    tier2_obj: dict | None = None,
+    tier2_signer_key_id: str | None = None,
 ) -> bytes:
     signer_ids = {}
     if signer_key_id is not None:
@@ -528,21 +548,38 @@ def manifest(
             sidecar_path = sidecar_directory / f"{name}.sig"
             if sidecar_path.exists():
                 signer_ids[name] = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)[0]
+    feeds = {
+        "autotune-candidates.json": {
+            "sha256": sha256(candidate), "bytes": len(candidate), "version": candidate_obj["version"],
+            "signer_key_id": signer_ids.get("autotune-candidates.json"),
+        },
+        "demand-rank.json": {
+            "sha256": sha256(demand), "bytes": len(demand), "version": demand_obj["version"],
+            "signer_key_id": signer_ids.get("demand-rank.json"),
+        },
+    }
+    if tier2 is not None:
+        if tier2_obj is None:
+            fail("manifest: tier2 bytes provided without a parsed tier2_obj")
+        if not tier2_signer_key_id:
+            fail("manifest: tier2 bytes provided without an authenticated tier2_signer_key_id")
+        # Tier-2 is versioned by its own catalog_id, not the autotune release
+        # train, so it is bound as a feed member without claiming release_id
+        # identity (#608 Partial: ledger feed membership). `signer_key_id`
+        # comes from the caller's authentication result (verify_tier2_signature),
+        # NOT from tier2_obj["signature"]["key_id"]: that field is metadata
+        # alongside the signature, not part of the signed canonical body in
+        # sign-catalog.go, so it is not itself authenticated (#608 audit).
+        feeds[TIER2_CATALOG_FEED_NAME] = {
+            "sha256": sha256(tier2), "bytes": len(tier2), "version": tier2_obj["catalog_id"],
+            "signer_key_id": tier2_signer_key_id,
+        }
     value = {
         "schema_version": "macprovider.autotune-release.v1",
         "release_id": candidate_obj["version"],
         "generated_at": candidate_obj["generated_at"],
         "policy_version": candidate_obj["policy_version"],
-        "feeds": {
-            "autotune-candidates.json": {
-                "sha256": sha256(candidate), "bytes": len(candidate), "version": candidate_obj["version"],
-                "signer_key_id": signer_ids.get("autotune-candidates.json"),
-            },
-            "demand-rank.json": {
-                "sha256": sha256(demand), "bytes": len(demand), "version": demand_obj["version"],
-                "signer_key_id": signer_ids.get("demand-rank.json"),
-            },
-        },
+        "feeds": feeds,
     }
     return json.dumps(value, indent=2, sort_keys=True).encode("utf-8") + b"\n"
 
@@ -610,11 +647,21 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
         if not isinstance(record["generated_at"], str) or (record["policy_version"] is not None and not isinstance(record["policy_version"], str)) or not isinstance(record["feeds"], dict):
             fail(f"{label}: invalid release entry {release_id!r}")
         parse_time(record["generated_at"], f"{label} release {release_id}")
-        expected_feeds = {"autotune-candidates.json", "demand-rank.json"}
-        exact_keys(record["feeds"], expected_feeds, expected_feeds, f"{label} release {release_id} feeds")
+        feed_names = set(record["feeds"])
+        # Historical-safe: releases published before #608 Tier-2 ledger
+        # membership keep their original 2-feed shape. Only the 3-feed shape
+        # (with tier2-catalog.json bound) is accepted for anything new.
+        if feed_names not in (LEGACY_LEDGER_FEEDS, TIER2_BOUND_LEDGER_FEEDS):
+            fail(
+                f"{label}: release {release_id!r} feeds must be exactly "
+                f"{sorted(LEGACY_LEDGER_FEEDS)} (historical) or "
+                f"{sorted(TIER2_BOUND_LEDGER_FEEDS)} (Tier-2 bound)"
+            )
         for feed_name, feed in record["feeds"].items():
             validate_ledger_feed(feed, f"{label} release {release_id} {feed_name}")
-            if feed["version"] != release_id:
+            # tier2-catalog.json is versioned by its own catalog_id, not the
+            # autotune release train (see manifest()).
+            if feed_name != TIER2_CATALOG_FEED_NAME and feed["version"] != release_id:
                 fail(f"{label}: feed version does not match release ID {release_id!r}")
     for release_id, tombstone in value["tombstones"].items():
         if not isinstance(release_id, str) or not release_id or not isinstance(tombstone, dict):
@@ -686,17 +733,47 @@ def generated_rejected_releases_go(ledger: dict[str, dict]) -> str:
     )
 
 
+def is_tier2_enrichment(base_record: dict, current_record: dict) -> bool:
+    """Return true only for the one-way #608 legacy 2-feed -> Tier-2-bound shape.
+
+    Existing current releases may be enriched with authenticated Tier-2 bytes
+    without re-signing the unchanged autotune/demand feed bytes. No other
+    rebinding is allowed: the two historical feed records, generated_at, and
+    policy_version must be byte-for-byte identical.
+    """
+    if base_record.get("generated_at") != current_record.get("generated_at"):
+        return False
+    if base_record.get("policy_version") != current_record.get("policy_version"):
+        return False
+    base_feeds = base_record.get("feeds")
+    current_feeds = current_record.get("feeds")
+    if not isinstance(base_feeds, dict) or not isinstance(current_feeds, dict):
+        return False
+    if set(base_feeds) != LEGACY_LEDGER_FEEDS or set(current_feeds) != TIER2_BOUND_LEDGER_FEEDS:
+        return False
+    for feed_name in LEGACY_LEDGER_FEEDS:
+        if current_feeds.get(feed_name) != base_feeds.get(feed_name):
+            return False
+    return True
+
+
 def require_ledger_evolution(base: dict[str, dict], current: dict[str, dict]) -> None:
     for release_id, base_record in base["releases"].items():
         if release_id not in current["releases"]:
             fail(f"release ledger: published release {release_id!r} was removed")
-        if current["releases"][release_id] != base_record:
+        if current["releases"][release_id] != base_record and not is_tier2_enrichment(base_record, current["releases"][release_id]):
             fail(f"release ledger: published release {release_id!r} was rebound to different content")
     for release_id, base_tombstone in base["tombstones"].items():
         if release_id not in current["tombstones"]:
             fail(f"release ledger: tombstone {release_id!r} was removed")
         if current["tombstones"][release_id] != base_tombstone:
             fail(f"release ledger: tombstone {release_id!r} was changed")
+    for release_id, current_record in current["releases"].items():
+        if set(current_record["feeds"]) == LEGACY_LEDGER_FEEDS and current_record != base["releases"].get(release_id):
+            fail(
+                f"release ledger: new release {release_id!r} is missing mandatory "
+                f"{TIER2_CATALOG_FEED_NAME!r} feed membership"
+            )
 
 
 def base_release_ledger() -> dict[str, dict]:
@@ -829,6 +906,345 @@ def validate_tier2_identity_binding(data: bytes, candidate: bytes, candidate_obj
     if data != derive_tier2_identity_binding(candidate, candidate_obj):
         fail("tier2 identity binding: generated drift from autotune candidates")
     return value
+
+
+def validate_tier2_catalog(data: bytes) -> dict:
+    """Structural validation of a signed Tier-2 catalog (scripts/sign-catalog.go shape).
+
+    This locks the JSON shape (fields, hash format, signature envelope) so
+    `generate`/`verify` can safely record `signer_key_id` + digest as a
+    release-ledger feed member (#608 Partial: ledger feed membership).
+    It does not authenticate the Ed25519 signature bytes —
+    every caller that trusts the catalog as "signed" (`generate`, `verify`,
+    `verify_directory`) MUST also call `verify_tier2_signature` on the same
+    bytes before recording `signer_key_id` anywhere. Cross-catalog identity
+    agreement is enforced separately by `check_tier2_binding`.
+    """
+    value = strict_json(data, "tier2-catalog")
+    top = {"catalog_id", "issued_at", "expires_at", "models", "signature", "version"}
+    exact_keys(value, top, top, "tier2-catalog")
+    if not isinstance(value["catalog_id"], str) or not value["catalog_id"].strip():
+        fail("tier2-catalog: catalog_id required")
+    parse_time(value["issued_at"], "tier2-catalog issued_at")
+    parse_time(value["expires_at"], "tier2-catalog expires_at")
+    issued = datetime.fromisoformat(value["issued_at"].replace("Z", "+00:00"))
+    expires = datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00"))
+    if issued >= expires:
+        fail("tier2-catalog: issued_at must be before expires_at")
+    if datetime.now(timezone.utc) >= expires:
+        fail("tier2-catalog: expires_at must be in the future (catalog has expired)")
+    version = value["version"]
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        fail("tier2-catalog: version must be 1")
+    models = value["models"]
+    if not isinstance(models, list) or not models:
+        fail("tier2-catalog: models required")
+    seen_models: set[str] = set()
+    model_fields = {"artifact_kind", "hash_scope", "model_id", "min_ram_gb", "notes", "sha256", "source"}
+    model_required = {"artifact_kind", "hash_scope", "model_id", "sha256", "source"}
+    for idx, entry in enumerate(models):
+        if not isinstance(entry, dict):
+            fail(f"tier2-catalog: models[{idx}] must be an object")
+        exact_keys(entry, model_fields, model_required, f"tier2-catalog models[{idx}]")
+        if entry["artifact_kind"] != "mlx_weight_file":
+            fail(f"tier2-catalog models[{idx}]: unsupported artifact_kind")
+        if not isinstance(entry["hash_scope"], str) or entry["hash_scope"] not in TIER2_HASH_SCOPES:
+            fail(f"tier2-catalog models[{idx}]: unsupported hash_scope")
+        model_id = entry["model_id"]
+        if not isinstance(model_id, str) or not model_id.strip():
+            fail(f"tier2-catalog models[{idx}]: model_id required")
+        normalized = model_id.lower().strip()
+        if normalized in seen_models:
+            fail(f"tier2-catalog models[{idx}]: duplicate model_id {model_id!r}")
+        seen_models.add(normalized)
+        if not isinstance(entry["sha256"], str) or not HEX64.fullmatch(entry["sha256"]):
+            fail(f"tier2-catalog models[{idx}]: sha256 must be lowercase 64-hex")
+        if not isinstance(entry["source"], str) or not entry["source"].strip():
+            fail(f"tier2-catalog models[{idx}]: source required")
+        min_ram = entry.get("min_ram_gb")
+        if min_ram is not None and (not isinstance(min_ram, int) or isinstance(min_ram, bool) or min_ram < 1):
+            fail(f"tier2-catalog models[{idx}]: min_ram_gb must be a positive integer")
+        notes = entry.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            fail(f"tier2-catalog models[{idx}]: notes must be a string")
+    signature = value["signature"]
+    if not isinstance(signature, dict):
+        fail("tier2-catalog: signature must be an object")
+    exact_keys(signature, {"alg", "key_id", "sig"}, {"alg", "key_id", "sig"}, "tier2-catalog signature")
+    if signature["alg"] != "Ed25519":
+        fail("tier2-catalog: signature.alg must be Ed25519")
+    if not isinstance(signature["key_id"], str) or not signature["key_id"].strip():
+        fail("tier2-catalog: signature.key_id required")
+    if not isinstance(signature["sig"], str) or not signature["sig"].strip():
+        fail("tier2-catalog: signature.sig required")
+    if not TIER2_SIG_PATTERN.fullmatch(signature["sig"]):
+        fail(
+            "tier2-catalog: signature.sig must be exactly 86 unpadded base64url "
+            "characters ([A-Za-z0-9_-]), matching Go's ed25519+RawURLEncoding output"
+        )
+    canonical_urlsafe_b64_decode(signature["sig"], 64, "tier2-catalog: signature.sig")
+    return value
+
+
+def _yaml_block_value(text: str, block: str, key: str) -> str | None:
+    """Read `block.key` from a simple flat YAML mapping.
+
+    Mirrors `yaml_block_value` in phase4-coordinator/dist/deploy-pearl-vps.sh
+    so both tools agree on the same coordinator.yaml without adding a PyYAML
+    dependency to this script.
+    """
+    block_start = re.compile(r"^[ \t]*" + re.escape(block) + r":[ \t]*$")
+    top_level = re.compile(r"^[^\s#][^:]*:")
+    key_line = re.compile(r"^[ \t]*" + re.escape(key) + r":[ \t]*(.*)$")
+    in_block = False
+    for raw_line in text.splitlines():
+        line = re.sub(r"[ \t]+#.*$", "", raw_line)
+        if not in_block:
+            if block_start.match(line):
+                in_block = True
+            continue
+        if top_level.match(line):
+            break
+        match = key_line.match(line)
+        if match:
+            return match.group(1).strip().strip("\"'")
+    return None
+
+
+def canonical_urlsafe_b64_decode(value: str, expected_len: int, label: str) -> bytes:
+    """Decode unpadded base64url and reject any input that is not itself the
+    canonical encoding of the decoded bytes.
+
+    Plain `base64.urlsafe_b64decode` tolerates trailing-character
+    malleability: the last symbol's unused low bits are ignored, so e.g. two
+    distinct 86-character strings can decode to the same 64-byte Ed25519
+    signature, or a non-canonical string can still decode to a valid-length
+    key. Re-encoding the decoded bytes and requiring an exact match pins the
+    accepted alphabet to exactly what Go's `RawURLEncoding` would emit
+    (#608 audit).
+    """
+    padded = value + "=" * (-len(value) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded)
+    except (ValueError, TypeError) as exc:
+        fail(f"{label} is not valid base64url: {exc}")
+    if len(decoded) != expected_len:
+        fail(f"{label} must decode to exactly {expected_len} bytes")
+    if base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii") != value:
+        fail(f"{label} is not canonically encoded (non-canonical base64url padding bits)")
+    return decoded
+
+
+def require_trusted_regular_input(path: pathlib.Path, label: str, max_bytes: int) -> None:
+    """Reject link/substitution hazards on files used as trust authority."""
+    if not path.is_absolute() or ".." in path.parts:
+        fail(f"{label} must use an absolute normalized path")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        fail(f"{label} cannot be inspected: {exc}")
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_size <= 0
+        or metadata.st_size > max_bytes
+    ):
+        fail(f"{label} must be a bounded regular non-symlink single-link file")
+    if os.geteuid() != 0:
+        return
+    current = pathlib.Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            component = current.lstat()
+        except OSError as exc:
+            fail(f"{label} path component {current} cannot be inspected: {exc}")
+        if component.st_uid != 0 or stat.S_ISLNK(component.st_mode):
+            fail(f"{label} path must be root-owned and symlink-free when privileged: {current}")
+        writable = component.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        sticky_root_directory = stat.S_ISDIR(component.st_mode) and component.st_mode & stat.S_ISVTX
+        if writable and not sticky_root_directory:
+            fail(f"{label} path is group/world-writable when privileged: {current}")
+
+
+def load_tier2_trusted_public_key(
+    public_key_path: pathlib.Path | None = None,
+    coordinator_config_path: pathlib.Path | None = None,
+) -> str:
+    """Resolve the trusted Tier-2 Ed25519 public key used to authenticate a
+    signed `tier2-catalog.json` before it can be trusted as a release feed
+    member.
+
+    Reads `tier2.catalog_public_key` from the same committed
+    `phase4-coordinator/dist/coordinator.yaml` that `deploy-pearl-vps.sh`
+    pins before upload, so `catalog-release.py` and the deploy pipeline
+    agree on one trusted key. Deliberately no environment-variable override:
+    an ambient env var would let anything that can set process environment
+    (not just a reviewed PR touching the committed trust root) swap the
+    trusted key. Tests instead monkeypatch the module-level
+    `COORDINATOR_YAML_PATH` constant, the same pattern already used for
+    `TIER2_CATALOG_PATH`.
+    """
+    if public_key_path is not None and coordinator_config_path is not None:
+        fail("tier2-catalog: specify only one explicit Tier-2 trust-root source")
+    explicit_path = public_key_path or coordinator_config_path
+    if explicit_path is not None:
+        source = str(explicit_path)
+        size_limit = 1024 if public_key_path is not None else 1024 * 1024
+        require_trusted_regular_input(
+            explicit_path,
+            f"tier2-catalog: trusted Tier-2 public key source {source}",
+            size_limit,
+        )
+        text = explicit_path.read_text()
+        candidate = (
+            text.strip()
+            if public_key_path is not None
+            else (_yaml_block_value(text, "tier2", "catalog_public_key") or "").strip()
+        )
+        if not candidate:
+            fail(f"tier2-catalog: tier2.catalog_public_key is empty in {source}")
+        canonical_urlsafe_b64_decode(candidate, 32, f"tier2-catalog: trusted public key in {source}")
+        return candidate
+    source = str(COORDINATOR_YAML_PATH)
+    require_trusted_regular_input(
+        COORDINATOR_YAML_PATH,
+        f"tier2-catalog: configured Tier-2 public key source {source}",
+        1024 * 1024,
+    )
+    candidate = (_yaml_block_value(COORDINATOR_YAML_PATH.read_text(), "tier2", "catalog_public_key") or "").strip()
+    if not candidate:
+        fail(f"tier2-catalog: tier2.catalog_public_key is empty in {source}; cannot authenticate signed Tier-2 catalogs")
+    canonical_urlsafe_b64_decode(candidate, 32, f"tier2-catalog: trusted public key in {source}")
+    return candidate
+
+
+def go_executable() -> str:
+    """Locate a trusted Go toolchain executable for `verify_tier2_signature`.
+
+    Mirrors `openssl_executable()`'s hardening where it matters for Tier-2:
+    no environment override, no PATH-selected binary, a fixed absolute
+    candidate list, a root-ownership check when running privileged, and a
+    version probe before trusting the binary. Tier-2 authenticity must not
+    depend on ambient process environment.
+    """
+    sealed_requirement = os.environ.get(REQUIRE_SEALED_GO_ENV)
+    if sealed_requirement not in (None, "1"):
+        fail(f"{REQUIRE_SEALED_GO_ENV} must be unset or exactly 1")
+    require_sealed = sealed_requirement == "1"
+
+    candidates = [
+        candidate
+        for candidate in FIXED_GO_EXECUTABLES
+        if candidate in ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
+    ] + [
+        candidate
+        for candidate in FIXED_GO_EXECUTABLES
+        if candidate not in ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
+    ]
+
+    checked: list[str] = []
+    for candidate in candidates:
+        if not candidate or candidate in checked:
+            continue
+        checked.append(candidate)
+        sealed_candidate = candidate in ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
+        if sealed_candidate:
+            if not os.path.lexists(candidate):
+                if require_sealed:
+                    fail(f"required sealed Go verifier toolchain is missing: {candidate}")
+                continue
+            if not root_trusted_executable(candidate):
+                fail(f"sealed Go verifier toolchain is not root-trusted: {candidate}")
+        elif os.geteuid() == 0 and not root_trusted_executable(candidate):
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=GO_PROBE_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if sealed_candidate:
+                fail(f"sealed Go verifier toolchain cannot execute: {candidate}")
+            continue
+        if result.returncode == 0 and re.match(r"^go version go\d", result.stdout):
+            return candidate
+        if sealed_candidate:
+            fail(f"sealed Go verifier toolchain failed its version probe: {candidate}")
+
+    fail("a Go toolchain is required to authenticate the signed Tier-2 catalog's Ed25519 signature")
+
+
+def require_trusted_verifier_source(path: pathlib.Path) -> None:
+    """Reject substituted verifier source before treating `go run` as proof."""
+    require_trusted_regular_input(
+        path,
+        f"tier2-catalog: signature verifier source {path}",
+        1024 * 1024,
+    )
+
+
+def tier2_trusted_key_fingerprint(public_key_b64: str) -> str:
+    """Stable identifier for a trusted Tier-2 Ed25519 public key.
+
+    Used as `signer_key_id` in the manifest/ledger instead of the catalog's
+    own `signature.key_id` claim: `sign-catalog.go`'s canonical signed body
+    excludes the entire `signature` object (see `canonicalCatalogJSON`), so
+    `key_id` is unauthenticated metadata alongside the signature, not part
+    of what Ed25519 actually covers. Recording it verbatim would let anyone
+    who can produce a validly-signed catalog choose an arbitrary
+    `signer_key_id` for the immutable ledger (#608 audit). Fingerprinting the
+    trusted key itself ties the recorded identity to what was cryptographically
+    proven, and changes only if the trusted key configuration changes.
+    """
+    padded = public_key_b64 + "=" * (-len(public_key_b64) % 4)
+    raw_key = base64.urlsafe_b64decode(padded)
+    return "tier2-coordinator-key:" + hashlib.sha256(raw_key).hexdigest()[:16]
+
+
+def verify_tier2_signature(
+    raw: bytes,
+    public_key_path: pathlib.Path | None = None,
+    coordinator_config_path: pathlib.Path | None = None,
+) -> str:
+    """Authenticate a Tier-2 catalog's Ed25519 signature before any caller
+    may trust it as "signed" (#608 Partial: ledger feed membership).
+
+    Delegates to `sign-catalog.go verify`, the same canonicalization and
+    verification `deploy-pearl-vps.sh` already runs before upload, instead
+    of reimplementing Go's exact struct-field JSON encoding in Python.
+    `validate_tier2_catalog` alone only locks the JSON shape; it does not
+    prove authenticity. Returns the authenticated signer's key fingerprint
+    for the caller to bind into `manifest()` as `tier2_signer_key_id`.
+    """
+    go_bin = go_executable()
+    require_trusted_verifier_source(SIGN_CATALOG_GO_PATH)
+    public_key = load_tier2_trusted_public_key(public_key_path, coordinator_config_path)
+    with tempfile.TemporaryDirectory(prefix="macprovider-tier2-verify-") as tmp:
+        tmpdir = pathlib.Path(tmp)
+        catalog_path = tmpdir / "tier2-catalog.json"
+        pubkey_path = tmpdir / "tier2-catalog.pub"
+        catalog_path.write_bytes(raw)
+        pubkey_path.write_text(public_key + "\n")
+        try:
+            result = subprocess.run(
+                [go_bin, "run", str(SIGN_CATALOG_GO_PATH), "verify", "-public-key", str(pubkey_path), str(catalog_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=TIER2_SIGN_VERIFY_TIMEOUT_SECONDS,
+                cwd=str(ROOT),
+            )
+        except subprocess.TimeoutExpired:
+            fail("tier2-catalog: signature verification timed out")
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip() or "unknown error")
+        fail(f"tier2-catalog: signature verification failed: {detail}")
+    return tier2_trusted_key_fingerprint(public_key)
 
 
 def load_tier2_models(tier2_data: bytes) -> dict[str, str]:
@@ -992,6 +1408,26 @@ def derive_tier2_unsigned_body(
     )
 
 
+def require_tier2_catalog() -> tuple[bytes, dict, str]:
+    """Bind signed Tier-2 bytes as a release feed member when `generate` runs.
+
+    Historical release-ledger rows generated before this capability existed
+    keep their original 2-feed shape (`validate_release_ledger` accepts both
+    shapes), but Step B makes every current/new release bind a canonical
+    `tier2-catalog.json` feed member. Absence is fail-closed.
+    """
+    if not TIER2_CATALOG_PATH.exists():
+        fail(
+            "generate: tier2-catalog.json is missing. Every current catalog "
+            "release must bind a signed Tier-2 catalog as a release-ledger "
+            f"feed member; place it at {TIER2_CATALOG_PATH}."
+        )
+    tier2 = TIER2_CATALOG_PATH.read_bytes()
+    tier2_obj = validate_tier2_catalog(tier2)
+    tier2_signer_key_id = verify_tier2_signature(tier2)
+    return tier2, tier2_obj, tier2_signer_key_id
+
+
 def updated_release_ledger(manifest_bytes: bytes) -> bytes:
     current = validate_release_ledger(LEDGER_PATH.read_bytes()) if LEDGER_PATH.exists() else {"releases": {}, "tombstones": {}}
     require_ledger_evolution(base_release_ledger(), current)
@@ -999,7 +1435,7 @@ def updated_release_ledger(manifest_bytes: bytes) -> bytes:
     if release_id in current["tombstones"]:
         fail(f"release ledger: release ID {release_id!r} is permanently rejected")
     existing = current["releases"].get(release_id)
-    if existing is not None and existing != record:
+    if existing is not None and existing != record and not is_tier2_enrichment(existing, record):
         fail(f"release ledger: release ID {release_id!r} is already bound to different content")
     updated = {
         "releases": dict(current["releases"]),
@@ -1020,9 +1456,15 @@ def generate(signer_key_id: str | None = None) -> None:
     demand = canonical_bytes(demand_obj)
     if signer_key_id is not None and signer_key_id not in keyring():
         fail(f"cannot generate for unknown or retired signer key ID: {signer_key_id}")
+    tier2, tier2_obj, tier2_signer_key_id = require_tier2_catalog()
+    check_tier2_binding(candidate, tier2)
     # Compute every derived artifact before mutating on-disk release state so a
     # binding/derivation failure cannot leave a partially updated ledger.
-    manifest_bytes = manifest(candidate, demand, candidate_obj, demand_obj, signer_key_id=signer_key_id)
+    manifest_bytes = manifest(
+        candidate, demand, candidate_obj, demand_obj,
+        signer_key_id=signer_key_id, tier2=tier2, tier2_obj=tier2_obj,
+        tier2_signer_key_id=tier2_signer_key_id,
+    )
     binding_bytes = derive_tier2_identity_binding(candidate, candidate_obj)
     swift_text = generated_swift(candidate, demand, signer_key_id)
     next_ledger = updated_release_ledger(manifest_bytes)
@@ -1041,7 +1483,7 @@ def generate(signer_key_id: str | None = None) -> None:
     print(
         f"generated catalog release {candidate_obj['version']} "
         f"candidate={sha256(candidate)} demand={sha256(demand)} "
-        f"tier2_binding={sha256(binding_bytes)}"
+        f"tier2_binding={sha256(binding_bytes)} tier2_catalog={sha256(tier2)}"
     )
 
 
@@ -1104,7 +1546,12 @@ def verify() -> None:
             fail(f"generated drift: {path}")
     if SWIFT_GENERATED.read_text() != generated_swift(candidate, demand):
         fail(f"generated drift: {SWIFT_GENERATED}")
-    expected_manifest = manifest(candidate, demand, candidate_obj, demand_obj)
+    tier2, tier2_obj, tier2_signer_key_id = require_tier2_catalog()
+    check_tier2_binding(candidate, tier2)
+    expected_manifest = manifest(
+        candidate, demand, candidate_obj, demand_obj,
+        tier2=tier2, tier2_obj=tier2_obj, tier2_signer_key_id=tier2_signer_key_id,
+    )
     if MANIFEST_PATH.read_bytes() != expected_manifest:
         fail(f"generated drift: {MANIFEST_PATH}")
     ledger = validate_release_ledger(LEDGER_PATH.read_bytes())
@@ -1132,11 +1579,15 @@ def verify() -> None:
     print(
         f"verified catalog release {candidate_obj['version']} "
         f"candidate={sha256(candidate)} demand={sha256(demand)} "
-        f"tier2_binding={sha256(TIER2_BINDING_PATH.read_bytes())}"
+        f"tier2_binding={sha256(TIER2_BINDING_PATH.read_bytes())} tier2_catalog={sha256(tier2)}"
     )
 
 
-def verify_directory(directory: pathlib.Path) -> None:
+def verify_directory(
+    directory: pathlib.Path,
+    tier2_public_key_file: pathlib.Path | None = None,
+    tier2_coordinator_config: pathlib.Path | None = None,
+) -> None:
     candidate_path = directory / "autotune-candidates.json"
     demand_path = directory / "demand-rank.json"
     candidate = candidate_path.read_bytes()
@@ -1146,7 +1597,17 @@ def verify_directory(directory: pathlib.Path) -> None:
     validate_pair(candidate_obj, demand_obj)
     if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj):
         fail("release directory feeds are not deterministic canonical bytes")
-    expected_manifest = manifest(candidate, demand, candidate_obj, demand_obj, directory)
+    tier2_path = directory / "tier2-catalog.json"
+    if not tier2_path.exists():
+        fail("release directory is missing required tier2-catalog.json feed")
+    tier2 = tier2_path.read_bytes()
+    tier2_obj = validate_tier2_catalog(tier2)
+    tier2_signer_key_id = verify_tier2_signature(tier2, tier2_public_key_file, tier2_coordinator_config)
+    check_tier2_binding(candidate, tier2)
+    expected_manifest = manifest(
+        candidate, demand, candidate_obj, demand_obj, directory,
+        tier2=tier2, tier2_obj=tier2_obj, tier2_signer_key_id=tier2_signer_key_id,
+    )
     if (directory / "release.json").read_bytes() != expected_manifest:
         fail("release directory manifest does not bind the feed bytes")
     keys = keyring(directory / "trusted-keys.json")
@@ -1161,11 +1622,7 @@ def verify_directory(directory: pathlib.Path) -> None:
     if binding_path.exists():
         validate_tier2_identity_binding(binding_path.read_bytes(), candidate, candidate_obj)
         print(f"verified repo-local tier2 identity binding for {candidate_obj['version']}")
-    tier2_path = directory / "tier2-catalog.json"
-    if tier2_path.exists():
-        # Digest overlap check only — this does not replace sign-catalog.go verify.
-        check_tier2_binding(candidate, tier2_path.read_bytes())
-        print(f"verified tier2 digest binding against release {candidate_obj['version']}")
+    print(f"verified tier2 catalog {tier2_obj['catalog_id']} feed membership against release {candidate_obj['version']}")
     print(f"verified release directory {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)}")
 
 
@@ -1240,6 +1697,8 @@ def main() -> int:
     sub.add_parser("verify")
     directory_parser = sub.add_parser("verify-directory")
     directory_parser.add_argument("--directory", required=True, type=pathlib.Path)
+    directory_parser.add_argument("--tier2-public-key-file", type=pathlib.Path)
+    directory_parser.add_argument("--tier2-coordinator-config", type=pathlib.Path)
     check_parser = sub.add_parser("check-tier2-binding")
     check_parser.add_argument(
         "--candidate",
@@ -1288,7 +1747,7 @@ def main() -> int:
         elif args.command == "verify":
             verify()
         elif args.command == "verify-directory":
-            verify_directory(args.directory)
+            verify_directory(args.directory, args.tier2_public_key_file, args.tier2_coordinator_config)
         elif args.command == "check-tier2-binding":
             cmd_check_tier2_binding(args.candidate, args.tier2)
         elif args.command == "derive-tier2":

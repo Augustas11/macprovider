@@ -568,7 +568,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/658",
-        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55\u2192vNext update/rollback/buyer-serving journey remains open. #610 still owns broader first-hop recovery conformance."
+        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55→vNext update/rollback/buyer-serving journey remains open. #610 still owns broader first-hop recovery conformance."
       }
     },
     {
@@ -996,6 +996,38 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/535",
         "rationale": "Partial #535 lands coordinator durable events + operator GETs; provider diagnostic_status over WSS, pearlctl inspect/alerts, and HTTPS beacon remain deferred."
+      }
+    },
+    {
+      "spec_id": "SPEC-037",
+      "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
+      "version": "v0.1.0",
+      "path": "specs/SPEC-037-kv-survival-restart.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "kv-cache-persistence"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-005",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-024",
+        "SPEC-032"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC lands first (RESEARCH_233 Approach A); IMPL follows in a separate PR behind a disabled-by-default flag; KVS-01 evidence pending."
       }
     },
     {
@@ -1503,6 +1535,201 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/535",
         "rationale": "Retention bound: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R001",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP1 (residency only, no observable-contract change): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R002",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP2 (hot-tier semantics preserved exactly): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R003",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the §5a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R004",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R005",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP5 (fail safe to miss): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R006",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP6 (encryption, index hiding, key lifecycle): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R007",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP7 (per-provider namespace and quota): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R008",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP8 (purge primitive and tombstones (ship-blocker)): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R009",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP9 (bounded streaming promotion): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R010",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP10 (lifecycle: TTL is an eligibility deadline): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R011",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP11 (configuration and default-off rollout): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R012",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP12 (telemetry and probe boundary): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R013",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP13 (KVS gates, production fence, stop condition): normative in SPEC-037 v0.1.0; gate evidence requires a non-production host or maintenance window."
       }
     },
     {

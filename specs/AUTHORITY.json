@@ -6,42 +6,497 @@
     "captured_at": "2026-07-16"
   },
   "domains": [
-    {"id": "provider-wire-protocol", "owner_spec": "SPEC-001", "consumers": ["SPEC-002", "SPEC-003", "SPEC-008"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "coordinator-admission-routing", "owner_spec": "SPEC-002", "consumers": ["SPEC-003", "SPEC-004", "SPEC-006", "SPEC-031", "SPEC-032"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "provider-onboarding-identity", "owner_spec": "SPEC-003", "consumers": ["SPEC-014", "SPEC-025", "SPEC-026", "SPEC-027"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "sticky-routing-identity", "owner_spec": "SPEC-004", "consumers": ["SPEC-006", "SPEC-008", "SPEC-024"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "billing-settlement-formula", "owner_spec": "SPEC-005", "consumers": ["SPEC-006", "SPEC-015", "SPEC-016", "SPEC-022", "SPEC-024"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "buyer-api-error-contract", "owner_spec": "SPEC-006", "consumers": ["SPEC-004", "SPEC-015", "SPEC-018", "SPEC-019", "SPEC-024"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "operator-protocol-explorer", "owner_spec": "SPEC-007", "consumers": [], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "tier2-trust-evidence", "owner_spec": "SPEC-008", "consumers": ["SPEC-010", "SPEC-011", "SPEC-012", "SPEC-022", "SPEC-032", "SPEC-033"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "provider-console", "owner_spec": "SPEC-009", "consumers": [], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "model-catalog-identity", "owner_spec": "SPEC-010", "consumers": ["SPEC-011", "SPEC-012", "SPEC-013", "SPEC-020", "SPEC-022", "SPEC-023", "SPEC-032"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/608"},
-    {"id": "operator-pushed-warm-swap", "owner_spec": "SPEC-011", "consumers": ["SPEC-012", "SPEC-020"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "coordinator-demand-pull-model-swap", "owner_spec": "SPEC-012", "consumers": ["SPEC-002", "SPEC-006", "SPEC-010", "SPEC-011"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "buyer-cold-model-visibility", "owner_spec": "SPEC-012", "consumers": ["SPEC-006", "SPEC-008", "SPEC-010", "SPEC-011"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "autotune-recommendation", "owner_spec": "SPEC-013", "consumers": ["SPEC-020", "SPEC-023", "SPEC-025", "SPEC-026", "SPEC-032", "SPEC-033"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/612"},
-    {"id": "provider-portal", "owner_spec": "SPEC-014", "consumers": ["SPEC-025", "SPEC-026", "SPEC-027"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "inference-receipts", "owner_spec": "SPEC-015", "consumers": ["SPEC-016", "SPEC-022", "SPEC-024", "SPEC-030"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "payout-lifecycle", "owner_spec": "SPEC-016", "consumers": ["SPEC-021", "SPEC-022"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "network-stats", "owner_spec": "SPEC-017", "consumers": ["SPEC-009"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "agentic-tool-calling", "owner_spec": "SPEC-018", "consumers": ["SPEC-006", "SPEC-019"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "structured-output", "owner_spec": "SPEC-019", "consumers": ["SPEC-006", "SPEC-018"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "provider-autoupdate", "owner_spec": "SPEC-020", "consumers": ["SPEC-001", "SPEC-003", "SPEC-025", "SPEC-026"], "status": "declared", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/610"},
-    {"id": "malibu-emission-ledger", "owner_spec": "SPEC-021", "consumers": ["SPEC-016", "SPEC-026"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "verified-model-settlement", "owner_spec": "SPEC-022", "consumers": ["SPEC-005", "SPEC-015", "SPEC-016"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "installer-autotune-policy", "owner_spec": "SPEC-023", "consumers": ["SPEC-013", "SPEC-025", "SPEC-026", "SPEC-032", "SPEC-033"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/612"},
-    {"id": "prefix-cache-billing-isolation", "owner_spec": "SPEC-024", "consumers": ["SPEC-004", "SPEC-005", "SPEC-006", "SPEC-015"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "native-app-lifecycle", "owner_spec": "SPEC-025", "consumers": ["SPEC-026"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/611"},
-    {"id": "browserless-onboarding", "owner_spec": "SPEC-026", "consumers": ["SPEC-021", "SPEC-025", "SPEC-027"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "provider-wallet-proof", "owner_spec": "SPEC-027", "consumers": ["SPEC-014", "SPEC-026"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "speculative-decoding", "owner_spec": "SPEC-028", "consumers": ["SPEC-001", "SPEC-030"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "sweep-workload-stratification", "owner_spec": "SPEC-029", "consumers": ["SPEC-023"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "losslessness-probe", "owner_spec": "SPEC-030", "consumers": ["SPEC-015", "SPEC-022", "SPEC-028"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "canary-sanction-lifecycle", "owner_spec": "SPEC-031", "consumers": ["SPEC-002", "SPEC-032", "SPEC-033"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "hardware-evidence-admission", "owner_spec": "SPEC-032", "consumers": ["SPEC-002", "SPEC-008", "SPEC-023", "SPEC-031", "SPEC-033"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "hardware-evidence-verifier", "owner_spec": "SPEC-033", "consumers": ["SPEC-023", "SPEC-031", "SPEC-032"], "status": "pending-reconciliation", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "referral-advocacy-policy", "owner_spec": "SPEC-034", "consumers": ["SPEC-001", "SPEC-003", "SPEC-025", "SPEC-026"], "status": "pending-reconciliation", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"},
-    {"id": "provider-connection-diagnostics", "owner_spec": "SPEC-035", "consumers": ["SPEC-002"], "status": "declared", "requires_signed_journey_result": false, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/535"},
-    {"id": "compute-integrity-settlement", "owner_spec": "SPEC-036", "consumers": [], "status": "declared", "requires_signed_journey_result": true, "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/614"}
+    {
+      "id": "provider-wire-protocol",
+      "owner_spec": "SPEC-001",
+      "consumers": [
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-008"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "coordinator-admission-routing",
+      "owner_spec": "SPEC-002",
+      "consumers": [
+        "SPEC-003",
+        "SPEC-004",
+        "SPEC-006",
+        "SPEC-031",
+        "SPEC-032"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "provider-onboarding-identity",
+      "owner_spec": "SPEC-003",
+      "consumers": [
+        "SPEC-014",
+        "SPEC-025",
+        "SPEC-026",
+        "SPEC-027"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "sticky-routing-identity",
+      "owner_spec": "SPEC-004",
+      "consumers": [
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-024"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "billing-settlement-formula",
+      "owner_spec": "SPEC-005",
+      "consumers": [
+        "SPEC-006",
+        "SPEC-015",
+        "SPEC-016",
+        "SPEC-022",
+        "SPEC-024"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "buyer-api-error-contract",
+      "owner_spec": "SPEC-006",
+      "consumers": [
+        "SPEC-004",
+        "SPEC-015",
+        "SPEC-018",
+        "SPEC-019",
+        "SPEC-024"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "operator-protocol-explorer",
+      "owner_spec": "SPEC-007",
+      "consumers": [],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "tier2-trust-evidence",
+      "owner_spec": "SPEC-008",
+      "consumers": [
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-012",
+        "SPEC-022",
+        "SPEC-032",
+        "SPEC-033"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "provider-console",
+      "owner_spec": "SPEC-009",
+      "consumers": [],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "model-catalog-identity",
+      "owner_spec": "SPEC-010",
+      "consumers": [
+        "SPEC-011",
+        "SPEC-012",
+        "SPEC-013",
+        "SPEC-020",
+        "SPEC-022",
+        "SPEC-023",
+        "SPEC-032",
+        "SPEC-037"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/608"
+    },
+    {
+      "id": "operator-pushed-warm-swap",
+      "owner_spec": "SPEC-011",
+      "consumers": [
+        "SPEC-012",
+        "SPEC-020"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "coordinator-demand-pull-model-swap",
+      "owner_spec": "SPEC-012",
+      "consumers": [
+        "SPEC-002",
+        "SPEC-006",
+        "SPEC-010",
+        "SPEC-011"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "buyer-cold-model-visibility",
+      "owner_spec": "SPEC-012",
+      "consumers": [
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-011"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "autotune-recommendation",
+      "owner_spec": "SPEC-013",
+      "consumers": [
+        "SPEC-020",
+        "SPEC-023",
+        "SPEC-025",
+        "SPEC-026",
+        "SPEC-032",
+        "SPEC-033"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/612"
+    },
+    {
+      "id": "provider-portal",
+      "owner_spec": "SPEC-014",
+      "consumers": [
+        "SPEC-025",
+        "SPEC-026",
+        "SPEC-027"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "inference-receipts",
+      "owner_spec": "SPEC-015",
+      "consumers": [
+        "SPEC-016",
+        "SPEC-022",
+        "SPEC-024",
+        "SPEC-030"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "payout-lifecycle",
+      "owner_spec": "SPEC-016",
+      "consumers": [
+        "SPEC-021",
+        "SPEC-022"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "network-stats",
+      "owner_spec": "SPEC-017",
+      "consumers": [
+        "SPEC-009"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "agentic-tool-calling",
+      "owner_spec": "SPEC-018",
+      "consumers": [
+        "SPEC-006",
+        "SPEC-019"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "structured-output",
+      "owner_spec": "SPEC-019",
+      "consumers": [
+        "SPEC-006",
+        "SPEC-018"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "provider-autoupdate",
+      "owner_spec": "SPEC-020",
+      "consumers": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-025",
+        "SPEC-026"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/610"
+    },
+    {
+      "id": "malibu-emission-ledger",
+      "owner_spec": "SPEC-021",
+      "consumers": [
+        "SPEC-016",
+        "SPEC-026"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "verified-model-settlement",
+      "owner_spec": "SPEC-022",
+      "consumers": [
+        "SPEC-005",
+        "SPEC-015",
+        "SPEC-016"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "installer-autotune-policy",
+      "owner_spec": "SPEC-023",
+      "consumers": [
+        "SPEC-013",
+        "SPEC-025",
+        "SPEC-026",
+        "SPEC-032",
+        "SPEC-033"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/612"
+    },
+    {
+      "id": "prefix-cache-billing-isolation",
+      "owner_spec": "SPEC-024",
+      "consumers": [
+        "SPEC-004",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-015",
+        "SPEC-037"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "native-app-lifecycle",
+      "owner_spec": "SPEC-025",
+      "consumers": [
+        "SPEC-026"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/611"
+    },
+    {
+      "id": "browserless-onboarding",
+      "owner_spec": "SPEC-026",
+      "consumers": [
+        "SPEC-021",
+        "SPEC-025",
+        "SPEC-027"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "provider-wallet-proof",
+      "owner_spec": "SPEC-027",
+      "consumers": [
+        "SPEC-014",
+        "SPEC-026"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "speculative-decoding",
+      "owner_spec": "SPEC-028",
+      "consumers": [
+        "SPEC-001",
+        "SPEC-030"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "sweep-workload-stratification",
+      "owner_spec": "SPEC-029",
+      "consumers": [
+        "SPEC-023"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "losslessness-probe",
+      "owner_spec": "SPEC-030",
+      "consumers": [
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-028"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "canary-sanction-lifecycle",
+      "owner_spec": "SPEC-031",
+      "consumers": [
+        "SPEC-002",
+        "SPEC-032",
+        "SPEC-033"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "hardware-evidence-admission",
+      "owner_spec": "SPEC-032",
+      "consumers": [
+        "SPEC-002",
+        "SPEC-008",
+        "SPEC-023",
+        "SPEC-031",
+        "SPEC-033"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "hardware-evidence-verifier",
+      "owner_spec": "SPEC-033",
+      "consumers": [
+        "SPEC-023",
+        "SPEC-031",
+        "SPEC-032"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "referral-advocacy-policy",
+      "owner_spec": "SPEC-034",
+      "consumers": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-025",
+        "SPEC-026"
+      ],
+      "status": "pending-reconciliation",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "provider-connection-diagnostics",
+      "owner_spec": "SPEC-035",
+      "consumers": [
+        "SPEC-002"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": false,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/535"
+    },
+    {
+      "id": "kv-cache-persistence",
+      "owner_spec": "SPEC-037",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "compute-integrity-settlement",
+      "owner_spec": "SPEC-036",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    }
   ]
 }

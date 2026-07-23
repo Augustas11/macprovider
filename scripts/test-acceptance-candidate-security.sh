@@ -352,7 +352,7 @@ for name in THIRD-PARTY-NOTICES.txt compatibility-set.json macprovider-cli mlx.m
   printf 'fixture:%s\n' "$name" > "$work/provider/$name"
 done
 chmod 755 "$work/provider/macprovider-cli"
-for name in release.json trusted-keys.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+for name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
   printf 'fixture:%s\n' "$name" > "$work/provider/catalog-release/$name"
 done
 for name in install.sh provider-launch-agent.plist.template updater-rollback.json watchdog-launch-agent.plist.template watchdog.sh; do
@@ -373,6 +373,7 @@ mkdir "$work/pearl-catalog"
 python3 "$root/scripts/catalog-release.py" verify
 cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/catalog/autotune/trusted-keys.json" \
+  "$root/phase3-binary/catalog/autotune/tier2-catalog.json" \
   "$root/phase3-binary/dist/static/autotune-candidates.json" \
   "$root/phase3-binary/dist/static/autotune-candidates.json.sig" \
   "$root/phase3-binary/dist/static/demand-rank.json" \

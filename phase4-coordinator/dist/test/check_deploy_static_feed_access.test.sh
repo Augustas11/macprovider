@@ -17,8 +17,17 @@ bash -n "$DEPLOY_SH"
 bash -n "$RECOVER_SH"
 [ -f "$WATCHDOG_UNIT" ] || fail "remote deploy watchdog unit is missing"
 
-grep -q '_autotune_release=\\$_autotune_root/releases/$AUTOTUNE_RELEASE_ID' "$DEPLOY_SH" ||
-  fail "deploy must stage an immutable versioned autotune release"
+grep -q '_autotune_release=\\$_autotune_root/releases/$AUTOTUNE_RELEASE_DIR_NAME' "$DEPLOY_SH" ||
+  fail "deploy must stage a content-addressed immutable catalog envelope"
+
+grep -q 'install .*tier2-catalog.json \\$_autotune_stage/tier2-catalog.json' "$DEPLOY_SH" &&
+  grep -q 'verify-directory --directory \\$_autotune_stage --tier2-public-key-file' "$DEPLOY_SH" ||
+  fail "deploy must stage and authenticate Tier-2 inside the release envelope"
+
+activation_line=$(grep -nF 'ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
+tier2_install_line=$(grep -nF '\$_catalog_root/releases/$AUTOTUNE_RELEASE_DIR_NAME/tier2-catalog.json' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
+[ -n "$activation_line" ] && [ -n "$tier2_install_line" ] && [ "$tier2_install_line" -lt "$activation_line" ] ||
+  fail "legacy Tier-2 path and release current must activate together under the deploy mutex"
 
 grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json' "$DEPLOY_SH" ||
   fail "deploy smoke must verify macprovider can read autotune feeds"
@@ -171,6 +180,73 @@ grep -q 'CATALOG_CANARY_PROVIDER_ID is required' "$DEPLOY_SH" ||
 grep -q 'CATALOG_CANARY_AUTH_TOKEN is required' "$DEPLOY_SH" ||
   fail "deploy must require authenticated canary evidence"
 
+token_validator_tmp="$(mktemp)"
+trap 'rm -f "$token_validator_tmp"' EXIT
+awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$token_validator_tmp"
+grep -qF '_validate_catalog_canary_auth_token()' "$token_validator_tmp" ||
+  fail "deploy must keep an extractable portable canary token validator"
+# BSD grep rejects interval upper bounds greater than 255. Length checks belong
+# in Bash so the production deploy remains portable on the operator Mac.
+if grep -qF '{32,512}' "$DEPLOY_SH"; then
+  fail "deploy must not use a BSD-grep-incompatible {32,512} interval"
+fi
+# shellcheck disable=SC1090
+. "$token_validator_tmp"
+token_31="$(printf '%031d' 0)"
+token_32="$(printf '%032d' 0)"
+token_512="$(printf '%0512d' 0)"
+token_513="$(printf '%0513d' 0)"
+! _validate_catalog_canary_auth_token "$token_31" ||
+  fail "canary token validator must reject 31-byte tokens"
+_validate_catalog_canary_auth_token "$token_32" ||
+  fail "canary token validator must accept safe 32-byte tokens"
+_validate_catalog_canary_auth_token "$token_512" ||
+  fail "canary token validator must accept safe 512-byte tokens"
+! _validate_catalog_canary_auth_token "$token_513" ||
+  fail "canary token validator must reject 513-byte tokens"
+! _validate_catalog_canary_auth_token "${token_32}!" ||
+  fail "canary token validator must reject unsafe characters"
+! _validate_catalog_canary_auth_token "${token_32}"$'\n''url = "https://attacker.invalid/"' ||
+  fail "canary token validator must reject newline curl-config injection"
+! _validate_catalog_canary_auth_token "${token_32}"$'\r''header = "X-Injected: yes"' ||
+  fail "canary token validator must reject carriage-return curl-config injection"
+
+deadline_alarm_tmp="$(mktemp)"
+trap 'rm -f "$token_validator_tmp" "$deadline_alarm_tmp"' EXIT
+awk '/^_run_with_deadline_alarm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_alarm_tmp"
+grep -qF '_run_with_deadline_alarm()' "$deadline_alarm_tmp" ||
+  fail "deploy must keep an extractable subprocess deadline helper"
+# shellcheck disable=SC1090
+. "$deadline_alarm_tmp"
+deadline_start="$SECONDS"
+if _run_with_deadline_alarm 1 sh -c 'sleep 30'; then
+  fail "subprocess deadline helper must terminate a hung command"
+fi
+[ "$((SECONDS - deadline_start))" -lt 5 ] ||
+  fail "subprocess deadline helper did not enforce its wall-clock bound"
+_run_with_deadline_alarm 2 sh -c 'exit 0' ||
+  fail "subprocess deadline helper must preserve successful commands"
+
+deadline_parser_tmp="$(mktemp)"
+trap 'rm -f "$token_validator_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"' EXIT
+awk '/^_parse_model_hash_legacy_until\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_parser_tmp"
+grep -qF '_parse_model_hash_legacy_until()' "$deadline_parser_tmp" ||
+  fail "deploy must keep an extractable MODEL_HASH_LEGACY_UNTIL parser"
+# shellcheck disable=SC1090
+. "$deadline_parser_tmp"
+deadline='2030-01-02T03:04:05Z'
+[ "$(_parse_model_hash_legacy_until "  $deadline  ")" = "$deadline" ] ||
+  fail "legacy deadline parser must accept an unquoted scalar"
+[ "$(_parse_model_hash_legacy_until "  \"$deadline\"  ")" = "$deadline" ] ||
+  fail "legacy deadline parser must strip matching double quotes"
+[ "$(_parse_model_hash_legacy_until "  '$deadline'  ")" = "$deadline" ] ||
+  fail "legacy deadline parser must strip matching single quotes"
+[ -z "$(_parse_model_hash_legacy_until '   ')" ] ||
+  fail "legacy deadline parser must preserve an absent deadline as empty"
+if _parse_model_hash_legacy_until '2030-01-02T03:04:05Z trailing' >/dev/null 2>&1; then
+  fail "legacy deadline parser must reject multiple scalar tokens"
+fi
+
 grep -q 'CATALOG_CANARY_SSH_TARGET is required' "$DEPLOY_SH" ||
   fail "deploy must require a trusted canary host for exact installed-byte verification"
 
@@ -182,6 +258,22 @@ grep -q 'StrictHostKeyChecking=yes' "$DEPLOY_SH" ||
 
 grep -q 'assigned_id=\$CANARY_ASSIGNED_QUERY&details=deployment' "$DEPLOY_SH" ||
   fail "deploy must gate completion on the exact proved provider session"
+
+proof_retry_line=$(grep -nF 'if run_catalog_canary_mac_proof "$CANARY_PROOF_TIMEOUT_S" > "$CANARY_INSTALLED_BODY"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+session_rebind_line=$(grep -nF 'read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY <<< "$CANARY_BINDING"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+session_query_line=$(grep -nF 'CANARY_STATUS=$(curl --config "$CANARY_CURL_CONFIG"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+[ -n "$proof_retry_line" ] && [ -n "$session_rebind_line" ] && [ -n "$session_query_line" ] &&
+  [ "$proof_retry_line" -lt "$session_rebind_line" ] && [ "$session_rebind_line" -lt "$session_query_line" ] ||
+  fail "each canary recovery attempt must re-prove the Mac and bind the query to that attempt's session"
+
+grep -q 'CANARY_RECOVERY_DEADLINE=' "$DEPLOY_SH" &&
+  grep -q '_run_with_deadline_alarm "$timeout_s" "${CANARY_SSH\[@\]}"' "$DEPLOY_SH" &&
+  grep -q 'rm -f "$CANARY_INSTALLED_BODY" "$CANARY_POOL_BODY"' "$DEPLOY_SH" &&
+  grep -q 'waiting for exact catalog canary recovery' "$DEPLOY_SH" ||
+  fail "deploy must retry full canary proof within a wall-clock deadline and discard stale attempt output"
+
+grep -q 'os.O_RDONLY | nofollow | nonblock' "$DEPLOY_SH" ||
+  fail "Mac proof must open untrusted file entries without blocking on special files"
 
 grep -q 'value.get("assigned_id") != sys.argv\[3\]' "$DEPLOY_SH" ||
   fail "deploy must reject coordinator evidence for a different assigned session"
@@ -197,6 +289,10 @@ grep -q 'value.get("catalog_evidence_source") != "provider_reported"' "$DEPLOY_S
 
 grep -q 'value.get("catalog_admission_mode") != "current"' "$DEPLOY_SH" ||
   fail "deploy canary must reject legacy and previous catalog admissions"
+
+grep -A1 -F '  "$STATIC_DEMAND_SIG" \' "$DEPLOY_SH" |
+  grep -qF '  "$AUTOTUNE_TIER2_JSON" <<'"'"'PY'"'"'' ||
+  fail "deploy canary expected-byte set must include the release-bound Tier-2 catalog"
 
 grep -q 'value.get("catalog_candidate_sha256") != sys.argv\[6\]' "$DEPLOY_SH" ||
   fail "deploy canary must match the active candidate catalog digest"

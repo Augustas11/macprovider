@@ -57,6 +57,7 @@ fi
 openssl pkey -pubin -in "$HERE/release-signing-public.pem" -noout >/dev/null
 
 install -d -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$INSTALL_PREFIX/usr/local/share/macprovider"
+install -d -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$INSTALL_PREFIX/usr/local/share/macprovider/scripts"
 install -d -o "$INSTALL_OWNER" -g "$INSTALL_GROUP" -m 0750 "$INSTALL_PREFIX/etc/macprovider"
 install -d -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0700 "$INSTALL_PREFIX/var/lib/macprovider-pearl-updater"
 install -d -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$INSTALL_PREFIX/usr/local/sbin" "$INSTALL_PREFIX/etc/systemd/system"
@@ -64,7 +65,8 @@ install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-pearl-update-gate" "$INSTALL_PREFIX/usr/local/sbin/macprovider-pearl-update-gate"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-pearl-updater-alert" "$INSTALL_PREFIX/usr/local/sbin/macprovider-pearl-updater-alert"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/release-signing-public.pem" "$INSTALL_PREFIX/usr/local/share/macprovider/release-signing-public.pem"
-install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/../../scripts/catalog-release.py" "$INSTALL_PREFIX/usr/local/share/macprovider/catalog-release.py"
+install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/../../scripts/catalog-release.py" "$INSTALL_PREFIX/usr/local/share/macprovider/scripts/catalog-release.py"
+install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/../../scripts/sign-catalog.go" "$INSTALL_PREFIX/usr/local/share/macprovider/scripts/sign-catalog.go"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/catalog-canary-proof.py" "$INSTALL_PREFIX/usr/local/share/macprovider/catalog-canary-proof.py"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater.service" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater.service"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater.timer" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater.timer"

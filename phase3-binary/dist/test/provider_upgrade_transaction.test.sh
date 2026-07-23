@@ -111,6 +111,7 @@ complete_payload="$(printf '%s\n' \
   catalog-release \
   catalog-release/release.json \
   catalog-release/trusted-keys.json \
+  catalog-release/tier2-catalog.json \
   catalog-release/autotune-candidates.json \
   catalog-release/autotune-candidates.json.sig \
   catalog-release/demand-rank.json \

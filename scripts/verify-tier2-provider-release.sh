@@ -135,6 +135,7 @@ validate_payload_entries() {
   local entry normalized_entry has_binary=0
   local has_catalog_manifest=0
   local has_catalog_keyring=0
+  local has_catalog_tier2=0
   local has_catalog_candidates=0
   local has_catalog_candidates_signature=0
   local has_catalog_demand=0
@@ -195,6 +196,9 @@ validate_payload_entries() {
       catalog-release/trusted-keys.json)
         has_catalog_keyring=$((has_catalog_keyring + 1))
         ;;
+      catalog-release/tier2-catalog.json)
+        has_catalog_tier2=$((has_catalog_tier2 + 1))
+        ;;
       catalog-release/autotune-candidates.json)
         has_catalog_candidates=$((has_catalog_candidates + 1))
         ;;
@@ -221,6 +225,7 @@ EOF
   if provider_version_requires_catalog; then
     [ "$has_catalog_manifest" -eq 1 ] || die "$label must contain exactly one catalog-release/release.json"
     [ "$has_catalog_keyring" -eq 1 ] || die "$label must contain exactly one catalog-release/trusted-keys.json"
+    [ "$has_catalog_tier2" -eq 1 ] || die "$label must contain exactly one catalog-release/tier2-catalog.json"
     [ "$has_catalog_candidates" -eq 1 ] || die "$label must contain exactly one catalog-release/autotune-candidates.json"
     [ "$has_catalog_candidates_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/autotune-candidates.json.sig"
     [ "$has_catalog_demand" -eq 1 ] || die "$label must contain exactly one catalog-release/demand-rank.json"

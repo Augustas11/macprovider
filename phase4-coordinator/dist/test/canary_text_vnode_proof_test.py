@@ -31,7 +31,7 @@ def load_vnode_function(path: pathlib.Path, source: str):
 
 deploy_text = deploy.read_text(encoding="utf-8")
 start = deploy_text.index("import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request")
-end = deploy_text.index("\nPY\nthen", start)
+end = deploy_text.index("\nPY\n}", start)
 implementations = (
     load_vnode_function(deploy, deploy_text[start:end]),
     load_vnode_function(pearl_proof, pearl_proof.read_text(encoding="utf-8")),

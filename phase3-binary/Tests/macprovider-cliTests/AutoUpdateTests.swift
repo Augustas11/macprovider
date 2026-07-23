@@ -2732,6 +2732,7 @@ final class AutoUpdateTests: XCTestCase {
         for name in [
             "release.json",
             "trusted-keys.json",
+            "tier2-catalog.json",
             "autotune-candidates.json",
             "autotune-candidates.json.sig",
             "demand-rank.json",

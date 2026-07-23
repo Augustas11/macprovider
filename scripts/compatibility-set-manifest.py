@@ -31,6 +31,7 @@ KEY_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 CATALOG_FILES = (
     "release.json",
     "trusted-keys.json",
+    "tier2-catalog.json",
     "autotune-candidates.json",
     "autotune-candidates.json.sig",
     "demand-rank.json",
@@ -505,7 +506,7 @@ def validate_envelope(data: bytes, require_signature: bool) -> dict:
 def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: pathlib.Path) -> dict:
     catalog_bytes = {
         name: read_regular(
-            (catalog_directory if name in {"release.json", "trusted-keys.json"} else catalog_feed_directory) / name,
+            (catalog_directory if name in {"release.json", "trusted-keys.json", "tier2-catalog.json"} else catalog_feed_directory) / name,
             f"catalog {name}",
         )
         for name in CATALOG_FILES
@@ -519,7 +520,7 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
     feeds = manifest["feeds"]
     if not isinstance(feeds, dict):
         fail("catalog release.json feeds: must be an object")
-    exact_keys(feeds, {"autotune-candidates.json", "demand-rank.json"}, "catalog release.json feeds")
+    exact_keys(feeds, {"autotune-candidates.json", "demand-rank.json", "tier2-catalog.json"}, "catalog release.json feeds")
     for name, record in feeds.items():
         if not isinstance(record, dict):
             fail(f"catalog release.json feed {name}: must be an object")
@@ -532,7 +533,7 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
             fail(f"catalog release.json feed {name}: byte count does not match packaged feed")
         if record["sha256"] != hashlib.sha256(catalog_bytes[name]).hexdigest():
             fail(f"catalog release.json feed {name}: digest does not match packaged feed")
-        if record["version"] != manifest["release_id"]:
+        if name != "tier2-catalog.json" and record["version"] != manifest["release_id"]:
             fail(f"catalog release.json feed {name}: version does not match release_id")
     return {
         "activation": "local",

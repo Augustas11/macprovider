@@ -24,6 +24,9 @@
             "release.json": {
               "$ref": "#/$defs/sha256"
             },
+            "tier2-catalog.json": {
+              "$ref": "#/$defs/sha256"
+            },
             "trusted-keys.json": {
               "$ref": "#/$defs/sha256"
             }
@@ -34,6 +37,7 @@
             "demand-rank.json",
             "demand-rank.json.sig",
             "release.json",
+            "tier2-catalog.json",
             "trusted-keys.json"
           ],
           "type": "object"

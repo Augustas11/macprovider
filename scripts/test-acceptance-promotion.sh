@@ -137,6 +137,7 @@ release_names=(
   "release-provenance.json"
   "release-toolchain.json"
   "release.json"
+  "tier2-catalog.json"
   "trusted-keys.json"
 )
 printf '%s\n' "${release_names[@]}" | LC_ALL=C sort > "$accepted/release-assets.txt"
@@ -165,6 +166,7 @@ digest = lambda name: hashlib.sha256((root / name).read_bytes()).hexdigest()
 catalog_names = (
     "release.json",
     "trusted-keys.json",
+    "tier2-catalog.json",
     "autotune-candidates.json",
     "autotune-candidates.json.sig",
     "demand-rank.json",
