@@ -60,6 +60,15 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private let eligibilityTTLSeconds: Int
     /// Creating write's incarnation identifier (ownership-checked DEK cleanup, FR-KVP6).
     private let incarnation: String
+    /// Write-live budget ceilings (HIGH-5): reject an oversized snapshot BEFORE the
+    /// deep copy so a huge cache can never be copied only to be skipped by the store.
+    private let writeStagingMaxBytes: Int
+    private let maxEntryBytes: Int
+    private let stagingMaxBytes: Int
+    /// Instantaneous write-live reservation (RAM bound). Captures are actor-serialized
+    /// by ConversationCache, so this bounds the copy-in-flight bytes.
+    private let writeLiveLock = NSLock()
+    private var writeLiveBytes = 0
 
     /// Live-model per-layer geometry template, keyed by served model ID. Guarded
     /// by its own lock so the synchronous `captureSnapshot` and async
@@ -87,10 +96,16 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private var pendingGen: [String: Int] = [:]
 
     init(store: KVDiskCacheStore, namespaceID: String, eligibilityTTLSeconds: Int,
+         writeStagingMaxBytes: Int = KVDiskCacheStoreConfig.writeStagingHardMax,
+         maxEntryBytes: Int = KVDiskCacheStoreConfig.writeStagingHardMax,
+         stagingMaxBytes: Int = KVDiskCacheStoreConfig.promotionCeilingHardMax,
          incarnation: String = UUID().uuidString) {
         self.store = store
         self.namespaceID = namespaceID
         self.eligibilityTTLSeconds = eligibilityTTLSeconds
+        self.writeStagingMaxBytes = writeStagingMaxBytes
+        self.maxEntryBytes = maxEntryBytes
+        self.stagingMaxBytes = stagingMaxBytes
         self.incarnation = incarnation
     }
 
@@ -189,6 +204,20 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // Only the v1-allowlisted unquantized class is serializable; any other
         // cache class skips persistence (byte-identical hot behavior for it).
         guard let caches = layers.layers as? [KVCacheSimple] else { return nil }
+
+        // HIGH-5 — estimate the decoded size from GEOMETRY (no byte copy) and skip an
+        // oversized snapshot BEFORE the deep copy, so a huge cache can never be copied
+        // only to be rejected by the store. Then reserve the write-live bytes for the
+        // copy and release on every exit via defer.
+        guard let estimatedDecoded = KVCacheSerialization.estimatedDecodedLength(caches, tokenCount: fullTokens.count),
+              estimatedDecoded <= writeStagingMaxBytes,
+              estimatedDecoded <= maxEntryBytes,
+              estimatedDecoded <= stagingMaxBytes else {
+            return nil
+        }
+        writeLiveLock.lock(); writeLiveBytes += estimatedDecoded; writeLiveLock.unlock()
+        defer { writeLiveLock.lock(); writeLiveBytes -= estimatedDecoded; writeLiveLock.unlock() }
+
         guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
 
         // Learn/refresh the live-model geometry template for future promotions.

@@ -2036,7 +2036,10 @@ actor ModelRuntime: ModelRuntimeServing {
     func attachKVDiskTier(_ tier: KVDiskTier) async {
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
-            eligibilityTTLSeconds: tier.eligibilityTTLSeconds)
+            eligibilityTTLSeconds: tier.eligibilityTTLSeconds,
+            writeStagingMaxBytes: tier.config.writeStagingMaxBytes,
+            maxEntryBytes: tier.config.maxEntryBytes,
+            stagingMaxBytes: tier.config.stagingMaxBytes)
         await conversationCache.attachColdTier(adapter)
         // CRITICAL-2: keep the adapter's cached epoch in step with the store so
         // captureSnapshot stamps the epoch at commit time. Seeds immediately.
@@ -2048,6 +2051,8 @@ actor ModelRuntime: ModelRuntimeServing {
         await tier.store.setHotPurgeHooks(
             single: { key in await cache.purgeHot(conversationKey: key) },
             all: { await cache.purgeAllHot() })
+        // HIGH-5: drain queued cold writes on graceful shutdown before lock release.
+        tier.setDrainHook { seconds in await cache.drainColdWrites(timeoutSeconds: seconds) }
         coldTierAttached = true
     }
 

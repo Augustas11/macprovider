@@ -673,41 +673,45 @@ actor KVDiskCacheStore {
                 try fsyncDirectory(entriesDir)
             }
 
-            // Build plaintext payload, chunk it, and seal each chunk under the DEK.
+            // Build plaintext payload once, then chunk it by RANGE (HIGH-5): the
+            // chunk plaintext is sliced on demand at seal time rather than materialized
+            // into a second full array of copies alongside `plaintext` and `blob`.
             let plaintext = try KVPayloadCodec.encode(tokens: snapshot.tokens, layers: snapshot.layers)
             precondition(plaintext.count == decodedLength, "codec length must equal decoded_length")
             let chunkSize = max(1, min(plaintext.count, KVDiskCacheFormat.maxChunkCiphertextBytes))
-            var plaintextChunks: [Data] = []
+            var chunkRanges: [Range<Int>] = []
             var pos = 0
             while pos < plaintext.count {
                 let end = min(pos + chunkSize, plaintext.count)
-                plaintextChunks.append(plaintext.subdata(in: pos ..< end))
+                chunkRanges.append(pos ..< end)
                 pos = end
             }
-            if plaintextChunks.isEmpty { plaintextChunks.append(Data()) }
+            if chunkRanges.isEmpty { chunkRanges.append(0 ..< 0) }
 
             // Chunk table is known pre-encryption (GCM preserves length). Build it, then
             // finalize the manifest sans blob hash to derive the AAD.
             var chunkRecords: [KVChunkRecord] = []
             var nonces: [Data] = []
-            for (ordinal, chunk) in plaintextChunks.enumerated() {
+            for (ordinal, range) in chunkRanges.enumerated() {
                 let nonce = try KVKeyManager.randomBytes(KVDiskCacheFormat.chunkNonceBytes)
                 nonces.append(nonce)
-                chunkRecords.append(KVChunkRecord(ordinal: ordinal, ctLength: chunk.count, nonce: nonce))
+                chunkRecords.append(KVChunkRecord(ordinal: ordinal, ctLength: range.count, nonce: nonce))
             }
             // blob_length is AAD-bound (only blob_sha256 is omitted from the AAD), and
             // it is fully known before encryption: GCM ciphertext length == plaintext
             // length, so each frame is (ct_length + 40) bytes. Compute it up front so
             // the AAD projection is stable between seal and read.
             let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
-            let blobLength = plaintextChunks.reduce(0) { $0 + $1.count + frameOverhead }
+            let blobLength = chunkRanges.reduce(0) { $0 + $1.count + frameOverhead }
             var manifest = buildManifest(
                 snapshot: snapshot, generation: generation, decodedLength: decodedLength,
                 chunks: chunkRecords, blobLength: blobLength, blobSHA256: String(repeating: "0", count: 64))
 
-            // Seal each chunk with its nonce + the AAD projection, assemble the blob.
+            // Seal each chunk with its nonce + the AAD projection, appending to the blob.
             var blob = Data()
-            for (ordinal, chunk) in plaintextChunks.enumerated() {
+            blob.reserveCapacity(blobLength)
+            for (ordinal, range) in chunkRanges.enumerated() {
+                let chunk = range.isEmpty ? Data() : plaintext.subdata(in: range)
                 let aad = try manifest.aad(ordinal: ordinal)
                 let sealed = try KVChunkCryptoSealFixedNonce(plaintext: chunk, dek: dek, aad: aad, nonce: nonces[ordinal])
                 let frame = try KVChunkFrame.encode(ordinal: ordinal, nonce: nonces[ordinal],
@@ -1690,6 +1694,24 @@ enum KVCacheSerialization {
         case .i32: return .int32
         case .u32: return .uint32
         }
+    }
+
+    /// Estimate the decoded payload length from cache GEOMETRY only — reading shapes
+    /// and dtypes, never copying tensor bytes (HIGH-5). Used to reject an oversized
+    /// snapshot BEFORE the expensive `.asData(access: .copy)` deep copy. Returns nil
+    /// on an unsupported dtype or a geometry that overflows the §5a equation.
+    static func estimatedDecodedLength(_ caches: [KVCacheSimple], tokenCount: Int) -> Int? {
+        var geometry: [KVDiskCacheFormat.LayerGeometryInput] = []
+        geometry.reserveCapacity(caches.count)
+        for cache in caches {
+            let state = cache.state
+            guard state.count == 2 else { return nil }
+            let k = state[0]
+            guard let dtype = codecDType(k.dtype) else { return nil }
+            geometry.append(KVDiskCacheFormat.LayerGeometryInput(
+                classID: "KVCacheSimple", ndim: k.shape.count, dims: k.shape, dtype: dtype))
+        }
+        return KVDiskCacheFormat.decodedLength(tokenCount: tokenCount, layers: geometry)
     }
 
     /// Snapshot per-layer state from KVCacheSimple caches. Returns nil if any layer is

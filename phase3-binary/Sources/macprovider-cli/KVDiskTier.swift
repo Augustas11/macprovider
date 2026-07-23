@@ -29,11 +29,20 @@ enum KVDiskCacheGate {
 /// (snapshot-at-commit capture and lazy promotion into the live model) is wired
 /// into `ModelRuntime`/`ConversationCache` in stage 5 alongside its AC-1/AC-8
 /// fixtures; this coordinator exposes the control-plane primitives those need.
-final class KVDiskTier: Sendable {
+final class KVDiskTier: @unchecked Sendable {
     let store: KVDiskCacheStore
     let config: KVDiskCacheConfig
     let namespaceID: String
     let eligibilityTTLSeconds: Int
+
+    /// Graceful-shutdown drain of queued cold writes (HIGH-5), wired at cold-tier
+    /// attach time. Bounded by `shutdownDrainSeconds`. Lock-guarded.
+    static let shutdownDrainSeconds = 5
+    private let drainLock = NSLock()
+    private var drainHook: (@Sendable (Int) async -> Void)?
+    func setDrainHook(_ hook: (@Sendable (Int) async -> Void)?) {
+        drainLock.lock(); drainHook = hook; drainLock.unlock()
+    }
 
     init(
         config: KVDiskCacheConfig,
@@ -102,9 +111,11 @@ final class KVDiskTier: Sendable {
         (try? await store.activate()) ?? false
     }
 
-    /// Graceful shutdown drain (FR-KVP3). The bounded write-drain lands with the
-    /// data path in stage 5; today this releases the lock cleanly.
+    /// Graceful shutdown drain (FR-KVP3 / HIGH-5): flush queued cold writes (bounded
+    /// by `shutdownDrainSeconds`) BEFORE releasing the namespace lock.
     func shutdown() async {
+        drainLock.lock(); let hook = drainHook; drainLock.unlock()
+        if let hook { await hook(Self.shutdownDrainSeconds) }
         await store.deactivate()
     }
 
