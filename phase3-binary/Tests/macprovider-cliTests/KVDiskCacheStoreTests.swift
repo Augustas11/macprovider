@@ -489,6 +489,30 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .miss = after else { return XCTFail("post-rotation read misses cleanly") }
     }
 
+    /// Item 5 (FR-KVP9): two concurrent promotions — one proceeds, the other returns
+    /// `disk_miss_busy` IMMEDIATELY (not after the first finishes). The claim is
+    /// actor-isolated and the decode runs off-actor, so the contender observes the
+    /// claimed slot rather than queueing behind the decode.
+    func testConcurrentPromotionSecondReturnsBusyImmediately() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:promote-busy"
+        let snapshot = try await makeSnapshot(store: store, rawKey: key, seq: 200, nowMillis: 1_000_000)
+        _ = try await store.write(snapshot, nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+
+        async let a = store.read(rawKey: key, runtime: runtime(index: index, seq: 200), nowMillis: 1_000_100)
+        async let b = store.read(rawKey: key, runtime: runtime(index: index, seq: 200), nowMillis: 1_000_100)
+        let results = try await [a, b]
+
+        let hits = results.filter { if case .hit = $0 { return true }; return false }.count
+        let busy = results.filter { if case .miss(.diskMissBusy, _) = $0 { return true }; return false }.count
+        XCTAssertEqual(hits, 1, "exactly one concurrent promotion proceeds")
+        XCTAssertEqual(busy, 1, "the contender returns disk_miss_busy immediately, not queued")
+    }
+
     /// CRITICAL-2: a snapshot whose key epoch was captured before a purge-all
     /// rotation is REJECTED (fence_lost) when its persist Task finally publishes —
     /// it can never be restamped into the new epoch and survive crypto-shredding.

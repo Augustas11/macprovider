@@ -1053,6 +1053,101 @@ actor KVDiskCacheStore {
 
     // MARK: - Read path (FR-KVP4/5/9)
 
+    /// Outcome of the off-actor bounded blob decode (Item 5). Sendable so it can cross
+    /// back from a detached decode task to the actor.
+    private enum KVPromoteDecode: Sendable {
+        case ok(tokens: [Int32], layers: [KVLayerPayload], blobSize: Int, peakStaging: Int)
+        case corrupt
+        case ioError
+        case deadline
+        case budget
+    }
+
+    /// Item 5 (FR-KVP9): the bounded streaming blob read + decrypt + decode, run OUTSIDE
+    /// the store's actor isolation (via a detached task) so it never blocks other
+    /// promotion admissions — a second promotion arriving during this work observes the
+    /// claimed `promotionInFlight` slot and returns `disk_miss_busy` immediately rather
+    /// than queueing behind the decode. Touches no actor-mutable state: it takes the
+    /// manifest, DEK, blob URL, deadline, and ceiling by value and returns a decoded
+    /// payload or a typed miss. `nonisolated` + immutable inputs make it Sendable-safe.
+    nonisolated private func promoteDecodeBlob(
+        blobURL: URL, manifest: KVDiskManifest, dek: Data, deadline: Date, stagingMaxBytes: Int
+    ) -> KVPromoteDecode {
+        // Pass 1: SHA-256 the blob by streaming the FILE through the hash in bounded
+        // windows, retaining NONE of the ciphertext.
+        let blobSize: Int
+        do {
+            let (shaFD, size) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
+            defer { close(shaFD) }
+            blobSize = size
+            guard size == manifest.blobLength else { return .corrupt }
+            var hasher = SHA256()
+            var remaining = size
+            let window = 1 << 20   // 1 MiB streaming window; never the whole blob
+            while remaining > 0 {
+                let take = min(window, remaining)
+                let piece = try readExactly(fd: shaFD, count: take)
+                hasher.update(data: piece)
+                remaining -= take
+            }
+            let actualSHA = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            guard actualSHA == manifest.blobSHA256 else { return .corrupt }
+        } catch let e as KVStoreError {
+            if case .boundsExceeded = e { return .corrupt }   // over-bound blob is corrupt
+            return .ioError
+        } catch { return .ioError }
+
+        // Pass 2: stream one frame at a time — read exact bytes, AEAD-open, feed the
+        // incremental decoder that materializes each layer and releases consumed bytes.
+        let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
+        let decoder = KVStreamingPayloadDecoder(
+            expectedDecodedLength: manifest.decodedLength, layerCount: manifest.layerCount)
+        var peakStaging = 0
+        enum StreamMiss: Error { case corrupt, deadline, budget }
+        do {
+            let (readFD, _) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
+            defer { close(readFD) }
+            for record in manifest.chunks {
+                if Date() > deadline { throw StreamMiss.deadline }
+                let frameData: Data
+                do { frameData = try readExactly(fd: readFD, count: frameOverhead + record.ctLength) }
+                catch { throw StreamMiss.corrupt }
+                let frame: KVParsedFrame
+                do { frame = try KVChunkFrame.decodeBlob(frameData, chunkTable: [record])[0] }
+                catch { throw StreamMiss.corrupt }
+                let aad: Data
+                do { aad = try manifest.aad(ordinal: frame.ordinal) } catch { throw StreamMiss.corrupt }
+                let opened: Data
+                do {
+                    opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
+                                                    tag: frame.tag, dek: dek, aad: aad)
+                } catch { throw StreamMiss.corrupt }
+                let liveBeforeDecode = frameData.count + opened.count + decoder.residualBytes + decoder.decodedBytes
+                peakStaging = max(peakStaging, liveBeforeDecode)
+                guard peakStaging <= stagingMaxBytes else { throw StreamMiss.budget }
+                do { try decoder.feed(opened) } catch { throw StreamMiss.corrupt }
+                // Item 4: enforce AFTER materialization of each layer on the true peak.
+                let liveAfterDecode = frameData.count + decoder.peakBytes
+                peakStaging = max(peakStaging, liveAfterDecode)
+                guard peakStaging <= stagingMaxBytes else { throw StreamMiss.budget }
+            }
+        } catch StreamMiss.deadline {
+            return .deadline
+        } catch StreamMiss.budget {
+            return .budget
+        } catch let e as KVStoreError {
+            if case .boundsExceeded = e { return .corrupt }
+            return .ioError
+        } catch { return .corrupt }
+
+        let decoded: KVDecodedPayload
+        do { decoded = try decoder.finish() } catch { return .corrupt }
+        guard decoded.tokens.count == manifest.tokenCount else { return .corrupt }
+        // Item 4: report the true internal high-water (source ⋂ tensor co-residency).
+        peakStaging = max(peakStaging, decoder.peakBytes)
+        return .ok(tokens: decoded.tokens, layers: decoded.layers, blobSize: blobSize, peakStaging: peakStaging)
+    }
+
     /// Attempt a cold hit for `rawKey` against the live runtime identity. Returns the
     /// decoded tokens + restored layer state, or a typed miss reason. `runtime`
     /// carries every live-identity input (a nil `modelSHA256` ⇒ identity unavailable).
@@ -1060,7 +1155,7 @@ actor KVDiskCacheStore {
     ///   WITHOUT emitting `disk_hit`; the caller (the runtime promotion adapter)
     ///   emits exactly one terminal code after the hot predicate accepts/rejects
     ///   the restored layers (§5 row 25). Miss codes are always emitted here.
-    func read(rawKey: String, runtime: KVRuntimeIdentity, nowMillis: Int, emitHitEvent: Bool = true) throws -> KVReadResult {
+    func read(rawKey: String, runtime: KVRuntimeIdentity, nowMillis: Int, emitHitEvent: Bool = true) async throws -> KVReadResult {
         guard activated else { return .miss(.diskMissIO, .ioError) }
         if let detail = quarantined { return .miss(.diskMissIO, detail) }
 
@@ -1161,140 +1256,61 @@ actor KVDiskCacheStore {
             return .miss(.diskMissBudget, .exceedsPromotionCeiling)
         }
 
+        // Item 5 (FR-KVP9): CLAIM the single promotion slot here (actor-isolated). The
+        // busy check above already returned `disk_miss_busy` immediately if the slot was
+        // taken. The bounded blob decode below runs OFF the actor (detached task) so a
+        // second promotion arriving during it observes the claimed slot and returns
+        // `disk_miss_busy` immediately rather than queueing behind this decode. The
+        // deadline starts at the claim, not after any queue wait.
         promotionInFlight = true
         defer { promotionInFlight = false }
         let deadline = Date().addingTimeInterval(TimeInterval(config.promotionMaxSeconds))
         let started = Date()
-
-        // HIGH-1 read streaming. Pass 1: SHA-256 the blob by streaming the FILE through
-        // the hash in bounded windows, retaining NONE of the ciphertext — the pre-AEAD
-        // integrity gate no longer forces whole-blob residency.
         let blobURL = dir.appendingPathComponent("gen-\(manifest.generation).blob")
-        let blobSize: Int
-        do {
-            let (shaFD, size) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
-            defer { close(shaFD) }
-            blobSize = size
-            guard size == manifest.blobLength else {
-                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-            }
-            var hasher = SHA256()
-            var remaining = size
-            let window = 1 << 20   // 1 MiB streaming window; never the whole blob
-            while remaining > 0 {
-                let take = min(window, remaining)
-                let piece = try readExactly(fd: shaFD, count: take)
-                hasher.update(data: piece)
-                remaining -= take
-            }
-            let actualSHA = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-            guard actualSHA == manifest.blobSHA256 else {
-                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-            }
-        } catch let e as KVStoreError {
-            // M-14: an over-bound blob is corrupt (integrity), not an I/O error.
-            if case .boundsExceeded = e {
-                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-            }
-            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
-        } catch {
-            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
-        }
+        let stagingCeiling = config.stagingMaxBytes
 
-        // Pass 2: re-open and stream one frame at a time — read the frame's exact bytes
-        // (size known from the manifest chunk table), AEAD-open under the AAD projection,
-        // feed the plaintext to the incremental decoder that materializes each layer and
-        // releases consumed bytes. ONE high-water budget spans the live ciphertext frame
-        // + opened plaintext + decoder scratch + decoded layers; the TRUE peak is
-        // reported and enforced against `stagingMaxBytes` (disk_miss_budget on overflow).
-        let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
-        let decoder = KVStreamingPayloadDecoder(
-            expectedDecodedLength: manifest.decodedLength, layerCount: manifest.layerCount)
-        var peakStaging = 0
-        enum StreamMiss: Error { case corrupt, deadline, budget }
-        do {
-            let (readFD, _) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
-            defer { close(readFD) }
-            for record in manifest.chunks {
-                if Date() > deadline { throw StreamMiss.deadline }
-                let frameData: Data
-                do { frameData = try readExactly(fd: readFD, count: frameOverhead + record.ctLength) }
-                catch { throw StreamMiss.corrupt }
-                // Parse + verify this single frame against its authoritative chunk record.
-                let frame: KVParsedFrame
-                do { frame = try KVChunkFrame.decodeBlob(frameData, chunkTable: [record])[0] }
-                catch { throw StreamMiss.corrupt }
-                let aad: Data
-                do { aad = try manifest.aad(ordinal: frame.ordinal) } catch { throw StreamMiss.corrupt }
-                let opened: Data
-                do {
-                    opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
-                                                    tag: frame.tag, dek: dek, aad: aad)
-                } catch { throw StreamMiss.corrupt }
-                // True live-memory high-water BEFORE decode: the ciphertext frame, the
-                // opened chunk plaintext, the decoder's residual scratch, and the decoded
-                // layers emitted so far.
-                let liveBeforeDecode = frameData.count + opened.count + decoder.residualBytes + decoder.decodedBytes
-                peakStaging = max(peakStaging, liveBeforeDecode)
-                guard peakStaging <= config.stagingMaxBytes else { throw StreamMiss.budget }
-                do { try decoder.feed(opened) } catch { throw StreamMiss.corrupt }
-                // Item 4: enforce AFTER materialization of each layer. `decoder.peakBytes`
-                // is the true source ⋂ tensor co-residency during this feed (no hidden
-                // whole-residual copy anymore); add the still-held ciphertext frame. A
-                // true peak over the ceiling is `disk_miss_budget`, and this value is the
-                // one reported in `peak_staging_bytes`.
-                let liveAfterDecode = frameData.count + decoder.peakBytes
-                peakStaging = max(peakStaging, liveAfterDecode)
-                guard peakStaging <= config.stagingMaxBytes else { throw StreamMiss.budget }
-            }
-        } catch StreamMiss.deadline {
+        // Await the off-actor decode. During this suspension the actor is free, so a
+        // contending promotion's admission runs and gets busy (FR-KVP9 "rather than
+        // queueing"). Running the blocking disk I/O + crypto off-actor also keeps the
+        // actor responsive.
+        let outcome = await Task.detached { [self] in
+            promoteDecodeBlob(blobURL: blobURL, manifest: manifest, dek: dek,
+                              deadline: deadline, stagingMaxBytes: stagingCeiling)
+        }.value
+
+        switch outcome {
+        case .deadline:
             emitMiss(.diskMissIO, detail: .promotionDeadline, prefix: prefix)
             return .miss(.diskMissIO, .promotionDeadline)
-        } catch StreamMiss.budget {
+        case .budget:
             emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
             return .miss(.diskMissBudget, .exceedsPromotionCeiling)
-        } catch let e as KVStoreError {
-            if case .boundsExceeded = e {
-                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+        case .ioError:
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix)
+            return .miss(.diskMissIO, .ioError)
+        case .corrupt:
+            emitMiss(.diskMissCorrupt, prefix: prefix)
+            return .miss(.diskMissCorrupt)
+        case let .ok(tokens, layers, blobSize, peakStaging):
+            // Update LRU last-eligible-use, durably (FR-KVP7 usage journal). Best-effort:
+            // a failure degrades LRU durability but never fails the hit.
+            if var entry = liveEntries[index] {
+                entry.lastUsedMillis = nowMillis
+                liveEntries[index] = entry
+                appendUsageRecord(index: index, millis: nowMillis)
             }
-            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
-        } catch {
-            emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+            let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
+            if emitHitEvent {
+                emit(.diskHit, indexHashPrefix: prefix, fields: [
+                    "restore_bytes": "\(blobSize)",
+                    "decrypt_ms": "\(elapsedMillis)",
+                    "peak_staging_bytes": "\(peakStaging)",
+                ])
+            }
+            return .hit(KVReadHit(tokens: tokens, layers: layers,
+                                  bytesRead: blobSize, decryptMillis: elapsedMillis,
+                                  peakStagingBytes: peakStaging))
         }
-
-        // Finalize the incremental decode with the exact self-delimiting length check.
-        let decoded: KVDecodedPayload
-        do {
-            decoded = try decoder.finish()
-        } catch {
-            emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-        }
-        guard decoded.tokens.count == manifest.tokenCount else {
-            emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-        }
-        // Item 4: report the true internal high-water (source ⋂ tensor co-residency).
-        peakStaging = max(peakStaging, decoder.peakBytes)
-
-        // Update LRU last-eligible-use, durably (FR-KVP7 usage journal) so the ordering
-        // survives restart and drives eviction. The journal append is best-effort: a
-        // failure degrades LRU durability but never fails the hit.
-        if var entry = liveEntries[index] {
-            entry.lastUsedMillis = nowMillis
-            liveEntries[index] = entry
-            appendUsageRecord(index: index, millis: nowMillis)
-        }
-
-        let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
-        if emitHitEvent {
-            emit(.diskHit, indexHashPrefix: prefix, fields: [
-                "restore_bytes": "\(blobSize)",
-                "decrypt_ms": "\(elapsedMillis)",
-                "peak_staging_bytes": "\(peakStaging)",
-            ])
-        }
-        return .hit(KVReadHit(tokens: decoded.tokens, layers: decoded.layers,
-                              bytesRead: blobSize, decryptMillis: elapsedMillis,
-                              peakStagingBytes: peakStaging))
     }
 
     /// Runtime cold-tier adapter entry point (FR-KVP3): compute the HMAC index and
@@ -2097,7 +2113,7 @@ actor KVDiskCacheStore {
     /// checks, and the §5a size bound, WITHOUT reading the bytes. Returns the fd (caller
     /// closes) and the fstat size. A size over the bound throws `boundsExceeded`
     /// (integrity → corrupt), matching `readBounded`.
-    private func openBoundedForRead(_ url: URL, maxBytes: Int) throws -> (fd: Int32, size: Int) {
+    nonisolated private func openBoundedForRead(_ url: URL, maxBytes: Int) throws -> (fd: Int32, size: Int) {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw KVStoreError.io("open failed errno=\(errno)") }
         var info = stat()
@@ -2114,7 +2130,7 @@ actor KVDiskCacheStore {
 
     /// Read exactly `count` bytes from `fd`, retrying short reads / EINTR. Throws on a
     /// short file (fewer bytes than requested) or an I/O error.
-    private func readExactly(fd: Int32, count: Int) throws -> Data {
+    nonisolated private func readExactly(fd: Int32, count: Int) throws -> Data {
         guard count >= 0 else { throw KVStoreError.io("negative read count") }
         var buffer = Data(count: count)
         guard count > 0 else { return buffer }
