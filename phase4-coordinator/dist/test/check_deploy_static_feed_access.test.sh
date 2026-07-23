@@ -150,6 +150,38 @@ grep -q 'cmp -s \$DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinato
   ! grep -q 'install -o root -g macprovider -m 0750 \$DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator' "$DEPLOY_SH" ||
   fail "direct catalog deploy must not replace one half of the signed coordinator/gateway pair"
 
+grep -qF 'tier2_require_hash_verified()' "$DEPLOY_SH" &&
+  grep -qF 'direct deploy cannot change tier2.require_hash_verified' "$DEPLOY_SH" &&
+  grep -qF 'ALLOW_CONFIG_DRIFT does not bypass this enforcement state-transition guard' "$DEPLOY_SH" ||
+  fail "direct deploy must hard-block every Tier-2 enforcement state transition"
+enforcement_guard_line=$(grep -nF 'direct deploy cannot change tier2.require_hash_verified' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+config_drift_override_line=$(grep -nF 'if [ "${ALLOW_CONFIG_DRIFT:-0}" != "1" ]' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+[ -n "$enforcement_guard_line" ] && [ -n "$config_drift_override_line" ] &&
+  [ "$enforcement_guard_line" -lt "$config_drift_override_line" ] ||
+  fail "Tier-2 enforcement transition guard must run before the config-drift override"
+tier2_parser_tmp="$(mktemp)"
+awk '/^tier2_require_hash_verified\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" >"$tier2_parser_tmp"
+# shellcheck disable=SC1090
+. "$tier2_parser_tmp"
+rm -f "$tier2_parser_tmp"
+[ "$(printf 'tier2:\n  require_hash_verified: false\npool:\n' | tier2_require_hash_verified)" = "false" ] ||
+  fail "Tier-2 transition parser must read the live false posture"
+[ "$(printf 'tier2:\n  require_hash_verified: true\npool:\n' | tier2_require_hash_verified)" = "true" ] ||
+  fail "Tier-2 transition parser must read the candidate true posture"
+[ "$(printf 'tier2:\n    require_hash_verified: true\npool:\n' | tier2_require_hash_verified)" = "true" ] ||
+  fail "Tier-2 transition parser must read valid four-space YAML"
+if printf 'tier2:\n  require_hash_verified: false\n  require_hash_verified: true\n' |
+  tier2_require_hash_verified >/dev/null; then
+  fail "Tier-2 transition parser must reject duplicate enforcement keys"
+fi
+if printf 'tier2:\n  nested:\n    require_hash_verified: true\n' |
+  tier2_require_hash_verified >/dev/null; then
+  fail "Tier-2 transition parser must reject a missing direct enforcement key"
+fi
+
+grep -qF 'tier2-enforcement-transaction.json' "$DEPLOY_SH" ||
+  fail "direct deploy must refuse an active Tier-2 enforcement transaction"
+
 grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'info.st_nlink != 1' "$DEPLOY_SH" &&
   grep -q 'unsafe coordinator deploy lock' "$DEPLOY_SH" ||
   fail "deploy lock setup must reject symlinks, hardlinks, and unsafe ownership/modes"

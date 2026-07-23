@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-malibu-emission-pearl.sh — Session C4: MALIBU emission Pearl rollout.
+# deploy-malibu-emission-pearl.sh — retired Pearl rollout; dry-run reference only.
 #
 # Applies stats migrations 012+014, installs coordinator binary with merged
 # overlay (preserves OPoI canary overlay when present), and keeps
@@ -55,6 +55,12 @@ run() {
     "$@"
   fi
 }
+
+if [ "$DRY_RUN" != "1" ]; then
+  echo "REFUSING: this coordinator-only Pearl deploy authority is retired." >&2
+  echo "Use the signed backend-pair updater; do not replace the hash-proven coordinator independently." >&2
+  exit 5
+fi
 
 for f in "$MALIBU_OVERLAY" "$DROPIN" "$MERGE_PY"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
@@ -138,7 +144,6 @@ if [ "$DRY_RUN" = "1" ]; then
   log "DRY_RUN: would merge overlays into coordinator.pearl-overlays.yaml"
 else
   WORKDIR=$(mktemp -d)
-  trap 'rm -rf "$WORKDIR"' EXIT
   BASE_OVERLAY="$OPIO_OVERLAY"
   if "${SSH[@]}" 'test -f /etc/macprovider/coordinator.pearl-overlays.yaml'; then
     "${SCP[@]}" "$VPS_USER@$VPS_HOST:/etc/macprovider/coordinator.pearl-overlays.yaml" "$WORKDIR/base.yaml"
@@ -163,7 +168,6 @@ else
     /tmp/macprovider-malibu-deploy.*) ;;
     *) echo "unexpected mktemp path: $DEPLOY_TMP" >&2; exit 1 ;;
   esac
-  trap "${SSH[@]} rm -rf $DEPLOY_TMP" EXIT
   "${SCP[@]}" "$BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
   "${SCP[@]}" "$WORKDIR/coordinator.pearl-overlays.yaml" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.pearl-overlays.yaml"
   "${SCP[@]}" "$DROPIN" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/malibu-emission.conf"

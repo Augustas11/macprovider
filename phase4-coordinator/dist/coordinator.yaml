@@ -284,18 +284,12 @@ admission:
 tier2:
   catalog_path: /opt/macprovider/autotune/current/tier2-catalog.json
   catalog_public_key: IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ
-  require_hash_verified: false
-  # Required only while pre-canonical providers remain connected. The deploy
-  # gate resolves this non-secret value from /etc/macprovider/coordinator.env
-  # and refuses a missing, malformed, or expired deadline. Observe
-  # model_hash_algorithm_legacy_bridge, update the remaining providers, then
-  # remove this field in the canonical-only rollout so missing algorithms fail
-  # closed. Never extend the bridge without a counted legacy cohort.
-  model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL
+  require_hash_verified: true
   # SPEC-015 v0.3 §M.4 — absolute base URL the coordinator advertises
   # as `catalog_url` / `catalog_pubkey_url` in /poolz when a catalog
   # is effectively active. Empty → falls back to scheme + request Host.
-  # Entry 80 preserved: require_hash_verified stays at false.
+  # Entry 191: physical snapshot-manifest providers are release-bound and
+  # hash verification is enforced fail-closed.
   public_catalog_base_url: "https://coordinator.streamvc.live"
 
 # Enumerated PINNED providers (SPEC-002 v1.0.4 Finding F-2: every pinned

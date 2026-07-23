@@ -1,0 +1,537 @@
+#!/usr/bin/env python3
+"""Durable rollback guard for the one-time Pearl Tier-2 enforcement flip."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import time
+from typing import Any
+
+
+CONFIG_PATH = Path("/opt/macprovider/coordinator.yaml")
+CURRENT_RELEASE = Path("/opt/macprovider/autotune/current")
+RELEASE_ROOT = Path("/opt/macprovider/autotune/releases")
+STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
+JOURNAL_PATH = STATE_ROOT / "tier2-enforcement-transaction.json"
+BACKUP_ROOT = STATE_ROOT / "tier2-enforcement-backups"
+LOCK_PATH = Path("/run/lock/macprovider-pearl-updater.lock")
+SERVICE = "macprovider-coordinator"
+SELF_PATH = Path("/usr/local/sbin/macprovider-tier2-enforcement-watchdog")
+WATCHDOG_UNIT = "macprovider-tier2-enforcement-watchdog"
+WATCHDOG_DELAY = "15m"
+WATCHDOG_DELAY_SECONDS = 15 * 60
+SCHEMA_VERSION = "macprovider-tier2-enforcement-transaction-v1"
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+TRANSACTION_RE = re.compile(r"^[0-9a-f]{64}$")
+TRUSTED_UID = 0
+TRUSTED_GID = 0
+
+
+class EnforcementError(RuntimeError):
+    pass
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def trusted_directory(path: Path, *, mode: int | None = None) -> None:
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != TRUSTED_UID
+        or info.st_nlink < 1
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        raise EnforcementError(f"untrusted root directory: {path}")
+    if mode is not None and stat.S_IMODE(info.st_mode) != mode:
+        raise EnforcementError(f"unexpected mode for {path}: {stat.S_IMODE(info.st_mode):04o}")
+
+
+def ensure_private_directory(path: Path) -> None:
+    if not path.exists():
+        trusted_directory(path.parent)
+        path.mkdir(mode=0o700)
+        fsync_directory(path.parent)
+    trusted_directory(path, mode=0o700)
+
+
+def read_trusted(path: Path, *, private: bool = False) -> tuple[bytes, os.stat_result]:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        mode = stat.S_IMODE(info.st_mode)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != TRUSTED_UID
+            or info.st_nlink != 1
+            or mode & 0o022
+            or (private and mode != 0o600)
+        ):
+            raise EnforcementError(f"untrusted root file: {path}")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 2 * 1024 * 1024:
+                raise EnforcementError(f"trusted file exceeds size limit: {path}")
+            chunks.append(chunk)
+        return b"".join(chunks), info
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write(
+    path: Path,
+    data: bytes,
+    *,
+    uid: int,
+    gid: int,
+    mode: int,
+) -> None:
+    trusted_directory(path.parent)
+    temporary = path.parent / f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(temporary, uid, gid)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def write_new_private(path: Path, data: bytes) -> None:
+    trusted_directory(path.parent, mode=0o700)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(path, TRUSTED_UID, TRUSTED_GID)
+        os.chmod(path, 0o600)
+        fsync_directory(path.parent)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def active_release() -> str:
+    resolved = str(CURRENT_RELEASE.resolve(strict=True))
+    prefix = str(RELEASE_ROOT.resolve(strict=True)) + "/"
+    if not resolved.startswith(prefix) or resolved == prefix:
+        raise EnforcementError("active catalog release pointer is outside the immutable release root")
+    return resolved
+
+
+def flip_to_enforced(original: bytes) -> bytes:
+    try:
+        text = original.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EnforcementError("coordinator config is not UTF-8") from exc
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line == "tier2:"]
+    if len(starts) != 1:
+        raise EnforcementError("coordinator config must contain exactly one top-level tier2 block")
+    start = starts[0]
+    end = start + 1
+    while end < len(lines) and (not lines[end] or lines[end][0].isspace()):
+        end += 1
+    block = lines[start + 1 : end]
+    if any("\t" in line for line in block):
+        raise EnforcementError("top-level tier2 block must not contain tabs")
+    keyed_lines = [
+        (index, len(line) - len(line.lstrip(" ")))
+        for index, line in enumerate(lines[start + 1 : end], start=start + 1)
+        if re.match(r"^ +[A-Za-z0-9_-]+:\s*", line)
+    ]
+    if not keyed_lines:
+        raise EnforcementError("top-level tier2 block has no direct fields")
+    direct_indent = min(indent for _, indent in keyed_lines)
+    indexes = [
+        index
+        for index, indent in keyed_lines
+        if indent == direct_indent
+        and re.match(r"^ +require_hash_verified:\s*", lines[index])
+    ]
+    if len(indexes) != 1 or lines[indexes[0]].strip() != "require_hash_verified: false":
+        raise EnforcementError("tier2.require_hash_verified must be exactly false before enforcement")
+    lines[indexes[0]] = lines[indexes[0]].replace(
+        "require_hash_verified: false",
+        "require_hash_verified: true",
+        1,
+    )
+    return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
+
+
+def run(command: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise EnforcementError(f"command failed: {' '.join(command)}") from exc
+
+
+def run_optional(command: list[str], *, timeout: int = 30) -> None:
+    try:
+        subprocess.run(
+            command,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise EnforcementError(f"command timed out: {' '.join(command)}") from exc
+
+
+def reload_service() -> None:
+    run(["systemctl", "kill", "-s", "HUP", SERVICE], timeout=15)
+    time.sleep(2)
+    run(["systemctl", "is-active", "--quiet", SERVICE], timeout=15)
+
+
+def reload_service_if_active() -> None:
+    try:
+        status = subprocess.run(
+            ["systemctl", "is-active", "--quiet", SERVICE],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise EnforcementError(f"command timed out: systemctl is-active --quiet {SERVICE}") from exc
+    if status.returncode == 0:
+        reload_service()
+    elif status.returncode not in (3, 4):
+        raise EnforcementError(f"could not determine service state for {SERVICE}")
+
+
+def cancel_watchdog() -> None:
+    run_optional(["systemctl", "stop", f"{WATCHDOG_UNIT}.timer"], timeout=15)
+
+
+def schedule_watchdog() -> None:
+    run_optional(["systemctl", "stop", f"{WATCHDOG_UNIT}.timer"], timeout=15)
+    run_optional(["systemctl", "reset-failed", f"{WATCHDOG_UNIT}.service"], timeout=15)
+    run(
+        [
+            "systemd-run",
+            f"--unit={WATCHDOG_UNIT}",
+            f"--on-active={WATCHDOG_DELAY}",
+            "--timer-property=AccuracySec=1s",
+            "--property=Restart=on-failure",
+            "--property=RestartSec=30s",
+            "--collect",
+            str(SELF_PATH),
+            "--reconcile",
+        ],
+        timeout=30,
+    )
+    run(["systemctl", "is-active", "--quiet", f"{WATCHDOG_UNIT}.timer"], timeout=15)
+
+
+def load_journal() -> dict[str, Any] | None:
+    if not JOURNAL_PATH.exists():
+        return None
+    raw, _ = read_trusted(JOURNAL_PATH, private=True)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise EnforcementError("Tier-2 enforcement journal is invalid JSON") from exc
+    required = {
+        "schema_version",
+        "transaction_id",
+        "backup_path",
+        "previous_config_sha256",
+        "enforced_config_sha256",
+        "release_pointer",
+        "rollback_deadline_unix",
+        "phase",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise EnforcementError("Tier-2 enforcement journal fields are invalid")
+    if payload["schema_version"] != SCHEMA_VERSION:
+        raise EnforcementError("Tier-2 enforcement journal schema is unsupported")
+    if not isinstance(payload["transaction_id"], str) or not TRANSACTION_RE.fullmatch(
+        payload["transaction_id"]
+    ):
+        raise EnforcementError("Tier-2 enforcement transaction identity is invalid")
+    backup = Path(str(payload["backup_path"]))
+    if backup.parent != BACKUP_ROOT or backup.name != f"{payload['transaction_id']}.yaml":
+        raise EnforcementError("Tier-2 enforcement backup path is invalid")
+    if not all(
+        isinstance(payload[name], str) and SHA256_RE.fullmatch(payload[name])
+        for name in ("previous_config_sha256", "enforced_config_sha256")
+    ):
+        raise EnforcementError("Tier-2 enforcement config digest is invalid")
+    release_prefix = str(RELEASE_ROOT.resolve(strict=True)) + "/"
+    if not isinstance(payload["release_pointer"], str) or not payload["release_pointer"].startswith(
+        release_prefix
+    ):
+        raise EnforcementError("Tier-2 enforcement release pointer is invalid")
+    deadline = payload["rollback_deadline_unix"]
+    if type(deadline) is not int or deadline <= 0:
+        raise EnforcementError("Tier-2 enforcement rollback deadline is invalid")
+    if payload["phase"] not in ("armed", "applied", "committed"):
+        raise EnforcementError("Tier-2 enforcement journal phase is invalid")
+    return payload
+
+
+def write_journal(payload: dict[str, Any]) -> None:
+    ensure_private_directory(STATE_ROOT)
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    if JOURNAL_PATH.exists():
+        read_trusted(JOURNAL_PATH, private=True)
+        atomic_write(
+            JOURNAL_PATH,
+            body,
+            uid=TRUSTED_UID,
+            gid=TRUSTED_GID,
+            mode=0o600,
+        )
+    else:
+        write_new_private(JOURNAL_PATH, body)
+
+
+def clear_transaction(payload: dict[str, Any]) -> None:
+    cancel_watchdog()
+    JOURNAL_PATH.unlink()
+    fsync_directory(STATE_ROOT)
+    Path(payload["backup_path"]).unlink(missing_ok=True)
+    fsync_directory(BACKUP_ROOT)
+
+
+def arm() -> dict[str, Any]:
+    if load_journal() is not None:
+        raise EnforcementError("a Tier-2 enforcement transaction is already active")
+    ensure_private_directory(STATE_ROOT)
+    ensure_private_directory(BACKUP_ROOT)
+    original, info = read_trusted(CONFIG_PATH)
+    enforced = flip_to_enforced(original)
+    release_pointer = active_release()
+    transaction_id = secrets.token_hex(32)
+    backup = BACKUP_ROOT / f"{transaction_id}.yaml"
+    schedule_watchdog()
+    journal: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "transaction_id": transaction_id,
+        "backup_path": str(backup),
+        "previous_config_sha256": digest(original),
+        "enforced_config_sha256": digest(enforced),
+        "release_pointer": release_pointer,
+        "rollback_deadline_unix": int(time.time()) + WATCHDOG_DELAY_SECONDS,
+        "phase": "armed",
+    }
+    try:
+        write_new_private(backup, original)
+        write_journal(journal)
+        current, current_info = read_trusted(CONFIG_PATH)
+        if (
+            digest(current) != journal["previous_config_sha256"]
+            or (current_info.st_dev, current_info.st_ino) != (info.st_dev, info.st_ino)
+            or active_release() != release_pointer
+        ):
+            raise EnforcementError("live config or release changed before enforcement publication")
+        atomic_write(
+            CONFIG_PATH,
+            enforced,
+            uid=info.st_uid,
+            gid=info.st_gid,
+            mode=stat.S_IMODE(info.st_mode),
+        )
+        journal["phase"] = "applied"
+        write_journal(journal)
+        reload_service()
+        return journal
+    except Exception as arm_error:
+        if JOURNAL_PATH.exists():
+            try:
+                rollback(transaction_id)
+            except Exception as rollback_error:
+                raise EnforcementError(
+                    "enforcement arm failed and immediate rollback failed; "
+                    f"transaction {transaction_id} remains durable "
+                    f"(arm={arm_error}; rollback={rollback_error})"
+                ) from rollback_error
+        else:
+            cancel_watchdog()
+        raise
+
+
+def require_transaction(payload: dict[str, Any], transaction_id: str | None) -> None:
+    if transaction_id is not None and payload["transaction_id"] != transaction_id:
+        raise EnforcementError("Tier-2 enforcement transaction identity changed")
+
+
+def commit(transaction_id: str) -> dict[str, Any]:
+    payload = load_journal()
+    if payload is None:
+        raise EnforcementError("no Tier-2 enforcement transaction is active")
+    require_transaction(payload, transaction_id)
+    live, _ = read_trusted(CONFIG_PATH)
+    if digest(live) != payload["enforced_config_sha256"]:
+        raise EnforcementError("cannot commit: live coordinator config changed")
+    if active_release() != payload["release_pointer"]:
+        raise EnforcementError("cannot commit: active catalog release changed")
+    payload["phase"] = "committed"
+    write_journal(payload)
+    result = dict(payload)
+    clear_transaction(payload)
+    return result
+
+
+def rollback(transaction_id: str | None = None) -> dict[str, Any]:
+    payload = load_journal()
+    if payload is None:
+        raise EnforcementError("no Tier-2 enforcement transaction is active")
+    require_transaction(payload, transaction_id)
+    if payload["phase"] == "committed":
+        result = dict(payload)
+        clear_transaction(payload)
+        return result
+    observed_release_pointer = active_release()
+    backup, _ = read_trusted(Path(payload["backup_path"]), private=True)
+    if digest(backup) != payload["previous_config_sha256"]:
+        raise EnforcementError("refusing rollback: config backup digest changed")
+    live, info = read_trusted(CONFIG_PATH)
+    live_digest = digest(live)
+    if live_digest == payload["enforced_config_sha256"]:
+        atomic_write(
+            CONFIG_PATH,
+            backup,
+            uid=info.st_uid,
+            gid=info.st_gid,
+            mode=stat.S_IMODE(info.st_mode),
+        )
+        reload_service_if_active()
+    elif live_digest != payload["previous_config_sha256"]:
+        raise EnforcementError("refusing stale rollback: live coordinator config changed")
+    restored, _ = read_trusted(CONFIG_PATH)
+    if digest(restored) != payload["previous_config_sha256"]:
+        raise EnforcementError("rollback did not restore the previous coordinator config")
+    result = dict(payload)
+    result["phase"] = "rolled_back"
+    result["observed_release_pointer"] = observed_release_pointer
+    clear_transaction(payload)
+    return result
+
+
+class FileLock:
+    def __enter__(self) -> "FileLock":
+        descriptor = os.open(
+            LOCK_PATH,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != TRUSTED_UID
+            or info.st_gid != TRUSTED_GID
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            os.close(descriptor)
+            raise EnforcementError("unsafe global Pearl updater lock")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        self.descriptor = descriptor
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        os.close(self.descriptor)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--arm", action="store_true")
+    mode.add_argument("--commit", action="store_true")
+    mode.add_argument("--rollback", action="store_true")
+    mode.add_argument("--reconcile", action="store_true")
+    parser.add_argument("--transaction-id")
+    args = parser.parse_args(argv)
+    if (args.commit or args.rollback) and not args.transaction_id:
+        parser.error("--transaction-id is required for commit/rollback")
+    if args.transaction_id and not TRANSACTION_RE.fullmatch(args.transaction_id):
+        parser.error("--transaction-id must be 64 lowercase hex characters")
+    return args
+
+
+def main(argv: list[str]) -> int:
+    if os.geteuid() != 0:
+        raise EnforcementError("Tier-2 enforcement watchdog must run as root")
+    args = parse_args(argv)
+    with FileLock():
+        if args.arm:
+            result = arm()
+            action = "armed"
+        elif args.commit:
+            result = commit(args.transaction_id)
+            action = "committed"
+        else:
+            result = rollback(args.transaction_id)
+            if args.reconcile:
+                action = "committed" if result["phase"] == "committed" else "reconciled"
+            else:
+                action = "committed" if result["phase"] == "committed" else "rolled_back"
+    output = {
+        "action": action,
+        "transaction_id": result["transaction_id"],
+        "previous_config_sha256": result["previous_config_sha256"],
+        "enforced_config_sha256": result["enforced_config_sha256"],
+        "release_pointer": result["release_pointer"],
+    }
+    if "observed_release_pointer" in result:
+        output["observed_release_pointer"] = result["observed_release_pointer"]
+    print(json.dumps(output, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except EnforcementError as exc:
+        print(f"tier2-enforcement-watchdog: ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)

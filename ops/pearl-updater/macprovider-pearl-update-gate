@@ -14,6 +14,9 @@ from pathlib import Path
 
 
 DEFAULT_JOURNAL = Path("/var/lib/macprovider-pearl-updater/active-transaction.json")
+DEFAULT_ENFORCEMENT_JOURNAL = Path(
+    "/var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json"
+)
 DEFAULT_GATE_ROOT = Path("/run/macprovider-pearl-updater")
 DEFAULT_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 DEFAULT_LOCK = Path("/run/lock/macprovider-pearl-updater.lock")
@@ -171,17 +174,37 @@ def main(argv: list[str]) -> int:
     if len(argv) != 1 or (argv[0] not in GATED_UNITS and not (testing and argv[0] == TEST_GATED_UNIT)):
         raise GateError("expected one protected systemd unit name")
     journal = Path(os.environ.get("PEARL_UPDATER_GATE_JOURNAL", str(DEFAULT_JOURNAL)))
+    enforcement_journal = Path(
+        os.environ.get(
+            "PEARL_UPDATER_GATE_ENFORCEMENT_JOURNAL",
+            str(DEFAULT_ENFORCEMENT_JOURNAL),
+        )
+    )
     gate_root = Path(os.environ.get("PEARL_UPDATER_GATE_ROOT", str(DEFAULT_GATE_ROOT)))
     boot_path = Path(os.environ.get("PEARL_UPDATER_GATE_BOOT_ID", str(DEFAULT_BOOT_ID)))
     lock_path = Path(os.environ.get("PEARL_UPDATER_GATE_LOCK", str(DEFAULT_LOCK)))
     if not testing and (
         journal != DEFAULT_JOURNAL
+        or enforcement_journal != DEFAULT_ENFORCEMENT_JOURNAL
         or gate_root != DEFAULT_GATE_ROOT
         or boot_path != DEFAULT_BOOT_ID
         or lock_path != DEFAULT_LOCK
     ):
         raise GateError("transaction gate path overrides are test-only")
     uid = os.geteuid() if testing else 0
+    if path_entry(enforcement_journal) is not None:
+        trusted_directory(enforcement_journal.parent, uid)
+        enforcement = trusted_json(enforcement_journal, uid)
+        if enforcement.get("schema_version") != "macprovider-tier2-enforcement-transaction-v1":
+            raise GateError("Tier-2 enforcement transaction journal schema is unsupported")
+        transaction_id = enforcement.get("transaction_id")
+        if not isinstance(transaction_id, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", transaction_id
+        ):
+            raise GateError("Tier-2 enforcement transaction identifier is invalid")
+        if enforcement.get("phase") not in ("armed", "applied", "committed"):
+            raise GateError("Tier-2 enforcement transaction phase is invalid")
+        raise GateError(f"active Tier-2 enforcement transaction blocks {argv[0]}")
     if path_entry(journal) is None:
         return 0
     trusted_directory(journal.parent, uid)

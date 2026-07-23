@@ -994,6 +994,10 @@ class Updater:
     def journal_path(self) -> Path:
         return self.state_root / "active-transaction.json"
 
+    @property
+    def tier2_enforcement_journal_path(self) -> Path:
+        return self.state_root / "tier2-enforcement-transaction.json"
+
     def _journal_transition(self, phase: str, **updates: object) -> None:
         if self.journal is None:
             return
@@ -2256,6 +2260,8 @@ class Updater:
             config_paths.append(runtime.overlay_config)
         located: list[tuple[Path, int, re.Match[str], list[str]]] = []
         tier2_catalog_owners: list[tuple[Path, str]] = []
+        effective_require_hash_verified: str | None = None
+        effective_model_hash_legacy_until: str | None = None
         config_texts: dict[Path, str] = {}
         config_hashes: dict[Path, str] = {}
         for path in config_paths:
@@ -2278,10 +2284,35 @@ class Updater:
             )
             if tier2_catalog_path is not None:
                 tier2_catalog_owners.append((path, tier2_catalog_path))
+            require_hash_verified = self._yaml_section_scalar(
+                text,
+                path,
+                "tier2",
+                "require_hash_verified",
+                required=False,
+            )
+            if require_hash_verified is not None:
+                effective_require_hash_verified = require_hash_verified
+            model_hash_legacy_until = self._yaml_section_scalar(
+                text,
+                path,
+                "tier2",
+                "model_hash_legacy_until",
+                required=False,
+            )
+            if model_hash_legacy_until is not None:
+                effective_model_hash_legacy_until = model_hash_legacy_until
         if not located:
             raise UpdateError("effective coordinator configuration has no advertised binary version field")
         if not tier2_catalog_owners:
             raise UpdateError("effective coordinator configuration has no tier2.catalog_path field")
+        if effective_require_hash_verified not in ("false", "true"):
+            raise UpdateError("effective tier2.require_hash_verified must be explicitly false or true")
+        if effective_require_hash_verified == "true" and (
+            effective_model_hash_legacy_until is not None
+            or runtime.environment.get("MODEL_HASH_LEGACY_UNTIL")
+        ):
+            raise UpdateError("enforced hash verification cannot retain the model hash algorithm legacy bridge")
         target, index, match, lines = located[-1]
         previous = next(value for value in match.groups()[1:4] if value is not None)
         lines[index] = f'{match.group(1)}"{release.provider_advertised_version}"{match.group(5)}{match.group(6) or ""}'
@@ -2358,8 +2389,8 @@ class Updater:
                 staged_require_hash_verified = candidate_require_hash
         if staged_catalog_path != next_catalog_path:
             raise UpdateError("staged effective tier2.catalog_path is not the release-bound current catalog path")
-        if staged_require_hash_verified != "false":
-            raise UpdateError("staged effective tier2.require_hash_verified must remain false")
+        if staged_require_hash_verified != effective_require_hash_verified:
+            raise UpdateError("staged effective tier2.require_hash_verified must preserve the live enforcement state")
 
         validation_base = staged_configs[runtime.base_config]
         validation_argv = [
@@ -3907,13 +3938,35 @@ class Updater:
     def local_gateway_ready(self, release: Release) -> bool:
         return self.local_gateway_identity_ready(self.release_identity(release))
 
-    def assert_effective_tier2_catalog_path(self) -> None:
+    def assert_effective_tier2_catalog_path(
+        self,
+        expected_require_hash_verified: str | None = None,
+    ) -> None:
         expected = str(self._current_tier2_catalog_path())
         actual = self.effective_coordinator_scalar("tier2", "catalog_path")
         if actual != expected:
             raise UpdateError("effective tier2.catalog_path is not the release-bound current catalog path")
-        if self.effective_coordinator_scalar("tier2", "require_hash_verified") != "false":
-            raise UpdateError("effective tier2.require_hash_verified must remain false")
+        actual_enforcement = self.effective_coordinator_scalar("tier2", "require_hash_verified")
+        if actual_enforcement not in ("false", "true"):
+            raise UpdateError("effective tier2.require_hash_verified must be explicitly false or true")
+        if (
+            expected_require_hash_verified is not None
+            and actual_enforcement != expected_require_hash_verified
+        ):
+            raise UpdateError(
+                "effective tier2.require_hash_verified must be "
+                f"{expected_require_hash_verified}"
+            )
+        if expected_require_hash_verified == "true":
+            runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+            if (
+                self.effective_coordinator_scalar("tier2", "model_hash_legacy_until")
+                is not None
+                or "MODEL_HASH_LEGACY_UNTIL" in runtime.environment
+            ):
+                raise UpdateError(
+                    "hash-enforced proof refuses the model hash algorithm legacy bridge"
+                )
 
     def _service_properties(self, unit: str, properties: tuple[str, ...]) -> dict[str, str]:
         result = self.run_command(
@@ -3936,14 +3989,16 @@ class Updater:
         binary: Path,
         expected_sha256: str,
         expected_version: str,
-        min_start_after_wall_ns: int,
+        min_start_after_wall_ns: int | None,
     ) -> dict[str, object]:
-        wall_now_ns = time.time_ns()
-        monotonic_now_ns = time.monotonic_ns()
-        min_start_after_monotonic_us = max(
-            0,
-            (min_start_after_wall_ns - wall_now_ns + monotonic_now_ns + 999) // 1000,
-        )
+        min_start_after_monotonic_us: int | None = None
+        if min_start_after_wall_ns is not None:
+            wall_now_ns = time.time_ns()
+            monotonic_now_ns = time.monotonic_ns()
+            min_start_after_monotonic_us = max(
+                0,
+                (min_start_after_wall_ns - wall_now_ns + monotonic_now_ns + 999) // 1000,
+            )
         properties = self._service_properties(
             unit,
             ("MainPID", "ExecMainStartTimestampMonotonic"),
@@ -3960,7 +4015,10 @@ class Updater:
             raise UpdateError(f"{unit} ExecMainStartTimestampMonotonic is invalid") from exc
         if proc_started_monotonic_us <= 0:
             raise UpdateError(f"{unit} has no valid monotonic start timestamp")
-        if proc_started_monotonic_us <= min_start_after_monotonic_us:
+        if (
+            min_start_after_monotonic_us is not None
+            and proc_started_monotonic_us <= min_start_after_monotonic_us
+        ):
             raise UpdateError(f"{unit} did not start after effective config/catalog publication")
         proc_exe = Path("/proc") / str(pid) / "exe"
         installed = self._trusted_regular_file(binary, f"installed {binary.name} binary")
@@ -3984,8 +4042,12 @@ class Updater:
             "process_started_monotonic_us": proc_started_monotonic_us,
         }
 
-    def verify_live_runtime_binding(self, release: Release) -> None:
-        self.assert_effective_tier2_catalog_path()
+    def verify_live_runtime_binding(
+        self,
+        release: Release,
+        expected_require_hash_verified: str | None = None,
+    ) -> None:
+        self.assert_effective_tier2_catalog_path(expected_require_hash_verified)
         identity = self.release_identity(release)
         if not self.local_coordinator_identity_ready(identity, False):
             raise UpdateError("live coordinator version does not match signed release")
@@ -4028,6 +4090,51 @@ class Updater:
             gateway_inode=gateway["inode"],
             tier2_catalog_path=str(self._current_tier2_catalog_path()),
             tier2_catalog_sha256=release.catalog.files["tier2-catalog.json"],
+        )
+
+    def verify_live_sighup_binding(
+        self,
+        release: Release,
+        expected_require_hash_verified: str,
+    ) -> None:
+        self.assert_effective_tier2_catalog_path(expected_require_hash_verified)
+        identity = self.release_identity(release)
+        if not self.local_coordinator_identity_ready(identity, False):
+            raise UpdateError("live coordinator version does not match signed release")
+        if not self.local_gateway_identity_ready(identity):
+            raise UpdateError("live gateway version does not match signed release")
+        coordinator = self._prove_live_service_binary(
+            "macprovider-coordinator.service",
+            self.install_root / "coordinator",
+            release.coordinator.sha256,
+            release.tag,
+            None,
+        )
+        gateway = self._prove_live_service_binary(
+            "macprovider-gateway.service",
+            self.install_root / "gateway",
+            release.gateway.sha256,
+            release.tag,
+            None,
+        )
+        runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+        config_paths = [runtime.base_config]
+        if runtime.overlay_config is not None:
+            config_paths.append(runtime.overlay_config)
+        self.audit(
+            "live_sighup_binding",
+            "success",
+            coordinator_pid=coordinator["pid"],
+            gateway_pid=gateway["pid"],
+            coordinator_inode=coordinator["inode"],
+            gateway_inode=gateway["inode"],
+            coordinator_config_sha256={
+                str(path): sha256_file(path)
+                for path in config_paths
+            },
+            tier2_catalog_path=str(self._current_tier2_catalog_path()),
+            tier2_catalog_sha256=release.catalog.files["tier2-catalog.json"],
+            require_hash_verified=expected_require_hash_verified,
         )
 
     def gateway_serving_ready(self) -> bool:
@@ -4197,6 +4304,10 @@ class Updater:
             "StrictHostKeyChecking=yes",
             "-o",
             "UserKnownHostsFile=" + str(self.config.catalog_canary_known_hosts_file),
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-F",
+            "/dev/null",
             "-o",
             "ConnectTimeout=10",
             "-o",
@@ -4492,16 +4603,12 @@ class Updater:
             "model": model_id,
         }
 
-    def prove_current_release(self, release: Release) -> tuple[SemVer, str]:
-        current, decision = self.assess_candidate(release)
-        if decision != "already_current":
-            raise UpdateError(f"prove-current requires already_current; candidate assessed as {decision}")
-        self.assert_effective_tier2_catalog_path()
-        if _path_entry_exists(self._legacy_tier2_catalog_path()):
-            raise UpdateError("legacy Tier-2 catalog path must be absent for prove-current")
-        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_DISABLED:
-            raise UpdateError("prove-current requires hard-disabled buyer canary configuration")
-        self.verify_live_runtime_binding(release)
+    def _prove_release_buyer_journey(
+        self,
+        release: Release,
+        *,
+        audit_event: str,
+    ) -> None:
         provider_id = self.config.catalog_canary_provider_id
         provider_evidence = self.verify_exact_provider_canary(release)
         model_id = provider_evidence.model_id
@@ -4523,7 +4630,7 @@ class Updater:
             seen_request_ids.add(buyer_proof["response_request_id"])
             seen_timestamps.add(buyer_proof["requested_at"])
             self.audit(
-                "single_authority_buyer_serving_cycle",
+                audit_event,
                 "success",
                 cycle=cycle,
                 candidate=release.tag,
@@ -4537,6 +4644,39 @@ class Updater:
                 response_request_id=buyer_proof["response_request_id"],
                 requested_at=buyer_proof["requested_at"],
             )
+
+    def prove_current_release(self, release: Release) -> tuple[SemVer, str]:
+        current, decision = self.assess_candidate(release)
+        if decision != "already_current":
+            raise UpdateError(f"prove-current requires already_current; candidate assessed as {decision}")
+        self.assert_effective_tier2_catalog_path("false")
+        if _path_entry_exists(self._legacy_tier2_catalog_path()):
+            raise UpdateError("legacy Tier-2 catalog path must be absent for prove-current")
+        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_DISABLED:
+            raise UpdateError("prove-current requires hard-disabled buyer canary configuration")
+        self.verify_live_runtime_binding(release, "false")
+        self._prove_release_buyer_journey(
+            release,
+            audit_event="single_authority_buyer_serving_cycle",
+        )
+        return current, decision
+
+    def prove_hash_enforced_release(self, release: Release) -> tuple[SemVer, str]:
+        current, decision = self.assess_candidate(release)
+        if decision != "already_current":
+            raise UpdateError(
+                f"prove-hash-enforced requires already_current; candidate assessed as {decision}"
+            )
+        self.assert_effective_tier2_catalog_path("true")
+        if _path_entry_exists(self._legacy_tier2_catalog_path()):
+            raise UpdateError("legacy Tier-2 catalog path must be absent for prove-hash-enforced")
+        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_DISABLED:
+            raise UpdateError("prove-hash-enforced requires hard-disabled buyer canary configuration")
+        self.verify_live_sighup_binding(release, "true")
+        self._prove_release_buyer_journey(
+            release,
+            audit_event="hash_enforced_buyer_serving_cycle",
+        )
         return current, decision
 
     def protected_provider_fleet_ready(self) -> bool:
@@ -5584,6 +5724,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--apply", action="store_true", help="perform a guarded transactional rollout")
     mode.add_argument("--reconcile", action="store_true", help="recover an interrupted rollout from its durable phase journal")
     mode.add_argument("--prove-current", action="store_true", help="prove the selected signed release is already serving from the single Tier-2 authority")
+    mode.add_argument("--prove-hash-enforced", action="store_true", help="prove the selected signed release is serving three buyer cycles with hash enforcement active")
     parser.add_argument("--tag", help="select one exact vMAJOR.MINOR.PATCH release")
     parser.add_argument("--source-dir", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
@@ -5592,8 +5733,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    if args.prove_current and not args.tag:
-        raise UpdateError("--prove-current requires --tag")
+    if (args.prove_current or args.prove_hash_enforced) and not args.tag:
+        raise UpdateError("proof modes require --tag")
     testing = os.environ.get("MACPROVIDER_UPDATER_TESTING") == "1"
     if args.source_dir and not testing:
         raise UpdateError("--source-dir is available only with MACPROVIDER_UPDATER_TESTING=1")
@@ -5657,8 +5798,18 @@ def main(argv: list[str]) -> int:
     lock_uid = trusted_uid
     with FileLock(updater.lock_path, required_uid=lock_uid), tempfile.TemporaryDirectory(prefix="macprovider-pearl-update-") as temporary:
         updater.validate_recovery_inputs(args.config)
-        if args.prove_current and updater._load_journal() is not None:
-            raise UpdateError("--prove-current refuses an active phase journal; run --reconcile first")
+        if _path_entry_exists(updater.tier2_enforcement_journal_path):
+            updater._trusted_regular_file(
+                updater.tier2_enforcement_journal_path,
+                "Tier-2 enforcement transaction journal",
+                private=True,
+            )
+            if not (args.prove_current or args.prove_hash_enforced):
+                raise UpdateError(
+                    "Tier-2 enforcement transaction is active; allow its watchdog to commit or reconcile"
+                )
+        if (args.prove_current or args.prove_hash_enforced) and updater._load_journal() is not None:
+            raise UpdateError("proof modes refuse an active phase journal; run --reconcile first")
         updater.reconcile()
         if args.reconcile:
             return 0
@@ -5685,6 +5836,21 @@ def main(argv: list[str]) -> int:
                         "current_version": str(current),
                         "tier2_catalog_path": str(updater._current_tier2_catalog_path()),
                         "single_authority_buyer_serving_cycles": 3,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.prove_hash_enforced:
+            current, decision = updater.prove_hash_enforced_release(release)
+            print(
+                json.dumps(
+                    {
+                        "action": "prove_hash_enforced",
+                        "candidate": release.tag,
+                        "current_version": str(current),
+                        "tier2_catalog_path": str(updater._current_tier2_catalog_path()),
+                        "hash_enforced_buyer_serving_cycles": 3,
                     },
                     sort_keys=True,
                 )

@@ -794,6 +794,10 @@ if ! kill -0 "$DEPLOY_LOCK_PID" 2>/dev/null; then
   echo "aborting deploy: Pearl deploy lock was lost after acquisition" >&2
   exit 11
 fi
+if $SSH 'test -e /var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json'; then
+  echo "aborting deploy: a Tier-2 enforcement transaction is active" >&2
+  exit 12
+fi
 
 # Recover the prior complete snapshot before using any live state as input to
 # config drift checks or a new rollback baseline.
@@ -1047,10 +1051,71 @@ redact_dsn() {
 print_config_drift_diff() {
   redact_dsn | sed 's/^/    /' >&2
 }
+tier2_require_hash_verified() {
+  awk '
+    /^tier2:[[:space:]]*$/ {
+      tier2_blocks += 1
+      in_tier2 = 1
+      next
+    }
+    in_tier2 && /^[^[:space:]]/ {
+      in_tier2 = 0
+    }
+    in_tier2 {
+      if (index($0, "\t") != 0) {
+        invalid = 1
+        next
+      }
+      match($0, /^ */)
+      indent = RLENGTH
+      if (indent > 0 && $0 ~ /^ +[A-Za-z0-9_-]+:[[:space:]]*/) {
+        child_count += 1
+        child_line[child_count] = $0
+        child_indent[child_count] = indent
+        if (minimum_indent == 0 || indent < minimum_indent) {
+          minimum_indent = indent
+        }
+      }
+    }
+    END {
+      if (tier2_blocks != 1 || invalid || minimum_indent == 0) {
+        exit 1
+      }
+      for (i = 1; i <= child_count; i += 1) {
+        if (child_indent[i] == minimum_indent &&
+            child_line[i] ~ /^ +require_hash_verified:[[:space:]]*/) {
+          count += 1
+          value = child_line[i]
+          sub(/^ +require_hash_verified:[[:space:]]*/, "", value)
+          sub(/[[:space:]]*$/, "", value)
+        }
+      }
+      if (count == 1 && (value == "true" || value == "false")) {
+        print value
+        exit 0
+      }
+      exit 1
+    }
+  '
+}
 LIVE_NORM=$($SSH 'cat /opt/macprovider/coordinator.yaml' 2>/dev/null | normalize_yaml) || {
   echo "could not pull live coordinator.yaml from Pearl for drift check" >&2; exit 6;
 }
 LOCAL_NORM=$(normalize_yaml < "$CONFIG")
+LIVE_TIER2_HASH_REQUIRED="$(printf '%s\n' "$LIVE_NORM" | tier2_require_hash_verified || true)"
+LOCAL_TIER2_HASH_REQUIRED="$(printf '%s\n' "$LOCAL_NORM" | tier2_require_hash_verified || true)"
+if [ -z "$LIVE_TIER2_HASH_REQUIRED" ] || [ -z "$LOCAL_TIER2_HASH_REQUIRED" ]; then
+  echo "" >&2
+  echo "  Aborting: direct deploy requires one unambiguous tier2.require_hash_verified boolean in both configs." >&2
+  exit 9
+fi
+if [ "$LOCAL_TIER2_HASH_REQUIRED" != "$LIVE_TIER2_HASH_REQUIRED" ]; then
+  echo "" >&2
+  echo "  Aborting: direct deploy cannot change tier2.require_hash_verified." >&2
+  echo "  Use the reviewed enforcement or rollback transaction for that state transition." >&2
+  echo "  ALLOW_CONFIG_DRIFT does not bypass this enforcement state-transition guard." >&2
+  exit 9
+fi
 if ! DRIFT_DIFF=$(diff <(printf '%s\n' "$LOCAL_NORM") <(printf '%s\n' "$LIVE_NORM")); then
   echo "" >&2
   echo "  CONFIG DRIFT detected (secrets masked; '<' = local, '>' = live):" >&2

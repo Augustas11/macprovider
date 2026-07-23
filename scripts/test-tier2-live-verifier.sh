@@ -18,6 +18,12 @@ fail() {
   exit 1
 }
 
+if ! grep -qF 'class NoRedirect' "$REPO_ROOT/scripts/verify-tier2-live.sh" ||
+  ! grep -qF 'urllib.request.ProxyHandler({})' "$REPO_ROOT/scripts/verify-tier2-live.sh" ||
+  ! grep -qF 'resp.read(MAX_RESPONSE_BYTES + 1)' "$REPO_ROOT/scripts/verify-tier2-live.sh"; then
+  fail "live verifier must reject redirects, ambient proxies, and oversized responses"
+fi
+
 assert_contains() {
   local file="$1"
   local needle="$2"
@@ -43,6 +49,23 @@ write_models() {
   local dir="$1"
   local mode="$2"
   case "$mode" in
+    observe_all)
+      cat >"$dir/models.json" <<'JSON'
+{
+  "data": [{"id":"mlx-community/test"}],
+  "tier2": {
+    "phase": 2,
+    "model_hash": {
+      "active": true,
+      "state": "all",
+      "require_verified": false,
+      "catalog_configured": true,
+      "catalog_available": true
+    }
+  }
+}
+JSON
+      ;;
     encrypted_all)
       cat >"$dir/models.json" <<'JSON'
 {
@@ -221,27 +244,42 @@ write_poolz() {
   case "$mode" in
     encrypted)
       cat >"$dir/poolz.json" <<'JSON'
-{"pool":[{"provider_id":"encrypted","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"hash_status":"hash_verified","model_hash":"abc123","encrypted_leg":true,"attestation_status":"unsupported"}]}
+{"pool":[{"provider_id":"encrypted","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"routing_eligible":true,"hash_status":"hash_verified","model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","encrypted_leg":true,"attestation_status":"unsupported"}]}
 JSON
       ;;
     encrypted_old)
       cat >"$dir/poolz.json" <<'JSON'
-{"pool":[{"provider_id":"encrypted-old","model_id":"mlx-community/test","binary_version":"1.2.5","state":"ready","slots_free":1,"hash_status":"hash_verified","model_hash":"abc123","encrypted_leg":true,"attestation_status":"unsupported"}]}
+{"pool":[{"provider_id":"encrypted-old","model_id":"mlx-community/test","binary_version":"1.2.5","state":"ready","slots_free":1,"routing_eligible":true,"hash_status":"hash_verified","model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","encrypted_leg":true,"attestation_status":"unsupported"}]}
 JSON
       ;;
     plain)
       cat >"$dir/poolz.json" <<'JSON'
-{"pool":[{"provider_id":"plain","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"hash_status":"hash_verified","model_hash":"abc123","encrypted_leg":false,"attestation_status":"unsupported"}]}
+{"pool":[{"provider_id":"plain","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"routing_eligible":true,"hash_status":"hash_verified","model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","encrypted_leg":false,"attestation_status":"unsupported"}]}
 JSON
       ;;
     attested)
       cat >"$dir/poolz.json" <<'JSON'
-{"pool":[{"provider_id":"attested","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"hash_status":"hash_verified","model_hash":"abc123","encrypted_leg":true,"attestation_status":"attested"}]}
+{"pool":[{"provider_id":"attested","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"routing_eligible":true,"hash_status":"hash_verified","model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","encrypted_leg":true,"attestation_status":"attested"}]}
 JSON
       ;;
     unsupported)
       cat >"$dir/poolz.json" <<'JSON'
-{"pool":[{"provider_id":"unsupported","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"hash_status":"hash_verified","model_hash":"abc123","encrypted_leg":true,"attestation_status":"unsupported"}]}
+{"pool":[{"provider_id":"unsupported","model_id":"mlx-community/test","binary_version":"1.2.6","state":"ready","slots_free":1,"routing_eligible":true,"hash_status":"hash_verified","model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","encrypted_leg":true,"attestation_status":"unsupported"}]}
+JSON
+      ;;
+    missing_algorithm)
+      cat >"$dir/poolz.json" <<'JSON'
+{"pool":[{"provider_id":"missing-algorithm","model_id":"mlx-community/test","binary_version":"1.8.60","state":"ready","slots_free":1,"routing_eligible":true,"hash_status":"hash_verified","model_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+JSON
+      ;;
+    malformed_hash)
+      cat >"$dir/poolz.json" <<'JSON'
+{"pool":[{"provider_id":"malformed-hash","model_id":"mlx-community/test","binary_version":"1.8.60","state":"ready","slots_free":1,"routing_eligible":true,"hash_status":"hash_verified","model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_hash":"abc123"}]}
+JSON
+      ;;
+    not_routable)
+      cat >"$dir/poolz.json" <<'JSON'
+{"pool":[{"provider_id":"not-routable","model_id":"mlx-community/test","binary_version":"1.8.60","state":"ready","slots_free":1,"routing_eligible":false,"hash_status":"hash_verified","model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
 JSON
       ;;
     *)
@@ -278,6 +316,30 @@ assert_contains "$TMP_ROOT/encrypted-ok.out" '"ready_encrypted_provider_count": 
 
 run_verify "$encrypted_ok" --enforced >"$TMP_ROOT/enforced-ok.out"
 assert_contains "$TMP_ROOT/enforced-ok.out" '"mode": "enforced"'
+assert_contains "$TMP_ROOT/enforced-ok.out" '"snapshot_manifest_provider_count": 1'
+
+enforce_ready_ok="$(make_fixture enforce-ready-ok observe_all encrypted)"
+run_verify "$enforce_ready_ok" --enforce-ready >"$TMP_ROOT/enforce-ready-ok.out"
+assert_contains "$TMP_ROOT/enforce-ready-ok.out" '"mode": "enforce-ready"'
+assert_contains "$TMP_ROOT/enforce-ready-ok.out" '"require_verified": false'
+
+missing_algorithm="$(make_fixture missing-algorithm encrypted_all missing_algorithm)"
+if run_verify "$missing_algorithm" --enforced >"$TMP_ROOT/missing-algorithm.out" 2>"$TMP_ROOT/missing-algorithm.err"; then
+  fail "expected enforced verification to reject a missing snapshot algorithm"
+fi
+assert_contains "$TMP_ROOT/missing-algorithm.err" "snapshot-manifest"
+
+malformed_hash="$(make_fixture malformed-hash encrypted_all malformed_hash)"
+if run_verify "$malformed_hash" --enforced >"$TMP_ROOT/malformed-hash.out" 2>"$TMP_ROOT/malformed-hash.err"; then
+  fail "expected enforced verification to reject a malformed model hash"
+fi
+assert_contains "$TMP_ROOT/malformed-hash.err" "snapshot-manifest"
+
+not_routable="$(make_fixture not-routable encrypted_all not_routable)"
+if run_verify "$not_routable" --enforced >"$TMP_ROOT/not-routable.out" 2>"$TMP_ROOT/not-routable.err"; then
+  fail "expected enforced verification to reject a non-routable provider"
+fi
+assert_contains "$TMP_ROOT/not-routable.err" "buyer-routable"
 
 encrypted_disclosure_bad="$(make_fixture encrypted-disclosure-bad encrypted_partial encrypted)"
 if run_verify "$encrypted_disclosure_bad" --b6-ready >"$TMP_ROOT/b6-disclosure-bad.out" 2>"$TMP_ROOT/b6-disclosure-bad.err"; then
