@@ -1,8 +1,8 @@
 {
   "$schema": "./production-exceptions.schema.json",
   "schema_version": "macprovider-production-exceptions-v1",
-  "updated_at": "2026-07-23T20:00:00Z",
-  "updated_by": "partial-584-fr-can23-wiring",
+  "updated_at": "2026-07-23T20:05:45Z",
+  "updated_by": "fix/608-stepd-clear-compat-bridge",
   "environment": "pearl-production",
   "exceptions": [
     {
@@ -117,8 +117,8 @@
       "issue": "https://github.com/Augustas11/macprovider/issues/609",
       "created_at": "2026-07-16T00:00:00Z",
       "expires_at": null,
-      "expiry_unknown_reason": "Pearl live coordinator.yaml has tier2.require_hash_verified=false and does NOT set tier2.model_hash_legacy_until; process environ has no MODEL_HASH_LEGACY_UNTIL. Containment is the require_hash_verified=false posture on coordinator v1.8.49, not a dated legacy-until env bridge. Flip requires reviewed promote + algorithm fail-closed evidence.",
-      "scope": "Pearl production Tier-2 hash enforcement while require_hash_verified remains false on coordinator v1.8.49; dual on-disk catalogs still present. Must not widen to arbitrary unsigned catalogs.",
+      "expiry_unknown_reason": "Pearl live coordinator.yaml has tier2.require_hash_verified=false and does NOT set tier2.model_hash_legacy_until; process environ has no MODEL_HASH_LEGACY_UNTIL. Containment is the require_hash_verified=false posture on coordinator v1.8.60, not a dated legacy-until env bridge. Flip requires reviewed promote + algorithm fail-closed evidence.",
+      "scope": "Pearl production Tier-2 hash enforcement while require_hash_verified remains false on coordinator v1.8.60. The #608 dual-file authority blocker is cleared; containment remains only for #609 algorithm fail-closed and physical-provider evidence. Must not widen to arbitrary unsigned catalogs.",
       "removal_condition": "Observed legacy provider count reaches zero, a physical provider reports canonical `macprovider.snapshot-manifest.v1` identity and buyer-serves, and the Tier-2 bridge field is removed so missing algorithms fail closed.",
       "rollback_command": "ssh pearl 'sudo grep -E \"MODEL_HASH_LEGACY_UNTIL|model_hash_legacy_until|require_hash_verified\" /etc/macprovider/coordinator.env /etc/macprovider/coordinator.yaml' # read-only; then remove the bridge via reviewed coordinator config PR/deploy.",
       "post_removal_validation": "Coordinator rejects missing/unknown `model_hash_algorithm`, emits no `model_hash_algorithm_legacy_bridge`, and #613 physical evidence shows buyer-serving with canonical artifact identity.",
@@ -141,8 +141,7 @@
         "2026-07-22 Pearl: 48h journal counts model_hash_algorithm_legacy_bridge=0 and hash_mismatch=0."
       ],
       "still_blocked_for_clearance": [
-        "Do not set require_hash_verified=true until coordinator promote includes Entry 170 algorithm fail-closed and physical providers prove model_hash_algorithm=macprovider.snapshot-manifest.v1 into buyer_serving.",
-        "Independent /opt/macprovider/tier2-catalog.json authority remains (#608 dual-file removal)."
+        "Do not set require_hash_verified=true until coordinator promote includes Entry 170 algorithm fail-closed and physical providers prove model_hash_algorithm=macprovider.snapshot-manifest.v1 into buyer_serving."
       ]
     },
     {
@@ -191,40 +190,29 @@
     },
     {
       "id": "exc-catalog-compatibility-bridges",
-      "status": "active",
+      "status": "removed",
       "environment": "pearl-production",
       "component": "catalog",
       "policy_delta": "Model/catalog authority may temporarily tolerate current-plus-previous or bridge compatibility instead of one strict signed release-bound model identity authority consumed uniformly by autotune and Tier-2.",
       "authority_surface": "Autotune current/previous catalog activation, `tier2.catalog_path`, `tier2.model_hash_legacy_until`, and catalog admission compatibility surfaces.",
-      "reason": "#608 records production drift between autotune/network catalog identity and Tier-2 catalog identity; #615 requires the bridge inventory to be explicit until a single release-bound authority is fully enforced. Partial #608 landed fail-closed conflict detection + release-derived Tier-2 identity binding tooling; the finish slice gates independent Tier-2 mutate paths so they cannot ship a conflicting live catalog, but the dual on-disk file still exists pending ledger membership and Pearl physical clearance.",
+      "reason": "#608 Step D is sealed on Pearl: the signed Tier-2 feed is a member of the active release ledger, the coordinator consumes only the release-bound Tier-2 path, the independent legacy file is absent, three exact physical-provider buyer-serving journeys passed, and the post-cutover stop-condition scan was empty.",
       "owner": "catalog release/provider upgrade",
       "issue": "https://github.com/Augustas11/macprovider/issues/608",
       "created_at": "2026-07-16T00:00:00Z",
-      "expires_at": null,
-      "expiry_unknown_reason": "Pearl still serves dual on-disk authorities: /opt/macprovider/autotune/current/* (published-2026-07-10-catalog-recovery-v1) and /opt/macprovider/tier2-catalog.json (macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b). Qwen identity currently agrees; dual-file removal remains open on #608. No MODEL_HASH_LEGACY_UNTIL on Pearl.",
+      "expires_at": "2026-07-23T20:05:45Z",
       "scope": "Pearl catalog/admission consumers across coordinator, provider CLI, and Tier-2 during migration.",
       "removal_condition": "Autotune and Tier-2 consume the same signed model identity rows from one release-bound file/authority, rollback restores one complete release (including Tier-2 bytes in the ledger/compatibility-set), and production emits no model-hash uncatalogued events for active signed release rows.",
       "rollback_command": "Use the catalog-release/provider-upgrade runbook to restore one complete signed catalog release set; do not edit Tier-2 identity separately from the network release. Before upload, `catalog-release.py check-tier2-binding` must pass against the autotune release being activated. `activate-tier2-observe.sh --apply` is retired for all live hosts; production Tier-2 mutation requires `deploy-pearl-vps.sh`.",
-      "post_removal_validation": "Coordinator active release identity and component digests match the signed release; Tier-2 expected identity is generated from the same row; no duplicate legacy catalog file participates in modern decisions.",
-      "partial_progress": [
-        "Coordinator startup/reload fail-closed on overlapping autotune vs Tier-2 hash conflicts (internal/catalogbind).",
-        "catalog-release.py emits tier2-identity-binding.json; derive-tier2 remains disabled until an explicit snapshot-manifest Tier-2 hash_scope exists; check-tier2-binding enforces digest overlap.",
-        "deploy-pearl-vps.sh refuses upload when Tier-2 conflicts with the staged autotune release.",
-        "Route-snapshot Tier-2 mismatch fails closed even outside settlement enforce mode.",
-        "2026-07-22 Pearl: Qwen artifact hash agrees across autotune + Tier-2 at 10adb5da\u2026; dual files still present.",
-        "activate-tier2-observe.sh --plan refuses conflicting Tier-2 identity; live --apply is retired (hermetic harness only) in favor of deploy-pearl-vps.sh.",
-        "Hermetic activation safety covers conflict, stale-backup-shaped refuse, pin-race, apply-retired gate, and root-owned remote staging."
-      ],
-      "still_blocked_for_clearance": [
-        "Pearl has not yet activated the release ledger/compatibility-set envelope that includes the signed Tier-2 feed member.",
-        "Physical /opt/macprovider/tier2-catalog.json dual file still exists (live mutate gated via deploy-only; not deleted).",
-        "Physical Pearl journey proof that no uncatalogued events fire for active release rows after single-authority cutover."
-      ],
-      "blocks_stable_promotion": true,
+      "post_removal_validation": "2026-07-23 Pearl evidence proves the active release pointer and Tier-2 digest, release-bound coordinator path, absent legacy file, CONFLICT=0 and AGREE=9, three immutable physical-provider buyer-serving cycles, active coordinator/gateway, hard-disabled buyer canary, and zero catalog stop-condition journal matches since cutover.",
+      "blocks_stable_promotion": false,
       "evidence": [
         "https://github.com/Augustas11/macprovider/issues/615",
         "https://github.com/Augustas11/macprovider/issues/608",
+        "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5062822871",
         "https://github.com/Augustas11/macprovider/issues/609",
+        "https://github.com/Augustas11/macprovider/pull/721",
+        "https://github.com/Augustas11/macprovider/pull/727",
+        "https://github.com/Augustas11/macprovider/pull/730",
         "ops/runbooks/catalog-release-provider-upgrade.md",
         "beta/DECISION_CRITERIA.md Entry 170",
         "specs/CONFORMANCE.json",
