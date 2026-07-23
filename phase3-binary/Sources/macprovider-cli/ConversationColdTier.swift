@@ -55,6 +55,11 @@ protocol ConversationColdTier: Sendable {
     /// purge-all cancellation (CRITICAL-2) + bounded shutdown drain (HIGH-5).
     func enqueuePersist(_ snapshot: ConversationColdSnapshot)
 
+    /// Cancel the queued/pending persist Task for ONE index WITHOUT publishing
+    /// (single-key purge, FR-KVP8 (a)/(b)). Awaits an in-flight task so it cannot
+    /// publish after the purge. Returns whether a pending persist existed for the key.
+    func cancelPendingPersist(conversationKey: String) async -> Bool
+
     /// Cancel every queued/pending persist Task WITHOUT publishing (purge-all, before
     /// epoch rotation, CRITICAL-2). Awaits in-flight tasks so none can publish into
     /// the rotated epoch.

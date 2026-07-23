@@ -279,14 +279,20 @@ actor ConversationCache {
 
     // MARK: - SPEC-037 FR-KVP8 hot-tier purge callbacks (wired from KVDiskTier)
 
-    /// Remove the matching hot entry and bump the within-process single-key purge
-    /// generation so any outstanding lease's `commit()` reinserts nothing.
-    func purgeHot(conversationKey: String) {
+    /// Remove the matching hot entry, cancel any queued/in-flight cold-tier persist
+    /// for the key, and bump the within-process single-key purge generation so any
+    /// outstanding lease's `commit()` reinserts nothing. Returns whether the hot tier
+    /// held live state (a resident entry OR a pending persist) so the store's purge
+    /// path never no-ops a purge that had hot/pending state (FR-KVP8 (a)).
+    @discardableResult
+    func purgeHot(conversationKey: String) async -> Bool {
         // Key on the trimmed form so a purge matches `begin()`'s entry keying.
         let key = conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
+        guard !key.isEmpty else { return false }
         localPurgeGen[key, default: 0] += 1
-        entries.removeValue(forKey: key)
+        let hadHot = entries.removeValue(forKey: key) != nil
+        let hadPending = await coldTier?.cancelPendingPersist(conversationKey: key) ?? false
+        return hadHot || hadPending
     }
 
     /// Clear every hot entry and invalidate every outstanding lease's pending

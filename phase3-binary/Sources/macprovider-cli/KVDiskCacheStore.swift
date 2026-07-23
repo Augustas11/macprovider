@@ -311,8 +311,21 @@ actor KVDiskCacheStore {
     /// drop the matching hot entry / invalidate outstanding leases BEFORE it
     /// unlinks the on-disk generation (single-key) or completes epoch rotation
     /// (purge-all). Nil while no hot tier is attached (control-plane-only process).
-    private var hotPurgeSingle: (@Sendable (String) async -> Void)?
+    /// The single-key hook returns whether the hot tier held live state (a resident
+    /// entry OR a pending/in-flight persist) for the key, so a purge that had hot or
+    /// pending state advances the durable high-watermark even with no disk artifacts
+    /// (FR-KVP8 (a): never no-op a purge that had hot/pending state).
+    private var hotPurgeSingle: (@Sendable (String) async -> Bool)?
     private var hotPurgeAll: (@Sendable () async -> Void)?
+
+    /// FR-KVP8 admission fences (CRITICAL). Set SYNCHRONOUSLY before any suspension
+    /// point inside a purge so writes/reads/promotions that interleave during the
+    /// `await hotPurge*` callback are denied for the affected index (per-index) or
+    /// the whole namespace (purge-all / high-watermark-cap rotation). `write` and
+    /// `read` are synchronous actor methods, so once they observe a clear fence they
+    /// complete atomically; a purge sets the fence before it can suspend.
+    private var purgingIndexes: Set<String> = []
+    private var namespacePurging = false
 
     struct KVLiveEntry: Sendable, Equatable {
         var bytes: Int
@@ -355,11 +368,19 @@ actor KVDiskCacheStore {
         dirFsyncCount = 0
     }
 
+    /// Test-only (FR-KVP8 CRITICAL (d)): fill the purge high-watermark map with
+    /// `count` dummy indices so the next single-key purge of a NEW index crosses the
+    /// 4096 cap and routes through the namespace-fence rotation — without creating
+    /// thousands of real entries.
+    func seedPurgeWatermarksForTest(count: Int) {
+        for i in 0 ..< count { metadata.purgeHighWatermarks["seed-\(i)"] = 1 }
+    }
+
     /// Wire the hot-tier purge callbacks (CRITICAL-1). `single` receives the raw
     /// conversation key (the hot tier keys on the trimmed raw key, not the HMAC
     /// index); `all` clears every hot entry and fences outstanding leases.
     func setHotPurgeHooks(
-        single: (@Sendable (String) async -> Void)?,
+        single: (@Sendable (String) async -> Bool)?,
         all: (@Sendable () async -> Void)?
     ) {
         hotPurgeSingle = single
@@ -598,6 +619,15 @@ actor KVDiskCacheStore {
     func write(_ snapshot: KVWriteSnapshot, nowMillis: Int) throws -> KVWriteResult {
         guard activated else { return skip(.ioError, snapshot) }
         if let detail = quarantined { return skip(detail, snapshot) }
+
+        // FR-KVP8 admission fence (CRITICAL): a write sampled before/during an
+        // in-progress purge for this index (or any purge-all/cap rotation) must not
+        // publish. The durable high-watermark fences a write that arrives AFTER the
+        // purge completes; this fence covers the interval a purge is suspended on its
+        // hot-tier callback.
+        if namespacePurging || purgingIndexes.contains(snapshot.indexHMAC) {
+            return skip(.fenceLost, snapshot)
+        }
 
         // Clock integrity: a rollback below the high-water skips writes.
         guard try advanceClock(nowMillis: nowMillis) else { return skip(.clockRollback, snapshot) }
@@ -918,6 +948,11 @@ actor KVDiskCacheStore {
             return .miss(.diskMissIO, .keychainUnavailable)
         }
 
+        // FR-KVP8 admission fence (CRITICAL): deny reads/promotions for an index (or
+        // the whole namespace) while a purge is in progress, so an old-epoch/old-gen
+        // entry cannot resurface across the purge's hot-tier callback suspension.
+        if namespacePurging || purgingIndexes.contains(index) { return .miss(.diskMissBusy) }
+
         // Back-pressure: at most one promotion in flight namespace-wide.
         guard !promotionInFlight else { return .miss(.diskMissBusy) }
 
@@ -1136,31 +1171,62 @@ actor KVDiskCacheStore {
             return .failed(.keychainUnavailable)
         }
 
+        // FR-KVP8 (CRITICAL): raise the per-index admission fence SYNCHRONOUSLY before
+        // any suspension so a write/read/promotion that interleaves during the
+        // hot-tier callback below is denied for this index.
+        purgingIndexes.insert(index)
+        defer { purgingIndexes.remove(index) }
+
         let dir = entryDir(index)
         let hadArtifacts = fileExists(dir)
-        let inFlight = false   // stage 1-2: no queued writers modeled outside the actor
-        // A purge of an index with no artifacts and no in-flight work no-ops the map.
-        if !hadArtifacts && !inFlight && metadata.purgeHighWatermarks[index] == nil {
+
+        // (3, hot half) Drop the matching hot entry, cancel its pending persist, and
+        // fence any outstanding lease's commit BEFORE the on-disk generation is
+        // unlinked (CRITICAL). The hook reports whether the hot tier held live state
+        // (resident entry OR queued/in-flight persist) — a purge that had hot OR
+        // pending state must NOT no-op, even with no disk artifacts, so a queued
+        // snapshot cannot later publish a disk entry with no watermark to fence it.
+        let hotHadState = await hotPurgeSingle?(rawKey) ?? false
+        let hadPriorHWM = metadata.purgeHighWatermarks[index] != nil
+
+        // A purge of an index with no disk artifacts, no hot/pending state, and no
+        // prior watermark is a genuine no-op.
+        if !hadArtifacts && !hotHadState && !hadPriorHWM {
             emit(.purgeOK, indexHashPrefix: indexPrefix(index), fields: ["entries_removed": "0", "bytes_freed": "0"])
             return .ok(entriesRemoved: 0, bytesFreed: 0)
+        }
+
+        // High-watermark-cap rotation (FR-KVP7 4096 path): admitting a NEW index into
+        // a full map forces an epoch rotation. Route it through the SAME namespace
+        // fence as purge-all so the hot tier is fully invalidated (CRITICAL (d)) rather
+        // than bypassing hot-tier invalidation.
+        if metadata.purgeHighWatermarks[index] == nil,
+           metadata.purgeHighWatermarks.count >= KVNamespaceMetadata.highWatermarkCap {
+            do {
+                let rotated = try await performNamespacePurgeRotation()
+                emit(.purgeOK, indexHashPrefix: indexPrefix(index),
+                     fields: ["entries_removed": "\(rotated.entries)", "bytes_freed": "\(rotated.bytes)", "mode": "cap_rotation"])
+                return .ok(entriesRemoved: rotated.entries, bytesFreed: rotated.bytes)
+            } catch let crash as KVInjectedCrash {
+                throw crash
+            } catch {
+                emit(.purgeFailed, indexHashPrefix: indexPrefix(index), fields: ["detail": KVReasonDetail.ioError.rawValue, "mode": "cap_rotation"])
+                return .failed(.ioError)
+            }
         }
 
         let newGeneration = metadata.highWatermark(for: index) + 1
         do {
             // (1) incomplete tombstone carrying the incremented purge generation,
-            //     fsync + dir fsync, THEN advance + fsync the high-watermark.
+            //     fsync + dir fsync, THEN advance + fsync the high-watermark. The hot
+            //     tier is already fenced above; the durable watermark now also fences
+            //     any racing/queued disk write that samples after the fence lifts.
             try writeTombstone(KVTombstone(epoch: metadata.keyEpoch, index: index,
                                            purgeGeneration: newGeneration, complete: false))
             try crashIf(.purgeAfterIncompleteTombstone)
-            try setHighWatermark(index: index, generation: newGeneration)
+            metadata.purgeHighWatermarks[index] = newGeneration
+            try persistMetadata()
             try crashIf(.purgeAfterHighWatermark)
-
-            // (3, hot half) Drop the matching hot entry and fence any outstanding
-            // lease's commit BEFORE the on-disk generation is unlinked (CRITICAL-1).
-            // The high-watermark is already durable, so a racing disk write is also
-            // fenced; this closes the RAM side so a subsequent same-key begin() is a
-            // cold_start miss and a pre-purge lease's commit() reinserts nothing.
-            await hotPurgeSingle?(rawKey)
 
             let bytesFreed = try completePurgeSteps(index: index, generation: newGeneration)
             emit(.purgeOK, indexHashPrefix: indexPrefix(index),
@@ -1214,25 +1280,36 @@ actor KVDiskCacheStore {
         guard activated else { return .failed(.ioError) }
         if let detail = quarantined { return .failed(detail) }
         do {
-            let bytesFreed = committedBytes
-            let entries = liveEntries.count
-            // Clear ALL hot entries and invalidate every outstanding lease's pending
-            // commit BEFORE epoch rotation completes and before purge_ok (CRITICAL-1).
-            await hotPurgeAll?()
-            // Fence + invalidate all in-memory publication state, then rotate.
-            try rotateEpoch()
-            liveEntries.removeAll()
-            lastGeneration.removeAll()
-            lastCommitSequence.removeAll()
-            committedBytes = 0
-            emit(.purgeOK, fields: ["entries_removed": "\(entries)", "bytes_freed": "\(bytesFreed)", "mode": "all"])
-            return .ok(entriesRemoved: entries, bytesFreed: bytesFreed)
+            let rotated = try await performNamespacePurgeRotation()
+            emit(.purgeOK, fields: ["entries_removed": "\(rotated.entries)", "bytes_freed": "\(rotated.bytes)", "mode": "all"])
+            return .ok(entriesRemoved: rotated.entries, bytesFreed: rotated.bytes)
         } catch let crash as KVInjectedCrash {
             throw crash
         } catch {
             emit(.purgeFailed, fields: ["detail": KVReasonDetail.ioError.rawValue, "mode": "all"])
             return .failed(.ioError)
         }
+    }
+
+    /// Shared namespace-fence rotation used by purge-all AND the high-watermark-cap
+    /// path (CRITICAL (c)/(d)). Raises the whole-namespace admission fence BEFORE the
+    /// suspending `hotPurgeAll` callback so no read/write/promotion is admitted across
+    /// it; `hotPurgeAll` clears every hot entry, invalidates all outstanding leases,
+    /// and cancels+joins every queued/in-flight persist so nothing publishes into the
+    /// pre-rotation epoch; THEN the epoch is rotated (crypto-shred) and in-memory
+    /// publication state is dropped; the fence lifts on return.
+    private func performNamespacePurgeRotation() async throws -> (entries: Int, bytes: Int) {
+        namespacePurging = true
+        defer { namespacePurging = false }
+        let bytesFreed = committedBytes
+        let entries = liveEntries.count
+        await hotPurgeAll?()
+        try rotateEpoch()
+        liveEntries.removeAll()
+        lastGeneration.removeAll()
+        lastCommitSequence.removeAll()
+        committedBytes = 0
+        return (entries, bytesFreed)
     }
 
     // MARK: - Epoch rotation (FR-KVP6 crash-safe ordering)
@@ -1386,20 +1463,6 @@ actor KVDiskCacheStore {
                 await self?.retentionSweepTick()
             }
         }
-    }
-
-    // MARK: - High-watermark map (FR-KVP7/8)
-
-    private func setHighWatermark(index: String, generation: Int) throws {
-        // Cap: reaching 4096 forces an epoch rotation (resets the map, preserves
-        // revocation via crypto-shred).
-        if metadata.purgeHighWatermarks[index] == nil,
-           metadata.purgeHighWatermarks.count >= KVNamespaceMetadata.highWatermarkCap {
-            try rotateEpoch()
-            return
-        }
-        metadata.purgeHighWatermarks[index] = generation
-        try persistMetadata()
     }
 
     // MARK: - Recovery (FR-KVP7)

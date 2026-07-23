@@ -199,6 +199,179 @@ final class KVDiskTierTests: XCTestCase {
         await tier.shutdown()
     }
 
+    // MARK: - FR-KVP8 purge admission fences (CRITICAL R2)
+
+    /// Actor-safe capture of a value produced inside a `@Sendable` purge callback.
+    private actor ValueBox<T: Sendable> {
+        var value: T?
+        func set(_ v: T) { value = v }
+    }
+
+    private func snapshot(for tier: KVDiskTier, key: String, seq: Int, sampled: Int,
+                          commitSequence: Int, nowMillis: Int) async throws -> KVWriteSnapshot {
+        let index = try await tier.store.currentIndex(rawKey: key)
+        return KVWriteSnapshot(
+            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
+            layers: makeLayers(seq: seq), identity: Self.identity,
+            sampledPurgeGeneration: sampled, commitSequence: commitSequence,
+            createdAtMillis: nowMillis, eligibleUntilMillis: nowMillis + 900_000,
+            incarnation: "inc-\(UUID().uuidString)")
+    }
+
+    private func runtimeIdentity(for tier: KVDiskTier, key: String) async throws -> KVRuntimeIdentity {
+        let index = try await tier.store.currentIndex(rawKey: key)
+        let id = Self.identity
+        return KVRuntimeIdentity(
+            namespaceID: "ns-tier", keyEpoch: 1, indexHMAC: try XCTUnwrap(index),
+            requestModel: id.requestModel, servedModelID: id.servedModelID, modelSHA256: id.modelSHA256,
+            catalogRevision: id.catalogRevision, tokenizerID: id.tokenizerID,
+            tokenizerConfigSHA256: id.tokenizerConfigSHA256, chatTemplateSHA256: id.chatTemplateSHA256,
+            abiEpoch: id.abiEpoch, mlxSwiftLMRevision: id.mlxSwiftLMRevision, mlxVersion: id.mlxVersion,
+            cacheClass: id.cacheClass, layerCount: id.layerCount,
+            layers: [KVLayerGeometry(layerIndex: 0, classID: "KVCacheSimple", layoutVersion: 1,
+                                     ndim: 4, dims: [1, 2, 32, 4], dtype: .f32, sequenceAxis: 2)],
+            kvBits: id.kvBits, kvGroupSize: id.kvGroupSize, kvQuantMode: id.kvQuantMode,
+            kvQuantPolicy: id.kvQuantPolicy, decodePath: id.decodePath, liveHighWatermark: 0)
+    }
+
+    /// CRITICAL (a)/(b): a HOT-ONLY purge (no disk artifacts) must still advance the
+    /// durable high-watermark, so a snapshot that sampled the pre-purge watermark
+    /// (queued before the first disk write) can never publish afterward.
+    func testHotOnlyPurgeAdvancesWatermarkAndFencesQueuedSnapshot() async throws {
+        let tier = makeTier(root: makeRoot())
+        let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
+        let cache = ConversationCache()
+        await tier.store.setHotPurgeHooks(
+            single: { key in await cache.purgeHot(conversationKey: key) },
+            all: { await cache.purgeAllHot() })
+
+        let key = "conv:kvs-synth:hot-only"
+        // Hot-only: seed a RAM entry with no disk generation.
+        let seedOpt = await cache.begin(
+            conversationKey: key, incomingTokens: Array(0 ..< 32), modelID: "m", kvBits: nil)
+        let seed = try XCTUnwrap(seedOpt)
+        await cache.commit(seed, cache: ConversationCacheLayers([]), fullTokens: Array(0 ..< 40))
+        let __e0 = await tier.status()?.entryCount; XCTAssertEqual(__e0, 0, "precondition: no disk artifacts")
+
+        // A snapshot captured (sampled) before the purge would carry HWM 0.
+        let sampledBefore = try await tier.store.highWatermark(rawKey: key)
+        XCTAssertEqual(sampledBefore, 0)
+
+        // Purge a hot-only key: must NOT no-op — the watermark advances.
+        guard case .ok = await tier.purge(rawKey: key) else { return XCTFail("purge failed") }
+        let sampledAfter = try await tier.store.highWatermark(rawKey: key)
+        XCTAssertGreaterThan(sampledAfter, sampledBefore, "hot-only purge must advance the watermark")
+
+        // The queued (pre-purge-sampled) snapshot is now fenced at write time.
+        let stale = try await snapshot(for: tier, key: key, seq: 40, sampled: sampledBefore,
+                                       commitSequence: 1, nowMillis: 1_000_000)
+        let result = try await tier.store.write(stale, nowMillis: 1_000_000)
+        guard case .skipped(.fenceLost) = result else {
+            return XCTFail("queued pre-purge snapshot must be fenced, got \(result)")
+        }
+        let __e1 = await tier.status()?.entryCount; XCTAssertEqual(__e1, 0, "no disk entry may be published post-purge")
+        await tier.shutdown()
+    }
+
+    /// CRITICAL (b): a write sampled DURING the purge suspension (the `hotPurgeSingle`
+    /// callback) is denied by the per-index admission fence.
+    func testWriteDuringPurgeSuspensionIsFenced() async throws {
+        let tier = makeTier(root: makeRoot())
+        let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
+        let key = "conv:kvs-synth:interleave"
+        try await writeEntry(tier, key: key, seq: 6, nowMillis: 1_000_000)
+
+        let box = ValueBox<KVWriteResult>()
+        await tier.store.setHotPurgeHooks(
+            single: { [self] _ in
+                // Runs while `purge` is suspended: a fresh, current-epoch write for the
+                // same index must be rejected because the fence is already raised.
+                if let snap = try? await snapshot(for: tier, key: key, seq: 8, sampled: 0,
+                                                  commitSequence: 99, nowMillis: 1_000_001),
+                   let r = try? await tier.store.write(snap, nowMillis: 1_000_001) {
+                    await box.set(r)
+                }
+                return true
+            }, all: {})
+
+        guard case .ok = await tier.purge(rawKey: key) else { return XCTFail("purge failed") }
+        let interleaved = await box.value
+        guard case .skipped(.fenceLost) = interleaved else {
+            return XCTFail("write during purge suspension must be fence_lost, got \(String(describing: interleaved))")
+        }
+        await tier.shutdown()
+    }
+
+    /// CRITICAL (c): during a purge-all namespace fence, a promotion read AND a new
+    /// write are both denied so no old-epoch data resurfaces across the suspension.
+    func testReadAndWriteDuringPurgeAllAreFenced() async throws {
+        let tier = makeTier(root: makeRoot())
+        let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
+        let key = "conv:kvs-synth:ns-fence"
+        try await writeEntry(tier, key: key, seq: 6, nowMillis: 1_000_000)
+
+        let readBox = ValueBox<KVReadResult>()
+        let writeBox = ValueBox<KVWriteResult>()
+        await tier.store.setHotPurgeHooks(single: { _ in false }, all: { [self] in
+            if let runtime = try? await runtimeIdentity(for: tier, key: key),
+               let r = try? await tier.store.read(rawKey: key, runtime: runtime, nowMillis: 1_000_001, emitHitEvent: false) {
+                await readBox.set(r)
+            }
+            if let snap = try? await snapshot(for: tier, key: key, seq: 8, sampled: 0,
+                                              commitSequence: 99, nowMillis: 1_000_001),
+               let w = try? await tier.store.write(snap, nowMillis: 1_000_001) {
+                await writeBox.set(w)
+            }
+        })
+
+        guard case .ok = await tier.purgeAll() else { return XCTFail("purge-all failed") }
+        guard case .miss(.diskMissBusy, _) = await readBox.value else {
+            return XCTFail("promotion read during purge-all must be fenced, got \(String(describing: await readBox.value))")
+        }
+        guard case .skipped(.fenceLost) = await writeBox.value else {
+            return XCTFail("write during purge-all must be fenced, got \(String(describing: await writeBox.value))")
+        }
+        await tier.shutdown()
+    }
+
+    /// CRITICAL (d): a single-key purge that crosses the 4096 high-watermark cap
+    /// routes through the namespace-fence rotation, which clears the hot tier via
+    /// `hotPurgeAll` (not just the one index).
+    func testHighWatermarkCapPurgeClearsHotTier() async throws {
+        let tier = makeTier(root: makeRoot())
+        let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
+        let cache = ConversationCache()
+        await tier.store.setHotPurgeHooks(
+            single: { key in await cache.purgeHot(conversationKey: key) },
+            all: { await cache.purgeAllHot() })
+
+        // Seed an unrelated hot entry that ONLY a namespace-wide invalidation clears.
+        let other = "conv:kvs-synth:bystander"
+        let seedOpt = await cache.begin(
+            conversationKey: other, incomingTokens: Array(0 ..< 32), modelID: "m", kvBits: nil)
+        let seed = try XCTUnwrap(seedOpt)
+        await cache.commit(seed, cache: ConversationCacheLayers([]), fullTokens: Array(0 ..< 40))
+        let __h0 = await cache.snapshotStats().entries; XCTAssertEqual(__h0, 1)
+
+        // Fill the watermark map to the cap so purging a NEW key forces rotation.
+        await tier.store.seedPurgeWatermarksForTest(count: KVNamespaceMetadata.highWatermarkCap)
+
+        let key = "conv:kvs-synth:cap-trigger"
+        // Give the key hot state so the purge is not a no-op.
+        let s2Opt = await cache.begin(
+            conversationKey: key, incomingTokens: Array(0 ..< 32), modelID: "m", kvBits: nil)
+        let s2 = try XCTUnwrap(s2Opt)
+        await cache.commit(s2, cache: ConversationCacheLayers([]), fullTokens: Array(0 ..< 40))
+
+        let epochBefore = await tier.store.currentEpoch
+        guard case .ok = await tier.purge(rawKey: key) else { return XCTFail("cap purge failed") }
+        let epochAfter = await tier.store.currentEpoch
+        XCTAssertEqual(epochAfter, epochBefore + 1, "cap purge must rotate the epoch")
+        let hotAfter = await cache.snapshotStats().entries
+        XCTAssertEqual(hotAfter, 0, "cap-triggered rotation must clear the whole hot tier, including the bystander")
+        await tier.shutdown()
+    }
+
     /// M-13 / FR-KVP7: serve-lock contention is transient, not permanent dormancy —
     /// the tier retries with bounded backoff and runs full activation once the lock
     /// is released.

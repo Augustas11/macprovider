@@ -50,11 +50,20 @@ final class KVConversationColdTierTests: XCTestCase {
         func enqueuePersist(_ snapshot: ConversationColdSnapshot) {
             lock.lock(); enqueued.append(snapshot); lock.unlock()
         }
+        func cancelPendingPersist(conversationKey: String) async -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            perKeyCancels.append(conversationKey)
+            return pendingKeys.remove(conversationKey) != nil
+        }
         func cancelPendingPersists() async { lock.lock(); cancelledPersists += 1; lock.unlock() }
         func drainPendingPersists(timeoutSeconds: Int) async {}
 
         private(set) var enqueued: [ConversationColdSnapshot] = []
         private(set) var cancelledPersists = 0
+        /// Keys the test asserts had a pending persist (drives `cancelPendingPersist`).
+        var pendingKeys: Set<String> = []
+        private(set) var perKeyCancels: [String] = []
+        var perKeyCancelKeys: [String] { lock.lock(); defer { lock.unlock() }; return perKeyCancels }
 
         var capturedSnapshots: [ConversationColdSnapshot] { lock.lock(); defer { lock.unlock() }; return captured }
         var enqueuedSnapshots: [ConversationColdSnapshot] { lock.lock(); defer { lock.unlock() }; return enqueued }
@@ -204,6 +213,25 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertEqual(after?.cachedPromptTokens, 0, "fenced commit must not repopulate the hot tier")
         XCTAssertTrue(fake.capturedSnapshots.isEmpty, "a fenced commit persists nothing to disk either")
         await cache.abort(after!)
+    }
+
+    /// FR-KVP8 (a)/(b): a single-key purge cancels the key's queued cold-tier persist
+    /// (so a snapshot queued before its first disk write never publishes) and reports
+    /// that the hot tier held live state even when there is no resident RAM entry.
+    func testSingleKeyPurgeCancelsPendingPersistAndReportsState() async {
+        let fake = FakeColdTier()
+        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let key = "conv:kvs-synth:pending"
+
+        // Model a queued-but-unpublished persist for the key.
+        fake.pendingKeys = [key]
+        let hadState = await cache.purgeHot(conversationKey: key)
+        XCTAssertTrue(hadState, "purge of a key with a pending persist must report hot/pending state")
+        XCTAssertEqual(fake.perKeyCancelKeys, [key], "the key's pending persist must be cancelled")
+
+        // A key with neither hot nor pending state reports no state.
+        let empty = await cache.purgeHot(conversationKey: "conv:kvs-synth:absent")
+        XCTAssertFalse(empty, "purge of an absent key reports no hot/pending state")
     }
 
     func testPurgeAllFencesInFlightCommit() async {

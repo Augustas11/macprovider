@@ -305,6 +305,16 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             incarnation: snapshot.incarnation, nowMillis: Self.nowMillis())
     }
 
+    func cancelPendingPersist(conversationKey: String) async -> Bool {
+        taskLock.lock()
+        let task = pendingTasks.removeValue(forKey: conversationKey)
+        if task != nil { pendingGen[conversationKey, default: 0] += 1 }
+        taskLock.unlock()
+        task?.cancel()
+        await task?.value   // ensure a started write cannot publish after the purge
+        return task != nil
+    }
+
     func cancelPendingPersists() async {
         taskLock.lock()
         let tasks = Array(pendingTasks.values)
