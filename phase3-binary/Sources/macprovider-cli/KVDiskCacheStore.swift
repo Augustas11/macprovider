@@ -1231,13 +1231,21 @@ actor KVDiskCacheStore {
                     opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
                                                     tag: frame.tag, dek: dek, aad: aad)
                 } catch { throw StreamMiss.corrupt }
-                // True live-memory high-water at this instant: the ciphertext frame, the
+                // True live-memory high-water BEFORE decode: the ciphertext frame, the
                 // opened chunk plaintext, the decoder's residual scratch, and the decoded
                 // layers emitted so far.
-                let live = frameData.count + opened.count + decoder.residualBytes + decoder.decodedBytes
-                peakStaging = max(peakStaging, live)
+                let liveBeforeDecode = frameData.count + opened.count + decoder.residualBytes + decoder.decodedBytes
+                peakStaging = max(peakStaging, liveBeforeDecode)
                 guard peakStaging <= config.stagingMaxBytes else { throw StreamMiss.budget }
                 do { try decoder.feed(opened) } catch { throw StreamMiss.corrupt }
+                // Item 4: enforce AFTER materialization of each layer. `decoder.peakBytes`
+                // is the true source ⋂ tensor co-residency during this feed (no hidden
+                // whole-residual copy anymore); add the still-held ciphertext frame. A
+                // true peak over the ceiling is `disk_miss_budget`, and this value is the
+                // one reported in `peak_staging_bytes`.
+                let liveAfterDecode = frameData.count + decoder.peakBytes
+                peakStaging = max(peakStaging, liveAfterDecode)
+                guard peakStaging <= config.stagingMaxBytes else { throw StreamMiss.budget }
             }
         } catch StreamMiss.deadline {
             emitMiss(.diskMissIO, detail: .promotionDeadline, prefix: prefix)
@@ -1264,7 +1272,8 @@ actor KVDiskCacheStore {
         guard decoded.tokens.count == manifest.tokenCount else {
             emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
         }
-        peakStaging = max(peakStaging, decoder.decodedBytes)
+        // Item 4: report the true internal high-water (source ⋂ tensor co-residency).
+        peakStaging = max(peakStaging, decoder.peakBytes)
 
         // Update LRU last-eligible-use, durably (FR-KVP7 usage journal) so the ordering
         // survives restart and drives eviction. The journal append is best-effort: a

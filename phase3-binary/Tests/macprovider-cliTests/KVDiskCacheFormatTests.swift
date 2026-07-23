@@ -175,6 +175,41 @@ final class KVDiskCacheFormatTests: XCTestCase {
         XCTAssertThrowsError(try KVPayloadCodec.decode(encoded, expectedDecodedLength: encoded.count + 1, layerCount: 0))
     }
 
+    /// Item 4 (FR-KVP9): the streaming decoder tracks the TRUE co-resident read peak —
+    /// the source residual still live WHILE a freshly materialized tensor is copied out
+    /// — so the peak exceeds the decoded payload size (the co-residency the pre-decode
+    /// measurement missed), yet stays bounded by payload + one layer's tensors. And the
+    /// round trip is exact (the copy-free reader did not corrupt parsing).
+    func testStreamingDecoderTracksTrueCoResidentPeak() throws {
+        let seq = 8
+        let elements = 1 * 2 * seq * 4
+        let tensorBytes = elements * KVCodecDType.f32.byteSize
+        let layers = (0 ..< 3).map { li in
+            KVLayerPayload(
+                layerIndex: li, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
+                cacheOffset: seq,
+                keyBytes: Data((0 ..< tensorBytes).map { UInt8(($0 + li) & 0xff) }),
+                valueBytes: Data((0 ..< tensorBytes).map { UInt8(($0 + li + 3) & 0xff) }))
+        }
+        let tokens = Array(0 ..< Int32(seq))
+        let plaintext = try KVPayloadCodec.encode(tokens: tokens, layers: layers)
+        let decodedLength = plaintext.count
+
+        let decoder = KVStreamingPayloadDecoder(expectedDecodedLength: decodedLength, layerCount: 3)
+        try decoder.feed(plaintext)
+        let out = try decoder.finish()
+        XCTAssertEqual(out.tokens, tokens, "copy-free reader must not corrupt parsing")
+        XCTAssertEqual(out.layers, layers)
+
+        // At the first layer's materialization, all three layers' source is still in the
+        // residual AND layer-0's tensors are copied out — so the true peak is strictly
+        // greater than the decoded payload size.
+        XCTAssertGreaterThan(decoder.peakBytes, decodedLength,
+                             "true peak must count source ⋂ tensor co-residency (missed by pre-decode measurement)")
+        // …but it is bounded: never more than the whole payload plus one layer's tensors.
+        XCTAssertLessThanOrEqual(decoder.peakBytes, decodedLength + 2 * tensorBytes)
+    }
+
     // MARK: - Chunk frame round trip
 
     func testChunkFrameRoundTrip() throws {

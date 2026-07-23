@@ -303,28 +303,38 @@ enum KVByteWriter {
 }
 
 /// Bounds-checked forward reader over a `Data` buffer.
+///
+/// Item 4 (FR-KVP9 read-peak): reads DIRECTLY from the backing `Data` via an index
+/// cursor and copies out only the exact slice `readBytes` requests — it never
+/// materializes a whole-buffer `[UInt8]` duplicate. The streaming decoder creates a
+/// fresh reader over its residual on every parse iteration; a `[UInt8](data)` copy
+/// there duplicated the ENTIRE residual (up to a 64 MiB chunk) co-resident with the
+/// residual and the freshly materialized tensor — an unaccounted read-side peak.
 struct KVByteReader {
-    private let bytes: [UInt8]
+    private let data: Data
+    private let base: Data.Index
     private(set) var offset: Int = 0
 
-    init(_ data: Data) { self.bytes = [UInt8](data) }
+    init(_ data: Data) { self.data = data; self.base = data.startIndex }
 
-    var remaining: Int { bytes.count - offset }
-    var isAtEnd: Bool { offset == bytes.count }
+    var remaining: Int { data.count - offset }
+    var isAtEnd: Bool { offset == data.count }
+
+    private func byte(_ i: Int) -> Int { Int(data[base + i]) }
 
     mutating func readU16LE() -> Int? {
         guard remaining >= 2 else { return nil }
-        let v = Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
+        let v = byte(offset) | (byte(offset + 1) << 8)
         offset += 2
         return v
     }
 
     mutating func readU32LE() -> Int? {
         guard remaining >= 4 else { return nil }
-        let v = Int(bytes[offset])
-            | (Int(bytes[offset + 1]) << 8)
-            | (Int(bytes[offset + 2]) << 16)
-            | (Int(bytes[offset + 3]) << 24)
+        let v = byte(offset)
+            | (byte(offset + 1) << 8)
+            | (byte(offset + 2) << 16)
+            | (byte(offset + 3) << 24)
         offset += 4
         return v
     }
@@ -336,7 +346,7 @@ struct KVByteReader {
 
     mutating func readU8() -> Int? {
         guard remaining >= 1 else { return nil }
-        let v = Int(bytes[offset])
+        let v = byte(offset)
         offset += 1
         return v
     }
@@ -345,7 +355,7 @@ struct KVByteReader {
         guard remaining >= 8 else { return nil }
         var v: UInt64 = 0
         for i in 0 ..< 8 {
-            v |= UInt64(bytes[offset + i]) << (8 * i)
+            v |= UInt64(byte(offset + i)) << (8 * i)
         }
         offset += 8
         // Reject values that would not fit an Int (defensive; codec caps prevent this).
@@ -355,7 +365,8 @@ struct KVByteReader {
 
     mutating func readBytes(_ count: Int) -> Data? {
         guard count >= 0, remaining >= count else { return nil }
-        let slice = Data(bytes[offset ..< offset + count])
+        let start = base + offset
+        let slice = Data(data[start ..< start + count])   // only the requested slice
         offset += count
         return slice
     }
@@ -1219,6 +1230,13 @@ final class KVStreamingPayloadDecoder {
     private let layerCount: Int
     private var consumedTotal = 0
     private(set) var decodedBytes = 0
+    /// Item 4 (FR-KVP9): the true internal read-side high-water — the maximum, over
+    /// every parse checkpoint, of (unconsumed residual + materialized layer bytes)
+    /// co-resident at that instant. Sampled AFTER each layer materializes (the source
+    /// residual bytes are still live until the subsequent `commit` drops them), so it
+    /// captures the frame ⋂ residual ⋂ tensor co-residency the pre-decode measurement
+    /// missed. The store adds the still-held frame and enforces the ceiling on it.
+    private(set) var peakBytes = 0
 
     var residualBytes: Int { residual.count }
 
@@ -1234,6 +1252,8 @@ final class KVStreamingPayloadDecoder {
             throw KVManifestParseError.corrupt("payload length exceeds decoded_length")
         }
         if residual.isEmpty { residual = data } else { residual.append(data) }
+        // Account the residual-only co-residency (before any layer parses this chunk).
+        peakBytes = max(peakBytes, residual.count + decodedBytes)
         try drain()
     }
 
@@ -1276,6 +1296,10 @@ final class KVStreamingPayloadDecoder {
             guard let layer = try parseLayer(&reader) else { return }   // incomplete → wait
             layers.append(layer)
             decodedBytes += layer.keyBytes.count + layer.valueBytes.count
+            // Item 4: sample the true co-resident peak AT materialization, BEFORE
+            // `commit` drops the consumed source bytes — residual still holds the just
+            // -parsed layer's source, so this counts source ⋂ tensor simultaneously.
+            peakBytes = max(peakBytes, residual.count + decodedBytes)
             commit(consumed: reader.offset)
         }
     }
