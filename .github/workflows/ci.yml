@@ -18,6 +18,85 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      swift: ${{ steps.filter.outputs.swift }}
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Fail OPEN. `swift` gates the macOS Swift/xcodebuild job and `code`
+          # gates the macOS SPEC-015 cross-service acceptance. Any uncertainty
+          # about the diff (missing base, unknown commit, git error, or an
+          # unexpected event) leaves BOTH true so every macOS job still runs.
+          # A missed detection must never skip a job a real change depends on.
+          swift=true
+          code=true
+
+          base=""
+          head=""
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA"; head="$PR_HEAD_SHA" ;;
+            push) base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
+          esac
+
+          zero="0000000000000000000000000000000000000000"
+          if [ -n "$base" ] && [ -n "$head" ] && [ "$base" != "$zero" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null \
+             && git cat-file -e "${head}^{commit}" 2>/dev/null \
+             && files="$(git diff --name-only "$base" "$head" 2>/dev/null)"; then
+            # Diff resolved: compute precise booleans from the file list.
+            swift=false
+            code=false
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              # Swift job covers phase3-binary sources, the build/xcodegen/
+              # sparkle scripts it invokes, the Makefile, and this workflow.
+              case "$f" in
+                phase3-binary/*|scripts/*|Makefile|.github/workflows/ci.yml)
+                  swift=true ;;
+              esac
+              # SPEC-015 acceptance is skipped only for documentation-only
+              # PRs: the docs/ tree and root-level Markdown (README.md,
+              # CLAUDE.md, ...). ANY file nested in a directory — including a
+              # nested *.md that might be a test fixture — is significant and
+              # runs the acceptance, as does any spec or root non-doc file.
+              case "$f" in
+                docs/*) : ;;
+                */*) code=true ;;
+                *.md) : ;;
+                *) code=true ;;
+              esac
+            done <<< "$files"
+          fi
+
+          {
+            echo "swift=$swift"
+            echo "code=$code"
+          } >> "$GITHUB_OUTPUT"
+          echo "detect: event=$EVENT_NAME base=$base head=$head -> swift=$swift code=$code"
+
   coordinator:
     name: phase4-coordinator (go vet + test)
     runs-on: ubuntu-latest
@@ -355,6 +434,11 @@ jobs:
     name: phase3-binary (swift test)
     runs-on: macos-15
     timeout-minutes: 25
+    needs: changes
+    # Swift/xcodebuild only runs when Swift sources, build scripts, the
+    # Makefile, or this workflow change. ci-required treats a skip here as a
+    # pass; the `changes` detector fails open so an undetected diff still runs.
+    if: ${{ needs.changes.outputs.swift == 'true' }}
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -409,6 +493,11 @@ jobs:
     name: spec-015-acceptance
     runs-on: macos-15
     timeout-minutes: 35
+    needs: changes
+    # Cross-service money-path acceptance. Skipped only for docs-only PRs
+    # (Markdown/docs with no specs/** or code changes); ci-required treats the
+    # skip as a pass. Any code or spec change still runs it. Fail-open.
+    if: ${{ needs.changes.outputs.code == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -432,6 +521,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - changes
       - coordinator
       - coordinator-stats-integration
       - coordinator-nginx-integration
@@ -448,6 +538,7 @@ jobs:
       - name: Require all CI jobs
         shell: bash
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           COORDINATOR_RESULT: ${{ needs.coordinator.result }}
           COORDINATOR_STATS_INTEGRATION_RESULT: ${{ needs.coordinator-stats-integration.result }}
           NGINX_INTEGRATION_RESULT: ${{ needs.coordinator-nginx-integration.result }}
@@ -463,25 +554,36 @@ jobs:
           set -euo pipefail
 
           failed=0
-          for check in \
-            "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
-            "phase4-coordinator (stats Postgres AC-9/10/19/20):${COORDINATOR_STATS_INTEGRATION_RESULT}" \
-            "phase4-coordinator (nginx Step 4.B behavior smoke):${NGINX_INTEGRATION_RESULT}" \
-            "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
-            "phase7-verify (go vet + test):${PHASE7_VERIFY_RESULT}" \
-            "phase7-verify integration (fixtures):${PHASE7_VERIFY_INTEGRATION_RESULT}" \
-            "integration (cross-service):${INTEGRATION_RESULT}" \
-            "spec-014-v0-2-gate:${SPEC_014_RESULT}" \
-            "deploy tooling (check-deploy-config gate):${DIST_TOOLING_RESULT}" \
-            "phase3-binary (swift test):${SWIFT_TESTS_RESULT}" \
-            "spec-015-acceptance:${SPEC_015_RESULT}"
-          do
-            name="${check%%:*}"
-            result="${check#*:}"
-            if [ "$result" != "success" ]; then
-              printf '%s result=%s\n' "$name" "$result" >&2
+
+          # Jobs that must always run and pass. `changes` is included: if the
+          # path detector fails, its gated jobs skip and merge must be blocked.
+          require_success() {
+            if [ "$2" != "success" ]; then
+              printf '%s result=%s (expected success)\n' "$1" "$2" >&2
               failed=1
             fi
-          done
+          }
+          # Path-gated macOS jobs. A skip (the change did not touch their
+          # paths) is a legitimate pass. Anything other than success or skipped
+          # (failure, cancelled, timed_out) still fails the gate.
+          allow_skip() {
+            if [ "$2" != "success" ] && [ "$2" != "skipped" ]; then
+              printf '%s result=%s (expected success or skipped)\n' "$1" "$2" >&2
+              failed=1
+            fi
+          }
+
+          require_success "detect changed paths" "$CHANGES_RESULT"
+          require_success "phase4-coordinator (go vet + test)" "$COORDINATOR_RESULT"
+          require_success "phase4-coordinator (stats Postgres AC-9/10/19/20)" "$COORDINATOR_STATS_INTEGRATION_RESULT"
+          require_success "phase4-coordinator (nginx Step 4.B behavior smoke)" "$NGINX_INTEGRATION_RESULT"
+          require_success "phase5-gateway (go vet + test)" "$GATEWAY_RESULT"
+          require_success "phase7-verify (go vet + test)" "$PHASE7_VERIFY_RESULT"
+          require_success "phase7-verify integration (fixtures)" "$PHASE7_VERIFY_INTEGRATION_RESULT"
+          require_success "integration (cross-service)" "$INTEGRATION_RESULT"
+          require_success "spec-014-v0-2-gate" "$SPEC_014_RESULT"
+          require_success "deploy tooling (check-deploy-config gate)" "$DIST_TOOLING_RESULT"
+          allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT"
+          allow_skip "spec-015-acceptance" "$SPEC_015_RESULT"
 
           exit "$failed"
