@@ -397,6 +397,30 @@ final class KVDiskTierTests: XCTestCase {
         await tier.shutdown()
     }
 
+    /// M-F: the retention tick samples the CURRENT wall time, so an IDLE process (no
+    /// reads/writes advancing the persisted clock) still cleans up entries past their
+    /// creation-based retention deadline.
+    func testIdleRetentionTickSamplesWallClock() async throws {
+        let tier = makeTier(root: makeRoot())
+        let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
+        let key = "conv:kvs-synth:idle-retain"
+        // Create an entry; the write advances the persisted clock only to this instant.
+        try await writeEntry(tier, key: key, seq: 5, nowMillis: 1_000_000)
+        let __c0 = await tier.status()?.entryCount; XCTAssertEqual(__c0, 1)
+
+        // No further request activity. A retention tick that (incorrectly) reused the
+        // persisted clock high-water would never pass the deadline. Sampling real time
+        // far past creation + retention window must evict it.
+        let retentionSeconds = tier.config.retentionMinutes * 60
+        let farFuture = 1_000_000 + (retentionSeconds + 60) * 1000
+        await tier.store.setSweepClockForTest { farFuture }
+        await tier.store.runRetentionTickForTest()
+
+        let finalCount = await tier.status()?.entryCount
+        XCTAssertEqual(finalCount, 0, "idle retention tick must evict entries past their retention deadline")
+        await tier.shutdown()
+    }
+
     /// M-13 / FR-KVP7: serve-lock contention is transient, not permanent dormancy —
     /// the tier retries with bounded backoff and runs full activation once the lock
     /// is released.

@@ -283,6 +283,8 @@ actor KVDiskCacheStore {
     private var dirFsyncCount = 0
     /// Test-only unlink-failure injection (M-D).
     private var unlinkFailInjected = false
+    /// Test-only retention-tick wall-clock override (M-F).
+    private var sweepClockOverride: (@Sendable () -> Int)?
 
     // Activation state
     private var lockFD: Int32 = -1
@@ -1474,11 +1476,29 @@ actor KVDiskCacheStore {
         }
     }
 
-    /// Periodic retention tick (M-12 "timer while active"). Uses the durable clock
-    /// high-water as its clock (monotonic, and synthetic-safe in unit tests).
+    /// Periodic retention tick (M-12 "timer while active"). M-F: sample the CURRENT
+    /// wall time each tick — not the persisted clock high-water, which only advances on
+    /// request activity, so an idle process would never clean up. Run the rollback /
+    /// high-water guard (which persists the advance) with the sampled time, then sweep.
     private func retentionSweepTick() {
         guard activated, quarantined == nil else { return }
-        try? runRetention(nowMillis: metadata.clockHighWaterMillis)
+        let now = sweepClockMillis()
+        // Rollback guard: a sampled time below the high-water leaves the store dormant
+        // for this tick (never sweeps on a backwards clock).
+        guard (try? advanceClock(nowMillis: now)) == true else { return }
+        try? runRetention(nowMillis: now)
+    }
+
+    /// Test-only (M-F): the wall-clock source for the retention tick. Defaults to real
+    /// time; a fake-clock idle test overrides it.
+    func setSweepClockForTest(_ provider: @escaping @Sendable () -> Int) { sweepClockOverride = provider }
+
+    /// Test-only (M-F): run one retention tick synchronously.
+    func runRetentionTickForTest() { retentionSweepTick() }
+
+    private func sweepClockMillis() -> Int {
+        if let sweepClockOverride { return sweepClockOverride() }
+        return Int(Date().timeIntervalSince1970 * 1000)
     }
 
     private func startRetentionTimer() {
