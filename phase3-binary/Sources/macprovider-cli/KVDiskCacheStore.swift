@@ -981,34 +981,34 @@ actor KVDiskCacheStore {
             emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
         }
 
-        // Frame decode + per-chunk AEAD open under the AAD projection.
-        let frames: [KVParsedFrame]
+        // Streaming frame decode + per-chunk AEAD open under the AAD projection
+        // (HIGH-6): parse, verify, and open one frame at a time so the full array of
+        // parsed frames is never retained alongside the accumulating plaintext. The
+        // staging ceiling is enforced as an actual peak bound after each chunk.
+        var plaintext = Data()
+        plaintext.reserveCapacity(min(manifest.decodedLength, config.stagingMaxBytes))
+        enum StreamMiss: Error { case corrupt, deadline, budget }
         do {
-            frames = try KVChunkFrame.decodeBlob(blob, chunkTable: manifest.chunks)
+            try KVChunkFrame.forEachFrame(blob, chunkTable: manifest.chunks) { frame in
+                if Date() > deadline { throw StreamMiss.deadline }
+                let aad: Data
+                do { aad = try manifest.aad(ordinal: frame.ordinal) } catch { throw StreamMiss.corrupt }
+                let opened: Data
+                do {
+                    opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
+                                                    tag: frame.tag, dek: dek, aad: aad)
+                } catch { throw StreamMiss.corrupt }
+                plaintext.append(opened)
+                guard plaintext.count <= config.stagingMaxBytes else { throw StreamMiss.budget }
+            }
+        } catch StreamMiss.deadline {
+            emitMiss(.diskMissIO, detail: .promotionDeadline, prefix: prefix)
+            return .miss(.diskMissIO, .promotionDeadline)
+        } catch StreamMiss.budget {
+            emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
+            return .miss(.diskMissBudget, .exceedsPromotionCeiling)
         } catch {
             emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-        }
-        var plaintext = Data()
-        for frame in frames {
-            if Date() > deadline {
-                emitMiss(.diskMissIO, detail: .promotionDeadline, prefix: prefix)
-                return .miss(.diskMissIO, .promotionDeadline)
-            }
-            let aad: Data
-            do { aad = try manifest.aad(ordinal: frame.ordinal) } catch {
-                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-            }
-            do {
-                let opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
-                                                    tag: frame.tag, dek: dek, aad: aad)
-                plaintext.append(opened)
-            } catch {
-                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-            }
-            guard plaintext.count <= config.stagingMaxBytes else {
-                emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
-                return .miss(.diskMissBudget, .exceedsPromotionCeiling)
-            }
         }
 
         // Payload decode with the exact self-delimiting length check.

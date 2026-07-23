@@ -133,6 +133,25 @@ final class KVDiskCacheFormatTests: XCTestCase {
         }
     }
 
+    /// HIGH-6: the parser rejects a manifest whose Σ ct_length disagrees with
+    /// decoded_length (before any allocation), even when blob_length stays coherent
+    /// with the frame sizes.
+    func testManifestRejectsCtLengthIncoherentWithDecodedLength() throws {
+        let manifest = Self.consistentManifest()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: try KVManifestCodec.encode(manifest)) as? [String: Any])
+        var chunks = try XCTUnwrap(object["chunks"] as? [[String: Any]])
+        let framing = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
+        // Shrink ct_length below decoded_length while keeping blob_length coherent
+        // with the frame size, so ONLY the Σ ct_length == decoded_length check fires.
+        chunks[0]["ct_length"] = 100
+        object["chunks"] = chunks
+        object["blob_length"] = 100 + framing
+        let data = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertThrowsError(try KVManifestCodec.decode(data, maxBlobBytes: Int.max)) { error in
+            guard case KVManifestParseError.corrupt = error else { return XCTFail("expected corrupt") }
+        }
+    }
+
     // MARK: - Payload codec round trip
 
     func testPayloadCodecRoundTrip() throws {

@@ -747,8 +747,13 @@ enum KVManifestCodec {
             throw KVManifestParseError.corrupt("decoded_length does not recompute")
         }
 
-        // blob_length equals Σ frame sizes (§5a blob framing).
+        // blob_length equals Σ frame sizes, AND Σ ct_length equals decoded_length
+        // (HIGH-6). GCM ciphertext length == plaintext length, so the chunk ciphertext
+        // bytes must sum to exactly the declared decoded payload length. Both checks
+        // run in the parser, BEFORE any blob/plaintext allocation, so an incoherent
+        // manifest is rejected as corrupt before a single payload byte is read.
         var frameTotal = 0
+        var ctTotal = 0
         for chunk in chunks {
             // magic(4)+ordinal(4)+ct_length(4)+nonce(12)+ciphertext(ct_length)+tag(16)
             let framing = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
@@ -757,9 +762,15 @@ enum KVManifestCodec {
             let (sum, o2) = frameTotal.addingReportingOverflow(withCipher)
             guard !o2 else { throw KVManifestParseError.corrupt("blob length overflow") }
             frameTotal = sum
+            let (ctSum, o3) = ctTotal.addingReportingOverflow(chunk.ctLength)
+            guard !o3 else { throw KVManifestParseError.corrupt("ct_length overflow") }
+            ctTotal = ctSum
         }
         guard frameTotal == blobLength else {
             throw KVManifestParseError.corrupt("blob_length disagrees with chunk frame sizes")
+        }
+        guard ctTotal == decodedLength else {
+            throw KVManifestParseError.corrupt("Σ ct_length disagrees with decoded_length")
         }
 
         return KVDiskManifest(
@@ -1199,9 +1210,19 @@ enum KVChunkFrame {
     /// and that frame nonce/ct_length agree with the manifest chunk table. Returns
     /// frames in ordinal order or throws corrupt.
     static func decodeBlob(_ data: Data, chunkTable: [KVChunkRecord]) throws -> [KVParsedFrame] {
-        var reader = KVByteReader(data)
         var frames: [KVParsedFrame] = []
         frames.reserveCapacity(chunkTable.count)
+        try forEachFrame(data, chunkTable: chunkTable) { frames.append($0) }
+        return frames
+    }
+
+    /// Streaming frame decode (HIGH-6): parse + verify one frame at a time and hand it
+    /// to `body`, so the caller can AEAD-open and materialize per chunk WITHOUT
+    /// retaining the full array of parsed frames alongside the accumulating plaintext.
+    static func forEachFrame(
+        _ data: Data, chunkTable: [KVChunkRecord], _ body: (KVParsedFrame) throws -> Void
+    ) throws {
+        var reader = KVByteReader(data)
         for expected in chunkTable {
             guard let magic = reader.readBytes(4), magic == KVDiskCacheFormat.chunkMagic else {
                 throw KVManifestParseError.corrupt("chunk frame magic mismatch")
@@ -1222,11 +1243,10 @@ enum KVChunkFrame {
                   let tag = reader.readBytes(KVDiskCacheFormat.gcmTagBytes) else {
                 throw KVManifestParseError.corrupt("chunk frame truncated")
             }
-            frames.append(KVParsedFrame(ordinal: ordinal, nonce: nonce, ciphertext: ciphertext, tag: tag))
+            try body(KVParsedFrame(ordinal: ordinal, nonce: nonce, ciphertext: ciphertext, tag: tag))
         }
         guard reader.isAtEnd else {
             throw KVManifestParseError.corrupt("trailing blob bytes")
         }
-        return frames
     }
 }
