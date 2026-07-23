@@ -52,8 +52,8 @@ grep -qF 'install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync
   fail "deploy script missing sidecar timer install"
 grep -qF '[ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ] && [ -f /etc/macprovider-stats/stats-inventory-sync.env ]' "$DEPLOY_SH" ||
   fail "deploy script must only enable timer when config and env exist"
-grep -qF 'warning: stats-inventory-sync.service failed; leaving coordinator deploy running' "$DEPLOY_SH" ||
-  fail "deploy script must not fail coordinator deploy on sidecar run failure"
+grep -qF 'warning: stats-inventory-sync.service failed; leaving coordinator deploy running with its parity marker and timer disabled' "$DEPLOY_SH" ||
+  fail "deploy script must keep a failed inventory sidecar disabled behind its parity marker"
 grep -qF 'psql_preflight_service onboarding_preflight "$ONBOARDING_POSTGRES_DSN"' "$DEPLOY_SH" ||
   fail "deploy script must preflight onboarding DSN through root-only service file"
 grep -qF 'psql_preflight_service auth_policy_request_preflight "$ONBOARDING_AUTH_POLICY_REQUEST_DSN"' "$DEPLOY_SH" ||
@@ -334,6 +334,8 @@ grep -qF 'stats-inventory-sync unit did not quiesce before migration' "$DEPLOY_S
   fail "deploy script must quiesce stats-inventory-sync before the migration"
 grep -qF 'systemctl disable "$unit"' "$DEPLOY_SH" ||
   fail "deploy script must disable (not merely stop) the inventory sidecar during the pre-migration quiesce"
+grep -qF 'stats-inventory-sync timer did not disable before migration: state=$enabled_state' "$DEPLOY_SH" ||
+  fail "deploy script must verify the inventory timer is disabled before migration"
 # The deploy must APPLY 019 itself (self-enforcing standard path), not just verify
 # it. It resolves the admin DSN from coordinator.env as DATA (require_env_value,
 # never sourced — enforced above) and drives the coordinator's stats-migrate.
@@ -602,17 +604,44 @@ grep -qF '_prior_next=$_prior.next.$$' "$DEPLOY_SH" ||
   fail "deploy script must capture the sidecar prior enable/active state before quiescing"
 grep -qF 'rm -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required' "$DEPLOY_SH" ||
   fail "deploy script must clear any stale sidecar parity marker before quiescing"
+grep -qF 'printf "parity_required=%s\n"  "$_parity_required"' "$DEPLOY_SH" ||
+  fail "deploy script must capture the pre-quiesce parity marker state"
+grep -qF 'stats inventory timer remains disabled: pre-existing schema/binary parity marker requires a matching sidecar promotion' "$DEPLOY_SH" ||
+  fail "deploy script must preserve a pre-existing sidecar parity hold at final activation"
+grep -qF 'systemctl disable --now stats-inventory-sync.timer' "$DEPLOY_SH" ||
+  fail "deploy script must disable the inventory timer when its initial parity proof fails"
+if awk '
+  /warning: stats-inventory-sync.service failed; leaving coordinator deploy running with its parity marker and timer disabled/ { exit }
+  /systemctl disable --now stats-inventory-sync.timer/ && /\|\| true/ { bad=1 }
+  END { exit bad ? 0 : 1 }
+' "$DEPLOY_SH"; then
+  fail "deploy script must not swallow inventory timer-disable failure before claiming a parity hold"
+fi
+grep -qF 'refusing parity-held stats-inventory sidecar replacement: install the signed matching coordinator/sidecar release first' "$DEPLOY_SH" ||
+  fail "deploy script must refuse a sidecar byte change while a pre-existing parity hold is active"
+grep -qF '! cmp -s $DEPLOY_TMP/stats-inventory-sync-linux-amd64 /opt/macprovider-stats/stats-inventory-sync' "$DEPLOY_SH" ||
+  fail "deploy script must byte-compare the staged and live inventory sidecars while a parity hold is active"
+grep -qF 'refusing stats-inventory sidecar install: missing pre-quiesce parity state' "$DEPLOY_SH" ||
+  fail "deploy script must refuse a sidecar install when its parity state is missing"
+grep -qF 'refusing stats-inventory sidecar install: invalid pre-quiesce parity state' "$DEPLOY_SH" ||
+  fail "deploy script must refuse a sidecar install when its parity state is invalid"
+grep -qF 'rm -f "$_sidecar_prior"' "$DEPLOY_SH" ||
+  fail "deploy script must clear the consumed sidecar prior-state file after commit gates pass"
 SIDECAR_CAPTURE_LINE=$(grep -nF '_prior_next=$_prior.next.$$' "$DEPLOY_SH" | head -1 | cut -d: -f1)
+SIDECAR_PARITY_CAPTURE_LINE=$(grep -nF '_parity_required=present' "$DEPLOY_SH" | head -1 | cut -d: -f1)
+SIDECAR_PARITY_CLEAR_LINE=$(grep -nF 'rm -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required' "$DEPLOY_SH" | head -1 | cut -d: -f1)
 SIDECAR_ARM_LINE=$(grep -nF 'SIDECAR_QUIESCE_ATTEMPTED=1' "$DEPLOY_SH" | head -1 | cut -d: -f1)
 SIDECAR_QUIESCE_LOOP_LINE=$(grep -nF 'for unit in stats-inventory-sync.timer stats-inventory-sync.service; do' "$DEPLOY_SH" | head -1 | cut -d: -f1)
-for anchor in "$SIDECAR_CAPTURE_LINE" "$SIDECAR_ARM_LINE" "$SIDECAR_QUIESCE_LOOP_LINE"; do
+for anchor in "$SIDECAR_CAPTURE_LINE" "$SIDECAR_PARITY_CAPTURE_LINE" "$SIDECAR_PARITY_CLEAR_LINE" "$SIDECAR_ARM_LINE" "$SIDECAR_QUIESCE_LOOP_LINE"; do
   [ -n "$anchor" ] ||
-    fail "could not locate one of the sidecar restore-on-failure anchors (capture/arm/quiesce-loop)"
+    fail "could not locate one of the sidecar restore-on-failure anchors (capture/parity/arm/quiesce-loop)"
 done
 [ "$SIDECAR_ARM_LINE" -lt "$SIDECAR_QUIESCE_LOOP_LINE" ] ||
   fail "SIDECAR_QUIESCE_ATTEMPTED arming (line $SIDECAR_ARM_LINE) must precede the quiesce loop (line $SIDECAR_QUIESCE_LOOP_LINE)"
 [ "$SIDECAR_CAPTURE_LINE" -lt "$SIDECAR_QUIESCE_LOOP_LINE" ] ||
   fail "sidecar prior-state capture (line $SIDECAR_CAPTURE_LINE) must precede the quiesce loop (line $SIDECAR_QUIESCE_LOOP_LINE)"
+[ "$SIDECAR_PARITY_CAPTURE_LINE" -lt "$SIDECAR_PARITY_CLEAR_LINE" ] ||
+  fail "sidecar parity state capture (line $SIDECAR_PARITY_CAPTURE_LINE) must precede clearing the marker (line $SIDECAR_PARITY_CLEAR_LINE)"
 
 # 2) Static: the parity marker (the schema/binary-incompatible crossing) must be
 #    set BEFORE the migration apply, and the EXIT trap must invoke the restore.
@@ -631,7 +660,9 @@ SIDECAR_MIGRATE_APPLY_BARE_LINE=$(grep -nE '^[[:space:]]*"\$coordinator_bin" sta
 #    message and never restores; an armed abort defers to the rollback's
 #    leave-stopped; and a successful deploy is a no-op.
 sidecar_fn_tmp="$(mktemp)"
-trap 'rm -f "$remote_preflight_tmp" "$parser_tmp" "$env_parse_tmp" "$gate_heredoc_tmp" "$gate_parser_tmp" "$gate_env_tmp" "$sidecar_fn_tmp"; rm -rf "$gate_run_dir"' EXIT
+sidecar_activation_tmp="$(mktemp)"
+sidecar_activation_dir="$(mktemp -d)"
+trap 'rm -f "$remote_preflight_tmp" "$parser_tmp" "$env_parse_tmp" "$gate_heredoc_tmp" "$gate_parser_tmp" "$gate_env_tmp" "$sidecar_fn_tmp" "$sidecar_activation_tmp"; rm -rf "$gate_run_dir" "$sidecar_activation_dir"' EXIT
 awk '/^_sidecar_restore_on_abort\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$sidecar_fn_tmp" ||
   fail "deploy script must keep an extractable _sidecar_restore_on_abort function"
 grep -qF '_sidecar_restore_on_abort()' "$sidecar_fn_tmp" ||
@@ -641,14 +672,25 @@ if ! bash -n "$sidecar_fn_tmp"; then
 fi
 
 run_sidecar_case() {
-  # $1 rc, $2 COORDINATOR_DEPLOY_ARMED, $3 parity-present-flag
+  # $1 rc, $2 COORDINATOR_DEPLOY_ARMED, $3 live-marker-present,
+  # $4 captured-prior parity state.
   (
     _stub_ssh() {
       case "$*" in
-        *coordinator-deploy-sidecar-parity-required*)
+        *"test -f /opt/macprovider/.coordinator-deploy-sidecar-parity-required"*)
           [ "${STUB_PARITY_PRESENT:-0}" = 1 ] && return 0 || return 1 ;;
         *coordinator-deploy-sidecar-prior-state*)
-          echo "STUB_RESTORE_INVOKED"; return 0 ;;
+          if [ "${STUB_PRIOR_PARITY:-absent}" = present ]; then
+            grep -qF 'touch /opt/macprovider/.coordinator-deploy-sidecar-parity-required' <<<"$*" ||
+              return 1
+            grep -qF 'systemctl disable --now stats-inventory-sync.timer' <<<"$*" ||
+              return 1
+            echo "STUB_PARITY_HOLD_RESTORED"
+          else
+            echo "STUB_RESTORE_INVOKED"
+          fi
+          return 0
+          ;;
       esac
       return 0
     }
@@ -656,36 +698,161 @@ run_sidecar_case() {
     SIDECAR_QUIESCE_ATTEMPTED=1
     COORDINATOR_DEPLOY_ARMED="$2"
     STUB_PARITY_PRESENT="$3"
+    STUB_PRIOR_PARITY="${4:-absent}"
     # shellcheck disable=SC1090
     . "$sidecar_fn_tmp"
     _sidecar_restore_on_abort "$1"
   ) 2>&1
 }
 
-restore_out="$(run_sidecar_case 1 0 0)"
-printf '%s' "$restore_out" | grep -qF 'restored to its pre-quiesce state' ||
+restore_out="$(run_sidecar_case 1 0 0 absent)"
+printf '%s' "$restore_out" | grep -qF 'restored to its pre-deploy state' ||
   fail "pre-migration abort must restore the sidecar: $restore_out"
 printf '%s' "$restore_out" | grep -qF 'STUB_RESTORE_INVOKED' ||
   fail "pre-migration abort must actually invoke the sidecar restore SSH: $restore_out"
 
-parity_out="$(run_sidecar_case 1 0 1)"
+prior_hold_out="$(run_sidecar_case 1 0 0 present)"
+printf '%s' "$prior_hold_out" | grep -qF 'STUB_PARITY_HOLD_RESTORED' ||
+  fail "an early abort must restore a pre-existing parity hold after the live marker was cleared: $prior_hold_out"
+if printf '%s' "$prior_hold_out" | grep -qF 'STUB_RESTORE_INVOKED'; then
+  fail "an early abort with a captured parity hold must not restore the timer's old enabled state: $prior_hold_out"
+fi
+
+parity_out="$(run_sidecar_case 1 0 1 absent)"
 printf '%s' "$parity_out" | grep -qF 'deliberately left stopped (schema/binary parity required — migration 019 applied' ||
   fail "post-migration abort must leave the sidecar stopped with the parity message: $parity_out"
 if printf '%s' "$parity_out" | grep -qF 'STUB_RESTORE_INVOKED'; then
   fail "post-migration abort must NOT restore the sidecar: $parity_out"
 fi
 
-armed_out="$(run_sidecar_case 1 1 0)"
+armed_out="$(run_sidecar_case 1 1 0 absent)"
 printf '%s' "$armed_out" | grep -qF 'the armed rollback leaves the old 2-column sidecar stopped' ||
   fail "armed abort must defer to the rollback and leave the sidecar stopped: $armed_out"
 if printf '%s' "$armed_out" | grep -qF 'STUB_RESTORE_INVOKED'; then
   fail "armed abort must NOT independently restore the sidecar: $armed_out"
 fi
 
-noop_out="$(run_sidecar_case 0 0 0)"
+noop_out="$(run_sidecar_case 0 0 0 absent)"
 if [ -n "$noop_out" ]; then
   fail "a successful deploy (rc=0) must be a sidecar restore no-op: $noop_out"
 fi
+
+# 4) Behavioral: extract the final inventory activation block, redirect its
+# absolute production paths to a fixture directory, and prove that a
+# pre-existing parity hold cannot re-enable the timer. Also prove that a fresh
+# successful sidecar clears the marker while a failed initial run leaves the
+# marker present and the timer disabled.
+awk '
+  /^  _sidecar_prior=\/opt\/macprovider\/\.coordinator-deploy-sidecar-prior-state$/ { in_block=1 }
+  in_block && /^  if \[ -f \/etc\/macprovider-stats\/stats-billing-mirror\.env / { exit }
+  in_block { print }
+' "$DEPLOY_SH" |
+  sed \
+    -e 's#/opt/macprovider/.coordinator-deploy-sidecar-prior-state#$FIXTURE_PRIOR#g' \
+    -e 's#/opt/macprovider/.coordinator-deploy-sidecar-parity-required#$FIXTURE_MARKER#g' \
+    -e 's#/etc/macprovider-stats/stats-hardware-inventory.yaml#$FIXTURE_INVENTORY#g' \
+    -e 's#/etc/macprovider-stats/stats-inventory-sync.env#$FIXTURE_ENV#g' \
+    -e 's#/opt/macprovider/.coordinator-deploy-rollback/stats-inventory-timer-was-active#$FIXTURE_ROLLBACK_ACTIVE#g' \
+    > "$sidecar_activation_tmp"
+if ! bash -n "$sidecar_activation_tmp"; then
+  fail "extracted final stats-inventory activation block must be valid bash"
+fi
+
+run_activation_case() {
+  # $1 prior parity state, $2 service-start result, $3 timer-disable result.
+  (
+    set -e
+    case_dir="$sidecar_activation_dir/$1-$2-${3:-0}"
+    mkdir -p "$case_dir"
+    FIXTURE_PRIOR="$case_dir/prior"
+    FIXTURE_MARKER="$case_dir/parity"
+    FIXTURE_INVENTORY="$case_dir/inventory.yaml"
+    FIXTURE_ENV="$case_dir/inventory.env"
+    FIXTURE_ROLLBACK_ACTIVE="$case_dir/rollback-active"
+    SYSTEMCTL_LOG="$case_dir/systemctl.log"
+    printf 'parity_required=%s\n' "$1" > "$FIXTURE_PRIOR"
+    touch "$FIXTURE_INVENTORY" "$FIXTURE_ENV"
+    # The migration path arms the marker for the current attempt before final
+    # activation regardless of whether a hold existed at transaction entry.
+    touch "$FIXTURE_MARKER"
+    STUB_SERVICE_START_RC="$2"
+    STUB_TIMER_DISABLE_RC="${3:-0}"
+    STUB_TIMER_ENABLED=enabled
+    STUB_TIMER_ACTIVE=active
+    STUB_SERVICE_ACTIVE=inactive
+    systemctl() {
+      printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+      if [ "$1" = "is-enabled" ] && [ "$2" = "stats-inventory-sync.timer" ]; then
+        printf '%s\n' "$STUB_TIMER_ENABLED"
+        [ "$STUB_TIMER_ENABLED" = enabled ]
+        return
+      fi
+      if [ "$1" = "is-active" ] && [ "$2" = "stats-inventory-sync.timer" ]; then
+        printf '%s\n' "$STUB_TIMER_ACTIVE"
+        [ "$STUB_TIMER_ACTIVE" = active ]
+        return
+      fi
+      if [ "$1" = "is-active" ] && [ "$2" = "stats-inventory-sync.service" ]; then
+        printf '%s\n' "$STUB_SERVICE_ACTIVE"
+        [ "$STUB_SERVICE_ACTIVE" = active ]
+        return
+      fi
+      if [ "$1 $2 ${3:-}" = "disable --now stats-inventory-sync.timer" ]; then
+        [ "$STUB_TIMER_DISABLE_RC" -eq 0 ] || return "$STUB_TIMER_DISABLE_RC"
+        STUB_TIMER_ENABLED=disabled
+        STUB_TIMER_ACTIVE=inactive
+        return 0
+      fi
+      if [ "$1 $2" = "stop stats-inventory-sync.service" ]; then
+        STUB_SERVICE_ACTIVE=inactive
+        return 0
+      fi
+      if [ "$1 $2 ${3:-}" = "enable --now stats-inventory-sync.timer" ]; then
+        STUB_TIMER_ENABLED=enabled
+        STUB_TIMER_ACTIVE=active
+        return 0
+      fi
+      if [ "$1 $2" = "start stats-inventory-sync.service" ]; then
+        return "$STUB_SERVICE_START_RC"
+      fi
+      return 0
+    }
+    journalctl() { return 0; }
+    export FIXTURE_PRIOR FIXTURE_MARKER FIXTURE_INVENTORY FIXTURE_ENV FIXTURE_ROLLBACK_ACTIVE
+    # shellcheck disable=SC1090
+    . "$sidecar_activation_tmp"
+    cat "$SYSTEMCTL_LOG"
+  ) 2>&1
+}
+
+held_out="$(run_activation_case present 0 0)"
+printf '%s' "$held_out" | grep -qF 'disable --now stats-inventory-sync.timer' ||
+  fail "pre-existing parity hold must keep the timer disabled: $held_out"
+if printf '%s' "$held_out" | grep -qF 'enable --now stats-inventory-sync.timer'; then
+  fail "pre-existing parity hold must not enable the timer: $held_out"
+fi
+test -f "$sidecar_activation_dir/present-0-0/parity" ||
+  fail "pre-existing parity hold must restore the marker"
+
+fresh_ok_out="$(run_activation_case absent 0 0)"
+printf '%s' "$fresh_ok_out" | grep -qF 'enable --now stats-inventory-sync.timer' ||
+  fail "fresh compatible sidecar must enable the timer: $fresh_ok_out"
+test ! -e "$sidecar_activation_dir/absent-0-0/parity" ||
+  fail "successful fresh sidecar activation must clear the parity marker"
+
+fresh_fail_out="$(run_activation_case absent 1 0)"
+printf '%s' "$fresh_fail_out" | grep -qF 'disable --now stats-inventory-sync.timer' ||
+  fail "failed fresh sidecar activation must disable the timer: $fresh_fail_out"
+test -f "$sidecar_activation_dir/absent-1-0/parity" ||
+  fail "failed fresh sidecar activation must preserve the parity marker"
+
+disable_fail_rc=0
+disable_fail_out="$(run_activation_case present 0 1)" || disable_fail_rc=$?
+if [ "$disable_fail_rc" -eq 0 ]; then
+  fail "pre-existing parity hold must abort when the inventory timer cannot be disabled: $disable_fail_out"
+fi
+test -f "$sidecar_activation_dir/present-0-1/parity" ||
+  fail "timer-disable failure must retain the parity marker"
 
 if LC_ALL=C grep -q $'\r' "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$AUTH_POLICY_BOOTSTRAP" "$HARDWARE_TRUST_BOOTSTRAP"; then
   fail "sidecar deploy artifacts contain CRLF line endings"
