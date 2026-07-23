@@ -8,11 +8,11 @@
 //   - non-correlated commit of staged results subject to a last-provider floor
 //   - zero durable "containment" state from a correlated-majority verdict
 //
-// This package is intentionally free of pool.Registry / ws.Server coupling so
-// the Sybil-safety properties can be hermetically proven. Wiring into the live
-// canary dispatch loop is a follow-up Partial; production Pearl canary remains
-// disabled under exc-canary-disabled-enable-gate until the full #584 re-enable
-// bar (physical baselines, emergency-disable drill, go/no-go) is paid.
+// This package is free of pool.Registry / ws.Server coupling so Sybil-safety
+// properties can be hermetically proven. The live canary path wires it via
+// phase4-coordinator/internal/ws/canary_correlation.go. Production Pearl canary
+// remains disabled under exc-canary-disabled-enable-gate until the full #584
+// re-enable bar (physical baselines, emergency-disable drill, go/no-go) is paid.
 package canarycorr
 
 import (

@@ -265,6 +265,22 @@ func (b *billingRecorder) recordRow(
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
+	// FR-CAN23 observed-serving residual: stamp successful buyer relays whenever
+	// we have a stable provider identity (independent of billing store wiring).
+	if status >= 200 && status < 300 && s.pool != nil {
+		stampID := providerID
+		if stampID == "" && providerAssignedID != "" {
+			for _, p := range s.pool.Snapshot() {
+				if p.AssignedID == providerAssignedID {
+					stampID = p.ProviderID
+					break
+				}
+			}
+		}
+		if stampID != "" {
+			s.pool.NoteBuyerSuccess(stampID, time.Now().UTC())
+		}
+	}
 	billingStore, billingCfg, billingSnapshotID := s.billingState()
 	if billingStore != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
 		stableProviderID := providerID

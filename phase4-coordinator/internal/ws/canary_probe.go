@@ -57,6 +57,11 @@ type canaryAttemptResult struct {
 	metrics        canaryProbeMetrics
 	modelClassBank bool
 	challenge      config.CanaryChallengeConfig
+	// probe is the exact body/expected/challenge used for this attempt so
+	// FR-CAN23 can re-dispatch the same fingerprint to snapshot peers.
+	probe canaryBuiltProbe
+	// sharedBankGen is non-zero when this attempt used a forced shared dispatch.
+	sharedBankGen uint64
 }
 
 func buildCanaryProbe(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig, modelClassBank bool) (canaryBuiltProbe, error) {

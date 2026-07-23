@@ -907,9 +907,10 @@ func testCanaryChallenge() config.CanaryChallengeConfig {
 // registerCanaryFloorPeer registers a second buyer-serving provider for modelID so
 // the FR-CAN22 last-provider floor does not spare the provider under test — letting
 // canary tests still exercise the normal trip path. It is WS-tunneled with a LIVE
-// stored session (canaryBuyerServing requires storedSessionFor for WS peers), and
-// is never itself probed.
-func registerCanaryFloorPeer(s *Server, registry *pool.Registry, modelID string) {
+// stored session (canaryBuyerServing requires storedSessionFor for WS peers).
+// FR-CAN23 shared-fingerprint re-dispatch may force-probe this peer; callers that
+// fail the primary must answer the peer via completePendingCorrelationPeers.
+func registerCanaryFloorPeer(s *Server, registry *pool.Registry, modelID string) net.Conn {
 	const id, session = "canary-floor-peer", "canary-floor-peer-session"
 	peerConn, _ := net.Pipe()
 	registry.Register(&pool.Provider{
@@ -924,7 +925,12 @@ func registerCanaryFloorPeer(s *Server, registry *pool.Registry, modelID string)
 		MaxConcurrency:   1,
 		MaxContextTokens: 4096,
 	}, peerConn)
-	s.sessions.Store(sessionKey(id, session), newProviderSession(id, session, peerConn, 1))
+	ps := newProviderSession(id, session, peerConn, 1)
+	s.sessions.Store(sessionKey(id, session), ps)
+	go ps.runWriter()
+	// Observed-serving stamp so the peer can lift FR-CAN23 residual floor.
+	registry.NoteBuyerSuccess(id, time.Now().UTC())
+	return peerConn
 }
 
 func runFailedCanaryProbe(t *testing.T, s *Server, providerConn net.Conn, provider *pool.Provider) {
@@ -948,6 +954,28 @@ func runFailedCanaryProbe(t *testing.T, s *Server, providerConn net.Conn, provid
 		ChunksSent: 1,
 	}))
 	waitForCanary(t, done)
+	// FR-CAN23: a multi-provider correctness failure stages until snapshot peers
+	// complete the shared-fingerprint re-dispatch (or the window expires).
+	completePendingCorrelationPeers(t, s)
+}
+
+// completePendingCorrelationPeers force-resolves any open FR-CAN23 epoch with
+// AllowIncomplete so hermetic unit tests (which typically only answer the
+// primary provider pipe) still progress counters. Production relies on shared
+// re-dispatch + the FR-CAN12 window in runCanarySweep instead.
+func completePendingCorrelationPeers(t *testing.T, s *Server) {
+	t.Helper()
+	s.canaryCorrMu.Lock()
+	var pending []*liveCorrelationEpoch
+	for key, ep := range s.canaryCorrByModel {
+		pending = append(pending, ep)
+		delete(s.canaryCorrByModel, key)
+	}
+	s.canarySharedDispatch = nil
+	s.canaryCorrMu.Unlock()
+	for _, ep := range pending {
+		s.resolveAndApplyCorrelation(ep, true)
+	}
 }
 
 func waitForCanary(t *testing.T, done <-chan struct{}) {

@@ -172,6 +172,11 @@ type Provider struct {
 	CanaryFailCount     int             `json:"canary_fail_count,omitempty"`
 	CanaryLastCheckedAt *time.Time      `json:"canary_last_checked_at,omitempty"`
 	CanaryLastFailedAt  *time.Time      `json:"canary_last_failed_at,omitempty"`
+	// LastBuyerSuccessAt is the most recent coordinator-observed successful
+	// buyer relay for this provider (HTTP 2xx / completed stream). Used by
+	// FR-CAN23 observed-serving residual so a peer that never served buyers
+	// cannot lift the last-provider floor. Omitted from wire JSON.
+	LastBuyerSuccessAt *time.Time `json:"-"`
 	LastAutoupdateEvent json.RawMessage `json:"last_autoupdate_event,omitempty"`
 	// HardwareCapacity is live, provider-reported capacity metadata carried on
 	// heartbeats for public aggregate stats. It is deliberately separate from
@@ -1258,6 +1263,19 @@ type CanaryResult struct {
 }
 
 func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool, at time.Time, threshold int) CanaryResult {
+	return r.recordCanaryResult(providerID, assignedID, passed, at, threshold, false)
+}
+
+// RecordCanaryResultForceFloorHeld accrues a canary failure (or pass) like
+// RecordCanaryResult, but when the failure reaches threshold it ALWAYS returns
+// CanaryTripFloorHeld without degrading/banning — used by FR-CAN23 when
+// canarycorr residual says no observed-serving peer capacity remains even if
+// request-independent BuyerServing peers would lift the FR-CAN22 floor.
+func (r *Registry) RecordCanaryResultForceFloorHeld(providerID, assignedID string, passed bool, at time.Time, threshold int) CanaryResult {
+	return r.recordCanaryResult(providerID, assignedID, passed, at, threshold, true)
+}
+
+func (r *Registry) recordCanaryResult(providerID, assignedID string, passed bool, at time.Time, threshold int, forceFloorHeld bool) CanaryResult {
 	if threshold <= 0 {
 		threshold = 3
 	}
@@ -1319,11 +1337,9 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	// buyer-routing model (providerServesActiveModel, not declared SupportedModels)
 	// AND the injected request-independent buyer-serving predicate (RoutingEligible
 	// + transport + context + not Tier-2-excluded); request-dependent context/quota
-	// are deferred to FR-CAN23, so a peer that passes the request-independent gates
-	// but is filtered per-request can still lift the floor (not a regression — the
-	// floor only ever spares a target that itself passes those same gates; see
-	// canaryBuyerServing).
-	if r.isBuyerServingLocked(p) && !r.hasOtherBuyerServingForModelLocked(providerID, p.ModelID) {
+	// residual is closed by FR-CAN23 forceFloorHeld when no observed-serving peer
+	// capacity remains (ghost BuyerServing peers must not lift the floor).
+	if forceFloorHeld || (r.isBuyerServingLocked(p) && !r.hasOtherBuyerServingForModelLocked(providerID, p.ModelID)) {
 		result.Tripped = CanaryTripFloorHeld
 		return result
 	}
@@ -1422,6 +1438,56 @@ func (r *Registry) BuyerServingCountForModel(modelID string) int {
 		}
 	}
 	return n
+}
+
+// BuyerServingProviderIDsForModel returns the provider IDs that currently pass
+// the injected buyer-serving predicate for modelID. Used to freeze FR-CAN23
+// pre-sweep snapshots. Order is not stable.
+func (r *Registry) BuyerServingProviderIDsForModel(modelID string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0)
+	for id, p := range r.providers {
+		if providerServesActiveModel(p, modelID) && r.isBuyerServingLocked(p) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// NoteBuyerSuccess records a coordinator-observed successful buyer relay for
+// FR-CAN23 observed-serving residual. No-op when the provider is unknown.
+func (r *Registry) NoteBuyerSuccess(providerID string, at time.Time) {
+	if r == nil || strings.TrimSpace(providerID) == "" {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	} else {
+		at = at.UTC()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return
+	}
+	t := at
+	p.LastBuyerSuccessAt = &t
+}
+
+// LastBuyerSuccessAt returns a copy of the provider's last buyer-success stamp.
+func (r *Registry) LastBuyerSuccessAt(providerID string) time.Time {
+	if r == nil {
+		return time.Time{}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil || p.LastBuyerSuccessAt == nil {
+		return time.Time{}
+	}
+	return *p.LastBuyerSuccessAt
 }
 
 // SELivenessResult is returned by RecordSELivenessResult.

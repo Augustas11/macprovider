@@ -77,7 +77,15 @@ type Server struct {
 	// is always followed by an enforced one — a provider cannot arrange (via
 	// reconnect / due-timing churn) to only ever be probed under grace and evade
 	// the TTFT sanction. Keyed by PROVIDER ID so it survives reconnects.
-	enforceNextCanary             sync.Map
+	enforceNextCanary sync.Map
+	// FR-CAN23 live correlation (package canarycorr). Open only while canary is
+	// enabled; Pearl production keeps canary disabled under #584. Guarded by
+	// canaryCorrMu. canaryBankGeneration is an interim monotonic bank/config
+	// generation (FR-CAN26 full hot-reload generation remains a Gap).
+	canaryCorrMu         sync.Mutex
+	canaryCorrByModel    map[string]*liveCorrelationEpoch
+	canarySharedDispatch map[string]sharedCanaryDispatch
+	canaryBankGeneration uint64
 	losslessnessPending           sync.Map
 	losslessnessNonceIndex        sync.Map
 	losslessnessDigestIndex       sync.Map
@@ -3419,6 +3427,8 @@ func (s *Server) runCanaryLoop() {
 }
 
 func (s *Server) runCanarySweep() {
+	// FR-CAN23: resolve any open multi-provider epochs whose FR-CAN12 window elapsed.
+	s.expireCanaryCorrelationWindows()
 	now := s.now()
 	activeKeys := map[string]struct{}{}
 	for _, provider := range shuffledProviders(s.pool.Snapshot()) {
@@ -3564,78 +3574,26 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		s.enforceNextCanary.Store(provider.ProviderID, struct{}{})
 		return true
 	}
-	passed := outcome == canaryProbePass
-	checkedAt := s.now()
-	result := s.pool.RecordCanaryResult(provider.ProviderID, provider.AssignedID, passed, checkedAt, s.canaryFailureThreshold())
-	if !result.Current {
-		// Stale session (the provider reconnected during this enforced probe):
-		// the result did NOT apply, so DO NOT clear enforceNextCanary — the next
-		// probe must still be enforced. Clearing it here would let a slow provider
-		// reconnect during every forced enforced probe and be graced again on the
-		// fresh session, re-opening the all-graced evasion (R4 SECURITY HIGH).
-		return false
+	class := mapCanaryFailClass(outcome, attempt.metrics.FailReason)
+	if s.shouldRouteThroughCorrelation(provider, class) {
+		return s.applyCanaryViaCorrelation(provider, attempt, class, epoch)
 	}
-	// A current, enforced probe was recorded — clear the pending-enforcement flag
-	// so a future genuine cold start can be graced again.
-	s.enforceNextCanary.Delete(provider.ProviderID)
-	if passed {
-		if result.SanctionCleared {
-			_ = s.deleteCanarySanction(provider.ProviderID)
-		}
-		if result.Count == 0 {
-			s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary passed")
-		}
+	// Snapshot members of an open epoch must never sanction outside resolve.
+	if s.providerInOpenCorrelation(provider.ProviderID) {
+		s.log.Info().
+			Str("provider_id", provider.ProviderID).
+			Msg("holding canary result for open FR-CAN23 epoch (no immediate apply)")
 		return true
 	}
-	event := s.log.Warn().
-		Str("provider_id", provider.ProviderID).
-		Int("canary_fail_count", result.Count).
-		Int("canary_failure_threshold", result.Threshold)
-	if attempt.metrics.FailReason != canaryFailNone {
-		event = event.Str("canary_fail_reason", string(attempt.metrics.FailReason))
-	}
-	if result.Tripped != pool.CanaryTripNone {
-		event = event.Str("canary_trip", string(result.Tripped))
-	}
-	if attempt.modelClassBank && attempt.metrics.LatencyGated {
-		event = event.
-			Int("canary_ttft_ms", attempt.metrics.TTFTMS).
-			Float64("canary_sustained_tps", attempt.metrics.SustainedTPS)
-	}
-	event.Msg("provider canary failed")
-	switch result.Tripped {
-	case pool.CanaryTripUnavailable:
-		if result.Tier == pool.TierProvisional && s.admission != nil {
-			s.admission.Reject(provider.ProviderID, "canary failures")
-		}
-		if session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); ok {
-			s.closeSession(session, CloseBanned, "canary_failed")
-		}
-	case pool.CanaryTripDegraded:
-		s.saveCanarySanction(pool.CanarySanctionSnapshot{
-			ProviderID:    provider.ProviderID,
-			FailCount:     result.Count,
-			LastCheckedAt: &checkedAt,
-			LastFailedAt:  &checkedAt,
-		})
-		s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider held degraded after canary threshold")
-	case pool.CanaryTripFloorHeld:
-		// SPEC-031 FR-CAN22 last-provider floor: the sole buyer-serving provider
-		// for this model reached the canary failure threshold but was spared to
-		// avoid emptying the pool (the incidents #1/#2 outage). It stays routable.
-		// This is canary-path redundancy telemetry (surface, never auto-remove) —
-		// NOT the full SPEC-032 FR-HG5 below-two operator alert (still a Gap). An
-		// operator must investigate the failing canary and/or add a second provider.
-		s.log.Warn().
-			Str("provider_id", provider.ProviderID).
-			Str("model_id", provider.ModelID).
-			Str("event", "canary_floor_held").
-			Int("canary_fail_count", result.Count).
-			Int("canary_failure_threshold", result.Threshold).
-			Bool("pool_redundancy_low", true).
-			Msg("sole buyer-serving provider for model failed canary threshold; spared to preserve availability (SPEC-031 FR-CAN22) — operator investigation required")
-	}
-	return true
+	return s.applyCanaryImmediate(provider, attempt, epoch)
+}
+
+// applyCanaryImmediate records a canary result on the ordinary FR-CAN11/22 path
+// (no multi-provider correlation staging).
+func (s *Server) applyCanaryImmediate(provider pool.Provider, attempt canaryAttemptResult, recoveryEpoch uint64) bool {
+	_ = recoveryEpoch // fencing already applied by runCanaryProbeAtEpoch
+	passed := attempt.outcome == canaryProbePass
+	return s.applyCanaryRecord(provider.ProviderID, provider.AssignedID, passed, attempt, false)
 }
 
 func (s *Server) saveCanarySanction(snapshot pool.CanarySanctionSnapshot) {
@@ -3670,9 +3628,25 @@ func (s *Server) canaryEpoch(providerID string) *atomic.Uint64 {
 func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryAttemptResult {
 	probeModelID := providerProbeModelID(provider)
 	challenges, modelClassBank := s.cfg.Pool.CanaryChallengesForModel(probeModelID)
-	probe, err := buildCanaryProbe(probeModelID, s.canaryMaxTokens(), challenges, modelClassBank)
-	if err != nil {
-		return canaryAttemptResult{outcome: canaryProbeSkip}
+	var probe canaryBuiltProbe
+	var sharedBankGen uint64
+	var shared sharedCanaryDispatch
+	var hadShared bool
+	if d, ok := s.takeSharedCanaryDispatch(provider.ProviderID); ok {
+		// FR-CAN23: re-dispatch the same challenge fingerprint as the open epoch.
+		shared = d
+		hadShared = true
+		probe = d.probe
+		sharedBankGen = d.bankGeneration
+		if probe.ModelClassBank {
+			modelClassBank = true
+		}
+	} else {
+		built, err := buildCanaryProbe(probeModelID, s.canaryMaxTokens(), challenges, modelClassBank)
+		if err != nil {
+			return canaryAttemptResult{outcome: canaryProbeSkip}
+		}
+		probe = built
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.canaryTimeout())
 	defer cancel()
@@ -3683,14 +3657,19 @@ func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryAttemptResu
 	} else {
 		outcome, metrics = s.runWSCanaryProbeAttempt(ctx, provider, probe)
 	}
+	if outcome == canaryProbeSkip && hadShared {
+		s.requeueSharedCanaryDispatch(provider.ProviderID, shared)
+	}
 	if challengeHasLatencyGates(probe.Challenge) {
 		metrics.LatencyGated = true
 	}
 	return canaryAttemptResult{
 		outcome:        outcome,
 		metrics:        metrics,
-		modelClassBank: probe.ModelClassBank,
+		modelClassBank: probe.ModelClassBank || modelClassBank,
 		challenge:      probe.Challenge,
+		probe:          probe,
+		sharedBankGen:  sharedBankGen,
 	}
 }
 

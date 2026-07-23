@@ -3,9 +3,9 @@
 **Issue:** [#584](https://github.com/Augustas11/macprovider/issues/584)  
 **Normative:** `specs/SPEC-031-canary-degrade-sanctions.md` FR-CAN23, FR-CAN29a, §14  
 **Code:** `phase4-coordinator/internal/canarycorr`  
-**Status:** **Partial** — pure state machine + hermetic tests landed; **not wired** into
-`ws.Server` canary dispatch / `pool.Registry.RecordCanaryResult`. Pearl canary stays
-disabled.
+**Status:** **Partial (wired 2026-07-23)** — pure state machine + hermetic tests + live
+`ws` canary path wiring landed. Pearl canary stays **disabled** (`exc-canary-disabled-enable-gate`
+active); wiring is inert until re-enable.
 
 ## Why a package-first Partial
 
