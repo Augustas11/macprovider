@@ -161,6 +161,26 @@ MALIBU_CAPTURE_STEP = r'''        shell: bash
             unsigned-release-inputs/release-toolchain.json \
             unsigned-release-inputs/unsigned-release-manifest.json \
             "${unsigned_assets[@]}"'''
+PROTECTED_OPENSSL3_STEP = (
+    "        id: protected_openssl\n"
+    "        shell: bash\n"
+    "        env:\n"
+    '          HOMEBREW_NO_AUTO_UPDATE: "1"\n'
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          brew install openssl@3\n"
+    '          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"\n'
+    '          "$openssl_bin" version | grep -E \'^OpenSSL 3\\.\'\n'
+    '          printf \'bin=%s\\n\' "$openssl_bin" >> "$GITHUB_OUTPUT"'
+)
+PROTECTED_OPENSSL_OUTPUT_ENV = (
+    '          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
+)
+PROTECTED_OPENSSL_CONSUMERS = (
+    ("Prepare release assets", 1),
+    ("Require an advancing immutable discovery head", 2),
+    ("Publish one append-only immutable discovery transport", 1),
+)
 
 
 def validate_malibu_candidate_preflight(job):
@@ -255,6 +275,62 @@ def validate_pearl_toolchain(job):
     if pearl_build.count("go build -mod=readonly -trimpath -buildvcs=true") != 3:
         raise SystemExit("all Pearl binaries must use explicit reviewed VCS stamping")
     return pearl_build
+
+
+def validate_protected_openssl(job):
+    selector = unique_step(
+        job, "Select OpenSSL 3 for protected release verification"
+    )
+    if selector.strip("\n") != PROTECTED_OPENSSL3_STEP:
+        raise SystemExit(
+            "protected release must retain the exact fail-closed OpenSSL 3 selector"
+        )
+    selector_position = job.find(
+        "- name: Select OpenSSL 3 for protected release verification"
+    )
+    toolchain_position = job.find("- name: Reverify captured release toolchain")
+    signing_position = job.find("- name: Sign + notarize binary")
+    discovery_position = job.find(
+        "- name: Require an advancing immutable discovery head"
+    )
+    if min(
+        selector_position,
+        toolchain_position,
+        signing_position,
+        discovery_position,
+    ) < 0 or not (
+        toolchain_position
+        < selector_position
+        < signing_position
+        < discovery_position
+    ):
+        raise SystemExit(
+            "protected OpenSSL 3 selection must follow toolchain verification "
+            "and precede signing and discovery verification"
+        )
+    if "OPENSSL_BIN=" in job:
+        raise SystemExit(
+            "protected release must not allow mutable OPENSSL_BIN environment writes"
+        )
+    if job.count(PROTECTED_OPENSSL_OUTPUT_ENV) != len(PROTECTED_OPENSSL_CONSUMERS):
+        raise SystemExit(
+            "every protected discovery producer and verifier must bind the "
+            "immutable selector output"
+        )
+    for name, expected_cli_uses in PROTECTED_OPENSSL_CONSUMERS:
+        consumer = unique_step(job, name)
+        if consumer.count(PROTECTED_OPENSSL_OUTPUT_ENV) != 1:
+            raise SystemExit(
+                f"{name} must bind the exact protected OpenSSL selector output"
+            )
+        if consumer.count('--openssl "$OPENSSL_BIN"') != expected_cli_uses:
+            raise SystemExit(
+                f"{name} must pass protected OpenSSL to every discovery command"
+            )
+        if consumer.count("OPENSSL_BIN") != expected_cli_uses + 1:
+            raise SystemExit(
+                f"{name} contains an unreviewed protected OpenSSL reference"
+            )
 
 
 if "secrets." in build or "contents: write" in build:
@@ -399,6 +475,7 @@ if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must be pinned by commit")
 validate_malibu_candidate_preflight(build)
 pearl_build = validate_pearl_toolchain(build)
+validate_protected_openssl(publish)
 for requirement in (
     "GOTOOLCHAIN=local",
     "CGO_ENABLED=0 GOOS=linux GOARCH=amd64",
@@ -520,6 +597,53 @@ malibu_post_capture_mutation = build.replace(
     "\n      - name: Verify staged Pearl Go binaries\n",
     1,
 )
+protected_openssl_removal_mutation = publish.replace(
+    "\n      - name: Select OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "",
+    1,
+)
+protected_openssl_suppression_mutation = publish.replace(
+    PROTECTED_OPENSSL3_STEP,
+    PROTECTED_OPENSSL3_STEP.replace(
+        "          brew install openssl@3\n",
+        "          brew install openssl@3 || true\n",
+        1,
+    ),
+    1,
+)
+protected_openssl_reorder_mutation = publish.replace(
+    "\n      - name: Select OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "",
+    1,
+).replace(
+    "\n      - name: Require an advancing immutable discovery head\n",
+    "\n      - name: Require an advancing immutable discovery head\n"
+    + "\n      - name: Select OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    1,
+)
+protected_openssl_override_mutation = publish.replace(
+    "\n      - name: Select OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP,
+    "\n      - name: Select OpenSSL 3 for protected release verification\n"
+    + PROTECTED_OPENSSL3_STEP
+    + "\n\n      - name: Override protected OpenSSL selection\n"
+    + "        shell: bash\n"
+    + "        run: echo 'OPENSSL_BIN=/usr/bin/true' >> \"$GITHUB_ENV\"",
+    1,
+)
+protected_openssl_consumer_removal_mutation = publish.replace(
+    '            --openssl "$OPENSSL_BIN" \\\n',
+    "",
+    1,
+)
+protected_openssl_output_replacement_mutation = publish.replace(
+    PROTECTED_OPENSSL_OUTPUT_ENV,
+    "          OPENSSL_BIN: /usr/bin/true",
+    1,
+)
 for description, mutation in (
     ("case-folded setup-go override", setup_override_mutation),
     ("toolchain seal replacement", seal_replacement_mutation),
@@ -556,6 +680,28 @@ for description, mutation in (
 ):
     try:
         validate_malibu_candidate_preflight(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
+for description, mutation in (
+    ("protected OpenSSL 3 selector removal", protected_openssl_removal_mutation),
+    (
+        "protected OpenSSL 3 selector failure suppression",
+        protected_openssl_suppression_mutation,
+    ),
+    ("protected OpenSSL 3 selector reorder", protected_openssl_reorder_mutation),
+    ("protected OpenSSL 3 environment override", protected_openssl_override_mutation),
+    (
+        "protected OpenSSL 3 consumer removal",
+        protected_openssl_consumer_removal_mutation,
+    ),
+    (
+        "protected OpenSSL 3 output replacement",
+        protected_openssl_output_replacement_mutation,
+    ),
+):
+    try:
+        validate_protected_openssl(mutation)
     except SystemExit:
         continue
     raise SystemExit(f"{description} mutation unexpectedly passed")
