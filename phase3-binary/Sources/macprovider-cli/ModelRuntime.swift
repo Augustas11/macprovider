@@ -1678,6 +1678,90 @@ actor ModelRuntime: ModelRuntimeServing {
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // SPEC-037 FR-KVP2.5: speculative-decode routing is
+                    // determined BEFORE any conversation-cache begin(). A
+                    // speculative-routed request acquires no lease, triggers no
+                    // promotion, commits nothing, and leaves no busy key. This
+                    // also fixes the latent stuck-busy-key bug on the streaming
+                    // speculative path, whose success branch previously returned
+                    // without committing or aborting a lease acquired above it
+                    // (and passed a possibly-trimmed prompt with cache: nil).
+                    if Self.speculativeRoute(
+                        for: request,
+                        draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
+                        numDraftTokens: snapshot.numDraftTokens
+                    ) == .speculative,
+                       let draftContainer = snapshot.draftContainer,
+                       let numDraftTokens = snapshot.numDraftTokens {
+                        var emittedText = ""
+                        var stoppedByRequestStop = false
+                        let generated = try await Self.collectSpeculativeText(
+                            input: lmInput,
+                            cache: nil,
+                            parameters: parameters,
+                            targetContext: context,
+                            draft: draftContainer,
+                            numDraftTokens: numDraftTokens,
+                            shouldCancel: shouldCancel,
+                            drainCancelled: drainCancelled
+                        )
+                        try drainCancelled.check()
+                        try Task.checkCancellation()
+
+                        let final = Self.applyOutputFilters(
+                            generated.output,
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: request.stop
+                        )
+                        let finalDelta = Self.delta(from: emittedText, to: final.text)
+                        let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                        if !finalDelta.isEmpty {
+                            if let error = structuredAccumulator.append(finalDelta) {
+                                throw error
+                            }
+                            idleState.noteContent()
+                            emittedText = final.text
+                            stoppedByRequestStop = final.hitStop
+                            onChunk(.content(finalDelta))
+                        }
+                        if final.hitStop {
+                            stoppedByRequestStop = true
+                        }
+                        if let error = structuredAccumulator.error {
+                            throw error
+                        }
+
+                        let finishReason: String
+                        if !parsed.toolCalls.isEmpty {
+                            finishReason = "tool_calls"
+                        } else if let maxTokens = request.maxTokens,
+                                  generated.generationTokenCount >= maxTokens,
+                                  !stoppedByRequestStop,
+                                  !final.hitStop {
+                            finishReason = "length"
+                        } else {
+                            finishReason = "stop"
+                        }
+
+                        let completion = CompletionResult(
+                            content: parsed.content,
+                            finishReason: finishReason,
+                            promptTokens: promptTokenIds.count,
+                            cachedPromptTokens: 0,
+                            completionTokens: generated.generationTokenCount,
+                            toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                            specDecodeDraftedTokens: generated.draftedTokens,
+                            specDecodeAcceptedTokens: generated.acceptedTokens,
+                            specDecodeGeneration: snapshot.specDecodeGeneration
+                        )
+                        return try Self.validateStructuredStreamingCompletion(
+                            completion,
+                            request: request,
+                            buyerVisibleContent: structuredAccumulator.content
+                        )
+                    }
+
                     let lease = await conversationCache.begin(
                         conversationKey: request.conversationKey,
                         incomingTokens: promptTokenIds,
@@ -1701,6 +1785,14 @@ actor ModelRuntime: ModelRuntimeServing {
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
 
+                    // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
+                    // BEFORE conversationCache.begin() (block above, ahead of the
+                    // lease acquisition) — a speculative-routed request acquires no
+                    // lease, triggers no promotion, commits nothing, and leaves no
+                    // busy key. This non-speculative path therefore never re-checks
+                    // speculativeRoute; the post-begin speculative block that origin
+                    // carried here would double-run and (on its success return) leak
+                    // the lease as a stuck busy key, so it is intentionally dropped.
                     let isHarmonyResponse = HarmonyResponseParser.isHarmonyModelID(request.model)
                     var harmonyFinalDetokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
                     var harmonyStreamingParser = HarmonyResponseParser.StreamingParser(
@@ -1713,99 +1805,6 @@ actor ModelRuntime: ModelRuntimeServing {
                         stopCandidates: stopTokenFilter.tokens + request.stop
                     )
                     let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools) && !isHarmonyResponse
-                    if Self.speculativeRoute(
-                        for: request,
-                        draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
-                        numDraftTokens: snapshot.numDraftTokens
-                    ) == .speculative,
-                       let draftContainer = snapshot.draftContainer,
-                       let numDraftTokens = snapshot.numDraftTokens {
-                        do {
-                            let generated = try await Self.collectSpeculativeText(
-                                input: iteratorInput,
-                                cache: nil,
-                                parameters: parameters,
-                                targetContext: context,
-                                draft: draftContainer,
-                                numDraftTokens: numDraftTokens,
-                                shouldCancel: shouldCancel,
-                                drainCancelled: drainCancelled
-                            )
-                            try drainCancelled.check()
-                            try Task.checkCancellation()
-
-                            let final = Self.applyOutputFilters(
-                                generated.output,
-                                stopTokenFilter: stopTokenFilter,
-                                requestStops: request.stop
-                            )
-                            let rawLengthFinish = request.maxTokens.map { generated.generationTokenCount >= $0 } ?? false
-                            let parsed = try Self.parseGeneratedOutput(
-                                filteredText: final.text,
-                                generatedTokenIDs: [],
-                                decode: { _ in "" },
-                                request: request,
-                                mode: .complete(finishReason: rawLengthFinish && !final.hitStop ? "length" : "stop"),
-                                defaultCompletionTokens: generated.generationTokenCount,
-                                stopTokenFilter: stopTokenFilter,
-                                requestStops: request.stop,
-                                globalHitStop: final.hitStop
-                            )
-                            let finalDelta = Self.delta(from: emittedText, to: parsed.content)
-                            if !finalDelta.isEmpty {
-                                if let error = structuredAccumulator.append(finalDelta) {
-                                    throw error
-                                }
-                                idleState.noteContent()
-                                emittedText = final.text
-                                stoppedByRequestStop = final.hitStop
-                                onChunk(.content(finalDelta))
-                            }
-                            if final.hitStop {
-                                stoppedByRequestStop = true
-                            }
-                            if let error = structuredAccumulator.error {
-                                throw error
-                            }
-
-                            let finishReason: String
-                            if !parsed.toolCalls.isEmpty {
-                                finishReason = "tool_calls"
-                            } else if let maxTokens = request.maxTokens,
-                                      generated.generationTokenCount >= maxTokens,
-                                      !stoppedByRequestStop,
-                                      !final.hitStop,
-                                      !parsed.hitStop {
-                                finishReason = "length"
-                            } else {
-                                finishReason = "stop"
-                            }
-
-                            let completion = CompletionResult(
-                                content: parsed.content,
-                                finishReason: finishReason,
-                                promptTokens: promptTokenIds.count,
-                                cachedPromptTokens: 0,
-                                completionTokens: parsed.completionTokens,
-                                generatedCompletionTokens: parsed.generatedCompletionTokens,
-                                toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                                modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
-                                specDecodeDraftedTokens: generated.draftedTokens,
-                                specDecodeAcceptedTokens: generated.acceptedTokens,
-                                specDecodeGeneration: snapshot.specDecodeGeneration
-                            )
-                            return try Self.validateStructuredStreamingCompletion(
-                                completion,
-                                request: request,
-                                buyerVisibleContent: structuredAccumulator.content
-                            )
-                        } catch {
-                            if let lease {
-                                await conversationCache.abort(lease)
-                            }
-                            throw error
-                        }
-                    }
                     let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
                     do {
                         let result: GenerateResult = generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
