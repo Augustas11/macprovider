@@ -4161,7 +4161,7 @@ class Updater:
         candidate_signer: str,
         *,
         deadline: float | None = None,
-    ) -> str:
+    ) -> tuple[str, str, str]:
         proof_program = _read_trusted_text(
             self.catalog_canary_proof,
             "catalog canary proof program",
@@ -4224,6 +4224,7 @@ class Updater:
         except (ValueError, KeyError, TypeError) as exc:
             raise UpdateError("trusted catalog canary Mac proof is invalid") from exc
         row_identity = local_catalog.get("row_identity") if isinstance(local_catalog, dict) else None
+        model_id = proof.get("model_id") if isinstance(proof, dict) else None
         assigned_id = proof.get("assigned_id") if isinstance(proof, dict) else None
         if (
             not isinstance(proof, dict)
@@ -4233,6 +4234,8 @@ class Updater:
             or not isinstance(local_status, dict)
             or local_status.get("provider_id") != provider_id
             or local_status.get("network_state") != "buyer_serving"
+            or local_status.get("model_loaded") is not True
+            or local_status.get("model") != model_id
             or not isinstance(local_coordinator, dict)
             or local_coordinator.get("connected") is not True
             or local_coordinator.get("session") != assigned_id
@@ -4245,10 +4248,15 @@ class Updater:
             or local_catalog.get("signer_key_id") != candidate_signer
             or not isinstance(row_identity, str)
             or not SHA256_RE.fullmatch(row_identity.lower())
+            or not isinstance(model_id, str)
+            or not model_id
+            or len(model_id) > 512
+            or model_id.strip() != model_id
+            or local_catalog.get("model_id") != model_id
             or files != release.catalog.files
         ):
             raise UpdateError("trusted catalog canary Mac proof does not match the candidate release")
-        return row_identity.lower(), assigned_id
+        return row_identity.lower(), assigned_id, model_id
 
     def catalog_provider_admission_ready(
         self,
@@ -4297,13 +4305,13 @@ class Updater:
             and str(status.get("catalog_row_identity", "")).lower() == row_identity
         )
 
-    def verify_exact_provider_canary(self, release: Release) -> None:
+    def verify_exact_provider_canary(self, release: Release) -> str:
         provider_id, token = self.validate_catalog_canary_configuration()
         candidate_digest, candidate_signer = self.catalog_candidate_identity(release)
         verified: dict[str, str] = {}
 
         def exact_canary_ready(deadline: float) -> bool:
-            row_identity, assigned_id = self.prove_catalog_canary_mac(
+            row_identity, assigned_id, model_id = self.prove_catalog_canary_mac(
                 release,
                 provider_id,
                 candidate_digest,
@@ -4323,6 +4331,7 @@ class Updater:
                 return False
             verified["row_identity"] = row_identity
             verified["assigned_id"] = assigned_id
+            verified["model_id"] = model_id
             return True
 
         self.wait_for_with_deadline(
@@ -4340,13 +4349,9 @@ class Updater:
             catalog_signer_key_id=candidate_signer,
             catalog_row_identity=verified["row_identity"],
             assigned_id=verified["assigned_id"],
+            model=verified["model_id"],
         )
-
-    def _catalog_canary_expected_model(self) -> str:
-        for row in self._canary_expected_fleet():
-            if row["provider_id"] == self.config.catalog_canary_provider_id:
-                return row["model_id"]
-        raise UpdateError("catalog canary provider is not bound in the expected fleet")
+        return verified["model_id"]
 
     def _buyer_token(self) -> str:
         token = _read_trusted_text(
@@ -4477,7 +4482,7 @@ class Updater:
             raise UpdateError("prove-current requires hard-disabled buyer canary configuration")
         self.verify_live_runtime_binding(release)
         provider_id = self.config.catalog_canary_provider_id
-        model_id = self._catalog_canary_expected_model()
+        model_id = self.verify_exact_provider_canary(release)
         seen_request_ids: set[str] = set()
         seen_timestamps: set[str] = set()
         for cycle in range(1, 4):
@@ -4487,7 +4492,8 @@ class Updater:
                 provider_id=provider_id,
                 model_id=model_id,
             )
-            self.verify_exact_provider_canary(release)
+            if self.verify_exact_provider_canary(release) != model_id:
+                raise UpdateError("catalog canary model changed during the buyer journey proof")
             if buyer_proof["response_request_id"] in seen_request_ids:
                 raise UpdateError("gateway buyer proof response request IDs are not unique")
             if buyer_proof["requested_at"] in seen_timestamps:

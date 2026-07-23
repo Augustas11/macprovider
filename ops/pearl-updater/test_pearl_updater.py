@@ -1625,10 +1625,13 @@ class PearlUpdaterTests(unittest.TestCase):
         proof = {
             "provider_id": "catalog-canary",
             "assigned_id": "session-canary",
+            "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
             "launchd_pid": 123,
             "local_status": {
                 "provider_id": "catalog-canary",
                 "network_state": "buyer_serving",
+                "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                "model_loaded": True,
                 "coordinator": {"connected": True, "session": "session-canary"},
                 "catalog": {
                     "release_id": release.catalog.release_id,
@@ -1636,6 +1639,7 @@ class PearlUpdaterTests(unittest.TestCase):
                     "digest": digest,
                     "signer_key_id": signer,
                     "row_identity": row_identity,
+                    "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
                 },
             },
             "files": dict(release.catalog.files),
@@ -1661,7 +1665,11 @@ class PearlUpdaterTests(unittest.TestCase):
                     signer,
                     deadline=125.0,
                 ),
-                (row_identity, "session-canary"),
+                (
+                    row_identity,
+                    "session-canary",
+                    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                ),
             )
         args, kwargs = self.updater.run_command.call_args
         self.assertIn(
@@ -1671,6 +1679,8 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(args[0][-2], "operator@canary.example")
         self.assertIn("catalog-canary", args[0][-1])
         self.assertIn("running_text_vnode", kwargs["input_text"])
+        self.assertIn('local_status.get("model_loaded") is not True', kwargs["input_text"])
+        self.assertIn("catalog_model_id != model_id", kwargs["input_text"])
         self.assertEqual(kwargs["timeout"], 25.0)
 
         proof["files"]["release.json"] = "0" * 64
@@ -1684,6 +1694,35 @@ class PearlUpdaterTests(unittest.TestCase):
             self.updater.prove_catalog_canary_mac(
                 release, "catalog-canary", digest, signer
             )
+
+        proof["files"] = dict(release.catalog.files)
+        invalid_model_proofs = {
+            "runtime model missing": {"local_status.model": None},
+            "runtime model not loaded": {"local_status.model_loaded": False},
+            "catalog model mismatch": {
+                "local_status.catalog.model_id": "different/model"
+            },
+            "emitted model mismatch": {"model_id": "different/model"},
+        }
+        for label, mutations in invalid_model_proofs.items():
+            with self.subTest(label=label):
+                invalid_proof = json.loads(json.dumps(proof))
+                for path, value in mutations.items():
+                    target = invalid_proof
+                    parts = path.split(".")
+                    for part in parts[:-1]:
+                        target = target[part]
+                    target[parts[-1]] = value
+                self.updater.run_command.return_value = subprocess.CompletedProcess(
+                    ["ssh"], 0, stdout=json.dumps(invalid_proof), stderr=""
+                )
+                with self.assertRaisesRegex(
+                    updater_module.UpdateError,
+                    "does not match the candidate release",
+                ):
+                    self.updater.prove_catalog_canary_mac(
+                        release, "catalog-canary", digest, signer
+                    )
 
     def test_exact_provider_canary_runs_mac_proof_before_authoritative_pool_gate(self):
         release = self.verify()
@@ -1706,7 +1745,12 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         order = []
         self.updater.prove_catalog_canary_mac = mock.Mock(
-            side_effect=lambda *_args, **_kwargs: order.append("mac") or ("b" * 64, "session-canary")
+            side_effect=lambda *_args, **_kwargs: order.append("mac")
+            or (
+                "b" * 64,
+                "session-canary",
+                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            )
         )
         self.updater.catalog_provider_admission_ready = mock.Mock(
             side_effect=lambda *_args, **_kwargs: order.append("pool") or True
@@ -1717,7 +1761,10 @@ class PearlUpdaterTests(unittest.TestCase):
             )
         )
 
-        self.updater.verify_exact_provider_canary(release)
+        self.assertEqual(
+            self.updater.verify_exact_provider_canary(release),
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        )
 
         self.assertEqual(order, ["mac", "pool"])
 
@@ -1745,8 +1792,16 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.prove_catalog_canary_mac = mock.Mock(
             side_effect=[
                 updater_module.UpdateError("provider not installed yet"),
-                (row_identity, "session-before-reconnect"),
-                (row_identity, "session-after-reconnect"),
+                (
+                    row_identity,
+                    "session-before-reconnect",
+                    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                ),
+                (
+                    row_identity,
+                    "session-after-reconnect",
+                    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                ),
             ]
         )
         self.updater.catalog_provider_admission_ready = mock.Mock(
@@ -1776,6 +1831,7 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_signer_key_id=self.updater.catalog_candidate_identity(release)[1],
             catalog_row_identity=row_identity,
             assigned_id="session-after-reconnect",
+            model="mlx-community/Llama-3.2-3B-Instruct-4bit",
         )
 
     def test_gateway_buyer_stream_requires_provider_model_token_done_and_request_id(self):
@@ -3517,9 +3573,10 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_canary_provider_id="catalog-canary",
         )
         self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
-        self.updater.verify_exact_provider_canary = mock.Mock()
+        self.updater.verify_exact_provider_canary = mock.Mock(
+            return_value="mlx-community/Llama-3.2-3B-Instruct-4bit"
+        )
         self.updater.verify_live_runtime_binding = mock.Mock()
-        self.updater._catalog_canary_expected_model = mock.Mock(return_value="mlx-community/Llama-3.2-3B-Instruct-4bit")
         self.updater.prove_gateway_buyer_stream = mock.Mock(
             side_effect=[
                 {
@@ -3546,7 +3603,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual((str(current), decision), ("1.8.27", "already_current"))
         self.updater.verify_live_runtime_binding.assert_called_once_with(release)
         self.assertEqual(self.updater.verify_buyer_canary_rollout_posture.call_count, 3)
-        self.assertEqual(self.updater.verify_exact_provider_canary.call_args_list, [mock.call(release)] * 3)
+        self.assertEqual(self.updater.verify_exact_provider_canary.call_args_list, [mock.call(release)] * 4)
         self.assertEqual(
             self.updater.prove_gateway_buyer_stream.call_args_list,
             [
@@ -3560,7 +3617,7 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.assertEqual(
             [call[0] for call in proof_order.mock_calls],
-            ["posture", "buyer", "provider"] * 3,
+            ["provider"] + ["posture", "buyer", "provider"] * 3,
         )
         proof_events = [
             call
@@ -3571,6 +3628,40 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.prepare_config_update.assert_not_called()
         self.updater.snapshot.assert_not_called()
         self.updater.install_release.assert_not_called()
+
+        self.updater.verify_exact_provider_canary.reset_mock(
+            side_effect=True,
+            return_value=True,
+        )
+        self.updater.verify_exact_provider_canary.side_effect = [
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+        ]
+        self.updater.prove_gateway_buyer_stream.reset_mock(
+            side_effect=True,
+            return_value=True,
+        )
+        self.updater.prove_gateway_buyer_stream.return_value = {
+            "request_id": "request-model-change",
+            "response_request_id": "gateway-request-model-change",
+            "requested_at": "2026-07-23T00:01:00Z",
+            "provider_id": "catalog-canary",
+            "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        }
+        self.updater.audit.reset_mock()
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "catalog canary model changed",
+        ):
+            self.updater.prove_current_release(release)
+
+        self.assertFalse(
+            any(
+                call.args[:2] == ("single_authority_buyer_serving_cycle", "success")
+                for call in self.updater.audit.call_args_list
+            )
+        )
 
     def test_prove_current_rejects_preconditions_fail_closed(self):
         release = self.stage(self.verify())
@@ -4701,7 +4792,11 @@ class PearlUpdaterTests(unittest.TestCase):
             return_value=("catalog-canary", "t" * 32)
         )
         self.updater.prove_catalog_canary_mac = mock.Mock(
-            return_value=(expected_row_identity, "session-canary")
+            return_value=(
+                expected_row_identity,
+                "session-canary",
+                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            )
         )
         self.updater.get_authorized_json = mock.Mock(
             return_value={

@@ -219,10 +219,17 @@ def main() -> int:
         catalog = local_status.get("catalog") if isinstance(local_status, dict) else None
         coordinator = local_status.get("coordinator") if isinstance(local_status, dict) else None
         assigned_id = coordinator.get("session") if isinstance(coordinator, dict) else None
+        model_id = local_status.get("model") if isinstance(local_status, dict) else None
+        catalog_model_id = catalog.get("model_id") if isinstance(catalog, dict) else None
         if (
             not isinstance(local_status, dict)
             or local_status.get("provider_id") != provider_id
             or local_status.get("network_state") != "buyer_serving"
+            or local_status.get("model_loaded") is not True
+            or not isinstance(model_id, str)
+            or not model_id
+            or len(model_id) > 512
+            or model_id.strip() != model_id
             or not isinstance(coordinator, dict)
             or coordinator.get("connected") is not True
             or not isinstance(assigned_id, str)
@@ -233,6 +240,7 @@ def main() -> int:
             or catalog.get("digest") != digest
             or catalog.get("signer_key_id") != signer
             or re.fullmatch(r"[0-9a-f]{64}", str(catalog.get("row_identity", "")).lower()) is None
+            or catalog_model_id != model_id
         ):
             fail("live canary status does not match the expected provider and catalog")
 
@@ -243,6 +251,7 @@ def main() -> int:
         print(json.dumps({
             "provider_id": installed_provider_id,
             "assigned_id": assigned_id,
+            "model_id": model_id,
             "launchd_pid": pid,
             "executable_path": process_path,
             "local_status": local_status,
