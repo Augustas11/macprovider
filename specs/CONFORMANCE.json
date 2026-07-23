@@ -1020,7 +1020,7 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -1503,6 +1503,244 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/535",
         "rationale": "Retention bound: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R001",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R002",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R003",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R004",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R005",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R006",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R007",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R008",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R009",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R010",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R011",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R012",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R013",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R014",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R015",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R016",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R017",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
     }
   ]
