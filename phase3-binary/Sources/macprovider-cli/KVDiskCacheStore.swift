@@ -756,7 +756,11 @@ actor KVDiskCacheStore {
     /// Attempt a cold hit for `rawKey` against the live runtime identity. Returns the
     /// decoded tokens + restored layer state, or a typed miss reason. `runtime`
     /// carries every live-identity input (a nil `modelSHA256` ⇒ identity unavailable).
-    func read(rawKey: String, runtime: KVRuntimeIdentity, nowMillis: Int) throws -> KVReadResult {
+    /// - Parameter emitHitEvent: when false, a successful restore returns the hit
+    ///   WITHOUT emitting `disk_hit`; the caller (the runtime promotion adapter)
+    ///   emits exactly one terminal code after the hot predicate accepts/rejects
+    ///   the restored layers (§5 row 25). Miss codes are always emitted here.
+    func read(rawKey: String, runtime: KVRuntimeIdentity, nowMillis: Int, emitHitEvent: Bool = true) throws -> KVReadResult {
         guard activated else { return .miss(.diskMissIO, .ioError) }
         if let detail = quarantined { return .miss(.diskMissIO, detail) }
 
@@ -904,14 +908,57 @@ actor KVDiskCacheStore {
         if var entry = liveEntries[index] { entry.lastUsedMillis = nowMillis; liveEntries[index] = entry }
 
         let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
-        emit(.diskHit, indexHashPrefix: prefix, fields: [
-            "restore_bytes": "\(blob.count)",
-            "decrypt_ms": "\(elapsedMillis)",
-            "peak_staging_bytes": "\(plaintext.count)",
-        ])
+        if emitHitEvent {
+            emit(.diskHit, indexHashPrefix: prefix, fields: [
+                "restore_bytes": "\(blob.count)",
+                "decrypt_ms": "\(elapsedMillis)",
+                "peak_staging_bytes": "\(plaintext.count)",
+            ])
+        }
         return .hit(KVReadHit(tokens: decoded.tokens, layers: decoded.layers,
                               bytesRead: blob.count, decryptMillis: elapsedMillis,
                               peakStagingBytes: plaintext.count))
+    }
+
+    /// Runtime cold-tier adapter entry point (FR-KVP3): compute the HMAC index and
+    /// allocate a restart-safe monotonic commit sequence (recovered at activation
+    /// as max-committed+1), then write — all inside the actor so concurrent commits
+    /// for one key cannot collide on a sequence. The synchronous deep copy of
+    /// tensor bytes already happened at hot-tier commit (`captureSnapshot`).
+    func writeColdSnapshot(
+        rawKey: String, tokens: [Int32], layers: [KVLayerPayload], identity: KVWriteIdentity,
+        sampledPurgeGeneration: Int, createdAtMillis: Int, eligibleUntilMillis: Int,
+        incarnation: String, nowMillis: Int
+    ) throws -> KVWriteResult {
+        guard activated else { return .skipped(.ioError) }
+        if let detail = quarantined { return .skipped(detail) }
+        guard identity.keyEpoch == metadata.keyEpoch else { return .skipped(.fenceLost) }
+        guard let index = try currentIndex(rawKey: rawKey) else {
+            emit(.diskWriteSkipped, detail: .keychainUnavailable)
+            return .skipped(.keychainUnavailable)
+        }
+        let seq = (lastCommitSequence[index] ?? 0) + 1
+        let snapshot = KVWriteSnapshot(
+            rawKey: rawKey, indexHMAC: index, tokens: tokens, layers: layers, identity: identity,
+            sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: seq,
+            createdAtMillis: createdAtMillis, eligibleUntilMillis: eligibleUntilMillis, incarnation: incarnation)
+        return try write(snapshot, nowMillis: nowMillis)
+    }
+
+    /// Emit `disk_hit` for a promotion the hot predicate accepted (§5 row 25). Kept
+    /// separate from `read` so the terminal code is emitted once, after the hot
+    /// tier confirms reuse.
+    func notePromotedHit(prefixHash: String, bytesRead: Int, decryptMillis: Int, peakStagingBytes: Int) {
+        emit(.diskHit, indexHashPrefix: prefixHash, fields: [
+            "restore_bytes": "\(bytesRead)",
+            "decrypt_ms": "\(decryptMillis)",
+            "peak_staging_bytes": "\(peakStagingBytes)",
+        ])
+    }
+
+    /// Emit `disk_promote_rejected` when the hot predicate rejected restored layers.
+    func notePromoteRejected(prefixHash: String, reason: String) {
+        emit(.diskPromoteRejected, indexHashPrefix: prefixHash, fields: ["hot_reason": reason])
     }
 
     // MARK: - Purge (FR-KVP8)
