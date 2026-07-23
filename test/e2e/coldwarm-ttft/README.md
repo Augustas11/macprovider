@@ -180,54 +180,83 @@ node coldwarm-probe.mjs --build-matrix
 ## KVS-01a — KV-survival restart cycle (SPEC-037, FR-KVP13 / §6)
 
 `kvs-01a.sh` is a distinct mode that drives the SPEC-037 restart-survival gate.
-Each cycle runs, in order:
+It is a **four-arm** gate: each cycle produces one sample for each of four arms,
+interleaved, and the run applies a §6 warm-relative pass contract.
 
-1. **persist turn** — a synthetic `conv:kvs-synth:` prefix over the direct-HTTP
-   operator path (the FR-KVP11 gate persists it);
-2. **persist barrier** — wait for `disk_write_committed` in the provider stderr
-   (persist-before-kill);
-3. **kill + relaunch** — SIGKILL the provider, relaunch the exact build/model;
-4. **template-seed turn** — a warm turn on a **different** throwaway
-   `conv:kvs-synth:` key, *before* the measured restored turn, so the
-   freshly-restarted adapter learns the live-model geometry template (see the
-   residual below); barrier on its `disk_write_committed`;
-5. **restored turn** — re-send the *same persisted prefix* + one new suffix token
-   within the eligibility window; it must promote from disk (`disk_hit`) and
-   report `cached_prompt_tokens` **equal to the persisted prefix's
-   `prompt_tokens`** by the unchanged LCP rule.
+The five-step per-cycle sequence:
 
-The probes no longer mask failures: **the harness exits nonzero** if any probe
-fails, if no `disk_write_committed` appears, or if the restored arm does not
-record `disk_hit` with the exact expected `cached_prompt_tokens`. This is a real
-pass/fail gate, not a data-collection dry run.
+1. **persist turn** — a synthetic `conv:kvs-synth:` prefix sent as **one user
+   turn** over the direct-HTTP operator path (the FR-KVP11 gate persists it). Its
+   assistant response is captured to a file; wait for `disk_write_committed`
+   (persist-before-kill).
+2. **kill + relaunch (enabled)** — SIGKILL the provider, relaunch the exact
+   build/model with the tier enabled.
+3. **geometry-seed turn** — a warm turn on a **different** throwaway
+   `conv:kvs-synth:` key, *before* the measured arms, so the freshly-restarted
+   adapter learns the live-model geometry template (see the residual below);
+   barrier on its `disk_write_committed`.
+4. **the four measured arms:**
+   - **restored** (disk hit) — a **genuine second conversation turn**:
+     `messages = [{user: BASE}, {assistant: <persist response>}, {user: <suffix>}]`.
+     Because the assistant message carries the persist turn's exact response, the
+     persisted canonical `prompt_token_ids ‖ generated` is an **exact prefix** of
+     this render, so `cached_prompt_tokens` equals the persisted prefix length
+     (**`prompt_tokens + completion_tokens`** of the persist turn) by the unchanged
+     LCP rule. Expected `disk_hit`. *(This fixes the earlier false-FAIL: inserting a
+     suffix into a single user message left the render structurally short of the
+     persisted prefix because of the chat template's assistant-priming tail, so
+     `cached_prompt_tokens` never matched.)*
+   - **warm** (in-RAM) — the **same** restored request repeated in the same
+     process: a hot-tier hit, the **paired warm control** for the latency story.
+   - **miss** (disk-enabled) — the genuine-second-turn shape on a **fresh
+     never-persisted** key, tier enabled: a disk miss / full prefill baseline.
+   - **disabled** (clean restart) — kill and relaunch with the tier **disabled**
+     (`KVS01A_PROVIDER_CMD_NODISK`), then the restored request: no survival, full
+     prefill.
+5. **record** every §6 field to the append-only NDJSON store.
 
-It is **harness capability, not a CI run** — it launches a real model. Like the
-cold-cycle path it refuses a production coordinator (`§6` production fence): the
-target must be a **local provider you own**, with the tier enabled
-(`kv_disk_cache.enabled=true`).
+**Pass/fail contract.** Every `restored` sample must record `disk_hit`,
+`correctness=ok`, and `cached_prompt_tokens` **exactly** equal to the persist
+turn's `prompt_tokens + completion_tokens`; a single miss fails the gate. Then the
+warm-relative percentile thresholds must hold: restored **p95 ≤ warm p95 ×
+`KVS01A_WARM_RATIO_P95`** (default 3.0 — restored skips prefill just like the in-RAM
+warm control), and restored **p95 < miss p50** and restored **p95 < disabled p50**
+(the survival benefit — a promoted prefix beats both a cold miss and a clean
+disk-disabled restart). Exit codes: `5` = a restored correctness failure, `6` =
+correctness held but a percentile threshold failed.
+
+It is **harness capability, not a CI run** — it launches real models and MUST NOT
+run in CI. Like the cold-cycle path it refuses a production coordinator (`§6`
+production fence): the targets must be **local providers you own**.
 
 ```bash
-export KVS01A_PROVIDER_CMD="macprovider-cli serve --config /path/to/local.yaml"
+export KVS01A_PROVIDER_CMD="macprovider-cli serve --config /path/to/local-enabled.yaml"
+export KVS01A_PROVIDER_CMD_NODISK="macprovider-cli serve --config /path/to/local-disabled.yaml"
 export KVS01A_BASE=http://127.0.0.1:8080
 export KVS01A_PROMPT_TOKENS=2500          # v1 allowlist class under the 256 MiB ceiling; 8k is KVS-01b
-./kvs-01a.sh --cycles 20                   # or KVS01A_CYCLES=20
+./kvs-01a.sh --cycles 30                  # gate mode: >= 30 samples/arm
+./kvs-01a.sh --smoke                      # 1–2 cycles, correctness only (thresholds skipped)
 ```
 
-`--cycles N` (or `KVS01A_CYCLES=N`) runs N full cycles interleaved and prints a
-**nearest-rank** TTFT percentile summary (`p50/p90/p99/min/max`) over the restored
-arm — the number that matters for the restart-survival latency story. Nearest-rank
-means the p-th percentile is the sample at 1-based rank `ceil(p/100 · n)` of the
-sorted samples (no interpolation), so with a handful of cycles the percentiles are
-honest picks of real samples rather than smoothed estimates.
+**Gate vs smoke.** Gate mode requires **≥ 30 samples/arm** (`--cycles N`, N ≥ 30)
+and applies the percentile thresholds; `--smoke` (1–2 cycles) checks only restored
+correctness and skips the thresholds — and skips arm **disabled** if
+`KVS01A_PROVIDER_CMD_NODISK` is unset. Percentiles are **nearest-rank** p50/p95:
+the p-th percentile is the sample at 1-based rank `ceil(p/100 · n)` of the sorted
+samples (no interpolation), an honest pick of a real sample.
 
-Each cycle appends one §6 record (regime `kvs01a_restored`) to `$KVS01A_STORE`
-(default `~/.local/state/kvs-01a/samples.ndjson`): `cycle`, `disk_reason`
-(hit/miss code), `cached_prompt_tokens`, `prompt_tokens`, `ttft_ms`,
-`total_latency_ms`, `restore_bytes`, `restore_ms`, `staging_peak_bytes`,
-`commit_serialized_bytes`, and `commit_latency_ms` (write-path overhead).
-`prompt_tokens` stays the full incoming length; `cached_prompt_tokens` is the
-promoted prefix length. `kvs-01a-probe.mjs` is the request half (one streaming
-turn), re-usable stand-alone for the warm/cold/seed arms.
+Each measured arm appends one §6 record (regimes `kvs01a_restored` / `_warm` /
+`_miss` / `_disabled`) to `$KVS01A_STORE`
+(default `~/.local/state/kvs-01a/samples.ndjson`), each carrying: `cycle`, `arm`,
+`disk_reason` (hit/miss code), `prompt_tokens`, `completion_tokens`,
+`cached_prompt_tokens`, `ttft_ms`, `total_latency_ms`, `restore_bytes`,
+`restore_ms`, `staging_peak_bytes`, `commit_serialized_bytes`, `commit_latency_ms`
+(write-path overhead), the buyer-visible `input_sha256` / `prompt_sha256`,
+`correctness`, the served `model` id, the disk-side `model_sha256` /
+`catalog_revision` / `format_schema_id` / `kv_bits`, and `host` / `node_version`
+build metadata. `prompt_tokens` stays the full incoming length;
+`cached_prompt_tokens` is the promoted prefix length. `kvs-01a-probe.mjs` is the
+request half (one streaming turn) and is re-usable stand-alone for any arm.
 
 ### Residual: load-time geometry capture (HIGH-3)
 
@@ -247,3 +276,6 @@ step 4 above **seeds the template explicitly** with a throwaway warm turn before
 measured restored turn. This is belt-and-braces and is kept even once fix (a) lands.
 Model-hash fencing in envelope validation means a stale/foreign template can only
 ever cause a *miss*, never an incorrect promotion.
+
+(In the sequence above this is **step 3**, the geometry-seed turn, run before the
+four measured arms.)
