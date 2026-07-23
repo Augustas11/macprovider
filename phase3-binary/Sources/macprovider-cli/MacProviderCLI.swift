@@ -996,9 +996,20 @@ struct ServeCommand: AsyncParsableCommand {
            !kvProviderID.isEmpty {
             let kvTTL = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
             let tier = KVDiskTier(config: resolved.kvDiskCache, namespaceID: kvProviderID, eligibilityTTLSeconds: kvTTL)
-            if await tier.activateForServe() {
+            switch await tier.activateForServeDetailed() {
+            case .activated:
                 await modelRuntime.attachKVDiskTier(tier)
                 kvDiskTier = tier
+            case .dormantLock:
+                // FR-KVP7 (M-13): the namespace lock is held by another writer — keep
+                // the tier and retry with bounded backoff in the background, running
+                // full recovery and attaching once the lock is finally acquired.
+                kvDiskTier = tier
+                Task { [modelRuntime] in
+                    await tier.retryActivationUntilAcquired { await modelRuntime.attachKVDiskTier(tier) }
+                }
+            case .quarantined, .disabled:
+                break
             }
         }
 

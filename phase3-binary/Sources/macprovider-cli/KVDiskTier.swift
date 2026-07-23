@@ -82,25 +82,62 @@ final class KVDiskTier: @unchecked Sendable {
 
     // MARK: - Lifecycle (FR-KVP7)
 
-    /// Activate the store on serve start when the tier is enabled. Fail-closed:
-    /// a config error, missing purge primitive, or lock unavailability leaves
-    /// the tier dormant (never fails the serve loop). Returns true on activation.
-    @discardableResult
-    func activateForServe() async -> Bool {
+    /// Serve-start activation outcome (M-13 / FR-KVP7).
+    enum ServeActivation: Sendable, Equatable {
+        case activated       // lock acquired, recovery ran
+        case dormantLock     // lock held by another writer — retry with backoff
+        case quarantined     // structural failure — do NOT retry
+        case disabled        // tier not enabled
+    }
+
+    /// Activate the store on serve start when the tier is enabled. Fail-closed: a
+    /// config error, missing purge primitive, or lock unavailability leaves the tier
+    /// dormant (never fails the serve loop). `.dormantLock` is transient — the caller
+    /// starts a bounded-backoff retry that runs FULL recovery once the lock is
+    /// finally acquired (FR-KVP7).
+    func activateForServeDetailed() async -> ServeActivation {
         guard config.effectiveEnabled else {
             for error in config.errors { log("event=kv_disk_cache action=config_error detail=\"\(error)\"") }
-            return false
+            return .disabled
         }
         logEnableNotice()
         do {
-            let activated = try await store.activate()
-            if !activated {
-                log("event=kv_disk_cache action=dormant reason=lock_unavailable")
-            }
-            return activated
+            if try await store.activate() { return .activated }
+            log("event=kv_disk_cache action=dormant reason=lock_unavailable retry=backoff")
+            return .dormantLock
         } catch {
             log("event=kv_disk_cache action=dormant reason=quarantined")
-            return false
+            return .quarantined
+        }
+    }
+
+    /// Back-compat bool wrapper.
+    @discardableResult
+    func activateForServe() async -> Bool {
+        if case .activated = await activateForServeDetailed() { return true }
+        return false
+    }
+
+    /// Bounded-backoff retry after `.dormantLock` (M-13 / FR-KVP7): the namespace
+    /// lock is held by another writer; take it over when it releases. `store.activate`
+    /// runs the FULL activation recovery once the lock is acquired. Stops on
+    /// quarantine. `onActivated` is invoked exactly once, on success.
+    func retryActivationUntilAcquired(_ onActivated: @Sendable @escaping () async -> Void) async {
+        var backoffSeconds = 1.0
+        let maxBackoffSeconds = 30.0
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+            do {
+                if try await store.activate() {
+                    log("event=kv_disk_cache action=activated reason=lock_acquired_after_retry")
+                    await onActivated()
+                    return
+                }
+            } catch {
+                log("event=kv_disk_cache action=dormant reason=quarantined_on_retry")
+                return
+            }
+            backoffSeconds = min(maxBackoffSeconds, backoffSeconds * 2)
         }
     }
 

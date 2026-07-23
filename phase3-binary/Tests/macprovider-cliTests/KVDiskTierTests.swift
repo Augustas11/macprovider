@@ -199,6 +199,28 @@ final class KVDiskTierTests: XCTestCase {
         await tier.shutdown()
     }
 
+    /// M-13 / FR-KVP7: serve-lock contention is transient, not permanent dormancy —
+    /// the tier retries with bounded backoff and runs full activation once the lock
+    /// is released.
+    func testServeLockDormancyRetriesUntilAcquired() async throws {
+        let root = makeRoot()
+        let holder = makeTier(root: root)
+        let held = await holder.activateForControlPlane(); XCTAssertTrue(held)
+
+        let contender = makeTier(root: root)
+        let outcome = await contender.activateForServeDetailed()
+        XCTAssertEqual(outcome, .dormantLock, "lock held by holder ⇒ dormant, retry")
+
+        let acquired = expectation(description: "retry acquires the lock after release")
+        let task = Task { await contender.retryActivationUntilAcquired { acquired.fulfill() } }
+
+        // Release the holder's lock; the background retry must then acquire it.
+        await holder.shutdown()
+        await fulfillment(of: [acquired], timeout: 20)
+        task.cancel()
+        await contender.shutdown()
+    }
+
     func testPurgeAbsentKeyNoOps() async throws {
         let tier = makeTier(root: makeRoot())
         let result = await tier.purge(rawKey: "conv:kvs-synth:never-written")
