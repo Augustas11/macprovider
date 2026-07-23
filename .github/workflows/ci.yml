@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded CI runs on the same ref. A second push to a PR (or to
+# main) supersedes the first, so let the in-flight run stop instead of
+# burning macOS minutes on a diff that is already stale. Keyed by ref so
+# concurrent PRs never cancel each other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   coordinator:
     name: phase4-coordinator (go vet + test)
