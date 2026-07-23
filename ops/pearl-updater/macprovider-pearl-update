@@ -271,6 +271,7 @@ class CatalogRelease:
 class CatalogCanaryEvidence:
     row_identity: str
     assigned_id: str
+    catalog_key: str
     model_id: str
 
 
@@ -4231,6 +4232,7 @@ class Updater:
         except (ValueError, KeyError, TypeError) as exc:
             raise UpdateError("trusted catalog canary Mac proof is invalid") from exc
         row_identity = local_catalog.get("row_identity") if isinstance(local_catalog, dict) else None
+        catalog_key = proof.get("catalog_key") if isinstance(proof, dict) else None
         model_id = proof.get("model_id") if isinstance(proof, dict) else None
         assigned_id = proof.get("assigned_id") if isinstance(proof, dict) else None
         if (
@@ -4242,7 +4244,7 @@ class Updater:
             or local_status.get("provider_id") != provider_id
             or local_status.get("network_state") != "buyer_serving"
             or local_status.get("model_loaded") is not True
-            or local_status.get("model") != model_id
+            or local_status.get("model") != catalog_key
             or not isinstance(local_coordinator, dict)
             or local_coordinator.get("connected") is not True
             or local_coordinator.get("session") != assigned_id
@@ -4255,21 +4257,23 @@ class Updater:
             or local_catalog.get("signer_key_id") != candidate_signer
             or not isinstance(row_identity, str)
             or not SHA256_RE.fullmatch(row_identity.lower())
+            or not isinstance(catalog_key, str)
+            or not catalog_key
+            or len(catalog_key) > 512
+            or catalog_key.strip() != catalog_key
             or not isinstance(model_id, str)
             or not model_id
             or len(model_id) > 512
             or model_id.strip() != model_id
-            or local_catalog.get("catalog_key") != model_id
-            or not isinstance(local_catalog.get("model_id"), str)
-            or not local_catalog["model_id"]
-            or len(local_catalog["model_id"]) > 512
-            or local_catalog["model_id"].strip() != local_catalog["model_id"]
+            or local_catalog.get("catalog_key") != catalog_key
+            or local_catalog.get("model_id") != model_id
             or files != release.catalog.files
         ):
             raise UpdateError("trusted catalog canary Mac proof does not match the candidate release")
         return CatalogCanaryEvidence(
             row_identity=row_identity.lower(),
             assigned_id=assigned_id,
+            catalog_key=catalog_key,
             model_id=model_id,
         )
 
@@ -4365,6 +4369,7 @@ class Updater:
             catalog_signer_key_id=candidate_signer,
             catalog_row_identity=evidence.row_identity,
             assigned_id=evidence.assigned_id,
+            catalog_key=evidence.catalog_key,
             model=evidence.model_id,
         )
         return evidence

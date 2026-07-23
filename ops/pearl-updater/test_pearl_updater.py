@@ -1625,7 +1625,8 @@ class PearlUpdaterTests(unittest.TestCase):
         proof = {
             "provider_id": "catalog-canary",
             "assigned_id": "session-canary",
-            "model_id": "llama-3.2-3b-instruct",
+            "catalog_key": "llama-3.2-3b-instruct",
+            "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
             "launchd_pid": 123,
             "local_status": {
                 "provider_id": "catalog-canary",
@@ -1669,7 +1670,8 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CatalogCanaryEvidence(
                     row_identity=row_identity,
                     assigned_id="session-canary",
-                    model_id="llama-3.2-3b-instruct",
+                    catalog_key="llama-3.2-3b-instruct",
+                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
                 ),
             )
         args, kwargs = self.updater.run_command.call_args
@@ -1702,7 +1704,8 @@ class PearlUpdaterTests(unittest.TestCase):
             "runtime model not loaded": {"local_status.model_loaded": False},
             "catalog key mismatch": {"local_status.catalog.catalog_key": "different-key"},
             "catalog model ID missing": {"local_status.catalog.model_id": None},
-            "emitted model key mismatch": {"model_id": "different-key"},
+            "emitted catalog key mismatch": {"catalog_key": "different-key"},
+            "emitted model ID mismatch": {"model_id": "different-model"},
         }
         for label, mutations in invalid_model_proofs.items():
             with self.subTest(label=label):
@@ -1749,6 +1752,7 @@ class PearlUpdaterTests(unittest.TestCase):
             or updater_module.CatalogCanaryEvidence(
                 row_identity="b" * 64,
                 assigned_id="session-canary",
+                catalog_key="llama-3.2-3b-instruct",
                 model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
             )
         )
@@ -1766,6 +1770,7 @@ class PearlUpdaterTests(unittest.TestCase):
             updater_module.CatalogCanaryEvidence(
                 row_identity="b" * 64,
                 assigned_id="session-canary",
+                catalog_key="llama-3.2-3b-instruct",
                 model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
             ),
         )
@@ -1799,11 +1804,13 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CatalogCanaryEvidence(
                     row_identity=row_identity,
                     assigned_id="session-before-reconnect",
+                    catalog_key="llama-3.2-3b-instruct",
                     model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
                 ),
                 updater_module.CatalogCanaryEvidence(
                     row_identity=row_identity,
                     assigned_id="session-after-reconnect",
+                    catalog_key="llama-3.2-3b-instruct",
                     model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
                 ),
             ]
@@ -1835,6 +1842,7 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_signer_key_id=self.updater.catalog_candidate_identity(release)[1],
             catalog_row_identity=row_identity,
             assigned_id="session-after-reconnect",
+            catalog_key="llama-3.2-3b-instruct",
             model="mlx-community/Llama-3.2-3B-Instruct-4bit",
         )
 
@@ -3580,6 +3588,7 @@ class PearlUpdaterTests(unittest.TestCase):
         provider_evidence = updater_module.CatalogCanaryEvidence(
             row_identity="b" * 64,
             assigned_id="session-canary",
+            catalog_key="llama-3.2-3b-instruct",
             model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
         )
         self.updater.verify_exact_provider_canary = mock.Mock(
@@ -4814,6 +4823,7 @@ class PearlUpdaterTests(unittest.TestCase):
             return_value=updater_module.CatalogCanaryEvidence(
                 row_identity=expected_row_identity,
                 assigned_id="session-canary",
+                catalog_key="llama-3.2-3b-instruct",
                 model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
             )
         )
