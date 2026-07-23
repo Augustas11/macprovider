@@ -339,6 +339,18 @@ jobs:
       # Production publication is fail closed: the protected environment must
       # supply a Developer ID identity and notarization credentials. An
       # adhoc-signed binary cannot satisfy the fresh-install launchd contract.
+      - name: Select OpenSSL 3 for protected release verification
+        id: protected_openssl
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew install openssl@3
+          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
+          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$openssl_bin" >> "$GITHUB_OUTPUT"
+
       - name: Sign + notarize binary
         shell: bash
         env:
@@ -1048,6 +1060,7 @@ jobs:
         shell: bash
         env:
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
@@ -1273,6 +1286,7 @@ jobs:
             --target-artifact-index "$compatibility_artifact_index" \
             --private-key "$release_signing_key" \
             --public-key ops/pearl-updater/release-signing-public.pem \
+            --openssl "$OPENSSL_BIN" \
             --output macprovider-release-discovery.json \
             --signature macprovider-release-discovery.json.sig
           release_assets+=("$compatibility_artifact_index")
@@ -1343,6 +1357,7 @@ jobs:
         if: needs.build.outputs.prerelease == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1595,6 +1610,7 @@ jobs:
         if: needs.build.outputs.prerelease == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         shell: bash
         run: |
           set -euo pipefail
