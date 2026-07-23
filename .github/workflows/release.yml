@@ -172,6 +172,14 @@ jobs:
           "$openssl_bin" version | grep -E '^OpenSSL 3\.'
           echo "OPENSSL_BIN=$openssl_bin" >> "$GITHUB_ENV"
 
+      - name: Preflight protected OpenSSL seal before tag creation
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+
       - name: Build package
         shell: bash
         env:
@@ -339,7 +347,7 @@ jobs:
       # Production publication is fail closed: the protected environment must
       # supply a Developer ID identity and notarization credentials. An
       # adhoc-signed binary cannot satisfy the fresh-install launchd contract.
-      - name: Select OpenSSL 3 for protected release verification
+      - name: Seal OpenSSL 3 for protected release verification
         id: protected_openssl
         shell: bash
         env:
@@ -347,9 +355,12 @@ jobs:
         run: |
           set -euo pipefail
           brew install openssl@3
-          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
-          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
-          printf 'bin=%s\n' "$openssl_bin" >> "$GITHUB_OUTPUT"
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-verifier
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
 
       - name: Sign + notarize binary
         shell: bash
