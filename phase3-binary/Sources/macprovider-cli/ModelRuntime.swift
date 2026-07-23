@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Jinja
 import MLX
 import MLXLLM
 import MLXHuggingFace
@@ -2639,23 +2640,23 @@ actor ModelRuntime: ModelRuntimeServing {
             else {
                 return nil
             }
-            // Chat-template engines (swift-jinja via Tokenizers) cannot
-            // convert NSNull into a Jinja Value. Omit null object members
-            // and a missing description rather than materializing NSNull.
-            // `default: null` and similar schema nulls are irrelevant to
-            // Qwen tool-call prompt rendering.
-            guard let parametersAny = jsonAnyForTemplate(parameters) else {
-                return nil
-            }
-            var function: [String: Any] = [
+            // Chat-template engines (swift-jinja via Tokenizers) reject
+            // Foundation `NSNull` (issue #718). Represent every JSON null as a
+            // native `Jinja.Value.null`, which `Value(any:)` passes through
+            // unchanged, so the rendered schema keeps its keys and array
+            // positions instead of silently dropping `enum:[null,…]`,
+            // `const:null`, or positional defaults.
+            // `description` is part of the receipt canonical tool subset, where
+            // an absent key and an explicit `null` both canonicalize to JCS null
+            // (PromptCanonicalizer.canonicalTool via jcsOrNull) — i.e. they share
+            // one signed prompt hash. Render both as a native Jinja null so the
+            // template the model actually sees cannot diverge from that hash.
+            let description = functionObject["description"].map { jsonAnyForTemplate($0) } ?? Jinja.Value.null
+            let function: [String: Any] = [
                 "name": name,
-                "parameters": parametersAny,
+                "description": description,
+                "parameters": jsonAnyForTemplate(parameters),
             ]
-            if let descriptionValue = functionObject["description"],
-               let description = jsonAnyForTemplate(descriptionValue)
-            {
-                function["description"] = description
-            }
             return [
                 "type": "function",
                 "function": function,
@@ -2685,26 +2686,30 @@ actor ModelRuntime: ModelRuntimeServing {
         return names.isEmpty ? nil : Set(names)
     }
 
-    /// Converts JSONValue for chat-template tools dicts.
-    /// Object members (and array elements) that are JSON null are omitted so
-    /// the result never contains `NSNull`, which swift-jinja cannot convert.
-    private static func jsonObjectForTemplate(_ object: [String: MacProviderCore.JSONValue]) -> [String: Any] {
-        var result: [String: Any] = [:]
-        result.reserveCapacity(object.count)
-        for (key, value) in object {
-            if let converted = jsonAnyForTemplate(value) {
-                result[key] = converted
-            }
-        }
-        return result
-    }
-
-    private static func jsonAnyForTemplate(_ value: MacProviderCore.JSONValue) -> Any? {
+    /// Converts a JSONValue subtree into the `Any` graph the chat template
+    /// consumes, preserving every key and array position. JSON null becomes a
+    /// native `Jinja.Value.null` (not `NSNull` and not an omission): swift-jinja
+    /// `Value(any:)` matches `case let value as Value` and passes it through,
+    /// so `default:null`, `const:null`, `enum:[null,…]`, and positional array
+    /// nulls survive round-trip with their original schema semantics (#718/#719).
+    ///
+    /// Recursion is bounded by the caller, not here: tool schemas are rejected
+    /// at `validateTools` (ChatCompletionRequest) when they exceed
+    /// `JSONSchemaValidator.maxDepth`, before `JSONValue.parse` builds the tree
+    /// this walk consumes. So every value reaching here is already depth-capped,
+    /// and the converter can stay a faithful shape-preserving pass with no
+    /// silent truncation of over-deep subtrees.
+    private static func jsonAnyForTemplate(_ value: MacProviderCore.JSONValue) -> Any {
         switch value {
         case .object(let object):
-            return jsonObjectForTemplate(object)
+            var result: [String: Any] = [:]
+            result.reserveCapacity(object.count)
+            for (key, member) in object {
+                result[key] = jsonAnyForTemplate(member)
+            }
+            return result
         case .array(let array):
-            return array.compactMap(jsonAnyForTemplate)
+            return array.map { jsonAnyForTemplate($0) }
         case .string(let string):
             return string
         case .int(let int):
@@ -2714,7 +2719,7 @@ actor ModelRuntime: ModelRuntimeServing {
         case .bool(let bool):
             return bool
         case .null:
-            return nil
+            return Jinja.Value.null
         }
     }
 
