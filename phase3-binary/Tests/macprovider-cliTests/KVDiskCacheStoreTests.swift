@@ -820,6 +820,125 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(code, .diskMissBudget)
     }
 
+    // MARK: - HIGH-1 streaming memory safety (FR-KVP3/FR-KVP9)
+
+    /// A multi-chunk entry (decoded_length > the 64 MiB chunk ceiling) must round-trip
+    /// byte-for-byte through the streaming seal + streaming decode, and the reported
+    /// peak_staging_bytes must stay under the promotion ceiling — i.e. the read never
+    /// materializes the whole blob AND the whole plaintext AND the whole decode at once.
+    func testMultiChunkRoundTripBoundsReportedPeak() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        // Generous ceiling so nothing is rejected; we assert the reported peak is well
+        // under it despite the entry crossing the 64 MiB chunk boundary.
+        let ceiling = 512 * 1024 * 1024
+        let store = KVDiskCacheStore(
+            config: makeConfig(root: root) {
+                $0.stagingMaxBytes = ceiling
+                $0.writeStagingMaxBytes = ceiling
+                $0.maxEntryBytes = 2 * 1024 * 1024 * 1024
+            }, keychain: keychain, sink: sink)
+        try await store.activate()
+
+        let key = "conv:kvs-synth:multichunk"
+        let seq = 100_000
+        let layerCount = 11        // 11 layers × ~6.4 MB ≈ 70 MB > 64 MiB → ≥ 2 chunks
+        let index = try await idx(store, key)
+        var layers: [KVLayerPayload] = []
+        for li in 0 ..< layerCount {
+            let elements = 1 * 2 * seq * 4
+            let byteCount = elements * KVCodecDType.f32.byteSize
+            let keyBytes = Data((0 ..< byteCount).map { UInt8(($0 + li) & 0xff) })
+            let valueBytes = Data((0 ..< byteCount).map { UInt8(($0 + li + 7) & 0xff) })
+            layers.append(KVLayerPayload(
+                layerIndex: li, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
+                cacheOffset: seq, keyBytes: keyBytes, valueBytes: valueBytes))
+        }
+        let geometry = layers.map {
+            KVDiskCacheFormat.LayerGeometryInput(classID: $0.classID, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
+        }
+        let decodedLength = try XCTUnwrap(
+            KVDiskCacheFormat.decodedLength(tokenCount: seq, layers: geometry))
+        XCTAssertGreaterThan(decodedLength, KVDiskCacheFormat.maxChunkCiphertextBytes,
+                             "test entry must span more than one chunk")
+
+        var identity = Self.identity
+        identity = KVWriteIdentity(
+            requestModel: identity.requestModel, servedModelID: identity.servedModelID,
+            modelSHA256: identity.modelSHA256, catalogRevision: identity.catalogRevision,
+            tokenizerID: identity.tokenizerID, tokenizerConfigSHA256: identity.tokenizerConfigSHA256,
+            chatTemplateSHA256: identity.chatTemplateSHA256, abiEpoch: identity.abiEpoch,
+            mlxSwiftLMRevision: identity.mlxSwiftLMRevision, mlxVersion: identity.mlxVersion,
+            cacheClass: identity.cacheClass, layerCount: layerCount, kvBits: nil, kvGroupSize: nil,
+            kvQuantMode: nil, kvQuantPolicy: nil, decodePath: identity.decodePath, keyEpoch: 1)
+        let snapshot = KVWriteSnapshot(
+            rawKey: key, indexHMAC: index, tokens: Array(0 ..< Int32(seq)), layers: layers,
+            identity: identity, sampledPurgeGeneration: 0, commitSequence: 1,
+            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_000_000 + 900_000,
+            incarnation: "inc-\(UUID().uuidString)")
+        let write = try await store.write(snapshot, nowMillis: 1_000_000)
+        guard case .committed = write else { return XCTFail("multi-chunk write should commit, got \(write)") }
+
+        let rt = KVRuntimeIdentity(
+            namespaceID: "ns-test", keyEpoch: 1, indexHMAC: index,
+            requestModel: "qwen-test", servedModelID: "qwen-test-served",
+            modelSHA256: String(repeating: "b", count: 64), catalogRevision: "r1",
+            tokenizerID: "tok-1", tokenizerConfigSHA256: String(repeating: "c", count: 64),
+            chatTemplateSHA256: String(repeating: "d", count: 64), abiEpoch: 1,
+            mlxSwiftLMRevision: "3.31.4", mlxVersion: "0.0.0", cacheClass: "KVCacheSimple",
+            layerCount: layerCount,
+            layers: (0 ..< layerCount).map {
+                KVLayerGeometry(layerIndex: $0, classID: "KVCacheSimple", layoutVersion: 1,
+                                ndim: 4, dims: [1, 2, seq, 4], dtype: .f32, sequenceAxis: 2)
+            },
+            kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil,
+            decodePath: "ordinary", liveHighWatermark: 0)
+        let result = try await store.read(rawKey: key, runtime: rt, nowMillis: 1_000_100)
+        guard case .hit(let hit) = result else { return XCTFail("expected multi-chunk hit, got \(result)") }
+        XCTAssertEqual(hit.layers, layers, "multi-chunk restore must be byte-identical")
+        XCTAssertEqual(hit.tokens, Array(0 ..< Int32(seq)))
+        XCTAssertGreaterThan(hit.peakStagingBytes, 0)
+        XCTAssertLessThanOrEqual(hit.peakStagingBytes, ceiling, "reported peak must stay under the ceiling")
+        // The streaming peak must be well below holding the whole blob + whole plaintext
+        // + whole decode co-resident (~3× decoded). Assert it stays under ~2.2× decoded.
+        XCTAssertLessThan(hit.peakStagingBytes, decodedLength * 22 / 10,
+                          "streaming read must not hold ~3× the decoded payload at once")
+        await store.deactivate()
+    }
+
+    /// An entry whose decoded_length is under the ceiling but whose TRUE streaming peak
+    /// (a live ciphertext frame + opened chunk on top of the decode) exceeds it must
+    /// miss with disk_miss_budget — the peak bound is enforced, not just decoded_length.
+    func testTrueDecodePeakOverCeilingMissesBudget() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let seq = 5
+        let elements = 1 * 2 * seq * 4
+        let geometry = [KVDiskCacheFormat.LayerGeometryInput(
+            classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32)]
+        let decodedLength = try XCTUnwrap(
+            KVDiskCacheFormat.decodedLength(tokenCount: seq, layers: geometry))
+        _ = elements
+        // Ceiling above decoded_length (write + pre-check pass) but below the true single
+        // -chunk peak (~2× decoded_length: a live frame + opened chunk before decode).
+        let ceiling = decodedLength + 64
+        let store = KVDiskCacheStore(
+            config: makeConfig(root: root) { $0.stagingMaxBytes = ceiling }, keychain: keychain, sink: sink)
+        try await store.activate()
+        let key = "conv:kvs-synth:peak-budget"
+        let snapshot = try await makeSnapshot(store: store, rawKey: key, seq: seq, nowMillis: 1_000_000)
+        let write = try await store.write(snapshot, nowMillis: 1_000_000)
+        guard case .committed = write else { return XCTFail("write under ceiling should commit, got \(write)") }
+        let index = try await idx(store, key)
+        let result = try await store.read(rawKey: key, runtime: runtime(index: index, seq: seq), nowMillis: 1_000_100)
+        guard case .miss(let code, let detail) = result else { return XCTFail("expected budget miss, got \(result)") }
+        XCTAssertEqual(code, .diskMissBudget)
+        XCTAssertEqual(detail, .exceedsPromotionCeiling)
+        await store.deactivate()
+    }
+
     func testPerEntryCapSkipsWrite() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

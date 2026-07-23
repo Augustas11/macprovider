@@ -1067,31 +1067,48 @@ struct KVDecodedPayload: Sendable, Equatable {
 enum KVPayloadCodec {
     /// Encode tokens + layers into the self-delimiting codec-v1 plaintext.
     static func encode(tokens: [Int32], layers: [KVLayerPayload]) throws -> Data {
+        // Concatenate the ordered segments. Byte-identical to `encodeSegments` joined.
         var out = Data()
-        out.append(try KVByteWriter.u32LE(tokens.count))
-        for token in tokens { out.append(KVByteWriter.i32LE(token)) }
+        for segment in try encodeSegments(tokens: tokens, layers: layers) { out.append(segment) }
+        return out
+    }
+
+    /// Encode tokens + layers into an ORDERED list of codec-v1 byte segments whose
+    /// concatenation is exactly the `encode(...)` plaintext (HIGH-1). The large
+    /// per-layer key/value tensor bytes are appended as references to the caller's
+    /// existing `Data` (no copy); only the small framing headers are freshly built. A
+    /// streaming sealer consumes these segments chunk-by-chunk so the whole plaintext
+    /// is never materialized as one buffer.
+    static func encodeSegments(tokens: [Int32], layers: [KVLayerPayload]) throws -> [Data] {
+        var segments: [Data] = []
+        var header = Data()
+        header.append(try KVByteWriter.u32LE(tokens.count))
+        for token in tokens { header.append(KVByteWriter.i32LE(token)) }
+        segments.append(header)
         for layer in layers {
             guard layer.dims.count == layer.ndim else { throw KVFormatError.overflow }
-            out.append(try KVByteWriter.u32LE(layer.layerIndex))
-            let classBytes = Data(layer.classID.utf8)
-            out.append(try KVByteWriter.u16LE(classBytes.count))
-            out.append(classBytes)
             guard layer.ndim >= 0, layer.ndim <= 255 else { throw KVFormatError.overflow }
-            out.append(Data([UInt8(layer.ndim)]))
-            for dim in layer.dims { out.append(try KVByteWriter.u64LE(dim)) }
-            out.append(Data([UInt8(layer.dtype.rawValue)]))
-            out.append(try KVByteWriter.u64LE(layer.cacheOffset))
             // element-count consistency guard: byte lengths must equal Π(dims)·size
             let expected = try expectedTensorBytes(dims: layer.dims, dtype: layer.dtype)
             guard layer.keyBytes.count == expected, layer.valueBytes.count == expected else {
                 throw KVFormatError.encodeFailed("tensor byte length disagrees with dims")
             }
-            out.append(try KVByteWriter.u64LE(layer.keyBytes.count))
-            out.append(layer.keyBytes)
-            out.append(try KVByteWriter.u64LE(layer.valueBytes.count))
-            out.append(layer.valueBytes)
+            var pre = Data()
+            pre.append(try KVByteWriter.u32LE(layer.layerIndex))
+            let classBytes = Data(layer.classID.utf8)
+            pre.append(try KVByteWriter.u16LE(classBytes.count))
+            pre.append(classBytes)
+            pre.append(Data([UInt8(layer.ndim)]))
+            for dim in layer.dims { pre.append(try KVByteWriter.u64LE(dim)) }
+            pre.append(Data([UInt8(layer.dtype.rawValue)]))
+            pre.append(try KVByteWriter.u64LE(layer.cacheOffset))
+            pre.append(try KVByteWriter.u64LE(layer.keyBytes.count))
+            segments.append(pre)
+            segments.append(layer.keyBytes)
+            segments.append(try KVByteWriter.u64LE(layer.valueBytes.count))
+            segments.append(layer.valueBytes)
         }
-        return out
+        return segments
     }
 
     /// Decode codec-v1 plaintext. `expectedDecodedLength` is the manifest's
@@ -1178,6 +1195,137 @@ enum KVPayloadCodec {
     }
 }
 
+/// Incremental codec-v1 decoder (HIGH-1 streaming read). Fed one decrypted chunk
+/// plaintext at a time; parses and emits complete token-header / layer records as soon
+/// as their bytes are available, dropping consumed bytes so the whole plaintext is
+/// never held. The bounds/consistency checks and error mapping mirror
+/// `KVPayloadCodec.decode` exactly, so a payload that round-trips one way round-trips
+/// the other. `residualBytes` (unconsumed scratch) and `decodedBytes` (emitted layer
+/// key+value bytes) let the store track a true live-memory high-water.
+final class KVStreamingPayloadDecoder {
+    private var residual = Data()
+    private var tokens: [Int32]?
+    private var layers: [KVLayerPayload] = []
+    private let expectedDecodedLength: Int
+    private let layerCount: Int
+    private var consumedTotal = 0
+    private(set) var decodedBytes = 0
+
+    var residualBytes: Int { residual.count }
+
+    init(expectedDecodedLength: Int, layerCount: Int) {
+        self.expectedDecodedLength = expectedDecodedLength
+        self.layerCount = layerCount
+        layers.reserveCapacity(layerCount)
+    }
+
+    /// Append a decrypted chunk plaintext and parse every complete record now available.
+    func feed(_ data: Data) throws {
+        guard consumedTotal + residual.count + data.count <= expectedDecodedLength else {
+            throw KVManifestParseError.corrupt("payload length exceeds decoded_length")
+        }
+        if residual.isEmpty { residual = data } else { residual.append(data) }
+        try drain()
+    }
+
+    /// Finalize: require the token header, all declared layers, exact byte consumption,
+    /// and no trailing bytes — the §5a self-delimiting guarantees.
+    func finish() throws -> KVDecodedPayload {
+        try drain()
+        guard let tokens else { throw KVManifestParseError.corrupt("token header absent") }
+        guard layers.count == layerCount else {
+            throw KVManifestParseError.corrupt("layer count short")
+        }
+        guard residual.isEmpty else { throw KVManifestParseError.corrupt("trailing payload bytes") }
+        guard consumedTotal == expectedDecodedLength else {
+            throw KVManifestParseError.corrupt("payload length disagrees with decoded_length")
+        }
+        return KVDecodedPayload(tokens: tokens, layers: layers)
+    }
+
+    /// Parse complete records from the front of `residual`, checkpointing after each so a
+    /// partial record is left buffered for the next `feed`.
+    private func drain() throws {
+        while true {
+            var reader = KVByteReader(residual)
+            if tokens == nil {
+                guard let tokenCount = reader.readU32LE() else { return }
+                guard tokenCount <= KVDiskCacheFormat.maxTokenCount else {
+                    throw KVManifestParseError.corrupt("token count invalid")
+                }
+                var parsed: [Int32] = []
+                parsed.reserveCapacity(tokenCount)
+                for _ in 0 ..< tokenCount {
+                    guard let token = reader.readI32LE() else { return }   // need more bytes
+                    parsed.append(token)
+                }
+                tokens = parsed
+                commit(consumed: reader.offset)
+                continue
+            }
+            if layers.count >= layerCount { return }
+            guard let layer = try parseLayer(&reader) else { return }   // incomplete → wait
+            layers.append(layer)
+            decodedBytes += layer.keyBytes.count + layer.valueBytes.count
+            commit(consumed: reader.offset)
+        }
+    }
+
+    /// Attempt to parse one layer record. Returns nil (no consumption) if `residual`
+    /// does not yet hold the whole record; throws on a structural violation.
+    private func parseLayer(_ reader: inout KVByteReader) throws -> KVLayerPayload? {
+        guard let layerIndex = reader.readU32LE() else { return nil }
+        guard layerIndex <= KVDiskCacheFormat.maxLayers else {
+            throw KVManifestParseError.corrupt("layer_index invalid")
+        }
+        guard let classLen = reader.readU16LE() else { return nil }
+        guard classLen <= KVDiskCacheFormat.maxStringBytes else {
+            throw KVManifestParseError.corrupt("class id invalid")
+        }
+        guard let classData = reader.readBytes(classLen) else { return nil }
+        guard let classID = String(data: classData, encoding: .utf8) else {
+            throw KVManifestParseError.corrupt("class id invalid")
+        }
+        guard let ndim = reader.readU8() else { return nil }
+        guard ndim <= KVDiskCacheFormat.maxNdim else {
+            throw KVManifestParseError.corrupt("ndim invalid")
+        }
+        var dims: [Int] = []
+        dims.reserveCapacity(ndim)
+        for _ in 0 ..< ndim {
+            guard let dim = reader.readU64LE() else { return nil }
+            guard UInt64(dim) <= KVDiskCacheFormat.maxDim else {
+                throw KVManifestParseError.corrupt("dim invalid")
+            }
+            dims.append(dim)
+        }
+        guard let dtypeRaw = reader.readU8() else { return nil }
+        guard let dtype = KVCodecDType(rawValue: dtypeRaw) else {
+            throw KVManifestParseError.corrupt("dtype invalid")
+        }
+        guard let cacheOffset = reader.readU64LE() else { return nil }
+        let expected: Int
+        do { expected = try KVPayloadCodec.expectedTensorBytes(dims: dims, dtype: dtype) }
+        catch { throw KVManifestParseError.corrupt("tensor geometry overflow") }
+        guard let keyLen = reader.readU64LE() else { return nil }
+        guard keyLen == expected else { throw KVManifestParseError.corrupt("key tensor invalid") }
+        guard let keyBytes = reader.readBytes(keyLen) else { return nil }
+        guard let valLen = reader.readU64LE() else { return nil }
+        guard valLen == expected else { throw KVManifestParseError.corrupt("value tensor invalid") }
+        guard let valBytes = reader.readBytes(valLen) else { return nil }
+        return KVLayerPayload(
+            layerIndex: layerIndex, classID: classID, ndim: ndim, dims: dims,
+            dtype: dtype, cacheOffset: cacheOffset, keyBytes: keyBytes, valueBytes: valBytes)
+    }
+
+    private func commit(consumed: Int) {
+        consumedTotal += consumed
+        // Rebase to a fresh 0-indexed Data so subsequent readers/appends never depend on
+        // a slice's non-zero startIndex.
+        residual = consumed >= residual.count ? Data() : Data(residual.dropFirst(consumed))
+    }
+}
+
 // MARK: - Chunk frame encode/decode ("KVS1" framing, §5a blob)
 
 struct KVParsedFrame: Sendable, Equatable {
@@ -1185,6 +1333,42 @@ struct KVParsedFrame: Sendable, Equatable {
     let nonce: Data
     let ciphertext: Data
     let tag: Data
+}
+
+/// Forward cursor over an ordered list of plaintext segments, yielding fixed-size
+/// chunk buffers on demand (HIGH-1 streaming seal). At most one chunk buffer plus a
+/// reference to the current source segment is resident; the whole plaintext is never
+/// concatenated. The concatenation of every `next(_:)` result equals the concatenated
+/// segments, so the on-disk chunk framing is byte-identical to the non-streaming path.
+struct KVSegmentCursor {
+    private let segments: [Data]
+    private var segIndex = 0
+    private var segOffset = 0
+    private(set) var totalRemaining: Int
+
+    init(_ segments: [Data]) {
+        self.segments = segments
+        self.totalRemaining = segments.reduce(0) { $0 + $1.count }
+    }
+
+    /// Pull exactly `count` bytes (or fewer only when the source is exhausted).
+    mutating func next(_ count: Int) -> Data {
+        var out = Data(capacity: count)
+        var need = count
+        while need > 0, segIndex < segments.count {
+            let seg = segments[segIndex]
+            let available = seg.count - segOffset
+            if available <= 0 { segIndex += 1; segOffset = 0; continue }
+            let take = min(need, available)
+            let start = seg.startIndex + segOffset
+            out.append(seg[start ..< start + take])
+            segOffset += take
+            need -= take
+            if segOffset >= seg.count { segIndex += 1; segOffset = 0 }
+        }
+        totalRemaining -= out.count
+        return out
+    }
 }
 
 enum KVChunkFrame {

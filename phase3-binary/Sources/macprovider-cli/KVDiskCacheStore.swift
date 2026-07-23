@@ -769,61 +769,79 @@ actor KVDiskCacheStore {
                 try fsyncDirectory(entriesDir)
             }
 
-            // Build plaintext payload once, then chunk it by RANGE (HIGH-5): the
-            // chunk plaintext is sliced on demand at seal time rather than materialized
-            // into a second full array of copies alongside `plaintext` and `blob`.
-            let plaintext = try KVPayloadCodec.encode(tokens: snapshot.tokens, layers: snapshot.layers)
-            precondition(plaintext.count == decodedLength, "codec length must equal decoded_length")
-            let chunkSize = max(1, min(plaintext.count, KVDiskCacheFormat.maxChunkCiphertextBytes))
-            var chunkRanges: [Range<Int>] = []
-            var pos = 0
-            while pos < plaintext.count {
-                let end = min(pos + chunkSize, plaintext.count)
-                chunkRanges.append(pos ..< end)
-                pos = end
+            // Chunk boundaries are byte ranges over the codec plaintext; derive them
+            // from decoded_length alone (HIGH-1) so the whole plaintext need never exist
+            // to plan the framing. GCM ciphertext length == plaintext length, so every
+            // ct_length — and thus blob_length — is known before a single byte is sealed.
+            let chunkSize = max(1, min(decodedLength, KVDiskCacheFormat.maxChunkCiphertextBytes))
+            var chunkLengths: [Int] = []
+            var remainingLen = decodedLength
+            while remainingLen > 0 {
+                let take = min(chunkSize, remainingLen)
+                chunkLengths.append(take)
+                remainingLen -= take
             }
-            if chunkRanges.isEmpty { chunkRanges.append(0 ..< 0) }
+            if chunkLengths.isEmpty { chunkLengths.append(0) }
 
-            // Chunk table is known pre-encryption (GCM preserves length). Build it, then
-            // finalize the manifest sans blob hash to derive the AAD.
             var chunkRecords: [KVChunkRecord] = []
             var nonces: [Data] = []
-            for (ordinal, range) in chunkRanges.enumerated() {
+            for (ordinal, len) in chunkLengths.enumerated() {
                 let nonce = try KVKeyManager.randomBytes(KVDiskCacheFormat.chunkNonceBytes)
                 nonces.append(nonce)
-                chunkRecords.append(KVChunkRecord(ordinal: ordinal, ctLength: range.count, nonce: nonce))
+                chunkRecords.append(KVChunkRecord(ordinal: ordinal, ctLength: len, nonce: nonce))
             }
-            // blob_length is AAD-bound (only blob_sha256 is omitted from the AAD), and
-            // it is fully known before encryption: GCM ciphertext length == plaintext
-            // length, so each frame is (ct_length + 40) bytes. Compute it up front so
-            // the AAD projection is stable between seal and read.
+            // blob_length is AAD-bound (only blob_sha256 is omitted from the AAD) and
+            // fully known before encryption: each frame is (ct_length + 40) bytes. The
+            // AAD projection is therefore stable between seal and read.
             let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
-            let blobLength = chunkRanges.reduce(0) { $0 + $1.count + frameOverhead }
-            var manifest = buildManifest(
+            let blobLength = chunkLengths.reduce(0) { $0 + $1 + frameOverhead }
+            let manifestForAAD = buildManifest(
                 snapshot: snapshot, generation: generation, decodedLength: decodedLength,
                 chunks: chunkRecords, blobLength: blobLength, blobSHA256: String(repeating: "0", count: 64))
 
-            // Seal each chunk with its nonce + the AAD projection, appending to the blob.
-            var blob = Data()
-            blob.reserveCapacity(blobLength)
-            for (ordinal, range) in chunkRanges.enumerated() {
-                let chunk = range.isEmpty ? Data() : plaintext.subdata(in: range)
-                let aad = try manifest.aad(ordinal: ordinal)
-                let sealed = try KVChunkCryptoSealFixedNonce(plaintext: chunk, dek: dek, aad: aad, nonce: nonces[ordinal])
-                let frame = try KVChunkFrame.encode(ordinal: ordinal, nonce: nonces[ordinal],
-                                                    ciphertext: sealed.ciphertext, tag: sealed.tag)
-                blob.append(frame)
+            // HIGH-1 streaming seal: pull each chunk's plaintext from the codec segments
+            // (never the whole plaintext as one buffer), AES-256-GCM seal it with its
+            // fresh nonce + the FR-KVP4 AAD projection, write the frame straight to the
+            // O_EXCL blob fd, fold the frame into a rolling SHA-256, and release both
+            // buffers before the next chunk. Peak live memory beyond the snapshot is one
+            // chunk plaintext + one frame — not the whole plaintext AND the whole blob.
+            let blobURL = dir.appendingPathComponent("gen-\(generation).blob")
+            var cursor = KVSegmentCursor(try KVPayloadCodec.encodeSegments(
+                tokens: snapshot.tokens, layers: snapshot.layers))
+            var blobHasher = SHA256()
+            var writtenBlobBytes = 0
+            let blobFD = try openExclusiveForWrite(blobURL)
+            do {
+                for (ordinal, len) in chunkLengths.enumerated() {
+                    let chunk = cursor.next(len)
+                    guard chunk.count == len else {
+                        throw KVStoreError.io("codec stream shorter than decoded_length")
+                    }
+                    let aad = try manifestForAAD.aad(ordinal: ordinal)
+                    let sealed = try KVChunkCryptoSealFixedNonce(
+                        plaintext: chunk, dek: dek, aad: aad, nonce: nonces[ordinal])
+                    let frame = try KVChunkFrame.encode(ordinal: ordinal, nonce: nonces[ordinal],
+                                                        ciphertext: sealed.ciphertext, tag: sealed.tag)
+                    try writeAll(fd: blobFD, frame)
+                    blobHasher.update(data: frame)
+                    writtenBlobBytes += frame.count
+                }
+                guard cursor.totalRemaining == 0 else {
+                    throw KVStoreError.io("codec stream longer than decoded_length")
+                }
+                guard fsync(blobFD) == 0 else { throw KVStoreError.io("blob fsync failed errno=\(errno)") }
+            } catch {
+                close(blobFD)
+                throw error
             }
-            precondition(blob.count == blobLength, "blob length must match the pre-encryption estimate")
-            let blobSHA = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
+            close(blobFD)
+            precondition(writtenBlobBytes == blobLength, "blob length must match the pre-encryption estimate")
+            let blobSHA = blobHasher.finalize().map { String(format: "%02x", $0) }.joined()
             // Only blob_sha256 changes (out of the AAD), so the sealed AAD stays valid.
-            manifest = buildManifest(
+            let manifest = buildManifest(
                 snapshot: snapshot, generation: generation, decodedLength: decodedLength,
                 chunks: chunkRecords, blobLength: blobLength, blobSHA256: blobSHA)
 
-            // Commit protocol: blob (O_EXCL) → fsync → entry dir fsync.
-            let blobURL = dir.appendingPathComponent("gen-\(generation).blob")
-            try writeFileExclusive(blob, to: blobURL)
             try crashIf(.afterBlobFsync)
             try fsyncDirectory(dir)
             try crashIf(.afterEntryDirFsync)
@@ -870,7 +888,7 @@ actor KVDiskCacheStore {
             }
 
             // Publish in-memory state.
-            let entryBytes = blob.count + manifestData.count
+            let entryBytes = writtenBlobBytes + manifestData.count
             committedBytes += entryBytes - previousBytes
             // Preserve the entry's original creation time across generations (M-12).
             // M-C: the retention basis is the persisted value if present, else the
@@ -893,7 +911,7 @@ actor KVDiskCacheStore {
             emit(.diskWriteCommitted, indexHashPrefix: indexPrefix(index), fields: [
                 "generation": "\(generation)",
                 "commit_sequence": "\(snapshot.commitSequence)",
-                "serialized_bytes": "\(blob.count)",
+                "serialized_bytes": "\(writtenBlobBytes)",
                 "write_ms": "\(Int(Date().timeIntervalSince(writeStarted) * 1000))",
             ])
             return .committed(generation: generation, commitSequence: snapshot.commitSequence)
@@ -1071,11 +1089,31 @@ actor KVDiskCacheStore {
         let deadline = Date().addingTimeInterval(TimeInterval(config.promotionMaxSeconds))
         let started = Date()
 
-        // Blob load + structural SHA-256 fast-fail (FR-KVP4c) before AEAD.
+        // HIGH-1 read streaming. Pass 1: SHA-256 the blob by streaming the FILE through
+        // the hash in bounded windows, retaining NONE of the ciphertext — the pre-AEAD
+        // integrity gate no longer forces whole-blob residency.
         let blobURL = dir.appendingPathComponent("gen-\(manifest.generation).blob")
-        let blob: Data
+        let blobSize: Int
         do {
-            blob = try readBounded(blobURL, maxBytes: manifest.blobLength)
+            let (shaFD, size) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
+            defer { close(shaFD) }
+            blobSize = size
+            guard size == manifest.blobLength else {
+                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+            }
+            var hasher = SHA256()
+            var remaining = size
+            let window = 1 << 20   // 1 MiB streaming window; never the whole blob
+            while remaining > 0 {
+                let take = min(window, remaining)
+                let piece = try readExactly(fd: shaFD, count: take)
+                hasher.update(data: piece)
+                remaining -= take
+            }
+            let actualSHA = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            guard actualSHA == manifest.blobSHA256 else {
+                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+            }
         } catch let e as KVStoreError {
             // M-14: an over-bound blob is corrupt (integrity), not an I/O error.
             if case .boundsExceeded = e {
@@ -1085,24 +1123,30 @@ actor KVDiskCacheStore {
         } catch {
             emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
         }
-        guard blob.count == manifest.blobLength else {
-            emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-        }
-        let actualSHA = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
-        guard actualSHA == manifest.blobSHA256 else {
-            emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
-        }
 
-        // Streaming frame decode + per-chunk AEAD open under the AAD projection
-        // (HIGH-6): parse, verify, and open one frame at a time so the full array of
-        // parsed frames is never retained alongside the accumulating plaintext. The
-        // staging ceiling is enforced as an actual peak bound after each chunk.
-        var plaintext = Data()
-        plaintext.reserveCapacity(min(manifest.decodedLength, config.stagingMaxBytes))
+        // Pass 2: re-open and stream one frame at a time — read the frame's exact bytes
+        // (size known from the manifest chunk table), AEAD-open under the AAD projection,
+        // feed the plaintext to the incremental decoder that materializes each layer and
+        // releases consumed bytes. ONE high-water budget spans the live ciphertext frame
+        // + opened plaintext + decoder scratch + decoded layers; the TRUE peak is
+        // reported and enforced against `stagingMaxBytes` (disk_miss_budget on overflow).
+        let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
+        let decoder = KVStreamingPayloadDecoder(
+            expectedDecodedLength: manifest.decodedLength, layerCount: manifest.layerCount)
+        var peakStaging = 0
         enum StreamMiss: Error { case corrupt, deadline, budget }
         do {
-            try KVChunkFrame.forEachFrame(blob, chunkTable: manifest.chunks) { frame in
+            let (readFD, _) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
+            defer { close(readFD) }
+            for record in manifest.chunks {
                 if Date() > deadline { throw StreamMiss.deadline }
+                let frameData: Data
+                do { frameData = try readExactly(fd: readFD, count: frameOverhead + record.ctLength) }
+                catch { throw StreamMiss.corrupt }
+                // Parse + verify this single frame against its authoritative chunk record.
+                let frame: KVParsedFrame
+                do { frame = try KVChunkFrame.decodeBlob(frameData, chunkTable: [record])[0] }
+                catch { throw StreamMiss.corrupt }
                 let aad: Data
                 do { aad = try manifest.aad(ordinal: frame.ordinal) } catch { throw StreamMiss.corrupt }
                 let opened: Data
@@ -1110,8 +1154,13 @@ actor KVDiskCacheStore {
                     opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
                                                     tag: frame.tag, dek: dek, aad: aad)
                 } catch { throw StreamMiss.corrupt }
-                plaintext.append(opened)
-                guard plaintext.count <= config.stagingMaxBytes else { throw StreamMiss.budget }
+                // True live-memory high-water at this instant: the ciphertext frame, the
+                // opened chunk plaintext, the decoder's residual scratch, and the decoded
+                // layers emitted so far.
+                let live = frameData.count + opened.count + decoder.residualBytes + decoder.decodedBytes
+                peakStaging = max(peakStaging, live)
+                guard peakStaging <= config.stagingMaxBytes else { throw StreamMiss.budget }
+                do { try decoder.feed(opened) } catch { throw StreamMiss.corrupt }
             }
         } catch StreamMiss.deadline {
             emitMiss(.diskMissIO, detail: .promotionDeadline, prefix: prefix)
@@ -1119,21 +1168,26 @@ actor KVDiskCacheStore {
         } catch StreamMiss.budget {
             emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
             return .miss(.diskMissBudget, .exceedsPromotionCeiling)
+        } catch let e as KVStoreError {
+            if case .boundsExceeded = e {
+                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+            }
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
         } catch {
             emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
         }
 
-        // Payload decode with the exact self-delimiting length check.
+        // Finalize the incremental decode with the exact self-delimiting length check.
         let decoded: KVDecodedPayload
         do {
-            decoded = try KVPayloadCodec.decode(plaintext, expectedDecodedLength: manifest.decodedLength,
-                                                layerCount: manifest.layerCount)
+            decoded = try decoder.finish()
         } catch {
             emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
         }
         guard decoded.tokens.count == manifest.tokenCount else {
             emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
         }
+        peakStaging = max(peakStaging, decoder.decodedBytes)
 
         // Update LRU last-eligible-use.
         if var entry = liveEntries[index] { entry.lastUsedMillis = nowMillis; liveEntries[index] = entry }
@@ -1141,14 +1195,14 @@ actor KVDiskCacheStore {
         let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
         if emitHitEvent {
             emit(.diskHit, indexHashPrefix: prefix, fields: [
-                "restore_bytes": "\(blob.count)",
+                "restore_bytes": "\(blobSize)",
                 "decrypt_ms": "\(elapsedMillis)",
-                "peak_staging_bytes": "\(plaintext.count)",
+                "peak_staging_bytes": "\(peakStaging)",
             ])
         }
         return .hit(KVReadHit(tokens: decoded.tokens, layers: decoded.layers,
-                              bytesRead: blob.count, decryptMillis: elapsedMillis,
-                              peakStagingBytes: plaintext.count))
+                              bytesRead: blobSize, decryptMillis: elapsedMillis,
+                              peakStagingBytes: peakStaging))
     }
 
     /// Runtime cold-tier adapter entry point (FR-KVP3): compute the HMAC index and
@@ -1764,6 +1818,47 @@ actor KVDiskCacheStore {
         return buffer
     }
 
+    /// Open a file for a bounded streaming read (HIGH-1): O_NOFOLLOW, owner + regular-file
+    /// checks, and the §5a size bound, WITHOUT reading the bytes. Returns the fd (caller
+    /// closes) and the fstat size. A size over the bound throws `boundsExceeded`
+    /// (integrity → corrupt), matching `readBounded`.
+    private func openBoundedForRead(_ url: URL, maxBytes: Int) throws -> (fd: Int32, size: Int) {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw KVStoreError.io("open failed errno=\(errno)") }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid() else {
+            close(fd)
+            throw KVStoreError.io("fstat/owner check failed")
+        }
+        guard info.st_size <= maxBytes else {
+            close(fd)
+            throw KVStoreError.boundsExceeded("file size \(info.st_size) exceeds bound \(maxBytes)")
+        }
+        return (fd, Int(info.st_size))
+    }
+
+    /// Read exactly `count` bytes from `fd`, retrying short reads / EINTR. Throws on a
+    /// short file (fewer bytes than requested) or an I/O error.
+    private func readExactly(fd: Int32, count: Int) throws -> Data {
+        guard count >= 0 else { throw KVStoreError.io("negative read count") }
+        var buffer = Data(count: count)
+        guard count > 0 else { return buffer }
+        var read = 0
+        try buffer.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { throw KVStoreError.io("read buffer unavailable") }
+            while read < count {
+                let n = Darwin.read(fd, base + read, count - read)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw KVStoreError.io("read failed errno=\(errno)")
+                }
+                if n == 0 { throw KVStoreError.io("short read: file ended early") }
+                read += n
+            }
+        }
+        return buffer
+    }
+
     /// Atomic write: unique O_EXCL temp in the destination directory, fsync, rename,
     /// fsync dir. Files are 0600.
     private func writeFileAtomic(_ data: Data, to dest: URL) throws {
@@ -1777,11 +1872,17 @@ actor KVDiskCacheStore {
         try fsyncDirectory(dir)
     }
 
-    /// Create a file with O_EXCL | O_NOFOLLOW at 0600, write all bytes, fsync fd.
-    private func writeFileExclusive(_ data: Data, to url: URL) throws {
+    /// Open a fresh file with O_CREAT | O_EXCL | O_NOFOLLOW at 0600. The caller owns the
+    /// returned fd (must `close`); used both for one-shot writes and the HIGH-1 streaming
+    /// blob seal that writes frame-by-frame before fsync.
+    private func openExclusiveForWrite(_ url: URL) throws -> Int32 {
         let fd = open(url.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw KVStoreError.io("exclusive create failed errno=\(errno) path=\(url.lastPathComponent)") }
-        defer { close(fd) }
+        return fd
+    }
+
+    /// Write all of `data` to `fd`, retrying short writes and EINTR.
+    private func writeAll(fd: Int32, _ data: Data) throws {
         var written = 0
         try data.withUnsafeBytes { ptr in
             guard let base = ptr.baseAddress else { return }
@@ -1794,6 +1895,13 @@ actor KVDiskCacheStore {
                 written += n
             }
         }
+    }
+
+    /// Create a file with O_EXCL | O_NOFOLLOW at 0600, write all bytes, fsync fd.
+    private func writeFileExclusive(_ data: Data, to url: URL) throws {
+        let fd = try openExclusiveForWrite(url)
+        defer { close(fd) }
+        try writeAll(fd: fd, data)
         guard fsync(fd) == 0 else { throw KVStoreError.io("fsync failed errno=\(errno)") }
     }
 
