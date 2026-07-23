@@ -990,6 +990,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.restore_deadman_monitoring = mock.Mock()
         self.updater.stop_for_rollout = mock.Mock()
         self.updater.snapshot = mock.Mock(return_value=self.root / "tx")
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
         self.updater.capture_rollout_state = mock.Mock()
         self.updater.install_release = mock.Mock()
         self.updater.verify_rollout = mock.Mock(side_effect=updater_module.UpdateError("restart failed"))
@@ -1012,6 +1013,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_provider_admission_rollout_policy = mock.Mock()
         self.updater.verify_exact_catalog_admission = mock.Mock()
         self.updater.verify_exact_provider_canary = mock.Mock()
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
         self.updater.restore_auxiliary_services = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
         self.updater._restore_canary_timer = mock.Mock()
@@ -1031,6 +1033,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_provider_admission_rollout_policy.assert_called_once_with()
         self.updater.verify_exact_catalog_admission.assert_called_once_with(release)
         self.updater.verify_exact_provider_canary.assert_called_once_with(release)
+        self.updater.verify_buyer_canary_rollout_posture.assert_called_once_with()
         self.updater._restore_canary_timer.assert_called_once_with()
 
     def test_bridge_rollout_requires_capacity_and_safe_active_deadline(self):
@@ -1515,6 +1518,46 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.updater.run_canary_gate.assert_called_once_with()
 
+    def test_serving_proof_disabled_mode_preserves_recovery_gates_without_running_canary(self):
+        identity = updater_module.RuntimeIdentity("v1.8.60", "v1.8.60", "1.8.60")
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.gateway_serving_ready = mock.Mock(return_value=True)
+        self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
+        self.updater.verify_disabled_buyer_canary_posture = mock.Mock()
+        self.updater.run_canary_gate = mock.Mock()
+        self.updater.audit = mock.Mock()
+
+        self.updater.prove_serving_recovery(identity)
+
+        self.assertEqual(self.updater.protected_provider_fleet_ready.call_count, 3)
+        self.updater.verify_disabled_buyer_canary_posture.assert_called_once_with()
+        self.updater.run_canary_gate.assert_not_called()
+        self.updater.audit.assert_any_call(
+            "buyer_canary_gate",
+            "skipped",
+            mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+            replacement_gates=(
+                "public_identity,"
+                "stable_protected_fleet,"
+                "exact_catalog_admission,"
+                "exact_provider_canary"
+            ),
+        )
+
+    def test_run_canary_gate_rejects_disabled_mode(self):
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "outside required mode"):
+            self.updater.run_canary_gate()
+
     def test_transaction_rollback_serving_proof_authorizes_exact_prior_version(self):
         transaction = self.root / "rollback-serving-transaction"
         transaction.mkdir()
@@ -1628,6 +1671,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.restore_deadman_monitoring = mock.Mock(side_effect=lambda: order.append("restore-heartbeat"))
         self.updater.restore_transaction = mock.Mock()
         self.updater.install_release = mock.Mock()
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
         self.updater.capture_rollout_state = mock.Mock(
             side_effect=lambda: (
                 order.append("capture"),
@@ -2329,6 +2373,187 @@ class PearlUpdaterTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(updater_module.UpdateError, "emergency-disable sentinel"):
                 self.updater.verify_canary_rollout_readiness()
+
+    def test_disabled_buyer_canary_posture_requires_hard_disabled_units(self):
+        state_root = self.root / "canary-state"
+        state_root.mkdir(mode=0o755)
+        sentinel = state_root / "DISABLED"
+        sentinel.write_bytes(b"")
+        sentinel.chmod(0o644)
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 1, stdout="disabled\n", stderr=""),
+                subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
+                subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
+            ]
+        )
+        self.updater.audit = mock.Mock()
+
+        with (
+            mock.patch.object(
+                updater_module,
+                "CANARY_ENABLE_GATE",
+                self.root / "missing-reviewed-enable-gate",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_LEGACY_ENABLE_GATE",
+                self.root / "missing-legacy-enable-gate",
+            ),
+            mock.patch.object(updater_module, "CANARY_DISABLE_SENTINEL", sentinel),
+        ):
+            self.updater.verify_disabled_buyer_canary_posture()
+
+        self.assertEqual(self.updater.run_command.call_count, 3)
+        self.updater.audit.assert_called_once_with(
+            "buyer_canary_rollout_posture",
+            "disabled",
+            mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+            timer_enabled=False,
+            timer_active=False,
+            service_active=False,
+        )
+
+    def test_disabled_buyer_canary_posture_rejects_any_enable_gate(self):
+        gate = self.root / "enabled"
+        gate.write_bytes(b"")
+        state_root = self.root / "canary-state"
+        state_root.mkdir(mode=0o755)
+        sentinel = state_root / "DISABLED"
+        sentinel.write_bytes(b"")
+        sentinel.chmod(0o644)
+        with (
+            mock.patch.object(updater_module, "CANARY_ENABLE_GATE", gate),
+            mock.patch.object(
+                updater_module,
+                "CANARY_LEGACY_ENABLE_GATE",
+                self.root / "missing-legacy-enable-gate",
+            ),
+            mock.patch.object(updater_module, "CANARY_DISABLE_SENTINEL", sentinel),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "must be absent"):
+                self.updater.verify_disabled_buyer_canary_posture()
+
+    def test_disabled_buyer_canary_posture_rejects_active_service(self):
+        state_root = self.root / "canary-state"
+        state_root.mkdir(mode=0o755)
+        sentinel = state_root / "DISABLED"
+        sentinel.write_bytes(b"")
+        sentinel.chmod(0o644)
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 1, stdout="disabled\n", stderr=""),
+                subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
+                subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+            ]
+        )
+        with (
+            mock.patch.object(
+                updater_module,
+                "CANARY_ENABLE_GATE",
+                self.root / "missing-reviewed-enable-gate",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_LEGACY_ENABLE_GATE",
+                self.root / "missing-legacy-enable-gate",
+            ),
+            mock.patch.object(updater_module, "CANARY_DISABLE_SENTINEL", sentinel),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "requires canary-buyer.service inactive"):
+                self.updater.verify_disabled_buyer_canary_posture()
+
+    def test_disabled_buyer_canary_posture_accepts_exact_systemd_state_directory_link(self):
+        private_root = self.root / "private"
+        private_root.mkdir(mode=0o755)
+        state_target = private_root / "macprovider-canary-buyer"
+        state_target.mkdir(mode=0o755)
+        sentinel = state_target / "DISABLED"
+        sentinel.write_bytes(b"")
+        sentinel.chmod(0o644)
+        state_link = self.root / "macprovider-canary-buyer"
+        state_link.symlink_to(Path("private/macprovider-canary-buyer"))
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 1, stdout="disabled\n", stderr=""),
+                subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
+                subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
+            ]
+        )
+
+        with (
+            mock.patch.object(
+                updater_module,
+                "CANARY_ENABLE_GATE",
+                self.root / "missing-reviewed-enable-gate",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_LEGACY_ENABLE_GATE",
+                self.root / "missing-legacy-enable-gate",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_DISABLE_SENTINEL",
+                state_link / "DISABLED",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_DISABLE_STATE_DIRECTORY",
+                state_target,
+            ),
+        ):
+            self.updater.verify_disabled_buyer_canary_posture()
+
+    def test_disabled_buyer_canary_posture_rejects_wrong_state_directory_link(self):
+        wrong_target = self.root / "wrong-state"
+        wrong_target.mkdir(mode=0o755)
+        (wrong_target / "DISABLED").write_bytes(b"")
+        state_link = self.root / "macprovider-canary-buyer"
+        state_link.symlink_to(Path("wrong-state"))
+
+        with (
+            mock.patch.object(
+                updater_module,
+                "CANARY_ENABLE_GATE",
+                self.root / "missing-reviewed-enable-gate",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_LEGACY_ENABLE_GATE",
+                self.root / "missing-legacy-enable-gate",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_DISABLE_SENTINEL",
+                state_link / "DISABLED",
+            ),
+            mock.patch.object(
+                updater_module,
+                "CANARY_DISABLE_STATE_DIRECTORY",
+                self.root / "private" / "macprovider-canary-buyer",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                updater_module.UpdateError,
+                "root-owned systemd StateDirectory link",
+            ):
+                self.updater.verify_disabled_buyer_canary_posture()
+
+    def test_buyer_canary_posture_dispatches_disabled_mode_without_runtime_authority(self):
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.verify_canary_authority = mock.Mock()
+        self.updater.verify_canary_rollout_readiness = mock.Mock()
+        self.updater.verify_disabled_buyer_canary_posture = mock.Mock()
+
+        self.updater.verify_buyer_canary_rollout_posture()
+
+        self.updater.verify_disabled_buyer_canary_posture.assert_called_once_with()
+        self.updater.verify_canary_authority.assert_not_called()
+        self.updater.verify_canary_rollout_readiness.assert_not_called()
 
     def test_canary_timer_restore_honors_late_kill_switch(self):
         self.updater.canary_timer_was_active = True
@@ -3488,6 +3713,42 @@ class PearlUpdaterTests(unittest.TestCase):
                     "rollout_reconciliation", "success", recovered_phase=phase
                 )
 
+    def test_phase_journal_persists_buyer_canary_mode_for_reconciliation(self):
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater._start_journal(release, updater_module.SemVer.parse("1.8.26"))
+
+        payload = json.loads(self.updater.journal_path.read_text())
+        self.assertEqual(
+            payload["buyer_canary_mode"],
+            updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_REQUIRED,
+        )
+        self.assertTrue(self.updater.reconcile())
+        self.assertEqual(
+            self.updater.config.buyer_canary_mode,
+            updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+
+    def test_reconcile_rejects_invalid_journal_buyer_canary_mode(self):
+        release = self.verify()
+        self.updater._start_journal(release, updater_module.SemVer.parse("1.8.26"))
+        self.updater.journal["buyer_canary_mode"] = "unexpected"
+        self.updater._journal_transition("prepared")
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "phase journal buyer canary mode is invalid",
+        ):
+            self.updater.reconcile()
+
     def test_reconcile_committed_success_moves_forward_to_candidate(self):
         release = self.stage(self.verify())
         self.install_coherent_pair(release)
@@ -3526,6 +3787,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.prove_serving_recovery = mock.Mock()
         self.updater.verify_provider_admission_rollout_policy = mock.Mock()
         self.updater.verify_exact_catalog_admission = mock.Mock()
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
         self.updater._restore_canary_timer = mock.Mock()
         self.updater.validate_catalog_canary_configuration = mock.Mock(
@@ -3659,6 +3921,7 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_maintenance_and_quiescence_precede_snapshot(self):
         release = self.verify()
         order = []
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
         self.updater.capture_rollout_state = mock.Mock(side_effect=lambda: order.append("capture"))
         self.updater.snapshot = mock.Mock(side_effect=lambda _release: order.append("snapshot") or self.root / "tx")
         self.updater.enter_deadman_maintenance = mock.Mock(side_effect=lambda: order.append("deadman"))
@@ -3679,6 +3942,10 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertFalse(config.allow_provider_drain)
         self.assertFalse(config.allow_private_acceptance)
         self.assertEqual(config.canary_timeout_s, 720)
+        self.assertEqual(
+            config.buyer_canary_mode,
+            updater_module.BUYER_CANARY_MODE_REQUIRED,
+        )
         self.assertEqual(config.provider_recovery_timeout_s, 900)
         self.assertEqual(config.provider_admission_policy, "")
         self.assertEqual(config.minimum_pool_ready_after_rollout, 0)
@@ -3690,12 +3957,27 @@ class PearlUpdaterTests(unittest.TestCase):
         config = updater_module.load_config(path)
         self.assertTrue(config.allow_private_acceptance)
 
+    def test_config_explicitly_selects_disabled_buyer_canary_mode(self):
+        path = self.root / "buyer-canary-disabled.conf"
+        path.write_text("PEARL_UPDATER_BUYER_CANARY_MODE=disabled\n")
+        config = updater_module.load_config(path)
+        self.assertEqual(
+            config.buyer_canary_mode,
+            updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+
+    def test_config_rejects_unknown_buyer_canary_mode(self):
+        path = self.root / "buyer-canary-invalid.conf"
+        path.write_text("PEARL_UPDATER_BUYER_CANARY_MODE=optional\n")
+        with self.assertRaisesRegex(updater_module.UpdateError, "buyer canary mode"):
+            updater_module.load_config(path)
+
     def test_no_sanction_recovery_or_internal_canary_enablement(self):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("/admin/reject", source)
         self.assertNotIn("canary_enabled", source)
 
-    def test_runbook_requires_load_credentials_and_removes_legacy_env(self):
+    def test_runbook_requires_load_credentials_and_keeps_legacy_controls_absent(self):
         runbook = SCRIPT.parent.parent / "runbooks" / "pearl-release-updater.md"
         text = runbook.read_text(encoding="utf-8")
         self.assertIn("/etc/macprovider/canary-buyer.token", text)
@@ -3703,7 +3985,10 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("/etc/macprovider/canary-buyer.operator-token", text)
         self.assertIn("/etc/macprovider/canary-buyer.expected-fleet.json", text)
         self.assertIn("/etc/macprovider-canary-buyer/enabled", text)
-        self.assertNotIn("/etc/macprovider/canary-buyer.enabled", text)
+        self.assertIn(
+            "sudo test ! -e /etc/macprovider/canary-buyer.enabled",
+            text,
+        )
         self.assertIn("/var/lib/macprovider-canary-buyer/DISABLED", text)
         self.assertIn("test ! -e /etc/macprovider/canary-buyer.env", text)
         self.assertIn(
@@ -3724,6 +4009,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900", example_text)
         self.assertIn("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60", example_text)
         self.assertIn("PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200", example_text)
+        self.assertIn("PEARL_UPDATER_BUYER_CANARY_MODE=required", example_text)
 
     def test_catalog_runbook_splits_deploy_authority_and_has_executable_bridge_rollback(self):
         runbook = SCRIPT.parent.parent / "runbooks" / "catalog-release-provider-upgrade.md"

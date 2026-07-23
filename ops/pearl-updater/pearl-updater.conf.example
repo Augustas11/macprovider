@@ -27,6 +27,12 @@ PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S=5
 PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900
 PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60
 PEARL_UPDATER_CANARY_TIMEOUT_S=720
+# Defaults to required. Use disabled only during an explicitly sealed production
+# window where both canary enable gates are absent, the root-owned empty 0644
+# DISABLED sentinel is present, and canary-buyer.timer/service are quiescent.
+# Disabled mode preserves the public identity, stable protected-fleet, exact
+# catalog-admission, and exact physical provider-canary rollout gates.
+PEARL_UPDATER_BUYER_CANARY_MODE=required
 PEARL_UPDATER_REVOKED_VERSIONS_FILE=/etc/macprovider/pearl-updater.revoked
 
 # Required rollout admission contract. Use bridge_required while migrating the
