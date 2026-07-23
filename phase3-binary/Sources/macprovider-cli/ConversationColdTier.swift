@@ -41,12 +41,17 @@ protocol ConversationColdTier: Sendable {
     /// unsupported or identity is unavailable — in which case nothing is
     /// persisted. The synchronous copy is the only hot-path cost; the actual disk
     /// write is deferred to `persist`.
+    /// - Parameter nowMillis: the EXACT hot-commit instant (integer ms), passed in so
+    ///   created_at/eligible_until derive from the commit timestamp — never from a
+    ///   wall-clock read taken AFTER the up-to-256 MiB deep copy, which would extend
+    ///   disk eligibility past the hot TTL by the copy duration (M-B).
     func captureSnapshot(
         conversationKey: String,
         layers: ConversationCacheLayers,
         fullTokens: [Int32],
         sampledPurgeGeneration: Int,
-        identity: KVIdentityCore
+        identity: KVIdentityCore,
+        nowMillis: Int
     ) -> ConversationColdSnapshot?
 
     /// Enqueue a captured snapshot for the bounded async writer. Non-blocking: the

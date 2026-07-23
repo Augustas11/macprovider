@@ -269,7 +269,8 @@ actor ConversationCache {
         if let coldTier, let cold, cold.eligible,
            let snapshot = coldTier.captureSnapshot(
                conversationKey: lease.key, layers: cache, fullTokens: fullTokens,
-               sampledPurgeGeneration: lease.sampledPurgeGeneration, identity: cold.identity) {
+               sampledPurgeGeneration: lease.sampledPurgeGeneration, identity: cold.identity,
+               nowMillis: Int(now.timeIntervalSince1970 * 1000)) {
             // The adapter owns the persist Task (one pending per index, purge-all
             // cancellation, bounded shutdown drain). Non-blocking (CRITICAL-2/HIGH-5).
             coldTier.enqueuePersist(snapshot)

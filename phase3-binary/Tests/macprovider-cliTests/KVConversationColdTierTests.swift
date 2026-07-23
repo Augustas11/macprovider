@@ -37,12 +37,12 @@ final class KVConversationColdTierTests: XCTestCase {
 
         func captureSnapshot(conversationKey: String, layers: ConversationCacheLayers,
                              fullTokens: [Int32], sampledPurgeGeneration: Int,
-                             identity: KVIdentityCore) -> ConversationColdSnapshot? {
+                             identity: KVIdentityCore, nowMillis: Int) -> ConversationColdSnapshot? {
             if captureReturnsNil { return nil }
             let snap = ConversationColdSnapshot(
                 rawKey: conversationKey, tokens: fullTokens, layers: [], identity: Self.writeIdentity,
                 sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: 1,
-                createdAtMillis: 0, eligibleUntilMillis: 0, incarnation: "test")
+                createdAtMillis: nowMillis, eligibleUntilMillis: nowMillis, incarnation: "test")
             lock.lock(); captured.append(snap); lock.unlock()
             return snap
         }
@@ -187,6 +187,22 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertEqual(fake.capturedSnapshots.count, 1, "exactly one synchronous snapshot at commit")
         XCTAssertEqual(fake.capturedSnapshots.first?.tokens, fullTokens,
                        "snapshot records the committed canonical token sequence")
+    }
+
+    /// M-B: creation/eligibility derive from the EXACT hot-commit instant passed into
+    /// captureSnapshot, not a wall-clock read taken after the deep copy.
+    func testCaptureUsesExactCommitInstant() async {
+        let fake = FakeColdTier()
+        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let tokens = int32Range(0..<40)
+        let lease = await cache.begin(
+            conversationKey: "conv:kvs-synth:instant", incomingTokens: tokens, modelID: "model-a",
+            kvBits: nil, cold: context(eligible: true))
+        let commitNow = Date(timeIntervalSince1970: 12345.5)   // *1000 is exact in Double
+        await cache.commit(lease!, cache: ConversationCacheLayers([trimmableCache(offset: tokens.count)]),
+                           fullTokens: tokens, now: commitNow, cold: context(eligible: true))
+        XCTAssertEqual(fake.capturedSnapshots.first?.createdAtMillis, 12_345_500,
+                       "captureSnapshot must receive the exact hot-commit instant in ms")
     }
 
     // MARK: - AC-4: a pre-purge hot lease finishing after purge reinserts nothing

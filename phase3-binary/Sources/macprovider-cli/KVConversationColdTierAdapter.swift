@@ -198,7 +198,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         layers: ConversationCacheLayers,
         fullTokens: [Int32],
         sampledPurgeGeneration: Int,
-        identity: KVIdentityCore
+        identity: KVIdentityCore,
+        nowMillis: Int
     ) -> ConversationColdSnapshot? {
         guard identity.modelSHA256 != nil else { return nil }         // identity_unavailable
         // Only the v1-allowlisted unquantized class is serializable; any other
@@ -261,7 +262,10 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             kvQuantPolicy: identity.kvQuantPolicy,
             decodePath: KVBuildIdentity.decodePathOrdinary,
             keyEpoch: capturedEpoch)        // CRITICAL-2: captured at commit, not at persist
-        let createdAt = Self.nowMillis()
+        // M-B: derive creation/eligibility from the EXACT hot-commit instant passed
+        // in — NOT a wall-clock read taken after the deep copy above, which would
+        // gain the copy duration beyond the hot TTL.
+        let createdAt = nowMillis
         return ConversationColdSnapshot(
             rawKey: conversationKey,
             tokens: fullTokens,
