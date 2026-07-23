@@ -123,6 +123,25 @@ setup_nested_md() {
 }
 assert_detect "nested markdown fixture" setup_nested_md false true
 
+# HIGH (r2): macOS is case-insensitive; a mixed-case phase3 path added on
+# Linux folds into the real Swift tree on checkout and must run swift-tests.
+setup_mixedcase_swift() {
+  mkdir -p Phase3-binary/app; echo x >Phase3-binary/app/Bad.swift
+  commit_all base >/dev/null; git rev-parse HEAD
+  echo y >Phase3-binary/app/Bad.swift; commit_all change >/dev/null
+}
+assert_detect "mixed-case Phase3-binary (run swift)" setup_mixedcase_swift true true
+
+# MEDIUM (r2): root .gitattributes can change how the Swift job's scripts are
+# checked out (eol/filters); it must run swift-tests.
+setup_gitattributes() {
+  echo '* text=auto' >.gitattributes
+  commit_all base >/dev/null; git rev-parse HEAD
+  printf 'phase3-binary/dist/test/*.sh text eol=crlf\n' >>.gitattributes
+  commit_all change >/dev/null
+}
+assert_detect "root .gitattributes (run swift)" setup_gitattributes true true
+
 # FAIL OPEN: an unresolvable base leaves both true.
 setup_fail_open() {
   mkdir -p phase4-coordinator; echo x >phase4-coordinator/a.go

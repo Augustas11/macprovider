@@ -35,6 +35,13 @@ matched_swift=0
 matched_code=0
 total=0
 
+# The macOS runners use a case-INSENSITIVE filesystem, so a path added on
+# case-sensitive Linux as `Phase3-binary/...swift` folds into the real
+# `phase3-binary` tree on checkout and is built by swift-tests. Match paths
+# ASCII-case-insensitively so such a change still trips the Swift gate. This is
+# fail-safe for the docs gate too: a case variant of a doc path stays a skip.
+shopt -s nocasematch
+
 classify() {
   # Reads NUL-delimited pathnames on stdin; sets swift/code and counters.
   local f
@@ -45,11 +52,12 @@ classify() {
     total=$((total + 1))
     case "$f" in
       # phase3-binary sources; the build/xcodegen/sparkle scripts the Swift
-      # job invokes; the Makefile; this workflow; AND the shared cross-language
-      # fixtures the Swift parity/losslessness/settlement suites read from
-      # other modules. Keep this list in sync with the Swift tests under
-      # phase3-binary/Tests and phase3-binary/app/Tests.
-      phase3-binary/*|scripts/*|Makefile|.github/workflows/ci.yml|\
+      # job invokes; the Makefile; this workflow; root .gitattributes (eol/
+      # filter rules can change how the Swift job's checked-out scripts run);
+      # AND the shared cross-language fixtures the Swift parity/losslessness/
+      # settlement suites read from other modules. Keep this list in sync with
+      # the Swift tests under phase3-binary/Tests and phase3-binary/app/Tests.
+      phase3-binary/*|scripts/*|Makefile|.gitattributes|.github/workflows/ci.yml|\
       phase7-verify/testdata/*|phase4-coordinator/test/jcs_fixtures/*|testdata/*)
         swift=true
         matched_swift=$((matched_swift + 1)) ;;
