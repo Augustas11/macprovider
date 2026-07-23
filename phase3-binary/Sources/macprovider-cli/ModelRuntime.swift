@@ -2010,6 +2010,13 @@ actor ModelRuntime: ModelRuntimeServing {
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds)
         await conversationCache.attachColdTier(adapter)
+        // CRITICAL-1: wire the store's purge path back to the hot tier so a purge /
+        // purge-all drops the matching RAM entry and fences outstanding leases
+        // before the on-disk generation is unlinked / the epoch is rotated.
+        let cache = conversationCache
+        await tier.store.setHotPurgeHooks(
+            single: { key in await cache.purgeHot(conversationKey: key) },
+            all: { await cache.purgeAllHot() })
         coldTierAttached = true
     }
 

@@ -122,6 +122,83 @@ final class KVDiskTierTests: XCTestCase {
         await tier.shutdown()
     }
 
+    /// CRITICAL-1: the real purge path must clear the hot tier (RAM) as well as
+    /// disk, and fence any outstanding lease so its commit reinserts nothing. Drives
+    /// `KVDiskTier.purge` with the hot-purge hooks wired exactly as
+    /// `ModelRuntime.attachKVDiskTier` wires them.
+    func testPurgeClearsHotTierAndFencesOutstandingLease() async throws {
+        let tier = makeTier(root: makeRoot())
+        let activated = await tier.activateForControlPlane(); XCTAssertTrue(activated)
+        let cache = ConversationCache()
+        await tier.store.setHotPurgeHooks(
+            single: { key in await cache.purgeHot(conversationKey: key) },
+            all: { await cache.purgeAllHot() })
+
+        let key = "conv:kvs-synth:hot-and-disk"
+        // Disk side: a committed generation the purge must unlink.
+        try await writeEntry(tier, key: key, seq: 6, nowMillis: 1_000_000)
+        let diskBefore = await tier.status()?.entryCount; XCTAssertEqual(diskBefore, 1)
+
+        // Hot side: seed an entry (cold_start begin → commit), then acquire an
+        // outstanding HIT lease that will attempt to commit after the purge.
+        let seedOpt = await cache.begin(
+            conversationKey: key, incomingTokens: Array(0 ..< 32), modelID: "m", kvBits: nil)
+        let seed = try XCTUnwrap(seedOpt)
+        await cache.commit(seed, cache: ConversationCacheLayers([]), fullTokens: Array(0 ..< 40))
+        let hotBefore = await cache.snapshotStats().entries; XCTAssertEqual(hotBefore, 1)
+        let staleOpt = await cache.begin(
+            conversationKey: key, incomingTokens: Array(0 ..< 48), modelID: "m", kvBits: nil)
+        let stale = try XCTUnwrap(staleOpt)
+        XCTAssertNotNil(stale.reusableCache, "precondition: outstanding lease is a hit")
+
+        // Drive the real purge path.
+        guard case .ok = await tier.purge(rawKey: key) else { return XCTFail("purge failed") }
+
+        // Disk generation gone.
+        let diskAfter = await tier.status()?.entryCount; XCTAssertEqual(diskAfter, 0)
+
+        // The pre-purge lease's commit reinserts nothing (fenced).
+        await cache.commit(stale, cache: ConversationCacheLayers([]), fullTokens: Array(0 ..< 48))
+        let hotAfter = await cache.snapshotStats().entries
+        XCTAssertEqual(hotAfter, 0, "purge must drop the hot entry and the fenced commit must not reinsert")
+
+        // A subsequent same-key begin is a cold_start miss.
+        let afterOpt = await cache.begin(
+            conversationKey: key, incomingTokens: Array(0 ..< 48), modelID: "m", kvBits: nil)
+        let after = try XCTUnwrap(afterOpt)
+        XCTAssertNil(after.reusableCache, "subsequent same-key begin must be a cold_start miss")
+        XCTAssertEqual(after.cachedPromptTokens, 0)
+        await cache.abort(after)
+        await tier.shutdown()
+    }
+
+    /// CRITICAL-1 purge-all half: clears every hot entry and fences leases before
+    /// the epoch rotation completes.
+    func testPurgeAllClearsHotTier() async throws {
+        let tier = makeTier(root: makeRoot())
+        let activated = await tier.activateForControlPlane(); XCTAssertTrue(activated)
+        let cache = ConversationCache()
+        await tier.store.setHotPurgeHooks(
+            single: { key in await cache.purgeHot(conversationKey: key) },
+            all: { await cache.purgeAllHot() })
+
+        let seedOpt = await cache.begin(
+            conversationKey: "conv:kvs-synth:x", incomingTokens: Array(0 ..< 32), modelID: "m", kvBits: nil)
+        let seed = try XCTUnwrap(seedOpt)
+        await cache.commit(seed, cache: ConversationCacheLayers([]), fullTokens: Array(0 ..< 40))
+        let staleOpt = await cache.begin(
+            conversationKey: "conv:kvs-synth:x", incomingTokens: Array(0 ..< 48), modelID: "m", kvBits: nil)
+        let stale = try XCTUnwrap(staleOpt)
+        _ = try XCTUnwrap(stale.reusableCache)
+
+        guard case .ok = await tier.purgeAll() else { return XCTFail("purge-all failed") }
+
+        await cache.commit(stale, cache: ConversationCacheLayers([]), fullTokens: Array(0 ..< 48))
+        let hotAfter = await cache.snapshotStats().entries
+        XCTAssertEqual(hotAfter, 0, "purge-all fences the outstanding lease's commit")
+        await tier.shutdown()
+    }
+
     func testPurgeAbsentKeyNoOps() async throws {
         let tier = makeTier(root: makeRoot())
         let result = await tier.purge(rawKey: "conv:kvs-synth:never-written")

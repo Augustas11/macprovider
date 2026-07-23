@@ -280,8 +280,11 @@ actor ConversationCache {
     /// Remove the matching hot entry and bump the within-process single-key purge
     /// generation so any outstanding lease's `commit()` reinserts nothing.
     func purgeHot(conversationKey: String) {
-        localPurgeGen[conversationKey, default: 0] += 1
-        entries.removeValue(forKey: conversationKey)
+        // Key on the trimmed form so a purge matches `begin()`'s entry keying.
+        let key = conversationKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        localPurgeGen[key, default: 0] += 1
+        entries.removeValue(forKey: key)
     }
 
     /// Clear every hot entry and invalidate every outstanding lease's pending

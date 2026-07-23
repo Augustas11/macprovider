@@ -286,6 +286,14 @@ actor KVDiskCacheStore {
     /// Cumulative counters per reason code (inspection surface).
     private var counters: [String: Int] = [:]
 
+    /// SPEC-037 FR-KVP8 hot-tier purge callbacks (CRITICAL-1). Set by the serve
+    /// wiring once the hot `ConversationCache` is attached, so the purge path can
+    /// drop the matching hot entry / invalidate outstanding leases BEFORE it
+    /// unlinks the on-disk generation (single-key) or completes epoch rotation
+    /// (purge-all). Nil while no hot tier is attached (control-plane-only process).
+    private var hotPurgeSingle: (@Sendable (String) async -> Void)?
+    private var hotPurgeAll: (@Sendable () async -> Void)?
+
     struct KVLiveEntry: Sendable, Equatable {
         var bytes: Int
         var lastUsedMillis: Int
@@ -311,6 +319,17 @@ actor KVDiskCacheStore {
 
     func setFailpoint(_ hook: (@Sendable (KVFailpoint) throws -> Void)?) {
         failpoint = hook
+    }
+
+    /// Wire the hot-tier purge callbacks (CRITICAL-1). `single` receives the raw
+    /// conversation key (the hot tier keys on the trimmed raw key, not the HMAC
+    /// index); `all` clears every hot entry and fences outstanding leases.
+    func setHotPurgeHooks(
+        single: (@Sendable (String) async -> Void)?,
+        all: (@Sendable () async -> Void)?
+    ) {
+        hotPurgeSingle = single
+        hotPurgeAll = all
     }
 
     private func crashIf(_ point: KVFailpoint) throws {
@@ -968,7 +987,7 @@ actor KVDiskCacheStore {
     /// Single-key purge with the exact tombstone-first 5-step ordering. Idempotent
     /// and fail-closed: any partial failure leaves the tombstone in place.
     @discardableResult
-    func purge(rawKey: String) throws -> KVPurgeResult {
+    func purge(rawKey: String) async throws -> KVPurgeResult {
         guard activated else { return .failed(.ioError) }
         if let detail = quarantined { return .failed(detail) }
 
@@ -1000,6 +1019,13 @@ actor KVDiskCacheStore {
             try crashIf(.purgeAfterIncompleteTombstone)
             try setHighWatermark(index: index, generation: newGeneration)
             try crashIf(.purgeAfterHighWatermark)
+
+            // (3, hot half) Drop the matching hot entry and fence any outstanding
+            // lease's commit BEFORE the on-disk generation is unlinked (CRITICAL-1).
+            // The high-watermark is already durable, so a racing disk write is also
+            // fenced; this closes the RAM side so a subsequent same-key begin() is a
+            // cold_start miss and a pre-purge lease's commit() reinserts nothing.
+            await hotPurgeSingle?(rawKey)
 
             let bytesFreed = try completePurgeSteps(index: index, generation: newGeneration)
             emit(.purgeOK, indexHashPrefix: indexPrefix(index),
@@ -1049,13 +1075,16 @@ actor KVDiskCacheStore {
     /// in-memory state, and rotates the key epoch through the intent journal, then
     /// verifies old-epoch Keychain material is absent before reporting success.
     @discardableResult
-    func purgeAll() throws -> KVPurgeResult {
+    func purgeAll() async throws -> KVPurgeResult {
         guard activated else { return .failed(.ioError) }
         if let detail = quarantined { return .failed(detail) }
         do {
             let bytesFreed = committedBytes
-            // Fence + invalidate all in-memory publication state (hot callback: integration).
             let entries = liveEntries.count
+            // Clear ALL hot entries and invalidate every outstanding lease's pending
+            // commit BEFORE epoch rotation completes and before purge_ok (CRITICAL-1).
+            await hotPurgeAll?()
+            // Fence + invalidate all in-memory publication state, then rotate.
             try rotateEpoch()
             liveEntries.removeAll()
             lastGeneration.removeAll()
@@ -1129,8 +1158,8 @@ actor KVDiskCacheStore {
     /// Rotate the epoch, delete the namespace directory, and delete all namespace
     /// Keychain items (enumerated by service prefix). The lock (held from outside the
     /// deleted tree) is retained until deletions verify.
-    func purgeAllAndForget() throws -> KVPurgeResult {
-        let result = try purgeAll()
+    func purgeAllAndForget() async throws -> KVPurgeResult {
+        let result = try await purgeAll()
         if case .failed = result { return result }
         do {
             try keys.deleteAllNamespaceItems()
