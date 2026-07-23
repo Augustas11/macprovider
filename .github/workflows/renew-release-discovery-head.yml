@@ -24,7 +24,7 @@ concurrency:
 jobs:
   renew:
     name: Append a renewed immutable discovery transport
-    runs-on: macos-15
+    runs-on: macos-15-intel
     environment: production-release
     permissions:
       actions: read

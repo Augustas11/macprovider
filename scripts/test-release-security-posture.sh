@@ -224,6 +224,7 @@ exec "$sealed_root/bin/openssl" "$@"'''
 PROTECTED_OPENSSL_OUTPUT_ENV = (
     '          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
 )
+SEALED_OPENSSL_RUNNER = "    runs-on: macos-15-intel"
 PROTECTED_OPENSSL_CONSUMERS = (
     ("Sign + notarize binary", 1, 0),
     ("Prepare release assets", 4, 1),
@@ -236,6 +237,10 @@ PROTECTED_OPENSSL_CONSUMERS = (
 
 
 def validate_candidate_openssl(job):
+    if job.count(SEALED_OPENSSL_RUNNER) != 1:
+        raise SystemExit(
+            "candidate release runner must match the reviewed Intel OpenSSL bottle"
+        )
     preflight = unique_step(
         job, "Preflight protected OpenSSL seal before tag creation"
     )
@@ -350,6 +355,10 @@ def validate_pearl_toolchain(job):
 
 
 def validate_protected_openssl(job):
+    if job.count(SEALED_OPENSSL_RUNNER) != 1:
+        raise SystemExit(
+            "protected release runner must match the reviewed Intel OpenSSL bottle"
+        )
     selector = unique_step(
         job, "Seal OpenSSL 3 for protected release verification"
     )
@@ -815,10 +824,20 @@ candidate_openssl_removal_mutation = build.replace(
     "",
     1,
 )
+candidate_openssl_runner_mutation = build.replace(
+    SEALED_OPENSSL_RUNNER,
+    "    runs-on: macos-15",
+    1,
+)
 protected_openssl_removal_mutation = publish.replace(
     "\n      - name: Seal OpenSSL 3 for protected release verification\n"
     + PROTECTED_OPENSSL3_STEP,
     "",
+    1,
+)
+protected_openssl_runner_mutation = publish.replace(
+    SEALED_OPENSSL_RUNNER,
+    "    runs-on: macos-15",
     1,
 )
 protected_openssl_suppression_mutation = publish.replace(
@@ -908,6 +927,12 @@ except SystemExit:
     pass
 else:
     raise SystemExit("candidate OpenSSL seal removal mutation unexpectedly passed")
+try:
+    validate_candidate_openssl(candidate_openssl_runner_mutation)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("candidate OpenSSL runner mismatch mutation unexpectedly passed")
 for description, mutation in (
     ("candidate Malibu preflight removal", malibu_preflight_removal_mutation),
     ("candidate Malibu preflight failure suppression", malibu_preflight_suppression_mutation),
@@ -929,6 +954,7 @@ for description, mutation in (
         continue
     raise SystemExit(f"{description} mutation unexpectedly passed")
 for description, mutation in (
+    ("protected OpenSSL 3 runner mismatch", protected_openssl_runner_mutation),
     ("protected OpenSSL 3 selector removal", protected_openssl_removal_mutation),
     (
         "protected OpenSSL 3 selector failure suppression",
@@ -1129,6 +1155,11 @@ for label, auxiliary, sealed_root, consumer_count in (
         5,
     ),
 ):
+    protected_job = auxiliary.split("\n  verify_public:", 1)[0]
+    if protected_job.count(SEALED_OPENSSL_RUNNER) != 1:
+        raise SystemExit(
+            f"{label} runner must match the reviewed Intel OpenSSL bottle"
+        )
     for requirement in (
         "- name: Seal reviewed OpenSSL 3",
         "id: protected_openssl",

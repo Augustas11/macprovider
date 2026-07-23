@@ -36,10 +36,10 @@ concurrency:
 jobs:
   build:
     name: Build unsigned release inputs from reviewed main
-    # The official macos-15 image contract carries Xcode 16.4 (16F6) at
+    # The official Intel macos-15 image contract carries Xcode 16.4 (16F6) at
     # /Applications/Xcode_16.4.app and macOS SDK 15.5:
     # https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md
-    runs-on: macos-15
+    runs-on: macos-15-intel
     permissions:
       contents: read
     outputs:
@@ -250,7 +250,7 @@ jobs:
   sign_publish:
     name: Sign and publish reviewed release
     needs: build
-    runs-on: macos-15
+    runs-on: macos-15-intel
     environment: production-release
     permissions:
       actions: read

@@ -19,6 +19,14 @@ import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 SEALED_OUTPUT = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
+SEALED_RUNNER = "    runs-on: macos-15-intel"
+protected, separator, public_verify = text.partition("\n  verify_public:\n")
+if not separator:
+    raise SystemExit("promotion workflow lacks isolated public verification job")
+if protected.count(SEALED_RUNNER) != 1:
+    raise SystemExit(
+        "promotion runner must match the reviewed Intel OpenSSL bottle"
+    )
 for required in (
     "candidate_run_id:",
     "candidate_sha:",
@@ -91,8 +99,7 @@ for step_name in (
         )
 if "go build" in text or "xcodebuild" in text or "./package.sh" in text:
     raise SystemExit("protected promoter contains a build capability")
-protected, separator, public_verify = text.partition("\n  verify_public:\n")
-if not separator or "scripts/verify-tier2-provider-release.sh" in protected:
+if "scripts/verify-tier2-provider-release.sh" in protected:
     raise SystemExit("candidate executable verification must be isolated from the protected promoter")
 if "environment: production-release" in public_verify or "secrets." in public_verify:
     raise SystemExit("public executable verifier gained protected credentials")

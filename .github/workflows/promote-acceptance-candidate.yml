@@ -36,7 +36,7 @@ concurrency:
 jobs:
   promote:
     name: Publish only the accepted bytes
-    runs-on: macos-15
+    runs-on: macos-15-intel
     environment: production-release
     outputs:
       tag: ${{ steps.request.outputs.tag }}

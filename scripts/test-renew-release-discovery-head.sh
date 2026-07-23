@@ -21,6 +21,12 @@ import sys
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 bridge = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 SEALED_OUTPUT = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
+SEALED_RUNNER = "    runs-on: macos-15-intel"
+protected = workflow.split("\n  verify_public:", 1)[0]
+if protected.count(SEALED_RUNNER) != 1:
+    raise SystemExit(
+        "renewal runner must match the reviewed Intel OpenSSL bottle"
+    )
 for requirement in (
     "name: Renew signed release discovery head",
     "workflow_dispatch:",
