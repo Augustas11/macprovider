@@ -285,6 +285,8 @@ actor KVDiskCacheStore {
     private var unlinkFailInjected = false
     /// Test-only retention-tick wall-clock override (M-F).
     private var sweepClockOverride: (@Sendable () -> Int)?
+    /// Test-only tombstone-directory listing-failure injection (HIGH-3).
+    private var tombstoneListFailInjected = false
 
     // Activation state
     private var lockFD: Int32 = -1
@@ -1496,6 +1498,15 @@ actor KVDiskCacheStore {
     /// Test-only (M-F): run one retention tick synchronously.
     func runRetentionTickForTest() { retentionSweepTick() }
 
+    /// Test-only (HIGH-3): force the tombstone-directory listing to fail.
+    func injectTombstoneListFailure(_ enabled: Bool) { tombstoneListFailInjected = enabled }
+
+    /// Test-only (HIGH-3): run tombstone recovery synchronously (as activation does).
+    func runTombstoneRecoveryForTest() throws { try recoverTombstones() }
+
+    /// Test-only: whether the store has quarantined itself.
+    var isQuarantinedForTest: Bool { quarantined != nil }
+
     private func sweepClockMillis() -> Int {
         if let sweepClockOverride { return sweepClockOverride() }
         return Int(Date().timeIntervalSince1970 * 1000)
@@ -1521,7 +1532,18 @@ actor KVDiskCacheStore {
 
     private func recoverTombstones() throws {
         guard fileExists(tombstonesDir) else { return }
-        let files = (try? FileManager.default.contentsOfDirectory(at: tombstonesDir, includingPropertiesForKeys: nil)) ?? []
+        // HIGH-3: an unreadable/corrupt tombstone directory must NEVER be treated as
+        // "no tombstones" (fail-open) — that silently drops the purge fence, letting a
+        // revoked entry re-admit. A directory-listing failure quarantines the namespace
+        // (dormancy) instead.
+        let files: [URL]
+        do {
+            if tombstoneListFailInjected { throw KVStoreError.io("injected tombstone list failure") }
+            files = try FileManager.default.contentsOfDirectory(at: tombstonesDir, includingPropertiesForKeys: nil)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
         for file in files where file.pathExtension == "json" {
             guard let data = try? readBounded(file, maxBytes: 64 * 1024),
                   let tomb = KVTombstoneCodec.decode(data) else {

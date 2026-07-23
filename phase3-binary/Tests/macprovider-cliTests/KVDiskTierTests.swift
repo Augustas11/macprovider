@@ -421,6 +421,24 @@ final class KVDiskTierTests: XCTestCase {
         await tier.shutdown()
     }
 
+    /// HIGH-3: an unreadable tombstone directory must fail CLOSED — recovery
+    /// quarantines the namespace rather than treating it as "no tombstones" (which
+    /// would silently drop the purge fence and let a revoked entry re-admit).
+    func testUnreadableTombstoneDirQuarantines() async throws {
+        let tier = makeTier(root: makeRoot())
+        let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
+        await tier.store.injectTombstoneListFailure(true)
+        do {
+            try await tier.store.runTombstoneRecoveryForTest()
+            XCTFail("recovery must throw on an unreadable tombstone directory")
+        } catch {
+            // expected: quarantine
+        }
+        let quarantined = await tier.store.isQuarantinedForTest
+        XCTAssertTrue(quarantined, "an unreadable tombstone dir must quarantine, never fail-open")
+        await tier.shutdown()
+    }
+
     /// M-13 / FR-KVP7: serve-lock contention is transient, not permanent dormancy —
     /// the tier retries with bounded backoff and runs full activation once the lock
     /// is released.
