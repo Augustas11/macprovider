@@ -256,7 +256,8 @@ def main() -> int:
         print(json.dumps({
             "provider_id": installed_provider_id,
             "assigned_id": assigned_id,
-            "model_id": model_id,
+            "catalog_key": model_id,
+            "model_id": catalog_model_id,
             "launchd_pid": pid,
             "executable_path": process_path,
             "local_status": local_status,
