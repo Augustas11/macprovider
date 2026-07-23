@@ -649,6 +649,30 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .miss = oldRead else { return XCTFail("old entry must be retention-evicted") }
     }
 
+    /// M-11: the write reservation is distinct from committed bytes and released on
+    /// every exit — a same-size replacement does not grow committed bytes (no
+    /// double-count), and two distinct same-size entries sum exactly (no leak).
+    func testQuotaAccountingNoDoubleCountOrLeak() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:quota"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, commitSequence: 1, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        let used1 = await store.inspect().bytesUsed
+        XCTAssertGreaterThan(used1, 0)
+
+        // Same-size replacement (gen 2) must not change committed bytes.
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, seed: 3, commitSequence: 2, nowMillis: 1_000_100), nowMillis: 1_000_100)
+        let used2 = await store.inspect().bytesUsed
+        XCTAssertEqual(used1, used2, "same-size replacement must not double-count the reservation")
+
+        // A distinct same-size entry sums exactly (reservation fully released).
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: "conv:kvs-synth:quota2", seq: 5, seed: 4, commitSequence: 1, nowMillis: 1_000_200), nowMillis: 1_000_200)
+        let used3 = await store.inspect().bytesUsed
+        XCTAssertEqual(used3, used1 * 2, "two same-size entries must sum exactly (no reservation leak)")
+    }
+
     func testFreeSpaceFloorRefusesWrite() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

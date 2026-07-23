@@ -295,6 +295,10 @@ actor KVDiskCacheStore {
     private var lastCommitSequence: [String: Int] = [:]
     /// Running committed byte accounting (blobs + manifests of live entries).
     private var committedBytes = 0
+    /// In-flight reservation bytes, distinct from committedBytes (M-11). Transitions
+    /// to committedBytes only at publication; released by the writer's defer on every
+    /// exit path. Writes are actor-serialized, so at most one reservation is live.
+    private var reservedBytes = 0
     /// Live entry indices with their committed byte size and last-eligible-use ms.
     private var liveEntries: [String: KVLiveEntry] = [:]
     /// At most one promotion in flight namespace-wide (FR-KVP9 back-pressure).
@@ -605,14 +609,22 @@ actor KVDiskCacheStore {
             return skip(.freeSpaceFloor, snapshot)
         }
 
-        // Quota reservation (evict LRU to fund, honoring the metadata reserve).
-        guard try reserveQuota(estimatedDiskBytes, nowMillis: nowMillis) else {
+        // Quota reservation (M-11): reserve the NET byte delta into a distinct
+        // `reservedBytes` counter — never `committedBytes` (which would double-count
+        // at publication). A replacement reserves only the growth over the previous
+        // generation's bytes and does NOT trigger entry-count eviction. The
+        // reservation is released on EVERY exit via defer (no leak on skip/crash).
+        let index = snapshot.indexHMAC
+        let previousBytes = liveEntries[index]?.bytes ?? 0
+        let isReplacement = liveEntries[index] != nil
+        let reservation = max(0, estimatedDiskBytes - previousBytes)
+        guard try reserveQuota(reservation, isReplacement: isReplacement, excluding: index, nowMillis: nowMillis) else {
             return skip(.quotaExhausted, snapshot)
         }
+        defer { reservedBytes -= reservation }
 
         // Write ordering: drop a stale snapshot (commit sequence ≤ last published).
-        if let last = lastCommitSequence[snapshot.indexHMAC], snapshot.commitSequence <= last {
-            committedBytes -= estimatedDiskBytes   // release the reservation
+        if let last = lastCommitSequence[index], snapshot.commitSequence <= last {
             return skip(.snapshotDisplaced, snapshot)
         }
 
@@ -622,10 +634,8 @@ actor KVDiskCacheStore {
         } catch let crash as KVInjectedCrash {
             throw crash
         } catch let e as KVKeychainError where isUnavailable(e) {
-            committedBytes -= estimatedDiskBytes
             return skip(.dekCreateFailed, snapshot)
         } catch {
-            committedBytes -= estimatedDiskBytes
             return skip(.ioError, snapshot)
         }
     }
@@ -1266,26 +1276,35 @@ actor KVDiskCacheStore {
 
     // MARK: - Quota / eviction (FR-KVP7)
 
-    /// Reserve `bytes` against the data budget (total minus the metadata reserve),
-    /// evicting LRU entries to fund the write. Returns false when it cannot be funded.
-    private func reserveQuota(_ bytes: Int, nowMillis: Int) throws -> Bool {
+    /// Reserve `bytes` (the NET growth over any existing generation) against the data
+    /// budget (total minus the metadata reserve), evicting LRU entries to fund the
+    /// write (M-11). The reservation is tracked in `reservedBytes`, distinct from
+    /// `committedBytes`, and released by the caller's `defer`. A replacement of an
+    /// existing index does NOT trigger entry-count eviction (the count is unchanged).
+    /// Returns false when it cannot be funded.
+    private func reserveQuota(_ bytes: Int, isReplacement: Bool, excluding index: String, nowMillis: Int) throws -> Bool {
         let dataBudget = max(0, config.maxBytes - config.metadataReserveBytes)
-        // Evict by entry count first.
-        while liveEntries.count >= config.maxEntries {
-            guard try evictOneLRU(nowMillis: nowMillis) else { return false }
+        // Entry-count eviction applies only when admitting a NEW index.
+        if !isReplacement {
+            while liveEntries.count >= config.maxEntries {
+                guard try evictOneLRU(excluding: index, nowMillis: nowMillis) else { return false }
+            }
         }
-        while committedBytes + bytes > dataBudget {
-            guard try evictOneLRU(nowMillis: nowMillis) else { return false }
+        while committedBytes + reservedBytes + bytes > dataBudget {
+            guard try evictOneLRU(excluding: index, nowMillis: nowMillis) else { return false }
         }
-        guard committedBytes + bytes <= dataBudget else { return false }
-        committedBytes += bytes
+        guard committedBytes + reservedBytes + bytes <= dataBudget else { return false }
+        reservedBytes += bytes
         return true
     }
 
-    /// Evict the least-recently-eligible-used entry; destroys its DEK (crypto-shred).
+    /// Evict the least-recently-eligible-used entry (never the index being written);
+    /// destroys its DEK (crypto-shred).
     @discardableResult
-    private func evictOneLRU(nowMillis: Int) throws -> Bool {
-        guard let victim = liveEntries.min(by: { $0.value.lastUsedMillis < $1.value.lastUsedMillis })?.key else {
+    private func evictOneLRU(excluding: String? = nil, nowMillis: Int) throws -> Bool {
+        guard let victim = liveEntries
+            .filter({ $0.key != excluding })
+            .min(by: { $0.value.lastUsedMillis < $1.value.lastUsedMillis })?.key else {
             return false
         }
         try destroyWholeEntry(index: victim, reason: .diskEvictQuota)
