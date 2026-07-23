@@ -553,6 +553,7 @@ actor KVDiskCacheStore {
     }
 
     private func commitEntry(_ snapshot: KVWriteSnapshot, decodedLength: Int, nowMillis: Int) throws -> KVWriteResult {
+        let writeStarted = Date()
         let index = snapshot.indexHMAC
         let dir = entryDir(index)
         let newEntry = !fileExists(dir)
@@ -683,6 +684,7 @@ actor KVDiskCacheStore {
                 "generation": "\(generation)",
                 "commit_sequence": "\(snapshot.commitSequence)",
                 "serialized_bytes": "\(blob.count)",
+                "write_ms": "\(Int(Date().timeIntervalSince(writeStarted) * 1000))",
             ])
             return .committed(generation: generation, commitSequence: snapshot.commitSequence)
         } catch let crash as KVInjectedCrash {

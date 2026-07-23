@@ -176,3 +176,33 @@ node coldwarm-probe.mjs --scenario warm --model qwen3-coder-30b-a3b-instruct --s
 node coldwarm-probe.mjs --scenario cold --state cold --regime canary_nonstream
 node coldwarm-probe.mjs --build-matrix
 ```
+
+## KVS-01a — KV-survival restart cycle (SPEC-037, FR-KVP13 / §6)
+
+`kvs-01a.sh` is a distinct mode that drives the SPEC-037 restart-survival gate:
+persist a synthetic `conv:kvs-synth:` prefix over the direct-HTTP operator path,
+**wait for `disk_write_committed`** in the provider stderr (the persist-before-kill
+barrier), SIGKILL the provider, relaunch the exact build/model, then re-send the
+same prefix + one new suffix token within the eligibility window and record whether
+it promoted from disk (`disk_hit`).
+
+It is **harness capability, not a CI run** — it launches a real model. Like the
+cold-cycle path it refuses a production coordinator (`§6` production fence): the
+target must be a **local provider you own**, with the tier enabled
+(`kv_disk_cache.enabled=true`).
+
+```bash
+export KVS01A_PROVIDER_CMD="macprovider-cli serve --config /path/to/local.yaml"
+export KVS01A_BASE=http://127.0.0.1:8080
+export KVS01A_PROMPT_TOKENS=2500          # v1 allowlist class under the 256 MiB ceiling; 8k is KVS-01b
+./kvs-01a.sh
+```
+
+Each cycle appends one §6 record (regime `kvs01a_restored`) to
+`$KVS01A_STORE` (default `~/.local/state/kvs-01a/samples.ndjson`): `disk_reason`
+(hit/miss code), `cached_prompt_tokens`, `prompt_tokens`, `ttft_ms`,
+`total_latency_ms`, `restore_bytes`, `restore_ms`, `staging_peak_bytes`,
+`commit_serialized_bytes`, and `commit_latency_ms` (write-path overhead). A
+restored hit reports a positive `cached_prompt_tokens` by the unchanged LCP rule;
+`prompt_tokens` stays the full incoming length. `kvs-01a-probe.mjs` is the request
+half (one streaming turn), re-usable stand-alone for the warm/cold arms.
