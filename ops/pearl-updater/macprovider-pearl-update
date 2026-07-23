@@ -54,6 +54,8 @@ BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
 INDEPENDENT_ALERT_ENV_PATH = Path("/etc/macprovider/monitor.env")
 VALIDATOR_ACCOUNT = "macprovider-updater-validate"
+BACKEND_SERVICE_ACCOUNT = "macprovider"
+BACKEND_SERVICE_GROUP = "macprovider"
 CATALOG_SERVICE_ACCOUNT = "macprovider"
 CATALOG_SERVICE_GROUP = "macprovider"
 INDEPENDENT_ALERT_ACCOUNT = "macprovider"
@@ -742,6 +744,7 @@ class Updater:
         trusted_uid: int = 0,
         candidate_uid: int | None = None,
         candidate_gid: int | None = None,
+        backend_gid: int | None = None,
         catalog_gid: int | None = None,
         independent_alert_gid: int | None = None,
         isolate_candidate_network: bool = False,
@@ -764,6 +767,7 @@ class Updater:
         self.trusted_uid = trusted_uid
         self.candidate_uid = trusted_uid if candidate_uid is None else candidate_uid
         self.candidate_gid = trusted_uid if candidate_gid is None else candidate_gid
+        self.backend_gid = self.candidate_gid if backend_gid is None else backend_gid
         self.catalog_gid = self.candidate_gid if catalog_gid is None else catalog_gid
         self.independent_alert_gid = (
             self.candidate_gid if independent_alert_gid is None else independent_alert_gid
@@ -3526,14 +3530,24 @@ class Updater:
         self._journal_transition("file_replace_complete", pending_action=None)
 
     def atomic_install(self, source: Path, destination: Path) -> None:
-        destination_stat = self._trusted_regular_file(destination, f"installed {destination.name} binary")
+        self._trusted_regular_file(destination, f"installed {destination.name} binary")
+        expected_sha256 = sha256_file(source)
         self.atomic_replace(
             source,
             destination,
-            uid=0,
-            gid=destination_stat.st_gid,
+            uid=self.trusted_uid,
+            gid=self.backend_gid,
             mode=0o750,
         )
+        installed = self._trusted_regular_file(destination, f"installed {destination.name} binary")
+        if (
+            installed.st_gid != self.backend_gid
+            or stat.S_IMODE(installed.st_mode) != 0o750
+            or sha256_file(destination) != expected_sha256
+        ):
+            raise UpdateError(
+                f"installed {destination.name} ownership, mode, or checksum is invalid"
+            )
 
     @staticmethod
     def _validate_catalog_target(target: str) -> None:
@@ -5100,6 +5114,7 @@ def main(argv: list[str]) -> int:
     if testing:
         candidate_uid = os.geteuid()
         candidate_gid = os.getegid()
+        backend_gid = candidate_gid
         catalog_gid = candidate_gid
         independent_alert_gid = candidate_gid
     else:
@@ -5111,6 +5126,10 @@ def main(argv: list[str]) -> int:
             raise UpdateError(f"{VALIDATOR_ACCOUNT} service account must not use the root uid or gid")
         candidate_uid = account.pw_uid
         candidate_gid = account.pw_gid
+        backend_gid = resolve_service_group_gid(
+            BACKEND_SERVICE_ACCOUNT,
+            BACKEND_SERVICE_GROUP,
+        )
         catalog_gid = resolve_service_group_gid(
             CATALOG_SERVICE_ACCOUNT,
             CATALOG_SERVICE_GROUP,
@@ -5134,6 +5153,7 @@ def main(argv: list[str]) -> int:
         trusted_uid=trusted_uid,
         candidate_uid=candidate_uid,
         candidate_gid=candidate_gid,
+        backend_gid=backend_gid,
         catalog_gid=catalog_gid,
         independent_alert_gid=independent_alert_gid,
         isolate_candidate_network=not testing,

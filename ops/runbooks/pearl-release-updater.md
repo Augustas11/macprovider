@@ -64,6 +64,12 @@ and the durable signed tag, commit, version, and component hashes match the
 candidate. A same-version binary or state-file mismatch triggers transactional
 pair repair instead of a skip.
 
+Live coordinator and gateway binaries are always normalized to
+`root:macprovider 0750` from the named systemd service group. The updater never
+inherits daemon ownership from a legacy or drifted destination file. The same
+invariant applies during rollback, and every atomic replacement is read back
+for exact group, mode, and checksum before service start.
+
 The first adoption may start from older deployment-script binaries whose
 embedded versions are clean `git describe` identities such as
 `v1.8.26-4-g64083ef`. The updater accepts that exact, non-dirty shape only when
