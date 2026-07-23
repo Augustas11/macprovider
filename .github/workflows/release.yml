@@ -108,6 +108,18 @@ jobs:
             phase4-coordinator/go.sum
             phase5-gateway/go.sum
 
+      - name: Seal the Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /usr/local/lib/macprovider-go-verifier
+          sudo install -d -o root -g wheel -m 0755 /usr/local/lib/macprovider-go-verifier
+          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/
+          sudo chown -R root:wheel /usr/local/lib/macprovider-go-verifier
+          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier
+          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go
+
       - name: Build Pearl linux-amd64 binaries
         shell: bash
         run: |
@@ -167,7 +179,8 @@ jobs:
         run: |
           set -euo pipefail
           cd phase3-binary/dist
-          MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \
+          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
+            MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \
             ./package.sh "${{ steps.release_source.outputs.tag }}"
 
       - name: Build Malibu.app

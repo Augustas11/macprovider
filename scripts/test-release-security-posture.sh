@@ -65,6 +65,30 @@ def unique_step(job, name):
 
 
 PEARL_SETUP_GO_SHA = "924ae3a1cded613372ab5595356fb5720e22ba16"
+PEARL_GO_SEAL_STEP = (
+    "        shell: bash\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    '          source_root="$(go env GOROOT)"\n'
+    "          sudo test ! -e /usr/local/lib/macprovider-go-verifier\n"
+    "          sudo install -d -o root -g wheel -m 0755 /usr/local/lib/macprovider-go-verifier\n"
+    '          sudo cp -a "$source_root/." /usr/local/lib/macprovider-go-verifier/\n'
+    "          sudo chown -R root:wheel /usr/local/lib/macprovider-go-verifier\n"
+    "          sudo chmod -R go-w /usr/local/lib/macprovider-go-verifier\n"
+    "          sudo test -x /usr/local/lib/macprovider-go-verifier/bin/go"
+)
+PEARL_SETUP_SEAL_BUILD_SEQUENCE = (
+    "\n      - name: Setup Go for Pearl binaries\n"
+    "{setup_go}\n"
+    "\n      - name: Seal the Tier-2 verifier toolchain\n"
+    f"{PEARL_GO_SEAL_STEP}\n"
+    "\n      - name: Build Pearl linux-amd64 binaries\n"
+)
+PEARL_SEALED_GO_REQUIREMENT = (
+    "          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \\\n"
+    '            MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \\\n'
+    '            ./package.sh "${{ steps.release_source.outputs.tag }}"'
+)
 PEARL_GO_VERIFY_STEP = (
     "        env:\n"
     '          EXPECTED_REVISION: ${{ steps.release_source.outputs.commit }}\n'
@@ -84,7 +108,9 @@ PEARL_VERIFY_UPLOAD_SEQUENCE = (
 
 def validate_pearl_toolchain(job):
     setup_go = unique_step(job, "Setup Go for Pearl binaries")
+    seal_go = unique_step(job, "Seal the Tier-2 verifier toolchain")
     pearl_build = unique_step(job, "Build Pearl linux-amd64 binaries")
+    package_build = unique_step(job, "Build package")
     verifier_step = unique_step(job, "Verify staged Pearl Go binaries")
     setup_go_uses = re.findall(
         r"(?m)^        uses: actions/setup-go@([0-9a-f]{40})$", job
@@ -100,6 +126,18 @@ def validate_pearl_toolchain(job):
         )
     if re.search(r"(?m)^          go-version:\s*", setup_go):
         raise SystemExit("Pearl Setup Go must not carry a second hardcoded Go version")
+    if seal_go.strip("\n") != PEARL_GO_SEAL_STEP:
+        raise SystemExit("Tier-2 verifier toolchain seal must contain only the exact root-owned copy")
+    sealed_go_path = "/usr/local/lib/macprovider-go-verifier"
+    if job.count(sealed_go_path) != PEARL_GO_SEAL_STEP.count(sealed_go_path):
+        raise SystemExit("sealed Go verifier path must appear only in the exact seal step")
+    expected_sequence = PEARL_SETUP_SEAL_BUILD_SEQUENCE.format(setup_go=setup_go.rstrip("\n"))
+    if job.count(expected_sequence) != 1:
+        raise SystemExit("Pearl Setup Go, verifier seal, and binary build must remain adjacent and ordered")
+    if package_build.count(PEARL_SEALED_GO_REQUIREMENT) != 1:
+        raise SystemExit("release package verification must require the sealed Go verifier")
+    if job.count("CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER") != 1:
+        raise SystemExit("release build must set the sealed Go verifier requirement exactly once")
     if verifier_step.strip("\n") != PEARL_GO_VERIFY_STEP:
         raise SystemExit("Pearl verifier step must contain only the exact binary verifier command")
     if job.count("scripts/verify-pearl-go-binaries.py") != 1:
@@ -275,6 +313,28 @@ setup_override_mutation = build.replace(
     "\n      - name: Build Pearl linux-amd64 binaries\n",
     1,
 )
+seal_replacement_mutation = build.replace(PEARL_GO_SEAL_STEP, "        run: true", 1)
+seal_failure_suppression_mutation = build.replace(
+    PEARL_GO_SEAL_STEP,
+    PEARL_GO_SEAL_STEP.replace(
+        "        run: |\n",
+        "        run: |\n          set +e\n",
+        1,
+    ),
+    1,
+)
+post_seal_override_mutation = build.replace(
+    "\n      - name: Build package\n",
+    "\n      - name: Override sealed Pearl Go\n"
+    "        run: sudo cp /bin/true /usr/local/lib/macprovider-go-verifier/bin/go\n"
+    "\n      - name: Build package\n",
+    1,
+)
+sealed_requirement_removal_mutation = build.replace(
+    "          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \\\n",
+    "",
+    1,
+)
 verifier_replacement_mutation = build.replace(PEARL_GO_VERIFY_STEP, "        run: true", 1)
 verifier_suppression_mutation = build.replace(
     PEARL_GO_VERIFY_STEP,
@@ -312,6 +372,10 @@ gateway_role_substitution_mutation = build.replace(
 )
 for description, mutation in (
     ("case-folded setup-go override", setup_override_mutation),
+    ("toolchain seal replacement", seal_replacement_mutation),
+    ("toolchain seal failure suppression", seal_failure_suppression_mutation),
+    ("post-seal toolchain override", post_seal_override_mutation),
+    ("sealed verifier requirement removal", sealed_requirement_removal_mutation),
     ("binary verifier replacement", verifier_replacement_mutation),
     ("binary verifier failure suppression", verifier_suppression_mutation),
     ("compound setup-go/verifier replacement", compound_mutation),

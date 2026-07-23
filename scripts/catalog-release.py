@@ -56,6 +56,7 @@ FIXED_GO_EXECUTABLES = (
     "/usr/local/lib/macprovider-go-verifier/bin/go",
 )
 ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES = frozenset({"/usr/local/lib/macprovider-go-verifier/bin/go"})
+REQUIRE_SEALED_GO_ENV = "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER"
 
 
 class CatalogError(RuntimeError):
@@ -1128,6 +1129,11 @@ def go_executable() -> str:
     version probe before trusting the binary. Tier-2 authenticity must not
     depend on ambient process environment.
     """
+    sealed_requirement = os.environ.get(REQUIRE_SEALED_GO_ENV)
+    if sealed_requirement not in (None, "1"):
+        fail(f"{REQUIRE_SEALED_GO_ENV} must be unset or exactly 1")
+    require_sealed = sealed_requirement == "1"
+
     candidates = [
         candidate
         for candidate in FIXED_GO_EXECUTABLES
@@ -1146,6 +1152,8 @@ def go_executable() -> str:
         sealed_candidate = candidate in ALWAYS_ROOT_TRUSTED_GO_EXECUTABLES
         if sealed_candidate:
             if not os.path.lexists(candidate):
+                if require_sealed:
+                    fail(f"required sealed Go verifier toolchain is missing: {candidate}")
                 continue
             if not root_trusted_executable(candidate):
                 fail(f"sealed Go verifier toolchain is not root-trusted: {candidate}")
