@@ -124,11 +124,26 @@ assert document["SUPublicEDKey"] == values[0]
 assert sorted(key for key in document if key.startswith("SU")) == ["SUPublicEDKey"]
 PY
 
-create_test_app "$work/later.app" 1.8.40 40
-python3 "$trust_anchor_helper" prepare v1.8.40 \
+create_test_app "$work/later.app" 1.8.45 45
+cp "$work/later.app/Contents/Info.plist" "$work/later.Info.plist"
+python3 "$trust_anchor_helper" preflight v1.8.59 \
   "$work/later.app" "$legacy_key" >/dev/null
+cmp "$work/later.Info.plist" "$work/later.app/Contents/Info.plist" ||
+  fail "candidate preflight mutated independently versioned Malibu"
+python3 "$trust_anchor_helper" prepare v1.8.59 \
+  "$work/later.app" "$legacy_key" >/dev/null
+cmp "$work/later.Info.plist" "$work/later.app/Contents/Info.plist" ||
+  fail "non-bridge preparation mutated independently versioned Malibu"
 python3 "$trust_anchor_helper" verify \
   "$work/later.app" "$legacy_key" >/dev/null
+
+create_test_app "$work/wrong-bridge-version.app" 1.8.45 45
+expect_anchor_failure wrong-bridge-version 'bundle version 1.8.45 does not match release tag v1.8.39' \
+  preflight v1.8.39 "$work/wrong-bridge-version.app" "$legacy_key"
+
+create_test_app "$work/reserved-bridge-version.app" 1.8.39 39
+expect_anchor_failure reserved-bridge-version 'reserved for the v1.8.39 trust-anchor release' \
+  preflight v1.8.59 "$work/reserved-bridge-version.app" "$legacy_key"
 
 create_test_app "$work/missing-anchor.app" 1.8.39 39
 expect_anchor_failure missing-anchor 'must contain only the exact frozen' \
