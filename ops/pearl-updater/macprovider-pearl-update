@@ -150,7 +150,18 @@ CANARY_AUTHORITY_PRIVATE_FILES = {
     CANARY_EXPECTED_FLEET: "canary expected fleet",
 }
 CANARY_ENABLE_GATE = Path("/etc/macprovider-canary-buyer/enabled")
+CANARY_LEGACY_ENABLE_GATE = Path("/etc/macprovider/canary-buyer.enabled")
 CANARY_DISABLE_SENTINEL = Path("/var/lib/macprovider-canary-buyer/DISABLED")
+CANARY_DISABLE_STATE_DIRECTORY = Path("/var/lib/private/macprovider-canary-buyer")
+BUYER_CANARY_MODE_REQUIRED = "required"
+BUYER_CANARY_MODE_DISABLED = "disabled"
+BUYER_CANARY_DISABLED_AUTHORITY = "hard-disabled-posture-v1"
+BUYER_CANARY_MODES = frozenset(
+    {
+        BUYER_CANARY_MODE_REQUIRED,
+        BUYER_CANARY_MODE_DISABLED,
+    }
+)
 
 
 class UpdateError(RuntimeError):
@@ -221,6 +232,7 @@ class Config:
     provider_recovery_timeout_s: int = 900
     service_health_timeout_s: int = 60
     canary_timeout_s: int = 720
+    buyer_canary_mode: str = BUYER_CANARY_MODE_REQUIRED
     revoked_versions_file: Path = Path("/etc/macprovider/pearl-updater.revoked")
     deadman_heartbeat_id: str = ""
     deadman_api_token_file: Path = Path("/etc/macprovider/pearl-updater.betterstack-token")
@@ -496,6 +508,13 @@ def bounded_int(value: str, key: str, minimum: int, maximum: int) -> int:
     return parsed
 
 
+def enum_value(value: str, key: str, allowed: frozenset[str]) -> str:
+    if value not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise UpdateError(f"{key} must be one of: {choices}")
+    return value
+
+
 def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
     values: dict[str, str] = {}
     if _path_entry_exists(path):
@@ -535,6 +554,7 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S",
         "PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S",
         "PEARL_UPDATER_CANARY_TIMEOUT_S",
+        "PEARL_UPDATER_BUYER_CANARY_MODE",
         "PEARL_UPDATER_REVOKED_VERSIONS_FILE",
         "PEARL_UPDATER_DEADMAN_HEARTBEAT_ID",
         "PEARL_UPDATER_DEADMAN_API_TOKEN_FILE",
@@ -571,6 +591,11 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         provider_recovery_timeout_s=bounded_int(values.get("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S", "900"), "provider recovery timeout", 10, 900),
         service_health_timeout_s=bounded_int(values.get("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S", "60"), "service health timeout", 5, 300),
         canary_timeout_s=bounded_int(values.get("PEARL_UPDATER_CANARY_TIMEOUT_S", "720"), "canary timeout", 700, 1800),
+        buyer_canary_mode=enum_value(
+            values.get("PEARL_UPDATER_BUYER_CANARY_MODE", BUYER_CANARY_MODE_REQUIRED),
+            "buyer canary mode",
+            BUYER_CANARY_MODES,
+        ),
         revoked_versions_file=Path(values.get("PEARL_UPDATER_REVOKED_VERSIONS_FILE", "/etc/macprovider/pearl-updater.revoked")),
         deadman_heartbeat_id=values.get("PEARL_UPDATER_DEADMAN_HEARTBEAT_ID", ""),
         deadman_api_token_file=Path(
@@ -945,6 +970,7 @@ class Updater:
             },
             "previous_version": str(previous),
             "previous_advertised_version": previous_advertised,
+            "buyer_canary_mode": self.config.buyer_canary_mode,
             "transaction_id": secrets.token_hex(32),
             "boot_id": self._boot_id(),
             "transaction": None,
@@ -2560,6 +2586,97 @@ class Updater:
             authority=CANARY_AUTHORITY_VERSION,
         )
 
+    def verify_disabled_buyer_canary_posture(self) -> None:
+        for gate, description in (
+            (CANARY_ENABLE_GATE, "canary reviewed enable gate"),
+            (CANARY_LEGACY_ENABLE_GATE, "legacy canary enable gate"),
+        ):
+            if _path_entry_exists(gate):
+                raise UpdateError(f"{description} must be absent in disabled buyer-canary mode")
+        state_root = CANARY_DISABLE_SENTINEL.parent
+        try:
+            state_root_info = state_root.lstat()
+        except OSError as exc:
+            raise UpdateError(
+                f"cannot inspect canary state directory {state_root}: {exc}"
+            ) from exc
+        if stat.S_ISLNK(state_root_info.st_mode):
+            expected_link = os.path.relpath(
+                CANARY_DISABLE_STATE_DIRECTORY,
+                start=state_root.parent,
+            )
+            try:
+                actual_link = os.readlink(state_root)
+            except OSError as exc:
+                raise UpdateError(
+                    f"cannot inspect canary state-directory link {state_root}: {exc}"
+                ) from exc
+            if (
+                state_root_info.st_uid != self.trusted_uid
+                or state_root_info.st_nlink != 1
+                or actual_link != expected_link
+            ):
+                raise UpdateError(
+                    "canary state-directory link must be the root-owned systemd StateDirectory link"
+                )
+            _trusted_directory(
+                CANARY_DISABLE_STATE_DIRECTORY,
+                "canary private state directory",
+                trusted_uid=self.trusted_uid,
+                mode=0o755,
+            )
+        else:
+            _trusted_directory(
+                state_root,
+                "canary state directory",
+                trusted_uid=self.trusted_uid,
+                mode=0o755,
+            )
+        sentinel = self._trusted_regular_file(
+            CANARY_DISABLE_SENTINEL,
+            "canary emergency-disable sentinel",
+        )
+        if stat.S_IMODE(sentinel.st_mode) != 0o644 or sentinel.st_size != 0:
+            raise UpdateError(
+                "canary emergency-disable sentinel must be an empty root-owned 0644 file"
+            )
+        if _path_entry_exists(self.canary_rollback_authorization):
+            raise UpdateError("stale legacy rollback authorization blocks rollout")
+        expected = (
+            ("is-enabled", "canary-buyer.timer", 1, "disabled"),
+            ("is-active", "canary-buyer.timer", 3, "inactive"),
+            ("is-active", "canary-buyer.service", 3, "inactive"),
+        )
+        for action, unit, returncode, output in expected:
+            result = self.run_command(
+                ["systemctl", action, unit],
+                check=False,
+                timeout=10,
+            )
+            if result.returncode != returncode or result.stdout.strip() != output:
+                raise UpdateError(
+                    f"disabled buyer-canary mode requires {unit} {output}; "
+                    f"systemctl {action} returned {result.stdout.strip()!r}"
+                )
+        self.audit(
+            "buyer_canary_rollout_posture",
+            "disabled",
+            mode=BUYER_CANARY_MODE_DISABLED,
+            timer_enabled=False,
+            timer_active=False,
+            service_active=False,
+        )
+
+    def verify_buyer_canary_rollout_posture(self) -> None:
+        if self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED:
+            self.verify_canary_authority()
+            self.verify_canary_rollout_readiness()
+            return
+        if self.config.buyer_canary_mode == BUYER_CANARY_MODE_DISABLED:
+            self.verify_disabled_buyer_canary_posture()
+            return
+        raise UpdateError("unsupported buyer canary mode")
+
     def _deadman_api_token(self) -> str:
         path = self.config.deadman_api_token_file
         token = _read_trusted_text(
@@ -2933,6 +3050,8 @@ class Updater:
             ) from journal_error
 
     def run_canary_gate(self, *, legacy_rollback_version: str | None = None) -> None:
+        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_REQUIRED:
+            raise UpdateError("buyer canary gate is unavailable outside required mode")
         unit = "canary-buyer.service"
         # The rollout can run for hours. Revalidate both immutable runtime
         # authority and the operator kill switches at the execution choke point,
@@ -3990,9 +4109,33 @@ class Updater:
                 protected_fleet_stable,
             )
         if legacy_rollback_version is None:
-            self.run_canary_gate()
+            if self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED:
+                self.run_canary_gate()
+            else:
+                self.verify_disabled_buyer_canary_posture()
+                self.audit(
+                    "buyer_canary_gate",
+                    "skipped",
+                    mode=BUYER_CANARY_MODE_DISABLED,
+                    replacement_gates=(
+                        "public_identity,"
+                        "stable_protected_fleet,"
+                        "exact_catalog_admission,"
+                        "exact_provider_canary"
+                    ),
+                )
         else:
-            self.run_canary_gate(legacy_rollback_version=legacy_rollback_version)
+            if self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED:
+                self.run_canary_gate(legacy_rollback_version=legacy_rollback_version)
+            else:
+                self.verify_disabled_buyer_canary_posture()
+                self.audit(
+                    "buyer_canary_gate",
+                    "skipped",
+                    mode=BUYER_CANARY_MODE_DISABLED,
+                    rollback=True,
+                    replacement_gates="public_identity,stable_protected_fleet",
+                )
 
     def verify_provider_admission_rollout_policy(self) -> None:
         self.validate_provider_admission_policy_config()
@@ -4108,6 +4251,7 @@ class Updater:
                 provider_recovery_timeout_s=self.config.provider_recovery_timeout_s,
             )
         self.verify_exact_provider_canary(release)
+        self.verify_buyer_canary_rollout_posture()
         self.restore_auxiliary_timers()
         self._restore_canary_timer()
 
@@ -4457,6 +4601,8 @@ class Updater:
                 self.assert_unit_quiescent(unit)
 
     def _canary_schedule_allowed(self) -> bool:
+        if self.config.buyer_canary_mode == BUYER_CANARY_MODE_DISABLED:
+            return False
         if _path_entry_exists(CANARY_DISABLE_SENTINEL):
             return False
         try:
@@ -4680,6 +4826,7 @@ class Updater:
         self.audit("rollout_started", "in_progress", candidate=release.tag, previous=str(previous))
         self._start_journal(release, previous)
         try:
+            self.verify_buyer_canary_rollout_posture()
             self.capture_rollout_state()
             self.enter_deadman_maintenance()
             self.stop_for_rollout()
@@ -4764,6 +4911,19 @@ class Updater:
                 recorded_boot_id,
             ):
                 raise UpdateError("phase journal boot identifier is invalid")
+            buyer_canary_mode = payload.get(
+                "buyer_canary_mode",
+                BUYER_CANARY_MODE_REQUIRED,
+            )
+            if (
+                not isinstance(buyer_canary_mode, str)
+                or buyer_canary_mode not in BUYER_CANARY_MODES
+            ):
+                raise UpdateError("phase journal buyer canary mode is invalid")
+            self.config = dataclasses.replace(
+                self.config,
+                buyer_canary_mode=buyer_canary_mode,
+            )
             current_boot_id = self._boot_id()
             previous_services = payload.get("previous_services")
             if not isinstance(previous_services, dict):
@@ -4999,8 +5159,7 @@ def main(argv: list[str]) -> int:
             raise
         current, decision = updater.assess_candidate(release)
         config_update = updater.prepare_config_update(release)
-        updater.verify_canary_authority()
-        updater.verify_canary_rollout_readiness()
+        updater.verify_buyer_canary_rollout_posture()
         updater.validate_deadman_configuration()
         updater.validate_catalog_canary_configuration()
         if decision == "already_current" and config_update.previous_version != config_update.next_version:
@@ -5020,7 +5179,12 @@ def main(argv: list[str]) -> int:
             "current_version": str(current),
             "provider_advertised_version": release.provider_advertised_version,
             "advertised_version_config": str(config_update.target),
-            "canary_rollout_authority": CANARY_AUTHORITY_VERSION,
+            "canary_rollout_authority": (
+                CANARY_AUTHORITY_VERSION
+                if config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED
+                else BUYER_CANARY_DISABLED_AUTHORITY
+            ),
+            "buyer_canary_mode": config.buyer_canary_mode,
             "deadman_maintenance": "betterstack-paused-during-apply",
             "repository": PINNED_REPOSITORY,
         }
