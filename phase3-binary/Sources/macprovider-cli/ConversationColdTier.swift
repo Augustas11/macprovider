@@ -198,4 +198,25 @@ struct ConversationColdSnapshot: Sendable {
     let createdAtMillis: Int
     let eligibleUntilMillis: Int
     let incarnation: String
+    /// Item 3 (FR-KVP3 write-live budget): the aggregate write-live bytes reserved for
+    /// this snapshot at capture (before the deep copy). Carried as a single-release
+    /// token through pending → active serialization → completion/cancellation/
+    /// displacement, and released exactly once by the persist Task. 0 for a snapshot
+    /// that carries no reservation (e.g. a test double).
+    let reservedWriteBytes: Int
+
+    init(rawKey: String, tokens: [Int32], layers: [KVLayerPayload], identity: KVWriteIdentity,
+         sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int,
+         eligibleUntilMillis: Int, incarnation: String, reservedWriteBytes: Int = 0) {
+        self.rawKey = rawKey
+        self.tokens = tokens
+        self.layers = layers
+        self.identity = identity
+        self.sampledPurgeGeneration = sampledPurgeGeneration
+        self.commitSequence = commitSequence
+        self.createdAtMillis = createdAtMillis
+        self.eligibleUntilMillis = eligibleUntilMillis
+        self.incarnation = incarnation
+        self.reservedWriteBytes = reservedWriteBytes
+    }
 }

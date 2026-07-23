@@ -1349,6 +1349,13 @@ actor KVDiskCacheStore {
         emit(.diskWriteSkipped, detail: .identityUnavailable, indexHashPrefix: identityPrefix(rawKey))
     }
 
+    /// Item 3 (FR-KVP3): emit `disk_write_skipped(detail=write_budget)` for a commit
+    /// refused BEFORE the deep copy because the aggregate write-live staging budget is
+    /// exhausted. Index prefix is best-effort (keychain may be dormant).
+    func noteWriteBudgetSkipped(rawKey: String) {
+        emit(.diskWriteSkipped, detail: .writeBudget, indexHashPrefix: identityPrefix(rawKey))
+    }
+
     private func identityPrefix(_ rawKey: String) -> String? {
         // `try?` flattens the throwing Optional; a nil epoch master ⇒ no prefix.
         guard let index = try? currentIndex(rawKey: rawKey) else { return nil }

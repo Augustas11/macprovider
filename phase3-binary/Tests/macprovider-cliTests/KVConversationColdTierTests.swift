@@ -386,4 +386,54 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertEqual(fake.finishedOutcomes.first?.reason, "prefix_diverged")
         await cache.abort(lease!)
     }
+
+    // MARK: - Item 3: aggregate write-live budget (FR-KVP3 RAM-DoS bound)
+
+    private func makeAdapter(writeStagingMaxBytes: Int) -> (KVConversationColdTierAdapter, KVDiskCacheStore) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvadapter-\(UUID().uuidString)", isDirectory: true)
+        let config = KVDiskCacheStoreConfig(
+            root: root, namespaceID: "ns-adapter",
+            maxBytes: 16 * 1024 * 1024, maxEntries: 64, maxEntryBytes: 8 * 1024 * 1024,
+            retentionSeconds: 3600, stagingMaxBytes: 256 * 1024 * 1024,
+            writeStagingMaxBytes: writeStagingMaxBytes, minFreeBytes: 1024 * 1024,
+            promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
+        let store = KVDiskCacheStore(config: config, keychain: KVInMemoryKeychain(), sink: KVRecordingEventSink())
+        let adapter = KVConversationColdTierAdapter(
+            store: store, namespaceID: "ns-adapter", eligibilityTTLSeconds: 900,
+            writeStagingMaxBytes: writeStagingMaxBytes)
+        return (adapter, store)
+    }
+
+    /// Item 3: N concurrent ceiling-sized reservations — only those fitting the
+    /// AGGREGATE budget are admitted; the rest are rejected. Releasing frees the
+    /// budget again, and after all releases nothing leaks.
+    func testWriteLiveBudgetAggregateReservationAndNoLeak() {
+        let (adapter, _) = makeAdapter(writeStagingMaxBytes: 1000)
+        XCTAssertTrue(adapter.reserveWriteLive(400))
+        XCTAssertTrue(adapter.reserveWriteLive(400))
+        XCTAssertFalse(adapter.reserveWriteLive(400), "aggregate budget exhausted → reject")
+        XCTAssertEqual(adapter.writeLiveBytesForTest, 800, "only the fitting reservations are held")
+        adapter.releaseWriteLive(400)
+        XCTAssertTrue(adapter.reserveWriteLive(400), "release frees budget for a new reservation")
+        adapter.releaseWriteLive(400)
+        adapter.releaseWriteLive(400)
+        XCTAssertEqual(adapter.writeLiveBytesForTest, 0, "no leak after all releases")
+    }
+
+    /// Item 3: the reservation is carried with the snapshot and released exactly once
+    /// by the persist Task — completion (or, here, a skipped write against an inactive
+    /// store) drains the aggregate budget back to zero.
+    func testPersistTaskReleasesWriteLiveReservation() async {
+        let (adapter, _) = makeAdapter(writeStagingMaxBytes: 4096)
+        XCTAssertTrue(adapter.reserveWriteLive(500))
+        XCTAssertEqual(adapter.writeLiveBytesForTest, 500)
+        let snap = ConversationColdSnapshot(
+            rawKey: "conv:kvs-synth:release", tokens: [], layers: [],
+            identity: FakeColdTier.writeIdentity, sampledPurgeGeneration: 0, commitSequence: 1,
+            createdAtMillis: 0, eligibleUntilMillis: 0, incarnation: "i", reservedWriteBytes: 500)
+        adapter.enqueuePersist(snap)
+        await adapter.drainPendingPersists(timeoutSeconds: 5)
+        XCTAssertEqual(adapter.writeLiveBytesForTest, 0, "persist Task releases the single-release reservation exactly once")
+    }
 }

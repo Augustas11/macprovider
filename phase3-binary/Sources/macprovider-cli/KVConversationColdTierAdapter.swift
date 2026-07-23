@@ -65,10 +65,39 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private let writeStagingMaxBytes: Int
     private let maxEntryBytes: Int
     private let stagingMaxBytes: Int
-    /// Instantaneous write-live reservation (RAM bound). Captures are actor-serialized
-    /// by ConversationCache, so this bounds the copy-in-flight bytes.
+    /// Aggregate write-live reservation (Item 3, FR-KVP3 RAM-DoS bound). ONE budget
+    /// (`writeStagingMaxBytes`) covers all write-side memory held simultaneously —
+    /// every pending snapshot's deep copy plus the active serializer/codec buffers.
+    /// A reservation is taken atomically BEFORE the deep copy (rejecting the commit if
+    /// it would exceed the budget) and released exactly once when the persist Task
+    /// finishes/cancels/is displaced — NOT at capture return. This bounds the true
+    /// simultaneous write-side residency, so multiple indices cannot each retain a
+    /// ceiling-sized snapshot concurrently.
     private let writeLiveLock = NSLock()
     private var writeLiveBytes = 0
+
+    /// Item 3: atomically reserve `estimate` bytes against the aggregate write-live
+    /// budget. Returns false (reject) when the running total plus `estimate` would
+    /// exceed `writeStagingMaxBytes`. A successful reservation MUST be released exactly
+    /// once via `releaseWriteLive`.
+    func reserveWriteLive(_ estimate: Int) -> Bool {
+        writeLiveLock.lock(); defer { writeLiveLock.unlock() }
+        guard writeLiveBytes + estimate <= writeStagingMaxBytes else { return false }
+        writeLiveBytes += estimate
+        return true
+    }
+
+    /// Item 3: release a previously-taken write-live reservation (idempotent-safe for a
+    /// zero-byte token). Never over-releases below zero.
+    func releaseWriteLive(_ bytes: Int) {
+        guard bytes > 0 else { return }
+        writeLiveLock.lock(); writeLiveBytes = max(0, writeLiveBytes - bytes); writeLiveLock.unlock()
+    }
+
+    /// Test-only: the current aggregate write-live reservation (asserts no leak).
+    var writeLiveBytesForTest: Int {
+        writeLiveLock.lock(); defer { writeLiveLock.unlock() }; return writeLiveBytes
+    }
 
     /// Live-model per-layer geometry template, keyed by served model ID. Guarded
     /// by its own lock so the synchronous `captureSnapshot` and async
@@ -208,16 +237,29 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
 
         // HIGH-5 — estimate the decoded size from GEOMETRY (no byte copy) and skip an
         // oversized snapshot BEFORE the deep copy, so a huge cache can never be copied
-        // only to be rejected by the store. Then reserve the write-live bytes for the
-        // copy and release on every exit via defer.
+        // only to be rejected by the store.
         guard let estimatedDecoded = KVCacheSerialization.estimatedDecodedLength(caches, tokenCount: fullTokens.count),
               estimatedDecoded <= writeStagingMaxBytes,
               estimatedDecoded <= maxEntryBytes,
               estimatedDecoded <= stagingMaxBytes else {
             return nil
         }
-        writeLiveLock.lock(); writeLiveBytes += estimatedDecoded; writeLiveLock.unlock()
-        defer { writeLiveLock.lock(); writeLiveBytes -= estimatedDecoded; writeLiveLock.unlock() }
+
+        // Item 3 (FR-KVP3): ONE aggregate write-live reservation held across the whole
+        // persist lifetime. Reserve atomically BEFORE the deep copy; if it would exceed
+        // the aggregate budget, REJECT (disk_write_skipped, detail=write_budget) rather
+        // than copying. The reservation is NOT released here — it is carried with the
+        // snapshot as a single-release token and released once by the persist Task
+        // (completion, cancellation, or displacement). Multiple indices therefore cannot
+        // each retain a ceiling-sized snapshot concurrently.
+        guard reserveWriteLive(estimatedDecoded) else {
+            Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
+            return nil
+        }
+        // From here, any early return before building the snapshot MUST release the
+        // reservation (the snapshot that would otherwise carry it is not produced).
+        var reservationHandedOff = false
+        defer { if !reservationHandedOff { releaseWriteLive(estimatedDecoded) } }
 
         guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
 
@@ -266,6 +308,9 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // in — NOT a wall-clock read taken after the deep copy above, which would
         // gain the copy duration beyond the hot TTL.
         let createdAt = nowMillis
+        // The reservation is handed off to the snapshot (single-release token); the
+        // persist Task releases it exactly once.
+        reservationHandedOff = true
         return ConversationColdSnapshot(
             rawKey: conversationKey,
             tokens: fullTokens,
@@ -275,7 +320,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             commitSequence: seq,
             createdAtMillis: createdAt,
             eligibleUntilMillis: createdAt + eligibilityTTLSeconds * 1000,
-            incarnation: incarnation)
+            incarnation: incarnation,
+            reservedWriteBytes: estimatedDecoded)
     }
 
     // MARK: - Bounded async write queue (one pending per index)
@@ -292,10 +338,17 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     }
 
     private func runPersist(_ snapshot: ConversationColdSnapshot, gen: Int) async {
+        // Item 3: release the single-release write-live reservation exactly once, on
+        // EVERY exit — completion, cancellation (skipped doWrite), or displacement (a
+        // newer commit cancelled this Task). This is the sole release site for a
+        // snapshot's reservation, so the aggregate budget cannot leak.
+        defer {
+            releaseWriteLive(snapshot.reservedWriteBytes)
+            taskLock.lock()
+            if pendingGen[snapshot.rawKey] == gen { pendingTasks.removeValue(forKey: snapshot.rawKey) }
+            taskLock.unlock()
+        }
         if !Task.isCancelled { await doWrite(snapshot) }
-        taskLock.lock()
-        if pendingGen[snapshot.rawKey] == gen { pendingTasks.removeValue(forKey: snapshot.rawKey) }
-        taskLock.unlock()
     }
 
     private func doWrite(_ snapshot: ConversationColdSnapshot) async {
