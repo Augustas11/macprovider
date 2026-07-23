@@ -206,9 +206,10 @@ PROTECTED_OPENSSL_OUTPUT_ENV = (
     '          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
 )
 PROTECTED_OPENSSL_CONSUMERS = (
-    ("Prepare release assets", 1),
-    ("Require an advancing immutable discovery head", 2),
-    ("Publish one append-only immutable discovery transport", 1),
+    ("Sign + notarize binary", 1, 0),
+    ("Prepare release assets", 4, 1),
+    ("Require an advancing immutable discovery head", 2, 2),
+    ("Publish one append-only immutable discovery transport", 1, 1),
 )
 
 
@@ -379,22 +380,27 @@ def validate_protected_openssl(job):
         raise SystemExit(
             "protected release must not allow mutable OPENSSL_BIN environment writes"
         )
+    post_selector = job[selector_position:]
+    if re.search(r"(?m)^\s*openssl\b", post_selector) or "$(openssl" in post_selector:
+        raise SystemExit(
+            "protected release crypto must not fall back to a PATH-selected OpenSSL"
+        )
     if job.count(PROTECTED_OPENSSL_OUTPUT_ENV) != len(PROTECTED_OPENSSL_CONSUMERS):
         raise SystemExit(
             "every protected discovery producer and verifier must bind the "
             "immutable selector output"
         )
-    for name, expected_cli_uses in PROTECTED_OPENSSL_CONSUMERS:
+    for name, expected_references, expected_cli_flags in PROTECTED_OPENSSL_CONSUMERS:
         consumer = unique_step(job, name)
         if consumer.count(PROTECTED_OPENSSL_OUTPUT_ENV) != 1:
             raise SystemExit(
                 f"{name} must bind the exact protected OpenSSL selector output"
             )
-        if consumer.count('--openssl "$OPENSSL_BIN"') != expected_cli_uses:
+        if consumer.count('--openssl "$OPENSSL_BIN"') != expected_cli_flags:
             raise SystemExit(
                 f"{name} must pass protected OpenSSL to every discovery command"
             )
-        if consumer.count("OPENSSL_BIN") != expected_cli_uses + 1:
+        if consumer.count("OPENSSL_BIN") != expected_references + 1:
             raise SystemExit(
                 f"{name} contains an unreviewed protected OpenSSL reference"
             )
