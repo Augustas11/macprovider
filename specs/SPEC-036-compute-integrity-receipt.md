@@ -1038,9 +1038,13 @@ The request `payload` MUST include:
   `post_sampler_probabilities`; future sampler stages MUST define their own
   coherent basis before enforce use.
 - `k`: integer, exactly 64 or 256.
-- `positions`: a closed array (length 1..8) where each element is an object with
-  exactly `prompt_id` (string), `prompt_ref` (string; an allowlisted synthetic
-  corpus reference or redacted prompt handle — never buyer-origin content),
+- `positions`: a closed array (length 1..8, spanning **at most 4 distinct
+  `prompt_id` values** with a one-to-one `prompt_id`↔`prompt_ref` mapping, enforcing
+  the inherited SPEC-030 §FR-3 four-prompt / eight-position bound; the coordinator and
+  provider MUST reject a request exceeding 4 distinct prompts or 8 positions) where
+  each element is an object with exactly `prompt_id` (string), `prompt_ref` (string;
+  an allowlisted synthetic corpus reference or redacted prompt handle — never
+  buyer-origin content),
   `position_index` (non-negative integer), `token_prefix_digest`
   (`sha256:<hex>` over the exact teacher-forced token prefix), `context_hash`
   (`sha256:<hex>`), and `reference_top_k_sets` (a closed array with one entry per active admissible
@@ -2118,9 +2122,14 @@ Before SPEC-036 can move toward LOCK:
    replay rejection, identity echoes, nonce/digest/expiry rejection,
    reference-top-K union support, per-position prompt/prefix/context binding,
    prefix or position mismatch rejection as `inconclusive:position_mismatch`,
-   provider-vs-reference tail-mass lower/upper bounds, explicit K=64 to K=256
-   retry predicates, high-tail inconclusive, and coordinator-owned verdict
-   computation.
+   the four-distinct-prompt / eight-position bound (rejecting a request with 5+
+   distinct prompts or 9+ positions), the `retry_of_probe_id` binding (present and
+   echoed for a K=256 retry, absent for K=64, rejected on cross-attempt mismatch),
+   per-reference pairwise `[K,2K]` support, provider-vs-reference tail-mass
+   lower/upper bounds, explicit K=64 to K=256 retry predicates, high-tail
+   inconclusive, the ordered measurement-validation precedence
+   (identity_reject / model_swap / position_mismatch / malformed / tail-k_retry),
+   and coordinator-owned verdict computation.
 4. A window-state test covers `quarantine_candidate_count` of the latest
    `min_window_canaries` eligible canaries, proves intervening passes do not
    reset quarantine-candidate counting, quarantine removing paid routing,
@@ -2186,8 +2195,12 @@ Before SPEC-036 can move toward LOCK:
    tails, sampler stage, prompt/position/prefix/context identifiers, and the
    canonical aggregation rule.
 10. Enforce activation tests prove startup or activation refuses when trusted
-    reference, calibration, settlement capture, disclosure, or storage
-    preconditions are missing.
+    reference, calibration, settlement capture, disclosure, storage, SPEC-022
+    enforce-subordination/coverage-subset, measured-false-positive-budget,
+    hardware-runtime-class match, TTL≥2×cadence, or the named
+    stable-device/operator-identity authority + approved cost model (FR-1)
+    preconditions are missing; and a positive fixture requires the
+    maintainer-approved identity authority to be named before enforce is permitted.
 11. A sampling-profile coverage test proves settlement denies covered paid
     requests whose buyer sampling profile is not covered by the captured fresh
     window.
@@ -2205,7 +2218,15 @@ Before SPEC-036 can move toward LOCK:
     preconditions before reactivating enforce; fail-closed circuit-breaker activation
     on quarantine/reference-fault spikes; `override_routing_only` not making held
     settlement payable; and `cleared` transition only after quiet-window, fresh
-    reference admission, dual approval, and audit-field requirements are met.
+    reference admission, dual approval, and audit-field requirements are met. It is
+    table-driven over the full FR-3 `effective_adverse_state` matrix: SPEC-036 mode ∈
+    {`enforce`, `warn_only`, `observe`} × SPEC-022 {enforce, not-enforce} × origin
+    {`enforce_preserved`, `telemetry_only`} × attribution {provider, breaker,
+    coordinator}, proving in particular the `observe` branch behaves identically to
+    `warn_only` (enforce-origin provider/breaker state stays money-blocking while
+    SPEC-022 enforces; coordinator-attributable dormant; telemetry_only never blocks;
+    all dormant when SPEC-022 is not enforce) and the telemetry→enforce
+    re-adjudication path.
 14. A capacity test proves configured background and targeted burst canary rates
     meet the operator-approved time-to-onboard, time-to-quarantine, and
     time-to-clear SLO, and that the reference fleet sustains freshness across
@@ -2222,8 +2243,14 @@ Before SPEC-036 can move toward LOCK:
     pass/quarantine verdicts use the agreed envelope across all active admissible
     trusted references, both suppress provider drift counters, and both appear in
     auditor bundles.
-16. A closed-reason test proves every enforce-mode non-payable
-    compute-integrity state maps to the v0.1 settlement reason enum.
+16. A closed-reason test is table-driven over every FR-3 mapping: the
+    captured-state→reason table, every `expiry_cause`, every
+    reference-set-admissibility status, every `blocked:<reason>`, unknown-value
+    fail-closed behavior (→ `compute_integrity_unreadable`), and multi-condition
+    reason-precedence collisions (e.g. drift + breaker → `compute_drift_quarantined`;
+    reference-stale + drift → the higher-precedence provider-attributable reason),
+    proving every enforce-mode non-payable compute-integrity condition maps to exactly
+    one member of the v0.1 settlement reason enum and no ad hoc reason is emitted.
 17. A sampler-stage test proves sampler stage is included in keys, thresholds,
     request-start capture, expiry triggers, and probe identity validation, and
     that v0.1 enforce refuses sampler stages without defined capture and
