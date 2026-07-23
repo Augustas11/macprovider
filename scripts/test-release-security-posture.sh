@@ -198,6 +198,10 @@ if [[ ! "$sealed_root" =~ ^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$ ]];
   exit 126
 fi
 
+for inherited_name in "${!DYLD_@}" "${!LD_@}" "${!OPENSSL_@}"; do
+  unset "$inherited_name"
+done
+
 export DYLD_LIBRARY_PATH="$sealed_root/lib"
 export OPENSSL_CONF="$sealed_root/etc/openssl.cnf"
 export OPENSSL_MODULES="$sealed_root/lib/ossl-modules"
@@ -544,8 +548,34 @@ if "ensure-release-tag-target" in text or "git push" in text:
     raise SystemExit("release workflow must not create a release tag")
 if "gh release download" in text:
     raise SystemExit("release workflow must publish the captured workflow files")
-if sealed_openssl_wrapper.strip() != SEALED_OPENSSL_WRAPPER:
-    raise SystemExit("sealed OpenSSL wrapper drifted from the reviewed runtime contract")
+def validate_sealed_openssl_wrapper(candidate):
+    if candidate.strip() != SEALED_OPENSSL_WRAPPER:
+        raise SystemExit(
+            "sealed OpenSSL wrapper drifted from the reviewed runtime contract"
+        )
+    for prefix in ("DYLD_", "LD_", "OPENSSL_"):
+        if f'"${{!{prefix}@}}"' not in candidate:
+            raise SystemExit(
+                f"sealed OpenSSL wrapper does not clear inherited {prefix} overrides"
+            )
+
+
+validate_sealed_openssl_wrapper(sealed_openssl_wrapper)
+wrapper_environment_reset_removal_mutation = sealed_openssl_wrapper.replace(
+    'for inherited_name in "${!DYLD_@}" "${!LD_@}" "${!OPENSSL_@}"; do\n'
+    '  unset "$inherited_name"\n'
+    "done\n\n",
+    "",
+    1,
+)
+try:
+    validate_sealed_openssl_wrapper(wrapper_environment_reset_removal_mutation)
+except SystemExit:
+    pass
+else:
+    raise SystemExit(
+        "sealed OpenSSL inherited-environment reset removal mutation unexpectedly passed"
+    )
 for requirement in (
     r"^/private/var/macprovider-openssl-[A-Za-z0-9._-]+$",
     'sudo test ! -e "$sealed_root"',
