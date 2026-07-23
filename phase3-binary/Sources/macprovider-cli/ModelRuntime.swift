@@ -394,6 +394,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentModelHash: String?
     private var currentModelHashAlgorithm: String?
     private var currentWeightsManifestSHA256: String?
+    /// SPEC-037 HIGH-8 — SHA-256 of the loaded model's live tokenizer configuration
+    /// and chat-template bytes, hashed at load time. Nil when the tokenizer files are
+    /// unreachable, in which case the cold tier treats identity as unavailable and
+    /// skips persistence (rather than deriving a fake hash from the model hash).
+    private var currentTokenizerConfigSHA256: String?
+    private var currentChatTemplateSHA256: String?
     private let verifiedCatalogArtifactSHA256: String?
     private let maxContextTokens: Int
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
@@ -536,6 +542,8 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentModelHash = nil
             self.currentModelHashAlgorithm = nil
             self.currentWeightsManifestSHA256 = nil
+            self.currentTokenizerConfigSHA256 = nil
+            self.currentChatTemplateSHA256 = nil
             if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
@@ -556,6 +564,9 @@ actor ModelRuntime: ModelRuntimeServing {
             ? nil
             : ModelArtifactIdentity.snapshotManifestV1
         self.currentWeightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: directory)
+        let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
+        self.currentTokenizerConfigSHA256 = tokenizerHashes.config
+        self.currentChatTemplateSHA256 = tokenizerHashes.template
 
         if let draftModelID = normalizedDraftModelID {
             let (draftContainer, draftDirectory) = try await Self.loadLocalContainer(from: normalizedDraftModelLoadPath ?? draftModelID)
@@ -623,6 +634,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentModelHash = modelHash
         self.currentModelHashAlgorithm = modelHashAlgorithm
         self.currentWeightsManifestSHA256 = weightsManifestSHA256
+        self.currentTokenizerConfigSHA256 = nil
+        self.currentChatTemplateSHA256 = nil
         self.verifiedCatalogArtifactSHA256 = nil
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -722,6 +735,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 let modelHash: String?
                 let modelHashAlgorithm: String?
                 let weightsManifestSHA256: String?
+                let tokenizerConfigSHA256: String?
+                let chatTemplateSHA256: String?
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
                 let draftFailureReason: String?
@@ -732,6 +747,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHash = loaded.1
                     modelHashAlgorithm = await self.currentModelHashAlgorithm
                     weightsManifestSHA256 = nil
+                    tokenizerConfigSHA256 = nil
+                    chatTemplateSHA256 = nil
                     if let configuredDraftModelID {
                         do {
                             let loadedDraft = try await testLoader(configuredDraftModelID)
@@ -761,6 +778,9 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHash = expected
                     modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
                     weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
+                    let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
+                    tokenizerConfigSHA256 = swapTokenizerHashes.config
+                    chatTemplateSHA256 = swapTokenizerHashes.template
                     if let configuredDraftModelID {
                         do {
                             let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
@@ -812,6 +832,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHash: modelHash,
                     modelHashAlgorithm: modelHashAlgorithm,
                     weightsManifestSHA256: weightsManifestSHA256,
+                    tokenizerConfigSHA256: tokenizerConfigSHA256,
+                    chatTemplateSHA256: chatTemplateSHA256,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason
@@ -893,6 +915,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelHash: modelHash,
             modelHashAlgorithm: nil,
             weightsManifestSHA256: nil,
+            tokenizerConfigSHA256: nil,
+            chatTemplateSHA256: nil,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil
@@ -905,6 +929,8 @@ actor ModelRuntime: ModelRuntimeServing {
         modelHash: String?,
         modelHashAlgorithm: String?,
         weightsManifestSHA256: String?,
+        tokenizerConfigSHA256: String?,
+        chatTemplateSHA256: String?,
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?
@@ -915,6 +941,8 @@ actor ModelRuntime: ModelRuntimeServing {
         currentModelHash = modelHash
         currentModelHashAlgorithm = modelHash == nil ? nil : modelHashAlgorithm
         currentWeightsManifestSHA256 = weightsManifestSHA256
+        currentTokenizerConfigSHA256 = tokenizerConfigSHA256
+        currentChatTemplateSHA256 = chatTemplateSHA256
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
         currentDraftContainer = draftContainer
@@ -2028,13 +2056,24 @@ actor ModelRuntime: ModelRuntimeServing {
     /// direct-HTTP provenance; the identity core carries the live model identity.
     private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
         guard coldTierAttached else { return nil }
+        // HIGH-8: identity_unavailable — skip the cold tier (no fabricated identity)
+        // when the real catalog revision or the live tokenizer/template hashes are
+        // unreachable. The store also fail-closes on a nil model hash, but gating
+        // here avoids persisting an entry with a placeholder identity.
+        guard let catalogRevision = verifiedCatalogArtifactSHA256,
+              let tokenizerConfigSHA256 = currentTokenizerConfigSHA256,
+              let chatTemplateSHA256 = currentChatTemplateSHA256 else {
+            return nil
+        }
         let eligible = KVDiskCacheGate.persists(
             conversationKey: request.conversationKey, provenance: request.ingestProvenance)
         let identity = KVIdentityCore.build(
             requestModel: request.model,
             servedModelID: snapshot.modelID ?? request.model,
             modelSHA256: snapshot.modelHash,
-            catalogRevision: verifiedCatalogArtifactSHA256 ?? "unknown")
+            catalogRevision: catalogRevision,
+            tokenizerConfigSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256)
         return ConversationColdContext(eligible: eligible, identity: identity)
     }
 
@@ -2361,6 +2400,51 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         return snapshot
+    }
+
+    /// SPEC-037 HIGH-8 — hash the loaded model's LIVE tokenizer configuration and
+    /// chat-template bytes for the KV envelope identity. Returns nil for either hash
+    /// that is genuinely unreachable, so the cold tier treats identity as unavailable
+    /// and skips persistence rather than deriving a fake hash from the model hash.
+    ///
+    /// - config hash: SHA-256 over the labelled bytes of `tokenizer_config.json` and
+    ///   `tokenizer.json` (whichever are present). Nil when neither exists.
+    /// - template hash: SHA-256 over a dedicated chat-template file if present, else
+    ///   over the `chat_template` field inside `tokenizer_config.json`. Nil when no
+    ///   chat template is discoverable.
+    static func tokenizerIdentityHashes(in directory: URL) -> (config: String?, template: String?) {
+        let fm = FileManager.default
+        func bytes(_ name: String) -> Data? {
+            let url = directory.appendingPathComponent(name)
+            guard fm.fileExists(atPath: url.path) else { return nil }
+            return try? Data(contentsOf: url)
+        }
+        func hex(_ data: Data) -> String {
+            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+
+        var configData = Data()
+        var configAny = false
+        for name in ["tokenizer_config.json", "tokenizer.json"] {
+            if let d = bytes(name) {
+                configData.append(Data((name + "\u{0}").utf8))
+                configData.append(d)
+                configAny = true
+            }
+        }
+        let configHash = configAny ? hex(configData) : nil
+
+        var templateData: Data?
+        for name in ["chat_template.jinja", "chat_template.json", "chat_template.txt"] {
+            if let d = bytes(name) { templateData = Data((name + "\u{0}").utf8) + d; break }
+        }
+        if templateData == nil, let cfg = bytes("tokenizer_config.json"),
+           let obj = try? JSONSerialization.jsonObject(with: cfg) as? [String: Any],
+           let template = obj["chat_template"] as? String {
+            templateData = Data(("chat_template\u{0}" + template).utf8)
+        }
+        let templateHash = templateData.map(hex)
+        return (configHash, templateHash)
     }
 
     static func modelWeightArtifactManifestHash(in directory: URL) throws -> String? {

@@ -9,31 +9,32 @@ import MLXLMCommon
 /// cache invalidation on upgrade is accepted, this tier is an optimization).
 enum KVBuildIdentity {
     static let abiEpoch = 1
-    static let mlxSwiftLMRevision = "mlx-swift-lm@spec037-v1"
-    static let mlxVersion = "mlx-swift@spec037-v1"
+    /// The REAL pinned mlx-swift-lm git revision (HIGH-8). Bump on any dependency
+    /// change: `KVBuildIdentityDriftTests` parses Package.resolved and fails CI if
+    /// this drifts from the resolved pin. A different pin ⇒ a different ABI ⇒ all
+    /// prior ciphertext hard-misses (accepted — this tier is an optimization).
+    static let mlxSwiftLMRevision = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
+    /// The REAL pinned mlx-swift package version (HIGH-8). Same bump-on-change rule.
+    static let mlxVersion = "0.31.4"
     static let decodePathOrdinary = "ordinary"
 }
 
 extension KVIdentityCore {
-    /// Build the per-request identity core from what ModelRuntime has directly.
-    /// The persisted class is always the unquantized `KVCacheSimple`, so the KV
+    /// Build the per-request identity core from what ModelRuntime has directly. The
+    /// persisted class is always the unquantized `KVCacheSimple`, so the KV
     /// quantization tuple is `nil` (matching the shipped `kvBits == nil` envelope
-    /// value). Tokenizer/template hashes are derived deterministically from the
-    /// canonical model hash: within a build a different artifact ⇒ different hash
-    /// ⇒ miss, and the same artifact round-trips (v0.1 resolution — the artifact
-    /// hash already covers the packaged tokenizer + template; separate live file
-    /// hashing is a future refinement).
+    /// value). Tokenizer/template hashes are the REAL live tokenizer-config +
+    /// chat-template byte hashes computed at model load (HIGH-8) — never derived from
+    /// the model hash. The caller (ModelRuntime.coldContext) supplies them and
+    /// suppresses the cold tier entirely when they are unavailable.
     static func build(
-        requestModel: String, servedModelID: String, modelSHA256: String?, catalogRevision: String
+        requestModel: String, servedModelID: String, modelSHA256: String?, catalogRevision: String,
+        tokenizerConfigSHA256: String, chatTemplateSHA256: String
     ) -> KVIdentityCore {
-        func derive(_ tag: String) -> String {
-            guard let hash = modelSHA256 else { return "" }
-            return SHA256.hash(data: Data((tag + ":" + hash).utf8)).map { String(format: "%02x", $0) }.joined()
-        }
-        return KVIdentityCore(
+        KVIdentityCore(
             requestModel: requestModel, servedModelID: servedModelID, modelSHA256: modelSHA256,
             catalogRevision: catalogRevision, tokenizerID: servedModelID,
-            tokenizerConfigSHA256: derive("tok"), chatTemplateSHA256: derive("tmpl"),
+            tokenizerConfigSHA256: tokenizerConfigSHA256, chatTemplateSHA256: chatTemplateSHA256,
             kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil)
     }
 }
