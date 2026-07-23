@@ -109,6 +109,11 @@ public struct AppConfig: Equatable, Sendable {
     // CLI `--prefill-step-size`.
     public var prefillStepSize: Int
 
+    // SPEC-037 FR-KVP11: encrypted KV survival disk tier. Default-off; resolved
+    // fail-closed (invalid value ⇒ tier disabled + `errors` populated, never a
+    // process abort). See `KVDiskCacheConfig`.
+    public var kvDiskCache: KVDiskCacheConfig
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -163,7 +168,8 @@ public struct AppConfig: Equatable, Sendable {
             providerToken: nil,
             managedBy: nil,
             streamInterval: 1,
-            prefillStepSize: 512
+            prefillStepSize: 512,
+            kvDiskCache: .defaults()
         )
     }
 }
@@ -204,6 +210,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var idlePrewarmRunOnBattery: Bool?
     public var streamInterval: Int?
     public var prefillStepSize: Int?
+    // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
+    public var kvDiskCache: KVDiskCacheCLIOverrides
 
     public init(
         port: Int? = nil,
@@ -237,7 +245,8 @@ public struct CLIOverrides: Equatable, Sendable {
         idlePrewarmPrompt: String? = nil,
         idlePrewarmRunOnBattery: Bool? = nil,
         streamInterval: Int? = nil,
-        prefillStepSize: Int? = nil
+        prefillStepSize: Int? = nil,
+        kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides()
     ) {
         self.port = port
         self.model = model
@@ -271,6 +280,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
         self.streamInterval = streamInterval
         self.prefillStepSize = prefillStepSize
+        self.kvDiskCache = kvDiskCache
     }
 }
 
@@ -314,6 +324,17 @@ public enum ConfigLoader {
         config = try applyCLI(config, cli: cli)
         config.configPath = configPath
         try validateIdlePrewarm(config)
+
+        // SPEC-037 FR-KVP11: resolve the kv_disk_cache group fail-closed (never
+        // throws; invalid ⇒ tier disabled + errors logged by the caller).
+        var kvYAML: [String: Any]?
+        if fileExists(configPath), let text = try? readFile(configPath),
+           let root = try? Yams.load(yaml: text) as? [String: Any] {
+            kvYAML = root["kv_disk_cache"] as? [String: Any]
+        }
+        config.kvDiskCache = KVDiskCacheConfigResolver.resolve(
+            yaml: kvYAML, environment: environment, cli: cli.kvDiskCache)
+
         return config
     }
 
