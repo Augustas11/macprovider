@@ -333,6 +333,46 @@ final class KVDiskCacheFormatTests: XCTestCase {
         assertMiss(mutated, runtime, .diskMissCorrupt)
     }
 
+    /// AC-2 completeness: the remaining FR-KVP4 exact-match fields not covered by the
+    /// single-field tests above, each mutated in the manifest → the mapped reason code.
+    /// Together with those tests this exhausts the FR-KVP4 authenticated-envelope list.
+    func testEnvelopeMutationTableCoversRemainingFRKVP4Fields() {
+        let (reference, runtime) = Self.validPair()
+        // Identity/ABI/quant scalars → disk_miss_envelope.
+        assertMiss(Self.mutate(reference) { $0.mlxVersion = "9.9.9" }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { $0.tokenizerID = "tok-other" }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { $0.cacheClass = "ArraysCache" }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { $0.layerCount = 2 }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { $0.kvGroupSize = 64 }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { $0.kvQuantMode = "affine" }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { $0.kvQuantPolicy = "per-tensor" }, runtime, .diskMissEnvelope)
+        // Per-layer geometry: dtype, ndim (with matching dims count), and a non-seq dim.
+        assertMiss(Self.mutate(reference) { m in
+            m.layers = m.layers.map { KVLayerRecord(layerIndex: $0.layerIndex, classID: $0.classID,
+                layoutVersion: $0.layoutVersion, ndim: $0.ndim, dims: $0.dims, dtype: .f32) }
+        }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { m in
+            m.layers = m.layers.map { KVLayerRecord(layerIndex: $0.layerIndex, classID: $0.classID,
+                layoutVersion: $0.layoutVersion, ndim: 3, dims: [1, 2, 2], dtype: $0.dtype) }
+        }, runtime, .diskMissEnvelope)
+        assertMiss(Self.mutate(reference) { m in
+            m.layers = m.layers.map { r -> KVLayerRecord in
+                var dims = r.dims; dims[0] = dims[0] + 1   // axis 0 ≠ sequence axis (2)
+                return KVLayerRecord(layerIndex: r.layerIndex, classID: r.classID,
+                    layoutVersion: r.layoutVersion, ndim: r.ndim, dims: dims, dtype: r.dtype)
+            }
+        }, runtime, .diskMissEnvelope)
+        // The class-id per-layer mismatch (allowlisted class but wrong layer class).
+        assertMiss(Self.mutate(reference) { m in
+            m.layers = m.layers.map { KVLayerRecord(layerIndex: $0.layerIndex, classID: "OtherCache",
+                layoutVersion: $0.layoutVersion, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype) }
+        }, runtime, .diskMissEnvelope)
+        // Reference still validates (guards against a helper that broke the base pair).
+        if case .ok = KVEnvelopeValidator.validate(reference, runtime: runtime, nowMillis: 1_000_500) {} else {
+            XCTFail("reference pair must still validate")
+        }
+    }
+
     // MARK: - Unicode canonical key equivalence (AC-1)
 
     func testComposedAndDecomposedKeysCanonicalizeToSameBytes() {
@@ -465,7 +505,14 @@ final class KVDiskCacheFormatTests: XCTestCase {
         var chatTemplateSHA256: String { get { m.chatTemplateSHA256 } set { m = Self.rebuild(m, chatTemplateSHA256: newValue) } }
         var abiEpoch: Int { get { m.abiEpoch } set { m = Self.rebuild(m, abiEpoch: newValue) } }
         var mlxSwiftLMRevision: String { get { m.mlxSwiftLMRevision } set { m = Self.rebuild(m, mlxSwiftLMRevision: newValue) } }
+        var mlxVersion: String { get { m.mlxVersion } set { m = Self.rebuild(m, mlxVersion: newValue) } }
+        var tokenizerID: String { get { m.tokenizerID } set { m = Self.rebuild(m, tokenizerID: newValue) } }
+        var cacheClass: String { get { m.cacheClass } set { m = Self.rebuild(m, cacheClass: newValue) } }
+        var layerCount: Int { get { m.layerCount } set { m = Self.rebuild(m, layerCount: newValue) } }
         var kvBits: Int? { get { m.kvBits } set { m = Self.rebuild(m, kvBits: newValue) } }
+        var kvGroupSize: Int? { get { m.kvGroupSize } set { m = Self.rebuild(m, kvGroupSize: newValue) } }
+        var kvQuantMode: String? { get { m.kvQuantMode } set { m = Self.rebuild(m, kvQuantMode: newValue) } }
+        var kvQuantPolicy: String? { get { m.kvQuantPolicy } set { m = Self.rebuild(m, kvQuantPolicy: newValue) } }
         var decodePath: String { get { m.decodePath } set { m = Self.rebuild(m, decodePath: newValue) } }
         var decodedLength: Int { get { m.decodedLength } set { m = Self.rebuild(m, decodedLength: newValue) } }
         var layers: [KVLayerRecord] { get { m.layers } set { m = Self.rebuild(m, layers: newValue) } }
@@ -473,9 +520,12 @@ final class KVDiskCacheFormatTests: XCTestCase {
         static func rebuild(
             _ m: KVDiskManifest, schemaID: String? = nil, namespaceID: String? = nil, keyEpoch: Int? = nil,
             indexHMAC: String? = nil, requestModel: String? = nil, servedModelID: String? = nil,
-            modelSHA256: String? = nil, catalogRevision: String? = nil, tokenizerConfigSHA256: String? = nil,
-            chatTemplateSHA256: String? = nil, abiEpoch: Int? = nil, mlxSwiftLMRevision: String? = nil,
-            kvBits: Int?? = nil, decodePath: String? = nil, decodedLength: Int? = nil, layers: [KVLayerRecord]? = nil
+            modelSHA256: String? = nil, catalogRevision: String? = nil, tokenizerID: String? = nil,
+            tokenizerConfigSHA256: String? = nil, chatTemplateSHA256: String? = nil, abiEpoch: Int? = nil,
+            mlxSwiftLMRevision: String? = nil, mlxVersion: String? = nil, cacheClass: String? = nil,
+            layerCount: Int? = nil, kvBits: Int?? = nil, kvGroupSize: Int?? = nil, kvQuantMode: String?? = nil,
+            kvQuantPolicy: String?? = nil, decodePath: String? = nil, decodedLength: Int? = nil,
+            layers: [KVLayerRecord]? = nil
         ) -> KVDiskManifest {
             KVDiskManifest(
                 schemaID: schemaID ?? m.schemaID, codecID: m.codecID, namespaceID: namespaceID ?? m.namespaceID,
@@ -483,12 +533,12 @@ final class KVDiskCacheFormatTests: XCTestCase {
                 commitSequence: m.commitSequence, purgeGeneration: m.purgeGeneration,
                 requestModel: requestModel ?? m.requestModel, servedModelID: servedModelID ?? m.servedModelID,
                 modelSHA256: modelSHA256 ?? m.modelSHA256, catalogRevision: catalogRevision ?? m.catalogRevision,
-                tokenizerID: m.tokenizerID, tokenizerConfigSHA256: tokenizerConfigSHA256 ?? m.tokenizerConfigSHA256,
+                tokenizerID: tokenizerID ?? m.tokenizerID, tokenizerConfigSHA256: tokenizerConfigSHA256 ?? m.tokenizerConfigSHA256,
                 chatTemplateSHA256: chatTemplateSHA256 ?? m.chatTemplateSHA256, abiEpoch: abiEpoch ?? m.abiEpoch,
-                mlxSwiftLMRevision: mlxSwiftLMRevision ?? m.mlxSwiftLMRevision, mlxVersion: m.mlxVersion,
-                cacheClass: m.cacheClass, layerCount: m.layerCount, layers: layers ?? m.layers,
-                kvBits: kvBits ?? m.kvBits, kvGroupSize: m.kvGroupSize, kvQuantMode: m.kvQuantMode,
-                kvQuantPolicy: m.kvQuantPolicy, decodePath: decodePath ?? m.decodePath, tokenCount: m.tokenCount,
+                mlxSwiftLMRevision: mlxSwiftLMRevision ?? m.mlxSwiftLMRevision, mlxVersion: mlxVersion ?? m.mlxVersion,
+                cacheClass: cacheClass ?? m.cacheClass, layerCount: layerCount ?? m.layerCount, layers: layers ?? m.layers,
+                kvBits: kvBits ?? m.kvBits, kvGroupSize: kvGroupSize ?? m.kvGroupSize, kvQuantMode: kvQuantMode ?? m.kvQuantMode,
+                kvQuantPolicy: kvQuantPolicy ?? m.kvQuantPolicy, decodePath: decodePath ?? m.decodePath, tokenCount: m.tokenCount,
                 createdAtMillis: m.createdAtMillis, eligibleUntilMillis: m.eligibleUntilMillis,
                 decodedLength: decodedLength ?? m.decodedLength, chunks: m.chunks, blobLength: m.blobLength,
                 blobSHA256: m.blobSHA256)

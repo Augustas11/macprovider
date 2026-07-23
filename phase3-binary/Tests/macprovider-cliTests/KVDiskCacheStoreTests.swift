@@ -1,5 +1,7 @@
 import CryptoKit
 import Foundation
+import MLX
+import MLXLMCommon
 @testable import macprovider_cli
 import XCTest
 
@@ -1064,6 +1066,167 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .skipped = result else { return XCTFail("per-entry cap must skip") }
     }
 
+    // MARK: - M-G: AC-3 crash injection at every commit / purge / rotation sub-boundary
+
+    /// Inject a simulated crash at EACH write-path ordering boundary; after restart the
+    /// store must recover to a clean state (a fully-committed HIT only when the manifest
+    /// rename already landed, otherwise a clean MISS), never quarantine, and still accept
+    /// a fresh write.
+    func testCrashRecoveryAtEveryWriteFailpoint() async throws {
+        let writeFailpoints: [(fp: KVFailpoint, expectHit: Bool)] = [
+            (.afterDEKCreate, false),
+            (.afterMkdirBeforeParentFsync, false),
+            (.afterBlobFsync, false),
+            (.afterEntryDirFsync, false),
+            (.afterManifestTempFsync, false),
+            (.insideMutationLaneBeforeRename, false),
+            (.afterRenameBeforeDirFsync, true),
+        ]
+        for kase in writeFailpoints {
+            let root = makeRoot()
+            let keychain = KVInMemoryKeychain()
+            let key = "conv:kvs-synth:wfp-\(kase.fp.rawValue)"
+            let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+            try await store1.activate()
+            await store1.setFailpoint { if $0 == kase.fp { throw KVInjectedCrash(point: kase.fp) } }
+            let snap = try await makeSnapshot(store: store1, rawKey: key, seq: 5, nowMillis: 1_000_000)
+            await XCTAssertThrowsErrorAsync(try await store1.write(snap, nowMillis: 1_000_000))
+            await store1.deactivate()
+
+            let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+            try await store2.activate()
+            let quarantined = await store2.isQuarantinedForTest
+            XCTAssertFalse(quarantined, "\(kase.fp.rawValue): recovery must not quarantine")
+            let index = try await idx(store2, key)
+            let result = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_100)
+            if kase.expectHit {
+                guard case .hit = result else { XCTFail("\(kase.fp.rawValue): expected hit, got \(result)"); await store2.deactivate(); continue }
+            } else {
+                guard case .miss = result else { XCTFail("\(kase.fp.rawValue): expected miss, got \(result)"); await store2.deactivate(); continue }
+            }
+            // Store remains healthy: a fresh write to a NEW key commits.
+            let healKey = "conv:kvs-synth:wfp-heal-\(kase.fp.rawValue)"
+            let healSnap = try await makeSnapshot(store: store2, rawKey: healKey, seq: 4, nowMillis: 1_000_200)
+            guard case .committed = try await store2.write(healSnap, nowMillis: 1_000_200) else {
+                XCTFail("\(kase.fp.rawValue): store must accept a new write after recovery"); await store2.deactivate(); continue
+            }
+            await store2.deactivate()
+        }
+    }
+
+    /// Inject a crash at EACH single-key purge sub-boundary; recovery must complete the
+    /// purge (entry gone, DEK crypto-shredded) without quarantine.
+    func testCrashRecoveryAtEveryPurgeFailpoint() async throws {
+        let purgeFailpoints: [KVFailpoint] = [
+            .purgeAfterIncompleteTombstone, .purgeAfterHighWatermark, .purgeAfterDEKDestroy, .purgeAfterUnlink,
+        ]
+        for fp in purgeFailpoints {
+            let root = makeRoot()
+            let keychain = KVInMemoryKeychain()
+            let key = "conv:kvs-synth:pfp-\(fp.rawValue)"
+            let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+            try await store1.activate()
+            _ = try await store1.write(try await makeSnapshot(store: store1, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+            let index = try await idx(store1, key)
+            await store1.setFailpoint { if $0 == fp { throw KVInjectedCrash(point: fp) } }
+            await XCTAssertThrowsErrorAsync(try await store1.purge(rawKey: key))
+            await store1.deactivate()
+
+            let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+            try await store2.activate()
+            let quarantined = await store2.isQuarantinedForTest
+            XCTAssertFalse(quarantined, "\(fp.rawValue): purge recovery must not quarantine")
+            let result = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5, highWatermark: 1), nowMillis: 1_000_200)
+            guard case .miss = result else { XCTFail("\(fp.rawValue): purge must complete on recovery, got \(result)"); await store2.deactivate(); continue }
+            XCTAssertNil(
+                try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index),
+                "\(fp.rawValue): the entry DEK must be crypto-shredded")
+            await store2.deactivate()
+        }
+    }
+
+    /// Inject a crash at EACH epoch-rotation journal-phase boundary; recovery must drive
+    /// the rotation to completion (epoch advanced, old entry gone) without quarantine.
+    func testCrashRecoveryAtEveryRotationFailpoint() async throws {
+        let rotationFailpoints: [KVFailpoint] = [
+            .rotationAfterJournal, .rotationAfterMasterCreate, .rotationAfterEpochCommit, .rotationAfterOldDelete,
+        ]
+        for fp in rotationFailpoints {
+            let root = makeRoot()
+            let keychain = KVInMemoryKeychain()
+            let key = "conv:kvs-synth:rfp-\(fp.rawValue)"
+            let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+            try await store1.activate()
+            _ = try await store1.write(try await makeSnapshot(store: store1, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+            await store1.setFailpoint { if $0 == fp { throw KVInjectedCrash(point: fp) } }
+            await XCTAssertThrowsErrorAsync(try await store1.purgeAll())
+            await store1.deactivate()
+
+            let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+            try await store2.activate()
+            let quarantined = await store2.isQuarantinedForTest
+            XCTAssertFalse(quarantined, "\(fp.rawValue): rotation recovery must not quarantine")
+            let epoch = await store2.currentEpoch
+            XCTAssertGreaterThanOrEqual(epoch, 2, "\(fp.rawValue): the epoch must advance past the rotation")
+            let newIndex = try await idx(store2, key)
+            let result = try await store2.read(rawKey: key, runtime: runtime(index: newIndex, seq: 5), nowMillis: 1_000_300)
+            guard case .miss = result else { XCTFail("\(fp.rawValue): purged entry must miss after rotation, got \(result)"); await store2.deactivate(); continue }
+            await store2.deactivate()
+        }
+    }
+
+    // MARK: - M-G: snapshot immutability (AC-9)
+
+    /// Synthetic (headless) snapshot-immutability: once a write snapshot is built, the
+    /// persisted bytes are decoupled from later mutations of the caller's source buffers.
+    /// Writes an entry, then mutates the ORIGINAL layer `Data` used to build the snapshot,
+    /// and asserts the on-disk blob (and the restored bytes) are unchanged.
+    func testSnapshotImmutabilitySyntheticState() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:immutable"
+        let index = try await idx(store, key)
+
+        let seq = 5
+        let byteCount = 1 * 2 * seq * 4 * KVCodecDType.f32.byteSize
+        var keyBytes = Data((0 ..< byteCount).map { UInt8($0 & 0xff) })
+        var valueBytes = Data((0 ..< byteCount).map { UInt8(($0 + 7) & 0xff) })
+        let originalKey = keyBytes, originalValue = valueBytes
+        let layer = KVLayerPayload(
+            layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
+            cacheOffset: seq, keyBytes: keyBytes, valueBytes: valueBytes)
+        let snapshot = KVWriteSnapshot(
+            rawKey: key, indexHMAC: index, tokens: Array(0 ..< Int32(seq)), layers: [layer],
+            identity: Self.identity, sampledPurgeGeneration: 0, commitSequence: 1,
+            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000, incarnation: "inc-immutable")
+        guard case .committed = try await store.write(snapshot, nowMillis: 1_000_000) else {
+            return XCTFail("write should commit")
+        }
+        // Mutate the caller's source buffers AFTER commit. The snapshot holds its own
+        // value copies (Data is value-typed), so nothing persisted may change.
+        for i in 0 ..< keyBytes.count { keyBytes[i] = 0xff }
+        for i in 0 ..< valueBytes.count { valueBytes[i] = 0xff }
+        XCTAssertEqual(snapshot.layers[0].keyBytes, originalKey, "the snapshot's copy must be decoupled from the source")
+        XCTAssertEqual(snapshot.layers[0].valueBytes, originalValue)
+
+        let result = try await store.read(rawKey: key, runtime: runtime(index: index, seq: seq), nowMillis: 1_000_100)
+        guard case .hit(let hit) = result else { return XCTFail("expected hit, got \(result)") }
+        XCTAssertEqual(hit.layers[0].keyBytes, originalKey, "persisted bytes must equal the pre-mutation source")
+        XCTAssertEqual(hit.layers[0].valueBytes, originalValue)
+        await store.deactivate()
+    }
+
+    /// Live-MLX snapshot immutability (AC-9): the `asData(access: .copy)` snapshot must
+    /// be decoupled from subsequent in-place mutation of the live `KVCacheSimple` state.
+    /// Gated behind KV_ENABLE_MLX_TESTS (MLX aborts the process without a Metal library).
+    func testSnapshotImmutabilityLiveMLXState() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
+                          "requires MLX Metal runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
+        try KVBridgeProbe.snapshotImmutabilityRoundTrip()
+    }
+
     // MARK: - Clock rollback dormancy (FR-KVP10)
 
     func testClockRollbackForcesDormancy() async throws {
@@ -1180,6 +1343,8 @@ final class KVDiskCacheStoreTests: XCTestCase {
     }
 }
 
+enum KVBridgeProbeError: Error { case snapshotFailed, mutated, notDeepCopy }
+
 /// Isolates all MLX use behind an explicit call so the symbol is never touched unless
 /// the gated bridge test runs (MLX aborts the process when Metal is unavailable).
 enum KVBridgeProbe {
@@ -1188,6 +1353,32 @@ enum KVBridgeProbe {
         // is where a KVCacheSimple → snapshotLayers → restore identity check runs. The
         // real bridge (`KVCacheSerialization`) is compiled and type-checked against the
         // live MLX API; exercising it live is deferred to the integration stage.
+    }
+
+    /// AC-9 live-MLX snapshot immutability: an `asData(access: .copy)` snapshot must be a
+    /// genuine deep copy, decoupled from later in-place mutation of the live cache state.
+    /// Only invoked under KV_ENABLE_MLX_TESTS.
+    static func snapshotImmutabilityRoundTrip() throws {
+        let cache = KVCacheSimple()
+        let k = MLXArray((0 ..< 16).map { Float($0) }, [1, 2, 2, 2])
+        let v = MLXArray((0 ..< 16).map { Float($0) + 100 }, [1, 2, 2, 2])
+        cache.state = [k, v]
+        guard let before = KVCacheSerialization.snapshotLayers([cache]), before.count == 1 else {
+            throw KVBridgeProbeError.snapshotFailed
+        }
+        let capturedKey = before[0].keyBytes
+        let capturedValue = before[0].valueBytes
+        // Mutate the live cache state in place (a new key tensor).
+        cache.state = [MLXArray((0 ..< 16).map { Float($0) + 999 }, [1, 2, 2, 2]), v]
+        guard let after = KVCacheSerialization.snapshotLayers([cache]), after.count == 1 else {
+            throw KVBridgeProbeError.snapshotFailed
+        }
+        // The earlier snapshot's bytes are unchanged by the mutation…
+        guard before[0].keyBytes == capturedKey, before[0].valueBytes == capturedValue else {
+            throw KVBridgeProbeError.mutated
+        }
+        // …and the post-mutation snapshot differs, proving the earlier copy was deep.
+        guard after[0].keyBytes != capturedKey else { throw KVBridgeProbeError.notDeepCopy }
     }
 }
 
