@@ -220,6 +220,7 @@ def main() -> int:
         coordinator = local_status.get("coordinator") if isinstance(local_status, dict) else None
         assigned_id = coordinator.get("session") if isinstance(coordinator, dict) else None
         model_id = local_status.get("model") if isinstance(local_status, dict) else None
+        catalog_key = catalog.get("catalog_key") if isinstance(catalog, dict) else None
         catalog_model_id = catalog.get("model_id") if isinstance(catalog, dict) else None
         if (
             not isinstance(local_status, dict)
@@ -240,7 +241,11 @@ def main() -> int:
             or catalog.get("digest") != digest
             or catalog.get("signer_key_id") != signer
             or re.fullmatch(r"[0-9a-f]{64}", str(catalog.get("row_identity", "")).lower()) is None
-            or catalog_model_id != model_id
+            or catalog_key != model_id
+            or not isinstance(catalog_model_id, str)
+            or not catalog_model_id
+            or len(catalog_model_id) > 512
+            or catalog_model_id.strip() != catalog_model_id
         ):
             fail("live canary status does not match the expected provider and catalog")
 

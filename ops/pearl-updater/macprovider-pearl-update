@@ -4259,7 +4259,11 @@ class Updater:
             or not model_id
             or len(model_id) > 512
             or model_id.strip() != model_id
-            or local_catalog.get("model_id") != model_id
+            or local_catalog.get("catalog_key") != model_id
+            or not isinstance(local_catalog.get("model_id"), str)
+            or not local_catalog["model_id"]
+            or len(local_catalog["model_id"]) > 512
+            or local_catalog["model_id"].strip() != local_catalog["model_id"]
             or files != release.catalog.files
         ):
             raise UpdateError("trusted catalog canary Mac proof does not match the candidate release")
