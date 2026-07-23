@@ -143,6 +143,7 @@ class PearlUpdaterTests(unittest.TestCase):
             trusted_uid=os.geteuid(),
             candidate_uid=os.geteuid(),
             candidate_gid=os.getegid(),
+            backend_gid=os.getegid(),
             catalog_verifier=REPO_ROOT / "scripts/catalog-release.py",
             tier2_coordinator_config=REPO_ROOT / "phase4-coordinator/dist/coordinator.yaml",
             catalog_canary_proof=SCRIPT.with_name("catalog-canary-proof.py"),
@@ -753,6 +754,59 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertTrue(self.updater.local_coordinator_ready(release, False))
         self.updater.get_json.return_value["recommended_binary_version"] = "1.8.26"
         self.assertFalse(self.updater.local_coordinator_ready(release, False))
+
+    def test_atomic_install_uses_backend_group_not_legacy_destination_group(self):
+        source = self.root / "candidate-coordinator"
+        destination = self.root / "coordinator"
+        source.write_bytes(fake_elf("candidate"))
+        destination.write_bytes(fake_elf("legacy"))
+        legacy_gid = self.updater.backend_gid + 10_000
+        installed = mock.Mock(
+            st_gid=self.updater.backend_gid,
+            st_mode=stat.S_IFREG | 0o750,
+        )
+        with (
+            mock.patch.object(
+                self.updater,
+                "_trusted_regular_file",
+                side_effect=[mock.Mock(st_gid=legacy_gid), installed],
+            ),
+            mock.patch.object(self.updater, "atomic_replace") as replace,
+            mock.patch.object(
+                updater_module,
+                "sha256_file",
+                side_effect=["candidate-sha", "candidate-sha"],
+            ),
+        ):
+            self.updater.atomic_install(source, destination)
+
+        replace.assert_called_once_with(
+            source,
+            destination,
+            uid=self.updater.trusted_uid,
+            gid=self.updater.backend_gid,
+            mode=0o750,
+        )
+
+    def test_restore_binaries_normalizes_backend_group_and_mode(self):
+        install = self.updater.install_root
+        transaction = self.root / "rollback-binaries"
+        install.mkdir(parents=True)
+        transaction.mkdir()
+        for name in ("coordinator", "gateway"):
+            (install / name).write_bytes(fake_elf("candidate-" + name))
+            (install / name).chmod(0o755)
+            (transaction / name).write_bytes(fake_elf("previous-" + name))
+            (transaction / name).chmod(0o600)
+
+        self.updater._restore_binaries(transaction)
+
+        for name in ("coordinator", "gateway"):
+            restored = install / name
+            self.assertEqual(restored.read_bytes(), fake_elf("previous-" + name))
+            self.assertEqual(restored.stat().st_uid, self.updater.trusted_uid)
+            self.assertEqual(restored.stat().st_gid, self.updater.backend_gid)
+            self.assertEqual(stat.S_IMODE(restored.stat().st_mode), 0o750)
 
     def test_strict_signed_release_enforces_admission_and_removes_bridge_deadline(self):
         self.make_bundle(rollout_mode="strict_post_migration")
