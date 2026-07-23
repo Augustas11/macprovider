@@ -17,6 +17,9 @@ PROVIDER_VERSION_OVERRIDE="${PROVIDER_VERSION:-}"
 KEEP_DOWNLOADS="${KEEP_DOWNLOADS:-0}"
 DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:-1}"
 DOWNLOAD_RETRY_SLEEP="${DOWNLOAD_RETRY_SLEEP:-5}"
+PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
+PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
+PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
 
 log() { printf '[tier2-provider-release] %s\n' "$*" >&2; }
 die() { printf '[tier2-provider-release] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -44,6 +47,9 @@ Environment:
   KEEP_DOWNLOADS=1                    keep downloaded artifacts and print path
   DOWNLOAD_ATTEMPTS                    default: 1
   DOWNLOAD_RETRY_SLEEP                 seconds between attempts; default: 5
+  PROVIDER_RUNTIME_MODE                execute (default) or structural
+  PROVIDER_EXPECTED_ARCHES             required in structural mode
+  PROVIDER_LIPO_BIN                    absolute lipo path when validating arches
 USAGE
 }
 
@@ -319,6 +325,24 @@ esac
 case "$DOWNLOAD_RETRY_SLEEP" in
   ''|*[!0-9]*) die "DOWNLOAD_RETRY_SLEEP must be a non-negative integer" ;;
 esac
+case "$PROVIDER_RUNTIME_MODE" in
+  execute) ;;
+  structural)
+    [ -n "$PROVIDER_EXPECTED_ARCHES" ] || {
+      die "structural mode requires PROVIDER_EXPECTED_ARCHES"
+    }
+    ;;
+  *) die "PROVIDER_RUNTIME_MODE must be execute or structural" ;;
+esac
+if [ -n "$PROVIDER_EXPECTED_ARCHES" ]; then
+  case "$PROVIDER_LIPO_BIN" in
+    /*) ;;
+    *) die "PROVIDER_LIPO_BIN must be an absolute path when architecture validation is required" ;;
+  esac
+  [ -f "$PROVIDER_LIPO_BIN" ] && [ -x "$PROVIDER_LIPO_BIN" ] && [ ! -L "$PROVIDER_LIPO_BIN" ] || {
+    die "PROVIDER_LIPO_BIN must be a regular executable and not a symlink"
+  }
+fi
 
 download_file() {
   local url="$1"
@@ -411,14 +435,26 @@ if [ -n "$pkg_expected_sha" ]; then
   [ "$pkg_binary_sha" = "$tar_binary_sha" ] || die "package binary sha256 differs from tarball binary"
   log "provider package binary matches tarball binary: $pkg_binary_sha"
 
-  pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
-  [ "$pkg_version" = "$PROVIDER_VERSION" ] || die "provider package version mismatch: got $pkg_version want $PROVIDER_VERSION"
-  log "provider package version ok: $pkg_version"
+  if [ "$PROVIDER_RUNTIME_MODE" = execute ]; then
+    pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
+    [ "$pkg_version" = "$PROVIDER_VERSION" ] || die "provider package version mismatch: got $pkg_version want $PROVIDER_VERSION"
+    log "provider package version ok: $pkg_version"
+  else
+    pkg_arches="$("$PROVIDER_LIPO_BIN" -archs "$pkg_expand_dir/Payload/macprovider-cli")"
+    [ "$pkg_arches" = "$PROVIDER_EXPECTED_ARCHES" ] || {
+      die "provider package architecture mismatch: got $pkg_arches want $PROVIDER_EXPECTED_ARCHES"
+    }
+    log "provider package architecture ok: $pkg_arches"
+    log "provider package runtime execution deferred to an architecture-compatible verifier"
+  fi
 
   tar czf "$pkg_payload_tar" -C "$pkg_expand_dir/Payload" .
   PROVIDER_ARTIFACT="$pkg_payload_tar" \
     PROVIDER_VERSION="$PROVIDER_VERSION" \
     PROVIDER_SHA256="" \
+    PROVIDER_RUNTIME_MODE="$PROVIDER_RUNTIME_MODE" \
+    PROVIDER_EXPECTED_ARCHES="$PROVIDER_EXPECTED_ARCHES" \
+    PROVIDER_LIPO_BIN="$PROVIDER_LIPO_BIN" \
     "$CHECKER"
 else
   log "no package entry in checksums.txt; tarball-only compatibility release"
@@ -459,6 +495,9 @@ fi
 PROVIDER_ARTIFACT="$tarball_path" \
   PROVIDER_VERSION="$PROVIDER_VERSION" \
   PROVIDER_SHA256="$expected_sha" \
+  PROVIDER_RUNTIME_MODE="$PROVIDER_RUNTIME_MODE" \
+  PROVIDER_EXPECTED_ARCHES="$PROVIDER_EXPECTED_ARCHES" \
+  PROVIDER_LIPO_BIN="$PROVIDER_LIPO_BIN" \
   "$CHECKER"
 
 if [ "$KEEP_DOWNLOADS" = "1" ]; then

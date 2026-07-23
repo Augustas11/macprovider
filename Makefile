@@ -71,6 +71,7 @@ test-dist:
 	bash scripts/test-release-discovery-transport.sh
 	bash scripts/test-renew-release-discovery-head.sh
 	bash scripts/test-tier2-provider-artifact.sh
+	bash scripts/test-tier2-provider-release.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
