@@ -719,6 +719,36 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertEqual(try ab.keychainItemCount(), 1, "'prov.sub' must not enumerate 'prov' items")
     }
 
+    /// M-14: an on-disk blob larger than its declared blob_length is an integrity
+    /// (disk_miss_corrupt) failure, not an I/O (disk_miss_io) failure.
+    func testOverBoundBlobClassifiesAsCorruptNotIO() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain, sink: sink)
+        try await store.activate()
+        let key = "conv:kvs-synth:overbound"
+        let s = try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        guard case .committed = try await store.write(s, nowMillis: 1_000_000) else { return XCTFail("write") }
+        let index = try await idx(store, key)
+
+        // Grow the committed blob past its declared blob_length on disk.
+        let blobURL = root.appendingPathComponent(namespaceDigest("ns-test"))
+            .appendingPathComponent("entries").appendingPathComponent(index)
+            .appendingPathComponent("gen-1.blob")
+        let handle = try FileHandle(forWritingTo: blobURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(repeating: 0, count: 1024))
+        try handle.close()
+
+        sink.reset()
+        let result = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_100)
+        guard case .miss(let code, _) = result else { return XCTFail("expected miss, got \(result)") }
+        XCTAssertEqual(code, .diskMissCorrupt, "over-bound blob must be corrupt, not io")
+        XCTAssertEqual(sink.codes(.diskMissCorrupt), 1)
+        XCTAssertEqual(sink.codes(.diskMissIO), 0, "bounds violation must not classify as io")
+    }
+
     // MARK: - Real keychain adapter graceful skip
 
     func testRealKeychainAdapterSkipsGracefully() throws {

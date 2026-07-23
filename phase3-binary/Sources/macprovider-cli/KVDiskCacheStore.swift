@@ -256,6 +256,10 @@ enum KVStoreError: Error, Equatable {
     case lockUnavailable
     case quarantined(KVReasonDetail)
     case io(String)
+    /// A read whose fstat size exceeds the declared/allocation bound (M-14). A
+    /// bounds violation is an integrity failure (disk_miss_corrupt), NOT an I/O
+    /// error — the file is structurally wrong, not merely unreadable.
+    case boundsExceeded(String)
 }
 
 // MARK: - Store actor
@@ -862,6 +866,12 @@ actor KVDiskCacheStore {
         let manifestData: Data
         do {
             manifestData = try readBounded(manifestURL, maxBytes: KVDiskCacheFormat.manifestMaxBytes)
+        } catch let e as KVStoreError {
+            // M-14: an over-bound manifest is corrupt (integrity), not an I/O error.
+            if case .boundsExceeded = e {
+                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+            }
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
         } catch {
             emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
         }
@@ -920,6 +930,12 @@ actor KVDiskCacheStore {
         let blob: Data
         do {
             blob = try readBounded(blobURL, maxBytes: manifest.blobLength)
+        } catch let e as KVStoreError {
+            // M-14: an over-bound blob is corrupt (integrity), not an I/O error.
+            if case .boundsExceeded = e {
+                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+            }
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
         } catch {
             emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
         }
@@ -1461,7 +1477,7 @@ actor KVDiskCacheStore {
         guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid() else {
             throw KVStoreError.io("fstat/owner check failed")
         }
-        guard info.st_size <= maxBytes else { throw KVStoreError.io("file exceeds bound") }
+        guard info.st_size <= maxBytes else { throw KVStoreError.boundsExceeded("file size \(info.st_size) exceeds bound \(maxBytes)") }
         let size = Int(info.st_size)
         var buffer = Data(count: size)
         let readCount = buffer.withUnsafeMutableBytes { ptr -> Int in
