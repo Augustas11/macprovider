@@ -489,6 +489,37 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .miss = after else { return XCTFail("post-rotation read misses cleanly") }
     }
 
+    /// Item 6 (FR-KVP6): activation with an unavailable Keychain is RETRYABLE dormancy
+    /// — not active, not quarantined, not throwing — and becomes active on a later
+    /// attempt once the Keychain is available (the bootstrap master is created then).
+    func testKeychainUnavailableActivationIsDormantThenActivates() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        keychain.forceUnavailable = true
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+
+        let firstActivated = try await store.activate()
+        let firstDormancy = await store.activationDormancy
+        let firstQuarantined = await store.isQuarantinedForTest
+        XCTAssertFalse(firstActivated, "keychain-unavailable activation must be dormant, not active")
+        XCTAssertEqual(firstDormancy, .keychain)
+        XCTAssertFalse(firstQuarantined, "keychain dormancy must NOT quarantine")
+
+        // Keychain becomes available: a later attempt fully activates + creates the master.
+        keychain.forceUnavailable = false
+        let secondActivated = try await store.activate()
+        let secondDormancy = await store.activationDormancy
+        XCTAssertTrue(secondActivated, "activation succeeds once the keychain is available")
+        XCTAssertEqual(secondDormancy, .none)
+
+        // The recovered tier now serves.
+        let key = "conv:kvs-synth:dormant-recover"
+        let snapshot = try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        guard case .committed = try await store.write(snapshot, nowMillis: 1_000_000) else {
+            return XCTFail("post-dormancy activation must serve writes")
+        }
+    }
+
     /// Item 5 (FR-KVP9): two concurrent promotions — one proceeds, the other returns
     /// `disk_miss_busy` IMMEDIATELY (not after the first finishes). The claim is
     /// actor-isolated and the decode runs off-actor, so the contender observes the

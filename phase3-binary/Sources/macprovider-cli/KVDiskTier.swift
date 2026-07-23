@@ -81,19 +81,21 @@ final class KVDiskTier: @unchecked Sendable {
 
     // MARK: - Lifecycle (FR-KVP7)
 
-    /// Serve-start activation outcome (M-13 / FR-KVP7).
+    /// Serve-start activation outcome (M-13 / FR-KVP7, Item 6 / FR-KVP6).
     enum ServeActivation: Sendable, Equatable {
-        case activated       // lock acquired, recovery ran
-        case dormantLock     // lock held by another writer — retry with backoff
-        case quarantined     // structural failure — do NOT retry
-        case disabled        // tier not enabled
+        case activated        // lock acquired, recovery ran
+        case dormantLock      // lock held by another writer — retry with backoff
+        case dormantKeychain  // Keychain unavailable pre-unlock — retry with backoff (Item 6)
+        case quarantined      // structural failure — do NOT retry
+        case disabled         // tier not enabled
     }
 
     /// Activate the store on serve start when the tier is enabled. Fail-closed: a
-    /// config error, missing purge primitive, or lock unavailability leaves the tier
-    /// dormant (never fails the serve loop). `.dormantLock` is transient — the caller
-    /// starts a bounded-backoff retry that runs FULL recovery once the lock is
-    /// finally acquired (FR-KVP7).
+    /// config error, missing purge primitive, lock unavailability, OR Keychain
+    /// unavailability leaves the tier dormant (never fails the serve loop). Both
+    /// `.dormantLock` and `.dormantKeychain` are transient — the caller starts a
+    /// bounded-backoff retry that runs FULL recovery once the condition clears
+    /// (FR-KVP7 lock; FR-KVP6 pre-unlock Keychain).
     func activateForServeDetailed() async -> ServeActivation {
         guard config.effectiveEnabled else {
             for error in config.errors { log("event=kv_disk_cache action=config_error detail=\"\(error)\"") }
@@ -102,8 +104,14 @@ final class KVDiskTier: @unchecked Sendable {
         logEnableNotice()
         do {
             if try await store.activate() { return .activated }
-            log("event=kv_disk_cache action=dormant reason=lock_unavailable retry=backoff")
-            return .dormantLock
+            switch await store.activationDormancy {
+            case .keychain:
+                log("event=kv_disk_cache action=dormant reason=keychain_unavailable retry=backoff")
+                return .dormantKeychain
+            case .lock, .none:
+                log("event=kv_disk_cache action=dormant reason=lock_unavailable retry=backoff")
+                return .dormantLock
+            }
         } catch {
             log("event=kv_disk_cache action=dormant reason=quarantined")
             return .quarantined

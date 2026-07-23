@@ -272,6 +272,16 @@ struct KVTombstone: Sendable, Equatable {
 
 // MARK: - Errors
 
+/// Why an activation attempt did not fully activate (Item 6). Distinct from a
+/// permanent quarantine (which throws): both `.lock` and `.keychain` are RETRYABLE
+/// dormancy — the serve retry loop re-activates when the condition clears. `.none`
+/// means the last attempt fully activated.
+enum KVActivationDormancy: Sendable, Equatable {
+    case none
+    case lock       // the namespace lock is held by another writer (FR-KVP7)
+    case keychain   // Keychain material is unavailable pre-unlock (FR-KVP6)
+}
+
 enum KVStoreError: Error, Equatable {
     case lockUnavailable
     case quarantined(KVReasonDetail)
@@ -310,6 +320,10 @@ actor KVDiskCacheStore {
     private var activated = false
     private var quarantined: KVReasonDetail?
     private var dormantForClock = false
+    /// Item 6: why the last activation attempt did not fully activate (retryable
+    /// dormancy vs fully active). Read by the serve coordinator to choose the retry
+    /// path. Distinct from quarantine, which throws.
+    private(set) var activationDormancy: KVActivationDormancy = .none
 
     // In-memory control-plane mirror (authoritative on disk)
     private var metadata: KVNamespaceMetadata
@@ -505,17 +519,20 @@ actor KVDiskCacheStore {
         // real directory we own, is not a symlink (O_NOFOLLOW), and is not writable by
         // group/other — the data dirs strictly 0700. A violation quarantines.
         try verifyDirectorySecurity()
-        guard try acquireLock(deadline: retryDeadline) else { return false }
+        guard try acquireLock(deadline: retryDeadline) else {
+            activationDormancy = .lock
+            return false
+        }
 
         do {
             try loadMetadata()
-            // Bootstrap the current-epoch master on first activation. Keychain
-            // unavailability here is tolerated (tier stays dormant, not quarantined).
-            do {
-                try ensureEpochMaster()
-            } catch let e as KVKeychainError where isUnavailable(e) {
-                // dormant for keychain; reads/writes will surface keychain_unavailable
-            }
+            // Item 6 (FR-KVP6): the epoch master + all keychain-dependent MANDATORY
+            // recovery must SUCCEED before the store is marked active. A Keychain that is
+            // unavailable (pre-unlock, missing entitlement) is RETRYABLE dormancy — never
+            // a spuriously-active store with un-created master / un-run recovery (which
+            // would block later retries), and never a permanent quarantine. The keychain
+            // catch below turns any such failure into `.keychain` dormancy + retry.
+            try ensureEpochMaster()
             try recoverRotationJournal()
             try recoverTombstones()
             try sweepOrphansAndAccount()
@@ -525,21 +542,26 @@ actor KVDiskCacheStore {
             // admission reserves — and status reports — the full namespace footprint.
             try loadUsageJournal()
             // M-E (FR-KVP6): destroy current-epoch entry DEKs with no matching live
-            // entry — orphans from a crash between DEK create and manifest commit, or
-            // from files swept without their key. Keychain unavailability is tolerated
-            // (the tier stays dormant rather than failing activation).
-            do {
-                try reconcileOrphanEntryDEKs()
-            } catch let e as KVKeychainError where isUnavailable(e) {
-                // dormant for keychain; reconciliation retries on the next activation
-            }
+            // entry — orphans from a crash between DEK create and manifest commit.
+            try reconcileOrphanEntryDEKs()
             recountArtifactAccounting()
             activated = true
+            activationDormancy = .none
             notifyEpoch()
             startRetentionTimer()
             return true
         } catch let crash as KVInjectedCrash {
             throw crash
+        } catch let e as KVKeychainError where isUnavailable(e) {
+            // Item 6: retryable Keychain dormancy — release the lock so the next attempt
+            // re-acquires cleanly, do NOT set `activated`, do NOT quarantine. The serve
+            // retry loop re-activates once the Keychain becomes available. Dormancy
+            // telemetry is single-line (not per-request) so no log storm.
+            _ = e
+            releaseLock()
+            activationDormancy = .keychain
+            emit(.diskMissIO, detail: .keychainUnavailable, fields: ["phase": "activation_dormant"])
+            return false
         } catch {
             releaseLock()
             quarantine(.ioError)
@@ -1843,14 +1865,13 @@ actor KVDiskCacheStore {
                 } catch let crash as KVInjectedCrash {
                     throw crash
                 } catch let e as KVKeychainError where isUnavailable(e) {
-                    // Coordinator LOW / FR-KVP6: a keychain-unavailable DEK-destroy during
-                    // interrupted-purge recovery stays dormant-and-retry — the index
-                    // remains durably blocked (reads → tombstoned, writes → fence_lost) and
-                    // the purge is re-completed on a later activation once the keychain is
-                    // available. This is NOT a quarantine, and we keep processing the
-                    // remaining tombstones so every incomplete index is fenced + its
-                    // high-watermark advanced (no fail-open on a skipped tombstone).
-                    _ = e
+                    // Item 6 / coordinator LOW (FR-KVP6): a keychain-unavailable DEK-destroy
+                    // during interrupted-purge recovery is RETRYABLE dormancy, NOT a
+                    // quarantine. Propagate so `activate()` releases the lock and returns
+                    // `.keychain` dormancy; the index stays durably blocked
+                    // (`blockedIndexes`, persisted via the incomplete tombstone) and the
+                    // purge is re-completed on a later activation once the keychain returns.
+                    throw e
                 } catch {
                     // Transient completion failure (e.g. unlink error): keep the index
                     // blocked (fail-closed) and let a later activation retry, rather than

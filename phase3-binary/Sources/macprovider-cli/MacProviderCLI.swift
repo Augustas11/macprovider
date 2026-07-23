@@ -1000,10 +1000,11 @@ struct ServeCommand: AsyncParsableCommand {
             case .activated:
                 await modelRuntime.attachKVDiskTier(tier)
                 kvDiskTier = tier
-            case .dormantLock:
-                // FR-KVP7 (M-13): the namespace lock is held by another writer — keep
-                // the tier and retry with bounded backoff in the background, running
-                // full recovery and attaching once the lock is finally acquired.
+            case .dormantLock, .dormantKeychain:
+                // FR-KVP7 (M-13): the namespace lock is held by another writer, OR
+                // (Item 6 / FR-KVP6) the Keychain is unavailable pre-unlock — keep the
+                // tier and retry with bounded backoff in the background, running full
+                // recovery and attaching once the condition clears.
                 kvDiskTier = tier
                 Task { [modelRuntime] in
                     await tier.retryActivationUntilAcquired { await modelRuntime.attachKVDiskTier(tier) }
