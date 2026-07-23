@@ -371,6 +371,124 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertNil(try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index))
     }
 
+    /// Item 1 (CRITICAL): a single-key purge whose unlink fails leaves the index
+    /// DURABLY blocked (incomplete tombstone) — a subsequent read never returns the old
+    /// generation, a fresh write is refused, and a later recovery completes the purge
+    /// and only THEN admits.
+    func testFailedPurgeDurablyBlocksIndexAndRecoveryCompletes() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let key = "conv:kvs-synth:blocked"
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        let snapshot = try await makeSnapshot(store: store1, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        _ = try await store1.write(snapshot, nowMillis: 1_000_000)
+        let index = try await idx(store1, key)
+
+        // Purge whose entry-directory unlink fails: DEK+watermark advance but the entry
+        // dir cannot be removed, so the incomplete tombstone remains and the index stays
+        // durably blocked even after the transient per-op fence lifts.
+        await store1.injectUnlinkFailure(true)
+        guard case .failed = try await store1.purge(rawKey: key) else { return XCTFail("purge should fail on unlink error") }
+
+        // Read of the blocked index fails closed (never the old generation)…
+        let read = try await store1.read(rawKey: key, runtime: runtime(index: index, seq: 5, highWatermark: 1), nowMillis: 1_000_100)
+        guard case .miss(.diskMissTombstoned, _) = read else { return XCTFail("blocked index must miss tombstoned, got \(read)") }
+        // …and a fresh write (sampling the advanced watermark, so ONLY the durable block
+        // stops it) is refused while the purge is incomplete.
+        let fresh = try await makeSnapshot(store: store1, rawKey: key, seq: 5, seed: 3, commitSequence: 2, sampledPurgeGen: 1, nowMillis: 1_000_200)
+        guard case .skipped(.fenceLost) = try await store1.write(fresh, nowMillis: 1_000_200) else {
+            return XCTFail("write to a purge-blocked index must be fence_lost")
+        }
+        await store1.deactivate()
+
+        // Restart: recovery completes the interrupted purge (unlink now succeeds) and
+        // only THEN admits — the entry is gone and its DEK destroyed.
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        let after = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5, highWatermark: 1), nowMillis: 1_000_300)
+        guard case .miss = after else { return XCTFail("recovery must complete the purge") }
+        XCTAssertNil(try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index))
+        // A fresh lease sampling the recovered high-watermark re-caches normally.
+        let recache = try await makeSnapshot(store: store2, rawKey: key, seq: 5, seed: 4, commitSequence: 5, sampledPurgeGen: 1, nowMillis: 1_000_400)
+        guard case .committed = try await store2.write(recache, nowMillis: 1_000_400) else { return XCTFail("post-recovery re-cache must commit") }
+    }
+
+    /// Item 1/2 (CRITICAL, coordinator refinement 1): the durable incomplete tombstone
+    /// + high-watermark are written BEFORE the first suspending hot-tier callback, so a
+    /// crash AT the callback cannot leave the entry restorable after restart.
+    func testCrashInsideHotCallbackRecovers() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let key = "conv:kvs-synth:hot-cb-crash"
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        let snapshot = try await makeSnapshot(store: store1, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        _ = try await store1.write(snapshot, nowMillis: 1_000_000)
+        let index = try await idx(store1, key)
+
+        await store1.setFailpoint { if $0 == .purgeBeforeHotCallback { throw KVInjectedCrash(point: .purgeBeforeHotCallback) } }
+        await XCTAssertThrowsErrorAsync(try await store1.purge(rawKey: key))
+        await store1.deactivate()
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        let result = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5, highWatermark: 1), nowMillis: 1_000_200)
+        guard case .miss = result else { return XCTFail("recovery must complete the purge after a hot-callback crash") }
+        XCTAssertNil(try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index))
+    }
+
+    /// Item 2 (CRITICAL): two concurrent single-key purges of the same index serialize
+    /// through the purge gate — no state survives and neither clears a fence the other
+    /// owns.
+    func testConcurrentSingleKeyPurgesSerialize() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:concurrent"
+        let snapshot = try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        _ = try await store.write(snapshot, nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+
+        async let a = store.purge(rawKey: key)
+        async let b = store.purge(rawKey: key)
+        let (ra, rb) = try await (a, b)
+        if case .failed = ra { XCTFail("purge A failed: \(ra)") }
+        if case .failed = rb { XCTFail("purge B failed: \(rb)") }
+
+        let read = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 5, highWatermark: 2), nowMillis: 1_000_100)
+        guard case .miss = read else { return XCTFail("no state may survive concurrent purges") }
+        XCTAssertNil(try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index))
+    }
+
+    /// Item 1 (CRITICAL): a purge-all that crashes right after opening the rotation
+    /// journal leaves it durably OPEN — the namespace fails closed (reads busy) until a
+    /// restart drives the rotation forward.
+    func testOpenRotationJournalBlocksReadsUntilRecovery() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let key = "conv:kvs-synth:rotjournal"
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        let snapshot = try await makeSnapshot(store: store1, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        _ = try await store1.write(snapshot, nowMillis: 1_000_000)
+        let index = try await idx(store1, key)
+
+        await store1.setFailpoint { if $0 == .rotationAfterJournal { throw KVInjectedCrash(point: .rotationAfterJournal) } }
+        await XCTAssertThrowsErrorAsync(try await store1.purgeAll())
+        let blocked = try await store1.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_100)
+        guard case .miss(.diskMissBusy, _) = blocked else { return XCTFail("open rotation journal must block reads, got \(blocked)") }
+        await store1.deactivate()
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        let epoch = await store2.currentEpoch
+        XCTAssertEqual(epoch, 2, "recovery completes the interrupted rotation")
+        let after = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_200)
+        guard case .miss = after else { return XCTFail("post-rotation read misses cleanly") }
+    }
+
     /// CRITICAL-2: a snapshot whose key epoch was captured before a purge-all
     /// rotation is REJECTED (fence_lost) when its persist Task finally publishes —
     /// it can never be restamped into the new epoch and survive crypto-shredding.

@@ -115,6 +115,15 @@ enum KVReasonDetail: String, Sendable, Equatable {
     case dekDestroyed = "dek_destroyed"
     case fstatFailed = "fstat_failed"
     case oversizedManifest = "oversized_manifest"
+    /// A read/promotion refused because an INCOMPLETE tombstone durably blocks the
+    /// index (a purge started but has not been completion-marked). Derived from
+    /// durable state, so it fails closed across a purge failure AND a restart until
+    /// recovery finishes the purge (Item 1, FR-KVP8 fail-closed revocation).
+    case purgePending = "purge_pending"
+    /// A write refused because the aggregate write-live staging budget
+    /// (`write_staging_max_bytes`) is exhausted across all concurrent snapshots
+    /// (Item 3, FR-KVP3 RAM-DoS bound).
+    case writeBudget = "write_budget"
 }
 
 /// Read/promotion-phase result of manifest parse + envelope validation. `ok`

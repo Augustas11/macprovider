@@ -86,6 +86,11 @@ enum KVFailpoint: String, Sendable, CaseIterable {
     // single-key purge (FR-KVP8)
     case purgeAfterIncompleteTombstone
     case purgeAfterHighWatermark
+    /// Fires immediately before the first suspending hot-tier callback, AFTER the
+    /// durable incomplete tombstone + high-watermark are written (Item 1/2). A crash
+    /// here models a power loss inside the hot callback: recovery MUST complete the
+    /// purge and the entry MUST never be restorable.
+    case purgeBeforeHotCallback
     case purgeAfterDEKDestroy
     case purgeAfterUnlink
     // epoch rotation (FR-KVP6)
@@ -353,6 +358,37 @@ actor KVDiskCacheStore {
     /// complete atomically; a purge sets the fence before it can suspend.
     private var purgingIndexes: Set<String> = []
     private var namespacePurging = false
+
+    /// FR-KVP8 durable per-index block (Item 1, CRITICAL). An index is blocked iff an
+    /// INCOMPLETE tombstone exists for it (a purge started but not completion-marked).
+    /// Unlike the transient `purgingIndexes` fence (cleared by the purge's `defer`),
+    /// this is derived from DURABLE state: it is established when an incomplete
+    /// tombstone becomes durable (in `writeTombstone`) and at activation recovery, and
+    /// cleared ONLY when the completion mark is durable. So a purge that FAILS after
+    /// the tombstone (DEK/unlink/fsync error) leaves the index blocked — a subsequent
+    /// read fails closed (`disk_miss_tombstoned`) and a write is refused
+    /// (`fence_lost`) until an in-process retry or a post-restart recovery completes
+    /// the purge. This closes the fail-open where the transient flag was cleared while
+    /// an incomplete tombstone still admitted the old generation.
+    private var blockedIndexes: Set<String> = []
+
+    /// A namespace is blocked (reads/writes/promotions refused) while a purge-all /
+    /// cap-rotation is in flight (`namespacePurging`) OR an open rotation-intent
+    /// journal is durably present in namespace metadata — including one left open by a
+    /// FAILED rotation. Recovery drives an open journal forward at the next
+    /// activation; until then the namespace fails closed rather than serving reads
+    /// against a half-rotated (or not-yet-rotated) epoch. Derived from durable state,
+    /// never only the transient flag.
+    private var namespaceBlocked: Bool { namespacePurging || metadata.rotationJournal != nil }
+
+    /// FR-KVP8 purge/rotation serialization gate (Item 2, CRITICAL). At most one
+    /// purge OR rotation runs at a time namespace-wide, so a running purge OWNS its
+    /// fence (`purgingIndexes` / `namespacePurging`) for its full duration — including
+    /// the suspension on the hot-tier callback. Without this, two concurrent control
+    /// connections could overlap: one purge clears a fence a second purge is still
+    /// relying on, and a hot commit admitted in that gap survives the remaining purge.
+    private var purgeGateHeld = false
+    private var purgeGateWaiters: [CheckedContinuation<Void, Never>] = []
 
     struct KVLiveEntry: Sendable, Equatable {
         var bytes: Int
@@ -681,12 +717,19 @@ actor KVDiskCacheStore {
         guard activated else { return skip(.ioError, snapshot) }
         if let detail = quarantined { return skip(detail, snapshot) }
 
-        // FR-KVP8 admission fence (CRITICAL): a write sampled before/during an
-        // in-progress purge for this index (or any purge-all/cap rotation) must not
-        // publish. The durable high-watermark fences a write that arrives AFTER the
-        // purge completes; this fence covers the interval a purge is suspended on its
-        // hot-tier callback.
-        if namespacePurging || purgingIndexes.contains(snapshot.indexHMAC) {
+        // FR-KVP8 admission fence (CRITICAL, Item 1): a write sampled before/during an
+        // in-progress OR incomplete purge must not publish. Derived from durable state:
+        //  - namespaceBlocked: in-flight purge-all/cap-rotation OR a durably open
+        //    rotation journal;
+        //  - purgingIndexes: the transient per-index fence covering the hot-callback
+        //    window;
+        //  - blockedIndexes: a durable incomplete tombstone (a purge that started but
+        //    has not completion-marked) — new state MUST NOT be admitted before the
+        //    completion mark, even after a purge failure or restart.
+        // The durable high-watermark additionally fences a write that arrives AFTER the
+        // purge completes (re-checked in the mutation lane).
+        if namespaceBlocked || purgingIndexes.contains(snapshot.indexHMAC)
+            || blockedIndexes.contains(snapshot.indexHMAC) {
             return skip(.fenceLost, snapshot)
         }
 
@@ -1038,10 +1081,19 @@ actor KVDiskCacheStore {
             return .miss(.diskMissIO, .keychainUnavailable)
         }
 
-        // FR-KVP8 admission fence (CRITICAL): deny reads/promotions for an index (or
-        // the whole namespace) while a purge is in progress, so an old-epoch/old-gen
-        // entry cannot resurface across the purge's hot-tier callback suspension.
-        if namespacePurging || purgingIndexes.contains(index) { return .miss(.diskMissBusy) }
+        // FR-KVP8 admission fence (CRITICAL, Item 1): deny reads/promotions derived from
+        // DURABLE state, not only the transient flags.
+        //  - Namespace-wide fence (in-flight purge-all/cap-rotation OR a durably open
+        //    rotation journal, including one left open by a failed rotation) → busy.
+        //  - A durably-blocked index (incomplete tombstone: purge started, not
+        //    completion-marked) → tombstoned. This holds across a purge FAILURE and a
+        //    restart until recovery finishes the purge, so an old generation can never
+        //    be read again before the completion mark.
+        //  - A transient per-index purge fence (the hot-callback window before the
+        //    tombstone is durable) → busy.
+        if namespaceBlocked { return .miss(.diskMissBusy) }
+        if blockedIndexes.contains(index) { return .miss(.diskMissTombstoned, .purgePending) }
+        if purgingIndexes.contains(index) { return .miss(.diskMissBusy) }
 
         // Back-pressure: at most one promotion in flight namespace-wide.
         guard !promotionInFlight else { return .miss(.diskMissBusy) }
@@ -1303,14 +1355,46 @@ actor KVDiskCacheStore {
         return indexPrefix(index)
     }
 
+    // MARK: - Purge/rotation serialization gate (Item 2, FR-KVP8)
+
+    /// Acquire the exclusive purge/rotation gate. A second purge awaits the first, so
+    /// at most one purge/rotation runs at a time and each owns its fence for its full
+    /// duration (including the hot-callback suspension). FIFO: the gate is handed
+    /// directly to the next waiter on release, so `purgeGateHeld` never drops between
+    /// a release and the resumed waiter running.
+    private func acquirePurgeGate() async {
+        if !purgeGateHeld { purgeGateHeld = true; return }
+        await withCheckedContinuation { purgeGateWaiters.append($0) }
+    }
+
+    private func releasePurgeGate() {
+        if purgeGateWaiters.isEmpty { purgeGateHeld = false }
+        else { purgeGateWaiters.removeFirst().resume() }
+    }
+
     // MARK: - Purge (FR-KVP8)
 
-    /// Single-key purge with the exact tombstone-first 5-step ordering. Idempotent
-    /// and fail-closed: any partial failure leaves the tombstone in place.
+    /// Single-key purge with the exact tombstone-first ordering. Idempotent and
+    /// fail-closed: any partial failure leaves the incomplete tombstone (and the
+    /// derived durable block, `blockedIndexes`) in place.
+    ///
+    /// Item 1/2 durable-first ordering (CRITICAL): the incomplete tombstone AND the
+    /// high-watermark are made durable (fsync) BEFORE the first suspending hot-tier
+    /// callback whenever there is durable state to revoke (disk artifacts or a prior
+    /// watermark), so a crash inside that callback still leaves a durable fence for
+    /// recovery to resume from. Only when there is NO durable state (no artifacts, no
+    /// prior watermark) is the hot callback consulted first — a crash there is safe
+    /// because nothing durable could be admitted (writes are fenced by
+    /// `purgingIndexes`, raised synchronously below, and no manifest could have been
+    /// published without disk artifacts existing).
     @discardableResult
     func purge(rawKey: String) async throws -> KVPurgeResult {
         guard activated else { return .failed(.ioError) }
         if let detail = quarantined { return .failed(detail) }
+
+        // Item 2 (CRITICAL): serialize purges/rotations so fences cannot race.
+        await acquirePurgeGate()
+        defer { releasePurgeGate() }
 
         let index: String
         do {
@@ -1330,21 +1414,21 @@ actor KVDiskCacheStore {
 
         let dir = entryDir(index)
         let hadArtifacts = fileExists(dir)
-
-        // (3, hot half) Drop the matching hot entry, cancel its pending persist, and
-        // fence any outstanding lease's commit BEFORE the on-disk generation is
-        // unlinked (CRITICAL). The hook reports whether the hot tier held live state
-        // (resident entry OR queued/in-flight persist) — a purge that had hot OR
-        // pending state must NOT no-op, even with no disk artifacts, so a queued
-        // snapshot cannot later publish a disk entry with no watermark to fence it.
-        let hotHadState = await hotPurgeSingle?(rawKey) ?? false
         let hadPriorHWM = metadata.purgeHighWatermarks[index] != nil
 
-        // A purge of an index with no disk artifacts, no hot/pending state, and no
-        // prior watermark is a genuine no-op.
-        if !hadArtifacts && !hotHadState && !hadPriorHWM {
-            emit(.purgeOK, indexHashPrefix: indexPrefix(index), fields: ["entries_removed": "0", "bytes_freed": "0"])
-            return .ok(entriesRemoved: 0, bytesFreed: 0)
+        // When there is no durable state to revoke (no disk artifacts, no prior
+        // watermark) the ONLY thing that can make this purge non-trivial is hot/pending
+        // state, which requires the suspending hot callback to learn. A crash during
+        // that callback is safe here: nothing durable exists to leave unfenced. In the
+        // durable-state path below the tombstone+HWM are written BEFORE the callback.
+        var hotCallbackDone = false
+        if !hadArtifacts && !hadPriorHWM {
+            let hotHadState = await hotPurgeSingle?(rawKey) ?? false
+            hotCallbackDone = true
+            if !hotHadState {
+                emit(.purgeOK, indexHashPrefix: indexPrefix(index), fields: ["entries_removed": "0", "bytes_freed": "0"])
+                return .ok(entriesRemoved: 0, bytesFreed: 0)
+            }
         }
 
         // High-watermark-cap rotation (FR-KVP7 4096 path): admitting a NEW index into
@@ -1368,16 +1452,24 @@ actor KVDiskCacheStore {
 
         let newGeneration = metadata.highWatermark(for: index) + 1
         do {
-            // (1) incomplete tombstone carrying the incremented purge generation,
-            //     fsync + dir fsync, THEN advance + fsync the high-watermark. The hot
-            //     tier is already fenced above; the durable watermark now also fences
-            //     any racing/queued disk write that samples after the fence lifts.
+            // (1) DURABLE-FIRST: create + fsync the incomplete tombstone (which also
+            //     establishes the durable in-memory block via `blockedIndexes`), THEN
+            //     advance + fsync the high-watermark — both BEFORE the suspending hot
+            //     callback, so a crash inside the callback still fences the index.
             try writeTombstone(KVTombstone(epoch: metadata.keyEpoch, index: index,
                                            purgeGeneration: newGeneration, complete: false))
             try crashIf(.purgeAfterIncompleteTombstone)
             metadata.purgeHighWatermarks[index] = newGeneration
             try persistMetadata()
             try crashIf(.purgeAfterHighWatermark)
+
+            // (2) Drop the matching hot entry, cancel its pending/in-flight persist, and
+            //     fence any outstanding lease's commit. Suspends on the hot actor — but
+            //     the durable fence above already holds, so a crash here is recoverable.
+            if !hotCallbackDone {
+                try crashIf(.purgeBeforeHotCallback)
+                _ = await hotPurgeSingle?(rawKey)
+            }
 
             let bytesFreed = try completePurgeSteps(index: index, generation: newGeneration)
             emit(.purgeOK, indexHashPrefix: indexPrefix(index),
@@ -1436,6 +1528,10 @@ actor KVDiskCacheStore {
     func purgeAll() async throws -> KVPurgeResult {
         guard activated else { return .failed(.ioError) }
         if let detail = quarantined { return .failed(detail) }
+        // Item 2 (CRITICAL): the namespace-exclusive section — serialized against every
+        // single-key purge and cap-rotation through the same gate.
+        await acquirePurgeGate()
+        defer { releasePurgeGate() }
         do {
             let rotated = try await performNamespacePurgeRotation()
             emit(.purgeOK, fields: ["entries_removed": "\(rotated.entries)", "bytes_freed": "\(rotated.bytes)", "mode": "all"])
@@ -1704,7 +1800,30 @@ actor KVDiskCacheStore {
                 try persistMetadata()
             }
             if !tomb.complete {
-                _ = try completePurgeSteps(index: tomb.index, generation: tomb.purgeGeneration)
+                // Item 1: block the index durably BEFORE attempting completion, so if
+                // completion cannot finish (transient I/O, or keychain dormancy) the
+                // index stays fenced (reads → tombstoned, writes → fence_lost) instead
+                // of admitting. `completePurgeSteps` clears the block via the durable
+                // completion mark on success.
+                blockedIndexes.insert(tomb.index)
+                do {
+                    _ = try completePurgeSteps(index: tomb.index, generation: tomb.purgeGeneration)
+                } catch let crash as KVInjectedCrash {
+                    throw crash
+                } catch let e as KVKeychainError where isUnavailable(e) {
+                    // Coordinator LOW / FR-KVP6: a keychain-unavailable DEK-destroy during
+                    // interrupted-purge recovery stays dormant-and-retry — the index
+                    // remains durably blocked (reads → tombstoned, writes → fence_lost) and
+                    // the purge is re-completed on a later activation once the keychain is
+                    // available. This is NOT a quarantine, and we keep processing the
+                    // remaining tombstones so every incomplete index is fenced + its
+                    // high-watermark advanced (no fail-open on a skipped tombstone).
+                    _ = e
+                } catch {
+                    // Transient completion failure (e.g. unlink error): keep the index
+                    // blocked (fail-closed) and let a later activation retry, rather than
+                    // quarantining the whole namespace for one stuck index.
+                }
             }
         }
     }
@@ -1825,6 +1944,11 @@ actor KVDiskCacheStore {
         try writeFileAtomic(data, to: url)
         try fsyncDirectory(tombstonesDir)
         tombstoneBytes = sumDirBytes(tombstonesDir)   // FR-KVP7 accounting
+        // Item 1: the durable in-memory block is established once the incomplete
+        // tombstone is durable, and lifted once the completion mark is durable — so
+        // admission derives "is this index blocked?" from durable purge state.
+        if tomb.complete { blockedIndexes.remove(tomb.index) }
+        else { blockedIndexes.insert(tomb.index) }
     }
 
     // MARK: - Usage journal + artifact accounting (FR-KVP7)
