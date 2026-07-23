@@ -383,6 +383,36 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .committed = try await writeSeq(3, seed: 3) else { return XCTFail("seq 3 should commit") }
     }
 
+    /// HIGH-4: a replacement write reuses the committed generation's DEK, so a crash
+    /// before the new manifest rename leaves the still-committed generation
+    /// decryptable after restart (duplicate-create would delete-then-add the DEK and
+    /// lose gen1).
+    func testReplacementCrashKeepsCommittedGenerationDecryptable() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let key = "conv:kvs-synth:dek-share"
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        // gen1 committed.
+        let s1 = try await makeSnapshot(store: store1, rawKey: key, seq: 5, seed: 0, commitSequence: 1, nowMillis: 1_000_000)
+        guard case .committed = try await store1.write(s1, nowMillis: 1_000_000) else { return XCTFail("gen1 should commit") }
+        let index = try await idx(store1, key)
+
+        // gen2 crashes inside the mutation lane, before the manifest rename.
+        await store1.setFailpoint { if $0 == .insideMutationLaneBeforeRename { throw KVInjectedCrash(point: .insideMutationLaneBeforeRename) } }
+        let s2 = try await makeSnapshot(store: store1, rawKey: key, seq: 5, seed: 9, commitSequence: 2, nowMillis: 1_000_100)
+        await XCTAssertThrowsErrorAsync(try await store1.write(s2, nowMillis: 1_000_100))
+        await store1.deactivate()
+
+        // Restart: recovery sweeps the orphaned gen2 blob + temp manifest, keeps gen1.
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store2.activate()
+        let result = try await store2.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_500)
+        guard case .hit(let hit) = result else { return XCTFail("committed gen1 must still read, got \(result)") }
+        XCTAssertEqual(hit.tokens, Array(0 ..< Int32(5)))
+        XCTAssertEqual(hit.layers, s1.layers, "committed gen1 bytes survive the crashed replacement")
+    }
+
     func testAbsentKeyPurgeNoOps() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

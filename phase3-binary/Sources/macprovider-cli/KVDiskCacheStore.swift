@@ -598,12 +598,20 @@ actor KVDiskCacheStore {
         let dir = entryDir(index)
         let newEntry = !fileExists(dir)
 
-        // DEK: create + verify before first use. A failed create aborts the write.
+        // DEK: ONE shared entry DEK across generations (HIGH-4). A replacement write
+        // REUSES the committed generation's DEK — creating a fresh DEK would
+        // delete-then-add, destroying the previous generation's key, so a crash
+        // before the new manifest rename would leave the still-committed generation
+        // undecryptable. A fresh DEK is created only when none exists (first write,
+        // or after a purge/eviction crypto-shredded it).
         let dek: Data
-        do {
+        let createdFreshDEK: Bool
+        if let existing = try keys.entryDEK(epoch: metadata.keyEpoch, index: index) {
+            dek = existing
+            createdFreshDEK = false
+        } else {
             dek = try keys.createEntryDEK(epoch: metadata.keyEpoch, index: index, incarnation: snapshot.incarnation)
-        } catch {
-            throw error
+            createdFreshDEK = true
         }
         try crashIf(.afterDEKCreate)
 
@@ -732,8 +740,10 @@ actor KVDiskCacheStore {
             // ownership-checked so a delayed abort cannot delete a re-created DEK.
             throw crash
         } catch {
-            // Real failure: ownership-checked abort deletion of the provisional DEK.
-            if newEntry {
+            // Real failure: ownership-checked abort deletion — ONLY when THIS write
+            // created the DEK fresh (HIGH-4). A reused DEK backs a still-committed
+            // prior generation and must survive this write's failure.
+            if createdFreshDEK {
                 try? keys.destroyEntryDEKIfOwnedBy(epoch: metadata.keyEpoch, index: index, incarnation: snapshot.incarnation)
             }
             throw error
