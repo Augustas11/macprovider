@@ -245,6 +245,7 @@ class Config:
     catalog_canary_provider_id: str = ""
     catalog_canary_auth_token_file: Path = Path("/etc/macprovider/pearl-updater.catalog-canary-token")
     catalog_canary_ssh_target: str = ""
+    catalog_canary_ssh_port: int = 22
     catalog_canary_ssh_key_file: Path = Path("/etc/macprovider/pearl-updater.catalog-canary-ssh-key")
     catalog_canary_known_hosts_file: Path = Path("/etc/macprovider/pearl-updater.catalog-canary-known-hosts")
     catalog_canary_install_dir: str = "macprovider/catalog-release"
@@ -615,6 +616,7 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID",
         "PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE",
         "PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET",
+        "PEARL_UPDATER_CATALOG_CANARY_SSH_PORT",
         "PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE",
         "PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE",
         "PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR",
@@ -666,6 +668,12 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
             )
         ),
         catalog_canary_ssh_target=values.get("PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET", ""),
+        catalog_canary_ssh_port=bounded_int(
+            values.get("PEARL_UPDATER_CATALOG_CANARY_SSH_PORT", "22"),
+            "catalog canary SSH port",
+            1,
+            65535,
+        ),
         catalog_canary_ssh_key_file=Path(
             values.get(
                 "PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE",
@@ -4314,6 +4322,8 @@ class Updater:
             "ServerAliveInterval=15",
             "-o",
             "ServerAliveCountMax=3",
+            "-p",
+            str(self.config.catalog_canary_ssh_port),
             self.config.catalog_canary_ssh_target,
             remote_command,
         ]
