@@ -438,6 +438,31 @@ final class KVDiskCacheStoreTests: XCTestCase {
         XCTAssertNil(try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index1))
     }
 
+    func testRetentionEvictsAndDestroysDEK() async throws {
+        // AC-4 addition (FR-KVP10/KVP6): retention eviction crypto-shreds the entry
+        // by destroying its DEK, not merely unlinking files.
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let store = KVDiskCacheStore(config: makeConfig(root: root) { $0.retentionSeconds = 60 }, keychain: keychain, sink: sink)
+        try await store.activate()
+
+        let key = "conv:kvs-synth:retain"
+        let snapshot = try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        _ = try await store.write(snapshot, nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+
+        // Advance past the 60s retention deadline and compact.
+        try await store.runRetention(nowMillis: 1_000_000 + 120_000)
+        XCTAssertGreaterThanOrEqual(sink.codes(.diskEvictRetention), 1)
+        XCTAssertNil(
+            try keychain.copySecret(service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index),
+            "retention eviction must destroy the entry DEK")
+
+        let result = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_000 + 120_100)
+        guard case .miss = result else { return XCTFail("evicted entry must miss") }
+    }
+
     func testFreeSpaceFloorRefusesWrite() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()
