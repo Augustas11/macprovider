@@ -202,6 +202,9 @@ struct KVDiskCacheStoreConfig: Sendable {
     var eligibilityTTLSeconds: Int      // hot-tier TTL, for the inspection surface
     /// Non-evictable metadata reserve (FR-KVP7): default 4 MiB.
     var metadataReserveBytes: Int = 4 * 1024 * 1024
+    /// Background retention sweep interval, seconds (M-12). 0 ⇒ no timer (opportunistic
+    /// on-write sweep still runs); the serve tier sets a real interval.
+    var retentionSweepSeconds: Int = 0
     /// Test hook: override host free-space (bytes). Nil ⇒ real statvfs.
     var freeSpaceOverride: Int? = nil
     /// Test hook (M-19): simulate a statvfs failure so the free-space floor fails
@@ -310,8 +313,15 @@ actor KVDiskCacheStore {
     struct KVLiveEntry: Sendable, Equatable {
         var bytes: Int
         var lastUsedMillis: Int
+        /// Immutable creation timestamp of the entry (index), preserved across
+        /// generations (M-12). Retention is measured from this, never from
+        /// lastUsedMillis, so reads cannot extend physical retention.
+        var creationMillis: Int
         var generation: Int
     }
+
+    /// Background retention sweep (M-12 "timer while active"). Cancelled on deactivate.
+    private var retentionTask: Task<Void, Never>?
 
     // MARK: Init
 
@@ -401,6 +411,7 @@ actor KVDiskCacheStore {
             try sweepOrphansAndAccount()
             activated = true
             notifyEpoch()
+            startRetentionTimer()
             return true
         } catch let crash as KVInjectedCrash {
             throw crash
@@ -413,6 +424,8 @@ actor KVDiskCacheStore {
 
     /// Release the lock and mark inactive (graceful shutdown / test teardown).
     func deactivate() {
+        retentionTask?.cancel()
+        retentionTask = nil
         releaseLock()
         activated = false
     }
@@ -554,6 +567,10 @@ actor KVDiskCacheStore {
 
         // Clock integrity: a rollback below the high-water skips writes.
         guard try advanceClock(nowMillis: nowMillis) else { return skip(.clockRollback, snapshot) }
+
+        // Opportunistic retention sweep on writes (M-12): evict entries past their
+        // creation-based retention deadline before admitting new state.
+        try? runRetention(nowMillis: nowMillis)
 
         // Key epoch must still be current (a warm-swap/rotation after commit skips).
         guard snapshot.identity.keyEpoch == metadata.keyEpoch else { return skip(.fenceLost, snapshot) }
@@ -745,7 +762,10 @@ actor KVDiskCacheStore {
             // Publish in-memory state.
             let entryBytes = blob.count + manifestData.count
             committedBytes += entryBytes - previousBytes
-            liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: nowMillis, generation: generation)
+            // Preserve the entry's original creation time across generations (M-12).
+            let creationMillis = liveEntries[index]?.creationMillis ?? snapshot.createdAtMillis
+            liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: nowMillis,
+                                             creationMillis: creationMillis, generation: generation)
             lastGeneration[index] = generation
             lastCommitSequence[index] = snapshot.commitSequence
 
@@ -1286,12 +1306,32 @@ actor KVDiskCacheStore {
         emit(reason, indexHashPrefix: indexPrefix(index), fields: ["bytes_freed": "\(freed)"])
     }
 
-    /// Retention compaction (FR-KVP10): evict entries whose creation predates the
-    /// retention deadline. Retention is a cleanup deadline, not a reuse extension.
+    /// Retention compaction (FR-KVP10 / M-12): evict entries whose IMMUTABLE creation
+    /// time predates the retention deadline. Retention is a physical cleanup deadline
+    /// measured from creation — never from lastUsed — so reads cannot extend it.
     func runRetention(nowMillis: Int) throws {
+        guard config.retentionSeconds > 0 else { return }
         let cutoff = nowMillis - config.retentionSeconds * 1000
-        for (index, entry) in liveEntries where entry.lastUsedMillis < cutoff {
+        for (index, entry) in liveEntries where entry.creationMillis < cutoff {
             try destroyWholeEntry(index: index, reason: .diskEvictRetention)
+        }
+    }
+
+    /// Periodic retention tick (M-12 "timer while active"). Uses the durable clock
+    /// high-water as its clock (monotonic, and synthetic-safe in unit tests).
+    private func retentionSweepTick() {
+        guard activated, quarantined == nil else { return }
+        try? runRetention(nowMillis: metadata.clockHighWaterMillis)
+    }
+
+    private func startRetentionTimer() {
+        guard retentionTask == nil, config.retentionSweepSeconds > 0 else { return }
+        let interval = UInt64(config.retentionSweepSeconds) * 1_000_000_000
+        retentionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                await self?.retentionSweepTick()
+            }
         }
     }
 
@@ -1369,7 +1409,8 @@ actor KVDiskCacheStore {
             let blobBytes = (try? fileSize(blobURL)) ?? 0
             let entryBytes = blobBytes + data.count
             committedBytes += entryBytes
-            liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: manifest.createdAtMillis, generation: manifest.generation)
+            liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: manifest.createdAtMillis,
+                                             creationMillis: manifest.createdAtMillis, generation: manifest.generation)
             lastGeneration[index] = manifest.generation
             lastCommitSequence[index] = manifest.commitSequence
         }

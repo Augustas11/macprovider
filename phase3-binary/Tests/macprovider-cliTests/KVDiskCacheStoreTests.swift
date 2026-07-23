@@ -603,6 +603,52 @@ final class KVDiskCacheStoreTests: XCTestCase {
         guard case .miss = result else { return XCTFail("evicted entry must miss") }
     }
 
+    /// M-12: retention is measured from the immutable creation time, so a read
+    /// within retention does NOT extend it — the entry is still evicted past
+    /// creation + retention.
+    func testReadsDoNotExtendRetention() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let store = KVDiskCacheStore(config: makeConfig(root: root) { $0.retentionSeconds = 60 }, keychain: keychain, sink: sink)
+        try await store.activate()
+        let key = "conv:kvs-synth:retain-basis"
+        let snap = try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000)
+        _ = try await store.write(snap, nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+
+        // A read at +30s hits and updates lastUsed — but must not extend retention.
+        let read = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_030_000)
+        guard case .hit = read else { return XCTFail("read within retention should hit") }
+
+        // At +70s (past creation + 60s), retention evicts despite the recent read.
+        try await store.runRetention(nowMillis: 1_070_000)
+        XCTAssertGreaterThanOrEqual(sink.codes(.diskEvictRetention), 1,
+                                    "retention is creation-based and must not be extended by reads")
+        let after = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_070_100)
+        guard case .miss = after else { return XCTFail("evicted entry must miss") }
+    }
+
+    /// M-12: a write opportunistically sweeps entries past their retention deadline.
+    func testWriteTriggersOpportunisticRetention() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let sink = KVRecordingEventSink()
+        let store = KVDiskCacheStore(config: makeConfig(root: root) { $0.retentionSeconds = 60 }, keychain: keychain, sink: sink)
+        try await store.activate()
+
+        let old = try await makeSnapshot(store: store, rawKey: "conv:kvs-synth:old", seq: 5, nowMillis: 1_000_000)
+        _ = try await store.write(old, nowMillis: 1_000_000)
+        let oldIndex = try await idx(store, "conv:kvs-synth:old")
+
+        // A later write (+200s) opportunistically evicts the old entry (creation +60s).
+        let fresh = try await makeSnapshot(store: store, rawKey: "conv:kvs-synth:fresh", seq: 5, nowMillis: 1_200_000)
+        _ = try await store.write(fresh, nowMillis: 1_200_000)
+        XCTAssertGreaterThanOrEqual(sink.codes(.diskEvictRetention), 1, "write must run opportunistic retention")
+        let oldRead = try await store.read(rawKey: "conv:kvs-synth:old", runtime: runtime(index: oldIndex, seq: 5), nowMillis: 1_200_100)
+        guard case .miss = oldRead else { return XCTFail("old entry must be retention-evicted") }
+    }
+
     func testFreeSpaceFloorRefusesWrite() async throws {
         let root = makeRoot()
         let keychain = KVInMemoryKeychain()

@@ -45,7 +45,7 @@ final class KVDiskTier: Sendable {
         self.config = config
         self.namespaceID = namespaceID
         self.eligibilityTTLSeconds = eligibilityTTLSeconds
-        let storeConfig = KVDiskCacheStoreConfig(
+        var storeConfig = KVDiskCacheStoreConfig(
             root: URL(fileURLWithPath: config.directory, isDirectory: true),
             namespaceID: namespaceID,
             maxBytes: config.maxBytes,
@@ -57,6 +57,8 @@ final class KVDiskTier: Sendable {
             minFreeBytes: config.minFreeBytes,
             promotionMaxSeconds: config.promotionMaxSeconds,
             eligibilityTTLSeconds: eligibilityTTLSeconds)
+        // M-12: run a background retention sweep every 5 minutes while active.
+        storeConfig.retentionSweepSeconds = 300
         self.store = KVDiskCacheStore(config: storeConfig, keychain: keychain, sink: sink)
     }
 
