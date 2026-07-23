@@ -340,6 +340,11 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             }
             _ = await group.next()   // whichever completes first (all drained OR timeout)
             group.cancelAll()
+            // M-A: cancelling the GROUP's children does not unblock the drainer child's
+            // `await task.value` on the underlying persist tasks. Cancel those tasks so
+            // queued (unstarted) writes resolve immediately and the timeout truly bounds
+            // the drain rather than blocking on unfinished work past the deadline.
+            for task in tasks { task.cancel() }
         }
     }
 }

@@ -1499,12 +1499,15 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             }
         )
-        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer)
+        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier)
         defer {
-            Task {
+            Task { [kvDiskTier] in
                 await idlePrewarmer.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.stop()
+                // M-A: flush queued cold writes + release the namespace lock on the
+                // normal serve-teardown path as well.
+                await kvDiskTier?.shutdown()
             }
             terminationHandlers.forEach { $0.cancel() }
         }
@@ -2217,7 +2220,8 @@ private func execCanonicalInstall(_ canonical: URL) throws -> Never {
 private func installTerminationHandlers(
     coordinatorClient: CoordinatorClient?,
     controlSocket: ControlSocketServer?,
-    idlePrewarmer: IdlePrewarmer?
+    idlePrewarmer: IdlePrewarmer?,
+    kvDiskTier: KVDiskTier?
 ) -> [DispatchSourceSignal] {
     [SIGTERM, SIGINT].map { signalNumber in
         signal(signalNumber, SIG_IGN)
@@ -2227,6 +2231,9 @@ private func installTerminationHandlers(
                 await idlePrewarmer?.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.drainAndExit(reason: "\(signalName(signalNumber)) received")
+                // M-A: drain queued cold writes (bounded by shutdownDrainSeconds) and
+                // release the namespace lock BEFORE exit, on the signal path too.
+                await kvDiskTier?.shutdown()
                 Darwin.exit(0)
             }
         }

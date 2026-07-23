@@ -36,8 +36,7 @@ final class KVDiskTier: @unchecked Sendable {
     let eligibilityTTLSeconds: Int
 
     /// Graceful-shutdown drain of queued cold writes (HIGH-5), wired at cold-tier
-    /// attach time. Bounded by `shutdownDrainSeconds`. Lock-guarded.
-    static let shutdownDrainSeconds = 5
+    /// attach time. Bounded by `config.shutdownDrainSeconds` (M-A). Lock-guarded.
     private let drainLock = NSLock()
     private var drainHook: (@Sendable (Int) async -> Void)?
     func setDrainHook(_ hook: (@Sendable (Int) async -> Void)?) {
@@ -152,7 +151,8 @@ final class KVDiskTier: @unchecked Sendable {
     /// by `shutdownDrainSeconds`) BEFORE releasing the namespace lock.
     func shutdown() async {
         drainLock.lock(); let hook = drainHook; drainLock.unlock()
-        if let hook { await hook(Self.shutdownDrainSeconds) }
+        // M-A: bound the drain by the RESOLVED config duration, not the hardcoded 5s.
+        if let hook { await hook(config.shutdownDrainSeconds) }
         await store.deactivate()
     }
 
