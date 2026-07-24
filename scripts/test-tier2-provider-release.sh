@@ -85,7 +85,7 @@ make_release_fixture() {
   local binary_dir="$fixture_dir/bin"
   local asset="$fixture_dir/macprovider-cli-v$version-darwin-arm64.tar.gz"
   local pkg_asset="$fixture_dir/macprovider-cli-v$version-darwin-arm64.pkg"
-  local app_asset="$fixture_dir/Malibu-v$version.zip"
+  local app_asset="$fixture_dir/Malibu-v$version.dmg"
   make_fake_binary "$binary_dir" "$version" "$include_surfaces"
   tar -czf "$asset" -C "$binary_dir" macprovider-cli mlx.metallib
   sha256_file "$asset" | awk -v asset="$(basename "$asset")" '{ print $1 "  " asset }' >"$fixture_dir/checksums.txt"
@@ -114,11 +114,14 @@ make_release_fixture() {
   case "$app_mode" in
     none)
       ;;
-    good)
+    good|bad-cli)
       local app_root="$fixture_dir/app-root"
       mkdir -p "$app_root/Malibu.app/Contents/MacOS"
       printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$app_root/Malibu.app/Contents/MacOS/Malibu"
       cp "$binary_dir/macprovider-cli" "$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
+      if [ "$app_mode" = "bad-cli" ]; then
+        printf '%s\n' '# app signing mutated this copy' >>"$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
+      fi
       cp "$binary_dir/mlx.metallib" "$app_root/Malibu.app/Contents/MacOS/mlx.metallib"
       chmod +x "$app_root/Malibu.app/Contents/MacOS/Malibu" "$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
       (cd "$app_root" && python3 - "$app_asset" <<'PY'
@@ -167,7 +170,7 @@ done
 [ -n "$url" ] || exit 2
 name="${url##*/}"
 case "$name" in
-  macprovider-cli-*-darwin-arm64.tar.gz|macprovider-cli-*-darwin-arm64.pkg|Malibu-v*.zip|checksums.txt|checksums.txt.sig)
+  macprovider-cli-*-darwin-arm64.tar.gz|macprovider-cli-*-darwin-arm64.pkg|Malibu-v*.dmg|checksums.txt|checksums.txt.sig)
     cp "$RELEASE_FIXTURE_DIR/$name" "$out"
     ;;
   *)
@@ -210,26 +213,46 @@ exit 2
 SH
 chmod +x "$WORKDIR/xcrun"
 
-cat >"$WORKDIR/ditto" <<'SH'
+cat >"$WORKDIR/hdiutil" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${1:-}" = "-x" ] && [ "${2:-}" = "-k" ]; then
-  archive="$3"
-  out="$4"
-  mkdir -p "$out"
-  python3 - "$archive" "$out" <<'PY'
+if [ "${1:-}" = "attach" ]; then
+  mount=""
+  archive=""
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -mountpoint)
+        mount="$2"
+        shift 2
+        ;;
+      -*)
+        shift
+        ;;
+      *)
+        archive="$1"
+        shift
+        ;;
+    esac
+  done
+  [ -n "$mount" ] && [ -n "$archive" ] || exit 2
+  mkdir -p "$mount"
+  python3 - "$archive" "$mount" <<'PY'
 import sys
 import zipfile
 
 with zipfile.ZipFile(sys.argv[1]) as archive:
     archive.extractall(sys.argv[2])
 PY
-  chmod +x "$out/Malibu.app/Contents/MacOS/Malibu" "$out/Malibu.app/Contents/MacOS/macprovider-cli"
+  chmod +x "$mount/Malibu.app/Contents/MacOS/Malibu" "$mount/Malibu.app/Contents/MacOS/macprovider-cli"
+  exit 0
+fi
+if [ "${1:-}" = "detach" ]; then
   exit 0
 fi
 exit 2
 SH
-chmod +x "$WORKDIR/ditto"
+chmod +x "$WORKDIR/hdiutil"
 
 cat >"$WORKDIR/lipo" <<'SH'
 #!/usr/bin/env bash
@@ -337,15 +360,27 @@ app_fixture="$WORKDIR/app-release"
 make_release_fixture "$app_fixture" "1.2.6" "1" "none" "good"
 PATH="$WORKDIR:$PATH" \
   CURL_BIN="$WORKDIR/curl" \
-  DITTO_BIN="$WORKDIR/ditto" \
   RELEASE_FIXTURE_DIR="$app_fixture" \
   MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
   RELEASE_TAG=v1.2.6 \
   "$VERIFIER" >"$WORKDIR/app.out" 2>"$WORKDIR/app.err"
-assert_contains "$WORKDIR/app.err" "Malibu.app zip sha256 verified"
+assert_contains "$WORKDIR/app.err" "Malibu.app DMG sha256 verified"
+assert_contains "$WORKDIR/app.err" "Malibu.app bundled binary matches tarball binary"
 assert_contains "$WORKDIR/app.err" "Malibu.app code signature verified"
-assert_contains "$WORKDIR/app.err" "Malibu.app stapler validation passed"
+assert_contains "$WORKDIR/app.err" "Malibu.app DMG stapler validation passed"
 assert_contains "$WORKDIR/app.err" "Malibu.app Gatekeeper assessment passed"
+
+bad_app_fixture="$WORKDIR/bad-app-release"
+make_release_fixture "$bad_app_fixture" "1.2.6" "1" "none" "bad-cli"
+if PATH="$WORKDIR:$PATH" \
+  CURL_BIN="$WORKDIR/curl" \
+  RELEASE_FIXTURE_DIR="$bad_app_fixture" \
+  MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
+  RELEASE_TAG=v1.2.6 \
+  "$VERIFIER" >"$WORKDIR/bad-app.out" 2>"$WORKDIR/bad-app.err"; then
+  die "mismatched Malibu.app CLI unexpectedly passed"
+fi
+assert_contains "$WORKDIR/bad-app.err" "Malibu.app bundled binary sha256 differs from tarball binary"
 
 bad_package_fixture="$WORKDIR/bad-package-release"
 make_release_fixture "$bad_package_fixture" "1.2.6" "1" "bad-extra"

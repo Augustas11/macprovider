@@ -357,7 +357,7 @@ jobs:
             --wait
           xcrun stapler staple "$dmg"
           xcrun stapler validate "$dmg"
-          bash scripts/verify-malibu-release-artifacts.sh "$dmg"
+          bash scripts/verify-malibu-release-artifacts.sh "$dmg" --expected-cli-sha256 "$CLI_SHA256"
 
           dmg_sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
           printf '%s  %s\n' "$dmg_sha" "$(basename "$dmg")" > "$dmg.sha256"
@@ -600,7 +600,7 @@ jobs:
               if manifest.get(key) != value:
                   raise SystemExit(f"candidate manifest mismatch for {key}")
           PY
-          bash scripts/verify-malibu-release-artifacts.sh "$dmg"
+          bash scripts/verify-malibu-release-artifacts.sh "$dmg" --expected-cli-sha256 "$CLI_SHA256"
           codesign --verify --strict --verbose=2 "$dmg"
           codesign -dv --verbose=4 "$dmg" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
           mount_dir="$(mktemp -d "$RUNNER_TEMP/malibu-candidate.XXXXXX")"

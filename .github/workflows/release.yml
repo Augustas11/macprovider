@@ -759,7 +759,8 @@ jobs:
           fi
 
           SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
-          codesign --force --deep \
+          source_cli_sha256="$(shasum -a 256 "$WORK/macprovider-cli" | awk '{print $1}')"
+          codesign --force \
             --options runtime \
             --timestamp \
             --preserve-metadata=identifier \
@@ -768,6 +769,12 @@ jobs:
             "$APP"
 
           codesign --verify --strict --verbose=2 --deep "$APP"
+          bundled_cli_sha256="$(shasum -a 256 "$APP/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
+          if [ "$bundled_cli_sha256" != "$source_cli_sha256" ]; then
+            echo "::error::Malibu embedded CLI sha256 differs from standalone CLI" >&2
+            echo "::error::standalone=$source_cli_sha256 embedded=$bundled_cli_sha256" >&2
+            exit 1
+          fi
           BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
           printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
             echo "::error::Bundling changed the CLI designated requirement identifier" >&2
@@ -1118,8 +1125,10 @@ jobs:
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
           dmg="phase3-binary/app/dist/Malibu-${tag}.dmg"
+          provider_tarball="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
           test -f "$dmg"
-          bash scripts/verify-malibu-release-artifacts.sh "$dmg"
+          test -f "$provider_tarball"
+          bash scripts/verify-malibu-release-artifacts.sh "$dmg" --provider-tarball "$provider_tarball"
           if [ "$tag" = v1.8.39 ]; then
             appcast="phase3-binary/app/dist/appcast.xml"
             test -f "$appcast"

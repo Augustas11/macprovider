@@ -211,6 +211,38 @@ spec-linked PR (how #713 shipped its `ci.yml` edit). Do not relax `ci.yml`
 into the governance-only allowlist to dodge this — that regime looks
 deliberate.
 
+## Release verification: workflow green is not production proof
+
+For every provider CLI release that ships both a standalone provider tarball
+and Malibu.app, the release contract is the installer/updater contract, not
+just GitHub Actions success.
+
+Rules:
+
+1. The `macprovider-cli` inside Malibu.app must be byte-identical to the
+   `macprovider-cli` inside the standalone provider tarball after all signing,
+   notarization, stapling, and packaging steps. Compare SHA-256 bytes, not
+   only `--version`, codesign requirement text, Gatekeeper, or notarization.
+2. Do not use recursive app signing (`codesign --force --deep`) on a bundle
+   after copying in the already-signed standalone provider CLI. Sign nested
+   code explicitly first, sign the outer app without `--deep`, then verify the
+   app with `codesign --verify --deep`.
+3. Do not mark a release production-verified until the updater path from the
+   previous stable version accepts it. `embedded_cli_mismatch` is a correct
+   fail-closed updater rejection, not a warning to bypass.
+4. Candidate workflow green is only candidate evidence. Final release proof
+   must come from immutable release assets after publication/download, with
+   signatures/checksums verified and the updater invariant exercised.
+5. If a public immutable release violates these invariants, do not patch the
+   release in place. Keep coordinator recommendation on the previous stable
+   version and cut a new release with matching artifacts.
+
+Keep product-specific smoke tests separate from release packaging proof. For
+example, Buzz/null-tool-schema verification proves the product fix; it does
+not prove the updater or Malibu packaging invariants above.
+
+Runbook: `docs/runbooks/provider-cli-release-verification.md`.
+
 ## Other repo conventions worth remembering
 
 - Every implementation slice must pass the audit loop before being treated as
