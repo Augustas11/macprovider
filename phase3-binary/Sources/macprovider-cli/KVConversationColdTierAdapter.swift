@@ -99,6 +99,12 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         writeLiveLock.lock(); defer { writeLiveLock.unlock() }; return writeLiveBytes
     }
 
+    /// Test-only (HIGH-3): the aggregate write-live footprint reserved for a snapshot of
+    /// the given decoded size — decoded PLUS the active seal footprint. Used to assert a
+    /// near-ceiling snapshot reserves more than `decoded`, so the true seal-time peak
+    /// cannot exceed `writeStagingMaxBytes`.
+    func writeFootprintForTest(decoded: Int) -> Int { decoded + activeSealFootprint(decoded: decoded) }
+
     /// Live-model per-layer geometry template, keyed by served model ID. Guarded
     /// by its own lock so the synchronous `captureSnapshot` and async
     /// `promoteCandidate` can both touch it without an actor hop.
@@ -244,11 +250,19 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // oversized snapshot BEFORE the deep copy, so a huge cache can never be copied
         // only to be rejected by the store.
         guard let estimatedDecoded = KVCacheSerialization.estimatedDecodedLength(caches, tokenCount: fullTokens.count),
-              estimatedDecoded <= writeStagingMaxBytes,
               estimatedDecoded <= maxEntryBytes,
               estimatedDecoded <= stagingMaxBytes else {
             return nil
         }
+
+        // HIGH-3 — the write-live budget must cover the ACTIVE seal footprint, not just
+        // the decoded snapshot. During the store's streaming seal, on top of the deep copy
+        // one chunk plaintext + its sealed ciphertext(+tag) + one frame + the manifest
+        // buffer are simultaneously live. Reserve that worst-case footprint (not merely
+        // `estimatedDecoded`) so a near-ceiling snapshot cannot exceed write_staging_max
+        // during sealing — it is rejected up front instead.
+        let writeFootprint = estimatedDecoded + activeSealFootprint(decoded: estimatedDecoded)
+        guard writeFootprint <= writeStagingMaxBytes else { return nil }
 
         // Item 3 (FR-KVP3): ONE aggregate write-live reservation held across the whole
         // persist lifetime. Reserve atomically BEFORE the deep copy; if it would exceed
@@ -257,14 +271,14 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // snapshot as a single-release token and released once by the persist Task
         // (completion, cancellation, or displacement). Multiple indices therefore cannot
         // each retain a ceiling-sized snapshot concurrently.
-        guard reserveWriteLive(estimatedDecoded) else {
+        guard reserveWriteLive(writeFootprint) else {
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
         // From here, any early return before building the snapshot MUST release the
         // reservation (the snapshot that would otherwise carry it is not produced).
         var reservationHandedOff = false
-        defer { if !reservationHandedOff { releaseWriteLive(estimatedDecoded) } }
+        defer { if !reservationHandedOff { releaseWriteLive(writeFootprint) } }
 
         guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
 
@@ -326,7 +340,20 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             createdAtMillis: createdAt,
             eligibleUntilMillis: createdAt + eligibilityTTLSeconds * 1000,
             incarnation: incarnation,
-            reservedWriteBytes: estimatedDecoded)
+            reservedWriteBytes: writeFootprint)
+    }
+
+    /// HIGH-3 — worst-case ACTIVE seal memory held (beyond the deep-copied snapshot) by
+    /// `KVDiskCacheStore.commitEntry`'s streaming seal: one chunk plaintext + its sealed
+    /// ciphertext(+GCM tag) + one framed chunk + the manifest buffer are co-resident.
+    /// Chunk size is bounded by the codec's max chunk ciphertext length.
+    private func activeSealFootprint(decoded: Int) -> Int {
+        let chunkLen = max(1, min(decoded, KVDiskCacheFormat.maxChunkCiphertextBytes))
+        let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
+        let chunkPlaintext = chunkLen
+        let sealedCiphertext = chunkLen + KVDiskCacheFormat.gcmTagBytes
+        let framedChunk = chunkLen + frameOverhead
+        return chunkPlaintext + sealedCiphertext + framedChunk + KVDiskCacheFormat.manifestMaxBytes
     }
 
     // MARK: - Bounded async write queue (one pending per index)

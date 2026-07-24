@@ -436,4 +436,18 @@ final class KVConversationColdTierTests: XCTestCase {
         await adapter.drainPendingPersists(timeoutSeconds: 5)
         XCTAssertEqual(adapter.writeLiveBytesForTest, 0, "persist Task releases the single-release reservation exactly once")
     }
+
+    /// HIGH-3: the write-live reservation must cover the ACTIVE seal footprint (one chunk
+    /// plaintext + sealed ciphertext(+tag) + one frame + the manifest buffer), not just
+    /// the decoded snapshot. So a snapshot whose decoded size sits AT the write-staging
+    /// ceiling has a true footprint that EXCEEDS the budget and is rejected — where the
+    /// old decoded-only reservation would have admitted it and then overrun during sealing.
+    func testWriteFootprintCoversActiveSealBuffers() {
+        let ceiling = 256 * 1024 * 1024
+        let (adapter, _) = makeAdapter(writeStagingMaxBytes: ceiling)
+        XCTAssertGreaterThan(adapter.writeFootprintForTest(decoded: 1_000_000), 1_000_000,
+                             "footprint must exceed decoded size to cover the active seal buffers")
+        XCTAssertGreaterThan(adapter.writeFootprintForTest(decoded: ceiling), ceiling,
+                             "a decoded-at-ceiling snapshot's true write footprint exceeds the budget → reject")
+    }
 }
