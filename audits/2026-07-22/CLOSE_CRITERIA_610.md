@@ -9,6 +9,18 @@ This document is the authoritative close checklist for #610. It supersedes stale
 “physical acceptance still open” wording in older runbook sections where they
 conflict.
 
+> **Advertise/release reconcile — 2026-07-24.** The public-release and Pearl-advertise
+> rows below were written against a pre-promote snapshot (`v1.8.58` private only,
+> Pearl ~1.8.49). Since then, **public `v1.8.60` shipped (2026-07-23)** — tag commit
+> `530e2479`, an ancestor of `origin/main`, containing #673 (`603da99d`) + #678
+> (`7a44d277`) — and **Pearl now advertises `v1.8.60`** (`/healthz` `version=v1.8.60`,
+> `recommended_binary_version=1.8.60`; `pearl-release.json` `provider_advertised_version: 1.8.60`).
+> Gate 1 (public release) and the advertise half of Gate 2 therefore **appear paid**;
+> evidence attached on [#585](https://github.com/Augustas11/macprovider/issues/585#issuecomment-5067431589)
+> and [#610](https://github.com/Augustas11/macprovider/issues/610#issuecomment-5067431733).
+> The first-hop-bridge, fleet-cohort, and **physical acceptance** rows are **unchanged
+> and still owed**. Cells updated inline below are marked `(2026-07-24)`.
+
 ---
 
 ## What is done
@@ -46,8 +58,10 @@ Key Shape A PASS properties (2026-07-22 UTC):
 - Isolated Pearl acceptance overlay bridged only exact public v1.8.48; production
   Pearl was restored byte-for-byte after the drill.
 
-**Not done:** no public `v1.8.58` tag/release; Pearl production advertise remains
-~**1.8.49**. Private candidate proof ≠ production release.
+**Superseded (2026-07-24):** at the time of writing there was no public tag and Pearl
+advertised ~**1.8.49**. Public **`v1.8.60`** has since shipped and Pearl now advertises
+**`1.8.60`** (see reconcile banner). The private-candidate limitation still holds for the
+**physical** rows: private candidate proof ≠ physical/fleet acceptance.
 
 ---
 
@@ -66,8 +80,8 @@ artifacts and journeys, not acceptance-coordinator overlays alone.
 
 | Gate | Current state | Close requirement |
 |---|---|---|
-| Public GitHub Release / tag containing #673 + #678 Partial | Absent (`v1.8.58` private only) | Ship reviewed public release whose artifact index binds the merged recovery Partial |
-| Pearl `coordinator_advertised_version.latest_binary_version` (and aligned `target_id`) | ~**1.8.49** on live Pearl | Promote Pearl to advertise/install the same public recovery release |
+| Public GitHub Release / tag containing #673 + #678 Partial | **Done (2026-07-24)** — public `v1.8.60`, tag `530e2479` ⊇ `603da99d`+`7a44d277` | Ship reviewed public release whose artifact index binds the merged recovery Partial — **met by `v1.8.60`** |
+| Pearl `coordinator_advertised_version.latest_binary_version` (and aligned `target_id`) | **Done (2026-07-24)** — Pearl advertises `1.8.60` (`/healthz`, `pearl-release.json`) | Promote Pearl to advertise/install the same public recovery release — **met** |
 | Provider cohort on public pre-fix 1.8.48 | Unknown production count | Recovery journey must work for real public installs without alternate binary paths or launchctl surgery |
 
 Rationale: operators and stranded public 1.8.48 hosts cannot consume private
@@ -140,8 +154,8 @@ Related sibling issues (remain OPEN despite merged Partials): #612, #616, #658.
 
 Use this ordered checklist when preparing to close #610:
 
-- [ ] Public release published containing #673 + #678 Partial (artifact index + tag).
-- [ ] Pearl promote: advertise/install matches that public release.
+- [x] Public release published containing #673 + #678 Partial (artifact index + tag). — **`v1.8.60` (2026-07-24)**
+- [x] Pearl promote: advertise/install matches that public release. — **Pearl advertises `1.8.60` (2026-07-24)**
 - [ ] If any production provider remains on public 1.8.48 set: enable
       `first_hop_bridge_ids` per runbook; prove production PATH update journey;
       plan bridge removal when cohort empty.

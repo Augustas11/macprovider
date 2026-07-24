@@ -9,6 +9,18 @@ This document states what is **done**, the **exact remaining close gates**, and 
 non-PATH acceptance criteria are still **required** versus **not yet paid**. It does
 not authorize closing #616.
 
+> **Advertise/release reconcile — 2026-07-24.** The "Public release / tag — NOT DONE …
+> advertise still ~1.8.49" rows were a pre-promote snapshot. Since then, **public
+> `v1.8.60` shipped (2026-07-23)** — tag commit `530e2479`, ancestor of `origin/main`,
+> containing #678 (`7a44d277`) — and **Pearl advertises `v1.8.60`** (`/healthz`
+> `version=v1.8.60`; `pearl-release.json` `provider_advertised_version: 1.8.60`).
+> Gate **R1** (public release + Pearl advertise) therefore **appears paid**; evidence on
+> [#585](https://github.com/Augustas11/macprovider/issues/585#issuecomment-5067431589)
+> and [#616](https://github.com/Augustas11/macprovider/issues/616#issuecomment-5067431913).
+> Gates **R2** (fleet PATH-shape convergence proof) and **R3** (whole-set / mixed /
+> interruption-rollback / **8 GB Air** physical ACs) are **unchanged and still owed** —
+> **not** marked PASS. Cells updated inline are marked `(2026-07-24)`.
+
 ---
 
 ## Executive summary
@@ -17,8 +29,8 @@ not authorize closing #616.
 |---|---|
 | Code on `main` | **DONE** — [#672](https://github.com/Augustas11/macprovider/pull/672) (PATH symlink converge on activation) + [#678](https://github.com/Augustas11/macprovider/pull/678) (PATH regular-file repair + canonical set resolution) |
 | Physical PATH strand (J4) | **PASS** — private candidate `Augustas11/macprovider:v1.8.58@8c4c57d87a2c59d7f7dd93556e05e3204ee4b093`; PATH regular-file 1.8.48 → symlink/payload/set converge; buyer HTTP 200 |
-| Public release / tag | **NOT DONE** — no public tag containing #678; Pearl coordinator advertise still ~1.8.49 |
-| Fleet cohort | **NOT DONE** — hosts on legacy PATH shapes remain until they hop |
+| Public release / tag | **DONE (2026-07-24)** — public `v1.8.60` (tag `530e2479` ⊇ #678 `7a44d277`); Pearl advertises `1.8.60` |
+| Fleet cohort | **NOT DONE** — hosts on legacy PATH shapes remain until they hop (per-host set-ID proof owed) |
 | Broader whole-set ACs | **UNPAID** — see §Non-PATH acceptance criteria; not waived |
 
 **Close rule:** #616 closes only when every row in §Remaining close gates is satisfied
@@ -76,9 +88,9 @@ All items below must pass before #616 closes.
 
 | Requirement | Status |
 |---|---|
-| Signed public GitHub Release + tag whose provider CLI component includes merged commits through #678 (commit `7a44d277` lineage) | **Open** |
-| Release ledger / compatibility-set ID published and discoverable via ordinary signed discovery | **Open** |
-| Pearl production coordinator `latest_binary_version` / `target_id` promoted to that release (not private acceptance overlay only) | **Open** — advertise still ~1.8.49 at time of writing |
+| Signed public GitHub Release + tag whose provider CLI component includes merged commits through #678 (commit `7a44d277` lineage) | **Met (2026-07-24)** — `v1.8.60`, tag `530e2479` ⊇ `7a44d277` |
+| Release ledger / compatibility-set ID published and discoverable via ordinary signed discovery | **Met (2026-07-24)** — `v1.8.60` `compatibility-set.json` SHA `f787d5df…`, `compatibility-artifact-index.json` SHA `c2b3a69d…` (anonymous discovery proof against v1.8.60 still to attach) |
+| Pearl production coordinator `latest_binary_version` / `target_id` promoted to that release (not private acceptance overlay only) | **Met (2026-07-24)** — Pearl advertises `1.8.60` (`/healthz`, `pearl-release.json`) |
 
 **Evidence to attach at close:** public tag name, compatibility-set ID, SHA-256 of
 `macprovider-cli` and `compatibility-set.json`, coordinator health/advertise snapshot

@@ -10,6 +10,20 @@ This document is the authoritative close checklist for #658. It separates **done
 Partial delivery from the **remaining close gates**. Merged workflow/tests and a
 private physical matrix do **not** close #658.
 
+> **Advertise/release reconcile — 2026-07-24.** The snapshot below (public stable
+> `v1.8.56`; "public `v1.8.57` absent") predates the promote. Since then, **public
+> `v1.8.60` shipped (2026-07-23)** — tag commit `530e2479`, immutable, latest — and Pearl
+> advertises `v1.8.60`. This makes **Gate 1** (public immutable discovery on production
+> vNext) and **Gate 3** (physical public journey) **runnable** — they were previously
+> blocked on private-only candidates — but **neither is paid yet**: the anonymous
+> discovery proof bound to `v1.8.60` and the physical public journey (installed v1.8.55
+> → public v1.8.60 + buyer 200) are still owed. **Gate 2** (renew-before-expiry) is being
+> exercised: a renewal of the current head `release-discovery-v1-1966299389624321`
+> (expires `2026-07-24T12:09:18Z`) was dispatched 2026-07-24 (run pending
+> `production-release` approval). Evidence on
+> [#585](https://github.com/Augustas11/macprovider/issues/585#issuecomment-5067431589)
+> and [#658](https://github.com/Augustas11/macprovider/issues/658#issuecomment-5067432118).
+
 ---
 
 ## Explicit non-closure rule
@@ -26,12 +40,12 @@ and buyer-serving, not acceptance-coordinator overlays or private candidates alo
 | Layer | State |
 |-------|-------|
 | Code on `main` | Partial [#674](https://github.com/Augustas11/macprovider/pull/674) merged 2026-07-21 |
-| Public stable | `v1.8.56` (latest immutable numeric release) |
+| Public stable | **`v1.8.60`** (latest immutable numeric release, 2026-07-23; was `v1.8.56` at authoring) |
 | Append-only transport | `release-discovery-v1-1954431381209089` (immutable prerelease) |
 | Fixed v1.8.55 transport | `release-discovery` tag — permanently immutable, pinned to v1.8.55 |
 | Private acceptance | `Augustas11/macprovider:v1.8.57@ea9093e406c7c85764d65e21d31c12ddcca45208` (physical drills only; **no public tag**) |
 | Physical J2 | **PASS** on private v1.8.57 matrix (`1.8.55` → candidate via supported bridge, buyer HTTP 200) |
-| Public / Pearl | Private candidate only; **public immutable discovery on production releases unpaid** |
+| Public / Pearl | Public `v1.8.60` shipped + Pearl advertises `1.8.60` (2026-07-24); **anonymous discovery proof bound to v1.8.60 + physical public journey still unpaid** |
 
 ---
 
@@ -80,7 +94,7 @@ scripts/verify-v1855-discovery-bridge.sh v1.8.56 <40-char-commit> release-discov
 
 Replace `<40-char-commit>` and `<sequence>` with the promoted release values from the promotion workflow outputs.
 
-**Not satisfied today:** Public `v1.8.57` is absent. Private physical J2 on `v1.8.57@ea9093e4` does not substitute for this gate.
+**Status (2026-07-24):** Public vNext now **exists** (`v1.8.60`, immutable, latest), so this gate is **runnable** — but not yet paid: run the anonymous discovery proof bound to `v1.8.60` (`verify-v1855-discovery-bridge.sh v1.8.60 530e2479… release-discovery-v1-<sequence>`) and attach. Private physical J2 on `v1.8.57@ea9093e4` still does not substitute for this gate.
 
 ---
 
