@@ -215,15 +215,19 @@ The five-step per-cycle sequence:
      prefill.
 5. **record** every §6 field to the append-only NDJSON store.
 
-**Pass/fail contract.** Every `restored` sample must record `disk_hit`,
-`correctness=ok`, and `cached_prompt_tokens` **exactly** equal to the persist
-turn's `prompt_tokens + completion_tokens`; a single miss fails the gate. Then the
-warm-relative percentile thresholds must hold: restored **p95 ≤ warm p95 ×
-`KVS01A_WARM_RATIO_P95`** (default 3.0 — restored skips prefill just like the in-RAM
-warm control), and restored **p95 < miss p50** and restored **p95 < disabled p50**
-(the survival benefit — a promoted prefix beats both a cold miss and a clean
-disk-disabled restart). Exit codes: `5` = a restored correctness failure, `6` =
-correctness held but a percentile threshold failed.
+**Pass/fail contract.** The **correctness gate is normative**: every `restored`
+sample must record `disk_hit`, `correctness=ok`, and `cached_prompt_tokens`
+**exactly** equal to the persist turn's `prompt_tokens + completion_tokens`; a
+single miss fails the gate (exit `5`). The warm-relative **percentile thresholds
+are ADVISORY for KVS-01a** (the ~2.5k correctness stage) per SPEC-037 §6 —
+restored **p95 ≤ warm p95 × `KVS01A_WARM_RATIO_P95`** (default 3.0), restored
+**p95 < miss p50**, restored **p95 < disabled p50**. They are recorded and printed
+every run, but they only **fail** the run (exit `6`) when you opt into perf-gate
+mode (`--perf-gate` / `KVS01A_PERF_GATE=1`); without it a breach is logged as
+`THRESHOLD ADVISORY` and the run still passes on correctness. These thresholds are
+**normative only for KVS-01b** (8k). Exit codes: `5` = restored correctness
+failure; `6` = correctness held but a percentile threshold failed **under
+perf-gate**.
 
 It is **harness capability, not a CI run** — it launches real models and MUST NOT
 run in CI. Like the cold-cycle path it refuses a production coordinator (`§6`
@@ -234,13 +238,15 @@ export KVS01A_PROVIDER_CMD="macprovider-cli serve --config /path/to/local-enable
 export KVS01A_PROVIDER_CMD_NODISK="macprovider-cli serve --config /path/to/local-disabled.yaml"
 export KVS01A_BASE=http://127.0.0.1:8080
 export KVS01A_PROMPT_TOKENS=2500          # v1 allowlist class under the 256 MiB ceiling; 8k is KVS-01b
-./kvs-01a.sh --cycles 30                  # gate mode: >= 30 samples/arm
+./kvs-01a.sh --cycles 30                  # gate mode: >= 30 samples/arm (correctness gate; thresholds advisory)
+./kvs-01a.sh --cycles 30 --perf-gate      # additionally ENFORCE the warm-relative percentile thresholds (exit 6 on breach)
 ./kvs-01a.sh --smoke                      # 1–2 cycles, correctness only (thresholds skipped)
 ```
 
 **Gate vs smoke.** Gate mode requires **≥ 30 samples/arm** (`--cycles N`, N ≥ 30)
-and applies the percentile thresholds; `--smoke` (1–2 cycles) checks only restored
-correctness and skips the thresholds — and skips arm **disabled** if
+and enforces the **correctness** gate; the warm-relative percentile thresholds are
+advisory unless `--perf-gate` is passed. `--smoke` (1–2 cycles) checks only restored
+correctness and skips the thresholds entirely — and skips arm **disabled** if
 `KVS01A_PROVIDER_CMD_NODISK` is unset. Percentiles are **nearest-rank** p50/p95:
 the p-th percentile is the sample at 1-based rank `ceil(p/100 · n)` of the sorted
 samples (no interpolation), an honest pick of a real sample.

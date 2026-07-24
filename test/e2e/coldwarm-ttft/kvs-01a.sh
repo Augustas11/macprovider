@@ -34,12 +34,14 @@
 #      model id + hash, catalog/format ids, kvBits, host/build metadata, correctness)
 #      to an append-only NDJSON store, following the coldwarm-ttft regime-label style.
 #
-# Pass contract (§6): EVERY restored sample must record disk_hit with the exact
-# expected cached_prompt_tokens and correctness=ok; restored p95 must sit within
-# KVS01A_WARM_RATIO_P95× of the warm p95 (restored skips prefill just like the in-RAM
-# warm control); and restored p95 must beat the disk-miss p50 and the disabled p50 (the
-# survival benefit). Gate mode requires >= 30 samples/arm; --smoke allows 1–2 cycles
-# for a quick check with the ratio/threshold checks relaxed to correctness only.
+# Pass contract (§6): the CORRECTNESS gates fail the run — EVERY restored sample must
+# record disk_hit with the exact expected cached_prompt_tokens and correctness=ok (a
+# violation is exit 5). The warm-relative PERCENTILE thresholds (restored p95 within
+# KVS01A_WARM_RATIO_P95× of warm p95; restored p95 < miss p50 and < disabled p50) are
+# ADVISORY for KVS-01a (~2.5k) per §6 — recorded/reported but they only fail the run
+# (exit 6) under an explicit perf-gate mode (--perf-gate / KVS01A_PERF_GATE=1). They are
+# normative only for KVS-01b (8k). Gate mode requires >= 30 samples/arm; --smoke allows
+# 1–2 cycles (correctness only).
 #
 # This is harness CAPABILITY, not a CI run — it launches real models and MUST NOT run
 # in CI. It refuses a production coordinator (local provider only, §6 production fence).
@@ -62,7 +64,9 @@
 #   KVS01A_WRITE_TIMEOUT  seconds to await disk_write_committed (default 60)
 #   KVS01A_CYCLES         cycles to run (default 1 smoke / 30 gate); --cycles N flag
 #   KVS01A_SMOKE          1 ⇒ smoke mode (1–2 cycles, correctness-only); --smoke flag
-#   KVS01A_WARM_RATIO_P95 restored p95 must be <= warm p95 × this (default 3.0)
+#   KVS01A_WARM_RATIO_P95 restored p95 <= warm p95 × this (default 3.0; advisory for 01a)
+#   KVS01A_PERF_GATE      1 ⇒ enforce the warm-relative percentile thresholds (exit 6 on
+#                         breach). Default 0 for KVS-01a (advisory). Also: --perf-gate.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,14 +80,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${KVS01A_SMOKE:=0}"
 : "${KVS01A_WARM_RATIO_P95:=3.0}"
 : "${KVS01A_CYCLES:=}"
+# MEDIUM-6: for KVS-01a (~2.5k correctness stage) the warm-relative percentile
+# thresholds are ADVISORY per SPEC-037 §6 — they are recorded/reported but do NOT
+# fail the run. They are normative only for KVS-01b (8k). Opt into enforcing them
+# with KVS01A_PERF_GATE=1 or --perf-gate. Correctness gates always fail the run.
+: "${KVS01A_PERF_GATE:=0}"
 GATE_MIN_SAMPLES=30
 
-# CLI: --cycles N, --smoke.
+# CLI: --cycles N, --smoke, --perf-gate.
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cycles) KVS01A_CYCLES="${2:?--cycles needs a number}"; shift 2 ;;
     --cycles=*) KVS01A_CYCLES="${1#*=}"; shift ;;
     --smoke) KVS01A_SMOKE=1; shift ;;
+    --perf-gate) KVS01A_PERF_GATE=1; shift ;;
     *) echo "kvs-01a: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -383,7 +393,7 @@ done
 # Nearest-rank percentile summary + warm-relative pass contract.
 "$NODE_BIN" -e '
   const fs = require("fs");
-  const work = process.argv[1], ratioP95 = Number(process.argv[2]), smoke = process.argv[3] === "1";
+  const work = process.argv[1], ratioP95 = Number(process.argv[2]), smoke = process.argv[3] === "1", perfGate = process.argv[4] === "1";
   const read = (arm) => { try { return fs.readFileSync(`${work}/ttft.${arm}.txt`, "utf8").split("\n").map(Number).filter(Number.isFinite).sort((a,b)=>a-b); } catch { return []; } };
   const nr = (xs, p) => xs.length ? xs[Math.min(xs.length-1, Math.max(0, Math.ceil(p/100*xs.length)-1))] : null;
   const arms = ["restored","warm","miss","disabled"];
@@ -392,23 +402,31 @@ done
   process.stderr.write("kvs-01a: nearest-rank TTFT percentiles (ms):\n");
   for (const a of arms) { const p = pct[a]; process.stderr.write(`  ${a.padEnd(9)} n=${p.n} p50=${p.p50 ?? "-"} p95=${p.p95 ?? "-"} min=${p.min ?? "-"} max=${p.max ?? "-"}\n`); }
   if (smoke) { process.stderr.write("kvs-01a: smoke mode — percentile thresholds skipped (correctness only)\n"); process.exit(0); }
+  // MEDIUM-6: warm-relative thresholds are ADVISORY for KVS-01a (~2.5k) — recorded and
+  // reported, but they only FAIL the run under an explicit perf-gate mode. They are
+  // normative only for KVS-01b (8k). Correctness gates fail the run regardless (exit 5).
   let fail = 0;
   const r = pct.restored, w = pct.warm, m = pct.miss, d = pct.disabled;
+  const tag = perfGate ? "THRESHOLD FAIL" : "THRESHOLD ADVISORY";
+  const note = (msg) => { process.stderr.write(`kvs-01a: ${tag} ${msg}\n`); if (perfGate) fail = 1; };
   // restored must skip prefill just like the in-RAM warm control.
-  if (r.p95 != null && w.p95 != null && r.p95 > w.p95 * ratioP95) { process.stderr.write(`kvs-01a: THRESHOLD FAIL restored p95 ${r.p95} > warm p95 ${w.p95} × ${ratioP95}\n`); fail = 1; }
+  if (r.p95 != null && w.p95 != null && r.p95 > w.p95 * ratioP95) { note(`restored p95 ${r.p95} > warm p95 ${w.p95} × ${ratioP95}`); }
   // restored (disk survival) must beat a disk-enabled miss (cold prefill).
-  if (r.p95 != null && m.p50 != null && !(r.p95 < m.p50)) { process.stderr.write(`kvs-01a: THRESHOLD FAIL restored p95 ${r.p95} !< miss p50 ${m.p50}\n`); fail = 1; }
+  if (r.p95 != null && m.p50 != null && !(r.p95 < m.p50)) { note(`restored p95 ${r.p95} !< miss p50 ${m.p50}`); }
   // ... and a clean disk-disabled restart.
-  if (r.p95 != null && d.p50 != null && !(r.p95 < d.p50)) { process.stderr.write(`kvs-01a: THRESHOLD FAIL restored p95 ${r.p95} !< disabled p50 ${d.p50}\n`); fail = 1; }
+  if (r.p95 != null && d.p50 != null && !(r.p95 < d.p50)) { note(`restored p95 ${r.p95} !< disabled p50 ${d.p50}`); }
+  if (!perfGate) { process.stderr.write("kvs-01a: percentile thresholds are advisory for KVS-01a (pass --perf-gate to enforce)\n"); }
   process.exit(fail);
-' "$WORK" "$KVS01A_WARM_RATIO_P95" "$KVS01A_SMOKE" || THRESHOLD_FAIL=1
+' "$WORK" "$KVS01A_WARM_RATIO_P95" "$KVS01A_SMOKE" "$KVS01A_PERF_GATE" || THRESHOLD_FAIL=1
 
 if (( FAILS > 0 )); then
   echo "kvs-01a: $FAILS/$KVS01A_CYCLES cycle(s) FAILED the restored correctness contract" >&2
   exit 5
 fi
 if [[ "${THRESHOLD_FAIL:-0}" == "1" ]]; then
-  echo "kvs-01a: restored correctness held but the warm-relative percentile thresholds failed" >&2
+  # Only reachable under --perf-gate / KVS01A_PERF_GATE=1 (MEDIUM-6): for KVS-01a the
+  # warm-relative thresholds are advisory and never set THRESHOLD_FAIL otherwise.
+  echo "kvs-01a: restored correctness held but the warm-relative percentile thresholds failed (perf-gate)" >&2
   exit 6
 fi
 echo "kvs-01a: all $KVS01A_CYCLES cycle(s) passed → $KVS01A_STORE" >&2
