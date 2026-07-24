@@ -2135,13 +2135,39 @@ actor KVDiskCacheStore {
         }
     }
 
+    /// HIGH-4: remove an orphan/superseded artifact at activation recovery, CHARGING its
+    /// bytes to `supersededLeakBytes` if the removal fails (honoring the unlink-failure
+    /// injection). Undeletable ciphertext must keep counting against the namespace quota
+    /// until a later sweep reclaims it, rather than dropping off the books (which would
+    /// reopen the quota bypass; AC-3 "orphan bytes swept and accounted").
+    private func reclaimOrChargeOrphan(_ url: URL, isDirectory: Bool) {
+        let bytes = orphanArtifactBytes(url, isDirectory: isDirectory)
+        do {
+            if unlinkFailInjected { throw KVStoreError.io("injected unlink failure") }
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            supersededLeakBytes += bytes
+        }
+    }
+
+    /// Total on-disk bytes of an orphan artifact (a file, or the shallow sum of a dir's
+    /// immediate files) used to charge the leak ledger when removal fails (HIGH-4).
+    private func orphanArtifactBytes(_ url: URL, isDirectory: Bool) -> Int {
+        if !isDirectory { return (try? fileSize(url)) ?? 0 }
+        let contents = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+        return contents.reduce(0) { $0 + ((try? fileSize($1)) ?? 0) }
+    }
+
     /// Sweep orphan temp/blob files and rebuild committed-byte accounting from
     /// surviving manifests (recovers generation/commit-sequence high-water).
     private func sweepOrphansAndAccount() throws {
         committedBytes = 0
         liveEntries.removeAll()
-        // Item 7: this sweep deletes every non-current-generation blob (and orphan dirs),
-        // reclaiming any superseded-blob bytes whose in-process deletion had failed.
+        // Item 7 / HIGH-4: this sweep deletes every non-current-generation blob (and orphan
+        // dirs), reclaiming any superseded-blob bytes whose in-process deletion had failed.
+        // Reset to 0, then RE-CHARGE any orphan/superseded artifact this sweep still cannot
+        // remove — its ciphertext stays on disk, so its bytes must keep counting against the
+        // namespace quota (AC-3), never silently dropping off the books.
         supersededLeakBytes = 0
         // Item 7 (coordinator refinement 2): reclaim namespace-root atomic temp files
         // (meta/usage/tombstone `.tmp.*`) left by a crash mid atomic-rename, so their
@@ -2161,18 +2187,19 @@ actor KVDiskCacheStore {
             // Sweep temp files always.
             let contents = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             for file in contents where file.lastPathComponent.hasPrefix("manifest.json.tmp.") {
-                try? FileManager.default.removeItem(at: file)
+                reclaimOrChargeOrphan(file, isDirectory: false)
             }
             guard fileExists(manifestURL),
                   let data = try? readBounded(manifestURL, maxBytes: KVDiskCacheFormat.manifestMaxBytes),
                   let manifest = try? KVManifestCodec.decode(data, maxBlobBytes: config.maxEntryBytes) else {
-                // No committed manifest ⇒ orphan generation; sweep the whole dir.
-                try? FileManager.default.removeItem(at: dir)
+                // No committed manifest ⇒ orphan generation; sweep the whole dir (HIGH-4:
+                // charge its bytes to the leak ledger if it cannot be removed).
+                reclaimOrChargeOrphan(dir, isDirectory: true)
                 continue
             }
             // Sweep non-current generation blobs (orphans from an interrupted compaction).
             for file in contents where file.pathExtension == "blob" && file.lastPathComponent != "gen-\(manifest.generation).blob" {
-                try? FileManager.default.removeItem(at: file)
+                reclaimOrChargeOrphan(file, isDirectory: false)
             }
             let blobURL = dir.appendingPathComponent("gen-\(manifest.generation).blob")
             let blobBytes = (try? fileSize(blobURL)) ?? 0

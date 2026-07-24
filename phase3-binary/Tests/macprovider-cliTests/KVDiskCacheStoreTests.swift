@@ -1750,6 +1750,40 @@ final class KVDiskCacheStoreTests: XCTestCase {
                       "rotation-intent journal must be durable on disk BEFORE hotPurgeAll runs")
         await store.deactivate()
     }
+
+    // MARK: - HIGH-4 (R4): undeletable orphan bytes stay charged at activation
+
+    /// HIGH-4: if activation recovery cannot remove a superseded/orphan ciphertext, its
+    /// bytes must remain CHARGED to `supersededLeakBytes` (fail-closed) rather than
+    /// dropping off the quota books, until a later sweep reclaims them (AC-3).
+    func testActivationChargesUndeletableOrphanBytes() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store1 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store1.activate()
+        let key = "conv:kvs-synth:orphan-charge"
+        _ = try await store1.write(try await makeSnapshot(store: store1, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        let index = try await idx(store1, key)
+        await store1.deactivate()
+
+        // Plant a non-current-generation orphan blob (gen-99) beside the live gen-1 entry.
+        let entryDir = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+            .appendingPathComponent("entries", isDirectory: true)
+            .appendingPathComponent(index, isDirectory: true)
+        let orphan = entryDir.appendingPathComponent("gen-99.blob")
+        let orphanBytes = Data(repeating: 0xAB, count: 4096)
+        try orphanBytes.write(to: orphan)
+
+        let store2 = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        await store2.injectUnlinkFailure(true)   // recovery cannot remove the orphan
+        try await store2.activate()
+        let leaked = await store2.supersededLeakBytesForTest
+        XCTAssertEqual(leaked, orphanBytes.count,
+                       "undeletable orphan ciphertext must stay charged against quota")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path),
+                      "the orphan blob is still on disk (removal failed) — hence still charged")
+        await store2.deactivate()
+    }
 }
 
 enum KVBridgeProbeError: Error { case snapshotFailed, mutated, notDeepCopy }
