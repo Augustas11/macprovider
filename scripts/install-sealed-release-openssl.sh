@@ -8,7 +8,7 @@ readonly expected_formula_revision="0"
 readonly expected_bottle_rebuild="1"
 readonly expected_bottle_tag="sequoia"
 readonly expected_bottle_sha256="5477285c4ebec45713873ae4002affece39e427c5f1b655c6a3df49c6b90f924"
-readonly expected_formula_sha256="773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"
+readonly expected_formula_sha256="00e19cdcb1b7d99058a8a15f316e5dce2e4b5cd2afee14b272e7f5448624801d"
 
 if [ "$#" -ne 1 ]; then
   echo "usage: $0 /private/var/macprovider-openssl-<name>" >&2
