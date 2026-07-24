@@ -970,7 +970,11 @@ struct ServeCommand: AsyncParsableCommand {
                 warmSwapEnabled: resolved.enableWarmSwap,
                 swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                 catalogModelIDAlias: catalogModelIDAlias,
-                verifiedModelArtifactSHA256: resolved.modelArtifactSHA256
+                verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
+                // MEDIUM-5 (FR-KVP4): thread the catalog REVISION separately from the
+                // artifact SHA so the cold-tier envelope carries both as distinct identity
+                // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
+                verifiedModelCatalogRevision: resolved.modelCatalogRevision
             )
         } catch {
             _ = try? lifecycleStateStore.transition(

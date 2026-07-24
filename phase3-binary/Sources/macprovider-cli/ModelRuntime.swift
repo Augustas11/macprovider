@@ -401,6 +401,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentTokenizerConfigSHA256: String?
     private var currentChatTemplateSHA256: String?
     private let verifiedCatalogArtifactSHA256: String?
+    /// SPEC-037 FR-KVP4 (MEDIUM-5) — the model's CATALOG REVISION, distinct from the
+    /// artifact SHA. FR-KVP4 requires model_sha256 AND catalog revision as SEPARATE
+    /// identity fields; a catalog-revision change with unchanged artifact bytes must
+    /// disk_miss_envelope, not hit. Nil ⇒ the cold tier treats identity as unavailable
+    /// and neither promotes nor persists (never falls back to the artifact SHA).
+    private let verifiedModelCatalogRevision: String?
     private let maxContextTokens: Int
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
     // quantization (mlx-swift default). maxBatch defaults to 1, the
@@ -504,7 +510,8 @@ actor ModelRuntime: ModelRuntimeServing {
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
-        verifiedModelArtifactSHA256: String? = nil
+        verifiedModelArtifactSHA256: String? = nil,
+        verifiedModelCatalogRevision: String? = nil
     ) async throws {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
@@ -526,6 +533,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
+        self.verifiedModelCatalogRevision = verifiedModelCatalogRevision
         self.loader = { targetModelID in
             let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
             let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
@@ -637,6 +645,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentTokenizerConfigSHA256 = nil
         self.currentChatTemplateSHA256 = nil
         self.verifiedCatalogArtifactSHA256 = nil
+        self.verifiedModelCatalogRevision = nil
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
@@ -2073,7 +2082,10 @@ actor ModelRuntime: ModelRuntimeServing {
             requestModel: request.model,
             servedModelID: snapshot.modelID ?? request.model,
             modelSHA256: snapshot.modelHash,
-            catalogRevision: verifiedCatalogArtifactSHA256,
+            // MEDIUM-5: the catalog revision is a SEPARATE identity field from the model
+            // artifact SHA (model_sha256). Absent ⇒ resolve() marks identity unavailable
+            // (no promote/persist) rather than aliasing the artifact hash as the revision.
+            catalogRevision: verifiedModelCatalogRevision,
             tokenizerConfigSHA256: currentTokenizerConfigSHA256,
             chatTemplateSHA256: currentChatTemplateSHA256)
     }

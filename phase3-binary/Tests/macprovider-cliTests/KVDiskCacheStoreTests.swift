@@ -1784,6 +1784,45 @@ final class KVDiskCacheStoreTests: XCTestCase {
                       "the orphan blob is still on disk (removal failed) — hence still charged")
         await store2.deactivate()
     }
+
+    // MARK: - MEDIUM-5 (R4): catalog revision is a SEPARATE identity field
+
+    /// MEDIUM-5 / FR-KVP4: a read whose catalog revision differs from the stored manifest
+    /// must MISS on the envelope even when the model_sha256 (artifact hash) is identical —
+    /// the two are distinct identity fields, so a catalog-revision change with unchanged
+    /// artifact bytes cannot serve a stale cold entry.
+    func testCatalogRevisionMismatchWithSameArtifactMissesEnvelope() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:catrev"
+        // Written under catalog revision "r1" (Self.identity.catalogRevision).
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+
+        // Same artifact (modelSHA256 "b"*64), DIFFERENT catalog revision "r2".
+        var runtimeR2 = runtime(index: index, seq: 5)
+        runtimeR2 = KVRuntimeIdentity(
+            namespaceID: runtimeR2.namespaceID, keyEpoch: runtimeR2.keyEpoch, indexHMAC: runtimeR2.indexHMAC,
+            requestModel: runtimeR2.requestModel, servedModelID: runtimeR2.servedModelID,
+            modelSHA256: runtimeR2.modelSHA256, catalogRevision: "r2", tokenizerID: runtimeR2.tokenizerID,
+            tokenizerConfigSHA256: runtimeR2.tokenizerConfigSHA256, chatTemplateSHA256: runtimeR2.chatTemplateSHA256,
+            abiEpoch: runtimeR2.abiEpoch, mlxSwiftLMRevision: runtimeR2.mlxSwiftLMRevision, mlxVersion: runtimeR2.mlxVersion,
+            cacheClass: runtimeR2.cacheClass, layerCount: runtimeR2.layerCount, layers: runtimeR2.layers,
+            kvBits: runtimeR2.kvBits, kvGroupSize: runtimeR2.kvGroupSize, kvQuantMode: runtimeR2.kvQuantMode,
+            kvQuantPolicy: runtimeR2.kvQuantPolicy, decodePath: runtimeR2.decodePath,
+            liveHighWatermark: runtimeR2.liveHighWatermark)
+
+        let result = try await store.read(rawKey: key, runtime: runtimeR2, nowMillis: 1_000_100)
+        guard case .miss(.diskMissEnvelope, _) = result else {
+            return XCTFail("a differing catalog revision (same artifact) must miss on the envelope, got \(result)")
+        }
+        // Control: the original revision "r1" still hits.
+        let hit = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_200)
+        guard case .hit = hit else { return XCTFail("same-revision read must still hit, got \(hit)") }
+        await store.deactivate()
+    }
 }
 
 enum KVBridgeProbeError: Error { case snapshotFailed, mutated, notDeepCopy }
