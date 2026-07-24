@@ -429,6 +429,65 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertEqual(command.port, 18080)
     }
 
+    // MARK: - SPEC-037 FR-KVP11 / AC-9: serve exposes + forwards the KV disk-tier flags
+
+    /// MEDIUM-5: every `--kv-disk-cache-*` flag parses on ServeCommand and maps to the
+    /// matching KVDiskCacheCLIOverrides field, so the triple-source config surface reaches
+    /// the resolver from the CLI. CLI-wins precedence is then verified through the resolver.
+    func testKVDiskCacheServeFlagsParseAndForward() throws {
+        let command = try ServeCommand.parse([
+            "--no-join", "--model", "model-a",
+            "--kv-disk-cache-enabled",
+            "--kv-disk-cache-dir", "/var/kvcache",
+            "--kv-disk-cache-max-bytes", "3000000000",
+            "--kv-disk-cache-max-entries", "42",
+            "--kv-disk-cache-max-entry-bytes", "500000000",
+            "--kv-disk-cache-retention-minutes", "30",
+            "--kv-disk-cache-staging-max-bytes", "100000000",
+            "--kv-disk-cache-write-staging-max-bytes", "200000000",
+            "--kv-disk-cache-min-free-bytes", "2000000000",
+            "--kv-disk-cache-promotion-max-s", "9",
+            "--kv-disk-cache-shutdown-drain-s", "7",
+        ])
+        let o = command.kvDiskCacheCLIOverrides
+        XCTAssertEqual(o.enabled, true)
+        XCTAssertEqual(o.directory, "/var/kvcache")
+        XCTAssertEqual(o.maxBytes, 3_000_000_000)
+        XCTAssertEqual(o.maxEntries, 42)
+        XCTAssertEqual(o.maxEntryBytes, 500_000_000)
+        XCTAssertEqual(o.retentionMinutes, 30)
+        XCTAssertEqual(o.stagingMaxBytes, 100_000_000)
+        XCTAssertEqual(o.writeStagingMaxBytes, 200_000_000)
+        XCTAssertEqual(o.minFreeBytes, 2_000_000_000)
+        XCTAssertEqual(o.promotionMaxSeconds, 9)
+        XCTAssertEqual(o.shutdownDrainSeconds, 7)
+        XCTAssertNil(o.allowBuyerKeys, "an unset flag defers to env/YAML (nil), not false")
+
+        // CLI-wins precedence: the CLI max_bytes overrides a conflicting environment value.
+        let resolved = KVDiskCacheConfigResolver.resolve(
+            yaml: nil, environment: ["MACPROVIDER_KV_DISK_CACHE_MAX_BYTES": "999"],
+            cli: o, homeDirectory: "/Users/tester")
+        XCTAssertTrue(resolved.effectiveEnabled)
+        XCTAssertEqual(resolved.maxBytes, 3_000_000_000, "CLI override wins over the environment")
+        XCTAssertEqual(resolved.directory, "/var/kvcache")
+    }
+
+    /// AC-9: `--kv-disk-cache-allow-buyer-keys` reaches the resolver and fails closed —
+    /// the tier is force-disabled with the v0.1 precondition error, even with enabled=true.
+    func testKVDiskCacheAllowBuyerKeysFlagFailsClosed() throws {
+        let command = try ServeCommand.parse([
+            "--no-join", "--model", "model-a",
+            "--kv-disk-cache-enabled",
+            "--kv-disk-cache-allow-buyer-keys",
+        ])
+        XCTAssertEqual(command.kvDiskCacheCLIOverrides.allowBuyerKeys, true)
+        let resolved = KVDiskCacheConfigResolver.resolve(
+            yaml: nil, environment: [:], cli: command.kvDiskCacheCLIOverrides, homeDirectory: "/Users/tester")
+        XCTAssertFalse(resolved.effectiveEnabled, "allow_buyer_keys=true must force the tier off")
+        XCTAssertTrue(resolved.errors.contains { $0.contains("allow_buyer_keys=true is rejected") },
+                      "the v0.1 precondition error must be recorded (and later logged on serve)")
+    }
+
     func testAutotuneCandidateFlagRequiresNoJoin() throws {
         XCTAssertThrowsError(try ServeCommand.parse([
             "--autotune-candidate",
