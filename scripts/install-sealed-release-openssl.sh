@@ -8,7 +8,12 @@ readonly expected_formula_revision="0"
 readonly expected_bottle_rebuild="1"
 readonly expected_bottle_tag="sequoia"
 readonly expected_bottle_sha256="5477285c4ebec45713873ae4002affece39e427c5f1b655c6a3df49c6b90f924"
-readonly expected_formula_sha256="00e19cdcb1b7d99058a8a15f316e5dce2e4b5cd2afee14b272e7f5448624801d"
+# GitHub macos-15-intel runners currently expose either reviewed Homebrew
+# formula text digest for this same OpenSSL 3.6.3 sequoia bottle.
+readonly -a expected_formula_sha256s=(
+  "773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"
+  "00e19cdcb1b7d99058a8a15f316e5dce2e4b5cd2afee14b272e7f5448624801d"
+)
 
 if [ "$#" -ne 1 ]; then
   echo "usage: $0 /private/var/macprovider-openssl-<name>" >&2
@@ -36,7 +41,7 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew info --json=v2 openssl@3 >"$formula_json"
 python3 - "$formula_json" \
   "$expected_openssl_version" "$expected_formula_revision" \
   "$expected_bottle_rebuild" "$expected_bottle_tag" \
-  "$expected_bottle_sha256" "$expected_formula_sha256" <<'PY'
+  "$expected_bottle_sha256" "${expected_formula_sha256s[@]}" <<'PY'
 import json
 import pathlib
 import sys
@@ -48,8 +53,10 @@ import sys
     expected_rebuild,
     expected_tag,
     expected_bottle_sha256,
-    expected_formula_sha256,
+    *expected_formula_sha256s,
 ) = sys.argv[1:]
+if not expected_formula_sha256s:
+    raise SystemExit("reviewed OpenSSL formula digest allowlist must not be empty")
 payload = json.loads(pathlib.Path(metadata_path).read_text(encoding="utf-8"))
 formulae = payload.get("formulae")
 if not isinstance(formulae, list) or len(formulae) != 1:
@@ -64,16 +71,18 @@ checks = {
     "bottle rebuild": (str(bottle.get("rebuild")), expected_rebuild),
     "bottle sha256": (bottle_file.get("sha256"), expected_bottle_sha256),
     "bottle cellar": (bottle_file.get("cellar"), "/usr/local/Cellar"),
-    "formula sha256": (
-        formula.get("ruby_source_checksum", {}).get("sha256"),
-        expected_formula_sha256,
-    ),
 }
 for label, (actual, expected) in checks.items():
     if actual != expected:
         raise SystemExit(
             f"reviewed OpenSSL {label} drifted: expected {expected!r}, got {actual!r}"
         )
+actual_formula_sha256 = formula.get("ruby_source_checksum", {}).get("sha256")
+if actual_formula_sha256 not in expected_formula_sha256s:
+    raise SystemExit(
+        "reviewed OpenSSL formula sha256 drifted: expected one of "
+        f"{sorted(expected_formula_sha256s)!r}, got {actual_formula_sha256!r}"
+    )
 PY
 
 HOMEBREW_NO_AUTO_UPDATE=1 brew fetch --force \
