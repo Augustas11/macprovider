@@ -1636,6 +1636,120 @@ final class KVDiskCacheStoreTests: XCTestCase {
         let value = try await store.currentIndex(rawKey: key)
         return try XCTUnwrap(value)
     }
+
+    /// Block the calling test until `sem` is signalled, WITHOUT parking a cooperative-pool
+    /// thread (which could deadlock the actor whose progress we are waiting on).
+    private func awaitSemaphore(_ sem: DispatchSemaphore) async {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global().async { sem.wait(); cont.resume() }
+        }
+    }
+
+    /// A promotion-decode pause hook that signals `entered` when the off-actor decode
+    /// begins and then parks until the decode Task is cancelled (the purge/rotation
+    /// cancel-or-join). Cancellation-aware so cancel-or-join cannot deadlock.
+    private func pauseUntilCancelled(_ entered: DispatchSemaphore) -> @Sendable () async -> Void {
+        { @Sendable in
+            entered.signal()
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 2_000_000) }
+        }
+    }
+
+    // MARK: - CRITICAL-1 (R4): off-actor promotion TOCTOU
+
+    /// CRITICAL-1(b/c): a single-key purge that completes WHILE a promotion decode is in
+    /// flight must yield a read MISS (never a `.hit` from the copied DEK/blob), and must
+    /// crypto-shred the DEK. The pause gate expresses the previously-unhookable window
+    /// "purge lands during an in-flight decode".
+    func testPromotionDecodeRaceSingleKeyPurgeYieldsMiss() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:promo-race-single"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+
+        let entered = DispatchSemaphore(value: 0)
+        await store.setPromoteDecodePause(pauseUntilCancelled(entered))
+
+        async let readResult = store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_100)
+        await awaitSemaphore(entered)                      // decode is genuinely paused
+        let purge = try await store.purge(rawKey: key)     // completes; cancel-or-joins the decode
+        if case .failed = purge { XCTFail("purge failed: \(purge)") }
+
+        let result = try await readResult
+        guard case .miss = result else {
+            return XCTFail("in-flight decode must not return a hit after purge_ok, got \(result)")
+        }
+        XCTAssertNil(try keychain.copySecret(
+            service: KVKeychainNaming(namespaceID: "ns-test").dekService(epoch: 1), account: index),
+            "purge must crypto-shred the entry DEK")
+        await store.deactivate()
+    }
+
+    /// CRITICAL-1(b/c): a purge-all (epoch rotation) that completes WHILE a promotion
+    /// decode is in flight must yield a read MISS — the post-decode re-fence sees the
+    /// rotated epoch and discards the old-epoch decoded state.
+    func testPromotionDecodeRacePurgeAllYieldsMiss() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:promo-race-all"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+        let index = try await idx(store, key)
+
+        let entered = DispatchSemaphore(value: 0)
+        await store.setPromoteDecodePause(pauseUntilCancelled(entered))
+
+        async let readResult = store.read(rawKey: key, runtime: runtime(index: index, seq: 5), nowMillis: 1_000_100)
+        await awaitSemaphore(entered)
+        guard case .ok = try await store.purgeAll() else { return XCTFail("purge-all should rotate") }
+
+        let result = try await readResult
+        guard case .miss = result else {
+            return XCTFail("in-flight decode must not return a hit after purge-all, got \(result)")
+        }
+        let epoch = await store.currentEpoch
+        XCTAssertEqual(epoch, 2, "purge-all rotates the epoch")
+        await store.deactivate()
+    }
+
+    // MARK: - CRITICAL-2 (R4): rotation journal durable before hot callback
+
+    /// CRITICAL-2: `performNamespacePurgeRotation` must fsync the rotation-intent journal
+    /// (the durable namespace-blocked marker) BEFORE the suspending `hotPurgeAll` callback.
+    /// The hook reads `meta.json` off disk at the instant it runs and asserts an OPEN
+    /// rotation journal is already durable — so a crash inside the callback leaves a
+    /// recoverable, namespace-blocked state rather than a lost fence with no journal.
+    func testPurgeAllPersistsRotationJournalBeforeHotCallback() async throws {
+        let root = makeRoot()
+        let keychain = KVInMemoryKeychain()
+        let store = KVDiskCacheStore(config: makeConfig(root: root), keychain: keychain)
+        try await store.activate()
+        let key = "conv:kvs-synth:journal-before-hot"
+        _ = try await store.write(try await makeSnapshot(store: store, rawKey: key, seq: 5, nowMillis: 1_000_000), nowMillis: 1_000_000)
+
+        let metaURL = root.appendingPathComponent(namespaceDigest("ns-test"), isDirectory: true)
+            .appendingPathComponent("meta.json")
+        let journalDurableWhenHotRan = DispatchSemaphore(value: 0)
+        let sawOpenJournal = LockedBox(false)
+        await store.setHotPurgeHooks(single: nil, all: { @Sendable in
+            if let data = try? Data(contentsOf: metaURL),
+               let json = String(data: data, encoding: .utf8),
+               json.contains("rotation_journal"), json.contains("created") {
+                sawOpenJournal.set(true)
+            }
+            journalDurableWhenHotRan.signal()
+        })
+
+        guard case .ok = try await store.purgeAll() else { return XCTFail("purge-all should rotate") }
+        await awaitSemaphore(journalDurableWhenHotRan)
+        XCTAssertTrue(sawOpenJournal.get(),
+                      "rotation-intent journal must be durable on disk BEFORE hotPurgeAll runs")
+        await store.deactivate()
+    }
 }
 
 enum KVBridgeProbeError: Error { case snapshotFailed, mutated, notDeepCopy }

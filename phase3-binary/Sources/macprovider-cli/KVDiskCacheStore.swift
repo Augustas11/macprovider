@@ -104,6 +104,22 @@ struct KVInjectedCrash: Error, Equatable {
     let point: KVFailpoint
 }
 
+#if DEBUG
+/// Test-only pause gate for the off-actor promotion decode (CRITICAL-1 regression). Holds
+/// an optional async hook under a lock so the nonisolated detached decode can await it
+/// without hopping onto the store actor (which would risk reentrancy against the very
+/// purge the test is racing). Compiled only in DEBUG.
+final class KVPromoteDecodeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hook: (@Sendable () async -> Void)?
+    func set(_ hook: (@Sendable () async -> Void)?) { lock.lock(); self.hook = hook; lock.unlock() }
+    func pauseIfSet() async {
+        lock.lock(); let hook = self.hook; lock.unlock()
+        if let hook { await hook() }
+    }
+}
+#endif
+
 // MARK: - Value types
 
 /// Envelope identity a snapshot carries immutably from hot-tier commit (FR-KVP3).
@@ -357,6 +373,24 @@ actor KVDiskCacheStore {
     private var liveEntries: [String: KVLiveEntry] = [:]
     /// At most one promotion in flight namespace-wide (FR-KVP9 back-pressure).
     private var promotionInFlight = false
+    /// CRITICAL-1: in-flight off-actor promotion decodes, keyed by index. `read()`
+    /// registers its detached decode here (under actor isolation) BEFORE awaiting it and
+    /// deregisters on return; a single-key purge cancel-or-joins the matching index's
+    /// decodes BEFORE destroying the DEK, and a purge-all / cap-rotation joins ALL before
+    /// crypto-shredding the epoch. Combined with the post-decode re-fence in `read()`,
+    /// this guarantees purge_ok is reported only after any decode holding a copied
+    /// (now-revoked) DEK has finished and its decoded plaintext has been discarded.
+    private struct KVPromotionHandle { let id: Int; let task: Task<KVPromoteDecode, Never> }
+    private var promotionHandleSeq = 0
+    private var inFlightPromotions: [String: [KVPromotionHandle]] = [:]
+    #if DEBUG
+    /// Test-only (CRITICAL-1 regression): a pause gate invoked INSIDE the off-actor
+    /// promotion decode so a test can complete a single-key purge AND a purge-all while a
+    /// decode is genuinely in flight, then assert the read returns a miss (not `.hit`) in
+    /// both cases. A plain reference `let` of a `Sendable` type is cross-actor accessible,
+    /// so the detached, nonisolated decode awaits it without an actor hop or reentrancy.
+    private let promoteDecodeGate = KVPromoteDecodeGate()
+    #endif
     /// Cumulative counters per reason code (inspection surface).
     private var counters: [String: Int] = [:]
 
@@ -445,6 +479,12 @@ actor KVDiskCacheStore {
     #if DEBUG
     func setFailpoint(_ hook: (@Sendable (KVFailpoint) throws -> Void)?) {
         failpoint = hook
+    }
+
+    /// Test-only (CRITICAL-1): install the off-actor promotion-decode pause hook so a
+    /// test can land a purge / purge-all while a decode is in flight.
+    func setPromoteDecodePause(_ hook: (@Sendable () async -> Void)?) {
+        promoteDecodeGate.set(hook)
     }
 
     /// Test-only (HIGH-7): fail the k-th subsequent `fsyncDirectory` call. Resets the
@@ -1180,6 +1220,10 @@ actor KVDiskCacheStore {
             var remaining = size
             let window = 1 << 20   // 1 MiB streaming window; never the whole blob
             while remaining > 0 {
+                // CRITICAL-1(c): a purge/rotation cancel-or-join cancels this decode; bail
+                // promptly so the joiner is not blocked for the full deadline. The read's
+                // post-decode re-fence turns this into the correct revocation miss.
+                if Task.isCancelled { return .ioError }
                 let take = min(window, remaining)
                 let piece = try readExactly(fd: shaFD, count: take)
                 hasher.update(data: piece)
@@ -1203,6 +1247,7 @@ actor KVDiskCacheStore {
             let (readFD, _) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
             defer { close(readFD) }
             for record in manifest.chunks {
+                if Task.isCancelled { throw StreamMiss.deadline }   // CRITICAL-1(c): bail on cancel
                 if Date() > deadline { throw StreamMiss.deadline }
                 let frameData: Data
                 do { frameData = try readExactly(fd: readFD, count: frameOverhead + record.ctLength) }
@@ -1364,14 +1409,50 @@ actor KVDiskCacheStore {
         let blobURL = dir.appendingPathComponent("gen-\(manifest.generation).blob")
         let stagingCeiling = config.stagingMaxBytes
 
+        // CRITICAL-1(b): snapshot the admission epoch + purge high-watermark under actor
+        // isolation so the post-decode re-fence can detect a purge/rotation that revoked
+        // this index during the off-actor decode suspension.
+        let epochAtEntry = metadata.keyEpoch
+        let hwmAtEntry = metadata.highWatermark(for: index)
+
         // Await the off-actor decode. During this suspension the actor is free, so a
         // contending promotion's admission runs and gets busy (FR-KVP9 "rather than
         // queueing"). Running the blocking disk I/O + crypto off-actor also keeps the
-        // actor responsive.
-        let outcome = await Task.detached { [self] in
-            promoteDecodeBlob(blobURL: blobURL, manifest: manifest, dek: dek,
-                              deadline: deadline, stagingMaxBytes: stagingCeiling)
-        }.value
+        // actor responsive. The decode is registered so a concurrent purge/rotation can
+        // cancel-or-join it BEFORE it destroys the DEK / crypto-shreds the epoch (Item c).
+        let decodeTask = Task.detached { [self] in
+            #if DEBUG
+            await promoteDecodeGate.pauseIfSet()
+            #endif
+            return promoteDecodeBlob(blobURL: blobURL, manifest: manifest, dek: dek,
+                                     deadline: deadline, stagingMaxBytes: stagingCeiling)
+        }
+        let handleID = registerPromotion(index: index, task: decodeTask)
+        let outcome = await decodeTask.value
+        deregisterPromotion(index: index, id: handleID)
+
+        // CRITICAL-1(b) RE-FENCE: the detached decode suspended this read. A single-key
+        // purge, purge-all, or cap-rotation may have DURABLY revoked this index during the
+        // window — advancing the purge high-watermark, rotating (crypto-shredding) the
+        // epoch, dropping the live entry, or setting a tombstone. A COMPLETED single-key
+        // purge already CLEARS `blockedIndexes`, so keying on that alone is insufficient;
+        // the epoch + high-watermark comparison (both advanced ON the actor before this
+        // read can resume) closes the window deterministically. On ANY mismatch DISCARD the
+        // decoded state — built from the copied DEK/blob, released as this returns — and
+        // return disk_miss_tombstoned rather than serving revoked KV.
+        if quarantined != nil {
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix)
+            return .miss(.diskMissIO, .ioError)
+        }
+        if metadata.keyEpoch != epochAtEntry
+            || metadata.highWatermark(for: index) != hwmAtEntry
+            || namespaceBlocked
+            || purgingIndexes.contains(index)
+            || blockedIndexes.contains(index)
+            || liveEntries[index] == nil {
+            emitMiss(.diskMissTombstoned, detail: .purgePending, prefix: prefix)
+            return .miss(.diskMissTombstoned, .purgePending)
+        }
 
         switch outcome {
         case .deadline:
@@ -1522,6 +1603,42 @@ actor KVDiskCacheStore {
         else { purgeGateWaiters.removeFirst().resume() }
     }
 
+    // MARK: - In-flight promotion tracking (CRITICAL-1)
+
+    /// Register a detached promotion decode under actor isolation, returning a handle id
+    /// the read path deregisters with on return.
+    private func registerPromotion(index: String, task: Task<KVPromoteDecode, Never>) -> Int {
+        promotionHandleSeq += 1
+        let id = promotionHandleSeq
+        inFlightPromotions[index, default: []].append(KVPromotionHandle(id: id, task: task))
+        return id
+    }
+
+    private func deregisterPromotion(index: String, id: Int) {
+        inFlightPromotions[index]?.removeAll { $0.id == id }
+        if inFlightPromotions[index]?.isEmpty == true { inFlightPromotions[index] = nil }
+    }
+
+    /// CRITICAL-1(c): cancel and JOIN every in-flight promotion decode for `index`, so a
+    /// single-key purge cannot destroy the DEK / report purge_ok while a decode still
+    /// holds a copied DEK for that index. Awaiting the off-actor tasks releases the actor,
+    /// but the per-index fence (`purgingIndexes`, and the durable `blockedIndexes`) is
+    /// already raised, so no NEW promotion for the index is admitted meanwhile.
+    private func cancelOrJoinPromotions(index: String) async {
+        let handles = inFlightPromotions[index] ?? []
+        for h in handles { h.task.cancel() }
+        for h in handles { _ = await h.task.value }
+    }
+
+    /// CRITICAL-1(c): cancel and JOIN ALL in-flight promotion decodes (purge-all /
+    /// cap-rotation), so no decode holding a copied old-epoch DEK survives the epoch
+    /// crypto-shred. The namespace fence (`namespacePurging`) is already raised.
+    private func cancelOrJoinAllPromotions() async {
+        let handles = inFlightPromotions.values.flatMap { $0 }
+        for h in handles { h.task.cancel() }
+        for h in handles { _ = await h.task.value }
+    }
+
     // MARK: - Purge (FR-KVP8)
 
     /// Single-key purge with the exact tombstone-first ordering. Idempotent and
@@ -1612,6 +1729,12 @@ actor KVDiskCacheStore {
             metadata.purgeHighWatermarks[index] = newGeneration
             try persistMetadata()
             try crashIf(.purgeAfterHighWatermark)
+
+            // CRITICAL-1(c): cancel-or-join any in-flight promotion decode for this index
+            // BEFORE destroying the DEK below, so no detached decode holding a copied DEK
+            // for this index is still producing plaintext when purge_ok is reported. The
+            // durable tombstone + high-watermark above already fence any NEW promotion.
+            await cancelOrJoinPromotions(index: index)
 
             // (2) Drop the matching hot entry, cancel its pending/in-flight persist, and
             //     fence any outstanding lease's commit. Suspends on the hot actor — but
@@ -1706,8 +1829,35 @@ actor KVDiskCacheStore {
         defer { namespacePurging = false }
         let bytesFreed = committedBytes
         let entries = liveEntries.count
+
+        // CRITICAL-2 (durable-before-suspension): make the rotation-intent journal
+        // durable (fsync via persistMetadata) BEFORE the suspending `hotPurgeAll`
+        // callback. A crash anywhere from here on leaves `metadata.rotationJournal != nil`
+        // ⇒ `namespaceBlocked`, so activation recovery drives the rotation forward and no
+        // old-epoch disk artifact can be served again. Previously the callback ran first,
+        // so a crash inside it lost the transient `namespacePurging` fence with NO durable
+        // journal — a restart could re-serve old-epoch ciphertext. This mirrors the
+        // single-key path's tombstone-first discipline.
+        let from = metadata.keyEpoch
+        let to = from + 1
+        metadata.rotationJournal = KVRotationJournal(from: from, to: to, phase: "created")
+        try persistMetadata()
+        try crashIf(.rotationAfterJournal)
+
+        // CRITICAL-1(c): cancel-or-join EVERY in-flight promotion decode before the epoch
+        // crypto-shred below, so no detached decode holding a copied old-epoch DEK can
+        // still be producing plaintext when this rotation reports purge_ok. The namespace
+        // fence above (`namespacePurging`) already refuses any NEW promotion admission.
+        await cancelOrJoinAllPromotions()
+
+        // Hot cleanup (suspends): clears every hot entry, invalidates outstanding leases,
+        // and cancels queued/in-flight persists so nothing publishes into the new epoch.
+        // The durable journal above already fences the namespace across this suspension.
         await hotPurgeAll?()
-        try rotateEpoch()
+
+        // Drive the already-journaled rotation forward: create epoch-(to) master, durably
+        // commit the new epoch (crypto-shred), delete old-epoch keys + files, clear journal.
+        try driveRotationForward()
         liveEntries.removeAll()
         lastGeneration.removeAll()
         lastCommitSequence.removeAll()
@@ -1721,18 +1871,9 @@ actor KVDiskCacheStore {
 
     // MARK: - Epoch rotation (FR-KVP6 crash-safe ordering)
 
-    private func rotateEpoch() throws {
-        let from = metadata.keyEpoch
-        let to = from + 1
-        // (0) durable rotation-intent journal entry before any key operation.
-        metadata.rotationJournal = KVRotationJournal(from: from, to: to, phase: "created")
-        try persistMetadata()
-        try crashIf(.rotationAfterJournal)
-        try driveRotationForward()
-    }
-
     /// Drive an open rotation journal forward through its remaining phases. Called at
-    /// activation for an open journal and inline by `rotateEpoch`.
+    /// activation for an open journal (recovery) and inline by
+    /// `performNamespacePurgeRotation` after the journal is durable (CRITICAL-2).
     private func driveRotationForward() throws {
         guard let journal = metadata.rotationJournal else { return }
         let incarnation = "rotate-\(journal.to)-\(UUID().uuidString)"

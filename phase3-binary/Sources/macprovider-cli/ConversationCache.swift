@@ -170,6 +170,19 @@ actor ConversationCache {
             entry = hot
         } else if gated, let coldTier, let cold,
                   let candidate = await coldTier.promoteCandidate(conversationKey: key, identity: cold.identity) {
+            // CRITICAL-1(d): `promoteCandidate` suspended this actor. Recheck the purge
+            // stamps sampled at `begin()` — a single-key `purgeHot` or a `purgeAllHot` that
+            // ran on this actor DURING the suspension bumped `localPurgeGen[key]` /
+            // `globalPurgeGen`, revoking the state the store just promoted. A bumped stamp
+            // ⇒ reject the candidate as a miss rather than seating layers the purge already
+            // invalidated (defense in depth alongside the store's own post-decode re-fence).
+            let promoFencedLocal = (localPurgeGen[key] ?? 0) > localPurgeStamp
+            let promoFencedGlobal = globalPurgeGen > globalPurgeStamp
+            if promoFencedLocal || promoFencedGlobal {
+                await coldTier.finishPromotion(candidate, accepted: false, rejectionReason: "purged_during_promotion")
+                log("event=conv_cache action=miss key_hash=\(keyHash) reason=purged_during_promotion")
+                return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
+            }
             promotionCandidate = candidate
             entry = Entry(
                 canonicalPromptTokens: candidate.canonicalTokens,
