@@ -409,6 +409,100 @@ final class ConfigApplierTests: XCTestCase {
         }
     }
 
+    // MARK: - #745 model vs model_artifact_path
+
+    /// AC-1/AC-5: serve --model <A> with config naming B must not keep B's artifact.
+    func testCLIModelPathClearsMismatchedConfigArtifactBinding() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig("""
+        model: openai/gpt-oss-20b
+        model_artifact_path: /tmp/incumbent-gpt-oss-weights
+        model_artifact_sha256: \(String(repeating: "a", count: 64))
+        port: 8080
+        """)
+
+        let candidatePath = "/tmp/candidate-llama-3.2-3b-weights"
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(model: candidatePath, configPath: fixture.configURL.path),
+            environment: [:]
+        )
+
+        XCTAssertEqual(loaded.model, candidatePath)
+        XCTAssertNil(loaded.modelArtifactPath, "mismatched config artifact must not silently win over --model")
+        XCTAssertNil(loaded.modelArtifactSHA256, "incumbent SHA must not bind to a different --model")
+        // ModelRuntime load path is modelLoadPath ?? modelID → candidate path.
+        XCTAssertEqual(loaded.modelArtifactPath ?? loaded.model, candidatePath)
+    }
+
+    /// Preserve working case: no artifact path → --model is the load identity.
+    func testCLIModelWithoutConfigArtifactLeavesPathNilForFallback() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig("""
+        model: some-old-id
+        port: 8080
+        """)
+
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(model: "/tmp/fresh-candidate", configPath: fixture.configURL.path),
+            environment: [:]
+        )
+
+        XCTAssertEqual(loaded.model, "/tmp/fresh-candidate")
+        XCTAssertNil(loaded.modelArtifactPath)
+        XCTAssertEqual(loaded.modelArtifactPath ?? loaded.model, "/tmp/fresh-candidate")
+    }
+
+    /// Same path via --model keeps the configured SHA binding.
+    func testCLIModelMatchingArtifactPathKeepsSHA() throws {
+        let fixture = try ConfigFixture()
+        let path = "/tmp/same-weights"
+        let sha = String(repeating: "b", count: 64)
+        try fixture.writeConfig("""
+        model: openai/gpt-oss-20b
+        model_artifact_path: \(path)
+        model_artifact_sha256: \(sha)
+        port: 8080
+        """)
+
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(model: path, configPath: fixture.configURL.path),
+            environment: [:]
+        )
+
+        XCTAssertEqual(loaded.model, path)
+        XCTAssertEqual(loaded.modelArtifactPath, path)
+        XCTAssertEqual(loaded.modelArtifactSHA256, sha)
+    }
+
+    /// Changing model identity string while an artifact is bound clears the artifact.
+    func testCLIModelIDDifferentFromConfigClearsArtifact() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig("""
+        model: openai/gpt-oss-20b
+        model_artifact_path: /tmp/gpt-oss-weights
+        model_artifact_sha256: \(String(repeating: "c", count: 64))
+        port: 8080
+        """)
+
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(model: "meta-llama/llama-3.2-3b-instruct", configPath: fixture.configURL.path),
+            environment: [:]
+        )
+
+        XCTAssertEqual(loaded.model, "meta-llama/llama-3.2-3b-instruct")
+        XCTAssertNil(loaded.modelArtifactPath)
+        XCTAssertNil(loaded.modelArtifactSHA256)
+    }
+
+    func testStandardizedPathIfFilesystemDetectsAbsoluteAndHomePaths() {
+        XCTAssertEqual(
+            ConfigLoader.standardizedPathIfFilesystem("/tmp/model"),
+            URL(fileURLWithPath: "/tmp/model").standardizedFileURL.path
+        )
+        XCTAssertNil(ConfigLoader.standardizedPathIfFilesystem("mlx-community/Llama-3.2-3B-Instruct-4bit"))
+        XCTAssertNil(ConfigLoader.standardizedPathIfFilesystem("openai/gpt-oss-20b"))
+    }
+
     private func fileMode(_ url: URL) throws -> mode_t {
         var st = stat()
         XCTAssertEqual(lstat(url.path, &st), 0)

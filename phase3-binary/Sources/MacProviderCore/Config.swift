@@ -466,7 +466,34 @@ public enum ConfigLoader {
             config.port = port
         }
         if let model = cli.model {
+            // #745: `--model` must control what is loaded, not only the identity
+            // string. Config `model_artifact_path` otherwise silently wins in
+            // ModelRuntime (`modelLoadPath ?? modelID`), so autotune candidate
+            // probes record the incumbent under the candidate's name.
+            //
+            // When CLI model disagrees with the configured artifact binding,
+            // clear the artifact path + SHA so load falls through to
+            // `modelLoadPath ?? modelID` with the CLI model. Fresh installs
+            // (no artifact path) are unchanged.
+            let previousModel = config.model
+            let previousArtifact = config.modelArtifactPath
             config.model = model
+            if let previousArtifact {
+                let modelPath = Self.standardizedPathIfFilesystem(model)
+                let artifactPath = Self.standardizedPathIfFilesystem(previousArtifact)
+                let sameFilesystemPath =
+                    modelPath != nil && artifactPath != nil && modelPath == artifactPath
+                let identityUnchanged = previousModel == model
+                if sameFilesystemPath {
+                    // Explicit path matches configured artifact — keep SHA binding.
+                } else if identityUnchanged, modelPath == nil {
+                    // Same model id, non-path CLI — keep configured artifact.
+                } else {
+                    // Mismatch: prefer CLI model (load path) over silent incumbent.
+                    config.modelArtifactPath = nil
+                    config.modelArtifactSHA256 = nil
+                }
+            }
         }
         if let draftModel = cli.draftModel {
             config.draftModel = draftModel
@@ -563,6 +590,31 @@ public enum ConfigLoader {
             config.prefillStepSize = prefillStepSize
         }
         return config
+    }
+
+    /// Returns a standardized absolute path when `value` names a filesystem
+    /// location (absolute, `~/…`, or `./…` / `../…`). HuggingFace model IDs
+    /// (`org/name`) return nil so they are not treated as artifact paths.
+    public static func standardizedPathIfFilesystem(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let expanded: String
+        if trimmed == "~" {
+            expanded = FileManager.default.homeDirectoryForCurrentUser.path
+        } else if trimmed.hasPrefix("~/") {
+            expanded = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(String(trimmed.dropFirst(2))).path
+        } else {
+            expanded = trimmed
+        }
+        let looksLikePath =
+            expanded.hasPrefix("/")
+            || expanded.hasPrefix("./")
+            || expanded.hasPrefix("../")
+            || expanded == "."
+            || expanded == ".."
+        guard looksLikePath else { return nil }
+        return URL(fileURLWithPath: expanded).standardizedFileURL.path
     }
 
     private static func readProviderTokenFile(_ path: String) throws -> String {
