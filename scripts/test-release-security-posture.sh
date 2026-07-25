@@ -604,12 +604,26 @@ compatibility_copy = app_sign.find(
 )
 anchor_prepare = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py prepare")
 anchor_verify = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py verify")
-app_codesign = app_sign.find("codesign --force \\")
-if min(first_bundle_write, compatibility_copy, anchor_prepare, anchor_verify, app_codesign) < 0 or not (
-    anchor_prepare < first_bundle_write < compatibility_copy < anchor_verify < app_codesign
+nested_payload_sign = app_sign.find("Sign nested copied payloads explicitly")
+app_codesign = app_sign.find("--entitlements phase3-binary/app/Malibu.entitlements")
+if min(
+    first_bundle_write,
+    compatibility_copy,
+    anchor_prepare,
+    anchor_verify,
+    nested_payload_sign,
+    app_codesign,
+) < 0 or not (
+    anchor_prepare
+    < first_bundle_write
+    < compatibility_copy
+    < anchor_verify
+    < nested_payload_sign
+    < app_codesign
 ):
     raise SystemExit(
-        "Malibu app must be preflighted before bundle writes and reverified before codesign"
+        "Malibu app must be preflighted before bundle writes, reverified, "
+        "and explicitly sign nested payloads before outer codesign"
     )
 if "codesign --force --deep" in app_sign:
     raise SystemExit("Malibu app signing must not recursively re-sign the embedded provider CLI")
@@ -627,6 +641,9 @@ for requirement in (
     "source_cli_sha256",
     "bundled_cli_sha256",
     "Malibu embedded CLI sha256 differs from standalone CLI",
+    "Sign nested copied payloads explicitly",
+    '"$APP/Contents/MacOS/mlx.metallib"',
+    "nested_bundle",
 ):
     if requirement not in app_sign:
         raise SystemExit(f"Malibu signing omits trust-continuity guard: {requirement}")

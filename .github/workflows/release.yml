@@ -758,6 +758,21 @@ jobs:
             exit 1
           fi
 
+          # Sign nested copied payloads explicitly before signing the outer
+          # app. Do not use codesign --deep here: the standalone provider CLI
+          # is already signed and must remain byte-identical to the tarball
+          # CLI after it is embedded in Malibu.app.
+          codesign --force \
+            --timestamp \
+            --sign "$SIGNING_ID" \
+            "$APP/Contents/MacOS/mlx.metallib"
+          while IFS= read -r -d '' nested_bundle; do
+            codesign --force \
+              --timestamp \
+              --sign "$SIGNING_ID" \
+              "$nested_bundle"
+          done < <(find "$APP/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -name '*.bundle' -print0)
+
           SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
           source_cli_sha256="$(shasum -a 256 "$WORK/macprovider-cli" | awk '{print $1}')"
           codesign --force \
