@@ -531,8 +531,10 @@ final class AutotuneRecommendTests: XCTestCase {
             hardwareIdentityHash: request.hardware.hardwareIdentityHash
         )
         // The cached benchmark was recorded under the pre-update CLI version.
+        // Keep swap false: #742 makes swap a paid hard veto; this test isolates
+        // CLI marketing-version independence of cached evidence admission.
         var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
-        benchmark.swapDetected = true
+        benchmark.swapDetected = false
         request.benchmarks[modelKey] = benchmark
 
         // A CLI update alone advances the marketing version with every
@@ -553,7 +555,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(result.recommendedModel, modelKey)
         XCTAssertNotEqual(result.recommendedModel, "none")
         XCTAssertFalse(result.humanTranscript().contains("donor mode only"))
-        XCTAssertTrue(result.warnings.contains(.swapObservedUnderLoad))
+        XCTAssertFalse(result.warnings.contains(.swapObservedUnderLoad))
     }
 
     func testRowIdentityPreservesEvidenceAcrossUnrelatedCatalogChange() throws {
@@ -2363,7 +2365,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(result.warnings.contains(.rateCardDefaultTierUsed))
     }
 
-    func testSwapDetectedNoLongerBlocksEligibilityButEmitsWarning() throws {
+    func testSwapDetectedHardBlocksPaidEligibilityAndEmitsWarning() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         // Flip swap flag on the existing feasible benchmark fixture.
@@ -2373,9 +2375,111 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertEqual(result.recommendedModel, modelKey, "v1.7.6 Track A2a: swap detected must not veto eligibility")
+        // #742 / SPEC-023 v0.7: swap is a paid-path hard veto.
+        XCTAssertNil(result.recommendedModel, "swap_detected must disqualify paid recommendation")
+        XCTAssertNotEqual(result.recommendedModel, modelKey)
         XCTAssertTrue(result.warnings.contains(.swapObservedUnderLoad))
-        XCTAssertFalse(result.warnings.contains(.noEligibleModel))
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertTrue(
+            result.allCandidates.contains { $0.catalogKey == modelKey && !$0.eligible && $0.why.localizedCaseInsensitiveContains("swap") }
+        )
+        XCTAssertTrue(result.humanTranscript().localizedCaseInsensitiveContains("swap"))
+    }
+
+    /// AC-1/AC-2/AC-5 for #742: replay the recorded 2026-07-23 M5/32 GB
+    /// production benchmark. The swapping qwen3-coder-30b row must never win.
+    func testM5_32GB_2026_07_23FixtureNeverRecommendsSwappingQwenCoder() throws {
+        var request = try makeMultiCandidateRequest(modelKeys: [
+            "qwen3-coder-30b-a3b-instruct",
+            "openai/gpt-oss-20b",
+            "qwen3-8b",
+            "meta-llama/llama-3.2-3b-instruct",
+        ])
+        request.hardware = AutotuneRecommendHardware(
+            machine: "Mac16,12",
+            chip: "Apple M5",
+            memoryGB: 32,
+            bandwidthTier: .c,
+            osVersion: "Version 26.5 (Build 25F71)",
+            binaryVersion: "1.8.60",
+            diversificationID: "fixture-div-2026-07-23",
+            hardwareIdentityHash: "fixture-hw-2026-07-23"
+        )
+        let generatedAt = Self.date("2026-07-23T12:00:00Z")
+        request.generatedAt = generatedAt
+
+        // Recorded production row that selected the live incident model.
+        request.benchmarks["qwen3-coder-30b-a3b-instruct"] = try fixtureBenchmark(
+            modelKey: "qwen3-coder-30b-a3b-instruct",
+            request: request,
+            sustainedTPS: 13.452081348183558,
+            ttftMS: 10_995,
+            swapDetected: true,
+            generatedAt: generatedAt
+        )
+        // Next-best measured row on the same Mac after the hand-switch (no swap).
+        request.benchmarks["openai/gpt-oss-20b"] = try fixtureBenchmark(
+            modelKey: "openai/gpt-oss-20b",
+            request: request,
+            sustainedTPS: 30.5,
+            ttftMS: 3_423,
+            swapDetected: false,
+            generatedAt: generatedAt
+        )
+        // Smaller rows that fit 32 GB and clear swap — present so the engine
+        // has non-swapping paid alternatives if gpt-oss is unavailable.
+        request.benchmarks["qwen3-8b"] = try fixtureBenchmark(
+            modelKey: "qwen3-8b",
+            request: request,
+            sustainedTPS: 40.0,
+            ttftMS: 1_200,
+            swapDetected: false,
+            generatedAt: generatedAt
+        )
+        request.benchmarks["meta-llama/llama-3.2-3b-instruct"] = try fixtureBenchmark(
+            modelKey: "meta-llama/llama-3.2-3b-instruct",
+            request: request,
+            sustainedTPS: 60.0,
+            ttftMS: 400,
+            swapDetected: false,
+            generatedAt: generatedAt
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertNotEqual(result.recommendedModel, "qwen3-coder-30b-a3b-instruct")
+        XCTAssertNotNil(result.recommendedModel, "at least one non-swapping paid row must remain eligible")
+        let qwen = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == "qwen3-coder-30b-a3b-instruct" })
+        XCTAssertFalse(qwen.eligible)
+        XCTAssertTrue(qwen.why.localizedCaseInsensitiveContains("swap"))
+    }
+
+    /// AC-4: when every paid row swaps, fall to donor mode with swap named.
+    func testAllSwappingPaidRowsFallToDonorWithSwapReason() throws {
+        var request = try makeRequest(modelKey: "qwen3-coder-30b-a3b-instruct")
+        request.hardware = AutotuneRecommendHardware(
+            machine: "Mac-test",
+            chip: "Apple M5",
+            memoryGB: 32,
+            bandwidthTier: .c,
+            osVersion: "macOS 15",
+            binaryVersion: "test-bin",
+            diversificationID: "diversification",
+            hardwareIdentityHash: "hardware"
+        )
+        var benchmark = try XCTUnwrap(request.benchmarks["qwen3-coder-30b-a3b-instruct"])
+        benchmark.swapDetected = true
+        benchmark.sustainedTPS = 13.452081348183558
+        benchmark.ttftMS = 10_995
+        request.benchmarks["qwen3-coder-30b-a3b-instruct"] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertTrue(result.warnings.contains(.swapObservedUnderLoad))
+        XCTAssertTrue(result.humanTranscript().contains("donor mode only"))
+        XCTAssertTrue(result.humanTranscript().localizedCaseInsensitiveContains("swap"))
     }
 
     func testThermalThrottleStillHardBlocksEligibility() throws {
@@ -2992,6 +3096,86 @@ final class AutotuneRecommendTests: XCTestCase {
           "source": "fixture"
         }
         """
+    }
+
+    private func makeMultiCandidateRequest(modelKeys: [String]) throws -> AutotuneRecommendRequest {
+        var demand = try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8))
+        var catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        var rateCard = try AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+        let keySet = Set(modelKeys)
+        let normalizedKeys = Set(modelKeys.map(AutotuneModelKeyNormalizer.normalize))
+        demand.rows = demand.rows.filter { keySet.contains($0.key) }
+        catalog.rows = catalog.rows.filter { keySet.contains($0.key) }
+        rateCard.rows = rateCard.rows.filter { keySet.contains($0.key) || normalizedKeys.contains($0.key) }
+
+        let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        let generatedAt = Self.date("2026-07-02T00:00:00Z")
+        let hardware = AutotuneRecommendHardware(
+            machine: "Mac-test",
+            chip: "Apple M4 Pro",
+            memoryGB: 64,
+            bandwidthTier: .c,
+            osVersion: "macOS 15",
+            binaryVersion: "test-bin",
+            diversificationID: "diversification",
+            hardwareIdentityHash: "hardware"
+        )
+        var benchmarks: [String: CandidateBenchmark] = [:]
+        for modelKey in modelKeys {
+            let candidate = try XCTUnwrap(catalog.rows[modelKey], "missing catalog row \(modelKey)")
+            benchmarks[modelKey] = CandidateBenchmark(
+                modelKey: modelKey,
+                sustainedTPS: 100,
+                ttftMS: max(1, candidate.benchGate.max4KTTFTMS - 1),
+                swapDetected: false,
+                thermalThrottleDetected: false,
+                artifactSHA256: candidate.modelSHA256 ?? String(repeating: "f", count: 64),
+                modelArtifactPath: "/tmp/\(modelKey)",
+                benchmarkID: "bench-\(modelKey)",
+                generatedAt: generatedAt,
+                candidateCatalogSHA256: catalogSHA,
+                binaryVersion: hardware.binaryVersion,
+                modelID: candidate.modelID,
+                hardwareIdentityHash: hardware.hardwareIdentityHash
+            )
+        }
+        return AutotuneRecommendRequest(
+            hardware: hardware,
+            demandRank: demand,
+            candidateCatalog: catalog,
+            candidateCatalogSHA256: catalogSHA,
+            rateCard: rateCard,
+            benchmarks: benchmarks,
+            warnings: [],
+            generatedAt: generatedAt,
+            donorMode: false
+        )
+    }
+
+    private func fixtureBenchmark(
+        modelKey: String,
+        request: AutotuneRecommendRequest,
+        sustainedTPS: Double,
+        ttftMS: Int,
+        swapDetected: Bool,
+        generatedAt: Date
+    ) throws -> CandidateBenchmark {
+        let candidate = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        return CandidateBenchmark(
+            modelKey: modelKey,
+            sustainedTPS: sustainedTPS,
+            ttftMS: ttftMS,
+            swapDetected: swapDetected,
+            thermalThrottleDetected: false,
+            artifactSHA256: candidate.modelSHA256 ?? String(repeating: "f", count: 64),
+            modelArtifactPath: "/tmp/\(modelKey)",
+            benchmarkID: "bench-2026-07-23-\(modelKey)",
+            generatedAt: generatedAt,
+            candidateCatalogSHA256: request.candidateCatalogSHA256,
+            binaryVersion: request.hardware.binaryVersion,
+            modelID: candidate.modelID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
     }
 
     private func makeRequest(modelKey: String = "qwen3-coder-30b-a3b-instruct") throws -> AutotuneRecommendRequest {

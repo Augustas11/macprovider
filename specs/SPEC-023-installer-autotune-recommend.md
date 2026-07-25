@@ -1,10 +1,16 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.6
+version: v0.7
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-10
+last-locked: 2026-07-25
 
 ## Change log
+
+- **v0.7 (2026-07-25)** — Swap is a paid-path hard eligibility veto (#742).
+  1. **`swap_detected == true` disqualifies paid recommendation.** Swap is a locally measured fact about the provider machine (pageouts during the Stage 1 probe). It needs no catalog threshold and applies on hardware never benchmarked in advance. A swapping row MUST NOT become `recommended_model`.
+  2. **§4 scoring untouched.** Ranking, demand weight, and payout-first order are unchanged; only §5 eligibility gains the swap gate.
+  3. **Donor mode keeps swap advisory.** When no non-swapping paid row exists, the CLI falls to donor mode and MUST name swap in the transcript / candidate `why` / `swap_observed_under_load` warning. Donor commit still admits a swapping row when other donor gates pass.
+  4. **No 60 s TTFT feasibility default on the paid path.** `autotune --recommend` MUST NOT default its probe TTFT ceiling to 60_000 ms. Omitting `--gate-ttft-ms` on `--recommend` disables that ceiling (`0`). Classic (non-recommend) Stage 1/2 retains the SPEC-013 60_000 ms default when the flag is omitted. Absolute buyer-facing TTFT bounds are deferred to selection-quality work (#744). Catalog `bench_gate` TPS/TTFT fields remain advisory.
 
 - **v0.6 (2026-07-10)** — Catalog recovery, trust-state separation, and buyer-coverage scoring.
   1. **One release unit.** Candidate and demand JSON, exact-byte SHA-256 digests, detached signatures, trusted verifier keyring, baked Swift payload, and release manifest are generated and verified from one canonical release directory. Candidate and demand feeds in one release share `version`, `generated_at`, and `policy_version`.
@@ -143,7 +149,7 @@ Required hardware fields:
 || `diversification_id` | string | HMAC-SHA256-derived provider ID if configured, otherwise HMAC-SHA256-derived stable machine identity | Input to deterministic diversification. Raw machine fingerprints MUST NOT be persisted, logged, emitted in JSON, included in support bundles, or sent to coordinator/gateway as part of v0.1 recommendation. |
 || `candidate_benchmarks[model_key].sustained_tps` | float | local autotune benchmark | Warm steady-state decode tokens/sec for each candidate. |
 || `candidate_benchmarks[model_key].ttft_ms` | integer | local autotune benchmark | Time to first token under the v0.1 benchmark prompt shape. |
-|| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.2]** Observed swap emits `swap_observed_under_load` warning; does not fail eligibility. |
+|| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.7 / #742]** Observed swap fails paid eligibility (hard block) and emits `swap_observed_under_load`. Donor mode keeps swap advisory. |
 || `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | Thermal throttle during probe fails eligibility. **[unchanged v0.2: hard block]** |
 
 HMAC identity rules:
@@ -175,7 +181,7 @@ Optional hardware fields:
 ||---|---|---|
 || `machine` | string | Human-readable Mac product name if available. |
 || `power_watts` | float | Used only when an electricity estimate is available. Absence must not fail recommendation. |
-|| `measured_memory_pressure` | string enum | May be used for confidence. **[amended v0.2: the only runtime hard failure is `thermal_throttle_detected == true`; swap is advisory per change log v0.2 point 1]**. |
+|| `measured_memory_pressure` | string enum | May be used for confidence. **[amended v0.7: runtime hard failures are `thermal_throttle_detected == true` and paid-path `swap_detected == true`]**. |
 || `benchmark_id` | string | Stable ID of the local benchmark run, included when available. |
 
 ### 3.2 Candidate/admission catalog
@@ -432,9 +438,10 @@ A row is eligible only if every gate passes:
 
 - `sustained_tps >= model.bench_gate.min_sustained_tps` **[v0.2 amendment: advisory; missing emits `tps_below_gate` warning but does not veto eligibility]**.
 - `ttft_ms <= model.bench_gate.max_4k_ttft_ms` **[v0.2 amendment: advisory; missing emits `ttft_above_gate` warning but does not veto eligibility]**.
-- `swap_detected == false` **[v0.2 amendment (originally shipped v1.7.6): advisory; observed swap emits `swap_observed_under_load` warning but does not veto eligibility]**.
-- `thermal_throttle_detected == false` **[unchanged from v0.1: hard block; the ONLY runtime hard eligibility gate in v0.2]**.
+- `swap_detected == false` **[amended v0.7 / #742: hard block for paid recommendation. When swap causes no paid row to land, emit `swap_observed_under_load`. Donor mode keeps swap advisory]**.
+- `thermal_throttle_detected == false` **[unchanged from v0.1: hard block]**.
 - The candidate benchmark must be from the current `benchmark_id` or from a cached run whose candidate catalog hash, binary version, model ID, and HMAC-derived hardware identity hash match and whose `generated_at` is no older than 7 days.
+- There is no default 60_000 ms TTFT feasibility ceiling on the paid `--recommend` path. Omitting `--gate-ttft-ms` with `--recommend` disables that ceiling; absolute buyer-facing TTFT bounds are out of scope for v0.7. Classic non-recommend Stage 1/2 retains the SPEC-013 default.
 
 In v0.4, there is no paid financial gate. All eligible rows proceed to recommendation regardless of earnings projections. Real earnings are recorded only after tokens are served.
 
@@ -531,17 +538,28 @@ Happy path applies only when at least one recommendable model is eligible and cl
 
 ### 7.2 Donor-tier path
 
-Use this text verbatim, replacing braces with computed values:
+Use this text as the donor transcript, replacing braces with computed values.
+When at least one candidate was disqualified for `swap_detected == true`, the CLI
+MUST insert the optional swap diagnostic line shown below (including its trailing
+blank line). When no swap disqualification applied, omit that line entirely so the
+blank line after the "No catalog model..." sentence remains a single blank line.
 
 ```text
 Detected {machine_or_chip}, {memory_gb} GB unified memory, Tier {bandwidth_tier}.
 No catalog model currently fits this Mac for network serving.
-
+{optional_swap_diagnostic}
 Best compatible option: {best_compatible_model}
 Recommendation: donor mode only
 
 You can keep this Mac configured for donor-mode testing, but it is not expected to earn meaningful revenue on the current rate card.
 Enable donor mode? [y/N]
+```
+
+`{optional_swap_diagnostic}` is either empty or exactly:
+
+```text
+At least one candidate was disqualified because swap was detected under probe load.
+
 ```
 
 Donor-tier path applies when no row passes all §5 gates and only a donor-compatible non-default row remains available for explicit local donor-mode testing.
@@ -557,7 +575,7 @@ v0.1 locks an explicit local donor-mode override:
 When `donor_mode == true`:
 
 - The CLI may skip only the recommendability and demand-rank `recommendable == true` default-selection gate.
-- The CLI MUST NOT bypass signed candidate-catalog presence, immutable model revision, canonical artifact-set digest check, `runtime_status != "blocked"`, model ID allowlist, RAM headroom, no-swap, no-thermal, or runtime-support gates.
+- The CLI MUST NOT bypass signed candidate-catalog presence, immutable model revision, canonical artifact-set digest check, `runtime_status != "blocked"`, model ID allowlist, RAM headroom, no-thermal, or runtime-support gates. Swap remains advisory for donor-mode commit (paid path hard-blocks swap per §5 / AC-12).
 - A donor-mode row must have signed candidate metadata with `runtime_status` equal to `candidate`, `listed`, or `recommendable`; `blocked` rows remain forbidden.
 - SPEC-023 does not add coordinator/gateway donor-routing or settlement behavior. Applying donor mode may write local config and status only; it MUST NOT auto-start or auto-register a network-connected paid provider for a non-recommendable donor row. Network-connected donor serving requires a separate donor-routing/settlement spec or build prerequisite.
 - The CLI must print an explicit warning before commit:
@@ -654,7 +672,7 @@ AC-10: A row with demand `recommendable: false` or candidate `runtime_status != 
 
 AC-11: A row whose `model.min_ram_gb > mac.ram_gb - 4` fails `hardware_fits` and is not benchmarked. v0.4 has no arbitrary local-model or custom donor-mode path override; any donor-mode selection must still select a row from the signed selected candidate catalog and pass §3.2, §5, §8, and AC-22 controls.
 
-AC-12 **[amended v0.2]**: A row whose local benchmark records `thermal_throttle_detected == true` fails eligibility (hard block). A row whose local benchmark records `swap_detected == true` emits `swap_observed_under_load` warning but does NOT fail eligibility on that basis alone.
+AC-12 **[amended v0.7 / #742]**: A row whose local benchmark records `thermal_throttle_detected == true` fails paid eligibility (hard block). A row whose local benchmark records `swap_detected == true` fails paid eligibility (hard block), MUST NOT become `recommended_model`, and emits `swap_observed_under_load`. When every paid row fails for swap (or other §5 gates) the CLI falls to donor mode and the transcript / candidate `why` names swap.
 
 AC-13 **[amended v0.2]**: A row whose benchmark misses `min_sustained_tps` or `max_4k_ttft_ms` emits `tps_below_gate` / `ttft_above_gate` warnings but does NOT fail eligibility on that basis alone.
 
@@ -666,9 +684,9 @@ AC-16: Missing candidate metadata, missing immutable `model_revision`, or missin
 
 AC-20: The happy-path transcript exactly matches §7.1 with per-token rate display.
 
-AC-21: The donor-tier transcript exactly matches §7.2.
+AC-21 **[amended v0.7 / #742]**: The donor-tier transcript matches §7.2, including the conditional swap diagnostic when swap caused no paid row to land (AC-12).
 
-AC-22 **[amended v0.4]**: `--donor-mode` allows a non-recommendable model to be locally committed only after printing the §8 warning, writing `donor_mode: true`, and verifying signed catalog metadata, immutable model revision, canonical artifact-set digest, `runtime_status != "blocked"`, model allowlist, RAM headroom, no-thermal-throttle, and runtime support. Swap and TPS/TTFT gates are advisory; observing them emits warnings but does not block donor-mode commit.
+AC-22 **[amended v0.7 / #742]**: `--donor-mode` allows a non-recommendable model to be locally committed only after printing the §8 warning, writing `donor_mode: true`, and verifying signed catalog metadata, immutable model revision, canonical artifact-set digest, `runtime_status != "blocked"`, model allowlist, RAM headroom, no-thermal-throttle, and runtime support. Swap remains advisory for donor-mode commit (paid path hard-blocks swap per AC-12); TPS/TTFT catalog gates remain advisory. Observing swap/TPS/TTFT emits warnings but does not block donor-mode commit.
 
 AC-23: Applying donor mode for a non-recommendable row does not auto-start or auto-register a network-connected paid provider. Any network-connected donor serving is blocked until a separate donor-routing/settlement prerequisite exists.
 

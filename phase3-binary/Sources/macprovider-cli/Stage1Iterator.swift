@@ -524,7 +524,8 @@ struct Stage1Prober: Stage1Probing {
         }
 
         let p95 = percentile95(ttfts)
-        if p95 > Double(gateTTFTMS) {
+        // gateTTFTMS == 0 means the ceiling is disabled (#742: no 60s default).
+        if gateTTFTMS > 0, p95 > Double(gateTTFTMS) {
             return .infeasible(
                 reason: "TTFT p95 \(Int(p95.rounded()))ms exceeded gate \(gateTTFTMS)ms",
                 nErr: ttfts.filter { $0 > Double(gateTTFTMS) }.count

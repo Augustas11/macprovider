@@ -45,10 +45,9 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     /// to this row for served inference, so credits still flow — the
     /// warning surfaces the discovery-tier pricing to the operator.
     case rateCardDefaultTierUsed = "rate_card_default_tier_used"
-    /// v1.7.6 Track A2a: at least one recommended candidate observed
-    /// swap pageouts during the Stage 1 probe. Swap is advisory; the
-    /// operator should be aware that heavy real-world context loads may
-    /// push this Mac into swap.
+    /// Observed swap pageouts during the Stage 1 probe. Paid recommendations
+    /// treat this as a hard eligibility veto (#742 / SPEC-023 v0.7); the warning
+    /// still surfaces so donor-mode transcripts can name the reason.
     case swapObservedUnderLoad = "swap_observed_under_load"
     /// Advisory QoS warning when measured TPS misses the signed catalog target.
     case tpsBelowGate = "tps_below_gate"
@@ -1624,9 +1623,14 @@ struct AutotuneRecommendEngine {
                let candidate = request.candidateCatalog.rows[target.catalogKey] {
                 warnings.formUnion(Self.advisoryBenchmarkWarnings(benchmark, candidate: candidate))
             }
-            if request.benchmarks[target.catalogKey]?.swapDetected == true {
-                warnings.insert(.swapObservedUnderLoad)
-            }
+        }
+        // #742: paid path hard-vetoes swap. Surface the warning when swap is why
+        // no paid row landed (donor fallthrough / no-eligible), including the case
+        // where no donor candidate exists. Do not warn on a clean paid pick just
+        // because a lower-ranked ineligible row swapped.
+        if recommended == nil,
+           request.benchmarks.values.contains(where: \.swapDetected) {
+            warnings.insert(.swapObservedUnderLoad)
         }
 
         let resultCandidates = eligible.isEmpty ? Array(scored.prefix(5)) : Array(eligible.prefix(5))
@@ -1669,9 +1673,12 @@ struct AutotuneRecommendEngine {
         guard candidate.minRAMGB <= request.hardware.memoryGB - Self.safetyMarginGB else { return false }
         guard request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier) else { return false }
         guard let benchmark else { return false }
-        // SPEC-023 v0.2: signed TPS/TTFT gates are advisory QoS warnings, not
-        // eligibility vetoes. Thermal throttling remains the runtime hard block.
+        // SPEC-023 v0.7 (#742): swap is a paid-path hard veto — a locally
+        // measured fact that needs no catalog threshold. Signed TPS/TTFT gates
+        // remain advisory QoS warnings. Thermal throttling stays a hard block.
+        // Donor-mode keeps swap advisory (see donorModeCompatible).
         return !benchmark.thermalThrottleDetected
+            && !benchmark.swapDetected
             && Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
     }
 
@@ -1794,6 +1801,9 @@ struct AutotuneRecommendEngine {
         if benchmark?.thermalThrottleDetected == true {
             return "\(modelKey) did not clear the thermal throttle recommendation gate.".prefixString(140)
         }
+        if benchmark?.swapDetected == true {
+            return "\(modelKey) did not clear the swap recommendation gate (swap detected under probe load).".prefixString(140)
+        }
         return "\(modelKey) did not clear one or more recommendation gates.".prefixString(140)
     }
 }
@@ -1869,10 +1879,16 @@ extension AutotuneRecommendResult {
             """
         }
         let best = donorFallbackModel ?? "none"
+        let swapReason: String
+        if warnings.contains(.swapObservedUnderLoad) {
+            swapReason = "\nAt least one candidate was disqualified because swap was detected under probe load.\n"
+        } else {
+            swapReason = ""
+        }
         return """
         Detected \(machineOrChip), \(hardware.memoryGB) GB unified memory, Tier \(hardware.bandwidthTier.rawValue).
         No catalog model currently fits this Mac for network serving.
-
+        \(swapReason)
         Best compatible option: \(best)
         Recommendation: donor mode only
 
