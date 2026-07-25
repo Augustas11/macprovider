@@ -3,6 +3,24 @@ import XCTest
 @testable import macprovider_cli
 
 final class AutotuneCommandTests: XCTestCase {
+    /// #742 AC-3: paid --recommend never inherits a 60 s TTFT default;
+    /// classic Stage 1/2 keeps SPEC-013's 60s default when the flag is omitted.
+    func testGateTTFTMSPathDependentDefaultAndExplicitZero() throws {
+        let omitted = try AutotuneCommand.parse(["--dry-run"])
+        XCTAssertNil(omitted.gateTTFTMS)
+
+        let recommend = try AutotuneCommand.parse(["--recommend", "--dry-run"])
+        XCTAssertNil(recommend.gateTTFTMS)
+
+        let explicit = try AutotuneCommand.parse(["--gate-ttft-ms", "3500", "--dry-run"])
+        XCTAssertEqual(explicit.gateTTFTMS, 3500)
+
+        let disabled = try AutotuneCommand.parse(["--gate-ttft-ms", "0", "--dry-run"])
+        XCTAssertEqual(disabled.gateTTFTMS, 0)
+
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--gate-ttft-ms", "-1", "--dry-run"]))
+    }
+
     func testDefaultCandidatePlanIsLargestFirst() throws {
         let command = try AutotuneCommand.parse(["--dry-run"])
         let plan = try command.candidatePlan()

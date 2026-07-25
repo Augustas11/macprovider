@@ -39,8 +39,13 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Option(help: "Stage 2 replicates per knob cell.")
     var stage2Replicates = 3
 
-    @Option(name: .customLong("gate-ttft-ms"), help: "Maximum p95 TTFT in milliseconds for feasibility.")
-    var gateTTFTMS = 60_000
+    /// Path-dependent default (#742 / AC-3):
+    /// - classic Stage 1/2 (SPEC-013): omitted → 60_000 ms
+    /// - paid `--recommend` (SPEC-023): omitted → disabled (0); no 60s default
+    /// Explicit `0` disables the ceiling on either path. Absolute buyer-facing
+    /// TTFT bounds land with selection-quality work (#744).
+    @Option(name: .customLong("gate-ttft-ms"), help: "Maximum p95 TTFT in milliseconds for Stage 1/2 feasibility. 0 disables the ceiling. Classic autotune defaults to 60000 when omitted; --recommend has no TTFT default.")
+    var gateTTFTMS: Int?
 
     @Option(help: "Relative throughput tie band for TTFT tiebreak.")
     var tpsTieEpsilon = 0.02
@@ -238,7 +243,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             candidateModelsJSON: candidatesJSON,
             stage1Replicates: stage1Replicates,
             stage2Replicates: stage2Replicates,
-            gateTTFTMS: gateTTFTMS,
+            gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
             tpsTieEpsilon: tpsTieEpsilon,
             recommendationJSON: nil,
             recipeHash: nil,
@@ -314,7 +319,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                     candidates: plan.candidates,
                     candidatesBySize: Self.candidatesBySize(for: plan),
                     targetContext: targetContext,
-                    gateTTFTMS: gateTTFTMS,
+                    gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
                     stage1Replicates: stage1Replicates,
                     port: port,
                     drainGrace: drainGrace,
@@ -388,7 +393,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                     maxBatchAxis: try Self.parsePositiveIntAxis(maxBatchAxis, flag: "--max-batch-axis"),
                     maxContextAxis: try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext),
                     targetContext: targetContext,
-                    gateTTFTMS: gateTTFTMS,
+                    gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
                     stage2Replicates: stage2Replicates,
                     tpsTieEpsilon: tpsTieEpsilon,
                     port: port,
@@ -585,12 +590,21 @@ struct AutotuneCommand: AsyncParsableCommand {
             candidateModels: plan.candidates,
             stage1Replicates: stage1Replicates,
             stage2Replicates: stage2Replicates,
-            gateTTFTMS: gateTTFTMS,
+            gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
             tpsTieEpsilon: tpsTieEpsilon,
             recommendation: recommendation,
             infeasible: infeasible,
             dbPath: dbPath
         )
+    }
+
+    /// Resolve the TTFT feasibility ceiling.
+    /// - `0` means disabled (explicit or paid-path default).
+    /// - Classic Stage 1/2 keeps SPEC-013's 60s default when the flag is omitted.
+    /// - Paid `--recommend` never inherits that 60s default (#742 AC-3).
+    private func resolvedGateTTFTMS(forRecommend: Bool) -> Int {
+        if let gateTTFTMS { return gateTTFTMS }
+        return forRecommend ? 0 : 60_000
     }
 
     private static func recommendation(
@@ -678,7 +692,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             lines.append("  \(index + 1). \(model)")
         }
         lines.append("autotune: stage1_replicates=\(stage1Replicates) stage2_replicates=\(stage2Replicates)")
-        lines.append("autotune: gate_ttft_ms=\(gateTTFTMS) tps_tie_epsilon=\(tpsTieEpsilon)")
+        let classicGate = resolvedGateTTFTMS(forRecommend: false)
+        lines.append("autotune: gate_ttft_ms=\(classicGate == 0 ? "disabled" : String(classicGate)) tps_tie_epsilon=\(tpsTieEpsilon)")
         lines.append("autotune: kv_bits_axis=\(kvBitsAxis) max_batch_axis=\(maxBatchAxis) max_context_axis=\(maxContextAxis.isEmpty ? "<target-context>" : maxContextAxis)")
         lines.append("autotune: port=\(port) db_path=\(dbPath) retain_runs=\(retainRuns)")
         lines.append("[dry-run] would evaluate Stage 1 candidates in this order and then hill-climb knobs only within the first feasible model.")
@@ -695,8 +710,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         guard stage2Replicates >= 1 else {
             throw ValidationError("--stage2-replicates must be >= 1")
         }
-        guard gateTTFTMS > 0 else {
-            throw ValidationError("--gate-ttft-ms must be > 0")
+        if let gateTTFTMS, gateTTFTMS < 0 {
+            throw ValidationError("--gate-ttft-ms must be >= 0 (0 disables the TTFT feasibility ceiling)")
         }
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
@@ -847,7 +862,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         let outcomes = try await AutotuneRecommendationBenchmarker().benchmarks(
             request: request,
             targetContext: Self.spec023RecommendationProbeContext,
-            gateTTFTMS: gateTTFTMS,
+            gateTTFTMS: resolvedGateTTFTMS(forRecommend: true),
             replicates: stage1Replicates,
             port: port,
             interruptFlag: interruptFlag,
