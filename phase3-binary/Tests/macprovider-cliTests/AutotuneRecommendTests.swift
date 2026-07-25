@@ -712,8 +712,12 @@ final class AutotuneRecommendTests: XCTestCase {
         let alias = "mlx-community/gpt-oss-20b-MXFP4-Q8"
         let normalized = "openai/gpt-oss-20b"
         var request = try makeRequest(modelKey: normalized)
+        // #743 interim holds gpt-oss demand recommendable=false; this test is about
+        // catalog-key aliasing / rate-card normalization, so force paid eligibility.
+        request.demandRank.rows[normalized]?.recommendable = true
         request.candidateCatalog.rows[alias] = request.candidateCatalog.rows.removeValue(forKey: normalized)
         request.demandRank.rows[alias] = request.demandRank.rows.removeValue(forKey: normalized)
+        request.demandRank.rows[alias]?.recommendable = true
         var benchmark = try XCTUnwrap(request.benchmarks.removeValue(forKey: normalized))
         benchmark.modelKey = alias
         benchmark.benchmarkID = "bench-alias"
@@ -727,6 +731,18 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(result.benchmarkID, "bench-alias")
         XCTAssertFalse(result.jsonString().contains("catalogKey"))
         XCTAssertFalse(result.jsonString().contains("catalog_key"))
+    }
+
+    /// #743 AC-5 interim: gpt-oss is not demand-recommendable while harmony is broken.
+    func testBakedGptOssDemandIsNotRecommendableWhileHarmonyHoldActive() throws {
+        let demand = try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8))
+        let row = try XCTUnwrap(demand.rows["openai/gpt-oss-20b"])
+        XCTAssertFalse(row.recommendable)
+
+        var request = try makeRequest(modelKey: "openai/gpt-oss-20b")
+        let result = AutotuneRecommendEngine().recommend(request)
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.allCandidates.allSatisfy { !$0.eligible })
     }
 
     func testRecommendedModelIsAlwaysTopRankedEligibleRow() throws {
