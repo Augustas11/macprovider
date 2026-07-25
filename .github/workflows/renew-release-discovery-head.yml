@@ -231,6 +231,9 @@ jobs:
             --openssl "$OPENSSL_BIN" >/dev/null
           cmp "$WORK/latest/compatibility-artifact-index.json" \
             "$WORK/current/compatibility-artifact-index.json"
+          # macos runners ship bash 3.2, where "${empty[@]}" is an unbound-variable
+          # error under `set -u`. A head with no signed policy minimum and no
+          # revocations leaves this array empty, so expand it guardedly below.
           policy_args=()
           while IFS= read -r arg; do
             [[ -n "$arg" ]] && policy_args+=("$arg")
@@ -270,7 +273,7 @@ jobs:
             --attempt "$GITHUB_RUN_ATTEMPT" \
             --compatibility-manifest "$WORK/latest/compatibility-set.json" \
             --target-artifact-index "$WORK/latest/compatibility-artifact-index.json" \
-            "${policy_args[@]}" \
+            ${policy_args[@]+"${policy_args[@]}"} \
             --issued-at "$issued_at" \
             --expires-at "$expires_at" \
             --private-key "$key" \
