@@ -37,6 +37,7 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         let benchmarks = object?["benchmarks"] as? [[String: Any]]
         XCTAssertEqual(benchmarks?.first?["model_key"] as? String, "model-a")
         XCTAssertEqual(benchmarks?.first?["sustained_tps"] as? Double, 42.5)
+        XCTAssertEqual(benchmarks?.first?["model_artifact_path"] as? String, "/tmp/model")
     }
 
     func testCanonicalPayloadRetainsCrossLanguageEvidenceSHA() throws {
@@ -45,9 +46,10 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
             snapshot: makeFixture().snapshot
         )
 
+        // Golden updated for #745: benchmarks now include model_artifact_path.
         XCTAssertEqual(
             payload.evidenceSHA,
-            "47e9892f2f2c986d4d58389bdf209a9e56b2bd92095720845331bc09758065bf"
+            "ddd18c573548d79cfa1caac0977f373db06d77d0c099ab48b1e2b45ebe618d21"
         )
         XCTAssertEqual(
             payload.data,

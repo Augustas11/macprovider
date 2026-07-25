@@ -458,6 +458,7 @@ func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
 		Benchmarks: []HardwareEvidenceBenchmark{{
 			ModelKey:                "model-a",
 			ModelID:                 "mlx-community/model-a",
+			ModelArtifactPath:       "/tmp/model",
 			SustainedTPS:            42.5,
 			TTFTMS:                  1200,
 			SwapDetected:            false,
@@ -476,7 +477,8 @@ func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "47e9892f2f2c986d4d58389bdf209a9e56b2bd92095720845331bc09758065bf"
+	// Golden updated for #745: benchmarks now include model_artifact_path.
+	const want = "ddd18c573548d79cfa1caac0977f373db06d77d0c099ab48b1e2b45ebe618d21"
 	if sha != want {
 		t.Fatalf("evidence SHA=%q want Swift JCS SHA %q", sha, want)
 	}

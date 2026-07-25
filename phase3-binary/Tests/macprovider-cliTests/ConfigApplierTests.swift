@@ -430,6 +430,7 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertEqual(loaded.model, candidatePath)
         XCTAssertNil(loaded.modelArtifactPath, "mismatched config artifact must not silently win over --model")
         XCTAssertNil(loaded.modelArtifactSHA256, "incumbent SHA must not bind to a different --model")
+        XCTAssertNil(loaded.modelCatalogModelID, "stale catalog alias must not survive --model mismatch")
         // ModelRuntime load path is modelLoadPath ?? modelID → candidate path.
         XCTAssertEqual(loaded.modelArtifactPath ?? loaded.model, candidatePath)
     }

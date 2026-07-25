@@ -490,8 +490,16 @@ public enum ConfigLoader {
                     // Same model id, non-path CLI — keep configured artifact.
                 } else {
                     // Mismatch: prefer CLI model (load path) over silent incumbent.
+                    // Clear artifact binding and catalog identity so we do not
+                    // serve/load under the incumbent's catalog alias (#745).
                     config.modelArtifactPath = nil
                     config.modelArtifactSHA256 = nil
+                    config.modelCatalogKey = nil
+                    config.modelCatalogModelID = nil
+                    config.modelCatalogRevision = nil
+                    config.modelCatalogSHA256 = nil
+                    config.modelCatalogVersion = nil
+                    config.modelCatalogHash = nil
                 }
             }
         }
