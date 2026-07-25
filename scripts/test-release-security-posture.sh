@@ -86,6 +86,15 @@ candidate_input = re.search(
 )
 if candidate_input is None:
     raise SystemExit("candidate dispatch input must be a boolean defaulting to false")
+promote_input = re.search(
+    r"\n      promote_run_id:\n"
+    r"(?:        .*\n)*?"
+    r"        default: \"\"\n"
+    r"        type: string\n",
+    text,
+)
+if promote_input is None:
+    raise SystemExit("release workflow must expose a string promote_run_id input")
 build = text.split("\n  build:\n", 1)[1].split(
     "\n  verify_provider_runtime:\n", 1
 )[0]
@@ -104,6 +113,7 @@ def unique_step(job, name):
 
 PEARL_SETUP_GO_SHA = "924ae3a1cded613372ab5595356fb5720e22ba16"
 PEARL_GO_SEAL_STEP = (
+    "        if: ${{ github.event.inputs.promote_run_id == '' }}\n"
     "        shell: bash\n"
     "        run: |\n"
     "          set -euo pipefail\n"
@@ -115,7 +125,9 @@ PEARL_GO_SEAL_STEP = (
     "          sudo chmod -R go-w /private/var/macprovider-go-verifier\n"
     "          sudo test -x /private/var/macprovider-go-verifier/bin/go"
 )
-CI_GO_SEAL_STEP = PEARL_GO_SEAL_STEP.replace("-g wheel", "-g root").replace(
+CI_GO_SEAL_STEP = PEARL_GO_SEAL_STEP.replace(
+    "        if: ${{ github.event.inputs.promote_run_id == '' }}\n", "", 1
+).replace("-g wheel", "-g root").replace(
     "root:wheel", "root:root"
 )
 SEALED_GO_EXECUTABLE = "/private/var/macprovider-go-verifier/bin/go"
@@ -126,6 +138,7 @@ PEARL_SETUP_SEAL_BUILD_SEQUENCE = (
     f"{PEARL_GO_SEAL_STEP}\n"
     "\n      - name: Build Pearl linux-amd64 binaries\n"
 )
+SLOW_BUILD_SKIP_GUARD = "        if: ${{ github.event.inputs.promote_run_id == '' }}"
 PEARL_SEALED_GO_REQUIREMENT = (
     "          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \\\n"
     '            MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \\\n'
@@ -152,14 +165,15 @@ UNSIGNED_UPLOAD_STEP = (
     '          name: unsigned-release-${{ steps.release_source.outputs.commit }}\n'
     "          path: unsigned-release-inputs/\n"
     "          if-no-files-found: error\n"
-    "          retention-days: 1"
+    "          retention-days: 7"
 )
 MALIBU_CANDIDATE_PREFLIGHT = (
     '          python3 "$GITHUB_WORKSPACE/scripts/prepare-malibu-bootstrap-trust-anchor.py" preflight \\\n'
     '            "$tag" "$RUNNER_TEMP/Malibu.app" \\\n'
     '            "$GITHUB_WORKSPACE/scripts/dist/malibu-v1.8.32-sparkle-public-key"'
 )
-MALIBU_BUILD_STEP = r'''        shell: bash
+MALIBU_BUILD_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
         run: |
           set -euo pipefail
           cd phase3-binary/app
@@ -175,7 +189,8 @@ MALIBU_BUILD_STEP = r'''        shell: bash
             CODE_SIGNING_ALLOWED=NO
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
             "$RUNNER_TEMP/Malibu.app"'''
-MALIBU_CAPTURE_STEP = r'''        shell: bash
+MALIBU_CAPTURE_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
         run: |
           set -euo pipefail
           tag="${{ steps.release_source.outputs.tag }}"
@@ -216,7 +231,8 @@ PROTECTED_OPENSSL3_STEP = r'''        id: protected_openssl
           "$sealed_bin" version | grep -E '^OpenSSL 3\.'
           printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"'''
 PROTECTED_OPENSSL_ROOT = "/private/var/macprovider-openssl-verifier"
-PROTECTED_OPENSSL_CANDIDATE_STEP = r'''        shell: bash
+PROTECTED_OPENSSL_CANDIDATE_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
         run: |
           set -euo pipefail
           candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -224,6 +240,25 @@ PROTECTED_OPENSSL_CANDIDATE_STEP = r'''        shell: bash
           "$sealed_bin" version | grep -E '^OpenSSL 3\.'
           printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
 '''
+PROMOTED_CANDIDATE_RESTORE_REQUIREMENTS = (
+    "        if: ${{ github.event.inputs.promote_run_id != '' }}",
+    "          GH_TOKEN: ${{ github.token }}",
+    "          PROMOTE_RUN_ID: ${{ github.event.inputs.promote_run_id }}",
+    '          artifact_name="unsigned-release-${commit}"',
+    '              "gh", "api", f"repos/{repo}/actions/runs/{run_id}",',
+    '          if run.get("head_sha") != expected_commit:',
+    '          if run.get("event") != "workflow_dispatch":',
+    '          if run.get("status") != "completed":',
+    '          if run.get("conclusion") not in {"cancelled", "success"}:',
+    '              "gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs", "--paginate",',
+    '          require_success("Build unsigned release inputs from reviewed main")',
+    '          require_success("Verify unsigned provider runtime on arm64")',
+    '              for job in by_name.get("Sign and publish reviewed release", [])',
+    '          gh run download "$PROMOTE_RUN_ID" \\',
+    '            --name "$artifact_name" \\',
+    "scripts/build-release-provenance.py",
+    'cmp unsigned-release-inputs/unsigned-release-manifest.json',
+)
 SEALED_OPENSSL_WRAPPER = r'''#!/bin/bash -p
 set -euo pipefail
 
@@ -284,6 +319,7 @@ def validate_candidate_openssl(job):
 def validate_malibu_candidate_preflight(job):
     build_app = unique_step(job, "Build Malibu.app")
     capture = unique_step(job, "Capture unsigned build artifact")
+    promoted_restore = unique_step(job, "Restore promoted unsigned candidate artifact")
     if build_app.strip("\n") != MALIBU_BUILD_STEP:
         raise SystemExit(
             "candidate Malibu build must retain the exact reviewed step"
@@ -294,15 +330,21 @@ def validate_malibu_candidate_preflight(job):
         )
     build_marker = "\n      - name: Build Malibu.app\n"
     capture_marker = "\n      - name: Capture unsigned build artifact\n"
+    restore_marker = "\n      - name: Restore promoted unsigned candidate artifact\n"
     verify_marker = "\n      - name: Verify staged Pearl Go binaries\n"
     if job.count(build_marker + build_app + capture_marker) != 1:
         raise SystemExit(
             "candidate Malibu build and fail-closed capture must remain adjacent"
         )
-    if job.count(capture_marker + capture + verify_marker) != 1:
+    if job.count(capture_marker + capture + restore_marker + promoted_restore + verify_marker) != 1:
         raise SystemExit(
-            "candidate artifact capture and exact verifier must remain adjacent"
+            "candidate artifact capture/promotion and exact verifier must remain adjacent"
         )
+    for requirement in PROMOTED_CANDIDATE_RESTORE_REQUIREMENTS:
+        if promoted_restore.count(requirement) != 1:
+            raise SystemExit(
+                f"promoted candidate restore step lacks exact gate: {requirement}"
+            )
     preflight_position = capture.find(MALIBU_CANDIDATE_PREFLIGHT)
     tar_position = capture.find(
         "tar czf unsigned-release-inputs/Malibu.app.tar.gz"
@@ -348,9 +390,21 @@ def validate_pearl_toolchain(job):
     sealed_go_path = str(pathlib.PurePosixPath(SEALED_GO_EXECUTABLE).parent.parent)
     if job.count(sealed_go_path) != PEARL_GO_SEAL_STEP.count(sealed_go_path):
         raise SystemExit("sealed Go verifier path must appear only in the exact seal step")
-    expected_sequence = PEARL_SETUP_SEAL_BUILD_SEQUENCE.format(setup_go=setup_go.rstrip("\n"))
-    if job.count(expected_sequence) != 1:
-        raise SystemExit("Pearl Setup Go, verifier seal, and binary build must remain adjacent and ordered")
+    for name, step in (
+        ("Setup Go for Pearl binaries", setup_go),
+        ("Build Pearl linux-amd64 binaries", pearl_build),
+        ("Build package", package_build),
+    ):
+        if step.count(SLOW_BUILD_SKIP_GUARD) != 1:
+            raise SystemExit(f"{name} must be skipped when promoting a candidate artifact")
+    setup_position = job.find("- name: Setup Go for Pearl binaries")
+    seal_position = job.find("- name: Seal the Tier-2 verifier toolchain")
+    pearl_position = job.find("- name: Build Pearl linux-amd64 binaries")
+    package_position = job.find("- name: Build package")
+    if min(setup_position, seal_position, pearl_position, package_position) < 0 or not (
+        setup_position < seal_position < pearl_position < package_position
+    ):
+        raise SystemExit("Pearl Setup Go, verifier seal, binary build, and package build must remain ordered")
     if package_build.count(PEARL_SEALED_GO_REQUIREMENT) != 1:
         raise SystemExit("release package verification must require the sealed Go verifier")
     if job.count("CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER") != 1:
@@ -955,8 +1009,10 @@ malibu_preflight_group_suppression_mutation = build.replace(
 )
 malibu_step_continue_on_error_mutation = build.replace(
     "\n      - name: Capture unsigned build artifact\n"
+    "        if: ${{ github.event.inputs.promote_run_id == '' }}\n"
     "        shell: bash\n",
     "\n      - name: Capture unsigned build artifact\n"
+    "        if: ${{ github.event.inputs.promote_run_id == '' }}\n"
     "        continue-on-error: true\n"
     "        shell: bash\n",
     1,

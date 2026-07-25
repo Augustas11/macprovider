@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      promote_run_id:
+        description: "Reuse a previously verified unsigned candidate run instead of rebuilding"
+        required: false
+        default: ""
+        type: string
       provider_admission_policy:
         description: "Signed provider admission rollout policy"
         required: true
@@ -61,6 +66,7 @@ jobs:
           RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
           RELEASE_PRERELEASE_INPUT: ${{ github.event.inputs.prerelease || 'false' }}
           RELEASE_CANDIDATE_INPUT: ${{ github.event.inputs.candidate || 'false' }}
+          PROMOTE_RUN_ID_INPUT: ${{ github.event.inputs.promote_run_id || '' }}
           PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
@@ -76,6 +82,16 @@ jobs:
           absence_policy="--require-existing"
           if [[ "$RELEASE_CANDIDATE_INPUT" == "true" ]]; then
             absence_policy="--allow-absent"
+          fi
+          if [[ -n "$PROMOTE_RUN_ID_INPUT" ]]; then
+            if [[ "$RELEASE_CANDIDATE_INPUT" == "true" ]]; then
+              echo "::error::candidate builds cannot promote another candidate run" >&2
+              exit 1
+            fi
+            if [[ ! "$PROMOTE_RUN_ID_INPUT" =~ ^[0-9]+$ ]]; then
+              echo "::error::promote_run_id must be a numeric GitHub Actions run id" >&2
+              exit 1
+            fi
           fi
           bash scripts/verify-release-source.sh \
             "$tag" "$commit" origin "$absence_policy"
@@ -99,6 +115,7 @@ jobs:
           bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
 
       - name: Setup Go for Pearl binaries
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         # Pinned to actions/setup-go v6.5.0. Linux binaries are cross-compiled
         # without CGO and carried as unsigned inputs into the protected signer.
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
@@ -109,6 +126,7 @@ jobs:
             phase5-gateway/go.sum
 
       - name: Seal the Tier-2 verifier toolchain
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -121,6 +139,7 @@ jobs:
           sudo test -x /private/var/macprovider-go-verifier/bin/go
 
       - name: Build Pearl linux-amd64 binaries
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -156,12 +175,14 @@ jobs:
           grep -Fq "$tag" "$RUNNER_TEMP/gateway-linux-amd64.strings"
 
       - name: Install reviewed XcodeGen artifact
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
 
       - name: Preflight protected OpenSSL seal before tag creation
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -171,6 +192,7 @@ jobs:
           printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
 
       - name: Build package
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         env:
           PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
@@ -182,6 +204,7 @@ jobs:
             ./package.sh "${{ steps.release_source.outputs.tag }}"
 
       - name: Build Malibu.app
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -200,6 +223,7 @@ jobs:
             "$RUNNER_TEMP/Malibu.app"
 
       - name: Capture unsigned build artifact
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -229,6 +253,84 @@ jobs:
             unsigned-release-inputs/unsigned-release-manifest.json \
             "${unsigned_assets[@]}"
 
+      - name: Restore promoted unsigned candidate artifact
+        if: ${{ github.event.inputs.promote_run_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_RUN_ID: ${{ github.event.inputs.promote_run_id }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          commit="${{ steps.release_source.outputs.commit }}"
+          prerelease="${{ steps.release_source.outputs.prerelease }}"
+          artifact_name="unsigned-release-${commit}"
+
+          python3 - "$GITHUB_REPOSITORY" "$PROMOTE_RUN_ID" "$commit" <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          repo, run_id, expected_commit = sys.argv[1:4]
+          run = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repo}/actions/runs/{run_id}",
+          ], text=True))
+          if run.get("head_sha") != expected_commit:
+              raise SystemExit(
+                  f"promoted run head_sha {run.get('head_sha')} does not match {expected_commit}"
+              )
+          if run.get("event") != "workflow_dispatch":
+              raise SystemExit("promoted run must be a manual release workflow dispatch")
+          if run.get("status") != "completed":
+              raise SystemExit("promoted run must be completed before production signing")
+          if run.get("conclusion") not in {"cancelled", "success"}:
+              raise SystemExit(
+                  f"promoted run conclusion must be cancelled-at-signing or success, got {run.get('conclusion')}"
+              )
+
+          jobs = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs", "--paginate",
+          ], text=True))
+          by_name = {}
+          for job in jobs.get("jobs", []):
+              by_name.setdefault(job.get("name"), []).append(job)
+
+          def require_success(name):
+              if not any(job.get("conclusion") == "success" for job in by_name.get(name, [])):
+                  raise SystemExit(f"promoted run lacks a successful {name} job")
+
+          require_success("Build unsigned release inputs from reviewed main")
+          require_success("Verify unsigned provider runtime on arm64")
+          if any(
+              job.get("conclusion") == "success"
+              for job in by_name.get("Sign and publish reviewed release", [])
+          ):
+              raise SystemExit("promoted candidate run must not have completed production signing")
+          PY
+
+          mkdir -p unsigned-release-inputs
+          gh run download "$PROMOTE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact_name" \
+            --dir unsigned-release-inputs
+
+          unsigned_assets=(
+            "unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz"
+            unsigned-release-inputs/Malibu.app.tar.gz
+            unsigned-release-inputs/release-toolchain.json
+            unsigned-release-inputs/coordinator-linux-amd64
+            unsigned-release-inputs/coordinator-cli-linux-amd64
+            unsigned-release-inputs/gateway-linux-amd64
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "$commit" \
+            "$GITHUB_REPOSITORY" "$prerelease" \
+            unsigned-release-inputs/release-toolchain.json \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json" \
+            "${unsigned_assets[@]}"
+          cmp unsigned-release-inputs/unsigned-release-manifest.json \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json"
+
       - name: Verify staged Pearl Go binaries
         env:
           EXPECTED_REVISION: ${{ steps.release_source.outputs.commit }}
@@ -245,7 +347,7 @@ jobs:
           name: unsigned-release-${{ steps.release_source.outputs.commit }}
           path: unsigned-release-inputs/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   verify_provider_runtime:
     name: Verify unsigned provider runtime on arm64
